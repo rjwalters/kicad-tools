@@ -924,6 +924,42 @@ class EscapeRouter:
             _os.environ.get("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", "0") == "1"
         )
 
+        # Issue #3118: micro-via in-pad rescue.  When enabled, the
+        # ``_try_in_pad_escape`` helper retries with micro-via dimensions
+        # (default 0.3 mm OD / 0.15 mm drill) if the standard via clips a
+        # neighbouring foreign-net pad on a fine-pitch QFP/SSOP.  This
+        # addresses the board-04 OSC_OUT cluster (LQFP-48 0.5 mm pitch
+        # where the manufacturer's 0.6 mm minimum via cannot fit between
+        # adjacent foreign-net pads).  The micro-via emitted on this
+        # path is tagged ``is_micro=True`` so the dimensions DRC
+        # rule exempts it from the standard min-via floors (and the
+        # via serialises as ``(via micro ...)`` round-trip per
+        # #3124/#3126).  The flag
+        # is independent of strict mode: it works on the default
+        # "proceed anyway" branch too.  CLI knob: route command's
+        # ``--micro-via-in-pad-fallback`` flag stamps
+        # ``KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK=1`` in the subprocess
+        # env so the lazily-constructed EscapeRouter inherits the
+        # opt-in.  The companion dimension flags
+        # (``KICAD_TOOLS_MICRO_VIA_SIZE`` /
+        # ``KICAD_TOOLS_MICRO_VIA_DRILL``) tune the retry dimensions;
+        # defaults match the stitch --micro-via 0.3 / 0.15 values.
+        self.micro_via_in_pad_fallback: bool = (
+            _os.environ.get("KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK", "0") == "1"
+        )
+        try:
+            self.micro_via_diameter: float = float(
+                _os.environ.get("KICAD_TOOLS_MICRO_VIA_SIZE", "0.3")
+            )
+        except (TypeError, ValueError):
+            self.micro_via_diameter = 0.3
+        try:
+            self.micro_via_drill: float = float(
+                _os.environ.get("KICAD_TOOLS_MICRO_VIA_DRILL", "0.15")
+            )
+        except (TypeError, ValueError):
+            self.micro_via_drill = 0.15
+
         # Issue #2881: Counter for "would-have-rescued" events -- bumped
         # every time the escape router would have invoked
         # ``_try_in_pad_escape`` for a fine-pitch QFP/SSOP pin but the
@@ -1035,19 +1071,14 @@ class EscapeRouter:
             PackageType.TQFP,
             PackageType.MULTI_ROW_CONNECTOR,
         )
-        if (
-            self.diff_pair_map
-            and package.package_type in pair_aware_dispatchers
-        ):
+        if self.diff_pair_map and package.package_type in pair_aware_dispatchers:
             paired_escapes, paired_pad_keys = self._generate_paired_escapes(package)
 
         # Reduce the package's pad list to the un-paired pads for the
         # per-package dispatcher.  We rebuild a shallow PackageInfo with
         # the filtered pad list rather than mutating the input.
         if paired_pad_keys:
-            remaining_pads = [
-                p for p in package.pads if (p.x, p.y) not in paired_pad_keys
-            ]
+            remaining_pads = [p for p in package.pads if (p.x, p.y) not in paired_pad_keys]
             from dataclasses import replace as _replace
 
             remaining_package = _replace(package, pads=remaining_pads)
@@ -1141,6 +1172,17 @@ class EscapeRouter:
                         layers=escape.via.layers,
                         net=escape.via.net,
                         net_name=escape.via.net_name,
+                        # Issue #3118: preserve in-pad and micro-via
+                        # markers across edge-clearance clamp.  Without
+                        # this, the in-pad escape rescue's
+                        # ``is_micro=True`` marker silently disappears
+                        # when the clamp pass rebuilds the Via, causing
+                        # the downstream dimensions DRC exemption to
+                        # miss the micro-via and the routed PCB to land
+                        # with bare ``(via ...)`` 0.3/0.15 tokens
+                        # instead of ``(via micro ...)``.
+                        in_pad=escape.via.in_pad,
+                        is_micro=escape.via.is_micro,
                     )
 
             # Clamp segment endpoints (skip x1/y1 of the first segment --
@@ -1150,17 +1192,27 @@ class EscapeRouter:
                 if i == 0:
                     cx2, cy2 = self._clamp_to_edge_clearance(seg.x2, seg.y2)
                     escape.segments[i] = Segment(
-                        x1=seg.x1, y1=seg.y1, x2=cx2, y2=cy2,
-                        width=seg.width, layer=seg.layer,
-                        net=seg.net, net_name=seg.net_name,
+                        x1=seg.x1,
+                        y1=seg.y1,
+                        x2=cx2,
+                        y2=cy2,
+                        width=seg.width,
+                        layer=seg.layer,
+                        net=seg.net,
+                        net_name=seg.net_name,
                     )
                 else:
                     cx1, cy1 = self._clamp_to_edge_clearance(seg.x1, seg.y1)
                     cx2, cy2 = self._clamp_to_edge_clearance(seg.x2, seg.y2)
                     escape.segments[i] = Segment(
-                        x1=cx1, y1=cy1, x2=cx2, y2=cy2,
-                        width=seg.width, layer=seg.layer,
-                        net=seg.net, net_name=seg.net_name,
+                        x1=cx1,
+                        y1=cy1,
+                        x2=cx2,
+                        y2=cy2,
+                        width=seg.width,
+                        layer=seg.layer,
+                        net=seg.net,
+                        net_name=seg.net_name,
                     )
 
         return escapes
@@ -1376,20 +1428,28 @@ class EscapeRouter:
         # direction, then step laterally by half_offset for each pad.
         launch_x = mid_x + dx * escape_dist
         launch_y = mid_y + dy * escape_dist
-        ep_p = (launch_x + sign_p * half_offset * lat_dx,
-                launch_y + sign_p * half_offset * lat_dy)
-        ep_n = (launch_x + sign_n * half_offset * lat_dx,
-                launch_y + sign_n * half_offset * lat_dy)
+        ep_p = (launch_x + sign_p * half_offset * lat_dx, launch_y + sign_p * half_offset * lat_dy)
+        ep_n = (launch_x + sign_n * half_offset * lat_dx, launch_y + sign_n * half_offset * lat_dy)
 
         seg_p = Segment(
-            x1=pad_p.x, y1=pad_p.y, x2=ep_p[0], y2=ep_p[1],
-            width=trace_w_p, layer=pad_p.layer,
-            net=pad_p.net, net_name=pad_p.net_name,
+            x1=pad_p.x,
+            y1=pad_p.y,
+            x2=ep_p[0],
+            y2=ep_p[1],
+            width=trace_w_p,
+            layer=pad_p.layer,
+            net=pad_p.net,
+            net_name=pad_p.net_name,
         )
         seg_n = Segment(
-            x1=pad_n.x, y1=pad_n.y, x2=ep_n[0], y2=ep_n[1],
-            width=trace_w_n, layer=pad_n.layer,
-            net=pad_n.net, net_name=pad_n.net_name,
+            x1=pad_n.x,
+            y1=pad_n.y,
+            x2=ep_n[0],
+            y2=ep_n[1],
+            width=trace_w_n,
+            layer=pad_n.layer,
+            net=pad_n.net,
+            net_name=pad_n.net_name,
         )
 
         escape_p = EscapeRoute(
@@ -1505,9 +1565,7 @@ class EscapeRouter:
         # MUST be free to land both on F.Cu and B.Cu).  The fix only
         # applies when there is a true inner copper layer available.
         if self.grid.layer_stack is not None:
-            target_def = self.grid.layer_stack.get_layer_by_name(
-                target_inner_layer.kicad_name
-            )
+            target_def = self.grid.layer_stack.get_layer_by_name(target_inner_layer.kicad_name)
             if target_def is None or target_def.is_outer:
                 logger.debug(
                     "Corridor reservation skipped: %s is not an inner layer "
@@ -1564,8 +1622,7 @@ class EscapeRouter:
         # outermost member trace still cannot fit between the corridor
         # and the next routing channel.
         lat_projections = [
-            (m.escape_point[0] - cx) * lat_dx + (m.escape_point[1] - cy) * lat_dy
-            for m in members
+            (m.escape_point[0] - cx) * lat_dx + (m.escape_point[1] - cy) * lat_dy for m in members
         ]
         lat_extent = max(abs(p) for p in lat_projections)
 
@@ -1584,10 +1641,7 @@ class EscapeRouter:
 
         # Use the WIDEST member trace_width for the padding so a partner
         # via clears the worst-case-width member.
-        max_trace_w = max(
-            self._get_trace_width_for_net(m.pad.net_name or "")
-            for m in members
-        )
+        max_trace_w = max(self._get_trace_width_for_net(m.pad.net_name or "") for m in members)
         lat_pad = intra_pair_clearance + max_trace_w
         lat_half = lat_extent + lat_pad
 
@@ -1648,8 +1702,7 @@ class EscapeRouter:
             self.pair_corridor_reservations += 1
             self.pair_corridor_reserved_cells += count
             logger.debug(
-                "Phase 2F corridor reserved: layer=%s cells=%d nets=%s "
-                "members=%d direction=%s",
+                "Phase 2F corridor reserved: layer=%s cells=%d nets=%s members=%d direction=%s",
                 target_inner_layer.name,
                 count,
                 sorted(owner_nets),
@@ -1773,9 +1826,7 @@ class EscapeRouter:
                     "partner escapes)"
                 )
                 return 0
-            target_def = self.grid.layer_stack.get_layer_by_name(
-                target_inner_layer.kicad_name
-            )
+            target_def = self.grid.layer_stack.get_layer_by_name(target_inner_layer.kicad_name)
             if target_def is None:
                 logger.debug(
                     "Inner-corner corridor skipped: layer %s not in stack",
@@ -2130,10 +2181,7 @@ class EscapeRouter:
         # the same strategy PR #2608 introduced for SSOP/TSSOP.  Plain
         # ``jlcpcb`` and unknown manufacturers continue to defer (no silent
         # surcharge for users who did not opt into via-in-pad).
-        try_in_pad_fallback = (
-            package.pin_pitch <= 0.55
-            and self.via_in_pad_supported
-        )
+        try_in_pad_fallback = package.pin_pitch <= 0.55 and self.via_in_pad_supported
 
         # Issue #2881: Track whether this package is a "would-have-rescued"
         # candidate -- fine-pitch enough to need via-in-pad rescue, but the
@@ -2143,10 +2191,7 @@ class EscapeRouter:
         # clearance.  The counter is consumed by ``--auto-mfr-tier`` to
         # decide whether escalating to a via-in-pad-capable tier would
         # help.
-        wants_in_pad_but_unavailable = (
-            package.pin_pitch <= 0.55
-            and not self.via_in_pad_supported
-        )
+        wants_in_pad_but_unavailable = package.pin_pitch <= 0.55 and not self.via_in_pad_supported
 
         # Effective clearance and escape width for the in-pad rescue
         # fallback.  We mirror the values used inside
@@ -2155,7 +2200,8 @@ class EscapeRouter:
         # them.
         ref = package.ref
         effective_clearance = self.rules.get_clearance_for_component(
-            ref, pin_pitch=package.pin_pitch,
+            ref,
+            pin_pitch=package.pin_pitch,
         )
         escape_width = (
             self.rules.min_trace_width
@@ -2222,16 +2268,17 @@ class EscapeRouter:
                 # (0.2 mm available, 0.381 mm required) -- the only
                 # viable along-edge escape is vertical via-in-pad.
                 escape_is_along_edge = direction != primary_dir
-                pin_boxed = (
-                    escape_is_along_edge
-                    and self._is_pin_boxed_by_plane_neighbours(
-                        pad, package,
-                    )
+                pin_boxed = escape_is_along_edge and self._is_pin_boxed_by_plane_neighbours(
+                    pad,
+                    package,
                 )
                 if try_in_pad_fallback and unclipped_escape.segments:
                     surface_seg = unclipped_escape.segments[0]
                     violation = self._segment_violates_pad_clearance(
-                        surface_seg, i, pads, effective_clearance,
+                        surface_seg,
+                        i,
+                        pads,
+                        effective_clearance,
                         # Issue #2755: Also check against pads on the OTHER
                         # edges of this QFP plus plane-net pads (net==0)
                         # that were filtered out of ``pads`` above.
@@ -2323,7 +2370,10 @@ class EscapeRouter:
                 if wants_in_pad_but_unavailable and unclipped_escape.segments:
                     surface_seg = unclipped_escape.segments[0]
                     if self._segment_violates_pad_clearance(
-                        surface_seg, i, pads, effective_clearance,
+                        surface_seg,
+                        i,
+                        pads,
+                        effective_clearance,
                         extra_pads=self._other_footprint_pads(package, pads),
                     ):
                         self.missed_via_in_pad_rescues += 1
@@ -2410,7 +2460,10 @@ class EscapeRouter:
                             "Escape for %s pin %s skipped: pad-clearance "
                             "clip produced segment of %.3fmm "
                             "(< %.3fmm threshold)",
-                            pad.net_name, pad.pin, seg_len, min_useful_length,
+                            pad.net_name,
+                            pad.pin,
+                            seg_len,
+                            min_useful_length,
                         )
                         continue
 
@@ -2572,9 +2625,14 @@ class EscapeRouter:
             ex = pad.x + dx * length
             ey = pad.y + dy * length
             candidate = Segment(
-                x1=pad.x, y1=pad.y, x2=ex, y2=ey,
-                width=trace_width, layer=pad.layer,
-                net=pad.net, net_name=pad.net_name,
+                x1=pad.x,
+                y1=pad.y,
+                x2=ex,
+                y2=ey,
+                width=trace_width,
+                layer=pad.layer,
+                net=pad.net,
+                net_name=pad.net_name,
             )
             min_gap = float("inf")
             for other in package_pads:
@@ -2774,6 +2832,7 @@ class EscapeRouter:
         smt_pitch = _calculate_min_pitch(smt_pads)
 
         from dataclasses import replace as _replace
+
         smt_package = _replace(
             package,
             pads=smt_pads,
@@ -2829,7 +2888,8 @@ class EscapeRouter:
         # can safely infer a tighter clearance when the user hasn't set one.
         ref = pads[0].ref if pads else ""
         effective_clearance = self.rules.get_clearance_for_component(
-            ref, pin_pitch=package.pin_pitch,
+            ref,
+            pin_pitch=package.pin_pitch,
         )
 
         # If get_clearance_for_component returned the default trace_clearance
@@ -2851,7 +2911,10 @@ class EscapeRouter:
                 logger.info(
                     "Fine-pitch auto-clearance for %s: %.3fmm "
                     "(derived from %.2fmm pitch, %.2fmm pad width)",
-                    ref, derived_clearance, package.pin_pitch, avg_pad_width,
+                    ref,
+                    derived_clearance,
+                    package.pin_pitch,
+                    avg_pad_width,
                 )
                 effective_clearance = derived_clearance
 
@@ -2939,7 +3002,10 @@ class EscapeRouter:
                 # Issue #2319: Check segment-to-pad clearance for the surface
                 # segment against neighboring pads before committing.
                 if self._segment_violates_pad_clearance(
-                    surface_seg, i, pads, effective_clearance,
+                    surface_seg,
+                    i,
+                    pads,
+                    effective_clearance,
                     # Issue #2755: Also check pads on the OTHER rows/edges
                     # of this footprint plus plane-net pads that were
                     # filtered out of the row-grouping step.
@@ -2984,7 +3050,8 @@ class EscapeRouter:
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "
                         "clearance violation (deferred to main router)",
-                        pad.net_name, i,
+                        pad.net_name,
+                        i,
                     )
                     continue
 
@@ -3046,7 +3113,10 @@ class EscapeRouter:
 
                 # Issue #2319: Check segment-to-pad clearance before committing.
                 if self._segment_violates_pad_clearance(
-                    segment, i, pads, effective_clearance,
+                    segment,
+                    i,
+                    pads,
+                    effective_clearance,
                     # Issue #2755: Also check pads on the OTHER rows/edges
                     # of this footprint plus plane-net pads that were
                     # filtered out of the row-grouping step.
@@ -3090,7 +3160,8 @@ class EscapeRouter:
                     logger.debug(
                         "Escape for pad %s (pin %d) skipped: segment-to-pad "
                         "clearance violation (deferred to main router)",
-                        pad.net_name, i,
+                        pad.net_name,
+                        i,
                     )
                     continue
 
@@ -3111,7 +3182,9 @@ class EscapeRouter:
             logger.warning(
                 "Escape routing for %s: %d of %d pins deferred to main router "
                 "(clearance violation)",
-                ref, skipped_count, len(pads),
+                ref,
+                skipped_count,
+                len(pads),
             )
 
         # Issue #1784: Post-generation pairwise clearance validation
@@ -3143,8 +3216,7 @@ class EscapeRouter:
             # Degenerate segment (zero length)
             cpx, cpy = seg.x1, seg.y1
         else:
-            t = max(0.0, min(1.0,
-                ((pad.x - seg.x1) * sx + (pad.y - seg.y1) * sy) / seg_len_sq))
+            t = max(0.0, min(1.0, ((pad.x - seg.x1) * sx + (pad.y - seg.y1) * sy) / seg_len_sq))
             cpx = seg.x1 + t * sx
             cpy = seg.y1 + t * sy
 
@@ -3189,7 +3261,9 @@ class EscapeRouter:
         helper for the threshold semantics and layer-awareness rules.
         """
         return segment_clears_foreign_via(
-            seg, via, trace_clearance,
+            seg,
+            via,
+            trace_clearance,
             hard_intersection_only=hard_intersection_only,
         )
 
@@ -3290,10 +3364,7 @@ class EscapeRouter:
 
         def _classify_edge(p: Pad) -> str | None:
             # Skip thermal/center pads.
-            if (
-                abs(p.x - center_x) < edge_margin
-                and abs(p.y - center_y) < edge_margin
-            ):
+            if abs(p.x - center_x) < edge_margin and abs(p.y - center_y) < edge_margin:
                 return None
             dists = {
                 "north": abs(p.y - max_y),
@@ -3347,10 +3418,7 @@ class EscapeRouter:
         prev_pad = same_edge[idx - 1]
         next_pad = same_edge[idx + 1]
 
-        return (
-            prev_pad.net in plane_nets
-            and next_pad.net in plane_nets
-        )
+        return prev_pad.net in plane_nets and next_pad.net in plane_nets
 
     @staticmethod
     def _other_footprint_pads(
@@ -3404,11 +3472,7 @@ class EscapeRouter:
         Returns True if any pad in either list violates clearance.
         """
         # Source pad identity for skipping (when in either list).
-        source_pad: Pad | None = (
-            pads[pad_index]
-            if 0 <= pad_index < len(pads)
-            else None
-        )
+        source_pad: Pad | None = pads[pad_index] if 0 <= pad_index < len(pads) else None
 
         for neighbor_idx in range(len(pads)):
             if neighbor_idx == pad_index:
@@ -3801,9 +3865,7 @@ class EscapeRouter:
 
         escape_dist = self.escape_clearance + self.rules.trace_width
         via_offset_base = (
-            self.rules.via_diameter / 2
-            + self.rules.via_clearance
-            + self.rules.trace_clearance
+            self.rules.via_diameter / 2 + self.rules.via_clearance + self.rules.trace_clearance
         )
 
         for ring_idx, coord in enumerate(sorted_coords):
@@ -3812,13 +3874,9 @@ class EscapeRouter:
 
             # Determine perpendicular escape direction for this row
             if is_horizontal:
-                direction = (
-                    EscapeDirection.NORTH if coord > center_y else EscapeDirection.SOUTH
-                )
+                direction = EscapeDirection.NORTH if coord > center_y else EscapeDirection.SOUTH
             else:
-                direction = (
-                    EscapeDirection.EAST if coord > center_x else EscapeDirection.WEST
-                )
+                direction = EscapeDirection.EAST if coord > center_x else EscapeDirection.WEST
 
             dx, dy = self._direction_to_vector(direction)
 
@@ -3831,9 +3889,14 @@ class EscapeRouter:
                     ep_y = pad.y + dy * escape_dist
 
                     segment = Segment(
-                        x1=pad.x, y1=pad.y, x2=ep_x, y2=ep_y,
-                        width=trace_width, layer=pad.layer,
-                        net=pad.net, net_name=pad.net_name,
+                        x1=pad.x,
+                        y1=pad.y,
+                        x2=ep_x,
+                        y2=ep_y,
+                        width=trace_width,
+                        layer=pad.layer,
+                        net=pad.net,
+                        net_name=pad.net_name,
                     )
 
                     escapes.append(
@@ -3862,32 +3925,40 @@ class EscapeRouter:
                         via_y = pad.y + stagger
 
                     # Escape point beyond via on the inner layer
-                    ep_x = via_x + dx * (
-                        self.rules.via_diameter / 2 + self.rules.trace_clearance
-                    )
-                    ep_y = via_y + dy * (
-                        self.rules.via_diameter / 2 + self.rules.trace_clearance
-                    )
+                    ep_x = via_x + dx * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
+                    ep_y = via_y + dy * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
 
                     segments: list[Segment] = [
                         Segment(
-                            x1=pad.x, y1=pad.y, x2=via_x, y2=via_y,
-                            width=trace_width, layer=pad.layer,
-                            net=pad.net, net_name=pad.net_name,
+                            x1=pad.x,
+                            y1=pad.y,
+                            x2=via_x,
+                            y2=via_y,
+                            width=trace_width,
+                            layer=pad.layer,
+                            net=pad.net,
+                            net_name=pad.net_name,
                         ),
                         Segment(
-                            x1=via_x, y1=via_y, x2=ep_x, y2=ep_y,
-                            width=trace_width, layer=inner_escape_layer,
-                            net=pad.net, net_name=pad.net_name,
+                            x1=via_x,
+                            y1=via_y,
+                            x2=ep_x,
+                            y2=ep_y,
+                            width=trace_width,
+                            layer=inner_escape_layer,
+                            net=pad.net,
+                            net_name=pad.net_name,
                         ),
                     ]
 
                     via = Via(
-                        x=via_x, y=via_y,
+                        x=via_x,
+                        y=via_y,
                         drill=self.rules.via_drill,
                         diameter=self.rules.via_diameter,
                         layers=(pad.layer, inner_escape_layer),
-                        net=pad.net, net_name=pad.net_name,
+                        net=pad.net,
+                        net_name=pad.net_name,
                     )
 
                     escapes.append(
@@ -3932,7 +4003,8 @@ class EscapeRouter:
 
         # Issue #2756: resolve the effective clearance once per package.
         effective_clearance = self.rules.get_clearance_for_component(
-            package.ref, pin_pitch=package.pin_pitch,
+            package.ref,
+            pin_pitch=package.pin_pitch,
         )
 
         # Useful-length threshold for the clipped stub: half the original
@@ -3968,7 +4040,10 @@ class EscapeRouter:
                 logger.debug(
                     "Radial escape for %s pin %s skipped: clipped length "
                     "%.3fmm < %.3fmm threshold (Issue #2756)",
-                    pad.net_name, pad.pin, escape_dist, min_useful_length,
+                    pad.net_name,
+                    pad.pin,
+                    escape_dist,
+                    min_useful_length,
                 )
                 continue
 
@@ -4146,8 +4221,10 @@ class EscapeRouter:
         # bounds and the rescue never fired).
         origin_x = getattr(self.grid, "origin_x", 0.0)
         origin_y = getattr(self.grid, "origin_y", 0.0)
-        if not (origin_x <= x <= origin_x + self.grid.width
-                and origin_y <= y <= origin_y + self.grid.height):
+        if not (
+            origin_x <= x <= origin_x + self.grid.width
+            and origin_y <= y <= origin_y + self.grid.height
+        ):
             return False
 
         # Check for obstacles in grid
@@ -4174,12 +4251,8 @@ class EscapeRouter:
         # context -- preserves existing behavior for call sites that
         # only have grid-cell information.
         if foreign_pads or foreign_tracks:
-            eff_clearance = (
-                clearance if clearance is not None else self.rules.via_clearance
-            )
-            eff_diameter = (
-                via_diameter if via_diameter is not None else self.rules.via_diameter
-            )
+            eff_clearance = clearance if clearance is not None else self.rules.via_clearance
+            eff_diameter = via_diameter if via_diameter is not None else self.rules.via_diameter
 
             # Pre-filter to foreign-net pads/tracks when the caller
             # supplied the via's own net.  This keeps the predicate
@@ -4213,8 +4286,10 @@ class EscapeRouter:
             # start_x/start_y/end_x/end_y interface.
             adapted_segs = [
                 _SegmentAdapter(
-                    start_x=s.x1, start_y=s.y1,
-                    end_x=s.x2, end_y=s.y2,
+                    start_x=s.x1,
+                    start_y=s.y1,
+                    end_x=s.x2,
+                    end_y=s.y2,
                     width=s.width,
                 )
                 for s in seg_list
@@ -4401,10 +4476,7 @@ class EscapeRouter:
 
         # Foreign-net pads on the same footprint (the pads the in-pad
         # rescue is most likely to clip on a fine-pitch QFP).
-        foreign_pads = [
-            p for p in package.pads
-            if p is not pad and p.net != pad.net
-        ]
+        foreign_pads = [p for p in package.pads if p is not pad and p.net != pad.net]
 
         # Quick path: dead-centre.  If the existing clearance predicate
         # accepts it, no nudge is needed.  This is the common case for
@@ -4496,8 +4568,15 @@ class EscapeRouter:
                         "(via at (%.3f, %.3f); budget=%.3fmm).  "
                         "Stencil aperture unaffected -- via barrel + "
                         "annular ring remain inside pad copper.",
-                        pad.net_name, pad.ref, pad.pin,
-                        pad.x, pad.y, offset, cand_x, cand_y, max_offset,
+                        pad.net_name,
+                        pad.ref,
+                        pad.pin,
+                        pad.x,
+                        pad.y,
+                        offset,
+                        cand_x,
+                        cand_y,
+                        max_offset,
                     )
                     return cand_x, cand_y, True
 
@@ -4634,8 +4713,12 @@ class EscapeRouter:
                 "In-pad escape for pad %s skipped: pad %.3fx%.3f mm "
                 "too small for drill=%.3fmm + 2x annular=%.3fmm "
                 "(needed long-axis dim >= %.3fmm)",
-                pad.net_name, pad.width, pad.height,
-                via_drill, min_annular, required_long_dim,
+                pad.net_name,
+                pad.width,
+                pad.height,
+                via_drill,
+                min_annular,
+                required_long_dim,
             )
             return None
 
@@ -4666,6 +4749,11 @@ class EscapeRouter:
         # (and tier-escalation logic) can decide whether to accept the
         # local DRC violation or escalate to a smaller-via tier / wider-
         # pitch footprint.
+        # Issue #3118: track whether the micro-via fallback fired so the
+        # emitted Via can be tagged (``is_micro=True``) for the
+        # dimensions DRC exemption and the (via micro ...) serialisation
+        # introduced by #3124/#3126.
+        is_micro_via_used = False
         if package is not None and not nudged:
             other_pads = [p for p in package.pads if p is not pad]
             if not self._via_clears_other_pads(
@@ -4676,34 +4764,96 @@ class EscapeRouter:
                 other_pads=other_pads,
                 same_net=pad.net,
             ):
+                # Issue #3118: BEFORE falling through to the strict-mode
+                # defer or the legacy "proceed anyway" warning, try the
+                # micro-via rescue.  When the manufacturer supports
+                # in-pad vias AND the caller opted into the fallback,
+                # recompute via_drill / via_diameter / min_annular with
+                # the micro-via triple (default 0.3 / 0.15 / derived) and
+                # re-run the geometry + clearance gates.  The micro-via
+                # OD is small enough on a 0.5 mm pitch to clear adjacent
+                # foreign-net pads where the standard 0.6 mm via cannot
+                # (pitch - micro_radius - neighbour_short/2 = 0.50 -
+                # 0.15 - 0.15 = 0.20 mm >= 0.15 mm clearance, board-04
+                # OSC_OUT geometry).
+                if self.micro_via_in_pad_fallback and self.micro_via_diameter < via_diameter:
+                    mv_diameter = self.micro_via_diameter
+                    mv_drill = self.micro_via_drill
+                    mv_min_annular = max((mv_diameter - mv_drill) / 2, 0.0)
+                    mv_required_long_dim = mv_drill + 2 * mv_min_annular
+                    if larger_dim + 1e-6 >= mv_required_long_dim:
+                        mv_via_x, mv_via_y, mv_nudged = self._select_in_pad_via_position(
+                            pad=pad,
+                            via_diameter=mv_diameter,
+                            min_annular=mv_min_annular,
+                            effective_clearance=effective_clearance,
+                            package=package,
+                        )
+                        if self._via_clears_other_pads(
+                            x=mv_via_x,
+                            y=mv_via_y,
+                            via_diameter=mv_diameter,
+                            clearance=effective_clearance,
+                            other_pads=other_pads,
+                            same_net=pad.net,
+                        ):
+                            logger.info(
+                                "In-pad MICRO-VIA rescue for pad %s "
+                                "(ref=%s pin=%s) at (%.3f, %.3f): "
+                                "standard via clipped neighbour, retried "
+                                "with %.3fmm OD / %.3fmm drill and "
+                                "clearance passes.  Tagged is_micro "
+                                "for the dimensions DRC exemption "
+                                "(Issue #3118).",
+                                pad.net_name,
+                                pad.ref,
+                                pad.pin,
+                                mv_via_x,
+                                mv_via_y,
+                                mv_diameter,
+                                mv_drill,
+                            )
+                            via_x, via_y, nudged = mv_via_x, mv_via_y, mv_nudged
+                            via_diameter = mv_diameter
+                            via_drill = mv_drill
+                            is_micro_via_used = True
                 # Issue #3033 / #3062: ``skip_on_clearance_violation``
                 # switches the "proceed anyway" branch to "return None"
                 # so the caller can surface the rescue failure as an
                 # explicit deferral instead of producing downstream DRC
                 # noise that cascades into NRST/GND corner-pad routing
                 # failures (board-04 LQFP-48 OSC_OUT cluster).
-                if skip_on_clearance_violation:
-                    logger.info(
-                        "In-pad rescue DEFERRED for pad %s (ref=%s pin=%s) at "
-                        "(%.3f, %.3f): dead-centre clips neighbour pad on %s "
-                        "and long-axis nudge cannot rescue (short-axis "
-                        "violation).  Returning None per Issue #3033 strict "
-                        "mode so the caller can surface the deferral instead "
-                        "of committing a DRC violation.",
-                        pad.net_name, pad.ref, pad.pin,
-                        via_x, via_y, pad.ref,
+                if not is_micro_via_used:
+                    if skip_on_clearance_violation:
+                        logger.info(
+                            "In-pad rescue DEFERRED for pad %s (ref=%s pin=%s) at "
+                            "(%.3f, %.3f): dead-centre clips neighbour pad on %s "
+                            "and long-axis nudge cannot rescue (short-axis "
+                            "violation).  Returning None per Issue #3033 strict "
+                            "mode so the caller can surface the deferral instead "
+                            "of committing a DRC violation.",
+                            pad.net_name,
+                            pad.ref,
+                            pad.pin,
+                            via_x,
+                            via_y,
+                            pad.ref,
+                        )
+                        return None
+                    logger.warning(
+                        "In-pad rescue for pad %s (ref=%s pin=%s) at (%.3f, %.3f) "
+                        "violates clearance to a neighboring foreign-net pad on "
+                        "%s.  Proceeding anyway (no fallback path on QFP/LQFP); "
+                        "the resulting via will trigger DRC errors at the "
+                        "manufacturer's clearance rule -- consider a smaller-via "
+                        "tier or a wider-pitch footprint (Issue #2944).",
+                        pad.net_name,
+                        pad.ref,
+                        pad.pin,
+                        via_x,
+                        via_y,
+                        pad.ref,
                     )
-                    return None
-                logger.warning(
-                    "In-pad rescue for pad %s (ref=%s pin=%s) at (%.3f, %.3f) "
-                    "violates clearance to a neighboring foreign-net pad on "
-                    "%s.  Proceeding anyway (no fallback path on QFP/LQFP); "
-                    "the resulting via will trigger DRC errors at the "
-                    "manufacturer's clearance rule -- consider a smaller-via "
-                    "tier or a wider-pitch footprint (Issue #2944).",
-                    pad.net_name, pad.ref, pad.pin,
-                    via_x, via_y, pad.ref,
-                )
 
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)
@@ -4729,6 +4879,15 @@ class EscapeRouter:
             net=pad.net,
             net_name=pad.net_name,
             in_pad=True,
+            # Issue #3118: tag the micro-via fallback so
+            # ``validate/rules/dimensions.py`` skips the standard
+            # min-via floors for it (the manufacturer's published
+            # Capability+ floor is 0.1 mm drill / 0.2 mm OD which
+            # the 0.15 / 0.3 default comfortably clears).  The flag
+            # is named ``is_micro`` per the schema convention from
+            # #3126 (which added the round-trip ``(via micro ...)``
+            # serialisation through the finalize pipeline).
+            is_micro=is_micro_via_used,
         )
 
         inner_seg = Segment(
@@ -4743,10 +4902,14 @@ class EscapeRouter:
         )
 
         logger.info(
-            "In-pad escape generated for pad %s (%s ref=%s pin=%s): "
-            "via at (%.3f, %.3f) -> %s",
-            pad.net_name, pad.layer.kicad_name, pad.ref, pad.pin,
-            via_x, via_y, escape_layer.kicad_name,
+            "In-pad escape generated for pad %s (%s ref=%s pin=%s): via at (%.3f, %.3f) -> %s",
+            pad.net_name,
+            pad.layer.kicad_name,
+            pad.ref,
+            pad.pin,
+            via_x,
+            via_y,
+            escape_layer.kicad_name,
         )
 
         return EscapeRoute(
@@ -4900,10 +5063,7 @@ class EscapeRouter:
         # if it had landed at the same coordinates.
         foreign_pads: list[Pad] | None = None
         if package is not None:
-            foreign_pads = [
-                p for p in package.pads
-                if p is not pad and p.net != pad.net
-            ]
+            foreign_pads = [p for p in package.pads if p is not pad and p.net != pad.net]
 
         # Issue #3073: The surface stub from the pad to the lateral via
         # must fit through the channel between same-row neighbour pads
@@ -4916,9 +5076,7 @@ class EscapeRouter:
         # candidate is rejected and the next offset is tried.  When all
         # candidates fail, the helper returns None (the caller falls
         # back to "defer to main router", matching pre-#3063 behaviour).
-        mfr_min_trace = (
-            self._mfr_limits.min_trace if self._mfr_limits is not None else None
-        )
+        mfr_min_trace = self._mfr_limits.min_trace if self._mfr_limits is not None else None
         narrow_width = mfr_min_trace if mfr_min_trace is not None else escape_width
 
         # Iterate offsets [step, 2*step, ..., max_offset]; skip 0 because
@@ -5019,11 +5177,7 @@ class EscapeRouter:
                 # Inner-layer escape point: continue the same direction
                 # past the via so the main router has a clean landing
                 # to pick up from, mirroring ``_try_in_pad_escape``.
-                inner_offset = (
-                    via_diameter / 2
-                    + effective_clearance
-                    + self.rules.trace_width
-                )
+                inner_offset = via_diameter / 2 + effective_clearance + self.rules.trace_width
                 escape_x = cand_x + dx * inner_offset
                 escape_y = cand_y + dy * inner_offset
 
@@ -5044,10 +5198,16 @@ class EscapeRouter:
                     "accepted at lateral offset=%.3fmm along %s. "
                     "L-stub width=%.3fmm on %s -> via -> %s "
                     "(Issue #3063, #3073).",
-                    pad.net_name, pad.ref, pad.pin,
-                    cand_x, cand_y, offset, direction.name,
+                    pad.net_name,
+                    pad.ref,
+                    pad.pin,
+                    cand_x,
+                    cand_y,
+                    offset,
+                    direction.name,
                     chosen_stub_width,
-                    pad.layer.kicad_name, escape_layer.kicad_name,
+                    pad.layer.kicad_name,
+                    escape_layer.kicad_name,
                 )
 
                 return EscapeRoute(
@@ -5069,8 +5229,12 @@ class EscapeRouter:
             "Lateral via-escape rescue for pad %s (ref=%s pin=%s) failed: "
             "no candidate in [%.3fmm, %.3fmm] along %s passes clearance "
             "(Issue #3063).",
-            pad.net_name, pad.ref, pad.pin,
-            step_mm, max_offset_mm, direction.name,
+            pad.net_name,
+            pad.ref,
+            pad.pin,
+            step_mm,
+            max_offset_mm,
+            direction.name,
         )
         return None
 
@@ -5224,12 +5388,14 @@ class EscapeRouter:
         for escape in escapes:
             if escape.via is None:
                 continue
-            probe_via_routes.append(Route(
-                net=escape.pad.net,
-                net_name=escape.pad.net_name,
-                segments=[],
-                vias=[escape.via],
-            ))
+            probe_via_routes.append(
+                Route(
+                    net=escape.pad.net,
+                    net_name=escape.pad.net_name,
+                    segments=[],
+                    vias=[escape.via],
+                )
+            )
 
         # Issue #3013 -- Pass B: validate segments against the union of
         # ``self.grid.routes`` and the Pass A probe list, then commit
@@ -5255,7 +5421,9 @@ class EscapeRouter:
                     # docstring for the rationale (board-04 NRST
                     # regression risk).
                     if self._segment_violates_foreign_via_clearance(
-                        seg, current_net, trace_clearance,
+                        seg,
+                        current_net,
+                        trace_clearance,
                         hard_intersection_only=True,
                         extra_routes=probe_via_routes,
                     ):
@@ -5267,7 +5435,9 @@ class EscapeRouter:
                         "Escape commit: deferred %s pin %s (ref=%s) to main "
                         "router -- segment overlaps foreign-net via copper "
                         "(Issue #2998 -- the SWDIO/BOOT0 family).",
-                        escape.pad.net_name, escape.pad.pin, escape.pad.ref,
+                        escape.pad.net_name,
+                        escape.pad.pin,
+                        escape.pad.ref,
                     )
                     continue
 
@@ -5360,7 +5530,9 @@ class EscapeRouter:
                 continue  # Same-net via -- skipped by convention.
             for via in route.vias:
                 if not self._segment_clears_foreign_via(
-                    seg, via, trace_clearance,
+                    seg,
+                    via,
+                    trace_clearance,
                     hard_intersection_only=hard_intersection_only,
                 ):
                     return True
@@ -5370,7 +5542,9 @@ class EscapeRouter:
                     continue  # Same-net via -- skipped by convention.
                 for via in route.vias:
                     if not self._segment_clears_foreign_via(
-                        seg, via, trace_clearance,
+                        seg,
+                        via,
+                        trace_clearance,
                         hard_intersection_only=hard_intersection_only,
                     ):
                         return True

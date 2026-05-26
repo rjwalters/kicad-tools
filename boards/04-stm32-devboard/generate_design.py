@@ -1053,6 +1053,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--auto-layers",
         "--auto-mfr-tier",
         "--placement-feedback",
+        # Issue #3118: enable the micro-via in-pad fallback so the OSC_OUT
+        # cluster at U2.5/U2.7 (LQFP-48 0.5 mm pitch, where the standard
+        # 0.6 mm jlcpcb-tier1 via cannot fit) drops a 0.3 / 0.15 micro-via
+        # instead of committing the clearance violation.  jlcpcb-tier1's
+        # Capability+ process supports the 0.3 / 0.15 micro-via natively
+        # (the same tier that already supplies via-in-pad for the escape
+        # router); the emitted via is tagged is_micro_via so the
+        # dimensions DRC exemption applies.
+        "--micro-via-in-pad-fallback",
         # Issue #3039: pin --seed 42 so the routed PCB is byte-identical
         # across runs and PR #3063 measurements are reproducible.
         "--seed",

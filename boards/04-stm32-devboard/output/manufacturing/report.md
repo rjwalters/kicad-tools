@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-23 | jlcpcb"
+date: "Rev 1 | 2026-05-26 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 17 (0 SMD, 0 THT, 17 other) |
 | Nets | 12 |
-| Traces | 97 segments |
-| Vias | 25 |
+| Traces | 105 segments |
+| Vias | 28 |
 | Board Size | 60.0 x 40.0 mm |
 
 ## Design Overview
@@ -84,9 +84,9 @@ Demonstrates circuit blocks API
 
 | Metric | Count |
 |--------|-------|
-| Errors | 7 |
+| Errors | 4 |
 | Warnings | 48 |
-| Blocking | 7 |
+| Blocking | 4 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -95,8 +95,7 @@ Demonstrates circuit blocks API
 |----------------|-------|
 | pad_grid | 48 |
 | via_in_pad | 3 |
-| clearance_segment_via | 2 |
-| clearance_pad_via | 2 |
+| clearance_segment_via | 1 |
 | connectivity | 1 |
 
 
@@ -108,7 +107,8 @@ Demonstrates circuit blocks API
 
 ### Action Items
 
-- **[CRITICAL]** Fix 7 blocking DRC violations (via_in_pad (3), clearance_segment_via (2), clearance_pad_via (2))
+- **[CRITICAL]** Fix 4 blocking DRC violations (via_in_pad (3), clearance_segment_via (1))
+- **[CRITICAL]** Increase min via drill: 0.150mm < 0.300mm required
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 - **[OPTIONAL]** Review 48 DRC warnings
 

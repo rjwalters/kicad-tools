@@ -2740,6 +2740,46 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--micro-via-in-pad-fallback",
+        action="store_true",
+        dest="route_micro_via_in_pad_fallback",
+        help=(
+            "Issue #3118: retry in-pad escape vias with smaller micro-via "
+            "dimensions (default 0.3 mm OD / 0.15 mm drill) when the "
+            "standard manufacturer-floor via clips a neighbouring "
+            "foreign-net pad on a fine-pitch QFP/SSOP.  Resolves the "
+            "board-04 OSC_OUT LQFP-48 0.5 mm-pitch cluster where the "
+            "0.6 mm minimum jlcpcb-tier1 via cannot fit.  Forwarded to "
+            "the inner 'kct route' command, which stamps "
+            "KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK=1 so EscapeRouter "
+            "inherits the opt-in.  Default off preserves legacy "
+            "behaviour bit-for-bit.  Only effective on manufacturers "
+            "that support via-in-pad (e.g. jlcpcb-tier1)."
+        ),
+    )
+    route_parser.add_argument(
+        "--micro-via-size",
+        type=float,
+        default=0.3,
+        dest="route_micro_via_size",
+        help=(
+            "Micro-via pad diameter in mm for the in-pad fallback "
+            "(default: 0.3).  Only used with "
+            "--micro-via-in-pad-fallback."
+        ),
+    )
+    route_parser.add_argument(
+        "--micro-via-drill",
+        type=float,
+        default=0.15,
+        dest="route_micro_via_drill",
+        help=(
+            "Micro-via drill diameter in mm for the in-pad fallback "
+            "(default: 0.15).  Only used with "
+            "--micro-via-in-pad-fallback."
+        ),
+    )
+    route_parser.add_argument(
         "--differential-pairs",
         action="store_true",
         help=(

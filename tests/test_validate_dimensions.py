@@ -59,12 +59,26 @@ class MockVia:
         drill: float,
         layers: list[str],
         net_number: int,
+        via_type: str | None = None,
+        is_micro: bool = False,
     ):
         self.position = position
         self.size = size
         self.drill = drill
         self.layers = layers
         self.net_number = net_number
+        # Issue #3118: micro-via tag.  The schema :class:`Via` carries
+        # ``via_type == "micro"`` when parsed from ``(via micro ...)``
+        # (round-trip preserved by #3124/#3126); the router primitive
+        # :class:`Via` carries ``is_micro=True`` when emitted by the
+        # router's micro-via fallback.  When either is set, the
+        # DimensionRules check exempts this via from the standard
+        # min-via floors (drill, diameter, annular ring) --
+        # jlcpcb-tier1's Capability+ process supports 0.1 mm drill /
+        # 0.2 mm OD natively so a flat exemption matches the
+        # manufacturer's published capability.
+        self.via_type = via_type
+        self.is_micro = is_micro
 
 
 class MockPad:
@@ -284,6 +298,142 @@ class TestViaDimensionChecks:
         assert len(annular_violations) == 1
         assert annular_violations[0].actual_value == pytest.approx(0.1)
         assert annular_violations[0].required_value == pytest.approx(0.15)
+
+
+class TestMicroViaDimensionExemption:
+    """Tests for the micro-via dimensions DRC exemption (Issue #3118).
+
+    Pins the contract that vias tagged as micro vias -- either via the
+    schema-side ``via_type == "micro"`` (round-trip from ``(via micro
+    ...)`` per #3124/#3126) or the router-primitive-side ``is_micro =
+    True`` -- are exempt from the standard min-via floors
+    (``dimension_via_drill`` / ``dimension_via_diameter`` /
+    ``dimension_annular_ring``).
+
+    Pairs with a regression guard: an untagged 0.3 / 0.15 via still
+    trips both checks, so the exemption rides specifically on the
+    tag, not on the dimensions themselves.
+    """
+
+    def test_tagged_micro_via_exempt_from_floors_via_type(self):
+        """A 0.3 mm OD / 0.15 mm drill via tagged ``via_type="micro"``
+        (the schema parse path: ``(via micro ...)``) does NOT trip the
+        dimensions DRC against jlcpcb-tier1's 0.6 / 0.3 / 0.15 floors.
+        This is the exemption that lets the in-pad micro-via fallback
+        land DRC-clean on board 04 after the routed PCB is re-loaded
+        through ``schema.pcb.Via.from_sexp``.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia(
+                    (5, 5),
+                    size=0.3,
+                    drill=0.15,
+                    layers=["F.Cu", "In1.Cu"],
+                    net_number=1,
+                    via_type="micro",
+                ),
+            ],
+            nets={1: MockNet(1, "OSC_OUT")},
+        )
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        via_violations = [v for v in results.violations if v.rule_id.startswith("dimension_via")]
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
+        assert len(via_violations) == 0, (
+            "Tagged micro-via must be exempt from dimension_via_drill "
+            "and dimension_via_diameter checks (Issue #3118); got "
+            f"{[v.rule_id for v in via_violations]}"
+        )
+        assert len(annular_violations) == 0, (
+            "Tagged micro-via must be exempt from the annular-ring "
+            "check too -- the exemption is a flat skip per the "
+            "manufacturer's published Capability+ floor."
+        )
+
+    def test_tagged_micro_via_exempt_from_floors_is_micro(self):
+        """Same as above but using the router-primitive-side
+        ``is_micro=True`` tag (the in-memory ``router.primitives.Via``
+        path that the validator sees when running on a freshly-routed
+        PCB without going through serialise/parse).
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia(
+                    (5, 5),
+                    size=0.3,
+                    drill=0.15,
+                    layers=["F.Cu", "In1.Cu"],
+                    net_number=1,
+                    is_micro=True,
+                ),
+            ],
+            nets={1: MockNet(1, "OSC_OUT")},
+        )
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        via_violations = [v for v in results.violations if v.rule_id.startswith("dimension_via")]
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
+        assert len(via_violations) == 0, (
+            "Router-side is_micro=True must also exempt the via "
+            "from dimension_via_drill / dimension_via_diameter"
+        )
+        assert len(annular_violations) == 0
+
+    def test_untagged_undersize_via_still_flagged(self):
+        """A 0.3 mm OD / 0.15 mm drill via WITHOUT any micro tag still
+        trips both standard floor checks.  This is the regression
+        guard ensuring the exemption rides on the tag specifically.
+        """
+        pcb = MockPCB(
+            vias=[
+                MockVia(
+                    (5, 5),
+                    size=0.3,
+                    drill=0.15,
+                    layers=["F.Cu", "B.Cu"],
+                    net_number=1,
+                ),
+            ],
+            nets={1: MockNet(1, "STRAY")},
+        )
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.15,
+        )
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        drill_violations = [v for v in results.violations if v.rule_id == "dimension_via_drill"]
+        diameter_violations = [
+            v for v in results.violations if v.rule_id == "dimension_via_diameter"
+        ]
+        assert len(drill_violations) == 1, (
+            "Untagged 0.15 mm drill must still trip dimension_via_drill"
+        )
+        assert len(diameter_violations) == 1, (
+            "Untagged 0.3 mm diameter must still trip dimension_via_diameter"
+        )
 
 
 class TestDrillClearanceCheck:

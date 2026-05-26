@@ -329,6 +329,40 @@ def run_route_command(args) -> int:
         args, "strict_in_pad_clearance", False
     ):
         sub_argv.append("--strict-in-pad-clearance")
+    # Issue #3118: Forward the --micro-via-in-pad-fallback triplet to the
+    # inner route command.  The inner main() sets the
+    # KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK env var (plus size/drill) so
+    # EscapeRouter consumes them on lazy construction.  Outer parser uses
+    # ``route_micro_via_in_pad_fallback`` dest, inner uses
+    # ``micro_via_in_pad_fallback``; check both for forward-compat.
+    if getattr(args, "route_micro_via_in_pad_fallback", False) or getattr(
+        args, "micro_via_in_pad_fallback", False
+    ):
+        sub_argv.append("--micro-via-in-pad-fallback")
+        sub_argv.extend(
+            [
+                "--micro-via-size",
+                str(
+                    getattr(
+                        args,
+                        "route_micro_via_size",
+                        getattr(args, "micro_via_size", 0.3),
+                    )
+                ),
+            ]
+        )
+        sub_argv.extend(
+            [
+                "--micro-via-drill",
+                str(
+                    getattr(
+                        args,
+                        "route_micro_via_drill",
+                        getattr(args, "micro_via_drill", 0.15),
+                    )
+                ),
+            ]
+        )
     # Issue #2464: Forward differential pair routing flags
     if getattr(args, "differential_pairs", False):
         sub_argv.append("--differential-pairs")
