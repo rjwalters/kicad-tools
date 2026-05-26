@@ -756,17 +756,26 @@ def _finalize_routes(
     multi_pad_net_ids: set[int],
     nets_to_route: int,
     quiet: bool = False,
+    *,
+    strict: bool = False,
+    verbose: bool = False,
+    aggregate_segment_drop_threshold: float = 0.5,
 ) -> tuple[str, dict, dict]:
     """Run cleanup, compute statistics, and generate S-expressions.
 
     This is the single canonical sequence that must be followed whenever
     route output is produced.  The ordering is:
 
-    1. ``cleanup_artifacts()`` -- mutates ``router.routes`` in place,
+    1. Snapshot per-net connectivity (issue #3124) so cleanup
+       regressions can be detected and reverted.
+    2. ``cleanup_artifacts()`` -- mutates ``router.routes`` in place,
        removing net-0 orphans and out-of-bounds segments while preserving
        connectivity.
-    2. ``to_sexp(skip_cleanup=True)`` -- serialize the (now clean) routes.
-    3. ``get_statistics()`` -- compute metrics from the cleaned routes so
+    3. Enforce the per-net connectivity invariant (issue #3124).  Any
+       net whose ``connected_pads`` count strictly decreased across the
+       cleanup is reverted (default) or raises in strict mode.
+    4. ``to_sexp(skip_cleanup=True)`` -- serialize the (now clean) routes.
+    5. ``get_statistics()`` -- compute metrics from the cleaned routes so
        they match what was written to disk.
 
     All four output paths in route_cmd.py (main CLI, layer escalation,
@@ -779,6 +788,17 @@ def _finalize_routes(
             nets_routed counting per Issue #1643).
         nets_to_route: Total number of nets targeted for routing.
         quiet: Suppress console output.
+        strict: When True, propagate strict-mode connectivity regressions
+            as ``sys.exit(6)``.  When False (the default), regressed nets
+            are reverted in place and a warning is logged.
+        verbose: When True, the connectivity invariant emits per-net
+            diff lines for debugging.
+        aggregate_segment_drop_threshold: Fractional segment-count
+            reduction beyond which a non-blocking warning is emitted
+            (issue #3124 AC #3).  Defaults to 0.5 (warn if cleanup
+            drops more than 50% of segments).  This warning fires
+            *after* per-net revert so it reflects the final state
+            written to disk.
 
     Returns:
         Tuple of (route_sexp, stats, cleanup_stats) where:
@@ -789,6 +809,18 @@ def _finalize_routes(
           ``segments_restored``, etc.
     """
     from kicad_tools.cli.progress import flush_print
+    from kicad_tools.router.connectivity_invariant import (
+        ConnectivityRegressionError,
+        enforce_connectivity_invariant,
+        snapshot_connectivity,
+    )
+
+    # Issue #3124: snapshot per-net connectivity *before* cleanup so we
+    # can revert any net that loses a reachable pad during the cleanup
+    # pass.  This guards against the finalize-phase regression that
+    # silently dropped 5 nets on board 05 (iter-1 best 19/32 -> saved
+    # PCB 14/32) because cleanup ran without a connectivity check.
+    _ci_snapshot_finalize = snapshot_connectivity(router)
 
     # Step 1: Run connectivity-aware cleanup before computing statistics
     # so that metrics reflect the segments actually written to the output
@@ -818,6 +850,47 @@ def _finalize_routes(
                 f"  Restored: {cleanup_stats['segments_restored']} segments, "
                 f"{cleanup_stats.get('vias_restored', 0)} vias (connectivity preservation)"
             )
+
+    # Issue #3124: enforce the per-net connectivity invariant around
+    # cleanup.  Any net whose connected_pads count strictly decreased
+    # is reverted (default mode) or raises ConnectivityRegressionError
+    # in strict mode.  This is the same invariant used after optimize
+    # and nudge, applied to the previously-uncovered cleanup/finalize
+    # step.
+    try:
+        enforce_connectivity_invariant(
+            router,
+            _ci_snapshot_finalize,
+            phase="finalize",
+            strict=strict,
+            verbose=verbose,
+            quiet=quiet,
+        )
+    except ConnectivityRegressionError:
+        # Strict mode: mirror the exit-code-6 contract used by the
+        # optimize / nudge guards.
+        sys.exit(6)
+
+    # Issue #3124 AC #3: emit a non-blocking warning when the aggregate
+    # segment count drops by more than ``aggregate_segment_drop_threshold``
+    # (default 50%).  This is observability, not a hard gate -- a 91%
+    # drop on board 05 was the canary that surfaced the underlying
+    # connectivity regression.  We measure the ratio *after* revert so
+    # the message reflects what was actually written.
+    final_segments = sum(len(r.segments) for r in router.routes)
+    if pre_cleanup_segments > 0:
+        drop_ratio = 1.0 - (final_segments / pre_cleanup_segments)
+        if drop_ratio > aggregate_segment_drop_threshold:
+            drop_pct = int(round(drop_ratio * 100))
+            warning_msg = (
+                f"WARNING: finalize cleanup reduced segment count by "
+                f"{drop_pct}% ({pre_cleanup_segments} -> {final_segments}). "
+                f"This is unusually large; check for connectivity "
+                f"regressions."
+            )
+            logger.warning(warning_msg)
+            if not quiet:
+                flush_print(f"  {warning_msg}")
 
     # Step 2: Generate S-expressions from the cleaned routes
     route_sexp = router.to_sexp(skip_cleanup=True)
@@ -2362,9 +2435,7 @@ def route_with_layer_escalation(
                     checkpoint_callback=_checkpoint_cb,
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
-                    best_stall_patience=(
-                        getattr(args, "early_stop_patience", 2) or None
-                    ),
+                    best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -2714,6 +2785,8 @@ def route_with_layer_escalation(
         _final_multi_pad_ids,
         final_result.nets_to_route,
         quiet=quiet,
+        strict=bool(getattr(args, "strict", False)),
+        verbose=bool(getattr(args, "verbose", False)),
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -3095,9 +3168,7 @@ def route_with_rule_relaxation(
                     checkpoint_callback=_checkpoint_cb,
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
-                    best_stall_patience=(
-                        getattr(args, "early_stop_patience", 2) or None
-                    ),
+                    best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -3299,6 +3370,8 @@ def route_with_rule_relaxation(
         _final_multi_pad_ids,
         final_result.nets_to_route,
         quiet=quiet,
+        strict=bool(getattr(args, "strict", False)),
+        verbose=bool(getattr(args, "verbose", False)),
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -4190,9 +4263,7 @@ def route_with_combined_escalation(
                         checkpoint_callback=_checkpoint_cb,
                         # Issue #3101: best-metric early-stop patience.  0
                         # disables (matches pre-#3101 behaviour).
-                        best_stall_patience=(
-                            getattr(args, "early_stop_patience", 2) or None
-                        ),
+                        best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                     )
                 elif args.strategy == "basic":
                     router.route_all()
@@ -4422,6 +4493,8 @@ def route_with_combined_escalation(
         _final_multi_pad_ids,
         final_result.nets_to_route,
         quiet=quiet,
+        strict=bool(getattr(args, "strict", False)),
+        verbose=bool(getattr(args, "verbose", False)),
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -5402,10 +5475,7 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=4,
         metavar="N",
-        help=(
-            "Maximum parallel workers per region group for --region-parallel "
-            "(default: 4)."
-        ),
+        help=("Maximum parallel workers per region group for --region-parallel (default: 4)."),
     )
 
     # Power plane stitching
@@ -6429,9 +6499,7 @@ def main(argv: list[str] | None = None) -> int:
                                     region_parallel=getattr(args, "region_parallel", False),
                                     partition_rows=getattr(args, "partition_rows", 2),
                                     partition_cols=getattr(args, "partition_cols", 2),
-                                    max_parallel_workers=getattr(
-                                        args, "max_parallel_workers", 4
-                                    ),
+                                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                                     checkpoint_callback=_checkpoint_cb,
                                 )
                             return router.route_all()
@@ -6947,6 +7015,8 @@ def main(argv: list[str] | None = None) -> int:
         multi_pad_net_ids,
         nets_to_route,
         quiet=quiet,
+        strict=bool(getattr(args, "strict", False)),
+        verbose=bool(getattr(args, "verbose", False)),
     )
 
     # Report differential pair length mismatch warnings

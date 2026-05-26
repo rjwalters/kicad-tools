@@ -430,6 +430,40 @@ class TestVia:
         assert "F.Cu" in sexp
         assert "B.Cu" in sexp
 
+    def test_via_to_sexp_default_is_not_micro(self):
+        """Issue #3124: default Via.is_micro is False (no token)."""
+        via = Via(x=10.0, y=20.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        assert via.is_micro is False
+        sexp = via.to_sexp()
+        # Standard via has no leading type token.
+        assert sexp.startswith("(via\n"), f"Expected plain (via NL, got: {sexp[:40]!r}"
+        assert "(via micro" not in sexp
+
+    def test_via_to_sexp_emits_micro_token(self):
+        """Issue #3124 AC #5: is_micro=True emits (via micro ...).
+
+        The token must appear immediately after ``via`` and match KiCad's
+        format -- this is what allows the router's in-pad escape (#3118)
+        to survive the route -> finalize -> KiCad round-trip.
+        """
+        via = Via(
+            x=10.0,
+            y=20.0,
+            drill=0.15,
+            diameter=0.3,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            is_micro=True,
+        )
+        sexp = via.to_sexp()
+        assert sexp.startswith("(via micro"), (
+            f"Micro via must serialize with leading 'micro' token, got: {sexp[:40]!r}"
+        )
+        # Sanity: other fields unchanged.
+        assert "(at 10.0000 20.0000)" in sexp
+        assert "0.3" in sexp
+        assert "0.15" in sexp
+
 
 class TestSegment:
     """Tests for Segment class."""

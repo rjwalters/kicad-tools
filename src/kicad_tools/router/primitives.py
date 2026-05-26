@@ -110,12 +110,26 @@ class Via:
     # board file does not need a separate fill/plating attribute -- the
     # manufacturer reads via-in-pad from the order options / DRU.
     in_pad: bool = False
+    # Issue #3124 (folds in #3118 prerequisite): micro-via marker.  When
+    # True, this via is serialized as ``(via micro ...)`` so KiCad and
+    # board manufacturers know to treat it as a laser-drilled micro-via
+    # rather than a standard through-hole via.  Matches
+    # :func:`kicad_tools.sexp.builders.via_node`'s ``via_type="micro"``
+    # output exactly.  The router's in-pad escape (#3118) is the primary
+    # producer of micro vias from inside the routing pipeline.
+    is_micro: bool = False
 
     def to_sexp(self) -> str:
-        """Generate KiCad S-expression."""
+        """Generate KiCad S-expression.
+
+        Emits ``(via micro ...)`` when :attr:`is_micro` is True so the
+        micro-via token survives the route -> finalize -> file
+        round-trip (issue #3124).  Otherwise emits a plain ``(via ...)``.
+        """
         layer_start = self.layers[0].kicad_name
         layer_end = self.layers[1].kicad_name
-        return f"""(via
+        type_token = " micro" if self.is_micro else ""
+        return f"""(via{type_token}
 \t\t(at {self.x:.4f} {self.y:.4f})
 \t\t(size {_fmt(self.diameter)})
 \t\t(drill {_fmt(self.drill)})

@@ -806,6 +806,13 @@ class Via:
     net_number: int
     net_name: str = ""
     uuid: str = ""
+    # Issue #3124 (folds in #3118 prerequisite): preserve the optional
+    # leading via-type token ``(via micro ...)`` / ``(via blind ...)`` /
+    # ``(via buried ...)`` through parse + emit so micro vias added by
+    # the router (or read from an upstream PCB) survive serialization.
+    # ``None`` => standard through-hole via.  The serializer mirrors
+    # :func:`kicad_tools.sexp.builders.via_node` exactly.
+    via_type: str | None = None
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Via:
@@ -817,6 +824,19 @@ class Via:
             layers=[],
             net_number=0,
         )
+
+        # Issue #3124: detect the optional leading via-type token.  KiCad
+        # emits ``(via micro ...)`` / ``(via blind ...)`` / ``(via buried
+        # ...)`` with the type as a bare atom immediately after ``via``.
+        # We only preserve the token (no semantic handling for blind/
+        # buried -- that's out of scope for this issue and #3118).
+        # ``sexp.values[0]`` is a string atom for these forms; for a
+        # standard through-hole via the first child is the ``(at ...)``
+        # list, which appears as an SExp in ``values``.
+        if sexp.values and isinstance(sexp.values[0], str):
+            token = sexp.values[0]
+            if token in ("micro", "blind", "buried"):
+                via.via_type = token
 
         if at := sexp.find("at"):
             via.position = (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
@@ -848,8 +868,16 @@ class Via:
         return via
 
     def to_sexp(self) -> SExp:
-        """Convert via to S-expression for serialization."""
+        """Convert via to S-expression for serialization.
+
+        When :attr:`via_type` is set (``"micro"`` / ``"blind"`` /
+        ``"buried"``) the token is emitted immediately after ``via`` to
+        match KiCad's format and survive a load + save round-trip
+        (issue #3124).
+        """
         via_sexp = SExp.list("via")
+        if self.via_type:
+            via_sexp.append(SExp.atom(self.via_type))
         via_sexp.append(SExp.list("at", self.position[0], self.position[1]))
         via_sexp.append(SExp.list("size", self.size))
         via_sexp.append(SExp.list("drill", self.drill))
