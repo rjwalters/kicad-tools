@@ -425,3 +425,240 @@ class TestPerNetDiff:
         assert pre_pads == 3 and post_pads == 3
         assert name == "VOUT"
         assert regressed is False
+
+
+class TestPartialRegressionDetection:
+    """Issue #3124: detect partial-net regressions, not just True->False.
+
+    The original invariant only fired when a *fully connected* net was
+    reduced below the connectivity threshold.  On board 05 only 19/32
+    nets were fully-connected pre-optimize; the remaining 13 partial
+    nets could be silently degraded further (e.g. 3/4 pads -> 1/4 pads)
+    with no revert -- that's how iter-1 best 19/32 collapsed to 14/32
+    in the saved PCB.  This test class encodes the strengthened
+    detector behavior.
+    """
+
+    def _make_4_pad_partial_router(self) -> _StubAutorouter:
+        """4-pad net wired as two disjoint 2-pad pairs (3/4 reachable).
+
+        Pads A, B, C, D all share net 7.  Initial geometry:
+
+            A ---- B           (segment AB)
+            C ---- mid ---- D  (chain C -> mid -> D, sharing midpoint)
+
+        Validate ranks "reachable pads" via the BFS of segments; the
+        AB segment connects {A, B} (2 pads in one component) and the
+        CD chain connects {C, D} (2 pads in another).  ``connected_pads``
+        is the *largest* component, so pre-phase it's 2/4 (the AB or CD
+        pair, whichever wins the size tiebreaker -- both are 2).
+
+        The hostile phase below drops the CD chain entirely.  After the
+        phase ``connected_pads`` is still 2 (the AB pair) -- but the
+        previously-reachable CD pair is gone, so any reasonable detector
+        should flag it.  We instead use a less ambiguous fixture: a
+        3-segment chain that reaches 3 of 4 pads pre-phase, and the
+        hostile phase drops one segment so only 2 are reachable.
+        """
+        # Linear chain: A (0,0) -> B (5,0) -> C (10,0) -> D (15,0)
+        # connected via 3 segments.  All 4 pads reachable pre-phase.
+        pad_a = _pad(0.0, 0.0, ref="A", net=7, net_name="DEGRADE")
+        pad_b = _pad(5.0, 0.0, ref="B", net=7, net_name="DEGRADE")
+        pad_c = _pad(10.0, 0.0, ref="C", net=7, net_name="DEGRADE")
+        pad_d = _pad(15.0, 0.0, ref="D", net=7, net_name="DEGRADE")
+        route = Route(
+            net=7,
+            net_name="DEGRADE",
+            segments=[
+                _seg(0.0, 0.0, 5.0, 0.0, net=7, net_name="DEGRADE"),
+                _seg(5.0, 0.0, 10.0, 0.0, net=7, net_name="DEGRADE"),
+                _seg(10.0, 0.0, 15.0, 0.0, net=7, net_name="DEGRADE"),
+            ],
+            vias=[],
+        )
+        return _StubAutorouter(
+            routes=[route],
+            pads={
+                ("U7", "A"): pad_a,
+                ("U7", "B"): pad_b,
+                ("U7", "C"): pad_c,
+                ("U7", "D"): pad_d,
+            },
+            nets={7: [("U7", "A"), ("U7", "B"), ("U7", "C"), ("U7", "D")]},
+            net_names={7: "DEGRADE"},
+        )
+
+    def _make_partial_already_router(self) -> _StubAutorouter:
+        """Pre-phase 3/4 reachable (partial).  Hostile phase drops to 2/4.
+
+        Chain A (0,0) -> B (5,0) -> C (10,0) connects 3 pads with 2
+        segments; pad D (100, 100) is far away and not on any segment,
+        so pre-phase ``connected_pads = 3`` and ``connected = False``
+        (3 < 4 total).  This is the missed case: the old invariant
+        would not fire because the net was never fully connected.
+        """
+        pad_a = _pad(0.0, 0.0, ref="A", net=8, net_name="ALREADY")
+        pad_b = _pad(5.0, 0.0, ref="B", net=8, net_name="ALREADY")
+        pad_c = _pad(10.0, 0.0, ref="C", net=8, net_name="ALREADY")
+        pad_d = _pad(100.0, 100.0, ref="D", net=8, net_name="ALREADY")
+        route = Route(
+            net=8,
+            net_name="ALREADY",
+            segments=[
+                _seg(0.0, 0.0, 5.0, 0.0, net=8, net_name="ALREADY"),
+                _seg(5.0, 0.0, 10.0, 0.0, net=8, net_name="ALREADY"),
+            ],
+            vias=[],
+        )
+        return _StubAutorouter(
+            routes=[route],
+            pads={
+                ("U8", "A"): pad_a,
+                ("U8", "B"): pad_b,
+                ("U8", "C"): pad_c,
+                ("U8", "D"): pad_d,
+            },
+            nets={8: [("U8", "A"), ("U8", "B"), ("U8", "C"), ("U8", "D")]},
+            net_names={8: "ALREADY"},
+        )
+
+    def test_partial_net_regression_detected(self):
+        """3/4 reachable -> 2/4 reachable on a never-fully-connected net.
+
+        The legacy invariant misses this (pre_connected was already
+        False, so True->False can't fire).  The strengthened detector
+        must catch it.
+        """
+        router = self._make_partial_already_router()
+        snapshot = snapshot_connectivity(router)
+
+        # Pre-phase: net 8 is partial (3/4) -- not fully connected.
+        assert snapshot.pre_connectivity[8]["connected"] is False
+        assert snapshot.pre_connectivity[8]["connected_pads"] == 3
+        assert snapshot.pre_connectivity[8]["total_pads"] == 4
+
+        # Hostile phase: drop the (5,0)->(10,0) segment so only A & B
+        # remain reachable.  ``connected_pads`` goes 3 -> 2.
+        router.routes[0].segments = [router.routes[0].segments[0]]
+
+        result = enforce_connectivity_invariant(
+            router,
+            snapshot,
+            phase="optimize",
+            strict=False,
+            quiet=True,
+        )
+
+        # The strengthened detector must flag this -- the old one would
+        # not (pre_connected was False the whole time).
+        assert 8 in result.regressed_nets, (
+            "Partial-net regression must trigger revert (issue #3124). "
+            f"Per-net diff: {result.per_net_diff[8]}"
+        )
+        assert result.reverted is True
+
+        # After revert: connected_pads is restored to 3.
+        from kicad_tools.router.observability import validate_net_connectivity
+
+        post = validate_net_connectivity(router.routes, snapshot.net_pads)
+        assert post[8]["connected_pads"] == 3
+
+    def test_partial_net_regression_strict_mode_raises(self):
+        """Same scenario but strict=True must raise."""
+        router = self._make_partial_already_router()
+        snapshot = snapshot_connectivity(router)
+
+        # Hostile drop.
+        router.routes[0].segments = [router.routes[0].segments[0]]
+
+        with pytest.raises(ConnectivityRegressionError) as excinfo:
+            enforce_connectivity_invariant(
+                router,
+                snapshot,
+                phase="optimize",
+                strict=True,
+                quiet=True,
+            )
+        assert 8 in excinfo.value.result.regressed_nets
+
+    def test_legacy_mode_misses_partial_regression(self):
+        """Sanity: the legacy detector (kill-switch) does not fire.
+
+        Documents the bug we're fixing: with
+        ``detect_partial_regressions=False`` the partial net is
+        silently degraded -- this is exactly what board 05 hit.
+        """
+        router = self._make_partial_already_router()
+        snapshot = snapshot_connectivity(router)
+        router.routes[0].segments = [router.routes[0].segments[0]]
+
+        result = enforce_connectivity_invariant(
+            router,
+            snapshot,
+            phase="optimize",
+            strict=False,
+            quiet=True,
+            detect_partial_regressions=False,
+        )
+        assert 8 not in result.regressed_nets
+        assert result.reverted is False
+
+    def test_fully_to_partial_still_caught_in_new_mode(self):
+        """The True->False case must still trigger in the new mode."""
+        router = self._make_4_pad_partial_router()
+        snapshot = snapshot_connectivity(router)
+        # Pre-phase: connected_pads == 4 (all reachable via the chain).
+        assert snapshot.pre_connectivity[7]["connected"] is True
+        assert snapshot.pre_connectivity[7]["connected_pads"] == 4
+
+        # Drop the (5,0)->(10,0) segment, splitting the chain.
+        router.routes[0].segments = [
+            router.routes[0].segments[0],
+            router.routes[0].segments[2],
+        ]
+
+        result = enforce_connectivity_invariant(
+            router,
+            snapshot,
+            phase="optimize",
+            strict=False,
+            quiet=True,
+        )
+        assert 7 in result.regressed_nets
+        assert result.reverted is True
+
+    def test_finalize_invariant_reverts_segment_loss(self):
+        """Simulate _finalize_routes-style cleanup that drops a segment.
+
+        Issue #3124 AC #2: the per-net invariant runs *after* the
+        finalize/cleanup phase, not just after optimize+nudge.  This
+        test uses the same fixture as the partial-regression test, but
+        labels the phase ``"finalize"`` so the test name and reporting
+        match the new code path.
+        """
+        router = self._make_partial_already_router()
+        snapshot = snapshot_connectivity(router)
+
+        # Simulate cleanup dropping a segment that breaks one pad
+        # off a multi-pad net.
+        router.routes[0].segments = [router.routes[0].segments[0]]
+
+        result = enforce_connectivity_invariant(
+            router,
+            snapshot,
+            phase="finalize",
+            strict=False,
+            quiet=True,
+        )
+
+        # The finalize-level invariant must catch this and revert.
+        assert 8 in result.regressed_nets, (
+            "Finalize-phase regression must be caught and reverted (issue #3124 AC #2)."
+        )
+        assert result.reverted is True
+
+        # Routes restored to the pre-cleanup state (3 reachable pads).
+        from kicad_tools.router.observability import validate_net_connectivity
+
+        post = validate_net_connectivity(router.routes, snapshot.net_pads)
+        assert post[8]["connected_pads"] == 3

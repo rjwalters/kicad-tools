@@ -225,3 +225,123 @@ def test_audio_r_strict_mode_raises_on_simulated_regression() -> None:
         )
     assert excinfo.value.phase == "optimize"
     assert 42 in excinfo.value.result.regressed_nets
+
+
+def test_via_micro_roundtrip(tmp_path) -> None:
+    """Issue #3124 AC #6: (via micro ...) survives _finalize_routes + write.
+
+    Construct a router state with one Via(is_micro=True), serialize
+    via the router's to_sexp path (the same one used by
+    _finalize_routes), insert into a synthetic PCB shell, and verify
+    the micro token is present in the on-disk file.
+
+    This is the end-to-end test that unblocks #3118: the router's
+    in-pad micro-via fallback can only be tested if the route ->
+    finalize -> file path preserves the micro token.
+    """
+    from kicad_tools.cli.route_cmd import _write_routed_pcb
+    from kicad_tools.router.primitives import Route as RouterRoute
+    from kicad_tools.router.primitives import Segment as RouterSegment
+    from kicad_tools.router.primitives import Via as RouterVia
+
+    # Minimal valid KiCad PCB shell -- the writer only needs to find
+    # the closing paren to insert the route_sexp.
+    pcb_shell = """(kicad_pcb
+\t(version 20240108)
+\t(generator "kicad-tools")
+\t(general
+\t\t(thickness 1.6)
+\t)
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t)
+)"""
+    pcb_in = tmp_path / "in.kicad_pcb"
+    pcb_out = tmp_path / "out.kicad_pcb"
+    pcb_in.write_text(pcb_shell)
+
+    # Build a route with one micro via and one segment.
+    seg = RouterSegment(
+        x1=10.0,
+        y1=20.0,
+        x2=15.0,
+        y2=20.0,
+        width=0.2,
+        layer=Layer.F_CU,
+        net=42,
+        net_name="MICROVIA_TEST",
+    )
+    via = RouterVia(
+        x=15.0,
+        y=20.0,
+        drill=0.15,
+        diameter=0.3,
+        layers=(Layer.F_CU, Layer.B_CU),
+        net=42,
+        net_name="MICROVIA_TEST",
+        is_micro=True,
+    )
+    route = RouterRoute(
+        net=42,
+        net_name="MICROVIA_TEST",
+        segments=[seg],
+        vias=[via],
+    )
+
+    # Use the same Route.to_sexp() path that _finalize_routes uses
+    # (via router.to_sexp -> "\n\t".join(r.to_sexp() for r in routes)).
+    route_sexp = "\n\t".join([route.to_sexp()])
+
+    _write_routed_pcb(
+        pcb_in,
+        pcb_out,
+        route_sexp,
+        is_checkpoint=False,
+    )
+
+    # Re-read and assert the (via micro ...) token is present.
+    written = pcb_out.read_text()
+    assert "(via micro" in written, (
+        "Micro-via token must survive _write_routed_pcb (issue #3124 AC #6). "
+        f"Written content excerpt: {written[-500:]}"
+    )
+    # And the segment was written too.
+    assert "(segment" in written
+    assert "F.Cu" in written
+
+
+def test_via_standard_not_marked_micro(tmp_path) -> None:
+    """Sanity: a standard via must NOT emit the micro token."""
+    from kicad_tools.cli.route_cmd import _write_routed_pcb
+    from kicad_tools.router.primitives import Route as RouterRoute
+    from kicad_tools.router.primitives import Via as RouterVia
+
+    pcb_shell = """(kicad_pcb
+\t(version 20240108)
+\t(generator "kicad-tools")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+)"""
+    pcb_in = tmp_path / "in.kicad_pcb"
+    pcb_out = tmp_path / "out.kicad_pcb"
+    pcb_in.write_text(pcb_shell)
+
+    via = RouterVia(
+        x=10.0,
+        y=20.0,
+        drill=0.3,
+        diameter=0.6,
+        layers=(Layer.F_CU, Layer.B_CU),
+        net=1,
+        net_name="STD",
+        is_micro=False,
+    )
+    route = RouterRoute(net=1, net_name="STD", segments=[], vias=[via])
+    _write_routed_pcb(pcb_in, pcb_out, route.to_sexp())
+
+    written = pcb_out.read_text()
+    assert "(via micro" not in written
+    assert "(via" in written

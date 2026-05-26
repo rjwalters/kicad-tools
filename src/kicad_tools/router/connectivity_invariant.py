@@ -196,14 +196,26 @@ def enforce_connectivity_invariant(
     strict: bool = False,
     verbose: bool = False,
     quiet: bool = False,
+    detect_partial_regressions: bool = True,
 ) -> ConnectivityInvariantResult:
     """Verify the post-phase invariant and revert regressed nets.
 
-    The invariant is: ``fully_connected(post) >= fully_connected(pre)``
+    The invariant is: ``connected_pads(post) >= connected_pads(pre)``
     measured on the multi-pad signal nets captured by
     :func:`snapshot_connectivity`.  When violated, the routes for every
     regressed net are reverted in place (default mode) or a
     :class:`ConnectivityRegressionError` is raised (strict mode).
+
+    **Issue #3124**: The original detector only fired on True->False
+    transitions of the fully-connected boolean (``pre_connected and not
+    post_connected``).  This missed the case where a net was already
+    *partially* connected pre-phase (e.g. 3/4 pads reachable) and the
+    phase degraded it further (e.g. 1/4 pads).  Board 05's optimize
+    phase dropped 5 nets from the iter-1 best snapshot because 13 of the
+    32 nets were only partially-connected when the invariant fired and
+    those degradations were silently allowed.  The detector is now
+    pad-count based: any decrease in ``connected_pads`` triggers a
+    revert (when ``detect_partial_regressions=True``, the default).
 
     Args:
         router: The :class:`Autorouter` whose routes were just mutated.
@@ -219,6 +231,13 @@ def enforce_connectivity_invariant(
             count and whether a revert happened.  When False, only
             regressed nets are logged via :mod:`logging` warnings.
         quiet: Suppress all ``print`` output even when ``verbose``.
+        detect_partial_regressions: When True (the default, issue
+            #3124), any net whose ``connected_pads`` strictly decreases
+            is treated as a regression and reverted.  When False, the
+            legacy behaviour is restored: only fully-connected
+            (True->False) regressions trigger a revert.  Provided as a
+            kill-switch in case a downstream caller has a reason to
+            tolerate partial degradation.
 
     Returns:
         :class:`ConnectivityInvariantResult` describing what happened.
@@ -237,7 +256,15 @@ def enforce_connectivity_invariant(
         total_pads = int(post_info.get("total_pads", 0))
         net_name = snapshot.net_names.get(nid, f"Net {nid}")
 
-        regressed = pre_connected and not post_connected
+        # Issue #3124: detect partial regressions, not just True->False.
+        # The original check (pre_connected and not post_connected) only
+        # fired when a fully-connected net became disconnected; it
+        # silently allowed a partial net (e.g. 3/4 pads) to be further
+        # degraded by the optimize / nudge / finalize phases.
+        if detect_partial_regressions:
+            regressed = post_pads < pre_pads
+        else:
+            regressed = pre_connected and not post_connected
         if regressed:
             result.regressed_nets.add(nid)
 

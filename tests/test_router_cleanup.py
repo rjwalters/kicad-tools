@@ -313,13 +313,13 @@ class TestCleanupCombined:
                 net=3,
                 net_name="MIX",
                 segments=[
-                    _seg(110, 90, 120, 90, net=3),   # valid
-                    _seg(115, 95, 125, 95, net=0),    # net-0 orphan
+                    _seg(110, 90, 120, 90, net=3),  # valid
+                    _seg(115, 95, 125, 95, net=0),  # net-0 orphan
                     _seg(200, 200, 210, 200, net=3),  # OOB
                 ],
                 vias=[
-                    _via(115, 90, net=3),   # valid
-                    _via(300, 300, net=3),   # OOB
+                    _via(115, 90, net=3),  # valid
+                    _via(300, 300, net=3),  # OOB
                 ],
             ),
         ]
@@ -544,9 +544,9 @@ class TestConnectivityAwareRestoration:
                 net=3,
                 net_name="SIG",
                 segments=[
-                    _seg(110, 90, 115, 90, net=3),   # seg1
-                    _seg(115, 90, 120, 90, net=0),   # bridge (net-0)
-                    _seg(120, 90, 125, 90, net=3),   # seg2
+                    _seg(110, 90, 115, 90, net=3),  # seg1
+                    _seg(115, 90, 120, 90, net=0),  # bridge (net-0)
+                    _seg(120, 90, 125, 90, net=3),  # seg2
                 ],
             ),
         ]
@@ -591,9 +591,9 @@ class TestConnectivityAwareRestoration:
                 net=5,
                 net_name="ESCAPE",
                 segments=[
-                    _seg(110, 90, 105, 85, net=5),     # fully inside
-                    _seg(105, 85, 99, 79, net=5),      # one endpoint inside (105,85), one OOB (99,79)
-                    _seg(99, 79, 95, 75, net=5),       # both endpoints OOB
+                    _seg(110, 90, 105, 85, net=5),  # fully inside
+                    _seg(105, 85, 99, 79, net=5),  # one endpoint inside (105,85), one OOB (99,79)
+                    _seg(99, 79, 95, 75, net=5),  # both endpoints OOB
                 ],
             ),
         ]
@@ -623,9 +623,9 @@ class TestConnectivityAwareRestoration:
                 net=5,
                 net_name="ESCAPE",
                 segments=[
-                    _seg(110, 90, 99, 79, net=5),      # one end inside, one OOB -> kept
-                    _seg(99, 79, 97, 77, net=5),        # both OOB -> normally removed
-                    _seg(97, 77, 110, 100, net=5),      # one OOB, one inside -> kept
+                    _seg(110, 90, 99, 79, net=5),  # one end inside, one OOB -> kept
+                    _seg(99, 79, 97, 77, net=5),  # both OOB -> normally removed
+                    _seg(97, 77, 110, 100, net=5),  # one OOB, one inside -> kept
                 ],
             ),
         ]
@@ -762,9 +762,9 @@ class TestConnectivityAwareRestoration:
                 net=2,
                 net_name="PAD_ESCAPE",
                 segments=[
-                    _seg(110, 90, 99, 79, net=2),      # one end inside, one OOB
-                    _seg(99, 79, 97, 77, net=2),        # both endpoints OOB (bridge)
-                    _seg(97, 77, 110, 100, net=2),      # one OOB, one inside
+                    _seg(110, 90, 99, 79, net=2),  # one end inside, one OOB
+                    _seg(99, 79, 97, 77, net=2),  # both endpoints OOB (bridge)
+                    _seg(97, 77, 110, 100, net=2),  # one OOB, one inside
                 ],
             ),
         ]
@@ -821,8 +821,8 @@ class TestFinalizeRoutes:
                 net=1,
                 net_name="SIG",
                 segments=[
-                    _seg(110, 90, 120, 90, net=1),      # in-bounds
-                    _seg(200, 200, 210, 210, net=1),     # out-of-bounds
+                    _seg(110, 90, 120, 90, net=1),  # in-bounds
+                    _seg(200, 200, 210, 210, net=1),  # out-of-bounds
                 ],
             ),
         ]
@@ -876,3 +876,155 @@ class TestFinalizeRoutes:
         assert stats["segments"] == 1
         # The sexp should only contain 1 segment definition
         assert route_sexp.count("(segment") == 1
+
+
+class TestFinalizeRoutesConnectivityInvariant:
+    """Issue #3124: _finalize_routes() enforces per-net connectivity.
+
+    The cleanup step inside _finalize_routes() can shrink the largest
+    connected component on a multi-pad net if it removes a segment
+    that bridges two sub-components.  Before #3124 this regression
+    was uncaught (the per-net invariant only ran after optimize and
+    nudge, not after cleanup).
+    """
+
+    def _make_router_with_pads(self) -> Autorouter:
+        """Build a 4-pad net with 3 chain segments and matching pads."""
+        from kicad_tools.router.primitives import Pad
+
+        router = _make_router()
+        # Pads on a horizontal line at y=90 on the F.Cu layer.
+        pads = {
+            ("U1", "A"): Pad(
+                x=110.0,
+                y=90.0,
+                width=0.5,
+                height=0.5,
+                net=1,
+                net_name="DEGRADE",
+                layer=Layer.F_CU,
+                ref="U1",
+                pin="A",
+            ),
+            ("U1", "B"): Pad(
+                x=115.0,
+                y=90.0,
+                width=0.5,
+                height=0.5,
+                net=1,
+                net_name="DEGRADE",
+                layer=Layer.F_CU,
+                ref="U1",
+                pin="B",
+            ),
+            ("U1", "C"): Pad(
+                x=120.0,
+                y=90.0,
+                width=0.5,
+                height=0.5,
+                net=1,
+                net_name="DEGRADE",
+                layer=Layer.F_CU,
+                ref="U1",
+                pin="C",
+            ),
+            ("U1", "D"): Pad(
+                x=125.0,
+                y=90.0,
+                width=0.5,
+                height=0.5,
+                net=1,
+                net_name="DEGRADE",
+                layer=Layer.F_CU,
+                ref="U1",
+                pin="D",
+            ),
+        }
+        router.pads = pads
+        router.nets = {1: list(pads.keys())}
+        router.net_names = {1: "DEGRADE"}
+
+        # 3-segment chain connecting all 4 pads.
+        router.routes = [
+            Route(
+                net=1,
+                net_name="DEGRADE",
+                segments=[
+                    _seg(110, 90, 115, 90, net=1),
+                    _seg(115, 90, 120, 90, net=1),
+                    _seg(120, 90, 125, 90, net=1),
+                ],
+            ),
+        ]
+        return router
+
+    def test_finalize_does_not_regress_clean_routes(self):
+        """A fully-connected multi-pad net survives finalize unchanged."""
+        from kicad_tools.cli.route_cmd import _finalize_routes
+
+        router = self._make_router_with_pads()
+        route_sexp, stats, _ = _finalize_routes(
+            router,
+            multi_pad_net_ids={1},
+            nets_to_route=1,
+            quiet=True,
+        )
+        # Cleanup is a no-op on well-formed routes.
+        assert len(router.routes) == 1
+        assert len(router.routes[0].segments) == 3
+        assert stats["nets_routed"] == 1
+        assert route_sexp.count("(segment") == 3
+
+    def test_finalize_strict_no_regression_does_not_exit(self):
+        """Strict mode is a pass-through when nothing regresses."""
+        from kicad_tools.cli.route_cmd import _finalize_routes
+
+        router = self._make_router_with_pads()
+        # Should not raise / exit.
+        _ = _finalize_routes(
+            router,
+            multi_pad_net_ids={1},
+            nets_to_route=1,
+            quiet=True,
+            strict=True,
+        )
+
+    def test_finalize_warns_on_aggregate_segment_drop(self, caplog):
+        """Issue #3124 AC #3: emit a WARNING when cleanup drops >50%
+        of segments.
+
+        We force a drop by giving the route a bunch of net-0 orphan
+        segments alongside a small valid chain; cleanup removes the
+        orphans (legitimately) but the ratio crosses the threshold,
+        so a warning fires.
+        """
+        import logging
+
+        from kicad_tools.cli.route_cmd import _finalize_routes
+
+        router = self._make_router_with_pads()
+        # Add a separate route with 10 net-0 segments that cleanup
+        # will legitimately remove.  pre = 3 + 10 = 13, post = 3.
+        # drop ratio = 1 - 3/13 = ~77%, > 50% threshold.
+        router.routes.append(
+            Route(
+                net=0,
+                net_name="",
+                segments=[
+                    _seg(110 + i * 0.1, 95, 110 + i * 0.1 + 0.05, 95, net=0) for i in range(10)
+                ],
+            )
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _finalize_routes(
+                router,
+                multi_pad_net_ids={1},
+                nets_to_route=1,
+                quiet=True,
+            )
+
+        # Warning surfaced via logger.
+        assert any("reduced segment count" in record.getMessage() for record in caplog.records), (
+            f"Expected aggregate-segment warning in caplog: {[r.getMessage() for r in caplog.records]}"
+        )
