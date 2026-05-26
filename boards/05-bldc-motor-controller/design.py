@@ -1091,8 +1091,19 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # Expanded from 60x80mm to 70x90mm to accommodate the STM32G431K8Tx MCU
     # (LQFP-32, 9x9mm body) which now lives between the bypass caps and
     # the gate driver.
-    BOARD_WIDTH = 70.0
-    BOARD_HEIGHT = 90.0
+    # Expanded again from 70x90mm to 80x100mm (Issue #3127 M-E Round 3) to
+    # restore routing-channel headroom on both axes.  PR #3111 empirically
+    # found that ``--placement-feedback`` rejected all 57 MOVE_COMPONENT
+    # candidates as "unsafe (board bounds)" against the 70x90 envelope
+    # (safety check at ``recovery/applicator.py:_position_within_bounds``);
+    # the larger envelope opens those candidates and gives the router
+    # additional channel width on the dense MOSFET / gate-driver columns.
+    # 80x100mm keeps the long axis under the JLCPCB 100x100mm small-board
+    # tier boundary so no manufacturing-tier change is incurred (+27% area).
+    # Mounting holes / zones / component placement re-derive automatically
+    # from the new corners via the BOARD_ORIGIN + offset arithmetic below.
+    BOARD_WIDTH = 80.0
+    BOARD_HEIGHT = 100.0
     BOARD_ORIGIN_X = 100.0
     BOARD_ORIGIN_Y = 100.0
 
