@@ -3570,16 +3570,19 @@ class Autorouter:
             detect_diff_pairs = None  # type: ignore[assignment]
 
         if detect_diff_pairs is not None and self.net_names:
-            # Build net_to_class map so explicit declarations can be
-            # consulted by detection.
+            # Build net_to_class map + class-name-keyed synth routing
+            # (Issue #3098 -- the detector looks up by class name in
+            # _gather_explicit_groups, but net_class_map is net-name keyed).
             net_to_class: dict[str, str] = {}
+            synth_routing: dict = dict(self.net_class_map)
             for net_name, net_class in self.net_class_map.items():
                 net_to_class[net_name] = net_class.name
+                synth_routing.setdefault(net_class.name, net_class)
 
             try:
                 pairs = detect_diff_pairs(
                     self.net_names,
-                    net_class_routing=self.net_class_map,
+                    net_class_routing=synth_routing,
                     net_to_class=net_to_class,
                 )
             except Exception:
@@ -3702,14 +3705,21 @@ class Autorouter:
         if not self.net_names:
             return
 
-        # Build net_to_class for explicit-declaration consultation.
-        # Identical construction to _prepare_routing / get_diff_pair_map.
-        # Built once here and reused by BOTH the diff-pair block below and
-        # the match-group block (Issue #2690, Epic #2661 Phase 1D) -- a
-        # single-source-of-truth idiom that avoids stale-state risk.
+        # Build net_to_class + a class-name-keyed routing map for
+        # explicit-declaration consultation.  ``self.net_class_map`` is
+        # keyed by NET NAME (e.g. "DQ0"), but ``detect_diff_pairs`` and
+        # ``detect_match_groups`` look up by CLASS NAME (e.g.
+        # "DDR_DATA_BYTE_0") inside ``_gather_explicit_groups``.  Mirrors
+        # the synth_routing idiom in ``validate/match_group_skew.py:174-181``
+        # (Issue #3098 -- without the class-name-keyed entries the
+        # detectors miss every explicit declaration on real router state
+        # and silently fall back to suffix inference or return empty).
+        # Single-source-of-truth idiom reused by BOTH blocks below.
         net_to_class: dict[str, str] = {}
+        synth_routing: dict = dict(self.net_class_map)
         for net_name, net_class in self.net_class_map.items():
             net_to_class[net_name] = net_class.name
+            synth_routing.setdefault(net_class.name, net_class)
 
         # --- Diff-pair skew bookkeeping (Issue #2657 / Phase 3H-cont) ---
         # Detection: defensive imports keep this helper robust against
@@ -3725,7 +3735,7 @@ class Autorouter:
             try:
                 detected_pairs = detect_diff_pairs(
                     self.net_names,
-                    net_class_routing=self.net_class_map,
+                    net_class_routing=synth_routing,
                     net_to_class=net_to_class,
                     kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
                 )
@@ -3764,7 +3774,7 @@ class Autorouter:
         try:
             detected_groups = detect_match_groups(
                 self.net_names,
-                net_class_routing=self.net_class_map,
+                net_class_routing=synth_routing,
                 net_to_class=net_to_class,
                 length_tracker=self._length_tracker,
                 enable_suffix_inference=False,  # opt-in only; see Phase 1C
@@ -3815,16 +3825,21 @@ class Autorouter:
         except ImportError:
             return out
 
-        # Build net_to_class for explicit-declaration consultation.
-        # Same construction as _prepare_routing.
+        # Build net_to_class + class-name-keyed synth_routing for
+        # explicit-declaration consultation (Issue #3098).  See the
+        # commentary in ``_finalize_routing`` for why both maps are
+        # needed: detector looks up by class name in
+        # _gather_explicit_groups but net_class_map is net-name keyed.
         net_to_class: dict[str, str] = {}
+        synth_routing: dict = dict(self.net_class_map)
         for net_name, net_class in self.net_class_map.items():
             net_to_class[net_name] = net_class.name
+            synth_routing.setdefault(net_class.name, net_class)
 
         try:
             detected = detect_diff_pairs(
                 self.net_names,
-                net_class_routing=self.net_class_map,
+                net_class_routing=synth_routing,
                 net_to_class=net_to_class,
                 kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
             )
