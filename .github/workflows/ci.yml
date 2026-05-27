@@ -423,6 +423,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Build C++ router backend
+        # `uv sync` does NOT build the native extension (see repo CLAUDE.md
+        # "Routing performance: build the C++ backend first").  Without
+        # this step board 06 routing falls back to pure Python which is
+        # 10-100x slower and reliably blows past the 10-min job timeout
+        # (Issue #3097 / PR #3141 Judge feedback, 2026-05-25).
+        run: uv run kct build-native
+
       - name: Re-route board + check diff-pair coverage
         run: |
           set -euo pipefail
@@ -530,6 +538,14 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --extra dev
+
+      - name: Build C++ router backend
+        # `uv sync` does NOT build the native extension (see repo CLAUDE.md
+        # "Routing performance: build the C++ backend first").  Without
+        # this step board 07 routing falls back to pure Python which is
+        # 10-100x slower.  Parity with diffpair-routing-regression
+        # (Issue #3097 / PR #3141 Judge feedback, 2026-05-25).
+        run: uv run kct build-native
 
       - name: Re-route board + check match-group coverage
         run: |
