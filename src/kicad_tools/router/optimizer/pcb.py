@@ -307,6 +307,49 @@ def _run_drc_error_count(
     Returns:
         Number of DRC errors found.
     """
+    counts = _run_drc_error_count_by_category(
+        pcb_text,
+        manufacturer=manufacturer,
+        layers=layers,
+        copper_oz=copper_oz,
+    )
+    return counts["__total__"]
+
+
+# Issue #3138: DRC rule categories that indicate routes crossing pads or
+# pad-clearance violations.  When per-net optimization grows the count
+# of any of these categories, the rollback gate must fire even if the
+# total error count stayed flat (or decreased while pad-violations
+# swapped in for other categories).  Without this, the optimizer can
+# trade a ``clearance_segment_segment`` violation for a
+# ``clearance_pad_segment`` one and silently leave a trace literally
+# crossing a pad.
+_PAD_VIOLATION_CATEGORIES = frozenset(
+    {
+        "clearance_pad_segment",
+        "clearance_pad_via",
+    }
+)
+
+
+def _run_drc_error_count_by_category(
+    pcb_text: str,
+    manufacturer: str,
+    layers: int,
+    copper_oz: float,
+) -> dict[str, int]:
+    """Run DRC and return a dict of error counts keyed by rule id.
+
+    The returned dict also contains a ``__total__`` key with the
+    aggregate error count so callers that only care about the total
+    can avoid summing the per-category values.
+
+    Issue #3138: introduced so the per-net rollback gate can detect
+    category swaps that leave the total flat -- e.g., when the
+    optimizer trades a ``clearance_segment_segment`` violation for a
+    ``clearance_pad_segment`` one (a route crossing a pad), the total
+    is unchanged but the pad-violation category went up.
+    """
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
 
@@ -327,9 +370,32 @@ def _run_drc_error_count(
         # by segment reshaping)
         results = checker.check_clearances()
         results.merge(checker.check_dimensions())
-        return results.error_count
+
+        counts: dict[str, int] = {"__total__": results.error_count}
+        for v in results.errors:
+            counts[v.rule_id] = counts.get(v.rule_id, 0) + 1
+        return counts
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _pad_violations_grew(
+    before: dict[str, int],
+    after: dict[str, int],
+) -> bool:
+    """Return True if any pad-violation category grew between ``before`` and ``after``.
+
+    Issue #3138 Approach B: the per-net rollback gate must fire on
+    category swaps that introduce pad-clearance violations even when the
+    aggregate error count is flat or improves.  Pad-overlap is a
+    show-stopper (the route literally crosses a pad), so any growth in
+    ``clearance_pad_segment`` or ``clearance_pad_via`` triggers
+    rollback regardless of what other categories did.
+    """
+    for category in _PAD_VIOLATION_CATEGORIES:
+        if after.get(category, 0) > before.get(category, 0):
+            return True
+    return False
 
 
 def optimize_pcb(
@@ -376,15 +442,15 @@ def optimize_pcb(
         stats.length_before += total_length(segs)
 
     # DRC baseline (when drc_aware is enabled)
-    baseline_errors = 0
+    baseline_counts: dict[str, int] = {"__total__": 0}
     if config.drc_aware and config.drc_manufacturer:
-        baseline_errors = _run_drc_error_count(
+        baseline_counts = _run_drc_error_count_by_category(
             pcb_text,
             manufacturer=config.drc_manufacturer,
             layers=config.drc_layers,
             copper_oz=config.drc_copper_oz,
         )
-        stats.drc_errors_before = baseline_errors
+        stats.drc_errors_before = baseline_counts["__total__"]
 
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
@@ -397,19 +463,33 @@ def optimize_pcb(
     if config.drc_aware and config.drc_manufacturer:
         # Build fully-optimized text and check DRC
         full_optimized_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
-        full_errors = _run_drc_error_count(
+        full_counts = _run_drc_error_count_by_category(
             full_optimized_text,
             manufacturer=config.drc_manufacturer,
             layers=config.drc_layers,
             copper_oz=config.drc_copper_oz,
         )
+        full_errors = full_counts["__total__"]
+        baseline_errors = baseline_counts["__total__"]
 
-        if full_errors > baseline_errors:
+        # Issue #3138: gate is now category-aware.  The old gate
+        # ``if full_errors > baseline_errors`` silently allowed
+        # optimization to *swap* category 5 ``clearance_segment_segment``
+        # violations for category 5 ``clearance_pad_segment`` ones at a
+        # constant total -- leaving traces literally crossing pads.
+        # The new gate fires the rollback loop whenever any
+        # pad-violation category grows, *or* the aggregate total grows.
+        needs_rollback = full_errors > baseline_errors or _pad_violations_grew(
+            baseline_counts, full_counts
+        )
+
+        if needs_rollback:
             # Some nets made things worse -- try rolling back one net at a time.
             # For each net, test keeping its original segments while all
             # other nets remain optimized.  If reverting a net reduces errors
             # back to (or below) baseline, mark it as rolled back.
             final_segments: dict[str, list[Segment]] = dict(optimized_segments)
+            current_counts = dict(full_counts)
 
             for net in list(optimized_segments.keys()):
                 # Skip nets whose optimization did not change the segments
@@ -420,21 +500,34 @@ def optimize_pcb(
                 trial = dict(final_segments)
                 trial[net] = segments_by_net[net]
                 trial_text = replace_segments(pcb_text, segments_by_net, trial)
-                trial_errors = _run_drc_error_count(
+                trial_counts = _run_drc_error_count_by_category(
                     trial_text,
                     manufacturer=config.drc_manufacturer,
                     layers=config.drc_layers,
                     copper_oz=config.drc_copper_oz,
                 )
 
-                if trial_errors < full_errors:
+                # Issue #3138: a rollback is helpful if it lowers the total
+                # error count *or* shrinks a pad-violation category (even
+                # when the total is flat).  The previous gate
+                # ``trial_errors < full_errors`` missed category swaps.
+                trial_total = trial_counts["__total__"]
+                pad_shrunk = any(
+                    trial_counts.get(c, 0) < current_counts.get(c, 0)
+                    for c in _PAD_VIOLATION_CATEGORIES
+                )
+                if trial_total < full_errors or pad_shrunk:
                     # Reverting this net helped -- keep original segments
                     final_segments[net] = segments_by_net[net]
                     stats.nets_rolled_back += 1
-                    full_errors = trial_errors
+                    full_errors = trial_total
+                    current_counts = trial_counts
 
-                    # If we are back at or below baseline, stop rolling back
-                    if full_errors <= baseline_errors:
+                    # If we are back at or below baseline AND no new
+                    # pad-violations remain, stop rolling back.
+                    if full_errors <= baseline_errors and not _pad_violations_grew(
+                        baseline_counts, current_counts
+                    ):
                         break
 
             optimized_segments = final_segments
