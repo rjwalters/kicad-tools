@@ -204,18 +204,20 @@ class TestDrcRollback:
 
         call_count = 0
 
-        def mock_drc_error_count(pcb_text, manufacturer, layers, copper_oz):
+        # Issue #3138: optimizer now uses _run_drc_error_count_by_category
+        # (returns dict keyed by rule id with ``__total__``).  Mock that.
+        def mock_drc_error_count_by_category(pcb_text, manufacturer, layers, copper_oz):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 # Baseline: 0 errors
-                return 0
+                return {"__total__": 0}
             elif call_count == 2:
                 # After full optimization: 3 errors (bad!)
-                return 3
+                return {"__total__": 3, "clearance_segment_segment": 3}
             else:
                 # Reverting the net: 0 errors (good!)
-                return 0
+                return {"__total__": 0}
 
         config = OptimizationConfig(
             drc_aware=True,
@@ -224,8 +226,8 @@ class TestDrcRollback:
         )
 
         with patch(
-            "kicad_tools.router.optimizer.pcb._run_drc_error_count",
-            side_effect=mock_drc_error_count,
+            "kicad_tools.router.optimizer.pcb._run_drc_error_count_by_category",
+            side_effect=mock_drc_error_count_by_category,
         ):
             stats = optimize_pcb(
                 pcb_path=str(pcb_file),
@@ -272,15 +274,22 @@ class TestDrcRollback:
 
         call_count = 0
 
+        # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
         def mock_drc(pcb_text, manufacturer, layers, copper_oz):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return 2  # baseline: 2 errors
+                return {"__total__": 2, "clearance_segment_segment": 2}  # baseline: 2 errors
             elif call_count == 2:
-                return 5  # after optimization: 5 errors (worse)
+                return {
+                    "__total__": 5,
+                    "clearance_segment_segment": 5,
+                }  # after optimization: 5 errors
             else:
-                return 2  # after reverting: back to 2 (good)
+                return {
+                    "__total__": 2,
+                    "clearance_segment_segment": 2,
+                }  # after reverting: back to 2
 
         config = OptimizationConfig(
             drc_aware=True,
@@ -289,7 +298,7 @@ class TestDrcRollback:
         )
 
         with patch(
-            "kicad_tools.router.optimizer.pcb._run_drc_error_count",
+            "kicad_tools.router.optimizer.pcb._run_drc_error_count_by_category",
             side_effect=mock_drc,
         ):
             stats = optimize_pcb(
@@ -334,9 +343,10 @@ class TestDrcRollback:
                 )
             ]
 
+        # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
         def mock_drc(pcb_text, manufacturer, layers, copper_oz):
             # Always return 0 errors -- optimization is safe
-            return 0
+            return {"__total__": 0}
 
         config = OptimizationConfig(
             drc_aware=True,
@@ -345,7 +355,7 @@ class TestDrcRollback:
         )
 
         with patch(
-            "kicad_tools.router.optimizer.pcb._run_drc_error_count",
+            "kicad_tools.router.optimizer.pcb._run_drc_error_count_by_category",
             side_effect=mock_drc,
         ):
             stats = optimize_pcb(
@@ -360,6 +370,206 @@ class TestDrcRollback:
         assert stats.drc_errors_after == 0
         # Should have merged 2 segments into 1
         assert stats.segments_after < stats.segments_before
+
+
+class TestCategoryAwareRollback:
+    """Issue #3138 Approach B: category-aware DRC rollback gate.
+
+    The previous gate at ``router/optimizer/pcb.py:407`` was
+    ``if full_errors > baseline_errors:`` -- a pure total-count check.
+    If the optimizer swapped a ``clearance_segment_segment`` violation
+    for a ``clearance_pad_segment`` one at constant total, the gate
+    silently passed and the optimized PCB ended up with a route literally
+    crossing a pad.  These tests cover the new pad-violation-category
+    guard.
+    """
+
+    def test_rollback_fires_on_pad_violation_swap_flat_total(self, tmp_path: Path):
+        """Total flat, but pad-violations grew: rollback must fire."""
+        from kicad_tools.router.optimizer.config import OptimizationConfig
+        from kicad_tools.router.optimizer.pcb import optimize_pcb
+        from kicad_tools.router.primitives import Segment
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(SIMPLE_PCB)
+        output_file = tmp_path / "out.kicad_pcb"
+
+        def shift_optimize(segments: list[Segment]) -> list[Segment]:
+            if not segments:
+                return segments
+            return [
+                Segment(
+                    x1=s.x1,
+                    y1=s.y1 + 0.001,
+                    x2=s.x2,
+                    y2=s.y2 + 0.001,
+                    width=s.width,
+                    layer=s.layer,
+                    net=s.net,
+                    net_name=s.net_name,
+                )
+                for s in segments
+            ]
+
+        call_count = 0
+
+        def mock_drc(pcb_text, manufacturer, layers, copper_oz):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Baseline: 2 segment-segment violations, 0 pad violations
+                return {
+                    "__total__": 2,
+                    "clearance_segment_segment": 2,
+                }
+            elif call_count == 2:
+                # After optimization: same total 2, but now they are pad
+                # violations (route crossing pads -- the show-stopper).
+                return {
+                    "__total__": 2,
+                    "clearance_pad_segment": 2,
+                }
+            else:
+                # After per-net rollback: pad violations cleared, back to baseline.
+                return {
+                    "__total__": 2,
+                    "clearance_segment_segment": 2,
+                }
+
+        config = OptimizationConfig(
+            drc_aware=True,
+            drc_manufacturer="jlcpcb",
+            drc_layers=2,
+        )
+
+        with patch(
+            "kicad_tools.router.optimizer.pcb._run_drc_error_count_by_category",
+            side_effect=mock_drc,
+        ):
+            stats = optimize_pcb(
+                pcb_path=str(pcb_file),
+                output_path=str(output_file),
+                optimize_fn=shift_optimize,
+                config=config,
+            )
+
+        # Approach B success: even with a FLAT total, the rollback
+        # loop fires because pad-violations grew.
+        assert stats.nets_rolled_back >= 1, (
+            "Issue #3138 Approach B: rollback must fire on category swaps "
+            "that introduce pad-clearance violations even when total is flat."
+        )
+
+    def test_no_rollback_when_only_segment_segment_grows(self, tmp_path: Path):
+        """Non-pad category growth with flat total should NOT fire the new gate.
+
+        The old behavior remains: if the total grows, rollback fires.  But
+        if the total is flat AND the new growth is in a non-pad category,
+        rollback does NOT fire (the old gate's behaviour is preserved).
+        """
+        from kicad_tools.router.optimizer.config import OptimizationConfig
+        from kicad_tools.router.optimizer.pcb import optimize_pcb
+        from kicad_tools.router.primitives import Segment
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(SIMPLE_PCB)
+        output_file = tmp_path / "out.kicad_pcb"
+
+        def shift_optimize(segments: list[Segment]) -> list[Segment]:
+            if not segments:
+                return segments
+            return [
+                Segment(
+                    x1=s.x1,
+                    y1=s.y1 + 0.001,
+                    x2=s.x2,
+                    y2=s.y2 + 0.001,
+                    width=s.width,
+                    layer=s.layer,
+                    net=s.net,
+                    net_name=s.net_name,
+                )
+                for s in segments
+            ]
+
+        call_count = 0
+
+        def mock_drc(pcb_text, manufacturer, layers, copper_oz):
+            nonlocal call_count
+            call_count += 1
+            # Always return the same categories: same total, only
+            # non-pad violation categories change.  No pad-violation
+            # growth means no rollback should fire.
+            if call_count == 1:
+                return {
+                    "__total__": 2,
+                    "clearance_segment_segment": 1,
+                    "clearance_segment_via": 1,
+                }
+            else:
+                return {
+                    "__total__": 2,
+                    "clearance_segment_segment": 2,
+                    "clearance_segment_via": 0,
+                }
+
+        config = OptimizationConfig(
+            drc_aware=True,
+            drc_manufacturer="jlcpcb",
+            drc_layers=2,
+        )
+
+        with patch(
+            "kicad_tools.router.optimizer.pcb._run_drc_error_count_by_category",
+            side_effect=mock_drc,
+        ):
+            stats = optimize_pcb(
+                pcb_path=str(pcb_file),
+                output_path=str(output_file),
+                optimize_fn=shift_optimize,
+                config=config,
+            )
+
+        # Non-pad category swap at flat total: rollback should NOT fire.
+        assert stats.nets_rolled_back == 0, (
+            "Issue #3138 Approach B: gate must remain conservative for "
+            "non-pad category swaps to avoid undoing useful optimizations."
+        )
+
+    def test_pad_violations_grew_helper(self):
+        """Direct unit test for the _pad_violations_grew helper."""
+        from kicad_tools.router.optimizer.pcb import _pad_violations_grew
+
+        # No change -- never grows
+        assert not _pad_violations_grew({}, {})
+        assert not _pad_violations_grew(
+            {"clearance_pad_segment": 2},
+            {"clearance_pad_segment": 2},
+        )
+
+        # Pad-segment growth
+        assert _pad_violations_grew(
+            {"clearance_pad_segment": 0},
+            {"clearance_pad_segment": 1},
+        )
+
+        # Pad-via growth
+        assert _pad_violations_grew(
+            {},
+            {"clearance_pad_via": 1},
+        )
+
+        # Non-pad category growth does NOT count
+        assert not _pad_violations_grew(
+            {"clearance_segment_segment": 0},
+            {"clearance_segment_segment": 5},
+        )
+
+        # Pad-segment shrunk -- does not count as growth
+        assert not _pad_violations_grew(
+            {"clearance_pad_segment": 5},
+            {"clearance_pad_segment": 1},
+        )
 
 
 class TestDrcAwareStatsFields:

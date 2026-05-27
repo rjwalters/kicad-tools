@@ -1618,10 +1618,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("Routing PCB...")
     print("=" * 60)
 
+    # Issue #3138: apply the empirically validated "combined intervention"
+    # baseline from #3134.  The four knobs together (tight clearance +
+    # placement spread + drc-aware optimizer + jlcpcb-tier1 manufacturer
+    # profile) lifted reach from 4/10 -> 6/10 on this board; the additional
+    # ``route_with_escape`` swap below is the algorithmic gap closer.
     rules = DesignRules(
-        grid_resolution=0.1,
+        grid_resolution=0.075,
         trace_width=0.3,
-        trace_clearance=0.3,
+        trace_clearance=0.15,
         via_drill=0.3,
         via_diameter=0.6,
     )
@@ -1656,7 +1661,24 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # cannot hang indefinitely on dense layouts (see issue #2794).  These
     # bounds are generous enough for this board's signal-net count (~10) but
     # short enough that any pathological case fails fast.
-    router.route_all_negotiated(per_net_timeout=30.0, timeout=240.0)
+    #
+    # Issue #3138: switched from ``route_all_negotiated()`` to
+    # ``route_with_escape(use_negotiated=True, ...)`` so the dense-package
+    # escape pre-pass (``generate_escape_routes`` + virtual escape-endpoint
+    # pads, ``router/core.py:10783-10821``) runs on U1 (STM32G031F6P6 TSSOP-20
+    # at 0.65mm pitch -- flagged by ``is_dense_package()`` in
+    # ``router/escape.py:222``).  Without the pre-pass, the U1 east-side
+    # cluster (pins 11-20) cannot escape and routing reach was capped at
+    # 6/10 nets even with the combined intervention (#3134).  The pre-pass
+    # generates short orthogonal escape stubs from each TSSOP pad and
+    # registers virtual escape-endpoint pads (#2401) so the main router
+    # routes between those endpoints rather than the original congested
+    # pin centers.
+    router.route_with_escape(
+        use_negotiated=True,
+        per_net_timeout=45.0,
+        timeout=420.0,
+    )
 
     stats_before = router.get_statistics()
     print("\n3. Raw routing results:")
@@ -1665,12 +1687,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Vias: {stats_before['vias']}")
 
     print("\n4. Optimizing traces...")
+    # Issue #3138 combined intervention: enable drc-aware optimization with
+    # jlcpcb-tier1 manufacturer profile so per-net optimizations that increase
+    # DRC violations are rolled back.
     opt_config = OptimizationConfig(
         merge_collinear=True,
         eliminate_zigzags=True,
         compress_staircase=True,
         convert_45_corners=True,
         minimize_vias=True,
+        drc_aware=True,
+        drc_manufacturer="jlcpcb-tier1",
     )
     optimizer = TraceOptimizer(config=opt_config)
 
@@ -1764,8 +1791,15 @@ def run_drc(pcb_path: Path) -> bool:
     print("=" * 60)
 
     try:
+        # Issue #3138: use jlcpcb-tier1 manufacturer profile to match the
+        # combined-intervention baseline (supports via-in-pad which the
+        # default jlcpcb profile does not).
         result = subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            [
+                sys.executable, "-m", "kicad_tools.cli", "check",
+                "--mfr", "jlcpcb-tier1",
+                str(pcb_path),
+            ],
             capture_output=True,
             text=True,
         )
