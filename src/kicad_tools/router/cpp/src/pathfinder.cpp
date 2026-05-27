@@ -339,7 +339,10 @@ RouteResult Pathfinder::route(
     int partner_net,
     int intra_pair_radius_cells,
     double per_net_timeout_seconds,
-    int max_search_iterations
+    int max_search_iterations,
+    float emit_trace_width,
+    float emit_via_diameter,
+    float emit_via_drill
 ) {
     // Non-resumable route: use local A* state, no member state touched.
     // This preserves backward compatibility for callers that don't need retry.
@@ -466,8 +469,13 @@ RouteResult Pathfinder::route(
             bool layer_ok = std::find(valid_end_layers.begin(), valid_end_layers.end(),
                                       current.layer) != valid_end_layers.end();
             if (layer_ok) {
+                // Issue #3130: forward per-net emit widths so the
+                // reconstructed Segment/Via carry per-net values instead
+                // of the global ``rules_`` defaults.
                 result = reconstruct_path(closed_list, current_idx,
-                                          start_x, start_y, end_x, end_y, net);
+                                          start_x, start_y, end_x, end_y, net,
+                                          emit_trace_width, emit_via_diameter,
+                                          emit_via_drill);
                 result.success = true;
                 return result;
             }
@@ -694,7 +702,10 @@ RouteResult Pathfinder::route_resumable(
     int partner_net,
     int intra_pair_radius_cells,
     double per_net_timeout_seconds,
-    int max_search_iterations
+    int max_search_iterations,
+    float emit_trace_width,
+    float emit_via_diameter,
+    float emit_via_drill
 ) {
     // Clear any previous search state
     clear_search_state();
@@ -716,6 +727,15 @@ RouteResult Pathfinder::route_resumable(
     // branch on every neighbor expansion.
     search_partner_net_ = partner_net;
     search_intra_pair_radius_cells_ = intra_pair_radius_cells;
+
+    // Issue #3130: cache per-net emit widths/diameters so
+    // ``reconstruct_path()`` (called from ``run_astar_loop()``) writes
+    // per-net values into the returned Segment/Via objects instead of
+    // the global ``rules_`` defaults.  Cached across resume() so an
+    // (initial + resume*) sequence for a single net stays consistent.
+    search_emit_trace_width_ = emit_trace_width;
+    search_emit_via_diameter_ = emit_via_diameter;
+    search_emit_via_drill_ = emit_via_drill;
 
     auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
     auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
@@ -852,10 +872,16 @@ RouteResult Pathfinder::run_astar_loop() {
                 // Issue #2447: Skip rejected goals (mirrors Python pathfinder's
                 // continue at line 1553 when _reconstruct_route fails).
                 if (!rejected_goals_.count(current_key)) {
+                    // Issue #3130: forward cached per-net emit widths so
+                    // the reconstructed Segment/Via carry per-net values
+                    // for the (initial + resume*) sequence.
                     result = reconstruct_path(search_closed_list_, current_idx,
                                               search_start_x_, search_start_y_,
                                               search_end_x_, search_end_y_,
-                                              search_net_);
+                                              search_net_,
+                                              search_emit_trace_width_,
+                                              search_emit_via_diameter_,
+                                              search_emit_via_drill_);
                     result.success = true;
                     return result;
                 }
@@ -1096,6 +1122,11 @@ void Pathfinder::clear_search_state() {
     // the previous net does not leak into the next route().
     search_has_deadline_ = false;
     search_timed_out_ = false;
+    // Issue #3130: reset per-net emit widths so a stale value from the
+    // previous net does not leak into the next route().
+    search_emit_trace_width_ = 0.0f;
+    search_emit_via_diameter_ = 0.0f;
+    search_emit_via_drill_ = 0.0f;
 }
 
 RouteResult Pathfinder::reconstruct_path(
@@ -1103,11 +1134,24 @@ RouteResult Pathfinder::reconstruct_path(
     int end_idx,
     float start_x, float start_y,
     float end_x, float end_y,
-    int net
+    int net,
+    float emit_trace_width,
+    float emit_via_diameter,
+    float emit_via_drill
 ) {
     RouteResult result;
     result.net = net;
     result.success = true;
+
+    // Issue #3130: Resolve per-net emit values up front.  A caller-supplied
+    // value > 0 wins; otherwise fall back to the global ``rules_`` defaults
+    // so existing callers (and the pre-#3130 ABI) see identical behavior.
+    const float seg_width = (emit_trace_width > 0.0f)
+        ? emit_trace_width : rules_.trace_width;
+    const float via_diameter = (emit_via_diameter > 0.0f)
+        ? emit_via_diameter : rules_.via_diameter;
+    const float via_drill = (emit_via_drill > 0.0f)
+        ? emit_via_drill : rules_.via_drill;
 
     // Build path from end to start
     std::vector<std::tuple<float, float, int, bool>> path;
@@ -1137,8 +1181,8 @@ RouteResult Pathfinder::reconstruct_path(
             Via via;
             via.x = current_x;
             via.y = current_y;
-            via.drill = rules_.via_drill;
-            via.diameter = rules_.via_diameter;
+            via.drill = via_drill;
+            via.diameter = via_diameter;
             via.layer_from = current_layer;
             via.layer_to = layer;
             via.net = net;
@@ -1152,7 +1196,7 @@ RouteResult Pathfinder::reconstruct_path(
                 seg.y1 = current_y;
                 seg.x2 = wx;
                 seg.y2 = wy;
-                seg.width = rules_.trace_width;
+                seg.width = seg_width;
                 seg.layer = layer;
                 seg.net = net;
                 result.segments.push_back(seg);
@@ -1170,7 +1214,7 @@ RouteResult Pathfinder::reconstruct_path(
         seg.y1 = current_y;
         seg.x2 = end_x;
         seg.y2 = end_y;
-        seg.width = rules_.trace_width;
+        seg.width = seg_width;
         seg.layer = current_layer;
         seg.net = net;
         result.segments.push_back(seg);

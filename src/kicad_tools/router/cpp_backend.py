@@ -1043,7 +1043,8 @@ class CppPathfinder:
         """
         if not self._per_call_timing_enabled:
             return self._route_impl(
-                start, end,
+                start,
+                end,
                 net_class=net_class,
                 negotiated_mode=negotiated_mode,
                 present_cost_factor=present_cost_factor,
@@ -1058,7 +1059,8 @@ class CppPathfinder:
         succeeded = False
         try:
             result = self._route_impl(
-                start, end,
+                start,
+                end,
                 net_class=net_class,
                 negotiated_mode=negotiated_mode,
                 present_cost_factor=present_cost_factor,
@@ -1085,14 +1087,16 @@ class CppPathfinder:
                 and per_net_timeout > 0
                 and elapsed > per_net_timeout * 1.2 + 0.5
             )
-            self._per_call_timings.append({
-                "net": start.net,
-                "net_name": start.net_name,
-                "elapsed": elapsed,
-                "per_net_timeout": per_net_timeout,
-                "deadline_violated": deadline_violated,
-                "succeeded": succeeded,
-            })
+            self._per_call_timings.append(
+                {
+                    "net": start.net,
+                    "net_name": start.net_name,
+                    "elapsed": elapsed,
+                    "per_net_timeout": per_net_timeout,
+                    "deadline_violated": deadline_violated,
+                    "succeeded": succeeded,
+                }
+            )
 
     def _route_impl(
         self,
@@ -1156,6 +1160,18 @@ class CppPathfinder:
             math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
         )
 
+        # Issue #3130: per-net emit widths/diameters.  Forward the per-net
+        # ``trace_width`` and ``via_size`` so the C++-internal Segment /
+        # Via objects returned from route_resumable() carry per-net values
+        # instead of the global ``rules_`` defaults.  Adapter overrides at
+        # ``_convert_result_to_route`` remain in place as a defensive
+        # fallback (used only when emit_* == 0).  ``via_drill`` is not yet
+        # a per-net attribute on ``NetClassRouting``; fall back to the
+        # global default so behavior matches pre-#3130 callers.
+        emit_trace_width = float(net_trace_width) if net_class else 0.0
+        emit_via_diameter = float(net_via_size) if net_class else 0.0
+        emit_via_drill = 0.0
+
         # Issue #2587 / Epic #2556 Phase 1C-cont: Resolve the diff-pair partner
         # net id and compute a tighter within-pair search radius.  When the
         # source net's ``NetClassRouting`` declares a ``diffpair_partner`` AND
@@ -1174,9 +1190,7 @@ class CppPathfinder:
                 intra_pair_clearance = net_class.effective_intra_pair_clearance()
                 intra_pair_radius_cells = max(
                     1,
-                    math.ceil(
-                        (net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution
-                    ),
+                    math.ceil((net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution),
                 )
 
         # Issue #2427: Compute pad metal bounds and approach zones.
@@ -1238,6 +1252,15 @@ class CppPathfinder:
                 # Issue #2610: per-net wall-clock deadline + iteration override.
                 timeout_seconds,
                 self._max_search_iterations,
+                # Issue #3130: per-net emit widths/diameters.  Forwarded so the
+                # C++-internal RouteResult carries per-net Segment.width and
+                # Via.diameter/drill matching the source net class instead of
+                # the global ``rules_`` defaults.  When ``net_class is None``
+                # all three are 0.0 and the C++ falls back to ``rules_.*``
+                # (pre-#3130 behavior).
+                emit_trace_width,
+                emit_via_diameter,
+                emit_via_drill,
             )
 
             if not result.success:
@@ -1423,6 +1446,10 @@ class CppPathfinder:
         route = Route(net=start.net, net_name=start.net_name)
 
         # Issue #1543: Apply net-class-aware trace width to segments.
+        # Issue #3130: As of #3130 the C++ pathfinder also accepts per-net
+        # emit widths and writes them into ``cpp_seg.width``, so this Python
+        # override is now a defensive fallback (e.g. when the call path
+        # passes a zero ``emit_trace_width``).
         trace_width = net_class.trace_width if net_class else None
 
         for cpp_seg in result.segments:
@@ -1439,6 +1466,16 @@ class CppPathfinder:
             )
             route.segments.append(seg)
 
+        # Issue #3130: Mirror the segment-width override for via diameter.
+        # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
+        # regardless of net class; this caused POWER-class nets (which declare
+        # ``via_size=0.8mm``) to emit vias at the global default.  With #3130
+        # the C++ side also honors ``emit_via_diameter``, so this is also
+        # a defensive fallback when called with ``emit_via_diameter == 0``.
+        # ``via_drill`` is not yet a per-net attribute on ``NetClassRouting``;
+        # fall back to ``cpp_via.drill`` for now.
+        via_diameter = net_class.via_size if net_class else None
+
         for cpp_via in result.vias:
             layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
             layer_to_value = self._grid.index_to_layer(cpp_via.layer_to)
@@ -1446,7 +1483,7 @@ class CppPathfinder:
                 x=cpp_via.x,
                 y=cpp_via.y,
                 drill=cpp_via.drill,
-                diameter=cpp_via.diameter,
+                diameter=via_diameter if via_diameter is not None else cpp_via.diameter,
                 layers=(Layer(layer_from_value), Layer(layer_to_value)),
                 net=cpp_via.net,
                 net_name=start.net_name,
@@ -1566,12 +1603,14 @@ class CppPathfinder:
         # ``pathfinder.py:_validate_route_clearance``.
         if self._foreign_vias:
             from .via_clearance import segment_clears_foreign_via
+
             for seg in route.segments:
                 for via in self._foreign_vias:
                     if via.net == start.net:
                         continue  # Same-net via -- skipped by convention.
                     if not segment_clears_foreign_via(
-                        seg, via,
+                        seg,
+                        via,
                         trace_clearance=self._rules.trace_clearance,
                         hard_intersection_only=False,
                     ):

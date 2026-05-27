@@ -221,7 +221,12 @@ NB_MODULE(router_cpp, m) {
              // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
              // and override for the iteration backstop (<= 0 = cols*rows*4).
              "per_net_timeout_seconds"_a = 0.0,
-             "max_search_iterations"_a = 0)
+             "max_search_iterations"_a = 0,
+             // Issue #3130: per-net emit widths/diameters (0 = use rules_ defaults).
+             // Defaults preserve pre-#3130 emit behavior identically.
+             "emit_trace_width"_a = 0.0f,
+             "emit_via_diameter"_a = 0.0f,
+             "emit_via_drill"_a = 0.0f)
         .def("route_resumable", &Pathfinder::route_resumable,
              "start_x"_a, "start_y"_a, "start_layer"_a,
              "end_x"_a, "end_y"_a, "end_layer"_a,
@@ -241,7 +246,12 @@ NB_MODULE(router_cpp, m) {
              // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
              // and override for the iteration backstop (<= 0 = cols*rows*4).
              "per_net_timeout_seconds"_a = 0.0,
-             "max_search_iterations"_a = 0)
+             "max_search_iterations"_a = 0,
+             // Issue #3130: per-net emit widths/diameters (0 = use rules_ defaults).
+             // Defaults preserve pre-#3130 emit behavior identically.
+             "emit_trace_width"_a = 0.0f,
+             "emit_via_diameter"_a = 0.0f,
+             "emit_via_drill"_a = 0.0f)
         .def("resume", &Pathfinder::resume,
              "reject_x"_a, "reject_y"_a, "reject_layer"_a)
         .def("clear_search_state", &Pathfinder::clear_search_state)

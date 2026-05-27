@@ -386,9 +386,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print(f"   Buck regulator: {buck.regulator.reference} (LM2596-5.0)")
     print(f"   Inductor: {buck.inductor.reference} = 33uH")
     print(f"   Diode: {buck.diode.reference} = SS34 (Schottky)")
-    print(
-        f"   Buck stage efficiency: {buck.get_efficiency_estimate() * 100:.0f}%"
-    )
+    print(f"   Buck stage efficiency: {buck.get_efficiency_estimate() * 100:.0f}%")
 
     print(f"\n4. LDO stage (5V → 3.3V): {cascade.ldo.ldo.reference} (AMS1117-3.3)")
     print(
@@ -447,8 +445,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         # pin lives on so the wire doesn't cross the body).
         end_pos = (pin_pos[0] + dx, pin_pos[1] + dy)
         sch.add_wire(pin_pos, end_pos, warn_on_collision=False)
-        sch.add_label(label_text, end_pos[0], end_pos[1], rotation=0,
-                      validate_connection=False)
+        sch.add_label(label_text, end_pos[0], end_pos[1], rotation=0, validate_connection=False)
 
     # Power pins (VDD/VDDA = +3.3V, VSS/VSSA = GND) get wired straight to
     # rails.  Pin 1 (VDD), 17 (VDD), 15 (VDDA) -> +3.3V.
@@ -525,11 +522,13 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # Add small wire stubs and labels (validate=False because the wires alone
     # may not have caught the label position before snapping)
     sch.add_wire(xtal_in_pos, (xtal_in_pos[0] - 5, xtal_in_pos[1]), warn_on_collision=False)
-    sch.add_label("OSC_IN", xtal_in_pos[0] - 5, xtal_in_pos[1], rotation=0,
-                  validate_connection=False)
+    sch.add_label(
+        "OSC_IN", xtal_in_pos[0] - 5, xtal_in_pos[1], rotation=0, validate_connection=False
+    )
     sch.add_wire(xtal_out_pos, (xtal_out_pos[0] + 5, xtal_out_pos[1]), warn_on_collision=False)
-    sch.add_label("OSC_OUT", xtal_out_pos[0] + 5, xtal_out_pos[1], rotation=0,
-                  validate_connection=False)
+    sch.add_label(
+        "OSC_OUT", xtal_out_pos[0] + 5, xtal_out_pos[1], rotation=0, validate_connection=False
+    )
 
     # Debug header (SWD).  SWD-6 pinout: 1=VCC, 2=SWDIO, 3=GND, 4=SWCLK,
     # 5=GND, 6=NRST.  ``connect_to_rails`` already wires pin 1 (VCC) and
@@ -626,28 +625,28 @@ def create_bldc_controller(output_dir: Path) -> Path:
             # SPI inputs: tied to +3.3V (idle high) since no MCU pin is
             # allocated on this demo board.  These are Input-type pins, so
             # tying multiple of them to the same +3.3V rail is fine.
-            "SCS": "+3.3V",           # SPI chip-select (idle high)
-            "SCLK": "+3.3V",          # SPI clock
-            "SDATAI": "+3.3V",        # SPI MOSI (idle high)
-            "SMODE": "+3.3V",         # SPI mode strap (3-wire vs 4-wire)
+            "SCS": "+3.3V",  # SPI chip-select (idle high)
+            "SCLK": "+3.3V",  # SPI clock
+            "SDATAI": "+3.3V",  # SPI MOSI (idle high)
+            "SMODE": "+3.3V",  # SPI mode strap (3-wire vs 4-wire)
             # Discrete control inputs: tied to static rails.
-            "ENABLE": "+3.3V",        # enable (always-on for demo)
-            "RESET": "+3.3V",         # active-low reset, idle high
-            "BRAKE": "+3.3V",         # active-low brake, idle high
-            "DIR": "+3.3V",           # direction strap
-            "CLKIN": "GND",           # external clock-in (unused, tied low)
+            "ENABLE": "+3.3V",  # enable (always-on for demo)
+            "RESET": "+3.3V",  # active-low reset, idle high
+            "BRAKE": "+3.3V",  # active-low brake, idle high
+            "DIR": "+3.3V",  # direction strap
+            "CLKIN": "GND",  # external clock-in (unused, tied low)
             # Feedback/tachometer inputs: tied low when unused.
-            "FGINP": "GND",           # tach +ve input (unused)
-            "FGINN_TACH": "GND",      # tach -ve / hall feedback (unused)
+            "FGINP": "GND",  # tach +ve input (unused)
+            "FGINN_TACH": "GND",  # tach -ve / hall feedback (unused)
             # Output pins MUST each have a unique net.  KiCad ERC reports
             # ``pin_to_pin`` when two Output-type pins share a wire (e.g.
             # tying ``FGOUT`` and ``~FAULTn`` both to ``+3.3V`` would
             # produce an Output-Output conflict).  On a real board these
             # would have external pull-ups to +3.3V and route to the MCU;
             # for this demo we give each its own local label.
-            "SDATAO": "SPI_MISO",     # SPI MISO (Output)
-            "FGFB": "FGFB",           # speed-loop feedback (Output)
-            "FGOUT": "FGOUT",         # tach output (Output)
+            "SDATAO": "SPI_MISO",  # SPI MISO (Output)
+            "FGFB": "FGFB",  # speed-loop feedback (Output)
+            "FGOUT": "FGOUT",  # tach output (Output)
             "~{FAULTn}": "DRV_FAULTn",  # fault status (Output, open-drain)
             "~{LOCKn}": "DRV_LOCKn",  # PLL-lock status (Output, open-drain)
             # --- Category 2: HS/LS gate outputs (right edge) ---
@@ -677,13 +676,13 @@ def create_bldc_controller(output_dir: Path) -> Path:
             # GND has two pins on the symbol (26 and 41).  pin_position
             # resolves the name "GND" to pin 26; the second pin (41) is
             # keyed by its number.
-            "GND": "GND",              # logic GND (pin 26)
-            "41": "GND",               # second GND pin (pin 41, same net)
+            "GND": "GND",  # logic GND (pin 26)
+            "41": "GND",  # second GND pin (pin 41, same net)
             # CP1/CP2 sit on the left edge of the symbol (despite the
             # naming suggesting otherwise), so they fit the block's
             # horizontal-stub pin_nets pattern.
-            "CP1": "DRV_CP1",          # charge-pump capacitor pin 1
-            "CP2": "DRV_CP2",          # charge-pump capacitor pin 2
+            "CP1": "DRV_CP1",  # charge-pump capacitor pin 1
+            "CP2": "DRV_CP2",  # charge-pump capacitor pin 2
             # Top-edge pins (VINT, VCP, VM, VSW, VREG) cannot use the
             # block's horizontal ``pin_nets`` stubs without colliding (the
             # pins are spaced 2.54 mm in x and the stub is also 2.54 mm).
@@ -708,8 +707,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         # Stub upward (away from symbol body which is below the pin row).
         _stub_end = (_pin_pos[0], _pin_pos[1] - 2.54)
         sch.add_wire(_pin_pos, _stub_end, warn_on_collision=False)
-        sch.add_label(_net_name, _stub_end[0], _stub_end[1], rotation=90,
-                      validate_connection=False)
+        sch.add_label(_net_name, _stub_end[0], _stub_end[1], rotation=90, validate_connection=False)
     gate_driver.connect_to_rails(vcc_rail_y=RAIL_5V, gnd_rail_y=RAIL_GND)
 
     # External 3-phase bootstrap cap network (BST_x to PHASE_x).
@@ -891,9 +889,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         # Connector pin -> block SIGNAL_IN (same Y, horizontal wire)
         sch.add_wire(pin_pos, hall_block.ports["SIGNAL_IN"], warn_on_collision=False)
         # Block SIGNAL_OUT -> label position (same Y, horizontal wire)
-        sch.add_wire(
-            hall_block.ports["SIGNAL_OUT"], (label_x, pin_pos[1]), warn_on_collision=False
-        )
+        sch.add_wire(hall_block.ports["SIGNAL_OUT"], (label_x, pin_pos[1]), warn_on_collision=False)
         sch.add_label(label, label_x, pin_pos[1], rotation=0)
         # Block VCC -> +3.3V rail (vertical wire upward)
         vcc_port = hall_block.ports["VCC"]
@@ -1384,7 +1380,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (pad "" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2) (layers "*.Cu" "*.Mask"))
   )"""
 
-    def generate_to220(ref: str, pos: tuple, value: str, gate_net: str, drain_net: str, source_net: str) -> str:
+    def generate_to220(
+        ref: str, pos: tuple, value: str, gate_net: str, drain_net: str, source_net: str
+    ) -> str:
         """Generate TO-220 footprint for power MOSFETs."""
         x, y = pos
         gate_num = NETS.get(gate_net, 0)
@@ -1405,7 +1403,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (pad "3" thru_hole oval (at 2.54 0) (size 1.8 1.8) (drill 1.0) (layers "*.Cu" "*.Mask") (net {source_num} "{source_net}"))
   )"""
 
-    def generate_sot223(ref: str, pos: tuple, value: str, pin1_net: str, pin2_net: str, pin3_net: str) -> str:
+    def generate_sot223(
+        ref: str, pos: tuple, value: str, pin1_net: str, pin2_net: str, pin3_net: str
+    ) -> str:
         """Generate SOT-223 footprint for LDO."""
         x, y = pos
         net1 = NETS.get(pin1_net, 0)
@@ -1541,62 +1541,62 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # tie-up gives the autorouter sensible electrical endpoints.
     DRV8301_PINS: list[tuple[str, str]] = [
         # Pin, net               # Datasheet name (function)
-        ("1",  "GND"),           # RT_CLK   (buck timing R)
-        ("2",  "GND"),           # COMP     (buck error-amp output)
-        ("3",  "+5V"),           # VSENSE   (buck output FB = +5V rail)
-        ("4",  "+3.3V"),         # PWRGD    (open-drain, pull-up)
-        ("5",  "+3.3V"),         # nOCTW    (open-drain, pull-up)
-        ("6",  "+3.3V"),         # nFAULT   (open-drain, pull-up)
-        ("7",  "GND"),           # DTC      (R to GND, programmable)
-        ("8",  "+3.3V"),         # nSCS     (idle high)
-        ("9",  "+3.3V"),         # SDI
-        ("10", "+3.3V"),         # SDO      (open-drain, pull-up)
-        ("11", "+3.3V"),         # SCLK
-        ("12", "GND"),           # DC_CAL   (normal operation)
-        ("13", "+5V"),           # GVDD     (gate-driver LDO, cap to GND)
-        ("14", "+5V"),           # CP1      (charge pump cap 1)
-        ("15", "+5V"),           # CP2      (charge pump cap 2)
-        ("16", "+3.3V"),         # EN_GATE  (always-on)
-        ("17", "PWM_AH"),        # INH_A    (PWM input from MCU)
-        ("18", "PWM_AL"),        # INL_A
-        ("19", "PWM_BH"),        # INH_B
-        ("20", "PWM_BL"),        # INL_B
-        ("21", "PWM_CH"),        # INH_C
-        ("22", "PWM_CL"),        # INL_C
-        ("23", "+3.3V"),         # DVDD     (internal 3.3-V LDO output)
-        ("24", "+3.3V"),         # REF      (current-sense reference)
-        ("25", "ISENSE_A+"),     # SO1      (op-amp 1 output)
-        ("26", "ISENSE_B+"),     # SO2      (op-amp 2 output)
-        ("27", "+5V"),           # AVDD     (internal 6-V LDO output)
-        ("28", "GND"),           # AGND
-        ("29", "VMOTOR"),        # PVDD1    (gate-driver supply)
-        ("30", "ISENSE_B+"),     # SP2      (amp 2 + input)
-        ("31", "ISENSE_B-"),     # SN2      (amp 2 - input)
-        ("32", "ISENSE_A+"),     # SP1      (amp 1 + input)
-        ("33", "ISENSE_A-"),     # SN1      (amp 1 - input)
-        ("34", "ISENSE_C-"),     # SL_C     (low-side source, half-bridge C)
-        ("35", "GATE_CL"),       # GL_C
-        ("36", "PHASE_C"),       # SH_C
-        ("37", "GATE_DRV_CH"),   # GH_C     (via R22 to GATE_CH)
-        ("38", "VMOTOR"),        # BST_C    (bootstrap, via cap)
-        ("39", "ISENSE_B-"),     # SL_B
-        ("40", "GATE_BL"),       # GL_B
-        ("41", "PHASE_B"),       # SH_B
-        ("42", "GATE_DRV_BH"),   # GH_B     (via R21 to GATE_BH)
-        ("43", "VMOTOR"),        # BST_B
-        ("44", "ISENSE_A-"),     # SL_A
-        ("45", "GATE_AL"),       # GL_A
-        ("46", "PHASE_A"),       # SH_A
-        ("47", "GATE_DRV_AH"),   # GH_A     (via R20 to GATE_AH)
-        ("48", "VMOTOR"),        # BST_A
-        ("49", "+3.3V"),         # VDD_SPI  (SPI logic supply)
-        ("50", "SW_OUT"),        # PH       (buck switch node)
-        ("51", "SW_OUT"),        # PH       (buck switch node, second pin)
-        ("52", "VMOTOR"),        # BST_BK   (buck bootstrap, via cap)
-        ("53", "VMOTOR"),        # PVDD2    (buck input supply)
-        ("54", "VMOTOR"),        # PVDD2    (buck input supply, 2nd pin)
-        ("55", "+3.3V"),         # EN_BUCK  (always-on)
-        ("56", "GND"),           # SS_TR    (cap to GND)
+        ("1", "GND"),  # RT_CLK   (buck timing R)
+        ("2", "GND"),  # COMP     (buck error-amp output)
+        ("3", "+5V"),  # VSENSE   (buck output FB = +5V rail)
+        ("4", "+3.3V"),  # PWRGD    (open-drain, pull-up)
+        ("5", "+3.3V"),  # nOCTW    (open-drain, pull-up)
+        ("6", "+3.3V"),  # nFAULT   (open-drain, pull-up)
+        ("7", "GND"),  # DTC      (R to GND, programmable)
+        ("8", "+3.3V"),  # nSCS     (idle high)
+        ("9", "+3.3V"),  # SDI
+        ("10", "+3.3V"),  # SDO      (open-drain, pull-up)
+        ("11", "+3.3V"),  # SCLK
+        ("12", "GND"),  # DC_CAL   (normal operation)
+        ("13", "+5V"),  # GVDD     (gate-driver LDO, cap to GND)
+        ("14", "+5V"),  # CP1      (charge pump cap 1)
+        ("15", "+5V"),  # CP2      (charge pump cap 2)
+        ("16", "+3.3V"),  # EN_GATE  (always-on)
+        ("17", "PWM_AH"),  # INH_A    (PWM input from MCU)
+        ("18", "PWM_AL"),  # INL_A
+        ("19", "PWM_BH"),  # INH_B
+        ("20", "PWM_BL"),  # INL_B
+        ("21", "PWM_CH"),  # INH_C
+        ("22", "PWM_CL"),  # INL_C
+        ("23", "+3.3V"),  # DVDD     (internal 3.3-V LDO output)
+        ("24", "+3.3V"),  # REF      (current-sense reference)
+        ("25", "ISENSE_A+"),  # SO1      (op-amp 1 output)
+        ("26", "ISENSE_B+"),  # SO2      (op-amp 2 output)
+        ("27", "+5V"),  # AVDD     (internal 6-V LDO output)
+        ("28", "GND"),  # AGND
+        ("29", "VMOTOR"),  # PVDD1    (gate-driver supply)
+        ("30", "ISENSE_B+"),  # SP2      (amp 2 + input)
+        ("31", "ISENSE_B-"),  # SN2      (amp 2 - input)
+        ("32", "ISENSE_A+"),  # SP1      (amp 1 + input)
+        ("33", "ISENSE_A-"),  # SN1      (amp 1 - input)
+        ("34", "ISENSE_C-"),  # SL_C     (low-side source, half-bridge C)
+        ("35", "GATE_CL"),  # GL_C
+        ("36", "PHASE_C"),  # SH_C
+        ("37", "GATE_DRV_CH"),  # GH_C     (via R22 to GATE_CH)
+        ("38", "VMOTOR"),  # BST_C    (bootstrap, via cap)
+        ("39", "ISENSE_B-"),  # SL_B
+        ("40", "GATE_BL"),  # GL_B
+        ("41", "PHASE_B"),  # SH_B
+        ("42", "GATE_DRV_BH"),  # GH_B     (via R21 to GATE_BH)
+        ("43", "VMOTOR"),  # BST_B
+        ("44", "ISENSE_A-"),  # SL_A
+        ("45", "GATE_AL"),  # GL_A
+        ("46", "PHASE_A"),  # SH_A
+        ("47", "GATE_DRV_AH"),  # GH_A     (via R20 to GATE_AH)
+        ("48", "VMOTOR"),  # BST_A
+        ("49", "+3.3V"),  # VDD_SPI  (SPI logic supply)
+        ("50", "SW_OUT"),  # PH       (buck switch node)
+        ("51", "SW_OUT"),  # PH       (buck switch node, second pin)
+        ("52", "VMOTOR"),  # BST_BK   (buck bootstrap, via cap)
+        ("53", "VMOTOR"),  # PVDD2    (buck input supply)
+        ("54", "VMOTOR"),  # PVDD2    (buck input supply, 2nd pin)
+        ("55", "+3.3V"),  # EN_BUCK  (always-on)
+        ("56", "GND"),  # SS_TR    (cap to GND)
     ]
 
     def _htssop56_pad_xy(pin_index: int) -> tuple[float, float, float, float]:
@@ -1634,7 +1634,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
             net_num = NETS.get(net_name, 0)
             pad_lines.append(
                 f'    (pad "{pin_str}" smd roundrect '
-                f'(at {px:.4f} {py:.4f}) (size {sx} {sy}) '
+                f"(at {px:.4f} {py:.4f}) (size {sx} {sy}) "
                 f'(layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) '
                 f'(net {net_num} "{net_name}"))'
             )
@@ -1667,38 +1667,38 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     #   * GPIO/TIM3 capture (PA6/PA7/PB0) -> HALL_A/B/C
     #   * SWD: PA13 SWDIO, PA14 SWCLK, PB3 SWO, PG10 NRST
     STM32G431K8_PINS: list[tuple[str, str]] = [
-        ("1",  "+3.3V"),       # VDD
-        ("2",  "OSC_IN"),      # PF0 -> RCC_OSC_IN
-        ("3",  "OSC_OUT"),     # PF1 -> RCC_OSC_OUT
-        ("4",  "NRST"),        # PG10 (NRST)
-        ("5",  "ISENSE_A-"),   # PA0  ADC1_IN1
-        ("6",  "ISENSE_B-"),   # PA1  ADC1_IN2
-        ("7",  "ISENSE_C-"),   # PA2  ADC1_IN3
-        ("8",  "GND"),         # PA3 (unused -> GND for autorouter)
-        ("9",  "GND"),         # PA4 (unused)
-        ("10", "GND"),         # PA5 (unused)
-        ("11", "HALL_A"),      # PA6  TIM3_CH1
-        ("12", "HALL_B"),      # PA7  TIM3_CH2
-        ("13", "HALL_C"),      # PB0  TIM3_CH3
-        ("14", "GND"),         # VSSA
-        ("15", "+3.3V"),       # VDDA
-        ("16", "GND"),         # VSS
-        ("17", "+3.3V"),       # VDD
-        ("18", "PWM_AH"),      # PA8  TIM1_CH1   (HS PWM -> DRV8301 INH_A)
-        ("19", "PWM_BH"),      # PA9  TIM1_CH2   (HS PWM -> DRV8301 INH_B)
-        ("20", "PWM_CH"),      # PA10 TIM1_CH3   (HS PWM -> DRV8301 INH_C)
-        ("21", "GND"),         # PA11 (unused)
-        ("22", "GND"),         # PA12 (unused)
-        ("23", "SWDIO"),       # PA13
-        ("24", "SWCLK"),       # PA14
-        ("25", "GND"),         # PA15 (unused)
-        ("26", "SWO"),         # PB3 (SWO/TIM2_CH2)
-        ("27", "GND"),         # PB4 (unused)
-        ("28", "GND"),         # PB5 (unused)
-        ("29", "PWM_AL"),      # PB6  TIM4_CH1   (LS PWM -> DRV8301 INL_A)
-        ("30", "PWM_BL"),      # PB7  TIM4_CH2   (LS PWM -> DRV8301 INL_B)
-        ("31", "PWM_CL"),      # PB8  TIM4_CH3   (LS PWM -> DRV8301 INL_C)
-        ("32", "GND"),         # VSS
+        ("1", "+3.3V"),  # VDD
+        ("2", "OSC_IN"),  # PF0 -> RCC_OSC_IN
+        ("3", "OSC_OUT"),  # PF1 -> RCC_OSC_OUT
+        ("4", "NRST"),  # PG10 (NRST)
+        ("5", "ISENSE_A-"),  # PA0  ADC1_IN1
+        ("6", "ISENSE_B-"),  # PA1  ADC1_IN2
+        ("7", "ISENSE_C-"),  # PA2  ADC1_IN3
+        ("8", "GND"),  # PA3 (unused -> GND for autorouter)
+        ("9", "GND"),  # PA4 (unused)
+        ("10", "GND"),  # PA5 (unused)
+        ("11", "HALL_A"),  # PA6  TIM3_CH1
+        ("12", "HALL_B"),  # PA7  TIM3_CH2
+        ("13", "HALL_C"),  # PB0  TIM3_CH3
+        ("14", "GND"),  # VSSA
+        ("15", "+3.3V"),  # VDDA
+        ("16", "GND"),  # VSS
+        ("17", "+3.3V"),  # VDD
+        ("18", "PWM_AH"),  # PA8  TIM1_CH1   (HS PWM -> DRV8301 INH_A)
+        ("19", "PWM_BH"),  # PA9  TIM1_CH2   (HS PWM -> DRV8301 INH_B)
+        ("20", "PWM_CH"),  # PA10 TIM1_CH3   (HS PWM -> DRV8301 INH_C)
+        ("21", "GND"),  # PA11 (unused)
+        ("22", "GND"),  # PA12 (unused)
+        ("23", "SWDIO"),  # PA13
+        ("24", "SWCLK"),  # PA14
+        ("25", "GND"),  # PA15 (unused)
+        ("26", "SWO"),  # PB3 (SWO/TIM2_CH2)
+        ("27", "GND"),  # PB4 (unused)
+        ("28", "GND"),  # PB5 (unused)
+        ("29", "PWM_AL"),  # PB6  TIM4_CH1   (LS PWM -> DRV8301 INL_A)
+        ("30", "PWM_BL"),  # PB7  TIM4_CH2   (LS PWM -> DRV8301 INL_B)
+        ("31", "PWM_CL"),  # PB8  TIM4_CH3   (LS PWM -> DRV8301 INL_C)
+        ("32", "GND"),  # VSS
     ]
 
     def _lqfp32_pad_xy(pin_index: int) -> tuple[float, float, float, float]:
@@ -1709,13 +1709,13 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         on the left/right edges are 1.5 wide x 0.5 tall; pads on the top/
         bottom edges are 0.5 wide x 1.5 tall.
         """
-        if 1 <= pin_index <= 8:           # left edge, top->bottom
+        if 1 <= pin_index <= 8:  # left edge, top->bottom
             return (-4.175, -2.8 + (pin_index - 1) * 0.8, 1.5, 0.5)
-        if 9 <= pin_index <= 16:          # bottom edge, left->right
+        if 9 <= pin_index <= 16:  # bottom edge, left->right
             return (-2.8 + (pin_index - 9) * 0.8, 4.175, 0.5, 1.5)
-        if 17 <= pin_index <= 24:         # right edge, bottom->top
+        if 17 <= pin_index <= 24:  # right edge, bottom->top
             return (4.175, 2.8 - (pin_index - 17) * 0.8, 1.5, 0.5)
-        if 25 <= pin_index <= 32:         # top edge, right->left
+        if 25 <= pin_index <= 32:  # top edge, right->left
             return (2.8 - (pin_index - 25) * 0.8, -4.175, 0.5, 1.5)
         raise ValueError(f"LQFP-32 pin {pin_index} out of range")
 
@@ -1732,7 +1732,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
             net_num = NETS.get(net_name, 0)
             pad_lines.append(
                 f'    (pad "{pin_str}" smd roundrect '
-                f'(at {px:.4f} {py:.4f}) (size {sx} {sy}) '
+                f"(at {px:.4f} {py:.4f}) (size {sx} {sy}) "
                 f'(layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) '
                 f'(net {net_num} "{net_name}"))'
             )
@@ -2037,13 +2037,23 @@ def create_bldc_pcb(output_dir: Path) -> Path:
 
     print("\n10. Adding connectors...")
     # J2: Motor output (3-pin)
-    parts.append(generate_pin_header("J2", J2_POS, 3, "Motor Output", ["PHASE_A", "PHASE_B", "PHASE_C"]))
+    parts.append(
+        generate_pin_header("J2", J2_POS, 3, "Motor Output", ["PHASE_A", "PHASE_B", "PHASE_C"])
+    )
     print(f"   J2 (Motor Output) at {J2_POS}")
     # J3: Hall sensors (5-pin)
-    parts.append(generate_pin_header("J3", J3_POS, 5, "Hall Sensors", ["HALL_A", "HALL_B", "HALL_C", "+3.3V", "GND"]))
+    parts.append(
+        generate_pin_header(
+            "J3", J3_POS, 5, "Hall Sensors", ["HALL_A", "HALL_B", "HALL_C", "+3.3V", "GND"]
+        )
+    )
     print(f"   J3 (Hall Sensors) at {J3_POS}")
     # J4: Debug header (6-pin SWD)
-    parts.append(generate_pin_header("J4", J4_POS, 6, "SWD Debug", ["+3.3V", "SWDIO", "SWCLK", "SWO", "NRST", "GND"]))
+    parts.append(
+        generate_pin_header(
+            "J4", J4_POS, 6, "SWD Debug", ["+3.3V", "SWDIO", "SWCLK", "SWO", "NRST", "GND"]
+        )
+    )
     print(f"   J4 (SWD Debug) at {J4_POS}")
 
     print("\n11. Adding LEDs...")
@@ -2232,10 +2242,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     - ``--manufacturer jlcpcb``: triggers the jlcpcb design-rule profile.
     - ``--differential-pairs``: enables the ISENSE_* matched-impedance
       pair handling.
-    - ``--backend python``: the Python backend honours per-net trace
-      widths (``net_class.trace_width``).  The C++ backend currently
-      uses a single ``rules.trace_width`` and would force gate-drive +
-      power nets to share the default width.  Issue #3096 enrichment.
+    - **Backend selection (no explicit pin)**: the Issue #3096 ``--backend
+      python`` pin was removed as of Issue #3130 -- the C++ pathfinder
+      now accepts per-net ``emit_trace_width`` / ``emit_via_diameter`` /
+      ``emit_via_drill`` parameters, so the original rationale
+      ("C++ uses a single rules.trace_width") no longer applies.
+      Empirically the C++ backend routes more signal nets than Python
+      on this recipe (17/32 vs 15/32 at HEAD) and finishes in ~3 minutes
+      vs ~6 minutes.  Letting ``--backend auto`` (the default) select
+      cpp when the native extension is built preserves both the speed
+      and the Python fallback for environments without it.
     - ``--seed 42``: deterministic output for byte-identical re-routes
       in CI.
     - ``--early-stop-patience 4``: per Issue #3101, the negotiator
@@ -2271,8 +2287,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--manufacturer",
         "jlcpcb",
         "--differential-pairs",
-        "--backend",
-        "python",
+        # Issue #3130: ``--backend`` pin removed.  The original (Issue #3096)
+        # pin to ``python`` cited "C++ backend currently uses a single
+        # rules.trace_width" -- a constraint resolved as of #3130's per-net
+        # ``emit_trace_width`` / ``emit_via_diameter`` / ``emit_via_drill``
+        # plumbing into ``Pathfinder::route_resumable``.  Empirically at
+        # HEAD post-#3117 (lex-tuple metric) + #3124 (finalize-phase fix)
+        # the C++ backend ALSO routes more nets than Python on this board
+        # (17 vs 15 signal nets at the same flag recipe) and finishes in
+        # ~3 minutes instead of ~6.  Letting the backend auto-resolve
+        # picks ``cpp`` whenever it is built (the default for builders
+        # using ``kct build-native``) while preserving the Python fallback
+        # for environments without the native extension.
         "--seed",
         "42",
         "--timeout",
@@ -2311,8 +2337,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     if success:
         print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
     else:
-        print(f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
-              "(partial routing; downstream zone fill + DRC will continue)")
+        print(
+            f"\n   PARTIAL: ``kct route`` exited with code {result.returncode} "
+            "(partial routing; downstream zone fill + DRC will continue)"
+        )
 
     return success
 
