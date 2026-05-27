@@ -6544,6 +6544,13 @@ def main(argv: list[str] | None = None) -> int:
                                     partition_cols=getattr(args, "partition_cols", 2),
                                     max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                                     checkpoint_callback=_checkpoint_cb,
+                                    # Issue #3132: forward --early-stop-patience
+                                    # to the inner main-path negotiator call so
+                                    # the CLI flag is honored (the previous
+                                    # implementation silently defaulted to 2).
+                                    best_stall_patience=(
+                                        getattr(args, "early_stop_patience", 2) or None
+                                    ),
                                 )
                             return router.route_all()
 
@@ -6598,6 +6605,10 @@ def main(argv: list[str] | None = None) -> int:
                             partition_cols=getattr(args, "partition_cols", 2),
                             max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                             checkpoint_callback=_checkpoint_cb,
+                            # Issue #3132: forward --early-stop-patience to the
+                            # inner main-path negotiator call so the CLI flag
+                            # is honored (default 2 was silently overriding it).
+                            best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                         )
                     else:
                         return router.route_all()
@@ -6667,6 +6678,13 @@ def main(argv: list[str] | None = None) -> int:
                         partition_cols=getattr(args, "partition_cols", 2),
                         max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                         checkpoint_callback=_checkpoint_cb,
+                        # Issue #3132: forward --early-stop-patience to the
+                        # inner negotiator so the CLI flag is honored.  This
+                        # is the call site board 05's
+                        # `--differential-pairs --strategy negotiated` recipe
+                        # actually hits; previously the parameter silently
+                        # defaulted to 2.
+                        best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                     )
 
                 result, dp_warnings = router.route_all_with_diffpairs(
@@ -6694,6 +6712,11 @@ def main(argv: list[str] | None = None) -> int:
                     partition_cols=getattr(args, "partition_cols", 2),
                     max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                     checkpoint_callback=_checkpoint_cb,
+                    # Issue #3132: forward --early-stop-patience to the inner
+                    # negotiator call so the CLI flag is honored.  Previously
+                    # the parameter silently defaulted to 2 even when the
+                    # CLI passed a higher value.
+                    best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                 )
             elif args.differential_pairs and args.strategy == "basic":
                 result, dp_warnings = router.route_all_with_diffpairs(diffpair_config)
