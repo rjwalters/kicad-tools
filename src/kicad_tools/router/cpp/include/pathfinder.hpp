@@ -67,7 +67,17 @@ public:
         // Issue #2610: per-net wall-clock deadline (seconds; <= 0 disables)
         // and override for the iteration backstop (<= 0 = use cols*rows*4).
         double per_net_timeout_seconds = 0.0,
-        int max_search_iterations = 0
+        int max_search_iterations = 0,
+        // Issue #3130: per-net emit widths/diameters.  When > 0, override the
+        // values written into the reconstructed Segment::width /
+        // Via::diameter / Via::drill so the C++-internal RouteResult carries
+        // per-net widths instead of the global ``rules_`` defaults.  This
+        // matches the per-net ``trace_radius_cells`` / ``via_radius_cells``
+        // plumbing already used by the A* expansion (the search behaviour
+        // is unchanged -- only the emit values are affected).
+        float emit_trace_width = 0.0f,
+        float emit_via_diameter = 0.0f,
+        float emit_via_drill = 0.0f
     );
 
     // Resumable A* routing: initializes search state and runs to first goal.
@@ -98,7 +108,14 @@ public:
         int intra_pair_radius_cells = 0,
         // Issue #2610: deadline + iteration override; see ``route()`` above.
         double per_net_timeout_seconds = 0.0,
-        int max_search_iterations = 0
+        int max_search_iterations = 0,
+        // Issue #3130: per-net emit widths/diameters.  See ``route()`` above
+        // for semantics.  Cached on the Pathfinder member fields so
+        // ``resume()`` -> ``reconstruct_path()`` honours the same per-net
+        // values across the (initial + resume*) sequence for a single net.
+        float emit_trace_width = 0.0f,
+        float emit_via_diameter = 0.0f,
+        float emit_via_drill = 0.0f
     );
 
     // Resume A* search after rejecting a goal cell.
@@ -175,13 +192,20 @@ private:
     // if open set exhausted / iteration limit hit.
     RouteResult run_astar_loop();
 
-    // Reconstruct path from A* result
+    // Reconstruct path from A* result.
+    //
+    // Issue #3130: ``emit_trace_width`` / ``emit_via_diameter`` /
+    // ``emit_via_drill`` override the global ``rules_`` defaults when > 0.
+    // Defaults preserve pre-#3130 emit behavior identically.
     RouteResult reconstruct_path(
         const std::vector<AStarNode>& closed_list,
         int end_idx,
         float start_x, float start_y,
         float end_x, float end_y,
-        int net
+        int net,
+        float emit_trace_width = 0.0f,
+        float emit_via_diameter = 0.0f,
+        float emit_via_drill = 0.0f
     );
 
     Grid3D& grid_;
@@ -244,6 +268,16 @@ private:
     int search_last_blocking_net_ = 0;
     float search_last_block_world_x_ = 0.0f;
     float search_last_block_world_y_ = 0.0f;
+
+    // Issue #3130: Per-net emit widths/diameters cached so ``resume()`` ->
+    // ``reconstruct_path()`` honors the same values across an entire
+    // (initial + resume*) sequence.  0.0 preserves pre-#3130 behavior
+    // (falls back to ``rules_.trace_width`` / ``rules_.via_diameter`` /
+    // ``rules_.via_drill``).  Set in ``route_resumable()``; consumed by
+    // ``reconstruct_path()`` when called from ``run_astar_loop()``.
+    float search_emit_trace_width_ = 0.0f;
+    float search_emit_via_diameter_ = 0.0f;
+    float search_emit_via_drill_ = 0.0f;
 
     // Issue #2610: Per-net wall-clock deadline for the resumable search.
     // ``search_has_deadline_`` is true when the caller supplied a positive
