@@ -97,11 +97,15 @@ class TestPatienceComparatorBehavior:
         increment here, not reset.
         """
         best = IterationMetrics(
-            iteration=0, routed_count=27, overflow=16,
+            iteration=0,
+            routed_count=27,
+            overflow=16,
             clearance_violations=12,
         )
         regressed = IterationMetrics(
-            iteration=1, routed_count=27, overflow=36,
+            iteration=1,
+            routed_count=27,
+            overflow=36,
             clearance_violations=12,
         )
         # Strictly worse on overflow -- not "better than" the best.
@@ -111,11 +115,15 @@ class TestPatienceComparatorBehavior:
         """A re-route that adds a clearance violation must not reset
         the patience counter even if it nudges overflow down."""
         best = IterationMetrics(
-            iteration=0, routed_count=27, overflow=16,
+            iteration=0,
+            routed_count=27,
+            overflow=16,
             clearance_violations=12,
         )
         worse_drc = IterationMetrics(
-            iteration=1, routed_count=27, overflow=14,
+            iteration=1,
+            routed_count=27,
+            overflow=14,
             clearance_violations=15,
         )
         assert not worse_drc.is_better_than(best)
@@ -268,13 +276,13 @@ class TestPatienceLogLine:
         # If the iteration body printed any "iter N" line *without* a
         # "new best" suffix, it must include the stall counter.
         import re
+
         iter_lines = re.findall(r"iter \d+ \| routed=.*", out)
         for line in iter_lines:
             if "new best" in line:
                 continue
             assert "stall=" in line, (
-                f"Expected '| stall=N' suffix on non-improving iter "
-                f"line; got: {line!r}"
+                f"Expected '| stall=N' suffix on non-improving iter line; got: {line!r}"
             )
 
 
@@ -339,10 +347,14 @@ class TestNetsFullyConnectedLexKey:
         # Both default-zero; ordering should mirror legacy
         # routed-count-then-overflow.
         more_routed = IterationMetrics(
-            iteration=1, routed_count=10, overflow=10,
+            iteration=1,
+            routed_count=10,
+            overflow=10,
         )
         fewer_routed = IterationMetrics(
-            iteration=2, routed_count=8, overflow=5,
+            iteration=2,
+            routed_count=8,
+            overflow=5,
         )
         # Old behaviour: routed_count dominates overflow.
         assert more_routed.is_better_than(fewer_routed)
@@ -350,7 +362,9 @@ class TestNetsFullyConnectedLexKey:
 
         # And the explicit-zero form is identical to the default form.
         more_routed_explicit = IterationMetrics(
-            iteration=1, routed_count=10, overflow=10,
+            iteration=1,
+            routed_count=10,
+            overflow=10,
             nets_fully_connected=0,
         )
         assert more_routed.sort_key == more_routed_explicit.sort_key
@@ -413,6 +427,7 @@ class TestCLIFlagWiredThrough:
         # Import lazily so we don't pay the cost in the common case
         # where this whole module is collected but not run.
         from kicad_tools.cli import route_cmd
+
         # ``_build_parser`` is the conventional name; if it isn't
         # exposed we walk the module for the parser constructor.
         builder = getattr(route_cmd, "_build_parser", None)
@@ -435,12 +450,101 @@ class TestCLIFlagWiredThrough:
 
     def test_flag_on_outer_parser(self):
         from kicad_tools.cli import parser as parser_mod
+
         src = inspect.getsource(parser_mod)
         # Outer parser declares the flag in build_parser; substring
         # search keeps this test cheap and independent of parser
         # construction details.
-        assert "--early-stop-patience" in src, (
-            "--early-stop-patience missing from outer parser.py"
+        assert "--early-stop-patience" in src, "--early-stop-patience missing from outer parser.py"
+
+
+class TestAllInnerCallsForwardPatience:
+    """Issue #3132: Every ``router.route_all_negotiated(...)`` call site
+    inside ``route_cmd.py`` must forward ``best_stall_patience`` derived
+    from ``args.early_stop_patience``.  Without that forwarding, the
+    parameter silently defaults to 2 in the router signature even when
+    the user passes ``--early-stop-patience 4`` on the CLI -- the bug
+    that wasted ~83% of the wall-clock budget on board 05's M-E run
+    (issue #3132).
+
+    The mechanism: ``route_cmd.do_routing()`` defines four inner
+    invocations of ``route_all_negotiated`` (one per branch of the
+    multi-resolution / diff-pair / standard strategy fork).  Earlier
+    revisions only wired ``best_stall_patience`` to the *outer*
+    layer-escalation and clearance-relaxation loops at lines 2438,
+    3171, and 4266, missing the four main-path sites at ~6530, ~6584,
+    ~6653, ~6680.  This regression test pins the wiring so any new
+    call site that misses the forwarding fails the suite immediately
+    instead of in production.
+    """
+
+    def test_every_route_all_negotiated_call_forwards_patience(self):
+        from kicad_tools.cli import route_cmd
+
+        src = inspect.getsource(route_cmd)
+
+        # Find every ``route_all_negotiated(`` invocation and pair each
+        # one with the closing paren of its argument list.  The
+        # argument-list block must contain a ``best_stall_patience=``
+        # kwarg.  We walk character-by-character to track parenthesis
+        # depth (string literals contain no parens in this file -- a
+        # cheap assumption verified by the test running green).
+        #
+        # Skip occurrences that sit inside a Python comment (the file
+        # has several ``# ...route_all_negotiated()`` prose mentions in
+        # docstrings/comments that would otherwise produce false
+        # positives at e.g. line 77).
+        call_marker = "router.route_all_negotiated("
+        start = 0
+        call_count = 0
+        missing_lines: list[int] = []
+        while True:
+            idx = src.find(call_marker, start)
+            if idx < 0:
+                break
+            # Ignore matches inside a single-line comment.  Find the
+            # start-of-line and check whether a ``#`` precedes the
+            # match on the same line.
+            line_start = src.rfind("\n", 0, idx) + 1
+            preceding = src[line_start:idx]
+            if "#" in preceding:
+                # Comment — skip without advancing call_count.
+                start = idx + len(call_marker)
+                continue
+            # Walk forward to find the matching close paren.
+            depth = 1
+            cursor = idx + len(call_marker)
+            while cursor < len(src) and depth > 0:
+                ch = src[cursor]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                cursor += 1
+            arg_block = src[idx + len(call_marker) : cursor - 1]
+            call_count += 1
+            if "best_stall_patience" not in arg_block:
+                # Translate idx -> 1-based line number for diagnostics.
+                line_no = src.count("\n", 0, idx) + 1
+                missing_lines.append(line_no)
+            start = cursor
+
+        # Sanity floor: at least the four main-path sites plus the
+        # three outer-escalation sites must exist (7 total).  If this
+        # drops, the test itself may be missing call sites.
+        assert call_count >= 7, (
+            f"Expected ≥7 route_all_negotiated invocations in route_cmd.py; "
+            f"found {call_count}.  Did the test marker text drift?"
+        )
+
+        assert not missing_lines, (
+            f"Issue #3132 regression: {len(missing_lines)} of {call_count} "
+            f"router.route_all_negotiated(...) call(s) in route_cmd.py do "
+            f"not forward ``best_stall_patience``.  Missing at line(s) "
+            f"{missing_lines}.  The CLI flag ``--early-stop-patience`` "
+            f"will be silently ignored at these sites because the router "
+            f"signature default is 2 even when args.early_stop_patience is "
+            f"larger."
         )
 
 
