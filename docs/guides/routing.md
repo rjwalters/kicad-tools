@@ -478,6 +478,40 @@ ladder). The two non-obvious cases:
 - **Exit 5** is a graceful SIGINT — the file on disk is the most recent
   checkpoint and is safe to feed back into `kct route` or KiCad.
 
+### Diagnosing clearance / under-clearance bugs
+
+When a route appears to violate clearance and you need to know which A*
+neighbor-expansion gate allowed (or unexpectedly rejected) a move, set the
+``KICAD_ROUTER_TRACE_ASTAR`` environment variable. Both the C++ backend
+(``router/cpp/src/pathfinder.cpp``) and the Python fallback
+(``router/pathfinder.py``) honor this flag and write one ``[A*]`` /
+``[A*/one-shot]`` / ``[A*/py]`` line per neighbor decision to ``stderr``.
+
+```bash
+# C++ backend
+KICAD_ROUTER_TRACE_ASTAR=1 uv run pytest \
+    tests/test_cpp_clearance_enforcement.py::TestGap1UnblockedCellClearance \
+    -v --no-cov 2> astar.log
+
+# Each line is structured:
+#   [A*] cur=(x,y,Layer) nbr=(x,y,Layer) DECISION reason=... [extra fields]
+# DECISION is ACCEPT or REJECT.  reasons include: oob,
+# diagonal_corner_blocked, foreign_net_blocked,
+# trace_clearance_envelope_overlap, trace_blocked(no_net_blocked_cell),
+# zone_blocked.
+
+# Filter to decisions for a specific suspect cell:
+grep "nbr=(8,8,L0)" astar.log
+```
+
+The output is voluminous (thousands of lines for even small fixtures) so the
+flag is **off by default** and the per-iteration overhead is a single
+predicted branch when unset. Use it for ad-hoc debugging only.
+
+Added by Issue #3135 to make future Gap-1-style under-clearance
+investigations restart-proof: prior debugging of the same fixture had to
+re-derive the gate-by-gate decision flow from source each time.
+
 ---
 
 ## Performance

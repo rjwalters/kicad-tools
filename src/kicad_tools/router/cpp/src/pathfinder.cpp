@@ -9,8 +9,26 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 namespace router {
+
+// Issue #3135: env-gated A* neighbor-expansion trace.  Set
+// ``KICAD_ROUTER_TRACE_ASTAR=1`` to log every neighbor accept/reject from the
+// resumable and one-shot A* loops.  The check is performed once per process
+// startup (``getenv`` is fairly cheap but not free); the cached result is
+// branch-predictable and the log path is then a single comparison when the
+// flag is unset.  Use this when investigating under-clearance bugs to verify
+// which gate (out-of-bounds / diagonal-corner / blocked-foreign /
+// trace-clearance) is letting (or not letting) a neighbor through.
+static bool astar_trace_enabled() {
+    static const bool enabled = []() {
+        const char* v = std::getenv("KICAD_ROUTER_TRACE_ASTAR");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return enabled;
+}
 
 Pathfinder::Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_routing)
     : grid_(grid), rules_(rules), diagonal_routing_(diagonal_routing) {
@@ -501,11 +519,24 @@ RouteResult Pathfinder::route(
             int ny = current.y + dy;
             int nlayer = current.layer;
 
-            if (!grid_.is_valid(nx, ny, nlayer)) continue;
+            if (!grid_.is_valid(nx, ny, nlayer)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT reason=oob\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
 
             if (dx != 0 && dy != 0) {
                 if (is_diagonal_blocked(current.x, current.y, dx, dy, nlayer, net,
                                         negotiated_mode)) {
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                            "reason=diagonal_corner_blocked\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer);
+                    }
                     continue;
                 }
             }
@@ -544,6 +575,12 @@ RouteResult Pathfinder::route(
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells,
                                          partner_net, intra_pair_radius_cells)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=trace_blocked(no_net_blocked_cell)\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
+                        }
                         continue;
                     }
                 } else {
@@ -552,6 +589,13 @@ RouteResult Pathfinder::route(
                     if (is_clearance_only && is_pad_exit) {
                         // Clearance zone cell while exiting pad - allow
                     } else {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=foreign_net_blocked cell.net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                cell.net);
+                        }
                         continue;
                     }
                 }
@@ -564,9 +608,25 @@ RouteResult Pathfinder::route(
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells,
                                          partner_net, intra_pair_radius_cells)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=trace_clearance_envelope_overlap "
+                                "radius=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                trace_radius_cells);
+                        }
                         continue;
                     }
                 }
+            }
+
+            if (astar_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
+                    "cell.blocked=%d cell.net=%d\n",
+                    current.x, current.y, current.layer, nx, ny, nlayer,
+                    cell.blocked ? 1 : 0, cell.net);
             }
 
             auto neighbor_key = std::make_tuple(nx, ny, nlayer);
@@ -911,11 +971,26 @@ RouteResult Pathfinder::run_astar_loop() {
             int ny = current.y + dy;
             int nlayer = current.layer;
 
-            if (!grid_.is_valid(nx, ny, nlayer)) continue;
+            if (!grid_.is_valid(nx, ny, nlayer)) {
+                // Issue #3135: trace out-of-bounds rejections so future
+                // under-clearance investigations can confirm the gate fired.
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT reason=oob\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
 
             if (dx != 0 && dy != 0) {
                 if (is_diagonal_blocked(current.x, current.y, dx, dy, nlayer,
                                         search_net_, search_negotiated_mode_)) {
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                            "reason=diagonal_corner_blocked\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer);
+                    }
                     continue;
                 }
             }
@@ -956,6 +1031,14 @@ RouteResult Pathfinder::run_astar_loop() {
                                          search_trace_radius_cells_,
                                          search_partner_net_,
                                          search_intra_pair_radius_cells_)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=trace_blocked(no_net_blocked_cell) "
+                                "cell.net=0 cell.is_obstacle=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                cell.is_obstacle ? 1 : 0);
+                        }
                         continue;
                     }
                 } else {
@@ -964,6 +1047,15 @@ RouteResult Pathfinder::run_astar_loop() {
                     if (is_clearance_only && is_pad_exit) {
                         // Clearance zone cell while exiting pad - allow
                     } else {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=foreign_net_blocked cell.net=%d "
+                                "cell.is_obstacle=%d pad_blocked=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                cell.net, cell.is_obstacle ? 1 : 0,
+                                cell.pad_blocked ? 1 : 0);
+                        }
                         continue;
                     }
                 }
@@ -978,9 +1070,25 @@ RouteResult Pathfinder::run_astar_loop() {
                                          search_trace_radius_cells_,
                                          search_partner_net_,
                                          search_intra_pair_radius_cells_)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=trace_clearance_envelope_overlap "
+                                "radius=%d net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_trace_radius_cells_, search_net_);
+                        }
                         continue;
                     }
                 }
+            }
+
+            if (astar_trace_enabled()) {
+                std::fprintf(stderr,
+                    "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
+                    "cell.blocked=%d cell.net=%d cell.is_obstacle=%d\n",
+                    current.x, current.y, current.layer, nx, ny, nlayer,
+                    cell.blocked ? 1 : 0, cell.net, cell.is_obstacle ? 1 : 0);
             }
 
             auto neighbor_key = std::make_tuple(nx, ny, nlayer);

@@ -19,6 +19,8 @@ different routing strategies. See heuristics.py for available options.
 
 import heapq
 import math
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -32,6 +34,28 @@ from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+
+# Issue #3135: env-gated A* neighbor-expansion trace.  Set
+# ``KICAD_ROUTER_TRACE_ASTAR=1`` to log every accept/reject decision from the
+# Python A* loop.  Mirrors the C++ instrumentation in
+# ``router/cpp/src/pathfinder.cpp`` so under-clearance investigations can use
+# the same flag regardless of which backend executed the search.  The check
+# is performed once at module load; the resulting bool is cached in
+# ``_ASTAR_TRACE_ENABLED`` for branch-predictable use in the hot loop.
+_ASTAR_TRACE_ENABLED = os.environ.get("KICAD_ROUTER_TRACE_ASTAR", "").strip() not in ("", "0")
+
+
+def _astar_trace(message: str) -> None:
+    """Emit an A* trace line to stderr when ``KICAD_ROUTER_TRACE_ASTAR`` is set.
+
+    Centralised so the hot loop only does ``if _ASTAR_TRACE_ENABLED:`` and
+    callers don't worry about flushing.  Output is unbuffered to match the
+    C++ side's ``std::fprintf(stderr, ...)`` semantics so traces from a mixed
+    Python/C++ run interleave in the order they happened.
+    """
+    sys.stderr.write(message)
+    sys.stderr.write("\n")
+    sys.stderr.flush()
 
 
 @dataclass(frozen=True)
@@ -2453,6 +2477,11 @@ class Router:
 
                 # Check grid bounds first
                 if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT reason=oob"
+                        )
                     continue
 
                 # For diagonal moves, check corner clearance to prevent cutting through obstacles
@@ -2461,6 +2490,12 @@ class Router:
                     if self._is_diagonal_corner_blocked(
                         current.x, current.y, dx, dy, nlayer, start.net, allow_sharing
                     ):
+                        if _ASTAR_TRACE_ENABLED:
+                            _astar_trace(
+                                f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                f"reason=diagonal_corner_blocked"
+                            )
                         continue
 
                 # Check blocked cells carefully
@@ -2491,6 +2526,12 @@ class Router:
                     elif cell.net == 0:
                         # No-net blocked cell - use pre-computed expanded bitmap
                         if expanded_blocked[nlayer, ny, nx]:
+                            if _ASTAR_TRACE_ENABLED:
+                                _astar_trace(
+                                    f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                    f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                    f"reason=trace_blocked(no_net_blocked_cell)"
+                                )
                             continue
                     else:
                         # Different net's blocked cell
@@ -2507,6 +2548,12 @@ class Router:
                             pass
                         else:
                             # Actual pad copper or not exiting a pad - block
+                            if _ASTAR_TRACE_ENABLED:
+                                _astar_trace(
+                                    f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                    f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                    f"reason=foreign_net_blocked cell.net={cell.net}"
+                                )
                             continue
                 else:
                     # Issue #864: Even when center cell is unblocked, check trace clearance
@@ -2525,14 +2572,32 @@ class Router:
                     if not is_pad_exit_or_approach:
                         # Issue #2430: Use pre-computed expanded blocked bitmap
                         if expanded_blocked[nlayer, ny, nx]:
+                            if _ASTAR_TRACE_ENABLED:
+                                _astar_trace(
+                                    f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                    f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                    f"reason=trace_clearance_envelope_overlap"
+                                )
                             continue
 
                 # Issue #2430: Use pre-computed zone blocking array
                 if zone_blocked_arr[nlayer, ny, nx]:
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT reason=zone_blocked"
+                        )
                     continue
 
                 if closed_arr[nlayer, ny, nx]:
                     continue
+
+                if _ASTAR_TRACE_ENABLED:
+                    _astar_trace(
+                        f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                        f"nbr=({nx},{ny},L{nlayer}) ACCEPT "
+                        f"cell.blocked={int(cell.blocked)} cell.net={cell.net}"
+                    )
 
                 # Calculate cost - use batch pre-computed values (Issue #963)
                 new_direction = (dx, dy)
