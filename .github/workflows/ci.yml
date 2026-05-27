@@ -400,11 +400,19 @@ jobs:
     #     can resolve it; it is documented as an allowlist residual
     #     in ``.github/routed-drc-tolerance.yml``.
     #
-    # The matrix-scoped soft-fail (``continue-on-error: ${{ matrix.board
-    # == 'boards/06-diffpair-test' }}``) was removed by Issue #3097 (the
-    # M-F closure PR) now that the re-route consistently passes the gate.
-    # Future boards added to the matrix are strictly required, same as
-    # board 06 today.
+    # Soft-fail deferred until #3144 resolves CoupledPathfinder
+    # non-determinism under CI load.  Locally passes (28 blocking < 34
+    # floor, slack=6); CI shows variance 35-43 errors across the same
+    # input + ``--seed 42``.  PR #3141 (M-F closure) initially removed
+    # this soft-fail, but Judge round-4 review identified the variance
+    # as a substantive non-determinism bug (NOT a timeout) that cannot
+    # be papered over by bumping the floor.  Per user-approved Option A,
+    # the soft-fail is restored here; the strict gate will be re-enabled
+    # in the follow-up PR that closes #3144.  Scoped via a matrix
+    # expression so any future board added to the matrix (e.g. board 03
+    # per the comment below) remains a STRICT required check; only the
+    # board-06 entry soft-fails.
+    continue-on-error: ${{ matrix.board == 'boards/06-diffpair-test' }}
     strategy:
       # Don't abort the matrix on a single board failure -- each board
       # is independent and reviewers want all annotations at once.
