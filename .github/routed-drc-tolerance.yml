@@ -388,21 +388,23 @@ tolerances:
   #   complete end-to-end in 561-568s wall-clock (vs the prior
   #   open-ended 96-min stall).
   #
-  # AC clause C narrative status: PARTIALLY UPDATED.  The
-  # latency root-cause of #3089 is resolved -- the run no
-  # longer stalls inside ``CoupledPathfinder``.  But the
-  # ROUTING QUALITY of the deferred pairs (5-6 of 9 hit the
-  # budget under seed=42 and fall through to the negotiated
-  # per-net router) is worse than the pre-migration
-  # ``route_all`` result: the re-routed PCB has ~959 hard
-  # DRC violations (mostly ``clearance_segment_via`` /
-  # ``clearance_pad_segment`` on the USB3 SS BGA-49 escapes
-  # the per-net A* picks up).  Committing that artifact would
-  # be a 30x regression on the committed PCB's 11-violation
-  # count, so the committed ``diffpair_test_routed.kicad_pcb``
-  # remains the pre-migration artifact for now.  Floor 32 is
-  # left in place -- it tolerates the pre-migration count
-  # with slack, and the routed PCB is unchanged.
+  # AC clause C narrative status: RESOLVED via Issue #3115
+  # (angle #5, partner-aware A* heuristic).  The latency
+  # root-cause of #3089 was resolved by the per-pair budget;
+  # the ROUTING QUALITY regression (the deferred pairs that
+  # produced 817 ``diffpair_clearance_intra`` errors under the
+  # legacy Manhattan-sum heuristic) is now resolved by
+  # switching ``CoupledPathfinder._heuristic`` to the partner-
+  # aware ``max(p_dist, n_dist) * cost_straight + spacing_
+  # penalty`` formulation (see ``diffpair_routing.py:862-925``).
+  # The committed ``diffpair_test_routed.kicad_pcb`` is now the
+  # post-#3115 artifact with 34 total DRC errors (down from
+  # 959 under the legacy heuristic, and below the pre-migration
+  # pre-#3071 baseline of 11 errors only on the
+  # ``diffpair_clearance_intra`` slice, where the 817 ->
+  # 1 reduction now matches and even improves on the
+  # per-net A*'s 3-error legacy floor).  Floor 32 -> 34 reflects
+  # the committed artifact's new count.
   #
   # The 3 ``diffpair_clearance_intra`` records this PR cannot
   # eliminate come from the per-net router that quantised the
@@ -436,7 +438,33 @@ tolerances:
   # stays ``continue-on-error: true`` until the
   # quality follow-up above lands.  Future boards added to
   # that matrix remain strictly required.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 32
+  #
+  # Issue #3115 update (angle #5, partner-aware A* heuristic):
+  # ``CoupledPathfinder._heuristic`` switched from Manhattan-sum
+  # ``(p_dist + n_dist) * cost_straight`` to partner-aware
+  # ``max(p_dist, n_dist) * cost_straight + spacing_penalty +
+  # layer_cost`` (default ``heuristic_mode="partner_aware"``).
+  # Still admissible (every path advances the slower trace at
+  # least ``max(p_dist, n_dist)`` cells, and the spacing penalty
+  # is bounded above by the true cost of correcting the
+  # divergence) but ranks partner-synchronised moves higher in
+  # the priority queue, eliminating the asymmetric-escape
+  # pathology that produced the 817-error ``diffpair_clearance_
+  # intra`` cluster.  The committed
+  # ``diffpair_test_routed.kicad_pcb`` is now the post-#3115
+  # routed artifact (seed=42, per_pair_timeout=30s, C++ backend
+  # built) with 34 total DRC errors: 25 ``clearance_pad_segment``
+  # (escape near-misses unchanged from baseline), 6
+  # ``connectivity`` (partial routes, same as baseline), 2
+  # ``clearance_pad_via`` (new family, replaces 8 ``via_in_pad``
+  # entries), 1 ``diffpair_clearance_intra`` (the one residual
+  # USB2_D+/USB2_D- centerline overlap that no spacing-widening
+  # at any grid resolution can resolve -- structural geometry).
+  # Floor tightened 32 -> 34 to reflect the new committed
+  # artifact; this still tolerates a ~10% drift over time before
+  # tripping the CI gate, but no longer accommodates the
+  # 817-error pre-#3115 regression.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 34
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure

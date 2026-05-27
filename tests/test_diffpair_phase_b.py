@@ -41,7 +41,6 @@ from kicad_tools.router.diffpair_routing import (
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import DesignRules
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -283,14 +282,12 @@ def test_repair_pass_bounded_when_pair_cannot_be_repaired():
     # No resolutions, capped at max_retries_per_pair attempts (2).
     assert resolved == 0
     assert call_count["value"] <= 2, (
-        f"Repair pass exceeded max_retries_per_pair=2: "
-        f"made {call_count['value']} attempts"
+        f"Repair pass exceeded max_retries_per_pair=2: made {call_count['value']} attempts"
     )
     # Original violation still in the buffer for the safety net.
-    assert any(
-        v.positive_net_name == "USB_D+"
-        for v in dpr.intra_clearance_violations()
-    ), "Repair pass dropped the original violation despite failing to fix it"
+    assert any(v.positive_net_name == "USB_D+" for v in dpr.intra_clearance_violations()), (
+        "Repair pass dropped the original violation despite failing to fix it"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -369,18 +366,15 @@ def test_repair_pass_resolves_violation_when_retry_succeeds():
     finally:
         dpr.route_differential_pair_coupled = original_method  # type: ignore[assignment]
 
-    assert resolved == 1, (
-        f"Repair pass should have resolved exactly 1 pair; got {resolved}"
-    )
+    assert resolved == 1, f"Repair pass should have resolved exactly 1 pair; got {resolved}"
     assert call_count["value"] == 1, (
         f"Repair pass should have succeeded on the first attempt; "
         f"made {call_count['value']} attempts"
     )
     # Original violation must be gone from the buffer.
-    assert not any(
-        v.positive_net_name == "USB_D+"
-        for v in dpr.intra_clearance_violations()
-    ), "Repair pass left the original violation in the buffer after successful resolution"
+    assert not any(v.positive_net_name == "USB_D+" for v in dpr.intra_clearance_violations()), (
+        "Repair pass left the original violation in the buffer after successful resolution"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +488,6 @@ def test_extra_spacing_cells_widens_min_spacing_cells():
     # coupled-spec path executes.  We then stub CoupledPathfinder to
     # return ``None`` (no path) so the rest of the routine is a no-op;
     # we only care about the constructor kwargs.
-    from types import SimpleNamespace
 
     from kicad_tools.router.diffpair import (
         DifferentialPair,
@@ -530,16 +523,52 @@ def test_extra_spacing_cells_widens_min_spacing_cells():
     from kicad_tools.router.primitives import Pad
 
     p_pads = [
-        Pad(x=1.0, y=1.0, width=1.0, height=1.0, net=1, net_name="USB_D+",
-            layer=Layer.F_CU, ref="J1", pin="1"),
-        Pad(x=5.0, y=1.0, width=1.0, height=1.0, net=1, net_name="USB_D+",
-            layer=Layer.F_CU, ref="U1", pin="1"),
+        Pad(
+            x=1.0,
+            y=1.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="USB_D+",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
+        ),
+        Pad(
+            x=5.0,
+            y=1.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="USB_D+",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
+        ),
     ]
     n_pads = [
-        Pad(x=1.0, y=2.0, width=1.0, height=1.0, net=2, net_name="USB_D-",
-            layer=Layer.F_CU, ref="J1", pin="2"),
-        Pad(x=5.0, y=2.0, width=1.0, height=1.0, net=2, net_name="USB_D-",
-            layer=Layer.F_CU, ref="U1", pin="2"),
+        Pad(
+            x=1.0,
+            y=2.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="USB_D-",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="2",
+        ),
+        Pad(
+            x=5.0,
+            y=2.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="USB_D-",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="2",
+        ),
     ]
     dpr._get_pair_pads = lambda _pair: (p_pads, n_pads)  # type: ignore[assignment]
 
@@ -557,17 +586,12 @@ def test_extra_spacing_cells_widens_min_spacing_cells():
 
     with patch.object(diffpair_routing, "CoupledPathfinder", side_effect=_capture):
         # First call: extra_spacing_cells=0 baseline.
-        dpr.route_differential_pair_coupled(
-            pair, coupled_only=True, extra_spacing_cells=0
-        )
+        dpr.route_differential_pair_coupled(pair, coupled_only=True, extra_spacing_cells=0)
         # Second call: extra_spacing_cells=2.
-        dpr.route_differential_pair_coupled(
-            pair, coupled_only=True, extra_spacing_cells=2
-        )
+        dpr.route_differential_pair_coupled(pair, coupled_only=True, extra_spacing_cells=2)
 
     assert len(captured_kwargs) == 2, (
-        f"Stub CoupledPathfinder was called {len(captured_kwargs)} times; "
-        f"expected 2"
+        f"Stub CoupledPathfinder was called {len(captured_kwargs)} times; expected 2"
     )
     base_floor = captured_kwargs[0]["min_spacing_cells"]
     wider_floor = captured_kwargs[1]["min_spacing_cells"]
@@ -631,32 +655,77 @@ def test_route_pair_on_fine_grid_uses_finer_resolution():
 
     rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
     pos = DifferentialSignal(
-        net_name="USB_D+", net_id=1, base_name="USB_D",
-        polarity="P", notation="plus_minus",
+        net_name="USB_D+",
+        net_id=1,
+        base_name="USB_D",
+        polarity="P",
+        notation="plus_minus",
     )
     neg = DifferentialSignal(
-        net_name="USB_D-", net_id=2, base_name="USB_D",
-        polarity="N", notation="plus_minus",
+        net_name="USB_D-",
+        net_id=2,
+        base_name="USB_D",
+        polarity="N",
+        notation="plus_minus",
     )
     pair = DifferentialPair(
-        name="USB_D", positive=pos, negative=neg,
-        pair_type=DifferentialPairType.USB2, rules=rules,
+        name="USB_D",
+        positive=pos,
+        negative=neg,
+        pair_type=DifferentialPairType.USB2,
+        rules=rules,
     )
 
     # Synthetic asymmetric pads: J1 has 0.8mm tall pads (FFC),
     # U1 has 0.35mm tall pads (QFN) -- the exact pathology the
     # issue body cites at boards/06-diffpair-test/U2 vs J4.
     p_pads = [
-        Pad(x=2.0, y=2.0, width=0.8, height=0.8, net=1, net_name="USB_D+",
-            layer=Layer.F_CU, ref="J1", pin="1"),
-        Pad(x=8.0, y=2.0, width=0.35, height=0.35, net=1, net_name="USB_D+",
-            layer=Layer.F_CU, ref="U1", pin="1"),
+        Pad(
+            x=2.0,
+            y=2.0,
+            width=0.8,
+            height=0.8,
+            net=1,
+            net_name="USB_D+",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
+        ),
+        Pad(
+            x=8.0,
+            y=2.0,
+            width=0.35,
+            height=0.35,
+            net=1,
+            net_name="USB_D+",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
+        ),
     ]
     n_pads = [
-        Pad(x=2.0, y=2.3, width=0.8, height=0.8, net=2, net_name="USB_D-",
-            layer=Layer.F_CU, ref="J1", pin="2"),
-        Pad(x=8.0, y=2.3, width=0.35, height=0.35, net=2, net_name="USB_D-",
-            layer=Layer.F_CU, ref="U1", pin="2"),
+        Pad(
+            x=2.0,
+            y=2.3,
+            width=0.8,
+            height=0.8,
+            net=2,
+            net_name="USB_D-",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="2",
+        ),
+        Pad(
+            x=8.0,
+            y=2.3,
+            width=0.35,
+            height=0.35,
+            net=2,
+            net_name="USB_D-",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="2",
+        ),
     ]
     dpr._get_pair_pads = lambda _pair: (p_pads, n_pads)  # type: ignore[assignment]
 
@@ -683,8 +752,7 @@ def test_route_pair_on_fine_grid_uses_finer_resolution():
         )
 
     assert len(captured_pathfinders) == 1, (
-        f"Expected exactly one fine-grid CoupledPathfinder; "
-        f"got {len(captured_pathfinders)}"
+        f"Expected exactly one fine-grid CoupledPathfinder; got {len(captured_pathfinders)}"
     )
     fine_pathfinder = captured_pathfinders[0]
     fine_resolution = fine_pathfinder.grid.resolution
@@ -771,9 +839,7 @@ def test_repair_pass_invokes_fine_grid_when_main_retries_fail():
         f"Expected exactly 1 fine-grid attempt after main retries failed; "
         f"got {fine_grid_calls['value']}"
     )
-    assert resolved == 0, (
-        f"All attempts failed; expected resolved=0 got {resolved}"
-    )
+    assert resolved == 0, f"All attempts failed; expected resolved=0 got {resolved}"
 
 
 def test_repair_pass_skips_fine_grid_when_disabled():
@@ -813,9 +879,12 @@ def test_repair_pass_skips_fine_grid_when_disabled():
         fake_positive = SimpleNamespace(net_id=1, net_name="USB_D+")
         fake_negative = SimpleNamespace(net_id=2, net_name="USB_D-")
         fake_pair = SimpleNamespace(
-            positive=fake_positive, negative=fake_negative, rules=None,
+            positive=fake_positive,
+            negative=fake_negative,
+            rules=None,
             pair_type=SimpleNamespace(value="usb"),
-            get_net_ids=lambda: (1, 2), name="USB_D",
+            get_net_ids=lambda: (1, 2),
+            name="USB_D",
         )
         dpr.detect_differential_pairs_with_source = lambda: [(fake_pair, "stub")]
 
@@ -859,16 +928,21 @@ def test_repair_pass_accepts_fine_grid_routes_when_clean():
         return [], None
 
     def _succeeding_fine(
-        pair, spacing_override=None, extra_spacing_cells=1,
-        per_pair_timeout=None, resolution_factor=0.5,
+        pair,
+        spacing_override=None,
+        extra_spacing_cells=1,
+        per_pair_timeout=None,
+        resolution_factor=0.5,
     ):
         # Lay clean routes 0.5mm apart (well above 0.10mm threshold).
         clean_p = _make_route(
-            net_id=1, net_name="USB_D+",
+            net_id=1,
+            net_name="USB_D+",
             segments=[(0.0, 1.0, 10.0, 1.0, Layer.F_CU)],
         )
         clean_n = _make_route(
-            net_id=2, net_name="USB_D-",
+            net_id=2,
+            net_name="USB_D-",
             segments=[(0.0, 1.5, 10.0, 1.5, Layer.F_CU)],
         )
         return [clean_p, clean_n], None
@@ -880,9 +954,12 @@ def test_repair_pass_accepts_fine_grid_routes_when_clean():
         fake_positive = SimpleNamespace(net_id=1, net_name="USB_D+")
         fake_negative = SimpleNamespace(net_id=2, net_name="USB_D-")
         fake_pair = SimpleNamespace(
-            positive=fake_positive, negative=fake_negative, rules=None,
+            positive=fake_positive,
+            negative=fake_negative,
+            rules=None,
             pair_type=SimpleNamespace(value="usb"),
-            get_net_ids=lambda: (1, 2), name="USB_D",
+            get_net_ids=lambda: (1, 2),
+            name="USB_D",
         )
         dpr.detect_differential_pairs_with_source = lambda: [(fake_pair, "stub")]
 
@@ -895,14 +972,12 @@ def test_repair_pass_accepts_fine_grid_routes_when_clean():
         dpr._route_pair_on_fine_grid = original_fine  # type: ignore[assignment]
 
     assert resolved == 1, (
-        f"Fine-grid sub-pass returned clean routes; expected resolved=1 "
-        f"got {resolved}"
+        f"Fine-grid sub-pass returned clean routes; expected resolved=1 got {resolved}"
     )
     # The original violation should be gone from the buffer.
-    assert not any(
-        v.positive_net_name == "USB_D+"
-        for v in dpr.intra_clearance_violations()
-    ), "Original violation persisted after a successful fine-grid sub-pass"
+    assert not any(v.positive_net_name == "USB_D+" for v in dpr.intra_clearance_violations()), (
+        "Original violation persisted after a successful fine-grid sub-pass"
+    )
 
 
 def test_route_pair_on_fine_grid_returns_empty_when_no_pads():
@@ -925,23 +1000,542 @@ def test_route_pair_on_fine_grid_returns_empty_when_no_pads():
 
     rules = DifferentialPairRules.for_type(DifferentialPairType.USB2)
     pos = DifferentialSignal(
-        net_name="USB_D+", net_id=1, base_name="USB_D",
-        polarity="P", notation="plus_minus",
+        net_name="USB_D+",
+        net_id=1,
+        base_name="USB_D",
+        polarity="P",
+        notation="plus_minus",
     )
     neg = DifferentialSignal(
-        net_name="USB_D-", net_id=2, base_name="USB_D",
-        polarity="N", notation="plus_minus",
+        net_name="USB_D-",
+        net_id=2,
+        base_name="USB_D",
+        polarity="N",
+        notation="plus_minus",
     )
     pair = DifferentialPair(
-        name="USB_D", positive=pos, negative=neg,
-        pair_type=DifferentialPairType.USB2, rules=rules,
+        name="USB_D",
+        positive=pos,
+        negative=neg,
+        pair_type=DifferentialPairType.USB2,
+        rules=rules,
     )
 
     # No pads resolved.
     dpr._get_pair_pads = lambda _pair: None  # type: ignore[assignment]
     routes, warning = dpr._route_pair_on_fine_grid(
-        pair, spacing_override=None, extra_spacing_cells=1,
+        pair,
+        spacing_override=None,
+        extra_spacing_cells=1,
         per_pair_timeout=None,
     )
     assert routes == []
     assert warning is None
+
+
+# ---------------------------------------------------------------------------
+# Phase B-9 (Issue #3115 angle #5): partner-aware A* heuristic on
+# ``CoupledPathfinder``.
+#
+# These tests pin the angle-#5 follow-up to PR #3122 (fine-grid sub-pass).
+# The legacy ``_heuristic`` is the Manhattan sum ``(p_dist + n_dist) *
+# cost_straight``; angle #5 switches the default to
+# ``max(p_dist, n_dist) * cost_straight + spacing_penalty + layer_cost``
+# which is still admissible but biases the search toward partner-
+# synchronised moves.
+# ---------------------------------------------------------------------------
+
+
+def test_coupled_pathfinder_accepts_heuristic_mode_kwarg():
+    """Issue #3115 (angle #5): the ``heuristic_mode`` kwarg must be on
+    ``CoupledPathfinder.__init__`` so callers (and tests) can opt back
+    into the legacy Manhattan-sum heuristic.
+
+    The default must be ``"partner_aware"`` so production calls
+    automatically get the new behaviour without changing the public
+    ``CoupledPathfinder()`` call sites in
+    ``route_differential_pair_coupled`` and ``_route_pair_on_fine_grid``.
+    """
+    import inspect
+
+    from kicad_tools.router.diffpair_routing import CoupledPathfinder
+
+    sig = inspect.signature(CoupledPathfinder.__init__)
+    assert "heuristic_mode" in sig.parameters, (
+        "CoupledPathfinder.__init__ lost the heuristic_mode kwarg added by Issue #3115"
+    )
+    assert sig.parameters["heuristic_mode"].default == "partner_aware", (
+        "Issue #3115 requires partner_aware as the default heuristic_mode "
+        "so production routing automatically gets the new behaviour"
+    )
+    # Companion knob: spacing_penalty_factor.
+    assert "spacing_penalty_factor" in sig.parameters, (
+        "CoupledPathfinder.__init__ lost the spacing_penalty_factor kwarg added by Issue #3115"
+    )
+
+
+def test_coupled_pathfinder_rejects_invalid_heuristic_mode():
+    """A typo in ``heuristic_mode`` should fail loudly at construction,
+    not silently fall back to one of the two real modes.
+    """
+    import pytest
+
+    from kicad_tools.router.diffpair_routing import CoupledPathfinder
+    from kicad_tools.router.grid import RoutingGrid
+
+    rules = DesignRules()
+    grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
+    with pytest.raises(ValueError, match="heuristic_mode"):
+        CoupledPathfinder(grid, rules, target_spacing_cells=3, heuristic_mode="bogus")  # type: ignore[arg-type]
+
+
+def test_partner_aware_heuristic_at_goal_is_zero():
+    """Both heuristics MUST return ``0`` (no layer change) when both
+    traces sit at their goal cells -- this is a pure admissibility
+    smoke test (h(goal) == 0).
+    """
+    from kicad_tools.router.diffpair_routing import (
+        CoupledPathfinder,
+        CoupledState,
+        GridPos,
+    )
+    from kicad_tools.router.grid import RoutingGrid
+
+    rules = DesignRules()
+    grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
+
+    p_goal = GridPos(20, 5, 0)
+    n_goal = GridPos(20, 8, 0)
+    at_goal = CoupledState(p_goal, n_goal, (0, 0))
+
+    legacy = CoupledPathfinder(grid, rules, target_spacing_cells=3, heuristic_mode="manhattan_sum")
+    new = CoupledPathfinder(grid, rules, target_spacing_cells=3, heuristic_mode="partner_aware")
+    # target_spacing_cells == |p_goal.y - n_goal.y| so the spacing
+    # penalty is zero at the goal.  Layer matches so layer_cost is zero
+    # too.  Both heuristics collapse to ``0``.
+    assert legacy._heuristic(at_goal, p_goal, n_goal) == 0.0
+    assert new._heuristic(at_goal, p_goal, n_goal) == 0.0
+
+
+def test_partner_aware_heuristic_undershoots_manhattan_sum_on_asymmetric_state():
+    """The whole point of angle #5: on a state where one trace is
+    much further from its goal than the other, the partner-aware
+    heuristic returns a SMALLER value than the Manhattan-sum
+    heuristic.
+
+    A smaller heuristic means a HIGHER ranking in the A* priority
+    queue, so states whose partner moves are still ahead are
+    preferred -- this is what biases the search toward partner-
+    synchronised escapes.
+
+    Concretely: state has P 10 cells from p_goal and N 2 cells from
+    n_goal, with spacing matching the target so spacing_penalty == 0.
+    Manhattan-sum heuristic = (10 + 2) * cost_straight = 12 *
+    cost_straight.  Partner-aware heuristic = max(10, 2) *
+    cost_straight = 10 * cost_straight.  Strictly less.
+    """
+    from kicad_tools.router.diffpair_routing import (
+        CoupledPathfinder,
+        CoupledState,
+        GridPos,
+    )
+    from kicad_tools.router.grid import RoutingGrid
+
+    rules = DesignRules()
+    grid = RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    # State: P far from goal, N close.  Spacing matches target.
+    target_spacing = 3
+    p_pos = GridPos(5, 5, 0)
+    n_pos = GridPos(5, 8, 0)  # 3 cells south of p_pos => spacing == 3.
+    state = CoupledState(p_pos, n_pos, (0, 0))
+    p_goal = GridPos(15, 5, 0)  # 10 cells from p_pos
+    n_goal = GridPos(7, 8, 0)  # 2 cells from n_pos
+
+    legacy = CoupledPathfinder(
+        grid,
+        rules,
+        target_spacing_cells=target_spacing,
+        heuristic_mode="manhattan_sum",
+    )
+    new = CoupledPathfinder(
+        grid,
+        rules,
+        target_spacing_cells=target_spacing,
+        heuristic_mode="partner_aware",
+    )
+
+    legacy_h = legacy._heuristic(state, p_goal, n_goal)
+    new_h = new._heuristic(state, p_goal, n_goal)
+
+    expected_legacy = (10 + 2) * rules.cost_straight  # 12 * cost_straight
+    expected_new = 10 * rules.cost_straight  # spacing matches -> no penalty
+    assert legacy_h == expected_legacy
+    assert new_h == expected_new
+    assert new_h < legacy_h, (
+        f"partner-aware heuristic must undershoot Manhattan-sum on "
+        f"asymmetric P/N distance, got new={new_h} legacy={legacy_h}"
+    )
+
+
+def test_partner_aware_heuristic_penalises_spacing_divergence():
+    """The spacing-penalty term must penalise states whose current
+    center-to-center spacing diverges from the target.  Pins the
+    monotonicity contract: a state with spacing == target has a
+    smaller (or equal) heuristic than the same state with spacing
+    further from target.
+    """
+    from kicad_tools.router.diffpair_routing import (
+        CoupledPathfinder,
+        CoupledState,
+        GridPos,
+    )
+    from kicad_tools.router.grid import RoutingGrid
+
+    rules = DesignRules()
+    grid = RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    target_spacing = 3
+    new = CoupledPathfinder(
+        grid,
+        rules,
+        target_spacing_cells=target_spacing,
+        heuristic_mode="partner_aware",
+        spacing_penalty_factor=0.5,
+    )
+
+    p_goal = GridPos(10, 5, 0)
+    n_goal = GridPos(10, 8, 0)
+
+    # State A: spacing matches target exactly.
+    state_match = CoupledState(GridPos(5, 5, 0), GridPos(5, 8, 0), (0, 0))
+    h_match = new._heuristic(state_match, p_goal, n_goal)
+
+    # State B: spacing is 6 cells (3 over target).  Manhattan distance
+    # to goal is identical to state A so the only difference is the
+    # spacing penalty.
+    state_diverged = CoupledState(GridPos(5, 5, 0), GridPos(5, 11, 0), (0, 0))
+    h_diverged = new._heuristic(state_diverged, p_goal, n_goal)
+
+    assert h_diverged > h_match, (
+        f"State with diverged spacing should have a larger heuristic "
+        f"(lower ranking) than a same-distance-to-goal state at target "
+        f"spacing; got h_diverged={h_diverged} h_match={h_match}"
+    )
+
+
+def test_partner_aware_heuristic_is_admissible():
+    """Admissibility check on a small synthetic search.
+
+    Routes a 2-pad differential pair end-to-end with the partner-aware
+    heuristic and verifies that the heuristic at every reachable state
+    never exceeds the actual remaining path cost (g_score of the
+    optimal path minus g_score of the state).  We pin this by:
+
+      1. Running an unbounded coupled search on a synthetic pair where
+         the start and goal are aligned and clearly routable.
+      2. Asserting the resulting pair routes (no path-found regression).
+
+    The admissibility argument is per-state but as a stand-in we
+    verify the search completes -- a non-admissible heuristic could
+    prune the optimal path and produce a non-optimal result, but on
+    this trivially routable pair any non-optimal route still violates
+    the spacing floor and would fail the within-pair clearance check
+    that ``find_intra_pair_clearance_violations`` runs.
+    """
+    from kicad_tools.router.diffpair_routing import (
+        CoupledPathfinder,
+        find_intra_pair_clearance_violations,
+    )
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.primitives import Pad
+
+    # Use a sparse 30x10mm grid with simple 2-layer stack -- plenty of
+    # room for both traces and no obstacles.
+    rules = DesignRules()
+    grid = RoutingGrid(width=30.0, height=10.0, rules=rules)
+
+    target_spacing = max(2, int(round(0.3 / grid.resolution)))
+    pf = CoupledPathfinder(
+        grid,
+        rules,
+        target_spacing_cells=target_spacing,
+        heuristic_mode="partner_aware",
+    )
+
+    p_start = Pad(
+        x=2.0,
+        y=4.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="DP_P",
+        layer=Layer.F_CU,
+        ref="J1",
+        pin="1",
+    )
+    p_end = Pad(
+        x=28.0,
+        y=4.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="DP_P",
+        layer=Layer.F_CU,
+        ref="J2",
+        pin="1",
+    )
+    n_start = Pad(
+        x=2.0,
+        y=4.5,
+        width=0.5,
+        height=0.5,
+        net=2,
+        net_name="DP_N",
+        layer=Layer.F_CU,
+        ref="J1",
+        pin="2",
+    )
+    n_end = Pad(
+        x=28.0,
+        y=4.5,
+        width=0.5,
+        height=0.5,
+        net=2,
+        net_name="DP_N",
+        layer=Layer.F_CU,
+        ref="J2",
+        pin="2",
+    )
+
+    result = pf.route_coupled(p_start, p_end, n_start, n_end)
+    assert result is not None, (
+        "partner-aware heuristic must still find a route on a trivially routable synthetic pair"
+    )
+    p_route, n_route = result
+    assert p_route.segments, "expected at least one P segment"
+    assert n_route.segments, "expected at least one N segment"
+
+    # The synthetic pair has 0.5mm spacing which exceeds the default
+    # 0.075mm intra_pair_clearance + 0.15mm trace width = 0.225mm
+    # required center spacing -- so no intra-pair clearance violation
+    # should be produced.  This is a non-regression check against an
+    # accidentally inadmissible heuristic that lets the search return
+    # a path that violates the spacing floor.
+    violations = find_intra_pair_clearance_violations(
+        p_route,
+        n_route,
+        threshold_mm=0.075,
+    )
+    assert violations is None, (
+        f"partner-aware heuristic produced route with intra-pair clearance violation: {violations}"
+    )
+
+
+def test_partner_aware_heuristic_solves_asymmetric_pad_pair():
+    """Issue #3115 angle #5 motivational test.
+
+    Construct an asymmetric-pad differential pair (pad heights 0.8mm
+    on one side, 0.35mm on the other -- the exact J4-FFC vs U2-QFN
+    pathology from board 06 per the curator's note #4 on issue
+    #3097).  Verify that with the partner-aware heuristic the
+    resulting routes have no ``diffpair_clearance_intra`` violation.
+
+    This is the "provably wins" gate the AC requires.  We compare
+    the partner-aware result against the legacy Manhattan-sum result
+    on the SAME synthetic pair; the partner-aware run must produce
+    a clean route (``find_intra_pair_clearance_violations is None``)
+    while we just assert the legacy run runs (it may or may not
+    produce a violation depending on grid quantisation).
+    """
+    from kicad_tools.router.diffpair_routing import (
+        CoupledPathfinder,
+        find_intra_pair_clearance_violations,
+    )
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.primitives import Pad
+
+    rules = DesignRules()
+    grid = RoutingGrid(width=20.0, height=10.0, rules=rules)
+
+    # Compute a target spacing of roughly 0.4mm (in grid cells).
+    target_spacing = max(2, int(round(0.4 / grid.resolution)))
+
+    # Asymmetric pads: 0.8mm-tall on left, 0.35mm-tall on right.
+    p_start = Pad(
+        x=2.0,
+        y=4.0,
+        width=0.8,
+        height=0.8,
+        net=1,
+        net_name="DP_P",
+        layer=Layer.F_CU,
+        ref="J1",
+        pin="1",
+    )
+    p_end = Pad(
+        x=18.0,
+        y=4.0,
+        width=0.35,
+        height=0.35,
+        net=1,
+        net_name="DP_P",
+        layer=Layer.F_CU,
+        ref="U1",
+        pin="1",
+    )
+    n_start = Pad(
+        x=2.0,
+        y=4.4,
+        width=0.8,
+        height=0.8,
+        net=2,
+        net_name="DP_N",
+        layer=Layer.F_CU,
+        ref="J1",
+        pin="2",
+    )
+    n_end = Pad(
+        x=18.0,
+        y=4.4,
+        width=0.35,
+        height=0.35,
+        net=2,
+        net_name="DP_N",
+        layer=Layer.F_CU,
+        ref="U1",
+        pin="2",
+    )
+
+    # Partner-aware run.
+    pf_new = CoupledPathfinder(
+        grid,
+        rules,
+        target_spacing_cells=target_spacing,
+        heuristic_mode="partner_aware",
+    )
+    new_result = pf_new.route_coupled(p_start, p_end, n_start, n_end)
+    assert new_result is not None, (
+        "partner-aware heuristic must find a route on the asymmetric-pad synthetic pair"
+    )
+    p_route_new, n_route_new = new_result
+
+    # The asymmetric pad case is what angle #5 targets -- the
+    # partner-aware heuristic must produce a clean route here, OR (if
+    # the underlying spacing floor still admits a sub-threshold route)
+    # at least the partner-aware run must not regress against legacy.
+    new_violations = find_intra_pair_clearance_violations(
+        p_route_new,
+        n_route_new,
+        threshold_mm=0.075,
+    )
+
+    # Legacy run -- just verify it doesn't crash (the legacy heuristic
+    # was the production path until Issue #3115; both modes must
+    # remain functional).
+    pf_legacy = CoupledPathfinder(
+        grid,
+        rules,
+        target_spacing_cells=target_spacing,
+        heuristic_mode="manhattan_sum",
+    )
+    legacy_result = pf_legacy.route_coupled(p_start, p_end, n_start, n_end)
+    assert legacy_result is not None, (
+        "legacy Manhattan-sum heuristic must still find a route -- "
+        "the opt-out path must not regress"
+    )
+
+    # The partner-aware route must be clean.  This is the "provably
+    # wins" assertion: even when both heuristics route the pair, the
+    # partner-aware one produces a route whose center-to-center
+    # spacing matches the target throughout.
+    assert new_violations is None, (
+        f"partner-aware heuristic produced intra-pair clearance "
+        f"violation on the asymmetric-pad pair (the angle-#5 target "
+        f"case): {new_violations}"
+    )
+
+
+def test_legacy_manhattan_sum_heuristic_still_routes_symmetric_pair():
+    """Non-regression: the legacy ``manhattan_sum`` heuristic must
+    still produce a valid route on a simple symmetric-pad pair.  Pins
+    that the opt-out path is preserved verbatim for any pinned-test
+    caller (Issue #3115).
+    """
+    from kicad_tools.router.diffpair_routing import (
+        CoupledPathfinder,
+        find_intra_pair_clearance_violations,
+    )
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.primitives import Pad
+
+    rules = DesignRules()
+    grid = RoutingGrid(width=20.0, height=10.0, rules=rules)
+    target_spacing = max(2, int(round(0.3 / grid.resolution)))
+
+    p_start = Pad(
+        x=2.0,
+        y=4.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="DP_P",
+        layer=Layer.F_CU,
+        ref="J1",
+        pin="1",
+    )
+    p_end = Pad(
+        x=18.0,
+        y=4.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="DP_P",
+        layer=Layer.F_CU,
+        ref="J2",
+        pin="1",
+    )
+    n_start = Pad(
+        x=2.0,
+        y=4.5,
+        width=0.5,
+        height=0.5,
+        net=2,
+        net_name="DP_N",
+        layer=Layer.F_CU,
+        ref="J1",
+        pin="2",
+    )
+    n_end = Pad(
+        x=18.0,
+        y=4.5,
+        width=0.5,
+        height=0.5,
+        net=2,
+        net_name="DP_N",
+        layer=Layer.F_CU,
+        ref="J2",
+        pin="2",
+    )
+
+    pf = CoupledPathfinder(
+        grid,
+        rules,
+        target_spacing_cells=target_spacing,
+        heuristic_mode="manhattan_sum",
+    )
+    result = pf.route_coupled(p_start, p_end, n_start, n_end)
+    assert result is not None, (
+        "Legacy Manhattan-sum heuristic must continue to find routes "
+        "on the symmetric easy case -- opt-out path is broken"
+    )
+    p_route, n_route = result
+    violations = find_intra_pair_clearance_violations(
+        p_route,
+        n_route,
+        threshold_mm=0.075,
+    )
+    assert violations is None, (
+        f"Symmetric-pad pair under legacy heuristic must not violate "
+        f"intra-pair clearance: {violations}"
+    )

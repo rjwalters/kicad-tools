@@ -17,7 +17,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from .core import Autorouter
@@ -330,6 +330,8 @@ class CoupledPathfinder:
         net_class_map: dict[str, NetClassRouting] | None = None,
         allow_swap_via: bool = False,
         min_spacing_cells: int = 0,
+        heuristic_mode: Literal["manhattan_sum", "partner_aware"] = "partner_aware",
+        spacing_penalty_factor: float = 0.25,
     ):
         """Initialize coupled pathfinder.
 
@@ -357,6 +359,41 @@ class CoupledPathfinder:
                 exempt from the floor -- those are the cells the pads
                 themselves occupy and the floor would otherwise
                 disqualify the search's only chance to land.
+            heuristic_mode: Issue #3115 (angle #5): Selects the A* heuristic
+                used by :meth:`_heuristic`.
+
+                * ``"manhattan_sum"`` (legacy):
+                  ``(p_dist + n_dist) * cost_straight + layer_cost``.
+                  Sums the Manhattan distance from each trace to its
+                  goal -- biases the search away from partner-
+                  synchronised moves because every symmetric step
+                  reduces the sum by 2 while every asymmetric (P-only
+                  or N-only) step reduces it by 1, even though both
+                  cost the same on a coupled run.
+                * ``"partner_aware"`` (default, Issue #3115): uses
+                  ``max(p_dist, n_dist) * cost_straight + spacing_penalty
+                  + layer_cost``.  Still admissible (every real path
+                  must advance the slower trace at least ``max(p_dist,
+                  n_dist)`` cells), but ranks partner-synchronised
+                  moves higher in the priority queue.  Reduces the
+                  asymmetric-escape pathology that produces the
+                  ``diffpair_clearance_intra`` cluster on board 06.
+                  ``spacing_penalty`` is a sub-cost-per-step term that
+                  penalises states whose current center-to-center
+                  spacing diverges from ``target_spacing_cells`` (see
+                  ``spacing_penalty_factor``).
+            spacing_penalty_factor: Issue #3115: Multiplier applied to
+                the ``abs(current_spacing - target_spacing_cells) *
+                cost_straight`` spacing penalty term in the
+                ``"partner_aware"`` heuristic.  Bounded above by ``1.0``
+                analytically (each cell-of-spacing-divergence costs at
+                most one ``cost_straight`` of true path cost to correct
+                via the asymmetric converge move), so any factor ``<=
+                1.0`` keeps the heuristic admissible.  Default ``0.25``
+                is the smallest value the synthetic-pair regression
+                test under :mod:`tests.test_diffpair_phase_b` empirically
+                showed lifts the asymmetric-escape case.  Ignored when
+                ``heuristic_mode == "manhattan_sum"``.
         """
         self.grid = grid
         self.rules = rules
@@ -366,6 +403,17 @@ class CoupledPathfinder:
         # Issue #3012: store the within-pair spacing floor.  ``0`` means
         # no floor (legacy behaviour).
         self.min_spacing_cells = max(0, int(min_spacing_cells))
+        # Issue #3115: heuristic mode + spacing-penalty factor.  Clamp
+        # the factor to [0, 1] to preserve admissibility -- any value
+        # > 1 risks ranking states whose required correction cost
+        # exceeds the true remaining-path cost, which would let A*
+        # return a sub-optimal route.
+        if heuristic_mode not in ("manhattan_sum", "partner_aware"):
+            raise ValueError(
+                f"heuristic_mode must be 'manhattan_sum' or 'partner_aware'; got {heuristic_mode!r}"
+            )
+        self.heuristic_mode: Literal["manhattan_sum", "partner_aware"] = heuristic_mode
+        self.spacing_penalty_factor = max(0.0, min(1.0, float(spacing_penalty_factor)))
         # Issue #3089: set when the most-recent ``route_coupled`` call
         # exited early due to ``timeout_seconds`` being exceeded.
         # Callers (``route_differential_pair_coupled``) read this to
@@ -865,7 +913,37 @@ class CoupledPathfinder:
         p_goal: GridPos,
         n_goal: GridPos,
     ) -> float:
-        """Calculate heuristic for coupled A* search."""
+        """Calculate heuristic for coupled A* search.
+
+        Two modes (selected at construction via ``heuristic_mode``):
+
+        * ``"manhattan_sum"`` (legacy): returns
+          ``(p_dist + n_dist) * cost_straight + layer_cost``.  This
+          biases the priority queue against partner-synchronised
+          moves: a symmetric step reduces the sum by 2 cost units,
+          while an asymmetric P-only-or-N-only step reduces it by 1,
+          even though both cost the same.  Net effect: A* preferentially
+          extends asymmetric escape stubs that produce the
+          ``diffpair_clearance_intra`` violations on board 06.
+        * ``"partner_aware"`` (Issue #3115, angle #5, default):
+          returns ``max(p_dist, n_dist) * cost_straight +
+          spacing_penalty + layer_cost``.
+
+          Admissibility argument (informal): every real path that
+          reaches the goal must advance the *slower* of P/N by at
+          least ``max(p_dist, n_dist)`` cells, so the ``max`` term
+          never exceeds the true remaining path cost.  The
+          ``spacing_penalty`` term costs at most
+          ``abs(current_spacing - target_spacing_cells) *
+          cost_straight * spacing_penalty_factor`` and the true cost
+          of correcting that divergence requires at least
+          ``abs(current_spacing - target_spacing_cells) *
+          cost_straight`` (one asymmetric converge move per cell of
+          divergence), so any ``spacing_penalty_factor <= 1.0`` keeps
+          the heuristic admissible.  The ``layer_cost`` term is the
+          same admissible per-trace via-cost the legacy heuristic
+          uses.
+        """
         # Manhattan distance for both traces
         p_dist = abs(state.p_pos.x - p_goal.x) + abs(state.p_pos.y - p_goal.y)
         n_dist = abs(state.n_pos.x - n_goal.x) + abs(state.n_pos.y - n_goal.y)
@@ -877,7 +955,24 @@ class CoupledPathfinder:
         if state.n_pos.layer != n_goal.layer:
             layer_cost += self.rules.cost_via
 
-        return (p_dist + n_dist) * self.rules.cost_straight + layer_cost
+        if self.heuristic_mode == "manhattan_sum":
+            return (p_dist + n_dist) * self.rules.cost_straight + layer_cost
+
+        # heuristic_mode == "partner_aware"
+        max_dist = max(p_dist, n_dist)
+        # Spacing penalty -- ranks states whose current center-to-
+        # center spacing diverges from the target lower in the heap.
+        # We compute the Euclidean spacing rather than Manhattan
+        # because the coupled-move tolerance check uses Euclidean
+        # (see _get_coupled_neighbors at line ~604).
+        spacing_dx = state.p_pos.x - state.n_pos.x
+        spacing_dy = state.p_pos.y - state.n_pos.y
+        current_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
+        spacing_divergence = abs(current_spacing - self.target_spacing_cells)
+        spacing_penalty = (
+            spacing_divergence * self.rules.cost_straight * self.spacing_penalty_factor
+        )
+        return max_dist * self.rules.cost_straight + spacing_penalty + layer_cost
 
     def route_coupled(
         self,
@@ -2565,8 +2660,7 @@ class DiffPairRouter:
             scale = (estimated_cells / max_fine_cells) ** 0.5
             fine_resolution = fine_resolution * scale
             logger.info(
-                "Phase B fine-grid: scaling resolution up to %.4fmm "
-                "to fit %d-cell cap (pair=%r)",
+                "Phase B fine-grid: scaling resolution up to %.4fmm to fit %d-cell cap (pair=%r)",
                 fine_resolution,
                 max_fine_cells,
                 pair.name,
@@ -2602,9 +2696,7 @@ class DiffPairRouter:
         # net) and other nets' pads in the bounding box (must be
         # blocked).
         pitches = self.autorouter.component_pitches
-        pad_refs_in_pair = {
-            (p.ref, p.pin) for p in p_pads + n_pads
-        }
+        pad_refs_in_pair = {(p.ref, p.pin) for p in p_pads + n_pads}
         # Add the pair's own pads first so net ownership is correct.
         for pad in p_pads + n_pads:
             fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
@@ -2612,10 +2704,7 @@ class DiffPairRouter:
         for (ref, pin), pad in self.autorouter.pads.items():
             if (ref, pin) in pad_refs_in_pair:
                 continue
-            if (
-                bbox_min_x <= pad.x <= bbox_max_x
-                and bbox_min_y <= pad.y <= bbox_max_y
-            ):
+            if bbox_min_x <= pad.x <= bbox_max_x and bbox_min_y <= pad.y <= bbox_max_y:
                 fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
 
         # Re-mark all currently-committed routes (foreign nets) on the
@@ -2672,22 +2761,15 @@ class DiffPairRouter:
             for ps, pe, ns, ne in legacy_specs:
                 specs.append((ps, pe, ns, ne))
         else:
-            coupled_specs, _stub_specs = self._pair_pads_for_coupled_routing_npad(
-                p_pads, n_pads
-            )
-            specs = [
-                (s.p_start, s.p_end, s.n_start, s.n_end)
-                for s in coupled_specs
-            ]
+            coupled_specs, _stub_specs = self._pair_pads_for_coupled_routing_npad(p_pads, n_pads)
+            specs = [(s.p_start, s.p_end, s.n_start, s.n_end) for s in coupled_specs]
 
         if not specs:
             return [], None
 
         produced_routes: list[Route] = []
         for ps, pe, ns, ne in specs:
-            result = pathfinder.route_coupled(
-                ps, pe, ns, ne, timeout_seconds=per_pair_timeout
-            )
+            result = pathfinder.route_coupled(ps, pe, ns, ne, timeout_seconds=per_pair_timeout)
             if result is None:
                 # Failed on at least one spec -- abandon the fine-grid
                 # attempt entirely (the caller will try the next angle
@@ -2851,8 +2933,7 @@ class DiffPairRouter:
                 snapshot = list(self._intra_clearance_violations)
                 # Keep all violations that are NOT from this pair.
                 self._intra_clearance_violations = [
-                    v for v in snapshot
-                    if v.positive_net_name != p_net_name
+                    v for v in snapshot if v.positive_net_name != p_net_name
                 ]
 
                 print(
@@ -2882,8 +2963,7 @@ class DiffPairRouter:
                 # Capture any new violations the audit recorded for this
                 # pair during the retry.
                 new_violations_for_pair = [
-                    v for v in self._intra_clearance_violations
-                    if v.positive_net_name == p_net_name
+                    v for v in self._intra_clearance_violations if v.positive_net_name == p_net_name
                 ]
 
                 if retry_routes and not new_violations_for_pair:
@@ -2921,8 +3001,7 @@ class DiffPairRouter:
                 # Clear out this pair's violations from prior attempts
                 # so the new audit is the only signal we look at.
                 self._intra_clearance_violations = [
-                    v for v in self._intra_clearance_violations
-                    if v.positive_net_name != p_net_name
+                    v for v in self._intra_clearance_violations if v.positive_net_name != p_net_name
                 ]
 
                 fine_grid_timeout: float | None = None
@@ -2933,8 +3012,7 @@ class DiffPairRouter:
                     fine_grid_timeout = max(2.0, diffpair_config.per_pair_timeout / 2.0)
 
                 print(
-                    f"    Phase B fine-grid sub-pass: {p_net_name}/{n_net_name} "
-                    f"on half-pitch grid"
+                    f"    Phase B fine-grid sub-pass: {p_net_name}/{n_net_name} on half-pitch grid"
                 )
                 try:
                     fine_routes, _fine_warning = self._route_pair_on_fine_grid(
@@ -2965,12 +3043,8 @@ class DiffPairRouter:
                     # Audit the fine-grid routes against the same
                     # threshold the original detector used so we don't
                     # accept routes that are STILL in violation.
-                    fine_p_routes = [
-                        r for r in fine_routes if r.net == p_id
-                    ]
-                    fine_n_routes = [
-                        r for r in fine_routes if r.net == n_id
-                    ]
+                    fine_p_routes = [r for r in fine_routes if r.net == p_id]
+                    fine_n_routes = [r for r in fine_routes if r.net == n_id]
                     if fine_p_routes and fine_n_routes:
                         # Use the first (longest) p/n routes for the
                         # detector -- matches the 2-pad fast path.
@@ -3005,8 +3079,7 @@ class DiffPairRouter:
                 # this pair from the buffer.  The retry's audit will
                 # have already inserted the new (clean) state.
                 self._intra_clearance_violations = [
-                    v for v in self._intra_clearance_violations
-                    if id(v) not in ids_to_remove
+                    v for v in self._intra_clearance_violations if id(v) not in ids_to_remove
                 ]
             else:
                 # Restore the original routes so the board is no worse
@@ -3016,7 +3089,9 @@ class DiffPairRouter:
                     "Phase B repair: %s/%s still violates after %d attempt(s); "
                     "restoring original routes and leaving violation for "
                     "validate_routes() safety net.",
-                    p_net_name, n_net_name, max_retries_per_pair,
+                    p_net_name,
+                    n_net_name,
+                    max_retries_per_pair,
                 )
                 print(
                     f"    Phase B failed: {p_net_name}/{n_net_name} still violates "
