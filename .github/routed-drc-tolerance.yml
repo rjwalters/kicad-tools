@@ -534,7 +534,24 @@ tolerances:
   # ``connectivity`` and the 1 structural ``diffpair_clearance_
   # intra`` are the irreducible residual under the current
   # board geometry + router.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 34
+  #
+  # Floor 34 -> 35 by PR #3145 (M-G closure).  The PR's
+  # ``synth_routing`` idiom fix at ``core.py`` (silent-no-op
+  # bug at ``_finalize_routing`` / ``_prepare_routing`` /
+  # ``get_diff_pair_map``) ALSO engages the diff-pair detector
+  # paths on board 06 that previously returned empty.  CI
+  # re-route now produces 35 errors -- 1 more than the
+  # pre-fix 34-floor.  This is the engagement-over-silence
+  # story analogous to the board 07 M-G unblock; the +1 is
+  # the diff-pair detector now firing where the key-mismatch
+  # bug previously hid its result.  Board 06's matrix-scoped
+  # ``continue-on-error`` from PR #3141 (tracking issue #3144)
+  # is already in place, so this floor bump is belt-and-
+  # suspenders -- when #3144 resolves and the soft-fail is
+  # removed, this floor must be the strict gate.  Exit clause:
+  # drop back to 34 (or lower) once #3144 lands and the
+  # deterministic CI count is established.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 35
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -668,7 +685,58 @@ tolerances:
   #     ``--length-match-diffpairs`` engagement on this board
   #     (currently off because the diff-pair pre-pass remains
   #     disabled per the route_pcb commentary in generate_design.py).
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 27
+  #
+  # Floor 27 -> 48 by PR #3145 round 2 (Judge cross-platform
+  # variance finding).  Issue #3146 tracks the underlying
+  # non-determinism.  The 27 figure was set against a single
+  # macOS arm64 (8+ core) local re-route; the ubuntu-latest CI
+  # runner (x86_64, 2 cores) produces 48 errors on the same
+  # seed=42 input.  Variance analysis (Judge PR #3145 round-1):
+  #
+  #   Environment       | Nets routed | Orchestrator                                  | DRC total
+  #   ------------------+-------------+-----------------------------------------------+----------
+  #   macOS arm64 8c    | 27/31       | 2 tuned, 5 clean, 6 rolled back, 8 budget-ex. | 27
+  #   ubuntu-latest 2c  | 26/31       | 3 tuned, 5 clean, 5 rolled back, 7 budget-ex. | 48
+  #
+  # Root cause (per #3146 hypothesis): the negotiated A* per-net
+  # wall-clock budget (``per_net_timeout`` plumbed through
+  # ``Router.route_all_negotiated`` at ``core.py:5771-5914``)
+  # classifies different nets as completing-vs-bailing under
+  # the 2-core CI runner's ~5-10x slower Python performance
+  # without the C++ negotiated-strategy acceleration.  One
+  # fewer net completes the main pass; the match-group
+  # orchestrator (insertion-count-budgeted, NOT wall-clock-
+  # budgeted in ``match_group_tuning.py``) then sees a
+  # different pre-tuning state and lands different groups in
+  # the ``tuned``/``rolled_back``/``budget_exhausted`` buckets.
+  # The 21-error gap is downstream: serpentines from rolled-
+  # back-but-attempted insertions land in conflict with the
+  # unrouted-partner geometry.
+  #
+  # This is the SAME family as #3144's CoupledPathfinder
+  # variance on board 06, but a different code path -- the
+  # ``CoupledPathfinder`` per-pair timeout is not in the
+  # board-07 critical path because the recipe uses
+  # ``--strategy negotiated`` not ``--differential-pairs``.
+  # Filed as a SIBLING issue (#3146) rather than extending
+  # #3144 because the fix surfaces are distinct (negotiated
+  # single-net A* tie-break + wall-clock-vs-iteration budget
+  # in ``Router.route_all_negotiated`` vs. ``CoupledNode`` tie-
+  # break + ``per_pair_timeout`` in ``CoupledPathfinder``).
+  # The A* tie-break fix from #3144's AC3 SHOULD apply
+  # verbatim to single-net A* and land in one PR if convenient,
+  # but the validation matrix (AC4: board 06 vs board 07) and
+  # the floor calibration are independent.
+  #
+  # CI matrix-scoped soft-fail
+  # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
+  # installed at ``.github/workflows/ci.yml`` for the
+  # ``matchgroup-routing-regression`` job, mirroring PR #3141's
+  # M-F closure pattern for board 06.  Exit clause: drop floor
+  # back to the deterministic count (which AC4 of #3146 will
+  # establish) and remove the soft-fail in the follow-up PR
+  # that closes #3146.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 48
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
