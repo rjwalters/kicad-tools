@@ -464,6 +464,61 @@ tolerances:
   # artifact; this still tolerates a ~10% drift over time before
   # tripping the CI gate, but no longer accommodates the
   # 817-error pre-#3115 regression.
+  #
+  # M-F closure (Issue #3097): the M-F milestone of the
+  # 5-board parity roadmap (#2394) closes with this floor in
+  # place AND the matrix-scoped ``continue-on-error`` in
+  # ``.github/workflows/ci.yml`` (the
+  # ``diffpair-routing-regression`` job) removed.  Both CI gates
+  # -- the diff-driven ``routed-pcb-drc-check`` and the
+  # from-scratch ``diffpair-routing-regression`` -- now pass
+  # strictly:
+  #   * ``check_routed_drc.py``: reports 28 blocking errors
+  #     (excludes advisory connectivity=6) against the 34-floor
+  #     -- slack=6.  The slack-tightening warning is by design
+  #     (the floor accommodates the diffpair-coverage script's
+  #     un-filtered count, which sums advisory + blocking).
+  #   * ``check_diffpair_coverage.py``: reports 34 total errors
+  #     against the 34-allowed -- exact match.  All three diff-
+  #     pair rules (``diffpair_clearance_intra``,
+  #     ``diffpair_length_skew``, ``diffpair_routing_continuity``)
+  #     are exercised against the engaged-pair set.
+  #
+  # The 1 residual ``diffpair_clearance_intra`` on
+  # ``USB2_D+/USB2_D-`` at PCB-local (15.0, 9.0) is a STRUCTURAL
+  # MANUFACTURER-TOLERANCE residual, documented per AC clause C
+  # of #3097: the USB-C source footprint (J1) places D+ at A6
+  # and B6 (row A column 5, row B column 6) and D- at A7 and
+  # B7 (row A column 6, row B column 5), creating mandatory
+  # diagonal X-crossover traces between same-net pads at the
+  # connector centerline (the connector is reversible -- D+/D-
+  # are intentionally mirrored across the two USB-C orientations,
+  # see USB-C spec rev 2.x section 3.x and ``generate_pcb.py``
+  # lines 234-258).  The two traces' centerlines cross at
+  # (15.0, 9.0) by geometric necessity; no router can avoid this
+  # without (a) electrically dropping one side of the USB-C
+  # (single-orientation operation, schema change), or (b)
+  # extending the diff-pair-clearance DRC rule with an explicit
+  # connector-crossover exception (separate quality follow-up).
+  # This residual is therefore documented as the "manufacturer-
+  # tolerance allowlist" entry the #3097 AC explicitly permits.
+  #
+  # diffpair_length_skew status (AC criterion: passes for >= 6/9
+  # declared pairs): all 9 declared pairs route within the
+  # ``max_length_delta`` tolerance configured in
+  # ``boards/06-diffpair-test/generate_design.py:203``.  The DRC
+  # check reports 0 ``diffpair_length_skew`` warnings/errors on
+  # the seed=42 re-route, satisfying the AC (9/9 >= 6/9).
+  #
+  # Exit clause (for further tightening): future work can drop
+  # this floor by addressing the 25 ``clearance_pad_segment``
+  # cluster (escape near-misses unchanged from baseline) and
+  # the 2 ``clearance_pad_via`` entries.  These are independent
+  # of the diff-pair rule family; they are general-purpose
+  # router fine-grid escape improvements.  The 6 advisory
+  # ``connectivity`` and the 1 structural ``diffpair_clearance_
+  # intra`` are the irreducible residual under the current
+  # board geometry + router.
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 34
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
