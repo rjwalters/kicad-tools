@@ -472,14 +472,29 @@ tolerances:
   # ``diffpair-routing-regression`` job) removed.  Both CI gates
   # -- the diff-driven ``routed-pcb-drc-check`` and the
   # from-scratch ``diffpair-routing-regression`` -- now pass
-  # strictly:
-  #   * ``check_routed_drc.py``: reports 28 blocking errors
-  #     (excludes advisory connectivity=6) against the 34-floor
-  #     -- slack=6.  The slack-tightening warning is by design
-  #     (the floor accommodates the diffpair-coverage script's
-  #     un-filtered count, which sums advisory + blocking).
-  #   * ``check_diffpair_coverage.py``: reports 34 total errors
-  #     against the 34-allowed -- exact match.  All three diff-
+  # strictly, but they MEASURE DIFFERENT COUNTS against this
+  # single 34 floor and that asymmetry is intentional:
+  #   * ``check_routed_drc.py`` (the ``Routed PCB DRC Check``
+  #     job): reports 28 BLOCKING errors against the 34 floor
+  #     (slack=6).  The script filters out advisory rules per
+  #     ``DRCChecker.ADVISORY_RULE_IDS`` (issue #3074) so the
+  #     6 ``connectivity`` findings on this board are excluded
+  #     from the gate-blocking count.  The slack-tightening
+  #     ``::warning::`` annotation that fires every PR is BY
+  #     DESIGN -- the 34 floor is set higher than the blocking
+  #     count so the sibling diffpair-coverage script (which
+  #     does NOT filter advisories, see below) also fits under
+  #     the same single floor.  Reviewers should NOT tighten
+  #     this floor to 28 without first auditing the coverage
+  #     script's un-filtered count.
+  #   * ``check_diffpair_coverage.py`` (the ``Diff-Pair Routing
+  #     Regression`` job): reports 34 TOTAL errors against the
+  #     34 floor -- exact match.  The script uses
+  #     ``kct check --errors-only`` which returns the
+  #     unfiltered ``summary.errors`` (advisory + blocking)
+  #     because that field is what reviewers calibrated the
+  #     allowlist against historically.  Tightening this floor
+  #     to 28 would break this gate (34 > 28).  All three diff-
   #     pair rules (``diffpair_clearance_intra``,
   #     ``diffpair_length_skew``, ``diffpair_routing_continuity``)
   #     are exercised against the engaged-pair set.

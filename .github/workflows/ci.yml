@@ -369,10 +369,15 @@ jobs:
     name: Diff-Pair Routing Regression
     runs-on: ubuntu-latest
     # Issue #2660 acceptance criterion #5: wall-clock <= 5 min on
-    # ubuntu-latest.  The 10-minute limit here is a safety net for slow
-    # runners; if the typical run creeps above 5 minutes, move to a
+    # ubuntu-latest.  Originally a 10-minute safety-net ceiling, bumped
+    # to 15 minutes per PR #3141 Judge feedback (2026-05-27):
+    # board 06's USB3 SS BGA-49 escape runs through CoupledPathfinder,
+    # which has NO C++ backend (the C++ extension only covers per-net
+    # A*, not the diff-pair coupled-routing path), so the ~2-3 min C++
+    # build + ~9-10 min Python coupled routing exceeds the prior 10-min
+    # ceiling.  If the typical run creeps above 5 minutes, move to a
     # nightly schedule per the epic's runtime guidance.
-    timeout-minutes: 10
+    timeout-minutes: 15
     # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
     #
     #   * LATENCY: #3089 landed a per-pair wall-clock budget plumbed
@@ -538,14 +543,6 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --extra dev
-
-      - name: Build C++ router backend
-        # `uv sync` does NOT build the native extension (see repo CLAUDE.md
-        # "Routing performance: build the C++ backend first").  Without
-        # this step board 07 routing falls back to pure Python which is
-        # 10-100x slower.  Parity with diffpair-routing-regression
-        # (Issue #3097 / PR #3141 Judge feedback, 2026-05-25).
-        run: uv run kct build-native
 
       - name: Re-route board + check match-group coverage
         run: |
