@@ -527,6 +527,28 @@ jobs:
     # and --differential-pairs is re-enabled in
     # boards/07-matchgroup-test/generate_design.py.
     timeout-minutes: 15
+    # Soft-fail deferred until #3146 resolves matchgroup-routing
+    # non-determinism under CI load.  Same family of bug as #3144
+    # (CoupledPathfinder variant for board 06) but at a different
+    # layer: board 07 routes with ``--strategy negotiated`` (not
+    # ``--differential-pairs``), so the variance source is the
+    # negotiated A* per-net wall-clock budget, not the
+    # CoupledPathfinder per-pair timeout.
+    #
+    # Symptom: PR #3145 (M-G closure) Judge round-1 found the
+    # seed=42 re-route produces 27 DRC errors locally
+    # (macOS arm64, 8+ cores) vs 48 on CI (ubuntu-latest, 2 cores)
+    # -- a 21-error gap explained by 1 fewer net completing in
+    # the main pass which secondarily perturbs the match-group
+    # orchestrator's tuned/rolled_back/budget_exhausted verdicts.
+    #
+    # Per user-approved Option A (mirrors PR #3141's M-F closure
+    # pattern), the soft-fail is installed here and the strict
+    # gate will be re-enabled in the follow-up PR that closes
+    # #3146.  Scoped via a matrix expression so any future
+    # board added to the matrix remains a STRICT required check;
+    # only the board-07 entry soft-fails.
+    continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}
     strategy:
       # Don't abort the matrix on a single board failure -- each board
       # is independent and reviewers want all annotations at once.

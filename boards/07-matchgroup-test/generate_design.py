@@ -490,6 +490,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Issue #3012 (router: CoupledPathfinder ignores
     # intra_pair_clearance).  Re-enable ``--differential-pairs``
     # here once that issue is closed.
+    # Issue #3098 (M-G milestone): add ``--length-match-groups`` so the
+    # ``apply_match_group_tuning`` orchestrator hook is engaged on the
+    # routed PCB.  Before this PR the recipe omitted the flag (it was
+    # gated as a "Phase 3H dependency" while #2723 was pending) and the
+    # post-route ADDR_BUS skew measured 21.165 mm vs the declared 0.500 mm
+    # tolerance -- the ``match_group_length_skew`` rule was engaged but
+    # failing because no group-aware serpentine insertion ran.
+    #
+    # The flag composes with ``--net-class-map``: the orchestrator
+    # consumes the rich per-group declarations
+    # (``length_match_group``, ``length_match_tolerance_mm``,
+    # ``length_match_reference``) from the sidecar JSON to drive
+    # ``apply_match_group_tuning`` after the main routing pass.
     cmd = [
         sys.executable,
         "-m",
@@ -513,6 +526,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         ",".join(skip_nets),
         "--net-class-map",
         str(sidecar_path),
+        "--length-match-groups",
     ]
 
     print(f"\n2. Input: {input_path}")

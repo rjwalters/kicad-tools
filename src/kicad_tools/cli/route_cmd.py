@@ -7013,15 +7013,23 @@ def main(argv: list[str] | None = None) -> int:
 
         if not quiet:
             print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
-        # Build net_to_class so explicit declarations can be consulted
-        # (mirrors the construction in core.py:_finalize_routing).
+        # Build net_to_class + a class-name-keyed routing map so the
+        # explicit-declaration consultation in ``_gather_explicit_groups``
+        # can find each net's NetClassRouting.  ``router.net_class_map`` is
+        # keyed by NET NAME (e.g. "DQ0"), but ``detect_match_groups`` looks
+        # up by CLASS NAME (e.g. "DDR_DATA_BYTE_0").  Mirrors the
+        # synth_routing idiom in ``validate/match_group_skew.py:174-181``
+        # (Issue #3098 -- without this the detector returned an empty
+        # group list and the orchestrator silently no-op'd).
         net_to_class: dict[str, str] = {}
+        synth_routing: dict = dict(router.net_class_map)
         for net_name, net_class in router.net_class_map.items():
             net_to_class[net_name] = net_class.name
+            synth_routing.setdefault(net_class.name, net_class)
         try:
             detected_groups = detect_match_groups(
                 net_names=router.net_names,
-                net_class_routing=router.net_class_map,
+                net_class_routing=synth_routing,
                 net_to_class=net_to_class,
                 length_tracker=router.length_tracker,
                 enable_suffix_inference=False,
