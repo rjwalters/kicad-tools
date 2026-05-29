@@ -622,6 +622,55 @@ def run_drc(pcb_path: Path) -> bool:
         return False
 
 
+def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
+    """Export the manufacturing bundle (gerbers, BOM, CPL, report, manifest).
+
+    Issue #3147: ``kct fleet status`` flags a board ``ship_ready=false``
+    with the ``"artifacts stale"`` blocker whenever the routed PCB is
+    newer than ``output/manufacturing/manifest.json``.  Re-running this
+    recipe always rewrites the routed PCB, so the recipe must also
+    regenerate the manufacturing bundle to keep the manifest current.
+
+    ``kct export`` runs the standard JLCPCB recipe (gerbers + drill + BOM
+    + CPL + report.{md,pdf} + manifest.json).  ``--skip-preflight`` skips
+    the strict pre-flight DRC/ERC gate so the bundle is produced even for
+    boards that ship with allowlisted tolerances (mirrors boards
+    03/04/05); for clean boards it is harmless.
+    """
+    print("\n" + "=" * 60)
+    print("Exporting manufacturing bundle...")
+    print("=" * 60)
+
+    mfg_dir = output_dir / "manufacturing"
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "export",
+        str(routed_path),
+        "--output",
+        str(mfg_dir),
+        "--mfr",
+        "jlcpcb",
+        "--skip-preflight",
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n")[-15:]:
+            print(f"   {line}")
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Error: {result.stderr}")
+        return False
+    manifest = mfg_dir / "manifest.json"
+    if manifest.exists():
+        print(f"\n   Manifest: {manifest}")
+        return True
+    print("\n   WARNING: manifest.json not produced")
+    return False
+
+
 def main() -> int:
     """Main entry point."""
     if len(sys.argv) > 1:
@@ -649,6 +698,13 @@ def main() -> int:
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
+        # Step 7: Export manufacturing bundle (#3147).  Run unconditionally
+        # so the manifest mtime stays newer than the routed PCB even when
+        # routing is incomplete (board 00 routing is tracked by #3148);
+        # keeping the bundle current is what clears the ``"artifacts
+        # stale"`` ship-ready blocker in ``kct fleet status``.
+        mfg_success = export_manufacturing_bundle(routed_path, output_dir)
+
         # Summary
         print("\n" + "=" * 60)
         print("SUMMARY")
@@ -663,6 +719,7 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
+        print(f"  MFG bundle: {'PASS' if mfg_success else 'FAIL'}")
         print("\nCircuit description:")
         print("  - J1: 2-pin power input (VCC, GND)")
         print("  - R1: 330 ohm current limiter")

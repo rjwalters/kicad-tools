@@ -19,11 +19,13 @@ import json
 import os
 from pathlib import Path
 
-from kicad_tools.cli.fleet_cmd import main
+from kicad_tools.cli.fleet_cmd import _survey_board, main
 
 # Re-import the synthetic-board builder from the sibling test module so we
 # stay in lockstep with its fixture coverage and avoid duplication.
 from tests.test_fleet_status import make_fake_board
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # ERC report helpers
@@ -605,3 +607,162 @@ class TestShipReadyDispatcher:
         result = run_fleet_command(args)
         # Warn-only -> exit 0 despite the FAIL board.
         assert result == 0
+
+
+class TestManufacturingStaleness:
+    """Issue #3147: lock in the staleness blocker semantics in both directions.
+
+    The root cause of the false-positive ``ship_ready=false`` is that
+    ``_survey_board()`` sets ``mfg.stale = True`` when the routed PCB mtime
+    is newer than ``manufacturing/manifest.json`` (``fleet_cmd.py``:611-616),
+    which becomes the ``"artifacts stale"`` blocker (lines 582-583).
+
+    Option A (this PR) fixes the *recipes* so they regenerate the bundle,
+    keeping the manifest newer than the routed PCB.  These tests guard that
+    the surveyor's staleness logic behaves correctly in both directions so
+    Option A does not weaken the genuine-staleness detection.
+    """
+
+    def test_manifest_newer_than_routed_is_not_stale(self, tmp_path: Path):
+        """Manifest newer than routed PCB -> not stale, no blocker.
+
+        This is the post-``generate_design.py`` state Option A produces:
+        the export step runs after routing, so the manifest mtime exceeds
+        the routed-PCB mtime and the board is ship-ready.
+        """
+        boards = tmp_path / "boards"
+        routed_pcb = make_fake_board(
+            boards,
+            "fresh-board",
+            routed_complete=True,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+
+        # Force the manifest to be NEWER than the routed PCB (mirrors a
+        # recipe that exports *after* routing).
+        manifest = routed_pcb.parent / "manufacturing" / "manifest.json"
+        routed_mtime = routed_pcb.stat().st_mtime
+        newer = routed_mtime + 3600.0
+        os.utime(manifest, (newer, newer))
+
+        status = _survey_board(boards / "fresh-board", "*_routed.kicad_pcb")
+
+        assert status.manufacturing.stale is False
+        assert "artifacts stale" not in status.blockers
+        assert status.ship_ready is True
+
+    def test_manifest_older_than_routed_is_stale(self, tmp_path: Path):
+        """Manifest older than routed PCB -> stale, blocker still fires.
+
+        Inverse of the above: this is the genuine "you re-routed but did
+        not re-export" condition.  The staleness detection MUST keep firing
+        so Option A does not paper over a real unshippable state.
+        """
+        boards = tmp_path / "boards"
+        routed_pcb = make_fake_board(
+            boards,
+            "stale-board",
+            routed_complete=True,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+
+        # Force the manifest OLDER than the routed PCB (re-routed, not
+        # re-exported).
+        manifest = routed_pcb.parent / "manufacturing" / "manifest.json"
+        routed_mtime = routed_pcb.stat().st_mtime
+        older = routed_mtime - 3600.0
+        os.utime(manifest, (older, older))
+
+        status = _survey_board(boards / "stale-board", "*_routed.kicad_pcb")
+
+        assert status.manufacturing.stale is True
+        assert "artifacts stale" in status.blockers
+        assert status.ship_ready is False
+
+
+class TestBoardRecipeExportWiring:
+    """Issue #3147: guard that every board recipe wires a ``kct export`` step.
+
+    A lightweight source-level assertion that catches a future recipe edit
+    that drops the export step (which would silently regress the
+    ship-ready status back to the ``"artifacts stale"`` false-positive).
+
+    Boards 03/04/05 already exported before this PR; the other six gained
+    the step in #3147.  All nine are asserted so the invariant holds across
+    the whole fleet (board 05 uses ``design.py`` rather than
+    ``generate_design.py``).
+    """
+
+    # (board sub-path, recipe filename) for every fleet recipe.
+    RECIPES = [
+        ("00-simple-led", "generate_design.py"),
+        ("01-voltage-divider", "generate_design.py"),
+        ("02-charlieplex-led", "generate_design.py"),
+        ("03-usb-joystick", "generate_design.py"),
+        ("04-stm32-devboard", "generate_design.py"),
+        ("05-bldc-motor-controller", "design.py"),
+        ("06-diffpair-test", "generate_design.py"),
+        ("07-matchgroup-test", "generate_design.py"),
+        ("external/softstart", "generate_design.py"),
+    ]
+
+    def test_every_recipe_invokes_kct_export(self):
+        """Each recipe source must contain a ``kct export`` invocation.
+
+        We assert on the ``"export"`` CLI argument appearing alongside the
+        ``kicad_tools.cli`` module path -- the shape every recipe uses to
+        shell out to ``python -m kicad_tools.cli export ...``.
+        """
+        missing: list[str] = []
+        for board_subpath, filename in self.RECIPES:
+            recipe = REPO_ROOT / "boards" / board_subpath / filename
+            assert recipe.exists(), f"recipe not found: {recipe}"
+            text = recipe.read_text()
+            has_module = "kicad_tools.cli" in text
+            has_export_arg = '"export"' in text
+            if not (has_module and has_export_arg):
+                missing.append(board_subpath)
+        assert not missing, (
+            "These board recipes are missing a `kct export` invocation "
+            f"(regression of #3147): {missing}.  Every recipe must "
+            "regenerate the manufacturing bundle after routing so "
+            "`kct fleet status` does not report a false `artifacts stale` "
+            "blocker."
+        )
+
+    def test_six_fixed_recipes_call_export_from_main(self):
+        """The 6 boards fixed in #3147 call the export helper from ``main()``.
+
+        Stronger than the presence check above: confirms the export helper
+        is actually *reached* (a call site exists), not just defined.  The
+        six recipes fixed in #3147 share an ``export_manufacturing_bundle``
+        helper invoked from their ``main()`` flow.
+        """
+        six_fixed = [
+            "00-simple-led",
+            "01-voltage-divider",
+            "02-charlieplex-led",
+            "06-diffpair-test",
+            "07-matchgroup-test",
+            "external/softstart",
+        ]
+        missing_call: list[str] = []
+        for board_subpath in six_fixed:
+            recipe = REPO_ROOT / "boards" / board_subpath / "generate_design.py"
+            text = recipe.read_text()
+            # Helper must be both defined and invoked (a bare definition with
+            # no call site would not keep the manifest fresh).
+            defined = "def export_manufacturing_bundle(" in text
+            called = "export_manufacturing_bundle(routed_path" in text
+            if not (defined and called):
+                missing_call.append(board_subpath)
+        assert not missing_call, (
+            "These #3147 board recipes define but do not call "
+            f"export_manufacturing_bundle() from main(): {missing_call}"
+        )
