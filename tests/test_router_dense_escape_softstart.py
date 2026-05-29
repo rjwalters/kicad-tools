@@ -270,6 +270,157 @@ class TestRouteWithEscapeFiresOnTSSOP20:
 
 
 # ---------------------------------------------------------------------------
+# Test 5 -- the observable stdout log line is emitted (Issue #3152)
+# ---------------------------------------------------------------------------
+
+
+class TestEscapeStdoutLogLine:
+    """Lock in the observable ``Dense packages escaped: N`` stdout signal.
+
+    Issue #3152: a 2026-05-27 audit reported the
+    ``Dense packages escaped: 1`` log line "not reported in log" for the
+    softstart board, raising a false alarm that the PR #3142 escape
+    pre-pass had regressed.  The curator's empirical investigation showed
+    the pre-pass *was* firing -- the audit had captured a truncated slice
+    of a 401-line run -- so no source fix was warranted.
+
+    What was missing was a test that pins the *observable* contract: the
+    structural guards in this module assert the call path
+    (``route_with_escape`` -> ``generate_escape_routes``) and the dense
+    detection, but none of them asserted the stdout summary line itself.
+    That line (``core.py:10969``) is the exact signal the audit relied
+    on, and nothing locked it in against either a silent regression or
+    future log-capture noise.
+
+    These tests drive ``route_with_escape(use_negotiated=False, ...)`` --
+    the fast non-negotiated path used by ``test_route_with_escape_invokes_pre_pass``
+    -- and assert on captured stdout from both sides of the
+    unconditional-emission contract:
+
+    * a TSSOP-20 board prints ``Dense packages escaped: 1`` and the
+      ``--- Phase 1: Escape Routing (1 dense packages) ---`` header, and
+    * a board with no dense package prints
+      ``Dense packages escaped: 0`` and the
+      ``--- No dense packages detected, skipping escape routing ---``
+      line.
+    """
+
+    def test_route_with_escape_logs_dense_packages_escaped(self, capsys):
+        """route_with_escape() must print the ``Dense packages escaped: N`` (N>=1) summary on a TSSOP-20 board."""
+        rules = DesignRules(
+            grid_resolution=0.075,
+            trace_width=0.3,
+            trace_clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+        )
+        router = Autorouter(width=30.0, height=30.0, rules=rules)
+
+        for pad in _stm32g031f6p6_tssop20_pads():
+            shifted = Pad(
+                x=pad.x + 15.0,
+                y=pad.y + 15.0,
+                width=pad.width,
+                height=pad.height,
+                net=pad.net,
+                net_name=pad.net_name,
+                layer=pad.layer,
+                ref=pad.ref,
+                pin=pad.pin,
+            )
+            router.pads[(shifted.ref, shifted.pin)] = shifted
+
+        # Non-negotiated path keeps CI fast (skips the slow A* loop); the
+        # summary log line is emitted on both paths (``core.py:10969``).
+        router.route_with_escape(
+            use_negotiated=False,
+            timeout=10.0,
+            per_net_timeout=2.0,
+        )
+
+        out = capsys.readouterr().out
+
+        # The Phase 1 header must report at least one dense package.
+        assert "--- Phase 1: Escape Routing (1 dense packages) ---" in out, (
+            "Issue #3152: route_with_escape() must print the Phase 1 "
+            "escape-routing header with the dense-package count when a "
+            "TSSOP-20 is present.  A missing header is the audit signal "
+            "that the escape pre-pass was bypassed.\n\nCaptured stdout:\n" + out
+        )
+
+        # The summary line is the exact signal the audit relied on.
+        assert "Dense packages escaped: 1" in out, (
+            "Issue #3152: route_with_escape() must print "
+            "'Dense packages escaped: 1' when U1 (TSSOP-20) is the only "
+            "dense package.  This stdout line (core.py:10969) is the "
+            "observable signal the 2026-05-27 audit checked for; pinning "
+            "it here guards against a silent regression of the escape "
+            "pre-pass.\n\nCaptured stdout:\n" + out
+        )
+
+    def test_route_with_escape_logs_zero_when_no_dense_package(self, capsys):
+        """With no dense package, route_with_escape() must still print the zero-count summary.
+
+        The summary line is emitted unconditionally (it prints ``0`` even
+        when there are no dense packages), so pinning the zero case locks
+        the contract from both sides and proves the ``N`` in the
+        positive test is meaningful, not a constant.
+        """
+        rules = DesignRules(
+            grid_resolution=0.075,
+            trace_width=0.3,
+            trace_clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+        )
+        router = Autorouter(width=30.0, height=30.0, rules=rules)
+
+        # Two widely-spaced pads on a single net: nowhere near the
+        # fine-pitch dual-row geometry that triggers is_dense_package().
+        router.pads[("R1", "1")] = Pad(
+            x=5.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            ref="R1",
+            pin="1",
+        )
+        router.pads[("R1", "2")] = Pad(
+            x=20.0,
+            y=20.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            ref="R1",
+            pin="2",
+        )
+
+        router.route_with_escape(
+            use_negotiated=False,
+            timeout=10.0,
+            per_net_timeout=2.0,
+        )
+
+        out = capsys.readouterr().out
+
+        assert "--- No dense packages detected, skipping escape routing ---" in out, (
+            "Issue #3152: route_with_escape() must print the "
+            "'No dense packages detected' line when no fine-pitch "
+            "package is present.\n\nCaptured stdout:\n" + out
+        )
+        assert "Dense packages escaped: 0" in out, (
+            "Issue #3152: the 'Dense packages escaped: N' summary is "
+            "emitted unconditionally and must print 0 when there are no "
+            "dense packages.\n\nCaptured stdout:\n" + out
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 4 -- the softstart call site is wired through route_with_escape
 # ---------------------------------------------------------------------------
 
