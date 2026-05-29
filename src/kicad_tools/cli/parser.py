@@ -418,6 +418,24 @@ def _add_check_parser(subparsers) -> None:
         help="Suppress silkscreen warnings from standard KiCad library footprints",
     )
     check_parser.add_argument(
+        "--netlist-sync",
+        action="store_true",
+        help=(
+            "Run a blocking schematic/PCB netlist-sync gate (issue #3154): "
+            "compares the schematic component set against the PCB footprint "
+            "set and exits with code 2 when schematic components are missing "
+            "from the PCB. Skips silently if no schematic is found."
+        ),
+    )
+    check_parser.add_argument(
+        "--schematic",
+        default=None,
+        help=(
+            "Explicit .kicad_sch path for --netlist-sync / the advisory drift "
+            "banner (default: auto-discover from project.kct or sibling file)."
+        ),
+    )
+    check_parser.add_argument(
         "--net-class-map",
         dest="net_class_map",
         default=None,
@@ -2577,6 +2595,28 @@ def _add_route_parser(subparsers) -> None:
             "Skip post-routing DRC validation. By default, the router runs "
             "a DRC check after routing and warns about violations. Use this "
             "flag for performance-critical use or when running separate validation."
+        ),
+    )
+    # Issue #3154: advisory schematic/PCB drift banner.  Mirror of the inner
+    # route_cmd.py flags; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--sync-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Print an advisory banner when the PCB footprint set has drifted "
+            "from the schematic netlist (default: enabled, non-blocking). Use "
+            "--no-sync-check to suppress. See 'kct check --netlist-sync' for a "
+            "blocking gate."
+        ),
+    )
+    route_parser.add_argument(
+        "--schematic",
+        default=None,
+        help=(
+            "Explicit .kicad_sch path for the advisory drift banner "
+            "(default: auto-discover from project.kct or sibling file)."
         ),
     )
     route_parser.add_argument(

@@ -10,6 +10,13 @@ Key classes:
     Reconciler - Orchestrates analysis and application of fixes
 """
 
+from .discover import resolve_schematic_for_pcb
+from .drift import (
+    analyze_drift,
+    format_drift_banner,
+    has_drift,
+    render_drift_report,
+)
 from .reconciler import (
     Reconciler,
     SyncAnalysis,
@@ -20,4 +27,9 @@ __all__ = [
     "Reconciler",
     "SyncAnalysis",
     "SyncMatch",
+    "analyze_drift",
+    "format_drift_banner",
+    "has_drift",
+    "render_drift_report",
+    "resolve_schematic_for_pcb",
 ]

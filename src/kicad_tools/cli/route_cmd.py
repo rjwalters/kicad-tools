@@ -5222,6 +5222,30 @@ def main(argv: list[str] | None = None) -> int:
             "flag for performance-critical use or when running separate validation."
         ),
     )
+    # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
+    # auto-discovered (or passed via --schematic) and the component sets have
+    # drifted, kct route prints a one-line, non-blocking warning before
+    # routing so an engineer is not lulled by a "65% routed" number on a board
+    # that is missing a third of the netlist.  --no-sync-check opts out.
+    parser.add_argument(
+        "--sync-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Print an advisory banner when the PCB footprint set has drifted "
+            "from the schematic netlist (default: enabled). The banner is "
+            "non-blocking; use --no-sync-check to suppress it. See "
+            "'kct check --netlist-sync' for a blocking gate."
+        ),
+    )
+    parser.add_argument(
+        "--schematic",
+        default=None,
+        help=(
+            "Explicit .kicad_sch path for the advisory drift banner "
+            "(default: auto-discover from project.kct or sibling file)."
+        ),
+    )
     parser.add_argument(
         "--manufacturer",
         "--mfr",
@@ -5823,6 +5847,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
+
+    # Issue #3154: advisory schematic/PCB drift banner.  Non-blocking -- the
+    # hard gate lives behind 'kct check --netlist-sync'.  Skips silently when
+    # no schematic is discovered, when in sync, or when --no-sync-check / --quiet.
+    if getattr(args, "sync_check", True) and not getattr(args, "quiet", False):
+        try:
+            from kicad_tools.sync.drift import analyze_drift, format_drift_banner
+
+            _drift_analysis, _ = analyze_drift(pcb_path, getattr(args, "schematic", None))
+            if _drift_analysis is not None:
+                _banner = format_drift_banner(_drift_analysis, pcb_path)
+                if _banner:
+                    print(_banner)
+        except Exception:
+            # Drift detection is advisory; never let it block routing.
+            pass
 
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --

@@ -57,6 +57,73 @@ def _find_pcb_file(directory: Path) -> Path | None:
     return None
 
 
+def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
+    """Print the advisory schematic/PCB drift banner (non-blocking).
+
+    No-op when no schematic can be resolved or the PCB is in sync.  This is
+    advisory only and never affects the caller's exit code (issue #3154).
+    """
+    from kicad_tools.sync.drift import analyze_drift, format_drift_banner
+
+    analysis, _resolved = analyze_drift(pcb_path, schematic)
+    if analysis is None:
+        return
+    banner = format_drift_banner(analysis, pcb_path)
+    if banner:
+        print(banner)
+
+
+def run_netlist_sync_gate(
+    pcb_path: Path,
+    schematic: str | None = None,
+    strict: bool = False,
+) -> int:
+    """Run the blocking schematic/PCB netlist-sync gate (issue #3154).
+
+    Reuses :class:`kicad_tools.sync.reconciler.Reconciler` (via the shared
+    drift helpers) to compare the schematic component set against the PCB
+    footprint set, then prints a full add/drop/orphan report.
+
+    Exit codes (mirroring ``kct check``'s convention):
+        0 - in sync, or only PCB-only/value/footprint drift without --strict
+        1 - no schematic could be resolved (cannot run the gate)
+        2 - components present in the schematic are missing from the PCB
+            (unbuildable BOM), or any drift with --strict
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file.
+        schematic: Optional explicit schematic path override.
+        strict: When True, any drift (including PCB-only/value/footprint)
+            yields exit code 2.
+    """
+    from kicad_tools.sync.drift import analyze_drift, has_drift, render_drift_report
+
+    analysis, resolved = analyze_drift(pcb_path, schematic)
+    if analysis is None or resolved is None:
+        print(
+            "Error: --netlist-sync requires a schematic, but none was found "
+            f"for {Path(pcb_path).name}.",
+            file=sys.stderr,
+        )
+        print(
+            "Hint: pass --schematic <path>.kicad_sch, or place a sibling "
+            "<basename>.kicad_sch next to the PCB.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(render_drift_report(analysis, pcb_path, resolved))
+
+    # Schematic-only drift == unbuildable BOM == blocking (mirrors the
+    # auditor's NOT_READY verdict rule).  PCB-only / value / footprint drift
+    # is advisory unless --strict.
+    if analysis.schematic_orphans:
+        return 2
+    if strict and has_drift(analysis):
+        return 2
+    return 0
+
+
 CHECK_CATEGORIES = [
     "clearance",
     "connectivity",
@@ -155,6 +222,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress silkscreen warnings from standard KiCad library footprints",
     )
     parser.add_argument(
+        "--netlist-sync",
+        action="store_true",
+        help=(
+            "Run a blocking schematic/PCB netlist-sync gate (issue #3154). "
+            "Compares the schematic component set against the PCB footprint set "
+            "via the Reconciler and prints a full add/drop/orphan report. Exits "
+            "with code 2 when components present in the schematic are missing "
+            "from the PCB (unbuildable BOM). PCB-only/value/footprint drift is a "
+            "warning unless --strict. Skips silently if no schematic is found."
+        ),
+    )
+    parser.add_argument(
+        "--schematic",
+        default=None,
+        help=(
+            "Explicit path to the .kicad_sch file for the netlist-sync gate / "
+            "advisory drift banner. When omitted, the schematic is "
+            "auto-discovered from project.kct or the sibling <basename>.kicad_sch."
+        ),
+    )
+    parser.add_argument(
         "--net-class-map",
         dest="net_class_map",
         default=None,
@@ -242,11 +330,27 @@ def main(argv: list[str] | None = None) -> int:
     else:
         pcb_path = input_path
 
+    # Netlist-sync gate (issue #3154): a dedicated, blocking schematic/PCB
+    # drift check that runs *instead of* the DRC pipeline and returns its own
+    # exit code.  Reuses the Reconciler via the shared drift helpers.
+    if getattr(args, "netlist_sync", False):
+        return run_netlist_sync_gate(
+            pcb_path,
+            schematic=getattr(args, "schematic", None),
+            strict=args.strict,
+        )
+
     try:
         pcb = PCB.load(pcb_path)
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
+
+    # Advisory drift banner (issue #3154): when a schematic is discovered (or
+    # passed via --schematic) and the component sets have drifted, print a
+    # one-line, non-blocking warning before running DRC.  Never affects the
+    # exit code on the default run -- the hard gate lives behind --netlist-sync.
+    _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
 
     # Auto-detect layer count from PCB if not explicitly provided
     if args.layers is not None:

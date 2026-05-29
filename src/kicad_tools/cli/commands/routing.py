@@ -258,6 +258,12 @@ def run_route_command(args) -> int:
         sub_argv.append("--high-performance")
     if getattr(args, "skip_drc", False):
         sub_argv.append("--skip-drc")
+    # Issue #3154: forward the advisory drift-banner flags.  --sync-check
+    # defaults on; forward --no-sync-check only when explicitly disabled.
+    if getattr(args, "sync_check", True) is False:
+        sub_argv.append("--no-sync-check")
+    if getattr(args, "schematic", None):
+        sub_argv.extend(["--schematic", args.schematic])
     if getattr(args, "auto_fix", False):
         sub_argv.append("--auto-fix")
     if getattr(args, "auto_fix_passes", None) is not None:

@@ -223,6 +223,11 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--output", args.output])
     if getattr(args, "suppress_library", False):
         sub_argv.append("--suppress-library")
+    # Issue #3154: forward the netlist-sync gate flags.
+    if getattr(args, "netlist_sync", False):
+        sub_argv.append("--netlist-sync")
+    if getattr(args, "schematic", None):
+        sub_argv.extend(["--schematic", args.schematic])
     if getattr(args, "net_class_map", None):
         sub_argv.extend(["--net-class-map", args.net_class_map])
     # Issue #3061: forward pad_grid tolerance flags.
