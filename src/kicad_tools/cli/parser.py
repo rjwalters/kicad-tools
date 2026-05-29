@@ -2930,6 +2930,31 @@ def _add_route_parser(subparsers) -> None:
             "diff-pair sibling traces under tight mfr profiles."
         ),
     )
+    route_parser.add_argument(
+        "--analog-nets",
+        dest="analog_nets",
+        default=None,
+        help=(
+            "Comma-separated list of analog net names (e.g. "
+            '"AUDIO_L,AUDIO_R") to route with a boosted analog class '
+            "(Issue #3171, Phase 3).  Selected nets get priority=2 (route "
+            "before digital signals) and cost_multiplier=0.85 (shorter-path "
+            "bias).  Pour/ground nets (e.g. GNDA) are never forced into the "
+            "pathfinder.  NOTE: guard-trace / shield-copper generation is NOT "
+            "implemented and is deferred to a follow-up (Phase 4)."
+        ),
+    )
+    route_parser.add_argument(
+        "--auto-analog",
+        dest="auto_analog",
+        action="store_true",
+        help=(
+            "Auto-detect analog nets via the Phase 2 detector "
+            "(detect_analog_nets) and route them with the boosted analog "
+            "class (Issue #3171).  May be combined with --analog-nets (the "
+            "two sets are unioned)."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:

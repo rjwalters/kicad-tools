@@ -2276,6 +2276,127 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
         flush_print(f"  Net-class map: merged {len(loaded)} sidecar entries")
 
 
+def _resolve_analog_net_names(router: "Autorouter", args) -> set[str]:
+    """Resolve the set of analog net names selected by the analog flags (#3171).
+
+    The union of:
+
+    * ``--analog-nets "NET1,NET2,..."`` -- explicit, comma-separated, with
+      surrounding whitespace stripped and empty entries dropped (mirrors the
+      ``--skip-nets`` comma-split pattern).
+    * ``--auto-analog`` -- auto-detected via Phase 2's
+      :func:`detect_analog_nets`, run against the router's loaded net names.
+
+    Returns an empty set when neither flag is supplied (the feature is a
+    strict no-op when absent).  Never raises: auto-detection failures are
+    swallowed so a detection edge case never blocks routing.
+    """
+    names: set[str] = set()
+
+    explicit = getattr(args, "analog_nets", None)
+    if explicit:
+        names |= {n.strip() for n in explicit.split(",") if n.strip()}
+
+    if getattr(args, "auto_analog", False):
+        try:
+            from kicad_tools.analysis.analog_detect import detect_analog_nets
+
+            # ``detect_analog_nets`` consumes a PCB exposing ``.nets`` as a
+            # ``{number: net-with-.name}`` mapping.  The router already holds
+            # the loaded ``net_names`` (``{net_id: name}``); wrap it in a tiny
+            # adapter so we reuse the Phase 2 classifier verbatim rather than
+            # duplicating its naming rules here.
+            net_names = getattr(router, "net_names", {}) or {}
+            adapter = _AnalogDetectAdapter(net_names)
+            names |= {a.name for a in detect_analog_nets(adapter)}
+        except Exception:
+            # Auto-detection is advisory; never let it block routing.
+            pass
+
+    return names
+
+
+class _AnalogDetectAdapter:
+    """Minimal PCB-shaped adapter exposing ``.nets`` for ``detect_analog_nets``.
+
+    ``detect_analog_nets`` only touches ``pcb.nets`` as a mapping of
+    ``{number: net}`` where each ``net`` has a ``.name`` attribute.  This
+    adapter projects the router's ``{net_id: name}`` mapping into that shape
+    so the Phase 2 (#3170) classifier can be reused without re-loading the
+    PCB at the per-attempt routing callsites.
+    """
+
+    class _Net:
+        __slots__ = ("name",)
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    def __init__(self, net_names: dict[int, str]) -> None:
+        self.nets = {num: self._Net(name) for num, name in net_names.items()}
+
+
+def _apply_analog_net_class(router: "Autorouter", args, quiet: bool = False) -> None:
+    """Inject the boosted analog routing class for selected nets (Issue #3171).
+
+    Phase 3 of analog-aware routing.  For each net selected by ``--analog-nets``
+    and/or ``--auto-analog`` (resolved via :func:`_resolve_analog_net_names`)
+    that is present on the board, set ``router.net_class_map[net]`` to
+    :data:`NET_CLASS_ANALOG` -- a priority- and cost-boosted class
+    (``priority=2``, ``cost_multiplier=0.85``) so the net routes earlier and
+    shorter.  No A*/pathfinder changes: the existing per-net priority
+    (``_get_net_priority``) and per-net ``cost_multiplier`` consumers do the
+    work.
+
+    Pour/ground guard (AC #5): a selected net whose *existing* class is a pour
+    net (``is_pour_net=True`` or ``route_via="pour"`` -- e.g. ``GNDA``) is
+    LEFT UNTOUCHED.  Those nets are satisfied by a copper zone, not the
+    pathfinder; forcing the analog (pathfinder) class onto them would drag a
+    pour/ground net into the router as an ordinary trace.
+
+    Idempotent and a strict no-op when neither flag is supplied.  Called at
+    every post-load callsite alongside :func:`_apply_net_class_map_sidecar`.
+    """
+    selected = _resolve_analog_net_names(router, args)
+    if not selected:
+        return
+
+    from kicad_tools.router.rules import NET_CLASS_ANALOG
+
+    # Only act on nets actually present on the board (AC: missing names are
+    # silently ignored).  ``router.net_names`` is {net_id: name}.
+    present = {name for name in router.net_names.values() if name}
+
+    applied: list[str] = []
+    skipped_pour: list[str] = []
+    for name in sorted(selected & present):
+        existing = router.net_class_map.get(name)
+        # Pour/ground guard: never force a poured net into the pathfinder.
+        if existing is not None and (
+            getattr(existing, "is_pour_net", False) or getattr(existing, "route_via", "") == "pour"
+        ):
+            skipped_pour.append(name)
+            continue
+        router.net_class_map[name] = NET_CLASS_ANALOG
+        applied.append(name)
+
+    if not quiet and (applied or skipped_pour):
+        from kicad_tools.cli.progress import flush_print
+
+        if applied:
+            flush_print(
+                f"  Analog routing: boosted {len(applied)} net(s) "
+                f"(priority={NET_CLASS_ANALOG.priority}, "
+                f"cost_multiplier={NET_CLASS_ANALOG.cost_multiplier}): "
+                f"{', '.join(applied)}"
+            )
+        if skipped_pour:
+            flush_print(
+                f"  Analog routing: left {len(skipped_pour)} pour/ground net(s) "
+                f"as-is (not forced into pathfinder): {', '.join(skipped_pour)}"
+            )
+
+
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -2495,6 +2616,10 @@ def route_with_layer_escalation(
 
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
+
+        # Issue #3171: inject boosted analog routing class for --analog-nets /
+        # --auto-analog selected nets (pour/ground nets are left untouched).
+        _apply_analog_net_class(router, args, quiet=quiet)
 
         # Issue #2396: Ensure pristine per-attempt state.  Today this is a
         # no-op (load_pcb_for_routing creates a fresh Autorouter) but it
@@ -3246,6 +3371,10 @@ def route_with_rule_relaxation(
 
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
+
+        # Issue #3171: inject boosted analog routing class for --analog-nets /
+        # --auto-analog selected nets (pour/ground nets are left untouched).
+        _apply_analog_net_class(router, args, quiet=quiet)
 
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
@@ -4361,6 +4490,10 @@ def route_with_combined_escalation(
             # Issue #2996: merge --net-class-map sidecar onto router's map.
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
 
+            # Issue #3171: inject boosted analog routing class for --analog-nets
+            # / --auto-analog selected nets (pour/ground nets left untouched).
+            _apply_analog_net_class(router, args, quiet=quiet)
+
             # Issue #1841: Tell the autorouter which pour nets lack zones
             router._pour_nets_without_zones = set(_no_zone)
 
@@ -5127,6 +5260,31 @@ def main(argv: list[str] | None = None) -> int:
             "coupled_continuity_threshold, target_diff_impedance, "
             "length_match_group) project through to the routing-time "
             "pathfinder.  Mirrors the kct check --net-class-map flag."
+        ),
+    )
+    parser.add_argument(
+        "--analog-nets",
+        dest="analog_nets",
+        default=None,
+        help=(
+            "Comma-separated list of analog net names (e.g. "
+            '"AUDIO_L,AUDIO_R") to route with a boosted analog class '
+            "(Issue #3171, Phase 3).  Selected nets get priority=2 (route "
+            "before digital signals) and cost_multiplier=0.85 (shorter-path "
+            "bias).  Pour/ground nets (e.g. GNDA) are never forced into the "
+            "pathfinder.  NOTE: guard-trace / shield-copper generation is NOT "
+            "implemented and is deferred to a follow-up (Phase 4)."
+        ),
+    )
+    parser.add_argument(
+        "--auto-analog",
+        dest="auto_analog",
+        action="store_true",
+        help=(
+            "Auto-detect analog nets via the Phase 2 detector "
+            "(detect_analog_nets) and route them with the boosted analog "
+            "class (Issue #3171).  May be combined with --analog-nets (the "
+            "two sets are unioned)."
         ),
     )
     parser.add_argument(
@@ -6329,6 +6487,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Issue #2996: merge --net-class-map sidecar onto router's map.
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
+
+    # Issue #3171: inject boosted analog routing class for --analog-nets /
+    # --auto-analog selected nets (pour/ground nets are left untouched).
+    _apply_analog_net_class(router, args, quiet=quiet)
 
     # Pass fine zones from multi-resolution plan to the router (Issue #1828).
     # This enables SubGridRouter to use fine-grid resolution for escape

@@ -392,6 +392,12 @@ def run_route_command(args) -> int:
     # autorouter's net_class_map at routing time.
     if getattr(args, "net_class_map", None) is not None:
         sub_argv.extend(["--net-class-map", args.net_class_map])
+    # Issue #3171 (Phase 3): forward the analog-aware routing flags so the
+    # inner route_cmd injects the boosted analog NetClassRouting class.
+    if getattr(args, "analog_nets", None):
+        sub_argv.extend(["--analog-nets", args.analog_nets])
+    if getattr(args, "auto_analog", False):
+        sub_argv.append("--auto-analog")
     return route_main(sub_argv)
 
 

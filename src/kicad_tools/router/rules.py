@@ -446,9 +446,7 @@ class DesignRules:
             # clearance is only sound when a trace centred between
             # two adjacent pads can satisfy full manufacturer
             # clearance against both.
-            effective_channel = (
-                pin_pitch - 2.0 * self.fine_pitch_clearance - self.trace_width
-            )
+            effective_channel = pin_pitch - 2.0 * self.fine_pitch_clearance - self.trace_width
             required_channel = 2.0 * self.trace_clearance + self.trace_width
             if effective_channel >= required_channel:
                 return self.fine_pitch_clearance
@@ -1175,6 +1173,33 @@ NET_CLASS_AUDIO = NetClassRouting(
     trace_width=0.2,
     clearance=0.15,
     cost_multiplier=1.0,
+    noise_sensitive=True,
+)
+
+# Issue #3171 (Phase 3: analog-aware routing).  The ``kct route
+# --analog-nets`` / ``--auto-analog`` flags inject this class onto the
+# router's name-pattern-classified ``net_class_map`` for designer-named (or
+# auto-detected) analog nets.  It *boosts* ``NET_CLASS_AUDIO``:
+#
+#   * ``priority=2`` (vs Audio's 3 and Digital's 4) so listed analog nets
+#     sort ahead of ordinary digital signals in ``_get_net_priority`` and get
+#     first pick of routing corridors before channels congest.
+#   * ``cost_multiplier=0.85`` (< 1.0) so the pathfinder applies a shorter-
+#     path bias to these nets (keeps noise-sensitive analog runs short).
+#   * ``noise_sensitive=True`` (carry-over from Audio).
+#
+# ``trace_width``/``clearance`` deliberately stay at the digital defaults --
+# width/impedance sizing is a separate concern (out of scope for Phase 3).
+# Critically this class is NOT a pour net (``is_pour_net=False``,
+# ``route_via="pathfinder"`` default); the injection helper additionally
+# refuses to overwrite any net whose existing class is a pour net (e.g.
+# ``GNDA``) so a pour/ground net is never forced into the pathfinder.
+NET_CLASS_ANALOG = NetClassRouting(
+    name="Analog",
+    priority=2,
+    trace_width=0.2,
+    clearance=0.15,
+    cost_multiplier=0.85,
     noise_sensitive=True,
 )
 
