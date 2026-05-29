@@ -467,7 +467,26 @@ def _dispatch_command(args) -> int:
     elif args.command == "export":
         return _run_export_command(args)
 
+    elif args.command == "optim":
+        return _run_optim_command(args)
+
     return 0
+
+
+def _run_optim_command(args) -> int:
+    """Dispatch the ``optim`` subcommand tree (issue #3186)."""
+    sub = getattr(args, "optim_command", None)
+    if sub == "fom-debug":
+        from .optim_fom_cmd import run_optim_fom_debug
+
+        return run_optim_fom_debug(
+            pcb_path=args.pcb,
+            weights_path=getattr(args, "weights", None),
+            output_format=getattr(args, "output_format", "text"),
+            verbose=getattr(args, "verbose", False),
+        )
+    print("error: no optim subcommand specified (try: kct optim fom-debug --help)")
+    return 2
 
 
 def _run_stitch_command(args) -> int:

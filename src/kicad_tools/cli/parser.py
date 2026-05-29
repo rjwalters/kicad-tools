@@ -194,8 +194,47 @@ def create_parser() -> argparse.ArgumentParser:
     _add_screenshot_parser(subparsers)
     _add_report_parser(subparsers)
     _add_export_parser(subparsers)
+    _add_optim_parser(subparsers)
 
     return parser
+
+
+def _add_optim_parser(subparsers) -> None:
+    """Add ``optim`` subcommand parser (issue #3186 hybrid FOM).
+
+    ``optim`` has nested subcommands:
+
+    * ``optim fom-debug <pcb> [--weights weights.yaml] [--format text|json]``
+    """
+    optim_parser = subparsers.add_parser(
+        "optim",
+        help="Placement / routing FOM tools (issue #3186)",
+    )
+    optim_subs = optim_parser.add_subparsers(dest="optim_command", help="Optim subcommand")
+
+    fom_debug = optim_subs.add_parser(
+        "fom-debug",
+        help="Print the per-term FOM breakdown for an existing placement",
+    )
+    fom_debug.add_argument("pcb", help="Path to .kicad_pcb file (placement or routed)")
+    fom_debug.add_argument(
+        "--weights",
+        default=None,
+        help="Path to weights YAML (default: uniform 1.0)",
+    )
+    fom_debug.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        dest="output_format",
+        help="Output format (default: text)",
+    )
+    fom_debug.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Include feature-extraction stats above the FOM table",
+    )
 
 
 def _add_symbols_parser(subparsers) -> None:

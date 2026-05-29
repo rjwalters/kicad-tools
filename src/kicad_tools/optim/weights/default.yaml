@@ -1,0 +1,22 @@
+# Default FOM weights -- Phase 1 baseline, uniform 1.0 across all terms.
+#
+# Issue #3186 ships this as the structural baseline.  Weight calibration
+# via Pareto sweep is the subject of issue #3188; do NOT hand-tune this
+# file in user PRs unless you know which boards you're tuning against.
+#
+# Each value is the marginal price-per-unit-violation for that term.
+# Terms whose normalised values are typically in [0, 1] need weights
+# around 1; terms whose values run higher (e.g. compactness in mm² per
+# pad on big boards, or turning_penalty in deg² per mm) need smaller
+# weights to avoid drowning out the rest.  Issue #3188 fixes this.
+weights:
+  trace_length_excess: 1.0
+  weighted_via_count: 1.0
+  turning_penalty: 1.0
+  net_congestion_variance: 1.0
+  match_group_skew: 1.0
+  diff_pair_clearance_margin: 1.0
+  decoupling_proximity: 1.0
+  crossing_count: 1.0
+  thermal_spread: 1.0
+  compactness: 1.0

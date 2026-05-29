@@ -90,6 +90,24 @@ from kicad_tools.optim.evolutionary import (
     EvolutionaryPlacementOptimizer,
     Individual,
 )
+from kicad_tools.optim.fom import (
+    HARD_CONSTRAINT_NAMES,
+    SOFT_TERM_NAMES,
+    FOMResult,
+    FOMWeights,
+    check_hard_constraints,
+    compute_fom,
+    compute_soft_terms,
+    default_weights,
+    legacy_weights,
+    load_weights_from_yaml,
+)
+from kicad_tools.optim.fom_features import (
+    BoardFeatures,
+    FootprintFeature,
+    PadFeature,
+    extract_features,
+)
 from kicad_tools.optim.geometry import Polygon, Vector2D
 from kicad_tools.optim.keepout import (
     KeepoutType,
@@ -104,6 +122,7 @@ from kicad_tools.optim.keepout import (
     load_keepout_zones_from_yaml,
     validate_keepout_violations,
 )
+from kicad_tools.optim.place_route import PlaceRouteOptimizer
 from kicad_tools.optim.placement import PlacementOptimizer
 from kicad_tools.optim.query import (
     Rectangle,
@@ -154,7 +173,6 @@ from kicad_tools.optim.thermal import (
     detect_thermal_constraints,
     get_thermal_summary,
 )
-from kicad_tools.optim.place_route import PlaceRouteOptimizer
 from kicad_tools.optim.workflow import (
     OptimizationResult,
     OptimizationWorkflow,
@@ -279,4 +297,19 @@ __all__ = [
     "PlacementZone",
     "assign_zone",
     "expand_regex_pattern",
+    # Hybrid FOM (issue #3186)
+    "FOMResult",
+    "FOMWeights",
+    "compute_fom",
+    "compute_soft_terms",
+    "check_hard_constraints",
+    "default_weights",
+    "legacy_weights",
+    "load_weights_from_yaml",
+    "SOFT_TERM_NAMES",
+    "HARD_CONSTRAINT_NAMES",
+    "BoardFeatures",
+    "FootprintFeature",
+    "PadFeature",
+    "extract_features",
 ]
