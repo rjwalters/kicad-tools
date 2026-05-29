@@ -111,16 +111,56 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # point keeps the validator from flagging dangling wire endpoints.
     rail_3v3_xend = X_SWD - 5.52
     rail_gnd_xend = X_SWD - 5.52
+    # The 3.3V rail uses the net label "+3V3" (not "+3.3V") so it unifies
+    # with the stock ``power:+3V3`` symbol below -- the stock symbol always
+    # publishes the global net "+3V3", and using a synthesized "+3.3V"
+    # symbol instead introduces a benign-but-noisy ``lib_symbol_issues``
+    # ERC warning (the synthetic library is not in the system lib table).
+    # The schematic net name is independent of the hand-built PCB net table
+    # (which keeps its "+3.3V" convention); each artifact is internally
+    # consistent.  Mirrors sister board 05 (PR #3004).  See issue #3149.
     sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=93, net_label="+5V")
-    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend, net_label="+3.3V")
+    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend, net_label="+3V3")
     sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=rail_gnd_xend, net_label="GND")
     print("   Added +5V, +3.3V, and GND rails")
 
-    # Add power symbols at the left ends of the rails.
+    # Add power symbols at the left ends of the rails, each wired down (or
+    # up, for GND) to its rail endpoint so the symbol pin meets a real wire
+    # endpoint (silences ``pin_not_connected``) AND so the symbol's global
+    # net publication unifies with the rail's labelled net.  Mirrors sister
+    # board 05's fix (PR #3004 / design.py:108-216); see issue #3149.
+    #
+    # +5V: the +5V rail has no genuine ``power_output`` source -- the only
+    # consumer is the AMS1117 VI pin, which is a ``power_input``.  Without
+    # the bridging wire the +5V symbol floats (``pin_not_connected``); even
+    # once wired, the rail has no driver so U1.VI fires
+    # ``power_pin_not_driven``.  Add a PWR_FLAG on the +5V column to mark the
+    # rail as externally driven (it is fed by C1 / an off-board 5V supply).
     sch.add_power("power:+5V", x=X_LEFT, y=RAIL_5V - 10, rotation=0)
+    sch.add_wire((X_LEFT, RAIL_5V - 10), (X_LEFT, RAIL_5V), warn_on_collision=False)
+    sch.add_pwr_flag(X_LEFT + 7, RAIL_5V - 10)
+    sch.add_wire((X_LEFT + 7, RAIL_5V - 10), (X_LEFT + 7, RAIL_5V), warn_on_collision=False)
+    sch.add_junction(X_LEFT + 7, RAIL_5V)
+
+    # +3V3: stock ``power:+3V3`` symbol whose published global net matches
+    # the rail's "+3V3" label (set above).  The 3.3V rail IS driven by the
+    # AMS1117 VO pin (``power_output``) once the symbol is wired to the
+    # rail, so NO PWR_FLAG here (a flag would trigger an
+    # Output<->Power-output ``pin_to_pin`` conflict against VO).
     sch.add_power("power:+3V3", x=80, y=RAIL_3V3 - 10, rotation=0)
+    sch.add_wire((80, RAIL_3V3 - 10), (80, RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(80, RAIL_3V3)
+
+    # GND: like +5V, the GND rail has no ``power_output`` driver (the
+    # AMS1117 GND pin and every MCU VSS pin are ``power_input``).  Wire the
+    # GND symbol up to the rail and add a PWR_FLAG so U1.GND no longer fires
+    # ``power_pin_not_driven``.
     sch.add_power("power:GND", x=X_LEFT, y=RAIL_GND + 10, rotation=0)
-    print("   Added power symbols")
+    sch.add_wire((X_LEFT, RAIL_GND + 10), (X_LEFT, RAIL_GND), warn_on_collision=False)
+    sch.add_pwr_flag(X_LEFT + 7, RAIL_GND + 10)
+    sch.add_wire((X_LEFT + 7, RAIL_GND + 10), (X_LEFT + 7, RAIL_GND), warn_on_collision=False)
+    sch.add_junction(X_LEFT + 7, RAIL_GND)
+    print("   Added power symbols (wired to rails; PWR_FLAG on +5V/GND)")
 
     # =========================================================================
     # Section 2: LDO Voltage Regulator (Manual Component Placement)
@@ -277,8 +317,18 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     )
     print(f"   Crystal: {xtal.crystal.reference} with C10, C11")
 
-    # Connect crystal ground to GND rail
+    # Connect crystal ground to GND rail.  The block's GND port is the
+    # MIDPOINT of the C10/C11 ground-bus horizontal wire, and
+    # ``connect_to_rails`` drops a vertical wire from that midpoint down to
+    # the rail.  Because the midpoint lands mid-segment on the ground bus
+    # (not on a wire endpoint) and the block adds a junction only at the
+    # rail end, the vertical wire's TOP endpoint is left as an
+    # ``unconnected_wire_endpoint`` (KiCad needs a junction dot to register
+    # the T-connection).  Add a junction at the GND port to close that
+    # warning.  See issue #3149 (AC #2).
     xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
+    _xtal_gnd = xtal.port("GND")
+    sch.add_junction(_xtal_gnd[0], _xtal_gnd[1])
 
     # Wire crystal IN/OUT to OSC_IN / OSC_OUT labels (on stubs).  Labels at the
     # MCU side are added below when we wire the MCU pins.
@@ -295,7 +345,16 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # =========================================================================
     print("\n5. Adding SWD debug header...")
 
-    # 6-pin SWD header on the far right of the MCU
+    # 6-pin SWD header on the far right of the MCU.  SWD-6 pinout (see
+    # debug.py:56-63): 1=VCC, 2=SWDIO, 3=GND, 4=SWCLK, 5=GND, 6=NRST.
+    # ``connect_to_rails`` only wires pin 1 (VCC) and the FIRST GND (pin 3);
+    # without ``pin_nets`` the signal pins 2/4/6 and the second GND-key pin
+    # 5 float (``pin_not_connected``) and the MCU-side SWDIO/SWCLK/NRST
+    # labels have no J1-side match (``isolated_pin_label`` + NRST
+    # ``pin_not_driven``).  Pass ``pin_nets`` so the block emits label
+    # stubs at pins 2/4/5/6 -- the SWDIO/SWCLK/NRST labels then unify with
+    # the MCU-side labels.  Mirrors sister board 05 (PR #3004,
+    # design.py:541-556); see issue #3149.
     debug = DebugHeader(
         sch,
         x=X_SWD,
@@ -305,10 +364,16 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         series_resistors=False,
         ref="J1",
         header_footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+        pin_nets={
+            "2": "SWDIO",
+            "4": "SWCLK",
+            "5": "GND",
+            "6": "NRST",
+        },
     )
     print(f"   Debug header: {debug.header.reference} (SWD-6)")
 
-    # Connect debug header power to rails
+    # Connect debug header power to rails (pin 1 VCC -> +3.3V, pin 3 GND).
     debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
 
     # =========================================================================
