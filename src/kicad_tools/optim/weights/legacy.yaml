@@ -1,0 +1,17 @@
+# Legacy weights -- backward compatibility with --use-routing-fitness (PR #3114).
+#
+# Issue #3186 acceptance criterion 5 requires that `--fom-config legacy.yaml`
+# match the current `--use-routing-fitness` baseline within +-5%.  That
+# baseline only considers routed wirelength, so this profile zeroes every
+# other term.
+weights:
+  trace_length_excess: 1.0
+  weighted_via_count: 0.0
+  turning_penalty: 0.0
+  net_congestion_variance: 0.0
+  match_group_skew: 0.0
+  diff_pair_clearance_margin: 0.0
+  decoupling_proximity: 0.0
+  crossing_count: 0.0
+  thermal_spread: 0.0
+  compactness: 0.0
