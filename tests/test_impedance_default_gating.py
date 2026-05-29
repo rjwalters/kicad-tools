@@ -503,3 +503,371 @@ class TestDiffOnlySpecsSuppressedWithoutDetection:
         assert "PCIE_TX+" in rule._partner_map
         assert "PCIE_TX-" in rule._partner_map
         assert rule._partner_map["PCIE_TX+"] == "PCIE_TX-"
+
+
+# Chorus-like 4-layer audio board (Issue #3157).  Slow I2S / DAC clock
+# nets (``DAC_CLK``, ``BCLK``, ``MCLK``, ``I2S_LRCLK``) plus plain audio /
+# I2C nets (``AUDIO_L``, ``AUDIO_R``, ``SDA``, ``SCL``) routed at the
+# literal 0.200 mm width on a 4-layer board WITH an explicit
+# ``(setup (stackup ...))`` block (JLCPCB-style).
+#
+# The real chorus-test board produced 32 false-positive impedance errors
+# here: the ``*CLK`` / ``*MCLK`` heuristic specs assumed "ends in CLK ==
+# high-speed 50Ω" and fired on these slow audio clocks (0.200 mm gives
+# ~63.5Ω, target 50.0Ω, ~27% deviation, requires 0.336 mm).  The plain
+# audio / I2C nets never matched any spec.  With the Issue #3157 fix the
+# single-ended heuristics are suppressed by default, so this board
+# produces zero single-ended impedance errors unless a net is explicitly
+# declared controlled-impedance.
+CHORUS_LIKE_4L_CLOCK_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" power)
+    (2 "In2.Cu" power)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup
+    (stackup
+      (layer "F.SilkS" (type "Top Silk Screen"))
+      (layer "F.Paste" (type "Top Solder Paste"))
+      (layer "F.Mask" (type "Top Solder Mask") (thickness 0.01))
+      (layer "F.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 1" (type "prepreg") (thickness 0.2104) (material "FR4") (epsilon_r 4.05) (loss_tangent 0.02))
+      (layer "In1.Cu" (type "copper") (thickness 0.0152))
+      (layer "dielectric 2" (type "core") (thickness 1.065) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
+      (layer "In2.Cu" (type "copper") (thickness 0.0152))
+      (layer "dielectric 3" (type "prepreg") (thickness 0.2104) (material "FR4") (epsilon_r 4.05) (loss_tangent 0.02))
+      (layer "B.Cu" (type "copper") (thickness 0.035))
+      (layer "B.Mask" (type "Bottom Solder Mask") (thickness 0.01))
+      (layer "B.SilkS" (type "Bottom Silk Screen"))
+      (copper_finish "ENIG")
+      (dielectric_constraints no)
+    )
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "DAC_CLK")
+  (net 2 "BCLK")
+  (net 3 "MCLK")
+  (net 4 "I2S_LRCLK")
+  (net 5 "AUDIO_L")
+  (net 6 "AUDIO_R")
+  (net 7 "SDA")
+  (net 8 "SCL")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (segment (start 110 120) (end 140 120) (width 0.2) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000031"))
+  (segment (start 110 121) (end 140 121) (width 0.2) (layer "F.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-000000000032"))
+  (segment (start 110 122) (end 140 122) (width 0.2) (layer "F.Cu") (net 3)
+    (uuid "00000000-0000-0000-0000-000000000033"))
+  (segment (start 110 123) (end 140 123) (width 0.2) (layer "F.Cu") (net 4)
+    (uuid "00000000-0000-0000-0000-000000000034"))
+  (segment (start 110 124) (end 140 124) (width 0.2) (layer "F.Cu") (net 5)
+    (uuid "00000000-0000-0000-0000-000000000035"))
+  (segment (start 110 125) (end 140 125) (width 0.2) (layer "F.Cu") (net 6)
+    (uuid "00000000-0000-0000-0000-000000000036"))
+  (segment (start 110 126) (end 140 126) (width 0.2) (layer "F.Cu") (net 7)
+    (uuid "00000000-0000-0000-0000-000000000037"))
+  (segment (start 110 127) (end 140 127) (width 0.2) (layer "F.Cu") (net 8)
+    (uuid "00000000-0000-0000-0000-000000000038"))
+)
+"""
+
+
+@pytest.fixture
+def chorus_like_4l_clock_pcb(tmp_path: Path) -> Path:
+    pcb_file = tmp_path / "chorus_like_4l_clock.kicad_pcb"
+    pcb_file.write_text(CHORUS_LIKE_4L_CLOCK_PCB)
+    return pcb_file
+
+
+class TestSingleEndedHeuristicSuppression:
+    """Issue #3157: single-ended impedance is declarative / opt-in.
+
+    The built-in single-ended name-pattern heuristics (``.*CLK$`` /
+    ``.*MCLK$`` / ``.*ETH.*`` -> 50Ω) must NOT auto-fire as DRC errors,
+    because they assume "ends in CLK == high-speed 50Ω" and produced 32
+    false-positive impedance errors on chorus-test (a low-speed 4-layer
+    audio board with slow I2S / DAC clock nets).
+    """
+
+    def test_explicit_stackup_4l_fixture_has_expected_shape(self, chorus_like_4l_clock_pcb: Path):
+        """Sanity: the fixture really IS a 4-layer board with explicit
+        stackup data (so it opts into controlled impedance via BOTH the
+        ``has_explicit_data`` and the ``>=4 copper`` branches -- the exact
+        chorus-test situation that made the heuristics fire pre-fix).
+        """
+        from kicad_tools.physics import Stackup
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(chorus_like_4l_clock_pcb))
+        stackup = Stackup.from_pcb(pcb)
+        assert stackup.has_explicit_data is True
+        assert stackup.num_copper_layers == 4
+
+    def test_clock_nets_produce_zero_impedance_errors_by_default(
+        self, chorus_like_4l_clock_pcb: Path
+    ):
+        """AC #1: a 4-layer board with clock-named nets and NO explicit
+        impedance declaration produces 0 impedance errors by default.
+
+        This is the chorus-test false-positive scenario.  Pre-#3157 the
+        ``*CLK`` / ``*MCLK`` heuristic specs fired on DAC_CLK / BCLK /
+        MCLK / I2S_LRCLK (each ~27% off 50Ω at 0.200 mm).  With the fix
+        the single-ended heuristics are suppressed by default.
+        """
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        pcb = PCB.load(str(chorus_like_4l_clock_pcb))
+        design_rules = get_profile("jlcpcb").get_design_rules(4, 1.0)
+
+        rule = ImpedanceRule()  # default specs, no net_class_map, no specs=
+        results = rule.check(pcb, design_rules)
+
+        impedance_violations = [
+            v for v in (results.errors + results.warnings) if v.rule_id == "impedance"
+        ]
+        # The "physics module unavailable" warning is not an impedance
+        # mismatch -- filter it out for an exact count.
+        impedance_mismatches = [
+            v for v in impedance_violations if "physics module not available" not in v.message
+        ]
+        assert impedance_mismatches == [], (
+            f"Expected 0 single-ended impedance errors on a 4L audio board "
+            f"with clock-named nets and no declared impedance, got "
+            f"{len(impedance_mismatches)}: {[v.message for v in impedance_mismatches]}.  "
+            f"Issue #3157: the *CLK / *MCLK heuristic specs are firing on "
+            f"slow audio clocks again."
+        )
+
+    def test_checker_pipeline_zero_impedance_errors_without_net_class_map(
+        self, chorus_like_4l_clock_pcb: Path
+    ):
+        """AC #1 at the ``DRCChecker`` level: ``check_impedance()`` with no
+        ``net_class_map`` produces 0 impedance errors on the chorus-like
+        board.  This is the exact path ``kct check`` (no ``--net-class-map``)
+        exercises.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb = PCB.load(str(chorus_like_4l_clock_pcb))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+        results = checker.check_impedance()
+
+        impedance_mismatches = [
+            v
+            for v in (results.errors + results.warnings)
+            if v.rule_id == "impedance" and "physics module not available" not in v.message
+        ]
+        assert impedance_mismatches == [], (
+            f"Expected 0 impedance errors from DRCChecker.check_impedance() "
+            f"without a net_class_map, got {len(impedance_mismatches)}: "
+            f"{[v.message for v in impedance_mismatches]}"
+        )
+
+    def test_default_specs_still_contain_se_patterns(self):
+        """Regression guard: the SE heuristic patterns must stay IN the
+        default spec list (so ``_find_matching_spec`` and the router's
+        impedance-driven-sizing bridge can still resolve a 50Ω target).
+
+        Issue #3157 suppresses their *evaluation* in ``check()``, it does
+        NOT remove them from the default list -- the #2964 router bridge
+        depends on ``_get_default_specs()`` returning the CLK spec.
+        """
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        clk_spec = rule._find_matching_spec("SWCLK")
+        assert clk_spec is not None
+        assert clk_spec.target_z0 == 50.0
+        # And it IS classified as a heuristic spec (so check() suppresses it).
+        assert ImpedanceRule._is_single_ended_heuristic_spec(clk_spec) is True
+
+    def test_plain_audio_and_i2c_nets_never_matched(self, chorus_like_4l_clock_pcb: Path):
+        """The plain audio / I2C nets (AUDIO_L/R, SDA, SCL) match no spec
+        at all -- they never produced errors even pre-fix.  This documents
+        the curator's correction to the issue body ("not ALL nets")."""
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        rule = ImpedanceRule()
+        for net in ("AUDIO_L", "AUDIO_R", "SDA", "SCL"):
+            assert rule._find_matching_spec(net) is None, (
+                f"Net {net!r} unexpectedly matched a default spec"
+            )
+
+
+class TestSingleEndedImpedanceOptIn:
+    """Issue #3157 AC #2: a net explicitly declared single-ended impedance
+    (via ``net_class_map`` ``target_single_impedance``) STILL gets checked.
+    """
+
+    def test_declared_50ohm_via_net_class_map_still_fires(self, chorus_like_4l_clock_pcb: Path):
+        """A net class declaring ``target_single_impedance=50`` makes the
+        rule evaluate that net's traces -- and the 0.200 mm width (~63.5Ω
+        on this 4L stackup) fires an impedance error.
+
+        This proves the opt-in path works: declared impedance is checked,
+        undeclared (heuristic-only) impedance is not.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb = PCB.load(str(chorus_like_4l_clock_pcb))
+
+        # Declare DAC_CLK as a 50Ω single-ended controlled-impedance net.
+        controlled = NetClassRouting(name="ControlledClock", target_single_impedance=50.0)
+        net_class_map = {"DAC_CLK": controlled}
+
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, net_class_map=net_class_map)
+        results = checker.check_impedance()
+
+        impedance_violations = [
+            v
+            for v in (results.errors + results.warnings)
+            if v.rule_id == "impedance" and "physics module not available" not in v.message
+        ]
+        # DAC_CLK is now checked and fails (0.200 mm != 50Ω on this stackup).
+        dac_clk_violations = [v for v in impedance_violations if "DAC_CLK" in (v.items or ())]
+        assert dac_clk_violations, (
+            "Expected an impedance violation on DAC_CLK after declaring it "
+            "50Ω single-ended via net_class_map.target_single_impedance, "
+            "but none fired.  AC #2 regressed -- declared impedance must "
+            "still be checked."
+        )
+
+        # The OTHER clock nets (BCLK, MCLK, I2S_LRCLK) were NOT declared,
+        # so they must stay silent -- only the declared net is checked.
+        for undeclared in ("BCLK", "MCLK", "I2S_LRCLK"):
+            assert not [v for v in impedance_violations if undeclared in (v.items or ())], (
+                f"Net {undeclared!r} was not declared controlled-impedance "
+                f"but produced an impedance violation -- the heuristic "
+                f"suppression leaked."
+            )
+
+    def test_declared_50ohm_at_correct_width_passes(self, tmp_path: Path):
+        """Belt-and-suspenders: a net declared 50Ω whose width is correct
+        for the stackup produces NO violation -- the opt-in path is a real
+        impedance check, not an unconditional failure.
+
+        The 50Ω-correct width on F.Cu is computed from the physics module
+        so the test stays stackup-agnostic, then a fresh PCB is written
+        with DAC_CLK widened to that value.
+        """
+        from kicad_tools.physics import Stackup
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        # Compute the 50Ω-correct F.Cu width for this stackup.
+        base_pcb = tmp_path / "base.kicad_pcb"
+        base_pcb.write_text(CHORUS_LIKE_4L_CLOCK_PCB)
+        rule = ImpedanceRule(stackup=Stackup.from_pcb(PCB.load(str(base_pcb))))
+        rule._init_physics(PCB.load(str(base_pcb)))
+        correct_width = rule.get_required_width(50.0, "F.Cu")
+        assert correct_width is not None and correct_width > 0
+
+        # Write a variant where DAC_CLK's segment is widened to that value.
+        widened = CHORUS_LIKE_4L_CLOCK_PCB.replace(
+            '(segment (start 110 120) (end 140 120) (width 0.2) (layer "F.Cu") (net 1)',
+            f'(segment (start 110 120) (end 140 120) (width {correct_width:.4f}) (layer "F.Cu") (net 1)',
+        )
+        variant = tmp_path / "variant.kicad_pcb"
+        variant.write_text(widened)
+
+        controlled = NetClassRouting(name="ControlledClock", target_single_impedance=50.0)
+        checker = DRCChecker(
+            PCB.load(str(variant)),
+            manufacturer="jlcpcb",
+            layers=4,
+            net_class_map={"DAC_CLK": controlled},
+        )
+        results = checker.check_impedance()
+
+        dac_clk_violations = [
+            v
+            for v in (results.errors + results.warnings)
+            if v.rule_id == "impedance" and "DAC_CLK" in (v.items or ())
+        ]
+        assert dac_clk_violations == [], (
+            f"DAC_CLK declared 50Ω at the impedance-correct width "
+            f"({correct_width:.4f}mm) should pass, but fired: "
+            f"{[v.message for v in dac_clk_violations]}"
+        )
+
+
+class TestDeriveSingleEndedImpedanceSpecs:
+    """Unit tests for the producer helper that maps a net-class map's
+    ``target_single_impedance`` to explicit ``NetImpedanceSpec`` entries.
+    """
+
+    def test_none_map_returns_empty(self):
+        from kicad_tools.validate.impedance_specs import (
+            derive_single_ended_impedance_specs,
+        )
+
+        assert derive_single_ended_impedance_specs(None) == []
+        assert derive_single_ended_impedance_specs({}) == []
+
+    def test_class_without_target_yields_no_spec(self):
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.impedance_specs import (
+            derive_single_ended_impedance_specs,
+        )
+
+        ncm = {"FOO": NetClassRouting(name="Plain")}  # target_single_impedance=None
+        assert derive_single_ended_impedance_specs(ncm) == []
+
+    def test_declared_target_yields_anchored_spec(self):
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.impedance_specs import (
+            derive_single_ended_impedance_specs,
+        )
+
+        ncm = {
+            "MY_CLK": NetClassRouting(
+                name="C", target_single_impedance=50.0, impedance_tolerance_percent=12.0
+            ),
+            "OTHER": NetClassRouting(name="Plain"),
+        }
+        specs = derive_single_ended_impedance_specs(ncm)
+        assert len(specs) == 1
+        spec = specs[0]
+        assert spec.target_z0 == 50.0
+        assert spec.target_zdiff is None
+        assert spec.tolerance_percent == 12.0
+        # Anchored to the exact net name -- must match MY_CLK and nothing else.
+        assert spec.matches("MY_CLK")
+        assert not spec.matches("NOT_MY_CLK")
+        assert not spec.matches("MY_CLK_2")
+
+    def test_special_regex_chars_in_net_name_are_escaped(self):
+        """Net names with ``+`` (diff-pair convention) must be matched
+        literally, not interpreted as a regex quantifier."""
+        from kicad_tools.router.rules import NetClassRouting
+        from kicad_tools.validate.impedance_specs import (
+            derive_single_ended_impedance_specs,
+        )
+
+        ncm = {"CLK+": NetClassRouting(name="C", target_single_impedance=50.0)}
+        specs = derive_single_ended_impedance_specs(ncm)
+        assert len(specs) == 1
+        assert specs[0].matches("CLK+")
+        assert not specs[0].matches("CLKK")  # '+' is literal, not quantifier

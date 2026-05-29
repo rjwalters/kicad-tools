@@ -394,21 +394,53 @@ class DRCChecker:
         ``validate.rules.__init__`` but was never reachable from
         ``kct check`` because no ``DRCChecker`` method invoked it.
 
-        When invoked from the standalone CLI (no per-class
-        ``target_*_impedance`` context), the rule uses its built-in
-        default specs (USB ~90Ω, clocks ~50Ω, LVDS ~100Ω) keyed off net
-        name patterns.  The router-side consumer
-        (``router/diffpair_impedance.py``) provides the impedance-driven
-        sizing that feeds back into the same rule via the per-class
-        ``target_diff_impedance`` / ``target_single_impedance`` fields
-        when those are set.
+        Single-ended impedance is **declarative / opt-in** (Issue #3157).
+        When invoked from the standalone CLI without a ``net_class_map``,
+        the rule's built-in single-ended *name-pattern heuristics*
+        (``.*CLK$`` / ``.*MCLK$`` / ``.*ETH.*`` -> 50Ω) are suppressed:
+        slow I2S / DAC clock nets on low-speed audio boards (``DAC_CLK``,
+        ``BCLK``, ``MCLK``, ``I2S_LRCLK``) match those patterns but need
+        no controlled impedance, and on a 4-layer board with an explicit
+        stackup the heuristics produced 32 false-positive impedance
+        errors on chorus-test.
+
+        When the checker is constructed with a ``net_class_map`` (the
+        ``kct check --net-class-map`` sidecar, Issue #2684), a single-ended
+        :class:`~kicad_tools.validate.rules.impedance.NetImpedanceSpec` is
+        derived from each net class's
+        :attr:`~kicad_tools.router.rules.NetClassRouting.target_single_impedance`
+        and passed as an **explicit** ``specs=`` list.  Explicit specs
+        bypass the heuristic-suppression gate and always evaluate, so a
+        net declared 50Ω single-ended still gets checked and fires when
+        its width is wrong.  This mirrors the producer-side wiring already
+        used by :meth:`check_match_group_length_skew` (Issue #2710).
+
+        Diff-pair impedance (``target_diff_impedance`` / ``detected_pairs``,
+        board 06) is **unaffected** -- this method only governs the
+        single-ended path.
 
         Returns:
             DRCResults containing impedance violations.  Empty when no
             traces match any spec (the standalone-CLI common case for
-            boards without high-speed nets).
+            boards without declared controlled-impedance nets).
         """
-        rule = ImpedanceRule()
+        if self.net_class_map is None:
+            # No router context -> no declared single-ended impedance.
+            # The rule's SE name-pattern heuristics stay suppressed
+            # (Issue #3157); diff-pair defaults still resolve internally.
+            rule = ImpedanceRule()
+        else:
+            from kicad_tools.validate.impedance_specs import (
+                derive_single_ended_impedance_specs,
+            )
+
+            specs = derive_single_ended_impedance_specs(self.net_class_map)
+            # Pass explicit ``specs=`` so they always evaluate (explicit
+            # specs set ``_using_default_specs=False`` and bypass the
+            # heuristic-suppression gate).  When no class declared a
+            # single-ended impedance, ``specs`` is empty -> conservative
+            # no-op (no single-ended impedance errors).
+            rule = ImpedanceRule(specs=specs)
         return rule.check(self.pcb, self.design_rules)
 
     def check_match_group_length_skew(self) -> DRCResults:
