@@ -1,6 +1,7 @@
 """Tests for manufacturing readiness audit (kct audit command)."""
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -2660,3 +2661,128 @@ class TestConnectivityStatusZoneVerification:
         d = status.to_dict()
         assert d["zone_connected_nets"] == 3
         assert d["has_zones"] is True
+
+
+class TestAnalogActionItems:
+    """Analog-sensitive components are NAMED in the audit action items.
+
+    Phase 1 of issue #3156: ``_generate_action_items`` must surface the
+    reference / value / reason that ``detect_analog_components`` already
+    produces, rather than collapsing the list to a count. Uses the
+    mock-PCB pattern (a minimal object exposing ``.footprints`` with
+    ``.reference`` / ``.value`` / ``.name``) and monkeypatches
+    ``_load_pcb`` so no analog ``.kicad_pcb`` fixture is required.
+    """
+
+    @dataclass
+    class _MockFootprint:
+        reference: str = ""
+        value: str = ""
+        name: str = ""
+
+    @dataclass
+    class _MockPCB:
+        footprints: list = field(default_factory=list)
+
+    def _make_audit(self, drc_clean_pcb: Path, monkeypatch, footprints):
+        """Build an Auditor whose PCB load returns the given footprints."""
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+        mock_pcb = self._MockPCB(footprints=list(footprints))
+        monkeypatch.setattr(audit, "_load_pcb", lambda: mock_pcb)
+        return audit
+
+    def _analog_items(self, items):
+        return [i for i in items if i.description.startswith("Analog-sensitive:")]
+
+    def test_names_each_detected_component(self, drc_clean_pcb: Path, monkeypatch):
+        """Every detected analog component is named with ref, value, reason."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [
+                self._MockFootprint(reference="U2", value="PCM5122", name="PCM5122"),
+                self._MockFootprint(reference="U3", value="OPA2134", name="OPA2134"),
+            ],
+        )
+        items = audit._generate_action_items(AuditResult())
+        analog = self._analog_items(items)
+
+        assert len(analog) == 2
+        descriptions = [i.description for i in analog]
+
+        # U2 is an audio DAC; U3 is an op-amp -- both named with ref+value+reason.
+        assert any(
+            "U2" in d and "PCM5122" in d and "audio DAC (PCM51xx family)" in d for d in descriptions
+        )
+        assert any("U3" in d and "OPA2134" in d and "op-amp" in d for d in descriptions)
+
+        # Advisory priority (non-blocking gate), no fix command.
+        for item in analog:
+            assert item.priority == 3
+            assert item.command is None
+
+    def test_single_component_named(self, drc_clean_pcb: Path, monkeypatch):
+        """A single analog component is still named (not a bare count)."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [self._MockFootprint(reference="U7", value="REF3025", name="REF3025")],
+        )
+        items = audit._generate_action_items(AuditResult())
+        analog = self._analog_items(items)
+
+        assert len(analog) == 1
+        assert "U7" in analog[0].description
+        assert "REF3025" in analog[0].description
+        assert "precision voltage reference" in analog[0].description
+        # The vague count-only wording must be gone.
+        assert "analog-sensitive component" not in analog[0].description.lower()
+
+    def test_no_analog_components_emits_no_item(self, drc_clean_pcb: Path, monkeypatch):
+        """A purely digital board produces no analog action item."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [
+                self._MockFootprint(reference="U1", value="STM32F407", name="STM32F407"),
+                self._MockFootprint(reference="R1", value="10k", name="R_0402"),
+            ],
+        )
+        items = audit._generate_action_items(AuditResult())
+        assert self._analog_items(items) == []
+
+    def test_detection_exception_does_not_crash(self, drc_clean_pcb: Path, monkeypatch):
+        """A detector/PCB-load failure is swallowed; audit still returns."""
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("malformed PCB")
+
+        monkeypatch.setattr(audit, "_load_pcb", _boom)
+
+        # Must not raise, and must still return the (non-analog) items.
+        items = audit._generate_action_items(AuditResult())
+        assert self._analog_items(items) == []
+
+    def test_json_path_carries_per_component_detail(self, drc_clean_pcb: Path, monkeypatch):
+        """The JSON serialization of action items keeps the per-component names."""
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            [
+                self._MockFootprint(reference="U2", value="PCM5122", name="PCM5122"),
+                self._MockFootprint(reference="U3", value="OPA2134", name="OPA2134"),
+            ],
+        )
+        result = AuditResult()
+        result.action_items = audit._generate_action_items(result)
+
+        payload = json.dumps(result.to_dict(), default=str)
+        data = json.loads(payload)
+        analog = [
+            i for i in data["action_items"] if i["description"].startswith("Analog-sensitive:")
+        ]
+        assert len(analog) == 2
+        joined = " ".join(i["description"] for i in analog)
+        assert "U2" in joined and "PCM5122" in joined
+        assert "U3" in joined and "OPA2134" in joined

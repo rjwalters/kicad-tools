@@ -1386,14 +1386,20 @@ class ManufacturingAudit:
             from kicad_tools.analysis.analog_detect import detect_analog_components
 
             analog = detect_analog_components(pcb)
-            if analog:
-                count = len(analog)
+            for component in analog:
+                # Name each detected component (reference + value + reason)
+                # so the engineer knows WHICH parts need analog layout care,
+                # not just how many. Detection logic itself is unchanged --
+                # this only surfaces the detail the detector already produced.
+                ref = component.reference or "?"
+                value = component.value.strip()
+                ref_value = f"{ref} ({value})" if value else ref
                 items.append(
                     ActionItem(
                         priority=3,
                         description=(
-                            f"{count} analog-sensitive component{'s' if count != 1 else ''}"
-                            " detected — manual layout review recommended"
+                            f"Analog-sensitive: {ref_value} — {component.reason}"
+                            "; manual layout review recommended"
                         ),
                         command=None,
                     )
