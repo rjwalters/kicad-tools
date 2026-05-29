@@ -2786,3 +2786,123 @@ class TestAnalogActionItems:
         joined = " ".join(i["description"] for i in analog)
         assert "U2" in joined and "PCM5122" in joined
         assert "U3" in joined and "OPA2134" in joined
+
+
+class TestAnalogNetActionItems:
+    """Analog NETS are named in the audit action items (Phase 2, #3170).
+
+    Mirrors ``TestAnalogActionItems`` at the net level: ``_generate_action_items``
+    must surface one priority-3 item per analog net (audio / analog supply /
+    analog ground / analog signal) and flag an isolated analog ground that
+    lacks a discrete net-tie/ferrite bridge to digital ground.  Uses a mock
+    PCB extended with a net-name surface and monkeypatches ``_load_pcb`` so
+    no analog ``.kicad_pcb`` fixture is required.
+    """
+
+    @dataclass
+    class _MockNet:
+        number: int
+        name: str
+
+    @dataclass
+    class _MockPad:
+        net_name: str = ""
+
+    @dataclass
+    class _MockFootprint:
+        reference: str = ""
+        value: str = ""
+        name: str = ""
+        pads: list = field(default_factory=list)
+
+    @dataclass
+    class _MockPCB:
+        footprints: list = field(default_factory=list)
+        nets: dict = field(default_factory=dict)
+
+    def _make_audit(self, drc_clean_pcb: Path, monkeypatch, *, net_names, footprints=()):
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+        nets = {0: self._MockNet(0, "")}
+        for i, name in enumerate(net_names, start=1):
+            nets[i] = self._MockNet(i, name)
+        mock_pcb = self._MockPCB(footprints=list(footprints), nets=nets)
+        monkeypatch.setattr(audit, "_load_pcb", lambda: mock_pcb)
+        return audit
+
+    def _net_items(self, items):
+        return [i for i in items if i.description.startswith("Analog net:")]
+
+    def _bridge_items(self, items):
+        return [i for i in items if "no bridge to" in i.description]
+
+    def test_one_item_per_analog_net(self, drc_clean_pcb: Path, monkeypatch):
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["AUDIO_L", "AUDIO_R", "+3.3VA", "VREF", "GND", "+3.3V"],
+        )
+        items = audit._generate_action_items(AuditResult())
+        net_items = self._net_items(items)
+
+        names = {d.description for d in net_items}
+        # 4 analog nets named; GND / +3.3V (digital) not named.
+        assert len(net_items) == 4
+        joined = " ".join(names)
+        assert "AUDIO_L" in joined and "AUDIO_R" in joined
+        assert "+3.3VA" in joined and "VREF" in joined
+        assert "GND" not in joined or "GNDA" in joined  # plain GND not flagged
+
+        for item in net_items:
+            assert item.priority == 3
+            assert item.command is None
+
+    def test_missing_bridge_flagged(self, drc_clean_pcb: Path, monkeypatch):
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["GNDA", "GND"],
+        )
+        items = audit._generate_action_items(AuditResult())
+        bridge = self._bridge_items(items)
+        assert len(bridge) == 1
+        assert "GNDA" in bridge[0].description
+        assert bridge[0].priority == 3
+
+    def test_bridge_present_no_flag(self, drc_clean_pcb: Path, monkeypatch):
+        nettie = self._MockFootprint(
+            reference="NT1",
+            name="NetTie-2_SMD",
+            value="NetTie",
+            pads=[self._MockPad(net_name="GNDA"), self._MockPad(net_name="GND")],
+        )
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["GNDA", "GND"],
+            footprints=[nettie],
+        )
+        items = audit._generate_action_items(AuditResult())
+        assert self._bridge_items(items) == []
+        # The analog ground is still named even though its bridge is fine.
+        assert any("GNDA" in i.description for i in self._net_items(items))
+
+    def test_purely_digital_board_no_net_items(self, drc_clean_pcb: Path, monkeypatch):
+        audit = self._make_audit(
+            drc_clean_pcb,
+            monkeypatch,
+            net_names=["GND", "+3.3V", "D0", "SPI_MOSI", "USB_DP"],
+        )
+        items = audit._generate_action_items(AuditResult())
+        assert self._net_items(items) == []
+        assert self._bridge_items(items) == []
+
+    def test_detection_exception_does_not_crash(self, drc_clean_pcb: Path, monkeypatch):
+        audit = ManufacturingAudit(drc_clean_pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("malformed PCB")
+
+        monkeypatch.setattr(audit, "_load_pcb", _boom)
+        items = audit._generate_action_items(AuditResult())
+        assert self._net_items(items) == []
+        assert self._bridge_items(items) == []
