@@ -551,7 +551,32 @@ tolerances:
   # removed, this floor must be the strict gate.  Exit clause:
   # drop back to 34 (or lower) once #3144 lands and the
   # deterministic CI count is established.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 35
+  #
+  # Floor 35 -> 39 by Issue #3151 (DRC parity).  The strict
+  # error-count gate ``scripts/ci/check_routed_drc.py`` used to
+  # shell out to ``kct check`` with NO ``--net-class-map``, so
+  # the three metadata-gated rule families (diffpair_length_skew,
+  # diffpair_routing_continuity, match_group_length_skew) silently
+  # no-op'd and the gate never counted them on the COMMITTED
+  # routed artifact.  The gate is now net-class-map-aware: board
+  # 06 has no committed ``net_class_map.json`` sidecar, so the
+  # gate derives the map in-process from
+  # ``generate_design.build_net_class_map()`` and threads it via
+  # ``--net-class-map`` (Option B in the issue).  The committed
+  # ``diffpair_test_routed.kicad_pcb`` now measures 39 BLOCKING
+  # errors (45 total - 6 advisory connectivity):
+  #   25 clearance_pad_segment + 2 clearance_pad_via
+  #   + 1 diffpair_clearance_intra            (unchanged, was 28)
+  #   + 5 diffpair_length_skew                (newly counted)
+  #   + 6 diffpair_routing_continuity         (newly counted)
+  #   = 39 blocking.
+  # The +11 is the previously-hidden diff-pair families now being
+  # counted -- NOT a routing regression.  Exit clause unchanged:
+  # the clearance_pad_segment cluster (general fine-grid escape)
+  # and the structural diffpair_clearance_intra residual are the
+  # tightening targets; the diff-pair length/continuity counts
+  # tighten as the board's coupled routing improves.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 39
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -736,6 +761,28 @@ tolerances:
   # back to the deterministic count (which AC4 of #3146 will
   # establish) and remove the soft-fail in the follow-up PR
   # that closes #3146.
+  #
+  # Issue #3151 (DRC parity) note: this floor is SHARED by two
+  # gates that measure different artifacts:
+  #   * ``check_matchgroup_coverage.py`` RE-ROUTES from source and
+  #     can land at 48 on the ubuntu-latest 2-core CI runner (the
+  #     cross-platform variance documented above, tracked by #3146).
+  #     This re-route count is the BINDING constraint on this floor.
+  #   * ``check_routed_drc.py`` measures the COMMITTED
+  #     ``matchgroup_test_routed.kicad_pcb`` artifact.  Issue #3151
+  #     made that gate net-class-map-aware: it now resolves board
+  #     07's committed ``output/net_class_map.json`` sidecar and
+  #     threads it via ``--net-class-map``, so it counts the 3
+  #     previously-missing families (diffpair_length_skew=4,
+  #     diffpair_routing_continuity=4, match_group_length_skew=1).
+  #     The committed-artifact blocking count rose 11 -> 20 (27
+  #     total - 7 advisory connectivity).  20 <= 48, so the gate
+  #     passes; it emits a drift warning (slack=28) flagging the
+  #     gap between the committed artifact and the re-route ceiling.
+  # The floor stays at 48 because it must accommodate the higher
+  # re-route count.  Exit clause: once #3146 lands a deterministic
+  # re-route count, split the committed-artifact floor (~20) from
+  # the re-route floor, or drop both to the deterministic value.
   boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 48
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by

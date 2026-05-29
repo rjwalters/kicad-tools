@@ -86,6 +86,52 @@ Results:
 DRC PASSED - No violations found
 ```
 
+## CLI: Diff-Pair and Match-Group Rules (`--net-class-map`)
+
+Three DRC rule families need per-net routing metadata that a `.kicad_pcb`
+file does **not** persist on its own (length-match-group membership,
+`coupled_routing` flags, skew tolerances):
+
+- `diffpair_length_skew` — intra-pair length mismatch
+- `diffpair_routing_continuity` — broken / un-coupled diff-pair routing
+- `match_group_length_skew` — length skew across a declared match group
+
+These rules re-derive their working state from a **net-class map** and
+**no-op when no map is supplied**. This is an intentional
+graceful-degradation contract: a bare `kct check` on a board routed by an
+external tool (e.g. Freerouting) will not fire diff-pair / match-group rules
+it cannot meaningfully evaluate. Consequently, on a routed board with
+engaged diff pairs you will see *fewer* errors from a bare `kct check` than
+from the in-pipeline DRC that `generate_design.py` runs.
+
+To enable these rules, pass a net-class-map **sidecar** — a JSON file
+mapping net names to their routing class — via `--net-class-map`:
+
+```bash
+# Bare check: diff-pair / match-group rules no-op (external-router contract)
+kct check board_routed.kicad_pcb --mfr jlcpcb
+
+# With the sidecar: the three gated families fire
+kct check board_routed.kicad_pcb --mfr jlcpcb \
+    --net-class-map output/net_class_map.json
+```
+
+**Sidecar convention.** Boards that exercise these rules emit the sidecar
+next to their routed PCB as `output/net_class_map.json` (see board 07's
+`generate_design.py`, which writes it and then runs `kct check` with the
+flag — that is the entire difference between its in-pipeline error count and
+a bare CLI run). The sidecar is produced from the board's
+`build_net_class_map()` via `net_class_map_to_dict` and consumed via
+`net_class_map_from_dict`.
+
+**CI resolves the map automatically.** The strict routed-PCB DRC gate
+(`scripts/ci/check_routed_drc.py`) is net-class-map-aware: it prefers a
+committed `net_class_map.json` next to the routed PCB and, for boards that
+don't commit one (e.g. board 06), derives it in-process from the board's
+`build_net_class_map()`. This keeps the CI gate's error count in parity with
+the in-pipeline DRC while leaving the standalone `kct check` no-op contract
+unchanged.
+
 ## CLI: Compare Manufacturer Rules
 
 See how different fabs compare:
