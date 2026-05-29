@@ -149,6 +149,10 @@ def run_fix_drc_command(args) -> int:
     sub_argv = [args.pcb]
     if getattr(args, "drc_report", None):
         sub_argv.extend(["--drc-report", args.drc_report])
+    if getattr(args, "mfr", "jlcpcb") != "jlcpcb":
+        sub_argv.extend(["--mfr", args.mfr])
+    if getattr(args, "layers", 2) != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
     if args.max_displacement != 0.5:
         sub_argv.extend(["--max-displacement", str(args.max_displacement)])
     if args.margin != 0.01:

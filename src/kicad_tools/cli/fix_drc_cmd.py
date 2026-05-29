@@ -26,6 +26,7 @@ from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
 from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, DrillRepairResult
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import ViolationType
+from kicad_tools.manufacturers import get_all_manufacturer_names
 
 
 @dataclass
@@ -91,6 +92,29 @@ Examples:
     parser.add_argument(
         "--drc-report",
         help="Path to existing DRC report (.rpt or .json). If not provided, requires kicad-cli.",
+    )
+    parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default="jlcpcb",
+        help=(
+            "Target manufacturer for design rules (default: jlcpcb). "
+            "Only used when fix-drc generates a DRC report internally "
+            "(no --drc-report given, or with --verify); ignored when "
+            "--drc-report is supplied since clearances come from the report."
+        ),
+    )
+    parser.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        default=2,
+        help=(
+            "Number of PCB layers used to derive clearance rules "
+            "(default: 2). Only used when generating a DRC report "
+            "internally; ignored when --drc-report is supplied."
+        ),
     )
     parser.add_argument(
         "--max-displacement",
@@ -190,7 +214,7 @@ Examples:
     effective_max_passes = 1 if args.dry_run else args.max_passes
 
     # Get initial DRC report
-    report = _get_drc_report(args.drc_report, pcb_path)
+    report = _get_drc_report(args.drc_report, pcb_path, manufacturer=args.mfr, layers=args.layers)
     if report is None:
         return 1
 
@@ -200,7 +224,7 @@ Examples:
     # --verify: snapshot violation counts from pure-Python DRC before repair
     verify_before: DRCReport | None = None
     if args.verify:
-        verify_before = _run_python_drc(pcb_path)
+        verify_before = _run_python_drc(pcb_path, manufacturer=args.mfr, layers=args.layers)
         if verify_before is not None and not args.quiet:
             print(
                 f"[verify] Before repair: {len(verify_before.violations)} "
@@ -393,7 +417,7 @@ Examples:
 
         # Re-run detection for next pass (unless this is the last allowed pass)
         if pass_num < effective_max_passes:
-            report = _run_python_drc(output_path)
+            report = _run_python_drc(output_path, manufacturer=args.mfr, layers=args.layers)
             if report is None:
                 break
 
@@ -410,7 +434,7 @@ Examples:
     # --verify: run pure-Python DRC on the (potentially modified) output and
     # print a before/after delta so the user can confirm fix-drc and check agree.
     if args.verify and not args.dry_run:
-        verify_after = _run_python_drc(output_path)
+        verify_after = _run_python_drc(output_path, manufacturer=args.mfr, layers=args.layers)
         if verify_before is not None and verify_after is not None:
             before_count = len(verify_before.violations)
             after_count = len(verify_after.violations)
@@ -428,8 +452,7 @@ Examples:
                 else:
                     print(f"  WARNING: {-delta} new violation(s) introduced!")
                 print(
-                    "\nThese counts use the same engine as `kct check` "
-                    "for consistent comparison."
+                    "\nThese counts use the same engine as `kct check` for consistent comparison."
                 )
 
     # Exit code: 0 = all repaired (no remaining violations of any type),
@@ -669,7 +692,12 @@ def _attempt_granular_rollback(
         return (True, 0, [])
 
 
-def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | None:
+def _get_drc_report(
+    drc_report_path: str | None,
+    pcb_path: Path,
+    manufacturer: str = "jlcpcb",
+    layers: int = 2,
+) -> DRCReport | None:
     """Load or generate a DRC report.
 
     Resolution order:
@@ -677,6 +705,11 @@ def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | 
     2. If kicad-cli is available, run it and parse the resulting report.
     3. Fall back to the pure-Python ``DRCChecker`` so that segment-to-via
        violations are detected even without kicad-cli installed.
+
+    ``manufacturer`` and ``layers`` (from ``--mfr`` / ``--layers``) are only
+    consumed by the pure-Python fallback path (case 3). When a report is
+    supplied or kicad-cli runs DRC, the clearance targets come from those
+    sources instead.
     """
     if drc_report_path:
         report_path = Path(drc_report_path)
@@ -709,15 +742,27 @@ def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | 
         pass
 
     # Fall back to the pure-Python DRC checker
-    return _run_python_drc(pcb_path)
+    return _run_python_drc(pcb_path, manufacturer=manufacturer, layers=layers)
 
 
-def _run_python_drc(pcb_path: Path) -> DRCReport | None:
+def _run_python_drc(
+    pcb_path: Path,
+    manufacturer: str = "jlcpcb",
+    layers: int = 2,
+) -> DRCReport | None:
     """Run pure-Python DRC and convert results into a DRCReport.
 
     Runs all check categories (clearance, dimensions, edge clearance,
     silkscreen, solder mask) so that ``fix-drc`` can report the full
     scope of violations even when it can only repair a subset.
+
+    Args:
+        pcb_path: Path to the PCB to check.
+        manufacturer: Manufacturer profile that supplies the clearance
+            targets (``--mfr``). Defaults to ``jlcpcb`` to preserve the
+            historical behaviour when no profile is selected.
+        layers: PCB layer count used to derive layer-dependent clearance
+            rules (``--layers``).
     """
     try:
         from kicad_tools.drc.compat import drc_results_to_report
@@ -725,7 +770,7 @@ def _run_python_drc(pcb_path: Path) -> DRCReport | None:
         from kicad_tools.validate.checker import DRCChecker
 
         pcb = PCB.load(pcb_path)
-        checker = DRCChecker(pcb)
+        checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers)
         results = checker.check_all()
 
         return drc_results_to_report(results, pcb_path)
@@ -778,9 +823,7 @@ def _print_json(
     # surface ``clearance.repaired`` / ``drill_clearance.repaired`` the
     # same way for consistency.
     rolled_back = bool(last.connectivity_rolled_back) if last is not None else False
-    partial_rolled_back = (
-        bool(last.connectivity_partial_rollback) if last is not None else False
-    )
+    partial_rolled_back = bool(last.connectivity_partial_rollback) if last is not None else False
     reverted_uuids = set(last.reverted_uuids) if last is not None else set()
 
     # Per-category reverted counts (for partial rollback): count nudges /
@@ -788,12 +831,8 @@ def _print_json(
     # counters (``RepairResult.repaired`` etc.) still reflect the
     # pre-rollback total; subtracting the reverted count gives the
     # effective post-rollback count.
-    clearance_reverted = sum(
-        1 for n in clearance_result.nudges if n.uuid in reverted_uuids
-    )
-    drill_reverted = sum(
-        1 for a in drill_result.actions if a.uuid in reverted_uuids
-    )
+    clearance_reverted = sum(1 for n in clearance_result.nudges if n.uuid in reverted_uuids)
+    drill_reverted = sum(1 for a in drill_result.actions if a.uuid in reverted_uuids)
 
     # For single-pass (or backward compat), use the single-pass totals
     if len(pass_results) == 1:
@@ -801,9 +840,8 @@ def _print_json(
         if rolled_back:
             total_repaired = 0
         elif partial_rolled_back:
-            total_repaired = (
-                (clearance_result.repaired - clearance_reverted)
-                + (drill_result.repaired - drill_reverted)
+            total_repaired = (clearance_result.repaired - clearance_reverted) + (
+                drill_result.repaired - drill_reverted
             )
         else:
             total_repaired = clearance_result.repaired + drill_result.repaired
@@ -856,9 +894,7 @@ def _print_json(
                     "y": n.y,
                     "net_name": n.net_name,
                     "displacement_mm": round(n.displacement_mm, 4),
-                    "reverted": (
-                        bool(rolled_back) or (n.uuid in reverted_uuids)
-                    ),
+                    "reverted": (bool(rolled_back) or (n.uuid in reverted_uuids)),
                 }
                 for n in clearance_result.nudges
             ],
@@ -882,9 +918,7 @@ def _print_json(
                     "net_name": a.net_name,
                     "displacement_mm": round(a.displacement_mm, 4),
                     "detail": a.detail,
-                    "reverted": (
-                        bool(rolled_back) or (a.uuid in reverted_uuids)
-                    ),
+                    "reverted": (bool(rolled_back) or (a.uuid in reverted_uuids)),
                 }
                 for a in drill_result.actions
             ],
@@ -955,12 +989,8 @@ def _print_summary(
             bool(last.connectivity_partial_rollback) if last is not None else False
         )
         reverted_uuids = set(last.reverted_uuids) if last is not None else set()
-        clearance_reverted = sum(
-            1 for n in clearance_result.nudges if n.uuid in reverted_uuids
-        )
-        drill_reverted = sum(
-            1 for a in drill_result.actions if a.uuid in reverted_uuids
-        )
+        clearance_reverted = sum(1 for n in clearance_result.nudges if n.uuid in reverted_uuids)
+        drill_reverted = sum(1 for a in drill_result.actions if a.uuid in reverted_uuids)
 
         if rolled_back:
             total_repaired = 0
@@ -979,10 +1009,7 @@ def _print_summary(
         if clearance_result.total_violations > 0:
             print(f"  Clearance: {clearance_repaired}/{clearance_result.total_violations}")
         if drill_result.total_violations > 0:
-            print(
-                f"  Drill clearance: "
-                f"{drill_repaired}/{drill_result.total_violations}"
-            )
+            print(f"  Drill clearance: {drill_repaired}/{drill_result.total_violations}")
     else:
         # Multi-pass: per-pass progress
         total_repaired_all = sum(p.repaired for p in pass_results)
@@ -1001,10 +1028,7 @@ def _print_summary(
                 )
 
     if non_targeted > 0:
-        print(
-            f"  Non-repairable: {non_targeted} "
-            f"(edge clearance, dimension, silkscreen, etc.)"
-        )
+        print(f"  Non-repairable: {non_targeted} (edge clearance, dimension, silkscreen, etc.)")
 
 
 def _print_text(
@@ -1034,9 +1058,7 @@ def _print_text(
     # path), only those entries get the ``(reverted)`` tag; the others
     # remain plain so the user can see the work that survived.
     rolled_back = bool(last.connectivity_rolled_back) if last is not None else False
-    partial_rolled_back = (
-        bool(last.connectivity_partial_rollback) if last is not None else False
-    )
+    partial_rolled_back = bool(last.connectivity_partial_rollback) if last is not None else False
     reverted_uuids = set(last.reverted_uuids) if last is not None else set()
 
     def _is_reverted(uuid: str) -> bool:
@@ -1047,12 +1069,8 @@ def _print_text(
         return False
 
     # Per-category reverted counts (for partial rollback).
-    clearance_reverted_count = sum(
-        1 for n in clearance_result.nudges if n.uuid in reverted_uuids
-    )
-    drill_reverted_count = sum(
-        1 for a in drill_result.actions if a.uuid in reverted_uuids
-    )
+    clearance_reverted_count = sum(1 for n in clearance_result.nudges if n.uuid in reverted_uuids)
+    drill_reverted_count = sum(1 for a in drill_result.actions if a.uuid in reverted_uuids)
 
     print(f"\n{'=' * 60}")
     print("DRC VIOLATION REPAIR")
@@ -1082,8 +1100,7 @@ def _print_text(
     elif partial_rolled_back:
         total_reverted = clearance_reverted_count + drill_reverted_count
         summary_suffix = (
-            f" (partial rollback -- {total_reverted} nudge(s) reverted "
-            f"on regressed nets)"
+            f" (partial rollback -- {total_reverted} nudge(s) reverted on regressed nets)"
         )
     print(f"\n{action} {total_repaired}/{total_violations} violations{summary_suffix}")
     if (rolled_back or partial_rolled_back) and last is not None:
@@ -1097,8 +1114,7 @@ def _print_text(
                 )
             else:
                 print(
-                    f"  Connectivity: {before} -> {after} connected nets "
-                    f"after granular rollback."
+                    f"  Connectivity: {before} -> {after} connected nets after granular rollback."
                 )
 
     if clearance_result.total_violations > 0:
@@ -1113,17 +1129,12 @@ def _print_text(
         elif partial_rolled_back:
             effective_repaired = clearance_result.repaired - clearance_reverted_count
             header_suffix = (
-                f" ({clearance_reverted_count} reverted)"
-                if clearance_reverted_count > 0
-                else ""
+                f" ({clearance_reverted_count} reverted)" if clearance_reverted_count > 0 else ""
             )
         else:
             effective_repaired = clearance_result.repaired
             header_suffix = ""
-        print(
-            f"CLEARANCE: {effective_repaired}/{clearance_result.total_violations}"
-            f"{header_suffix}"
-        )
+        print(f"CLEARANCE: {effective_repaired}/{clearance_result.total_violations}{header_suffix}")
         if clearance_result.nudges:
             for nudge in clearance_result.nudges[:5]:
                 nudge_suffix = " (reverted)" if _is_reverted(nudge.uuid) else ""
@@ -1140,9 +1151,7 @@ def _print_text(
         elif partial_rolled_back:
             effective_drill_repaired = drill_result.repaired - drill_reverted_count
             drill_header_suffix = (
-                f" ({drill_reverted_count} reverted)"
-                if drill_reverted_count > 0
-                else ""
+                f" ({drill_reverted_count} reverted)" if drill_reverted_count > 0 else ""
             )
         else:
             effective_drill_repaired = drill_result.repaired
@@ -1213,10 +1222,7 @@ def _print_text(
             if clearance_result.skipped_exceeds_max + drill_result.skipped_exceeds_max > 0:
                 print(f"    Try increasing --max-displacement (currently {max_displacement}mm)")
         if non_targeted > 0:
-            print(
-                f"  Non-repairable: {non_targeted} "
-                f"(edge clearance, dimension, silkscreen, etc.)"
-            )
+            print(f"  Non-repairable: {non_targeted} (edge clearance, dimension, silkscreen, etc.)")
 
 
 if __name__ == "__main__":

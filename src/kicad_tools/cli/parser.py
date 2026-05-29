@@ -3307,6 +3307,29 @@ def _add_fix_drc_parser(subparsers) -> None:
         help="Path to existing DRC report (.rpt or .json)",
     )
     fix_drc_parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_all_manufacturer_names(),
+        default="jlcpcb",
+        help=(
+            "Target manufacturer for design rules (default: jlcpcb). "
+            "Only used when fix-drc generates a DRC report internally "
+            "(no --drc-report given, or with --verify); ignored when "
+            "--drc-report is supplied since clearances come from the report."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        default=2,
+        help=(
+            "Number of PCB layers used to derive clearance rules "
+            "(default: 2). Only used when generating a DRC report "
+            "internally; ignored when --drc-report is supplied."
+        ),
+    )
+    fix_drc_parser.add_argument(
         "--max-displacement",
         type=float,
         default=0.5,
