@@ -510,28 +510,20 @@ class ManufacturingAudit:
         Resolution order:
         1. Check project.kct for artifacts.schematic
         2. Default to <basename>.kicad_sch
+
+        Delegates the project.kct + sibling lookup to the shared
+        :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb` helper so
+        ``kct audit``, ``kct route``, and ``kct check`` agree on where the
+        schematic lives.  When the helper finds nothing, falls back to the
+        historical project-basename default so existing behaviour is preserved.
         """
-        project_dir = self.path.parent
+        from kicad_tools.sync.discover import resolve_schematic_for_pcb
 
-        # 1. Try to find project.kct and use artifacts.schematic
-        kct_path = project_dir / "project.kct"
-        if not kct_path.exists():
-            kct_path = project_dir.parent / "project.kct"
+        resolved = resolve_schematic_for_pcb(self.pcb_path)
+        if resolved is not None:
+            return resolved
 
-        if kct_path.exists():
-            try:
-                from kicad_tools.spec import load_spec
-
-                spec = load_spec(kct_path)
-                if spec.project and spec.project.artifacts and spec.project.artifacts.schematic:
-                    sch_path = kct_path.parent / spec.project.artifacts.schematic
-                    if sch_path.exists():
-                        logger.debug(f"Using schematic from project.kct: {sch_path}")
-                        return sch_path
-            except Exception as e:
-                logger.debug(f"Failed to load project.kct: {e}")
-
-        # 2. Default to <basename>.kicad_sch
+        # Fall back to <project-basename>.kicad_sch (historical default).
         return self.path.with_suffix(".kicad_sch")
 
     def _read_assembly_mode(self) -> str | None:
