@@ -32,6 +32,10 @@
 		)
 		(symbol "74xGxx:74LVC1G17"
 			(pin_names (offset 0.254))
+			(property "ki_fp_filters" "SOT?23* SOT?553* Texas?R-PDSO-G5?DCK* Texas?R-PDSO-N5?DRL* Texas?X2SON*0.8x0.8mm*P0.48mm*"
+				(at 0 0 0)
+				(effects (font (size 1.27 1.27)) (hide yes))
+			)
 			(symbol "74LVC1G17_0_1"
 				(rectangle
 					(start -3.81 3.81)
