@@ -1,0 +1,13 @@
+Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
+C1,100nF,Capacitor_SMD:C_0402_1005Metric,22.0000mm,18.0000mm,0.0,Top
+C2,100nF,Capacitor_SMD:C_0402_1005Metric,38.0000mm,18.0000mm,0.0,Top
+C3,100nF,Capacitor_SMD:C_0402_1005Metric,30.0000mm,28.0000mm,0.0,Top
+C4,100nF,Capacitor_SMD:C_0402_1005Metric,30.0000mm,10.0000mm,0.0,Top
+J1,USB-C,Connector_USB:USB_C_Receptacle_GCT_USB4105,30.0000mm,5.0000mm,0.0,Top
+J2,Joystick,Module:Joystick_Analog,12.0000mm,22.0000mm,0.0,Top
+SW1,Button,Button_Switch_SMD:SW_SPST_TL3342,15.0000mm,35.0000mm,0.0,Top
+SW2,Button,Button_Switch_SMD:SW_SPST_TL3342,27.0000mm,35.0000mm,0.0,Top
+SW3,Button,Button_Switch_SMD:SW_SPST_TL3342,39.0000mm,35.0000mm,0.0,Top
+SW4,Button,Button_Switch_SMD:SW_SPST_TL3342,51.0000mm,35.0000mm,0.0,Top
+U1,MCU,Package_QFP:TQFP-32_7x7mm_P0.8mm,30.0000mm,20.0000mm,0.0,Top
+Y1,16MHz,Crystal:Crystal_HC49-U_Vertical,45.0000mm,18.0000mm,0.0,Top

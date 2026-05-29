@@ -283,7 +283,68 @@ tolerances:
   # pass lands (drops the 9 fine-pitch clearance_pad_segment cluster)
   # OR the USB-C diff-pair-aware routing handles the 0.25mm pad
   # geometry without producing the intra-clearance overlap.
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 12
+  #
+  # Tightened 12 -> 11 by Issue #3150 (M-D closure, mirrors M-F/#3097).
+  # Board 03 is now measured against ``jlcpcb-tier1`` via the
+  # ``manufacturers:`` override below (the J1 USB-C escape lands a
+  # standard 0.6/0.3mm via-in-pad on U1-28 / USB_D- that tier-0 jlcpcb
+  # forbids but jlcpcb-tier1's Capability-Plus process permits outright
+  # -- same mechanism as board-04, #3033/#3038).  Swapping the
+  # measurement profile drops the 1 ``via_in_pad`` 1 -> 0 with ZERO
+  # re-route: the committed PCB already carries the standard via-in-pad,
+  # only the profile that judges it changes.  The #3128 micro-via-in-pad
+  # fallback flag is NOT needed here -- this is a pure profile-measurement
+  # change, not a routing change.
+  #
+  # Residual 11 blocking errors under ``--mfr jlcpcb-tier1`` (verified
+  # at HEAD via ``scripts/ci/check_routed_drc.py``):
+  #   * 9 ``clearance_pad_segment`` -- USB-C connector + MCU pin escape
+  #     near-misses (0.077-0.112mm vs 0.127mm threshold).  GENUINE
+  #     fine-pitch escape geometry, NOT structural.
+  #   * 1 ``clearance_segment_via`` -- 0.070mm < 0.127mm at USB_D+/USB_D-
+  #     via vs trace in J1's diff-pair landing area.  GENUINE.
+  #   * 1 ``diffpair_clearance_intra`` -- USB_D+/USB_D- at -0.200mm
+  #     centerline overlap.  STRUCTURAL allowlist entry (see below).
+  # Plus 1 ``connectivity`` (USB_D+ A6 pad stranded) which is advisory
+  # and EXCLUDED from the CI blocking gate per
+  # ``DRCChecker.ADVISORY_RULE_IDS`` (#3074).  So the gate measures 11.
+  #
+  # STRUCTURAL allowlist entry -- the 1 ``diffpair_clearance_intra`` on
+  # USB_D+/USB_D- at -0.200mm is a STRUCTURAL MANUFACTURER-TOLERANCE
+  # residual, mirroring the board-06 USB2_D+/USB2_D- entry (lines
+  # 502-519) closed by M-F / #3097 / PR #3141.  The USB-C source
+  # footprint (J1) is REVERSIBLE: D+ occupies A6 (-0.25mm) and B6
+  # (+0.25mm), while D- occupies A7 (+0.25mm) and B7 (-0.25mm) -- the
+  # two halves are intentionally mirrored across the two USB-C plug
+  # orientations (see ``generate_design.py:582-599`` ``generate_usb_connector``
+  # pad map).  Routing both A-row and B-row halves of each net forces a
+  # diagonal X-crossover at the connector centerline, producing a
+  # -0.200mm centerline overlap that no spacing-widening or re-route can
+  # resolve without (a) electrically dropping one orientation of the
+  # USB-C (single-orientation operation, a schematic change explicitly
+  # out of scope per #3150), or (b) extending the diffpair-clearance DRC
+  # rule with a connector-crossover exception (separate quality
+  # follow-up).  Identical under both jlcpcb and jlcpcb-tier1 (-0.200mm
+  # vs 0.127mm), confirming it is footprint-geometry-structural, not
+  # tier-dependent.  This residual is the documented "USB-C edge case"
+  # allowlist exit the #3150 AC permits.
+  #
+  # DEFERRED follow-up (NOT fixed in #3150) -- the 9
+  # ``clearance_pad_segment`` (0.077-0.112mm) + 1 ``clearance_segment_via``
+  # (0.070mm) genuine fine-pitch escape near-misses are real geometry
+  # work, NOT structural.  Resolving them requires a router DRC-nudge
+  # pass or a J1 USB-C footprint re-spin with wider pad spacing --
+  # exactly the family this board's commentary has tracked since #2924,
+  # and the same disposition M-F (board 06) used to defer its 25
+  # ``clearance_pad_segment`` cluster (lines 528+).  Tracked under the
+  # #3150 follow-up issue #3165.
+  #
+  # Exit clause: tighten 11 -> below once the deferred fine-pitch
+  # escape follow-up (#3165) lands (router DRC-nudge pass or J1 re-spin),
+  # dropping the 9 ``clearance_pad_segment`` + 1 ``clearance_segment_via``
+  # genuine cluster.  The 1 structural ``diffpair_clearance_intra`` stays
+  # allowlisted until the DRC rule grows a USB-C-crossover exception.
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 11
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
@@ -910,3 +971,13 @@ manufacturers:
   # this board against the same `--mfr jlcpcb-tier1` profile the
   # design ships against (issue #3033 / PR #3038).
   boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: jlcpcb-tier1
+  # Board-03's J1 USB-C escape lands a standard 0.6/0.3mm via-in-pad on
+  # U1-28 (USB_D-) that the strict tier-0 jlcpcb profile forbids but
+  # jlcpcb-tier1's Capability-Plus process permits outright -- the same
+  # via-in-pad mechanism as board-04 (#3033/#3038).  Measuring board 03
+  # against jlcpcb-tier1 drops the 1 `via_in_pad` to 0 with no re-route
+  # (the #3128 micro-via fallback is NOT needed; the committed standard
+  # via-in-pad clears under tier-1 alone), matching the profile the
+  # board now ships against in `boards/03-usb-joystick/generate_design.py`
+  # (issue #3150).
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: jlcpcb-tier1

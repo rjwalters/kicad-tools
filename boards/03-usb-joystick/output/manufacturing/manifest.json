@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "kicad_tools_version": "0.13.0",
+  "generated_at": "2026-05-29T03:00:34.193717+00:00",
+  "manufacturer": "jlcpcb",
+  "files": {
+    "bom_jlcpcb.csv": {
+      "sha256": "10b08099de62e1fb166bf4ef2c409f5764914abfa513ef8cffd1e29378fbfcac",
+      "size": 179
+    },
+    "cpl_jlcpcb.csv": {
+      "sha256": "06cd8f8f18e46f6c2c8bfe6e45d3772797cac9682bfef089b7246fb47b949b9a",
+      "size": 906
+    },
+    "gerbers.zip": {
+      "sha256": "f0a05f8fddf18fd3a20e536dac9ffa2216aa3efb47b62a6d592af7f77715bd32",
+      "size": 51190
+    },
+    "report.pdf": {
+      "sha256": "2bc103ad95ad51c40e242813014f78a2c3fce4832d29a800b8965d202facf37d",
+      "size": 32527
+    },
+    "report.md": {
+      "sha256": "7ff2d35e1f33cac6b265b8e959b424a5a05c82684a32fd2f69a646c2e4b91bef",
+      "size": 2719
+    },
+    "kicad_project.zip": {
+      "sha256": "fe7f7ed7a0b8858cf8f245021620b1f2b12935e4014a5b86338c782ded0983e5",
+      "size": 62425
+    },
+    "README.txt": {
+      "sha256": "9fac12ccd276e93dc1f74abc3126f6e10cb3bf1df06a15b8253a7e3a86ffac44",
+      "size": 761
+    }
+  },
+  "board": {
+    "name": "usb_joystick_routed",
+    "pcb_file": "usb_joystick_routed.kicad_pcb"
+  }
+}
