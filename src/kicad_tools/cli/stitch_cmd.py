@@ -3878,11 +3878,27 @@ def run_post_stitch_drc(pcb_path: Path) -> int:
     return 0
 
 
-def output_result(result: StitchResult, dry_run: bool = False, run_drc: bool = False) -> None:
-    """Output the stitching result."""
+def output_result(
+    result: StitchResult,
+    dry_run: bool = False,
+    run_drc: bool = False,
+    edited_path: Path | None = None,
+) -> None:
+    """Output the stitching result.
+
+    Args:
+        edited_path: Absolute path of the .kicad_pcb file actually edited. When
+            provided it is echoed in the header so the printed via coordinates
+            are unambiguously tied to that file's coordinate space (avoids the
+            ambiguity where a console summary is read against a different stage
+            file than the one stitch edited).
+    """
     import sys
 
-    print(f"\nStitching vias for {result.pcb_name}")
+    if edited_path is not None:
+        print(f"\nStitching vias for {edited_path.resolve()}")
+    else:
+        print(f"\nStitching vias for {result.pcb_name}")
     print("=" * 60)
 
     # Show warning for nets with no zone found (falling back to B.Cu)
@@ -4281,7 +4297,7 @@ def main(argv: list[str] | None = None) -> int:
                 micro_via_drill=args.micro_via_drill,
             )
 
-        output_result(result, dry_run=args.dry_run, run_drc=args.drc)
+        output_result(result, dry_run=args.dry_run, run_drc=args.drc, edited_path=pcb_path)
 
         # Run DRC if requested (and not dry run, and vias were actually added)
         if args.drc and not args.dry_run and result.vias_added:

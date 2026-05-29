@@ -259,7 +259,11 @@ Examples:
                 break
 
         if not args.quiet and args.format == "text" and pass_num == 1:
-            print(f"Found {total_targeted} repairable violation(s):")
+            # Engine-label the detection total so it cannot be read as a
+            # contradiction next to the pure-Python --verify counts. The
+            # detection report (from kicad-cli when available) is authoritative
+            # for what fix-drc actually repairs.
+            print(f"Found {total_targeted} repairable violation(s) (kicad-cli engine):")
             if clearance_violations:
                 print(f"  Clearance: {len(clearance_violations)}")
             if drill_violations:
@@ -695,7 +699,7 @@ def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | 
 
         kicad_cli = find_kicad_cli()
         if kicad_cli:
-            print(f"Running DRC on: {pcb_path.name}")
+            print(f"Running DRC (kicad-cli) on: {pcb_path.name}")
             drc_result = run_drc(pcb_path)
             if not drc_result.success:
                 print(f"Error running DRC: {drc_result.stderr}", file=sys.stderr)

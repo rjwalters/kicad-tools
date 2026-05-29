@@ -238,6 +238,44 @@ class TestNetStatusCLI:
         # Should show incomplete/unrouted nets
         assert "Incomplete" in captured.out or "unconnected" in captured.out.lower()
 
+    def test_incomplete_summary_header_internally_consistent(self, incomplete_pcb: Path, capsys):
+        """Bug #1 regression: --incomplete summary must describe the full board.
+
+        Previously the ``--incomplete`` filter dropped the complete nets from
+        the result but kept the original ``total_nets``, so the Summary header
+        printed e.g. ``Complete: 0`` next to ``N nets total`` -- inconsistent.
+        The header must reflect the unfiltered board: Complete + Incomplete +
+        Unrouted == total, and Complete must equal the non-``--incomplete`` run.
+        """
+        import re
+
+        def _parse_summary(out: str) -> tuple[int, int, int, int]:
+            total = int(re.search(r"Summary: (\d+) nets total", out).group(1))
+            complete = int(re.search(r"Complete:\s+(\d+)", out).group(1))
+            incomplete = int(re.search(r"Incomplete:\s+(\d+)", out).group(1))
+            unrouted = int(re.search(r"Unrouted:\s+(\d+)", out).group(1))
+            return total, complete, incomplete, unrouted
+
+        # Unfiltered run establishes the ground-truth counts.
+        main([str(incomplete_pcb)])
+        full_out = capsys.readouterr().out
+        full_total, full_complete, full_incomplete, full_unrouted = _parse_summary(full_out)
+        # The fixture must actually exercise the bug: at least one complete net.
+        assert full_complete > 0
+
+        # --incomplete run: header must match the unfiltered board exactly.
+        main([str(incomplete_pcb), "--incomplete"])
+        inc_out = capsys.readouterr().out
+        inc_total, inc_complete, inc_incomplete, inc_unrouted = _parse_summary(inc_out)
+
+        # Internally consistent: the three buckets sum to the stated total.
+        assert inc_complete + inc_incomplete + inc_unrouted == inc_total
+        # And the header describes the full board, not the filtered subset.
+        assert inc_total == full_total
+        assert inc_complete == full_complete
+        assert inc_incomplete == full_incomplete
+        assert inc_unrouted == full_unrouted
+
     def test_net_filter_found(self, incomplete_pcb: Path, capsys):
         """Test --net filter for existing net."""
         result = main([str(incomplete_pcb), "--net", "VCC"])
