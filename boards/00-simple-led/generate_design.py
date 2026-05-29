@@ -511,6 +511,46 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     output_path.write_text(output_content)
 
+    # Step 7: Create + fill copper pours for power/ground nets.
+    #
+    # VCC and GND are classified as power/pour nets (is_pour_net=True in
+    # DEFAULT_NET_CLASS_MAP), so the router auto-skips them -- they are
+    # meant to be connected via copper zones, not traces.  Without this
+    # step no zones are generated and both power nets are left stranded,
+    # producing connectivity DRC errors (issue #3148).  This mirrors what
+    # the official ``kct route`` CLI does -- ``auto_pour_if_missing()``
+    # creates the zone outlines and ``_fill_zones_after_route()`` fills
+    # them via kicad-cli (see ``src/kicad_tools/cli/route_cmd.py``).
+    # Calling both here keeps the board script in lock-step with the
+    # supported pipeline.
+    from kicad_tools.cli.route_cmd import _fill_zones_after_route
+    from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+    # Inset zones from the board edge so they satisfy the copper-to-edge
+    # clearance DRC rule (jlcpcb minimum is 0.30mm).  Without this the
+    # zone outlines sit flush with the edge cuts and DRC flags
+    # ``edge_clearance_zone`` violations.
+    edge_clearance = 0.3
+
+    print("\n7. Creating copper zones for power nets (VCC, GND)...")
+    zones_created, pour_nets = auto_pour_if_missing(
+        output_path,
+        edge_clearance=edge_clearance,
+        # GND is explicitly committed to a pour above (skip_nets=["GND"]),
+        # so force it through the all-power-board guard alongside VCC.
+        force_pour_nets=["VCC", "GND"],
+    )
+    if zones_created:
+        print(f"   Created {zones_created} zone(s) for: {', '.join(pour_nets)}")
+    else:
+        print("   Warning: No copper zones created!")
+
+    # Step 8: Fill the zones so DRC sees plane copper rather than bare
+    # outlines (issue #2516).  Must run after traces exist so the fill
+    # respects trace clearances.
+    print("\n8. Filling copper zones...")
+    _fill_zones_after_route(output_path)
+
     total_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_nets
 
