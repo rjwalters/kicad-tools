@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, LayerStack
+    from kicad_tools.router.primitives import Route
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -685,6 +686,8 @@ def _make_checkpoint_callback(
     output_path: Path,
     interval: float,
     quiet: bool = False,
+    *,
+    preserved_sexp: str = "",
 ):
     """Build a checkpoint callback for ``route_all_negotiated`` (Issue #2808).
 
@@ -709,6 +712,14 @@ def _make_checkpoint_callback(
         interval: Minimum seconds between checkpoint writes.  ``0`` (or
             negative) disables checkpointing entirely.
         quiet: Suppress the "checkpoint: wrote ..." log line.
+        preserved_sexp: Issue #3155.  S-expression of preserved existing
+            copper (segments/vias from ``--preserve-existing``).  Appended
+            to every checkpoint write so the staged input file -- which
+            ``_write_routed_pcb`` strips clean before inserting the
+            snapshot, and which the layer-escalation loop *re-reads* on the
+            next attempt -- never loses the preserved geometry.  Empty (the
+            default) means no preservation, preserving pre-#3155 checkpoint
+            bytes exactly.
 
     Returns:
         Callback or ``None``.
@@ -732,6 +743,11 @@ def _make_checkpoint_callback(
         # Route has its own to_sexp() so we can serialize directly without
         # touching the router's live state.
         route_sexp = "\n\t".join(r.to_sexp() for r in best_routes)
+        # Issue #3155: carry preserved existing copper through every
+        # checkpoint so the strip-then-rewrite (#2976) inside
+        # _write_routed_pcb does not erase it from the staged input.
+        if preserved_sexp:
+            route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
         _write_routed_pcb(
             pcb_path,
             output_path,
@@ -751,6 +767,63 @@ def _make_checkpoint_callback(
     return _checkpoint
 
 
+def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
+    """Parse existing copper from ``pcb_path`` for --preserve-existing (#3155).
+
+    Returns one :class:`Route` per net that has top-level
+    ``(segment ...)`` / ``(via ...)`` geometry.  This is captured *once* from
+    the freshly-staged input (before any routing or checkpoint write mutates
+    it) so the preserved geometry can be re-emitted by both the checkpoint
+    callback and the final write -- independent of the per-attempt
+    ``router.existing_routes``, which the layer-escalation loop would otherwise
+    lose when it re-reads a checkpoint-overwritten staged file.
+
+    Returns an empty list when the file has no routed copper or cannot be read.
+    """
+    from kicad_tools.router.optimizer.pcb import parse_segments, parse_vias
+    from kicad_tools.router.primitives import Route
+
+    try:
+        text = Path(pcb_path).read_text()
+    except OSError:
+        return []
+
+    segments_by_net = parse_segments(text)
+    vias_by_net = parse_vias(text)
+    all_net_names = set(segments_by_net) | set(vias_by_net)
+
+    routes: list[Route] = []
+    for net_name in sorted(all_net_names):
+        segs = segments_by_net.get(net_name, [])
+        vias = vias_by_net.get(net_name, [])
+        if not segs and not vias:
+            continue
+        net_id = segs[0].net if segs else vias[0].net
+        routes.append(Route(net=net_id, net_name=net_name, segments=segs, vias=vias))
+    return routes
+
+
+def _serialize_preserved_routes(
+    preserved_routes: list["Route"],
+    exclude_net_ids: set[int] | None = None,
+) -> str:
+    """Serialize preserved routes, skipping any net in ``exclude_net_ids``.
+
+    The exclusion set is the freshly-routed net ids: a net that was both
+    pre-existing *and* re-routed must be emitted from the routed copy only,
+    never twice (#3155 defensive dedupe).
+    """
+    exclude = exclude_net_ids or set()
+    parts: list[str] = []
+    for route in preserved_routes:
+        if route.net in exclude:
+            continue
+        sexp = route.to_sexp()
+        if sexp:
+            parts.append(sexp)
+    return "\n\t".join(parts)
+
+
 def _finalize_routes(
     router: "Autorouter",
     multi_pad_net_ids: set[int],
@@ -760,6 +833,8 @@ def _finalize_routes(
     strict: bool = False,
     verbose: bool = False,
     aggregate_segment_drop_threshold: float = 0.5,
+    preserve_existing: bool = False,
+    preserved_routes: list["Route"] | None = None,
 ) -> tuple[str, dict, dict]:
     """Run cleanup, compute statistics, and generate S-expressions.
 
@@ -799,6 +874,20 @@ def _finalize_routes(
             drops more than 50% of segments).  This warning fires
             *after* per-net revert so it reflects the final state
             written to disk.
+        preserve_existing: Issue #3155 incremental routing.  When True,
+            append the S-expression of every preserved route to
+            ``route_sexp`` so pre-existing copper -- manually routed nets,
+            ``--skip-nets`` geometry, and standalone stitch vias -- survives
+            the strip-then-rewrite in ``_write_routed_pcb``.  Preserved
+            routes whose net id was also (re-)routed into ``router.routes``
+            are skipped to avoid double-emission.
+        preserved_routes: The list of preserved :class:`Route` objects to
+            re-emit when ``preserve_existing`` is True.  Captured once from
+            the freshly-staged input via :func:`_capture_preserved_routes`
+            (NOT ``router.existing_routes``, which the escalation loop can
+            lose to a checkpoint-overwritten staged file).  ``None`` falls
+            back to ``router.existing_routes`` for callers that load fresh
+            and never checkpoint.
 
     Returns:
         Tuple of (route_sexp, stats, cleanup_stats) where:
@@ -894,6 +983,38 @@ def _finalize_routes(
 
     # Step 2: Generate S-expressions from the cleaned routes
     route_sexp = router.to_sexp(skip_cleanup=True)
+
+    # Issue #3155: re-emit preserved copper.  The preserved routes were
+    # captured once from the freshly-staged input (``preserved_routes``),
+    # falling back to ``router.existing_routes`` (populated by
+    # ``load_pcb_for_routing(load_existing_routes=True)``) for callers that
+    # load fresh and never checkpoint.  Neither source is touched by
+    # ``cleanup_artifacts()`` (which only walks ``router.routes``), so the
+    # geometry is re-emitted verbatim and survives the destructive strip in
+    # ``_write_routed_pcb`` (#2976).  ``Autorouter.to_sexp()`` is left
+    # untouched (regression-safe); we serialize each preserved Route directly.
+    #
+    # Defensive dedupe: a net that already exists *and* was re-routed would
+    # otherwise appear twice (once from ``router.routes``, once from the
+    # preserved set).  Skip any preserved route whose net id is present in
+    # the freshly-routed set so the freshly-routed copper wins.
+    if preserve_existing:
+        source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
+        if source_routes:
+            routed_net_ids = {r.net for r in router.routes}
+            preserved_sexp = _serialize_preserved_routes(
+                source_routes, exclude_net_ids=routed_net_ids
+            )
+            if preserved_sexp:
+                emitted = [r for r in source_routes if r.net not in routed_net_ids]
+                preserved_segments = sum(len(r.segments) for r in emitted)
+                preserved_vias = sum(len(r.vias) for r in emitted)
+                route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
+                if not quiet:
+                    flush_print(
+                        f"  Preserved existing: {preserved_segments} segments, "
+                        f"{preserved_vias} vias ({len(emitted)} routes)"
+                    )
 
     # Step 3: Compute statistics from the cleaned routes
     stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
@@ -2232,6 +2353,16 @@ def route_with_layer_escalation(
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
+    # Issue #3155: capture preserved copper ONCE from the staged input before
+    # any routing or checkpoint write mutates it.  The escalation loop below
+    # re-reads ``pcb_path`` (== the staged ``output_path``) on every attempt,
+    # and checkpoint writes overwrite it with routed-only geometry, so the
+    # per-attempt ``router.existing_routes`` cannot be trusted to retain the
+    # original copper.  Capturing here keeps it stable across all attempts.
+    _preserve = bool(getattr(args, "preserve_existing", False))
+    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
+    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+
     # Layer stacks to try (in escalation order)
     layer_configs = [
         (2, LayerStack.two_layer()),
@@ -2287,6 +2418,7 @@ def route_with_layer_escalation(
         output_path,
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
+        preserved_sexp=_preserved_sexp,
     )
 
     for attempt_num, (layer_count, layer_stack) in enumerate(layer_configs, 1):
@@ -2339,6 +2471,10 @@ def route_with_layer_escalation(
                     force_python=force_python,
                     validate_drc=not args.force,
                     strict_drc=False,
+                    # Issue #3155: incremental routing.  When set, existing
+                    # copper is loaded as grid obstacles + populated into
+                    # router.existing_routes so it survives the route pass.
+                    load_existing_routes=getattr(args, "preserve_existing", False),
                 )
         except Exception as e:
             if not quiet:
@@ -2787,6 +2923,8 @@ def route_with_layer_escalation(
         quiet=quiet,
         strict=bool(getattr(args, "strict", False)),
         verbose=bool(getattr(args, "verbose", False)),
+        preserve_existing=bool(getattr(args, "preserve_existing", False)),
+        preserved_routes=_preserved_routes,
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -2978,6 +3116,11 @@ def route_with_rule_relaxation(
         min_clearance_floor=args.min_clearance_floor,
     )
 
+    # Issue #3155: capture preserved copper once before routing/checkpoints.
+    _preserve = bool(getattr(args, "preserve_existing", False))
+    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
+    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+
     # Determine layer stack
     if args.layers == "auto":
         pcb_text = pcb_path.read_text()
@@ -3028,6 +3171,7 @@ def route_with_rule_relaxation(
         output_path,
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
+        preserved_sexp=_preserved_sexp,
     )
 
     # Issue #2823: precompute total tier count so per-attempt budget can
@@ -3080,6 +3224,8 @@ def route_with_rule_relaxation(
                     force_python=force_python,
                     validate_drc=not args.force,
                     strict_drc=False,
+                    # Issue #3155: incremental routing (see route_with_layer_escalation).
+                    load_existing_routes=getattr(args, "preserve_existing", False),
                 )
         except Exception as e:
             if not quiet:
@@ -3372,6 +3518,8 @@ def route_with_rule_relaxation(
         quiet=quiet,
         strict=bool(getattr(args, "strict", False)),
         verbose=bool(getattr(args, "verbose", False)),
+        preserve_existing=bool(getattr(args, "preserve_existing", False)),
+        preserved_routes=_preserved_routes,
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -4051,6 +4199,11 @@ def route_with_combined_escalation(
         min_clearance_floor=args.min_clearance_floor,
     )
 
+    # Issue #3155: capture preserved copper once before routing/checkpoints.
+    _preserve = bool(getattr(args, "preserve_existing", False))
+    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
+    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+
     # Layer stacks to try (in escalation order)
     layer_configs = [
         (2, LayerStack.two_layer()),
@@ -4111,6 +4264,7 @@ def route_with_combined_escalation(
         output_path,
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
+        preserved_sexp=_preserved_sexp,
     )
 
     # 2D search: prioritize fewer layers first, then stricter rules.
@@ -4183,6 +4337,8 @@ def route_with_combined_escalation(
                         force_python=force_python,
                         validate_drc=not args.force,
                         strict_drc=False,
+                        # Issue #3155: incremental routing (see route_with_layer_escalation).
+                        load_existing_routes=getattr(args, "preserve_existing", False),
                     )
             except Exception as e:
                 if not quiet:
@@ -4495,6 +4651,8 @@ def route_with_combined_escalation(
         quiet=quiet,
         strict=bool(getattr(args, "strict", False)),
         verbose=bool(getattr(args, "verbose", False)),
+        preserve_existing=bool(getattr(args, "preserve_existing", False)),
+        preserved_routes=_preserved_routes,
     )
     # Update result with post-cleanup stats
     final_result.nets_routed = final_stats["nets_routed"]
@@ -4680,6 +4838,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-nets",
         help="Comma-separated nets to skip (e.g., GND,VCC,VBUS)",
+    )
+    parser.add_argument(
+        "--preserve-existing",
+        action="store_true",
+        default=False,
+        help=(
+            "Incremental routing (Issue #3155): load existing "
+            "(segment ...)/(via ...) copper as immovable obstacles and "
+            "re-emit it unchanged, so only unconnected nets are routed. "
+            "Preserves manually-routed nets, skipped nets' geometry, and "
+            "standalone stitch vias across a route pass. Default off (full "
+            "re-route, existing copper is replaced by freshly routed nets)."
+        ),
     )
     parser.add_argument(
         "--grid",
@@ -5942,6 +6113,11 @@ def main(argv: list[str] | None = None) -> int:
     # Auto-classify pour nets and extend skip_nets
     _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
 
+    # Issue #3155: capture preserved copper once before routing/checkpoints.
+    _preserve = bool(getattr(args, "preserve_existing", False))
+    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
+    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+
     # Import router modules
     from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating
     from kicad_tools.router import (
@@ -6085,6 +6261,8 @@ def main(argv: list[str] | None = None) -> int:
                 force_python=force_python,
                 validate_drc=not args.force,
                 strict_drc=False,  # Only fail on hard constraint (grid > clearance)
+                # Issue #3155: incremental routing (see route_with_layer_escalation).
+                load_existing_routes=getattr(args, "preserve_existing", False),
                 # Issue #2610: thread --max-search-iterations through.
                 # The inner parser declares this flag with default=0 (Issue
                 # #2819), so the attribute is guaranteed to exist; the
@@ -6490,6 +6668,7 @@ def main(argv: list[str] | None = None) -> int:
             output_path,
             float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
             quiet=quiet,
+            preserved_sexp=_preserved_sexp,
         )
 
         # Define routing function for profiling
@@ -7091,6 +7270,8 @@ def main(argv: list[str] | None = None) -> int:
         quiet=quiet,
         strict=bool(getattr(args, "strict", False)),
         verbose=bool(getattr(args, "verbose", False)),
+        preserve_existing=bool(getattr(args, "preserve_existing", False)),
+        preserved_routes=_preserved_routes,
     )
 
     # Report differential pair length mismatch warnings

@@ -2304,6 +2304,19 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument("--skip-nets", help="Comma-separated nets to skip")
     route_parser.add_argument(
+        "--preserve-existing",
+        action="store_true",
+        default=False,
+        help=(
+            "Incremental routing: load existing (segment ...)/(via ...) copper "
+            "as immovable obstacles and re-emit it unchanged, so only "
+            "unconnected nets are routed. Preserves manually-routed nets, "
+            "skipped nets' geometry, and standalone stitch vias across a "
+            "route pass. Default off (full re-route, existing copper is "
+            "replaced by freshly routed nets)."
+        ),
+    )
+    route_parser.add_argument(
         "--grid",
         type=str,
         default="auto",

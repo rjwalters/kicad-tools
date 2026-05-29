@@ -171,6 +171,11 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--strategy", args.strategy])
     if args.skip_nets:
         sub_argv.extend(["--skip-nets", args.skip_nets])
+    # Issue #3155: forward --preserve-existing (incremental routing).  Both
+    # outer (parser.py) and inner (route_cmd.py) parsers declare it as a
+    # store_true defaulting to False, so only forward when the user set it.
+    if getattr(args, "preserve_existing", False):
+        sub_argv.append("--preserve-existing")
     grid_val = str(args.grid)
     if grid_val.lower() != "auto":
         sub_argv.extend(["--grid", grid_val])
