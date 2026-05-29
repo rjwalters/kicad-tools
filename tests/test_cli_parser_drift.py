@@ -41,6 +41,7 @@ model pattern.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -417,3 +418,122 @@ def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env():
             os.environ.pop("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", None)
         else:
             os.environ["KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE"] = saved
+
+
+# ---------------------------------------------------------------------------
+# Manufacturer-flag consistency across DRC-family subcommands (#3159)
+# ---------------------------------------------------------------------------
+#
+# ``--mfr`` selects the manufacturer profile that supplies clearance /
+# design-rule targets.  Every subcommand that derives rules from a
+# manufacturer profile must accept it so users do not have to learn a
+# different (or missing) flag per subcommand.
+#
+# ``fix-drc`` was the drift case (#3159): it silently pinned its
+# internally-generated DRC report to ``jlcpcb`` because it had no
+# ``--mfr`` flag at all, while ``check`` / ``audit`` / ``route`` / ``drc`` /
+# ``repair-clearance`` all declare it.
+#
+# NOTE: the *spelling* and ``choices`` source are intentionally not
+# unified here -- ``check``/``audit`` use ``get_manufacturer_ids()`` while
+# ``route``/``drc``/``fix-drc`` use ``get_all_manufacturer_names()``.  This
+# test only pins that ``--mfr`` is *present* on each; unifying the
+# parent-parser is deferred to a separate issue.
+MFR_SUBCOMMANDS = ("check", "audit", "route", "drc", "fix-drc", "repair-clearance")
+
+
+def _outer_subparser_flags(name: str) -> set[str]:
+    """Return the ``--long-form`` flags declared on the named outer subparser."""
+    from kicad_tools.cli.parser import create_parser
+
+    main_parser = create_parser()
+    for action in main_parser._actions:
+        choices = getattr(action, "choices", None)
+        if choices and name in choices:
+            return _flags_from_parser(choices[name])
+    raise AssertionError(f"could not find {name!r} subparser on outer parser")
+
+
+@pytest.mark.parametrize("subcommand", MFR_SUBCOMMANDS)
+def test_mfr_flag_is_consistent_across_subcommands(subcommand):
+    """Every manufacturer-relevant subcommand must accept ``--mfr``.
+
+    Catches future drift of the kind that left ``fix-drc`` without the
+    flag (#3159).
+    """
+    flags = _outer_subparser_flags(subcommand)
+    assert "--mfr" in flags, (
+        f"kct {subcommand} is missing --mfr; manufacturer-relevant "
+        f"subcommands must accept --mfr consistently (regresses #3159)."
+    )
+
+
+def test_fix_drc_mfr_on_inner_and_outer_parser():
+    """Direct regression test for #3159.
+
+    ``fix-drc`` had no ``--mfr`` flag on either parser, so
+    ``kct fix-drc --mfr jlcpcb-tier1 board.kicad_pcb`` failed with
+    ``error: unrecognized arguments``.  Pin both parsers so the flag
+    never goes missing again.
+    """
+    outer = _outer_subparser_flags("fix-drc")
+    assert "--mfr" in outer, (
+        "--mfr is missing from the outer parser.py fix-drc subparser (this would regress #3159)"
+    )
+
+    # Inner parser: the flag must parse without an "unrecognized
+    # arguments" error.  We parse a minimal argv and assert the value
+    # lands on the namespace.
+    from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
+
+    captured: dict[str, object] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        ns = real_parse_args(self, *args, **kwargs)
+        if getattr(self, "prog", "") == "kicad-tools fix-drc":
+            captured["ns"] = ns
+            raise SystemExit(0)
+        return ns
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            fix_drc_main(["board.kicad_pcb", "--mfr", "jlcpcb"])
+
+    assert "ns" in captured, "failed to capture inner fix-drc namespace"
+    assert getattr(captured["ns"], "mfr", None) == "jlcpcb", (
+        "inner fix-drc parser must accept --mfr and store it on the namespace (regresses #3159)"
+    )
+
+
+def test_fix_drc_threads_manufacturer_into_drc_checker():
+    """``--mfr`` must flow into the self-generated DRC report.
+
+    In the no-``--drc-report`` path, ``fix-drc`` builds its own report via
+    ``_run_python_drc`` -> ``DRCChecker(pcb, manufacturer=...)``.  Before
+    #3159 the manufacturer was never passed, so clearance targets were
+    silently pinned to jlcpcb.  Assert the selected profile reaches the
+    checker.
+    """
+    from unittest.mock import MagicMock
+
+    from kicad_tools.cli import fix_drc_cmd
+
+    fake_checker = MagicMock()
+    fake_checker.check_all.return_value = []
+
+    with (
+        patch("kicad_tools.validate.checker.DRCChecker", return_value=fake_checker) as mk,
+        patch("kicad_tools.schema.pcb.PCB.load", return_value=MagicMock()),
+        patch("kicad_tools.drc.compat.drc_results_to_report", return_value=MagicMock()),
+    ):
+        fix_drc_cmd._run_python_drc(Path("board.kicad_pcb"), manufacturer="oshpark", layers=4)
+
+    assert mk.call_count == 1, "_run_python_drc should construct exactly one DRCChecker"
+    _, kwargs = mk.call_args
+    assert kwargs.get("manufacturer") == "oshpark", (
+        "_run_python_drc must thread --mfr into DRCChecker(manufacturer=...) (regresses #3159)"
+    )
+    assert kwargs.get("layers") == 4, (
+        "_run_python_drc must thread --layers into DRCChecker(layers=...)"
+    )
