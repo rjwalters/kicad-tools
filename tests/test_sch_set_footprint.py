@@ -119,7 +119,9 @@ SPACE_INDENTED_SCHEMATIC = """\
 """
 
 
-def _write_sch(tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch") -> Path:
+def _write_sch(
+    tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch"
+) -> Path:
     p = tmp_path / name
     p.write_text(content)
     return p
@@ -253,7 +255,9 @@ class TestLoadMapping:
 
     def test_csv_with_comments(self, tmp_path):
         p = tmp_path / "map.csv"
-        p.write_text("# Header comment\nR1,Resistor_SMD:R_0805\n\n# Another comment\nC1,Capacitor_SMD:C_0603\n")
+        p.write_text(
+            "# Header comment\nR1,Resistor_SMD:R_0805\n\n# Another comment\nC1,Capacitor_SMD:C_0603\n"
+        )
         result = _load_mapping(p)
         assert len(result) == 2
 
@@ -325,10 +329,14 @@ class TestRunSetFootprint:
     def test_batch_json_mapping(self, tmp_path):
         sch = _write_sch(tmp_path)
         map_path = tmp_path / "map.json"
-        map_path.write_text(json.dumps({
-            "R1": "Resistor_SMD:R_0805_2012Metric",
-            "C1": "Capacitor_SMD:C_0603_1608Metric",
-        }))
+        map_path.write_text(
+            json.dumps(
+                {
+                    "R1": "Resistor_SMD:R_0805_2012Metric",
+                    "C1": "Capacitor_SMD:C_0603_1608Metric",
+                }
+            )
+        )
         ret = run_set_footprint(
             schematic_path=sch,
             map_path=map_path,
@@ -492,10 +500,14 @@ class TestHierarchicalSchematic:
         child.write_text(CHILD_SCHEMATIC)
 
         map_path = tmp_path / "map.json"
-        map_path.write_text(json.dumps({
-            "R1": "Resistor_SMD:R_0805_2012Metric",
-            "C2": "Capacitor_SMD:C_0805_2012Metric",
-        }))
+        map_path.write_text(
+            json.dumps(
+                {
+                    "R1": "Resistor_SMD:R_0805_2012Metric",
+                    "C2": "Capacitor_SMD:C_0805_2012Metric",
+                }
+            )
+        )
         ret = run_set_footprint(
             schematic_path=parent,
             map_path=map_path,
@@ -523,3 +535,141 @@ class TestHierarchicalSchematic:
         assert ret == 0
         # File should be unchanged
         assert child.read_text() == original_child
+
+
+# ---------------------------------------------------------------------------
+# Pin-count validation tests (require KiCad footprint libraries)
+# ---------------------------------------------------------------------------
+
+from kicad_tools.cli.sch_set_footprint import (  # noqa: E402
+    _build_symbol_pin_counts,
+    _footprint_pad_count,
+)
+from kicad_tools.footprints.library_path import detect_kicad_library_path  # noqa: E402
+
+FIXTURE_MISSING_FP = Path(__file__).parent / "fixtures" / "missing_footprint.kicad_sch"
+
+_LIBS_AVAILABLE = detect_kicad_library_path().found
+
+requires_kicad_libs = pytest.mark.skipif(
+    not _LIBS_AVAILABLE,
+    reason="KiCad footprint libraries not installed in this environment",
+)
+
+
+def _copy_fixture(tmp_path: Path) -> Path:
+    dest = tmp_path / "missing_footprint.kicad_sch"
+    dest.write_text(FIXTURE_MISSING_FP.read_text())
+    return dest
+
+
+class TestPinCountValidation:
+    def test_build_symbol_pin_counts(self):
+        counts = _build_symbol_pin_counts(FIXTURE_MISSING_FP)
+        assert counts["R1"] == 2
+        assert counts["U7"] == 5
+        assert counts["NT2"] == 2
+
+    @requires_kicad_libs
+    def test_footprint_pad_count(self):
+        paths = detect_kicad_library_path()
+        assert _footprint_pad_count(paths, "Package_TO_SOT_SMD:SOT-23-5") == 5
+        assert _footprint_pad_count(paths, "Resistor_SMD:R_0603_1608Metric") == 2
+
+    @requires_kicad_libs
+    def test_mismatch_single_ref_aborts(self, tmp_path, capsys):
+        """AC #4: assigning a 5-pad footprint to a 2-pin part fails."""
+        sch = _copy_fixture(tmp_path)
+        original = sch.read_text()
+        ret = run_set_footprint(
+            schematic_path=sch,
+            ref="R1",
+            footprint="Package_TO_SOT_SMD:SOT-23-5",
+            backup=False,
+        )
+        err = capsys.readouterr().err
+        assert ret == 1
+        assert "pin-count mismatch" in err
+        assert "2 pins" in err and "5 pads" in err
+        # File must not be modified when validation aborts.
+        assert sch.read_text() == original
+
+    @requires_kicad_libs
+    def test_match_single_ref_succeeds(self, tmp_path):
+        """AC #4: a pad-count-matching footprint assigns cleanly."""
+        sch = _copy_fixture(tmp_path)
+        ret = run_set_footprint(
+            schematic_path=sch,
+            ref="R1",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+            backup=False,
+        )
+        assert ret == 0
+        assert "Resistor_SMD:R_0603_1608Metric" in sch.read_text()
+
+    @requires_kicad_libs
+    def test_no_validate_overrides_mismatch(self, tmp_path):
+        """--no-validate (validate=False) lets a mismatch through."""
+        sch = _copy_fixture(tmp_path)
+        ret = run_set_footprint(
+            schematic_path=sch,
+            ref="R1",
+            footprint="Package_TO_SOT_SMD:SOT-23-5",
+            validate=False,
+            backup=False,
+        )
+        assert ret == 0
+        assert "Package_TO_SOT_SMD:SOT-23-5" in sch.read_text()
+
+    @requires_kicad_libs
+    def test_batch_mismatch_warns_but_succeeds(self, tmp_path, capsys):
+        """Batch mode warns on mismatch but does not abort (backward compat)."""
+        sch = _copy_fixture(tmp_path)
+        map_path = tmp_path / "map.json"
+        map_path.write_text(json.dumps({"R1": "Package_TO_SOT_SMD:SOT-23-5"}))
+        ret = run_set_footprint(
+            schematic_path=sch,
+            map_path=map_path,
+            backup=False,
+        )
+        err = capsys.readouterr().err
+        assert ret == 0
+        assert "pin-count mismatch" in err
+        # Despite the warning, the assignment is applied in batch mode.
+        assert "Package_TO_SOT_SMD:SOT-23-5" in sch.read_text()
+
+    @requires_kicad_libs
+    def test_batch_strict_aborts_on_mismatch(self, tmp_path, capsys):
+        """--strict makes a batch mismatch abort with non-zero exit."""
+        sch = _copy_fixture(tmp_path)
+        original = sch.read_text()
+        map_path = tmp_path / "map.json"
+        map_path.write_text(json.dumps({"R1": "Package_TO_SOT_SMD:SOT-23-5"}))
+        ret = run_set_footprint(
+            schematic_path=sch,
+            map_path=map_path,
+            strict=True,
+            backup=False,
+        )
+        assert ret == 1
+        assert sch.read_text() == original
+
+    def test_no_library_skips_validation(self, tmp_path, monkeypatch):
+        """AC #5: no library -> validation skipped, assignment still applies."""
+        import kicad_tools.cli.sch_set_footprint as sf
+        from kicad_tools.footprints.library_path import LibraryPaths
+
+        monkeypatch.setattr(
+            sf,
+            "detect_kicad_library_path",
+            lambda *a, **k: LibraryPaths(footprints_path=None, source="auto"),
+        )
+        sch = _copy_fixture(tmp_path)
+        ret = run_set_footprint(
+            schematic_path=sch,
+            ref="R1",
+            footprint="Package_TO_SOT_SMD:SOT-23-5",
+            backup=False,
+        )
+        assert ret == 0
+        assert "Package_TO_SOT_SMD:SOT-23-5" in sch.read_text()

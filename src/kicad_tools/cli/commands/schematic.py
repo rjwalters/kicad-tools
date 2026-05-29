@@ -10,9 +10,12 @@ def run_sch_command(args) -> int:
     """Handle schematic subcommands."""
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
-        print("Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins, pin-map,")
         print(
-            "          connections, unconnected, set-footprint, set-value, set-reference,"
+            "Commands: summary, hierarchy, labels, validate, preflight, wires, info, pins, pin-map,"
+        )
+        print(
+            "          connections, unconnected, set-footprint, suggest-footprint,"
+            " set-value, set-reference,"
             " set-symbol-property, replace,"
             " sync-hierarchy, rename-signal,"
         )
@@ -24,9 +27,7 @@ def run_sch_command(args) -> int:
             "          add-wire, add-junction,"
             " add-label, cleanup-wires, remove-wire, insert-inline,"
         )
-        print(
-            "          disconnect, reconnect-pin, move-component, remove-component, re-annotate,"
-        )
+        print("          disconnect, reconnect-pin, move-component, remove-component, re-annotate,")
         print("          repair-instances")
         return 1
 
@@ -177,6 +178,19 @@ def run_sch_command(args) -> int:
             map_path=map_path,
             dry_run=getattr(args, "dry_run", False),
             backup=getattr(args, "backup", True),
+            validate=getattr(args, "validate", True),
+            strict=getattr(args, "strict", False),
+        )
+
+    elif args.sch_command == "suggest-footprint":
+        from ..sch_suggest_footprint import run_suggest_footprint
+
+        return run_suggest_footprint(
+            schematic_path=schematic_path,
+            ref=args.ref,
+            package=getattr(args, "package", None),
+            output_format=getattr(args, "format", "text"),
+            limit=getattr(args, "limit", 20),
         )
 
     elif args.sch_command == "set-value":
@@ -512,7 +526,15 @@ def run_sch_command(args) -> int:
     elif args.sch_command == "reconnect-pin":
         from ..sch_reconnect_pin import main as reconnect_pin_main
 
-        sub_argv = [str(schematic_path), "--ref", args.ref, "--pin", args.pin, "--to-net", args.to_net]
+        sub_argv = [
+            str(schematic_path),
+            "--ref",
+            args.ref,
+            "--pin",
+            args.pin,
+            "--to-net",
+            args.to_net,
+        ]
         if args.lib_paths:
             for path in args.lib_paths:
                 sub_argv.extend(["--lib-path", path])

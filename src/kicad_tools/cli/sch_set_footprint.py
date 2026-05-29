@@ -24,11 +24,19 @@ import re
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.lib_footprints import _count_pads
 from kicad_tools.cli.modify_schematic import (
     create_backup,
     find_symbol_text_range,
     set_footprint_text,
 )
+from kicad_tools.core.sexp_file import load_footprint
+from kicad_tools.footprints.library_path import (
+    LibraryPaths,
+    detect_kicad_library_path,
+    parse_library_id,
+)
+from kicad_tools.schema import Schematic
 
 
 def _find_subsheet_files(text: str, schematic_dir: Path) -> list[Path]:
@@ -103,6 +111,66 @@ def _load_mapping(map_path: Path) -> dict[str, str]:
     return mapping
 
 
+def _footprint_pad_count(paths: LibraryPaths, footprint: str) -> int | None:
+    """Resolve a ``Library:Footprint`` (or bare name) to its pad count.
+
+    Returns ``None`` when the footprint file cannot be located -- e.g. no
+    library is installed, an unknown library/footprint, or a parse error.
+    Validation callers treat ``None`` as "cannot validate" and skip silently.
+    """
+    if not paths.found:
+        return None
+
+    lib, name = parse_library_id(footprint)
+    fp_path: Path | None = None
+    if lib:
+        fp_path = paths.get_footprint_file(lib, name, fallback_search=True)
+    else:
+        fp_path = paths.find_footprint_by_name(name)
+
+    if fp_path is None:
+        return None
+
+    try:
+        sexp = load_footprint(fp_path)
+        return _count_pads(sexp)
+    except Exception:
+        return None
+
+
+def _build_symbol_pin_counts(schematic_path: Path) -> dict[str, int]:
+    """Map symbol reference -> expected pin count for the whole hierarchy.
+
+    Prefers the resolved library-symbol pin count, falling back to the
+    instance pin list. Failures are swallowed so validation can degrade to
+    "no data" rather than aborting the assignment.
+    """
+    counts: dict[str, int] = {}
+    for sch_file in _collect_schematic_files(schematic_path):
+        try:
+            sch = Schematic.load(sch_file)
+        except Exception:
+            continue
+        for sym in sch.symbols:
+            ref = sym.reference
+            if not ref:
+                continue
+            pin_count: int | None = None
+            try:
+                lib_sym = sch.get_lib_symbol_resolved(sym.lib_id)
+                if lib_sym is not None and lib_sym.pin_count > 0:
+                    pin_count = lib_sym.pin_count
+            except Exception:
+                pin_count = None
+            if pin_count is None:
+                inst = len(sym.pins)
+                if inst > 0:
+                    pin_count = inst
+            if pin_count is not None:
+                counts[ref] = pin_count
+    return counts
+
+
 def run_set_footprint(
     schematic_path: Path,
     ref: str | None = None,
@@ -110,8 +178,18 @@ def run_set_footprint(
     map_path: Path | None = None,
     dry_run: bool = False,
     backup: bool = True,
+    validate: bool = True,
+    strict: bool = False,
+    config_override: str | Path | None = None,
 ) -> int:
     """Run the set-footprint operation.
+
+    When *validate* is True and a KiCad footprint library is available, each
+    assigned footprint's pad count is compared against the symbol's pin count
+    and a warning is emitted on mismatch. In single-ref mode (or under
+    *strict*), a mismatch makes the command exit non-zero; in batch mode the
+    mismatch only warns so existing bulk-assign workflows are unaffected.
+    When no library is available, validation is silently skipped.
 
     Returns 0 on success, 1 on error.
     """
@@ -137,6 +215,40 @@ def run_set_footprint(
     else:
         print("Error: Provide either --ref/--footprint or --map", file=sys.stderr)
         return 1
+
+    single_ref_mode = map_path is None
+
+    # --- Pin-count validation (best-effort, before any modification) ---
+    if validate:
+        paths = detect_kicad_library_path(config_override)
+        if paths.found:
+            symbol_pins = _build_symbol_pin_counts(schematic_path)
+            mismatches: list[str] = []
+            for r, fp in mapping.items():
+                expected = symbol_pins.get(r)
+                if expected is None:
+                    continue
+                pad_count = _footprint_pad_count(paths, fp)
+                if pad_count is None:
+                    continue
+                if pad_count != expected:
+                    mismatches.append(
+                        f"  {r}: symbol has {expected} pins but footprint "
+                        f"'{fp}' has {pad_count} pads"
+                    )
+            if mismatches:
+                print(
+                    "Warning: pin-count mismatch between symbol and footprint:",
+                    file=sys.stderr,
+                )
+                for m in mismatches:
+                    print(m, file=sys.stderr)
+                if single_ref_mode or strict:
+                    print(
+                        "Aborting due to pin-count mismatch (use --no-validate to override).",
+                        file=sys.stderr,
+                    )
+                    return 1
 
     # Collect all schematic files (root + sub-sheets)
     all_files = _collect_schematic_files(schematic_path)
@@ -233,8 +345,18 @@ def main(argv: list[str] | None = None):
     parser.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
+    parser.add_argument("--no-backup", action="store_true", help="Skip creating backup files")
     parser.add_argument(
-        "--no-backup", action="store_true", help="Skip creating backup files"
+        "--no-validate",
+        dest="validate",
+        action="store_false",
+        default=True,
+        help="Skip pin-count validation against the footprint library",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail on any pin-count mismatch, even in batch mode",
     )
 
     args = parser.parse_args(argv)
@@ -260,6 +382,8 @@ def main(argv: list[str] | None = None):
         map_path=args.map_file,
         dry_run=args.dry_run,
         backup=not args.no_backup,
+        validate=args.validate,
+        strict=args.strict,
     )
 
 

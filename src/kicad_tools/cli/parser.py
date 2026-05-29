@@ -623,6 +623,36 @@ def _add_sch_parser(subparsers) -> None:
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
     sch_set_fp.add_argument("--backup", action="store_true", help="Create backup before modifying")
+    sch_set_fp.add_argument(
+        "--no-validate",
+        dest="validate",
+        action="store_false",
+        default=True,
+        help="Skip pin-count validation against the footprint library",
+    )
+    sch_set_fp.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail on any pin-count mismatch, even in batch mode",
+    )
+
+    # sch suggest-footprint
+    sch_suggest_fp = sch_subparsers.add_parser(
+        "suggest-footprint",
+        help="Suggest library footprints for a symbol by pin count / package",
+    )
+    sch_suggest_fp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_suggest_fp.add_argument("--ref", required=True, help="Symbol reference (e.g., U7, R1)")
+    sch_suggest_fp.add_argument(
+        "--package",
+        help="Package keyword hint to filter/rank candidates (e.g., SOT-23, R_0603)",
+    )
+    sch_suggest_fp.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    sch_suggest_fp.add_argument(
+        "--limit", type=int, default=20, help="Maximum number of suggestions (default: 20)"
+    )
 
     # sch set-value
     sch_set_val = sch_subparsers.add_parser("set-value", help="Set value property for symbols")

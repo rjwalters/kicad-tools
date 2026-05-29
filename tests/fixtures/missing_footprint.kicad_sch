@@ -1,0 +1,204 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(uuid "00000000-0000-0000-0000-0000000000aa")
+	(paper "A4")
+	(lib_symbols
+		(symbol "Device:R"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "R_0_1"
+				(rectangle
+					(start -1.016 -2.54)
+					(end 1.016 2.54)
+					(stroke (width 0.254))
+					(fill (type none))
+				)
+			)
+			(symbol "R_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 1.27)
+					(name "~")
+					(number "1")
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 1.27)
+					(name "~")
+					(number "2")
+				)
+			)
+		)
+		(symbol "74xGxx:74LVC1G17"
+			(pin_names (offset 0.254))
+			(symbol "74LVC1G17_0_1"
+				(rectangle
+					(start -3.81 3.81)
+					(end 3.81 -3.81)
+					(stroke (width 0.254))
+					(fill (type background))
+				)
+			)
+			(symbol "74LVC1G17_1_1"
+				(pin input line
+					(at -6.35 0 0)
+					(length 2.54)
+					(name "A")
+					(number "2")
+				)
+				(pin output line
+					(at 6.35 0 180)
+					(length 2.54)
+					(name "Y")
+					(number "4")
+				)
+				(pin power_in line
+					(at 0 6.35 270)
+					(length 2.54)
+					(name "VCC")
+					(number "5")
+				)
+				(pin power_in line
+					(at 0 -6.35 90)
+					(length 2.54)
+					(name "GND")
+					(number "3")
+				)
+				(pin no_connect line
+					(at -6.35 -2.54 0)
+					(length 2.54)
+					(name "NC")
+					(number "1")
+				)
+			)
+		)
+		(symbol "Device:NetTie_2"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "NetTie_2_0_1"
+				(polyline
+					(pts (xy -1.016 0) (xy 1.016 0))
+					(stroke (width 0.254))
+					(fill (type none))
+				)
+			)
+			(symbol "NetTie_2_1_1"
+				(pin passive line
+					(at -2.54 0 0)
+					(length 1.524)
+					(name "1")
+					(number "1")
+				)
+				(pin passive line
+					(at 2.54 0 180)
+					(length 1.524)
+					(name "2")
+					(number "2")
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 50 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "11111111-1111-1111-1111-111111111111")
+		(property "Reference" "R1"
+			(at 52 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10k"
+			(at 52 50 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 50 50 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 50 50 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(pin "1" (uuid "aaaa0001-0000-0000-0000-000000000001"))
+		(pin "2" (uuid "aaaa0001-0000-0000-0000-000000000002"))
+		(instances
+			(project "test"
+				(path "/" (reference "R1") (unit 1))
+			)
+		)
+	)
+	(symbol
+		(lib_id "74xGxx:74LVC1G17")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "22222222-2222-2222-2222-222222222222")
+		(property "Reference" "U7"
+			(at 104 46 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "74LVC1G17"
+			(at 104 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(pin "1" (uuid "bbbb0001-0000-0000-0000-000000000001"))
+		(pin "2" (uuid "bbbb0001-0000-0000-0000-000000000002"))
+		(pin "3" (uuid "bbbb0001-0000-0000-0000-000000000003"))
+		(pin "4" (uuid "bbbb0001-0000-0000-0000-000000000004"))
+		(pin "5" (uuid "bbbb0001-0000-0000-0000-000000000005"))
+		(instances
+			(project "test"
+				(path "/" (reference "U7") (unit 1))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:NetTie_2")
+		(at 150 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "33333333-3333-3333-3333-333333333333")
+		(property "Reference" "NT2"
+			(at 152 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "NetTie_2"
+			(at 152 50 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" ""
+			(at 150 50 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 150 50 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(pin "1" (uuid "cccc0001-0000-0000-0000-000000000001"))
+		(pin "2" (uuid "cccc0001-0000-0000-0000-000000000002"))
+		(instances
+			(project "test"
+				(path "/" (reference "NT2") (unit 1))
+			)
+		)
+	)
+	(sheet_instances
+		(path "/" (page "1"))
+	)
+)
