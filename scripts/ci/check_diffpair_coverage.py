@@ -65,7 +65,6 @@ Why a separate script (not folded into ``check_routed_drc.py``):
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import subprocess
 import sys
@@ -162,8 +161,7 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
     script = board_dir / "generate_design.py"
     if not script.is_file():
         print(
-            f"::error::generate_design.py not found at {script} -- "
-            "cannot re-route board.",
+            f"::error::generate_design.py not found at {script} -- cannot re-route board.",
             flush=True,
         )
         return False
@@ -208,47 +206,19 @@ def find_routed_pcb(board_dir: Path) -> Path | None:
     return candidates[0]
 
 
-def _import_module_from_path(module_name: str, path: Path):
-    """Import a module by file path without adding it to sys.path permanently."""
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot create import spec for {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+# ``build_net_class_map_for_board`` was promoted to the shared
+# ``net_class_map_resolver`` module (Issue #3151) so both the diff-pair
+# coverage gate and the strict ``check_routed_drc`` error-count gate derive
+# the map the same way.  Re-export it here under the original name so this
+# script's public surface (and its tests) are unchanged.  ``scripts/ci`` is
+# on ``sys.path`` because this file lives in it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from net_class_map_resolver import build_net_class_map_for_board  # noqa: E402
 
 
-def build_net_class_map_for_board(board_dir: Path) -> dict | None:
-    """Import ``generate_design.build_net_class_map()`` from a board dir.
-
-    Returns ``None`` if the board's ``generate_design.py`` does not
-    expose a ``build_net_class_map`` function (e.g., boards 01-05).
-    In that case the diff-pair routing-continuity rule will degrade to
-    a no-op (the design doesn't declare diff-pair net classes), which is
-    correct behaviour for non-diff-pair boards.
-    """
-    script = board_dir / "generate_design.py"
-    if not script.is_file():
-        return None
-
-    # The board's generate_design.py imports its sibling modules via a
-    # ``sys.path.insert(0, str(Path(__file__).parent))`` -- replicate that
-    # so the import resolves correctly.
-    saved_path = list(sys.path)
-    sys.path.insert(0, str(board_dir))
-    try:
-        mod = _import_module_from_path(
-            f"_diffpair_coverage_generate_design_{board_dir.name.replace('-', '_')}",
-            script,
-        )
-    finally:
-        sys.path[:] = saved_path
-
-    return getattr(mod, "build_net_class_map", lambda: None)()
-
-
-def _measure_skew_data_from_pcb(pcb, engaged_pairs: set[tuple[int, int]]) -> dict[tuple[str, str], float]:
+def _measure_skew_data_from_pcb(
+    pcb, engaged_pairs: set[tuple[int, int]]
+) -> dict[tuple[str, str], float]:
     """Compute per-pair length skew from segments on a routed PCB.
 
     The :class:`~kicad_tools.validate.rules.diffpair_length_skew.DiffPairLengthSkewRule`
@@ -360,9 +330,7 @@ def count_errors_via_kct_check(pcb_path: Path) -> int:
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"kct check produced invalid JSON on {pcb_path}: {e}"
-        ) from e
+        raise RuntimeError(f"kct check produced invalid JSON on {pcb_path}: {e}") from e
 
     summary = data.get("summary", {})
     errors = summary.get("errors")
@@ -558,10 +526,7 @@ def check_board(
         annotate_error(str(routed_pcb), msg)
         failed = True
     else:
-        print(
-            f"[diffpair-coverage] OK: all {len(DIFFPAIR_RULE_IDS)} diff-pair "
-            "rules exercised."
-        )
+        print(f"[diffpair-coverage] OK: all {len(DIFFPAIR_RULE_IDS)} diff-pair rules exercised.")
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
     if error_count > allowed:
@@ -585,10 +550,7 @@ def check_board(
         if allowed == 0:
             print("[diffpair-coverage] OK: 0 errors (strict gate).")
         else:
-            print(
-                f"[diffpair-coverage] OK: {error_count} errors "
-                f"(within allowlist max {allowed})."
-            )
+            print(f"[diffpair-coverage] OK: {error_count} errors (within allowlist max {allowed}).")
 
     return 2 if failed else 0
 

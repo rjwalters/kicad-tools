@@ -59,6 +59,16 @@ import yaml
 # ``uv run kct check``) so ``kicad_tools`` is always importable.
 from kicad_tools.validate.checker import DRCChecker  # noqa: E402
 
+# Issue #3151: the strict error-count gate must count the diff-pair and
+# match-group rule families, which only fire when ``kct check`` is given a
+# ``--net-class-map`` sidecar (the rules no-op without one -- the documented
+# graceful-degradation contract).  ``net_class_map_resolver`` lives next to
+# this script in ``scripts/ci``; add that directory to ``sys.path`` so the
+# import works whether the gate is launched as ``scripts/ci/check_routed_drc.py``
+# or imported as a module by the test suite.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from net_class_map_resolver import resolve_net_class_map_sidecar  # noqa: E402
+
 DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 DEFAULT_MANUFACTURER = "jlcpcb"
 
@@ -251,6 +261,23 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
     classification.  Advisory findings are returned separately so the gate
     can still surface them in diagnostic output without gating on them.
 
+    Net-class-map awareness (Issue #3151):
+        ``kct check``'s diff-pair (``diffpair_length_skew``,
+        ``diffpair_routing_continuity``) and match-group
+        (``match_group_length_skew``) rules re-derive their working state
+        from a ``net_class_map`` and no-op when none is supplied -- the
+        documented graceful-degradation contract for external-router
+        boards.  ``generate_design.py``'s in-pipeline DRC counts those
+        families because it passes the board's sidecar; the bare ``kct
+        check`` this gate used to run did not, so the strict gate silently
+        missed 3 rule families on routed boards.  This function now
+        resolves a sidecar per board (committed ``net_class_map.json``
+        preferred, in-process ``build_net_class_map`` fallback for boards
+        like 06 that don't commit one) and threads it via ``--net-class-map``
+        so the gate counts the same errors the pipeline does.  Boards with
+        no derivable map (e.g. 01-05) run bare and the rules correctly
+        no-op -- the standalone-CLI contract is untouched.
+
     Args:
         pcb_path: Path to a ``.kicad_pcb`` file.
         mfr: Manufacturer-profile name to pass via ``--mfr`` (defaults to
@@ -279,7 +306,10 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
         "--format",
         "json",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    with resolve_net_class_map_sidecar(pcb_path) as sidecar:
+        if sidecar is not None:
+            cmd.extend(["--net-class-map", str(sidecar)])
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     # Exit 1 = tool-level failure (file not found, parse error). Exit 0 = no
     # errors. Exit 2 = errors found. Both 0 and 2 produce valid JSON on stdout.
