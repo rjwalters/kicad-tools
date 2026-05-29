@@ -1,0 +1,7 @@
+Comment,Designator,Footprint,LCSC Part #
+100nF,"C1,C2,C3,C4",,C1525
+16MHz,Y1,,C13738
+Button,"SW1,SW2,SW3,SW4",,C318884
+Joystick,J2,,C50950
+MCU,U1,,C44854
+USB-C,J1,,C165948

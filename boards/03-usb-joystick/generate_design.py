@@ -1215,6 +1215,15 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     print("=" * 60)
 
     mfg_dir = output_dir / "manufacturing"
+    # Issue #3150: board 03 is ROUTED/DRC-gated against jlcpcb-tier1
+    # (Capability-Plus permits the standard via-in-pad on U1-28 / USB_D-
+    # that tier-0 forbids; see the manufacturers: override in
+    # .github/routed-drc-tolerance.yml).  The `kct export` fab-spec layer,
+    # however, only recognises the base `jlcpcb` profile name for CPL /
+    # spec-overlay generation (tier-1 is a routing/DRC capability tier, not
+    # a distinct fab house), so the bundle exports against `jlcpcb` --
+    # exactly mirroring board-04's split (#3033/#3038): route+check at
+    # tier-1, export at jlcpcb.
     cmd = [
         sys.executable,
         "-m",
@@ -1251,8 +1260,20 @@ def run_drc(pcb_path: Path) -> bool:
     print("=" * 60)
 
     try:
+        # Issue #3150: align the local DRC summary with the jlcpcb-tier1
+        # profile this board ships and is gated against (see
+        # export_manufacturing_bundle and the manufacturers: override in
+        # .github/routed-drc-tolerance.yml).
         result = subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--mfr",
+                "jlcpcb-tier1",
+            ],
             capture_output=True,
             text=True,
         )
