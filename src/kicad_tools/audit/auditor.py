@@ -1407,6 +1407,42 @@ class ManufacturingAudit:
         except Exception:
             logger.debug("Analog component detection skipped", exc_info=True)
 
+        # Analog net advisory (Phase 2, issue #3170).
+        #
+        # Mirror the per-component block above at the NET level: name each
+        # detected analog net (audio / analog supply / analog ground /
+        # analog signal) so the engineer knows WHICH nets need analog layout
+        # care, and flag an isolated analog ground whose discrete bridge
+        # (ferrite / net-tie) to digital ground is missing.  Like the
+        # component block, this degrades gracefully -- a detection failure is
+        # logged at debug and never raises.
+        try:
+            pcb = self._load_pcb()
+            from kicad_tools.analysis.analog_detect import (
+                check_analog_ground_bridge,
+                detect_analog_nets,
+            )
+
+            for net in detect_analog_nets(pcb):
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=f"Analog net: {net.name} — {net.reason}",
+                        command=None,
+                    )
+                )
+
+            for warning in check_analog_ground_bridge(pcb):
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=f"Audit: {warning}",
+                        command=None,
+                    )
+                )
+        except Exception:
+            logger.debug("Analog net detection skipped", exc_info=True)
+
         return sorted(items, key=lambda x: x.priority)
 
     # Helper methods for extracting PCB metrics
