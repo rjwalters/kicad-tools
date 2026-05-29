@@ -843,3 +843,91 @@ class TestPipelineCmdExitCodeHandling:
                 cwd=Path("/tmp"),
             )
             assert success is True, "Exit code 0 should be treated as success"
+
+
+class TestPartialOutputLabeling:
+    """Bug #4 regression: ``route`` must clarify the _partial vs -o relationship.
+
+    On partial routing ``route`` writes the canonical ``-o`` target (full route
+    + optimize + DRC) AND a separate ``<stem>_partial.kicad_pcb`` raw snapshot
+    built from the unrouted source (pre-optimize, pre-DRC). Previously nothing
+    distinguished them, so the less-processed ``_partial`` file could be mistaken
+    for authoritative. The output must name the canonical file and label
+    ``_partial`` as a raw pre-optimize snapshot.
+    """
+
+    def _make_fake_router(self):
+        router = MagicMock()
+        router.routes = [MagicMock()]  # non-empty so save proceeds
+        router.to_sexp.return_value = "(segment (start 0 0) (end 1 1) (net 1))"
+        router.get_statistics.return_value = {
+            "nets_routed": 2,
+            "segments": 5,
+            "vias": 1,
+        }
+        return router
+
+    def test_partial_snapshot_labeled_and_canonical_named(self, tmp_path, capsys):
+        """_save_partial_results labels _partial and names the canonical output."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text('(kicad_pcb (version 20240101) (generator "test"))')
+        output_path = tmp_path / "board_routed.kicad_pcb"
+
+        saved_state = dict(route_cmd._interrupt_state)
+        try:
+            route_cmd._interrupt_state["router"] = self._make_fake_router()
+            route_cmd._interrupt_state["output_path"] = output_path
+            route_cmd._interrupt_state["pcb_path"] = pcb_path
+            route_cmd._interrupt_state["quiet"] = False
+            route_cmd._interrupt_state["best_completed_attempt"] = False
+
+            saved = route_cmd._save_partial_results()
+        finally:
+            route_cmd._interrupt_state.clear()
+            route_cmd._interrupt_state.update(saved_state)
+
+        assert saved is True
+
+        # The _partial file is written separately from the canonical -o target.
+        partial_path = output_path.with_stem(output_path.stem + "_partial")
+        assert partial_path.exists()
+
+        out = capsys.readouterr().out
+        # _partial is explicitly labeled as a non-canonical raw snapshot.
+        assert "partial snapshot saved to" in out.lower()
+        assert "pre-optimize" in out.lower()
+        assert "not canonical" in out.lower()
+        # The canonical output is named so it is unambiguous.
+        assert str(output_path) in out
+        assert "Canonical output remains" in out
+
+    def test_best_completed_attempt_writes_canonical_not_partial(self, tmp_path, capsys):
+        """Adaptive best-completed result writes to -o, not a _partial snapshot."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text('(kicad_pcb (version 20240101) (generator "test"))')
+        output_path = tmp_path / "board_routed.kicad_pcb"
+
+        saved_state = dict(route_cmd._interrupt_state)
+        try:
+            route_cmd._interrupt_state["router"] = self._make_fake_router()
+            route_cmd._interrupt_state["output_path"] = output_path
+            route_cmd._interrupt_state["pcb_path"] = pcb_path
+            route_cmd._interrupt_state["quiet"] = False
+            route_cmd._interrupt_state["best_completed_attempt"] = True
+
+            saved = route_cmd._save_partial_results()
+        finally:
+            route_cmd._interrupt_state.clear()
+            route_cmd._interrupt_state.update(saved_state)
+
+        assert saved is True
+        # A full best-completed pass goes to the canonical path, no _partial file.
+        partial_path = output_path.with_stem(output_path.stem + "_partial")
+        assert output_path.exists()
+        assert not partial_path.exists()
+        out = capsys.readouterr().out
+        assert "not canonical" not in out.lower()

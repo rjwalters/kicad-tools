@@ -1096,7 +1096,19 @@ def _save_partial_results() -> bool:
 
             if not quiet:
                 stats = router.get_statistics()
-                print(f"\n  Partial results saved to: {save_path}")
+                # The _partial file is a raw router snapshot (routes inserted
+                # into the *unrouted* source) written BEFORE optimize/cleanup
+                # and DRC. It is therefore less-processed than the canonical
+                # -o output and should not be treated as authoritative. Only
+                # the adaptive best-completed case writes to output_path itself.
+                if save_path == output_path:
+                    print(f"\n  Partial results saved to: {save_path}")
+                else:
+                    print(
+                        f"\n  Raw partial snapshot saved to: {save_path} "
+                        f"(pre-optimize, pre-DRC; NOT canonical)"
+                    )
+                    print(f"  Canonical output remains: {output_path}")
                 print(f"    Nets routed: {stats['nets_routed']}")
                 print(f"    Segments: {stats['segments']}")
                 print(f"    Vias: {stats['vias']}")
@@ -7675,6 +7687,11 @@ def main(argv: list[str] | None = None) -> int:
     if not all_nets_routed and not args.dry_run and router.routes:
         partial_saved = _save_partial_results()
         if partial_saved and not quiet:
+            # Make the authoritative file unambiguous: the -o target (written
+            # by the routing pipeline with optimize + DRC applied) is canonical;
+            # the _partial file is a raw pre-optimize snapshot (see
+            # _save_partial_results). Emit exactly one canonical-output line.
+            print(f"  Canonical output: {output_path} (full route + optimize + DRC)")
             print("  Open in KiCad to complete remaining nets manually")
 
     # Export failed nets to file if requested

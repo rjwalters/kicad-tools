@@ -649,6 +649,53 @@ class TestCLIMain:
         assert output_file.exists()
         assert "(via" in output_file.read_text()
 
+    def test_main_echoes_absolute_edited_path_with_matching_coords(
+        self, stitch_test_pcb: Path, tmp_path, capsys
+    ):
+        """Bug #2 regression: stitch must echo the absolute edited-file path.
+
+        The console previously printed only the bare filename, which let a
+        reader pair the printed via coordinates with the wrong stage file
+        (different coordinate space). Echo the absolute path of the file
+        actually edited, and verify the printed coords match the vias written
+        to that same file.
+        """
+        import re
+
+        output_file = tmp_path / "stitched_out.kicad_pcb"
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "-o", str(output_file)])
+        assert exit_code == 0
+
+        captured = capsys.readouterr()
+        out = captured.out
+
+        # The absolute path of the file actually edited must appear in stdout.
+        assert str(output_file.resolve()) in out
+
+        # Parse the via coordinates written into the edited file.
+        written_content = output_file.read_text()
+        written_coords: set[tuple[float, float]] = set()
+        for m in re.finditer(
+            r"\(via\b.*?\(at\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\)",
+            written_content,
+            re.DOTALL,
+        ):
+            written_coords.add((round(float(m.group(1)), 2), round(float(m.group(2)), 2)))
+        assert written_coords, "fixture produced no vias to verify"
+
+        # Parse the via coordinates printed to the console.
+        printed_coords = [
+            (round(float(x), 2), round(float(y), 2))
+            for x, y in re.findall(r"@ \((-?\d+\.?\d*), (-?\d+\.?\d*)\)", out)
+        ]
+        assert printed_coords, "no via coords were printed"
+
+        # Every printed coordinate must correspond to a written via (same space).
+        for coord in printed_coords:
+            assert coord in written_coords, (
+                f"printed via {coord} not found among written vias {written_coords}"
+            )
+
     def test_main_output_copies_project_file(self, stitch_test_pcb: Path, tmp_path):
         """Main with -o should copy matching .kicad_pro file."""
         # Create matching project file alongside the test PCB

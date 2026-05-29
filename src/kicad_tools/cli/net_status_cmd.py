@@ -102,7 +102,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         output_json(filtered, pcb_path, args.by_class)
     else:
-        output_text(filtered, pcb_path, args.verbose, args.by_class, args.incomplete)
+        # The summary header must always describe the unfiltered board so its
+        # counts stay internally consistent (Complete + Incomplete + Unrouted ==
+        # total). The filtered set only drives the net *list* below the header.
+        output_text(
+            filtered,
+            pcb_path,
+            args.verbose,
+            args.by_class,
+            args.incomplete,
+            summary_result=result,
+        )
 
     # Exit code
     if result.incomplete_count > 0 or result.unrouted_count > 0:
@@ -116,15 +126,25 @@ def output_text(
     verbose: bool = False,
     by_class: bool = False,
     incomplete_only: bool = False,
+    summary_result: NetStatusResult | None = None,
 ) -> None:
-    """Output results as formatted text."""
+    """Output results as formatted text.
+
+    Args:
+        result: The (possibly filtered) result used to render the net list.
+        summary_result: The unfiltered result used for the Summary header. When
+            ``--incomplete`` filters complete nets out of ``result``, the header
+            must still describe the full board so its counts stay consistent
+            (Complete + Incomplete + Unrouted == total). Defaults to ``result``.
+    """
+    summary = summary_result if summary_result is not None else result
     print(f"Net Status: {pcb_path.name}")
     print("=" * 60)
     print()
-    print(f"Summary: {result.total_nets} nets total")
-    print(f"  Complete:   {result.complete_count} (100% connected)")
-    print(f"  Incomplete: {result.incomplete_count} (partially connected)")
-    print(f"  Unrouted:   {result.unrouted_count} (0% connected)")
+    print(f"Summary: {summary.total_nets} nets total")
+    print(f"  Complete:   {summary.complete_count} (100% connected)")
+    print(f"  Incomplete: {summary.incomplete_count} (partially connected)")
+    print(f"  Unrouted:   {summary.unrouted_count} (0% connected)")
     print()
 
     if by_class:

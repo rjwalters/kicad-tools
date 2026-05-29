@@ -828,6 +828,78 @@ class TestFixDRCCLI:
         # Should contain repair count info
         assert "/" in captured.out
 
+    def test_detection_and_verify_totals_each_name_their_engine(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """Bug #3 regression: dual totals in one run must each name their engine.
+
+        ``fix-drc`` shows a detection total (authoritative, kicad-cli engine)
+        and, with ``--verify``, a pure-Python snapshot total. When both appear
+        in one run they previously read as a contradiction because the
+        detection total was unlabeled. Each total line must now state its
+        engine so no two unlabeled totals appear together.
+        """
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--verify",
+                "--dry-run",
+                "--format",
+                "text",
+            ]
+        )
+        assert result in (0, 1, 2, 3)
+
+        captured = capsys.readouterr()
+        out = captured.out
+
+        # The detection total is engine-labeled.
+        assert "Found" in out and "repairable violation(s) (kicad-cli engine)" in out
+        # The --verify snapshot total names its (different) engine.
+        assert "via pure-Python DRC" in out
+
+    def test_kicad_cli_detection_line_is_engine_labeled(self, monkeypatch, tmp_path):
+        """Bug #3 regression: the kicad-cli DRC run line names the engine.
+
+        When ``_get_drc_report`` runs DRC via kicad-cli (no ``--drc-report``),
+        the "Running DRC ..." status line must identify the kicad-cli engine.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        from kicad_tools.cli import fix_drc_cmd
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        class _FakeDRCResult:
+            success = True
+            stderr = ""
+            output_path = None
+
+        def _fake_find_kicad_cli():
+            return "/usr/bin/kicad-cli"
+
+        def _fake_run_drc(_path):
+            return _FakeDRCResult()
+
+        def _fake_load(_path):
+            # The "Running DRC (kicad-cli) on:" status line is printed BEFORE
+            # the report is loaded, so the loaded value is irrelevant here.
+            return None
+
+        monkeypatch.setattr("kicad_tools.cli.runner.find_kicad_cli", _fake_find_kicad_cli)
+        monkeypatch.setattr("kicad_tools.cli.runner.run_drc", _fake_run_drc)
+        monkeypatch.setattr("kicad_tools.drc.report.DRCReport.load", staticmethod(_fake_load))
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fix_drc_cmd._get_drc_report(None, pcb_file)
+
+        assert "Running DRC (kicad-cli) on:" in buf.getvalue()
+
     def test_quiet_mode(self, pcb_clearance: Path, report_clearance: Path, capsys):
         """--quiet should suppress all output."""
         main(
