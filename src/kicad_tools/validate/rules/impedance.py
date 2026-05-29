@@ -102,8 +102,37 @@ class ImpedanceRule(DRCRule):
     name = "Impedance Control"
     description = "Verify trace widths match target impedance requirements"
 
-    @staticmethod
-    def _get_default_specs() -> list[NetImpedanceSpec]:
+    # Single-ended heuristic name patterns (Issue #3157).  These regexes
+    # encode the *assumption* "a net whose name ends in CLK / MCLK / ETH
+    # is a high-speed 50Ω single-ended signal".  That assumption is
+    # routinely wrong: slow I2S / DAC clocks on low-speed audio boards
+    # (``DAC_CLK``, ``BCLK``, ``MCLK``, ``I2S_LRCLK``) match it but need
+    # no controlled impedance.  We keep the patterns in the default spec
+    # list (so ``_find_matching_spec`` and the impedance-driven sizing
+    # bridge can still resolve a 50Ω target for a net that genuinely is
+    # high-speed) but ``check()`` no longer *evaluates* them as DRC
+    # errors unless the caller opts in (explicit ``specs=`` or a net
+    # declared controlled-impedance via ``net_class_map``).
+    _SINGLE_ENDED_HEURISTIC_PATTERNS: tuple[str, ...] = (
+        r".*CLK$",
+        r".*MCLK$",
+        r".*ETH.*",
+    )
+
+    @classmethod
+    def _is_single_ended_heuristic_spec(cls, spec: NetImpedanceSpec) -> bool:
+        """Return True if ``spec`` is one of the built-in SE heuristic specs.
+
+        Used by :meth:`check` to suppress the name-pattern single-ended
+        50Ω assumption (Issue #3157) unless the caller opted in.  Keys on
+        the exact regex string so user-supplied or net-class-derived specs
+        (which arrive via ``specs=`` and therefore bypass this gate
+        entirely) are never accidentally classified as heuristic.
+        """
+        return spec.net_pattern in cls._SINGLE_ENDED_HEURISTIC_PATTERNS
+
+    @classmethod
+    def _get_default_specs(cls) -> list[NetImpedanceSpec]:
         """Return default impedance specifications for common signal types.
 
         Ordering note (Issue #2970): the ``+/-`` and ``_P/_N`` diff-pair
@@ -114,6 +143,14 @@ class ImpedanceRule(DRCRule):
         further ensures ``MIPI_CLK+`` does not match the single-ended
         pattern at all -- the trailing ``+`` is required to live in
         ``.*[+\\-]$``'s diff-pair pattern.
+
+        Issue #3157 note: the single-ended ``.*CLK$`` / ``.*MCLK$`` /
+        ``.*ETH.*`` patterns remain in this list so ``_find_matching_spec``
+        keeps resolving a 50Ω target for genuinely high-speed nets, but
+        :meth:`check` no longer evaluates them as DRC errors by default
+        (they were producing false positives on slow audio clock nets).
+        Single-ended impedance is now opt-in via ``net_class_map`` /
+        explicit ``specs=``.
         """
         return [
             # USB differential pairs - 90Ω differential (covers + / - / P / M / D+/D-)
@@ -126,7 +163,8 @@ class ImpedanceRule(DRCRule):
             NetImpedanceSpec(r".*_[PN]$", target_zdiff=100.0),
             NetImpedanceSpec(r".*[+\-]$", target_zdiff=100.0),
             # High-speed single-ended - 50Ω.  ``.*CLK$`` (anchored) so
-            # ``MIPI_CLK+`` does NOT mis-match as single-ended.
+            # ``MIPI_CLK+`` does NOT mis-match as single-ended.  These
+            # are SUPPRESSED in check() by default (Issue #3157).
             NetImpedanceSpec(r".*CLK$", target_z0=50.0),
             NetImpedanceSpec(r".*MCLK$", target_z0=50.0),
             NetImpedanceSpec(r".*ETH.*", target_z0=50.0),
@@ -324,6 +362,24 @@ class ImpedanceRule(DRCRule):
                 and spec.target_zdiff is not None
                 and net_name not in self._partner_map
             ):
+                continue
+
+            # Issue #3157: when running on the built-in default spec list
+            # (no explicit ``specs=`` from the caller), suppress the
+            # single-ended name-pattern heuristics (``.*CLK$`` /
+            # ``.*MCLK$`` / ``.*ETH.*`` -> 50Ω).  These assume "ends in
+            # CLK == high-speed 50Ω", which is wrong for slow I2S / DAC
+            # clock nets (``DAC_CLK``, ``BCLK``, ``MCLK``, ``I2S_LRCLK``)
+            # on low-speed audio boards -- they produced 32 false-positive
+            # impedance errors on chorus-test.  Single-ended impedance is
+            # now declarative / opt-in: a net only gets a single-ended
+            # impedance target when the caller passes an explicit ``specs=``
+            # list (e.g. derived from a net class's
+            # ``target_single_impedance`` via ``check_impedance()``'s
+            # ``net_class_map`` wiring), which sets ``_using_default_specs``
+            # to False and bypasses this gate.  The diff-pair path
+            # (``target_zdiff`` + ``detected_pairs``) is untouched.
+            if self._using_default_specs and self._is_single_ended_heuristic_spec(spec):
                 continue
 
             for trace in traces:
