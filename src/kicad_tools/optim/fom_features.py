@@ -333,3 +333,437 @@ def _mst_cost_manhattan(points: list[tuple[float, float]]) -> float:
                 if c < min_edge[k]:
                     min_edge[k] = c
     return total
+
+
+# ------------------------------------------------------------------
+# Phase 0 learned-predictor feature vector (issue #3187)
+# ------------------------------------------------------------------
+#
+# The functions below produce a fixed-length, numeric feature vector
+# suitable as input to a gradient-boosted classifier.  They are
+# *placement-only* (no segments / vias / zones required) because the
+# Phase 0 predictor's job is to estimate manufacturability *before*
+# we pay the routing compute cost.
+#
+# The feature set mirrors the issue body's enumeration:
+#
+# 1.  4   component density per quadrant
+# 2.  3   pin density in dense-package neighbourhoods (top-3 dense pkgs)
+# 3.  1   max free-channel-width estimate
+# 4.  1   rectilinear Steiner-minimum-tree total length over signal nets
+# 5.  3   component-to-edge min, pin-to-pin min, decoupling proximity median
+# 6.  1   dense-package count
+# 7.  2   analog / digital net inter-component proximity (means)
+# 8.  3   bbox aspect ratio, convex-hull area, wasted-space ratio
+# 9.  2   pour-net pad coverage, isolated-pad count
+# ----
+#         20 features total
+#
+# Each feature is finite and float-valued.  NaNs are mapped to 0.0
+# at the caller boundary so downstream estimators don't choke.
+
+
+PHASE0_FEATURE_NAMES: tuple[str, ...] = (
+    "comp_density_q1",
+    "comp_density_q2",
+    "comp_density_q3",
+    "comp_density_q4",
+    "pin_density_pkg1",
+    "pin_density_pkg2",
+    "pin_density_pkg3",
+    "free_channel_width_max",
+    "steiner_signal_length",
+    "comp_to_edge_min",
+    "pin_to_pin_min",
+    "decoupling_proximity_median",
+    "dense_package_count",
+    "analog_inter_comp_mean",
+    "digital_inter_comp_mean",
+    "bbox_aspect_ratio",
+    "convex_hull_area",
+    "wasted_space_ratio",
+    "pour_pad_coverage",
+    "isolated_pad_count",
+)
+
+
+def _safe(x: float) -> float:
+    """Coerce NaN/inf to 0.0 so the feature vector is always finite."""
+    if x is None:
+        return 0.0
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(xf) or math.isinf(xf):
+        return 0.0
+    return xf
+
+
+def _component_density_per_quadrant(features: BoardFeatures) -> tuple[float, float, float, float]:
+    """Components per mm^2 in each of the 4 board-bbox quadrants."""
+    min_x, min_y, max_x, max_y = features.board_bbox
+    mid_x = 0.5 * (min_x + max_x)
+    mid_y = 0.5 * (min_y + max_y)
+    half_w = max(max_x - mid_x, 1e-6)
+    half_h = max(max_y - mid_y, 1e-6)
+    area_q = half_w * half_h
+    counts = [0, 0, 0, 0]
+    for fp in features.footprints:
+        if fp.x >= mid_x and fp.y >= mid_y:
+            counts[0] += 1
+        elif fp.x < mid_x and fp.y >= mid_y:
+            counts[1] += 1
+        elif fp.x < mid_x and fp.y < mid_y:
+            counts[2] += 1
+        else:
+            counts[3] += 1
+    return (
+        counts[0] / area_q,
+        counts[1] / area_q,
+        counts[2] / area_q,
+        counts[3] / area_q,
+    )
+
+
+def _pin_density_dense_packages(features: BoardFeatures, top_k: int = 3) -> list[float]:
+    """For the top-K densest footprints (pins / bbox area), report pins/mm^2.
+
+    Returns ``top_k`` values, padded with zeros if there are fewer footprints.
+    A "dense package" is just whichever footprints have the largest
+    pins-per-bbox-area; this captures BGAs, QFNs, fine-pitch QFPs.
+    """
+    densities: list[float] = []
+    for fp in features.footprints:
+        n_pads = len(fp.pad_features)
+        if n_pads < 4:
+            continue
+        bx0, by0, bx1, by1 = fp.bbox
+        area = max((bx1 - bx0) * (by1 - by0), 1e-4)
+        densities.append(n_pads / area)
+    densities.sort(reverse=True)
+    out = densities[:top_k]
+    while len(out) < top_k:
+        out.append(0.0)
+    return out
+
+
+def _max_free_channel_width(features: BoardFeatures) -> float:
+    """Largest gap between adjacent footprint bboxes along the X axis.
+
+    A crude proxy for routing channels: project all footprint bboxes
+    onto the X axis, sort, and find the maximum free width between
+    consecutive intervals.  Returns 0 if there are fewer than 2 footprints
+    or all footprints overlap horizontally.
+    """
+    if len(features.footprints) < 2:
+        return 0.0
+    intervals = []
+    for fp in features.footprints:
+        bx0, _, bx1, _ = fp.bbox
+        intervals.append((bx0, bx1))
+    intervals.sort()
+    merged: list[tuple[float, float]] = []
+    for lo, hi in intervals:
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    if len(merged) < 2:
+        return 0.0
+    gaps = [merged[i + 1][0] - merged[i][1] for i in range(len(merged) - 1)]
+    return max(0.0, max(gaps))
+
+
+def _steiner_total_signal_length(features: BoardFeatures) -> float:
+    """Sum of RSMT lower-bound lengths across all multi-pad signal nets.
+
+    Power nets (heuristically detected by name) are excluded so the
+    feature captures signal congestion rather than plane-net pad count.
+    """
+    total = 0.0
+    for net_num, pads in features.nets_to_pads.items():
+        if len(pads) < 2:
+            continue
+        name = features.net_names.get(net_num, "") or ""
+        if _looks_like_power_net(name):
+            continue
+        total += steiner_lower_bound(pads)
+    return total
+
+
+def _looks_like_power_net(name: str) -> bool:
+    """Crude power-net heuristic (avoid importing the heavier classifier here)."""
+    if not name:
+        return False
+    upper = name.upper()
+    return (
+        upper.startswith("+")
+        or upper.startswith("GND")
+        or upper in {"VCC", "VDD", "VSS", "VBUS"}
+        or upper.startswith(("VCC", "VDD", "VSS"))
+    )
+
+
+def _component_to_edge_min(features: BoardFeatures) -> float:
+    """Minimum distance from any footprint centre to the board bbox edge."""
+    min_x, min_y, max_x, max_y = features.board_bbox
+    best = math.inf
+    for fp in features.footprints:
+        d = min(fp.x - min_x, max_x - fp.x, fp.y - min_y, max_y - fp.y)
+        if d < best:
+            best = d
+    return 0.0 if best is math.inf else max(0.0, best)
+
+
+def _pin_to_pin_min(features: BoardFeatures) -> float:
+    """Minimum Euclidean distance between any two pads on different footprints.
+
+    Within-footprint pads (same reference) are excluded; if there are <2
+    cross-footprint pads we return 0.  O(N^2) is fine at the scale we
+    care about (< ~5K pads per board for Phase 0 seeds).
+    """
+    all_pads: list[PadFeature] = []
+    for fp in features.footprints:
+        all_pads.extend(fp.pad_features)
+    if len(all_pads) < 2:
+        return 0.0
+    best = math.inf
+    n = len(all_pads)
+    # Bail out for huge boards: O(N^2) only up to 4000 pads (~16M comps).
+    cap = min(n, 4000)
+    for i in range(cap):
+        pi = all_pads[i]
+        for j in range(i + 1, cap):
+            pj = all_pads[j]
+            if pi.reference == pj.reference:
+                continue
+            d = euclidean((pi.x, pi.y), (pj.x, pj.y))
+            if d < best:
+                best = d
+    return 0.0 if best is math.inf else best
+
+
+def _decoupling_proximity_median(features: BoardFeatures) -> float:
+    """Median distance from each decoupling-cap pad to its nearest IC pad.
+
+    Heuristic: any footprint whose reference starts with "C" and that
+    sits on a power-looking net is treated as a decoupling cap.
+    The IC set is any footprint with >= 8 pads.  When there are no
+    decoupling caps or no ICs we return 0.0.
+    """
+    ic_pads: list[PadFeature] = []
+    for fp in features.footprints:
+        if len(fp.pad_features) >= 8:
+            ic_pads.extend(fp.pad_features)
+    if not ic_pads:
+        return 0.0
+    distances: list[float] = []
+    for fp in features.footprints:
+        if not (fp.reference or "").upper().startswith("C"):
+            continue
+        # Only score caps that touch a power-looking net on any pad
+        if not any(_looks_like_power_net(p.net_name) for p in fp.pad_features):
+            continue
+        for cap_pad in fp.pad_features:
+            d_best = min(euclidean((cap_pad.x, cap_pad.y), (p.x, p.y)) for p in ic_pads)
+            distances.append(d_best)
+    if not distances:
+        return 0.0
+    distances.sort()
+    mid = len(distances) // 2
+    if len(distances) % 2 == 1:
+        return distances[mid]
+    return 0.5 * (distances[mid - 1] + distances[mid])
+
+
+def _dense_package_count(features: BoardFeatures) -> int:
+    """Number of footprints with >= 16 pads (BGAs, large QFPs, etc.)."""
+    return sum(1 for fp in features.footprints if len(fp.pad_features) >= 16)
+
+
+def _analog_digital_inter_component(features: BoardFeatures) -> tuple[float, float]:
+    """Mean inter-footprint distance restricted to analog vs digital nets.
+
+    Heuristic: a net whose name contains "ADC", "DAC", "ANA", "SIG", "AIN"
+    is analog; nets whose name starts with "D" (e.g. D0, DIO, DATA) or
+    contain "SCK", "MOSI", "MISO", "I2C", "UART", "USB" are digital.
+    Everything else is ignored.  Returns (analog_mean, digital_mean) of
+    *per-net pair-distance means* across qualifying nets.  Zero when no
+    such nets exist.
+    """
+    analog: list[float] = []
+    digital: list[float] = []
+    analog_kw = ("ADC", "DAC", "ANA", "SIG", "AIN", "AOUT")
+    digital_kw = ("D0", "D1", "D2", "DIO", "DATA", "SCK", "MOSI", "MISO", "I2C", "UART", "USB")
+    for net_num, pads in features.nets_to_pads.items():
+        name = (features.net_names.get(net_num, "") or "").upper()
+        if not name:
+            continue
+        if any(k in name for k in analog_kw):
+            target = analog
+        elif name.startswith(digital_kw) or any(k in name for k in digital_kw):
+            target = digital
+        else:
+            continue
+        refs = {p.reference for p in pads}
+        if len(refs) < 2:
+            continue
+        # Mean pair distance between distinct footprints on this net
+        pairs: list[float] = []
+        # Aggregate one pad per ref for a coarse measure
+        ref_to_xy: dict[str, tuple[float, float]] = {}
+        for p in pads:
+            ref_to_xy.setdefault(p.reference, (p.x, p.y))
+        refs_list = list(ref_to_xy)
+        for i in range(len(refs_list)):
+            for j in range(i + 1, len(refs_list)):
+                pairs.append(euclidean(ref_to_xy[refs_list[i]], ref_to_xy[refs_list[j]]))
+        if pairs:
+            target.append(sum(pairs) / len(pairs))
+    a_mean = (sum(analog) / len(analog)) if analog else 0.0
+    d_mean = (sum(digital) / len(digital)) if digital else 0.0
+    return a_mean, d_mean
+
+
+def _bbox_aspect_ratio(features: BoardFeatures) -> float:
+    """Aspect ratio of the board bbox (max(w,h) / min(w,h))."""
+    min_x, min_y, max_x, max_y = features.board_bbox
+    w = max_x - min_x
+    h = max_y - min_y
+    if w <= 0 or h <= 0:
+        return 1.0
+    return max(w, h) / min(w, h)
+
+
+def _convex_hull_area(features: BoardFeatures) -> float:
+    """Area of the convex hull of all footprint centres (mm^2).
+
+    Uses the monotone-chain algorithm; no external deps.
+    """
+    pts = [(fp.x, fp.y) for fp in features.footprints]
+    if len(pts) < 3:
+        return 0.0
+    pts = sorted(set(pts))
+    if len(pts) < 3:
+        return 0.0
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[float, float]] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper: list[tuple[float, float]] = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1] + upper[:-1]
+    # Shoelace.
+    n = len(hull)
+    s = 0.0
+    for i in range(n):
+        x1, y1 = hull[i]
+        x2, y2 = hull[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return abs(s) * 0.5
+
+
+def _wasted_space_ratio(features: BoardFeatures) -> float:
+    """1 - (sum of footprint bbox areas / board bbox area).
+
+    Higher = more empty space (which may correlate with both
+    sparse-easy-to-route boards and poorly-organised layouts).
+    """
+    min_x, min_y, max_x, max_y = features.board_bbox
+    board_area = max((max_x - min_x) * (max_y - min_y), 1e-4)
+    fp_area_total = 0.0
+    for fp in features.footprints:
+        bx0, by0, bx1, by1 = fp.bbox
+        fp_area_total += max(bx1 - bx0, 0.0) * max(by1 - by0, 0.0)
+    ratio = 1.0 - fp_area_total / board_area
+    return max(0.0, min(1.0, ratio))
+
+
+def _pour_pad_coverage(features: BoardFeatures) -> float:
+    """Fraction of pads that lie on a power-looking net.
+
+    A high coverage means most ground/power pads can be served by a
+    pour rather than traces, which usually correlates with easier
+    routing.
+    """
+    total = 0
+    pour = 0
+    for fp in features.footprints:
+        for p in fp.pad_features:
+            total += 1
+            if _looks_like_power_net(p.net_name):
+                pour += 1
+    if total == 0:
+        return 0.0
+    return pour / total
+
+
+def _isolated_pad_count(features: BoardFeatures) -> int:
+    """Number of pads whose net has only one pad (or no net assignment).
+
+    These are dead-end pads -- either truly unconnected or the only
+    consumer of a single-pad net, both of which look unusual to the
+    classifier.
+    """
+    # Count pads per net first
+    net_pad_counts: dict[int, int] = {}
+    for fp in features.footprints:
+        for p in fp.pad_features:
+            net_pad_counts[p.net_number] = net_pad_counts.get(p.net_number, 0) + 1
+    count = 0
+    for fp in features.footprints:
+        for p in fp.pad_features:
+            if p.net_number == 0 or net_pad_counts.get(p.net_number, 0) == 1:
+                count += 1
+    return count
+
+
+def extract_phase0_features(features: BoardFeatures) -> dict[str, float]:
+    """Compute the Phase 0 numeric feature vector.
+
+    Returns a dict with one entry per name in :data:`PHASE0_FEATURE_NAMES`.
+    Order is deterministic (matches :data:`PHASE0_FEATURE_NAMES`).
+    """
+    q = _component_density_per_quadrant(features)
+    pin_dens = _pin_density_dense_packages(features, top_k=3)
+    a_mean, d_mean = _analog_digital_inter_component(features)
+
+    values: dict[str, float] = {
+        "comp_density_q1": _safe(q[0]),
+        "comp_density_q2": _safe(q[1]),
+        "comp_density_q3": _safe(q[2]),
+        "comp_density_q4": _safe(q[3]),
+        "pin_density_pkg1": _safe(pin_dens[0]),
+        "pin_density_pkg2": _safe(pin_dens[1]),
+        "pin_density_pkg3": _safe(pin_dens[2]),
+        "free_channel_width_max": _safe(_max_free_channel_width(features)),
+        "steiner_signal_length": _safe(_steiner_total_signal_length(features)),
+        "comp_to_edge_min": _safe(_component_to_edge_min(features)),
+        "pin_to_pin_min": _safe(_pin_to_pin_min(features)),
+        "decoupling_proximity_median": _safe(_decoupling_proximity_median(features)),
+        "dense_package_count": float(_dense_package_count(features)),
+        "analog_inter_comp_mean": _safe(a_mean),
+        "digital_inter_comp_mean": _safe(d_mean),
+        "bbox_aspect_ratio": _safe(_bbox_aspect_ratio(features)),
+        "convex_hull_area": _safe(_convex_hull_area(features)),
+        "wasted_space_ratio": _safe(_wasted_space_ratio(features)),
+        "pour_pad_coverage": _safe(_pour_pad_coverage(features)),
+        "isolated_pad_count": float(_isolated_pad_count(features)),
+    }
+    # Sanity: keys match exactly the canonical names.
+    assert set(values) == set(PHASE0_FEATURE_NAMES)
+    return values
+
+
+def extract_phase0_features_from_pcb(pcb: PCB) -> dict[str, float]:
+    """Convenience wrapper: extract features then build the Phase 0 vector."""
+    return extract_phase0_features(extract_features(pcb))

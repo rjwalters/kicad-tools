@@ -321,3 +321,165 @@ def test_footprint_feature_bbox_with_pads():
         pad_features=[_pad_feature(0, 0), _pad_feature(10, 20)],
     )
     assert fp.bbox == (0, 0, 10, 20)
+
+
+# ----------------------------------------------------------------------
+# Phase 0 numeric feature vector  (issue #3187)
+# ----------------------------------------------------------------------
+
+
+def _bf_with_footprints(footprints, board_bbox=(0.0, 0.0, 20.0, 20.0)):
+    bf = BoardFeatures()
+    bf.footprints = list(footprints)
+    bf.board_bbox = board_bbox
+    # Re-populate nets_to_pads from the footprints' pads.
+    for fp in footprints:
+        for pad in fp.pad_features:
+            if pad.net_number > 0:
+                bf.nets_to_pads.setdefault(pad.net_number, []).append(pad)
+                bf.net_names.setdefault(pad.net_number, pad.net_name)
+    return bf
+
+
+def _ff(ref, x, y, pads=(), layer="F.Cu", fixed=False):
+    return FootprintFeature(
+        reference=ref,
+        value="",
+        name="",
+        x=x,
+        y=y,
+        rotation=0.0,
+        layer=layer,
+        locked=False,
+        is_fixed=fixed,
+        pad_features=list(pads),
+    )
+
+
+def test_phase0_feature_count_matches_names():
+    from kicad_tools.optim.fom_features import (
+        PHASE0_FEATURE_NAMES,
+        extract_phase0_features,
+    )
+
+    # Build a trivial board with one footprint + one pad.
+    bf = _bf_with_footprints([_ff("R1", 5, 5, [_pad_feature(5, 5, net=1)])])
+    feats = extract_phase0_features(bf)
+    assert set(feats) == set(PHASE0_FEATURE_NAMES)
+    assert len(feats) == 20
+
+
+def test_phase0_features_finite_on_empty_board():
+    from kicad_tools.optim.fom_features import (
+        PHASE0_FEATURE_NAMES,
+        extract_phase0_features,
+    )
+
+    feats = extract_phase0_features(BoardFeatures())
+    assert set(feats) == set(PHASE0_FEATURE_NAMES)
+    import math as _m
+
+    for n, v in feats.items():
+        assert _m.isfinite(v), f"feature {n} = {v} is not finite"
+
+
+def test_phase0_component_density_per_quadrant():
+    from kicad_tools.optim.fom_features import _component_density_per_quadrant
+
+    # Board 0..10 x 0..10.  Put one comp in each quadrant.
+    fps = [
+        _ff("R1", 7.5, 7.5, [_pad_feature(7.5, 7.5)]),  # Q1
+        _ff("R2", 2.5, 7.5, [_pad_feature(2.5, 7.5)]),  # Q2
+        _ff("R3", 2.5, 2.5, [_pad_feature(2.5, 2.5)]),  # Q3
+        _ff("R4", 7.5, 2.5, [_pad_feature(7.5, 2.5)]),  # Q4
+    ]
+    bf = _bf_with_footprints(fps, board_bbox=(0.0, 0.0, 10.0, 10.0))
+    q1, q2, q3, q4 = _component_density_per_quadrant(bf)
+    # Each quadrant is 5x5 = 25 mm^2 with 1 component each.
+    assert q1 == pytest.approx(1 / 25)
+    assert q2 == pytest.approx(1 / 25)
+    assert q3 == pytest.approx(1 / 25)
+    assert q4 == pytest.approx(1 / 25)
+
+
+def test_phase0_dense_package_count_threshold():
+    from kicad_tools.optim.fom_features import _dense_package_count
+
+    # 8 pads -> not dense; 16 pads -> dense.
+    fps = [
+        _ff("U1", 5, 5, [_pad_feature(5, 5) for _ in range(8)]),
+        _ff("U2", 5, 5, [_pad_feature(5, 5) for _ in range(20)]),
+    ]
+    bf = _bf_with_footprints(fps)
+    assert _dense_package_count(bf) == 1
+
+
+def test_phase0_isolated_pad_count_picks_up_unconnected():
+    from kicad_tools.optim.fom_features import _isolated_pad_count
+
+    # 3 pads on net 0 (isolated) + 2 pads on net 1 (connected) = 3 isolated.
+    fps = [
+        _ff(
+            "R1",
+            0,
+            0,
+            [
+                _pad_feature(0, 0, net=0),
+                _pad_feature(1, 0, net=0),
+                _pad_feature(2, 0, net=0),
+                _pad_feature(3, 0, net=1),
+                _pad_feature(4, 0, net=1),
+            ],
+        )
+    ]
+    bf = _bf_with_footprints(fps)
+    assert _isolated_pad_count(bf) == 3
+
+
+def test_phase0_pour_pad_coverage_picks_power_nets():
+    from kicad_tools.optim.fom_features import _pour_pad_coverage
+
+    fps = [
+        _ff(
+            "U1",
+            0,
+            0,
+            [
+                _pad_feature(0, 0, net=1, name="GND"),
+                _pad_feature(1, 0, net=2, name="VCC"),
+                _pad_feature(2, 0, net=3, name="DATA"),
+                _pad_feature(3, 0, net=4, name="CLK"),
+            ],
+        )
+    ]
+    bf = _bf_with_footprints(fps)
+    # 2 of 4 pads are power-looking.
+    assert _pour_pad_coverage(bf) == pytest.approx(0.5)
+
+
+def test_phase0_bbox_aspect_ratio_square_is_one():
+    from kicad_tools.optim.fom_features import _bbox_aspect_ratio
+
+    bf = BoardFeatures(board_bbox=(0, 0, 10, 10))
+    assert _bbox_aspect_ratio(bf) == 1.0
+
+
+def test_phase0_bbox_aspect_ratio_2_to_1():
+    from kicad_tools.optim.fom_features import _bbox_aspect_ratio
+
+    bf = BoardFeatures(board_bbox=(0, 0, 20, 10))
+    assert _bbox_aspect_ratio(bf) == 2.0
+
+
+def test_phase0_convex_hull_area_unit_square():
+    from kicad_tools.optim.fom_features import _convex_hull_area
+
+    bf = _bf_with_footprints(
+        [
+            _ff("F1", 0, 0),
+            _ff("F2", 1, 0),
+            _ff("F3", 1, 1),
+            _ff("F4", 0, 1),
+        ]
+    )
+    assert _convex_hull_area(bf) == pytest.approx(1.0)

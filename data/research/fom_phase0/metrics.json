@@ -1,0 +1,22 @@
+{
+  "ap_global_oof": 0.7007561531247714,
+  "ap_mean": 0.6859243744915324,
+  "auc_global_oof": 0.9188762626262627,
+  "auc_mean": 0.8452380952380952,
+  "auc_std": 0.05059523809523814,
+  "brier_mean": 0.18352556068675235,
+  "decision": "escalate",
+  "decision_rationale": "Global OOF AUC = 0.919 > 0.70 -- signal exists. Phase 1: integrate as residual into compute_fom(..., predictor=load_classifier(), beta=0.1).",
+  "n_at_pred_gt_0p8": 6,
+  "n_folds": 5,
+  "n_positive": 32,
+  "n_samples": 131,
+  "precision_at_pred_gt_0p8": 0.6666666666666666,
+  "seeds_in_corpus": [
+    "charlieplex_3x3",
+    "matchgroup_test",
+    "stm32_devboard",
+    "usb_joystick",
+    "voltage_divider"
+  ]
+}
