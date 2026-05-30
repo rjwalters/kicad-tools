@@ -107,6 +107,21 @@ datasheet = [
 placement = [
     "cmaes>=0.12.0",
 ]
+# Research utilities for the FOM weight-calibration pipeline (#3187 + #3188):
+# - pymoo: NSGA-II Pareto sweep in scripts/research/calibrate_fom.py
+# - pandas/pyarrow: labels.parquet loaders in notebooks
+# - scikit-learn/joblib: Phase 0 routability classifier (used by
+#   scripts/research/train_phase0_classifier.py and demo_integration.py)
+# Not required at runtime -- install with `uv sync --extra research` if you
+# want to re-run scripts/research/calibrate_fom.py or load the classifier
+# via compute_fom's predictor hook.
+research = [
+    "pymoo>=0.6.1.6",
+    "pandas>=2.3.3",
+    "pyarrow>=24.0.0",
+    "scikit-learn>=1.7.2",
+    "joblib>=1.5.3",
+]
 # KiCad IPC API client (live instance interaction, KiCad 9.0+)
 ipc = [
     "pynng>=0.8.0",

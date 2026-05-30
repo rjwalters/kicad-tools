@@ -136,7 +136,26 @@ class FOMWeights:
 
 
 def default_weights() -> FOMWeights:
-    """Return the uniform-1.0 default weights (issue #3186 baseline)."""
+    """Return the production default FOM weights.
+
+    Resolution order (highest priority first):
+
+    1. If ``src/kicad_tools/optim/weights/default.yaml`` exists *and* contains
+       calibrated (non-uniform) values, use those. This is the file written
+       by ``scripts/research/calibrate_fom.py`` (issue #3188) and is
+       considered the production default.
+    2. Otherwise, fall back to the uniform 1.0 baseline from #3186.
+
+    This indirection lets the CLI flip its default by editing the YAML
+    without touching code, and lets ``--fom-config legacy.yaml`` continue
+    to opt into the wirelength-only behaviour from PR #3114.
+    """
+    default_yaml = Path(__file__).resolve().parent / "weights" / "default.yaml"
+    if default_yaml.is_file():
+        try:
+            return load_weights_from_yaml(default_yaml)
+        except Exception:  # noqa: BLE001 -- never crash on a malformed default
+            pass
     return FOMWeights()
 
 
@@ -505,5 +524,8 @@ def load_weights_from_yaml(path: str | Path) -> FOMWeights:
     if isinstance(data, dict) and "weights" in data and isinstance(data["weights"], dict):
         data = data["weights"]
     if not isinstance(data, dict):
-        return default_weights()
+        # Use uniform-1.0 fallback directly (not default_weights()) to avoid
+        # an infinite loop: default_weights() loads its YAML via this
+        # function, and a malformed default YAML would recurse forever.
+        return FOMWeights()
     return FOMWeights.from_dict(data)
