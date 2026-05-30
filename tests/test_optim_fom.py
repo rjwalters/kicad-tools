@@ -45,10 +45,29 @@ class _StubReport:
 # --------------------------------------------------------------------
 
 
-def test_default_weights_are_uniform_one():
+def test_default_weights_match_calibrated_yaml():
+    """Default weights should load from the calibrated YAML (issue #3188).
+
+    Before #3188 these were the uniform 1.0 placeholder from #3186; the
+    Pareto-sweep calibration shipped in #3188 replaces them with the values
+    in ``src/kicad_tools/optim/weights/default.yaml``.
+    """
     w = default_weights()
+    # Sanity: not the uniform-1.0 placeholder.
+    assert not all(getattr(w, n) == 1.0 for n in SOFT_TERM_NAMES), (
+        "default_weights() should be the calibrated values, not uniform 1.0"
+    )
+    # Cross-check against the package YAML.
+    from pathlib import Path
+
+    from kicad_tools.optim.fom import load_weights_from_yaml
+
+    pkg_default = Path(__file__).resolve().parents[1] / "src/kicad_tools/optim/weights/default.yaml"
+    yaml_w = load_weights_from_yaml(pkg_default)
     for name in SOFT_TERM_NAMES:
-        assert getattr(w, name) == 1.0
+        assert getattr(w, name) == getattr(yaml_w, name), (
+            f"default_weights() {name} mismatch with package YAML"
+        )
 
 
 def test_legacy_weights_zero_all_but_length():
@@ -125,11 +144,23 @@ def test_load_weights_from_yaml_non_dict_root(tmp_path: Path):
 
 
 def test_load_weights_from_yaml_real_default_yaml():
-    # Sanity-check the shipped default.yaml loads and produces uniform 1.0.
+    """Sanity-check that the shipped default.yaml loads as the calibrated
+    values produced by issue #3188's Pareto sweep.
+
+    Before #3188 this YAML was uniform 1.0; after #3188 it carries the
+    Pareto-derived values. The exact numbers may drift if the calibration
+    pipeline is rerun, so we test for structural properties (positive,
+    non-uniform, all 10 terms present) rather than hard-coded numbers.
+    """
     here = Path(__file__).parent.parent / "src/kicad_tools/optim/weights/default.yaml"
     w = load_weights_from_yaml(here)
+    # All terms present and positive.
     for name in SOFT_TERM_NAMES:
-        assert getattr(w, name) == 1.0
+        v = getattr(w, name)
+        assert v > 0.0, f"{name} weight should be positive, got {v}"
+    # Not the uniform 1.0 placeholder (issue #3188 calibration).
+    values = [getattr(w, n) for n in SOFT_TERM_NAMES]
+    assert len(set(values)) > 1, "default weights should be non-uniform after #3188 calibration"
 
 
 def test_load_weights_from_yaml_real_legacy_yaml():

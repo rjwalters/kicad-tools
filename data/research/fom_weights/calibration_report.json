@@ -1,0 +1,227 @@
+{
+  "per_board_weights": {
+    "voltage_divider": {
+      "trace_length_excess": 20.483231199100484,
+      "weighted_via_count": 0.01997073751831635,
+      "turning_penalty": 0.02573677940981712,
+      "net_congestion_variance": 0.026003252639694004,
+      "match_group_skew": 2.8201650384413264,
+      "diff_pair_clearance_margin": 1.0809164669418787,
+      "decoupling_proximity": 34.84904246008392,
+      "crossing_count": 0.05002826026138534,
+      "thermal_spread": 13.122354318076555,
+      "compactness": 0.5028739414600485
+    },
+    "charlieplex_3x3": {
+      "trace_length_excess": 0.8482750835896631,
+      "weighted_via_count": 0.011539747085430067,
+      "turning_penalty": 0.012576297945132778,
+      "net_congestion_variance": 0.3910993327839835,
+      "match_group_skew": 1.229046336442692,
+      "diff_pair_clearance_margin": 9.241969804666848,
+      "decoupling_proximity": 98.17005521933983,
+      "crossing_count": 1.178214472042112,
+      "thermal_spread": 0.021083548429736726,
+      "compactness": 0.01759755298272926
+    },
+    "usb_joystick": {
+      "trace_length_excess": 3.142808870848441,
+      "weighted_via_count": 0.018476220708852905,
+      "turning_penalty": 0.08147298147119733,
+      "net_congestion_variance": 1.642910459009162,
+      "match_group_skew": 0.07385504529341677,
+      "diff_pair_clearance_margin": 0.5406239711912681,
+      "decoupling_proximity": 0.4034386534647333,
+      "crossing_count": 0.02148934131029975,
+      "thermal_spread": 63.79547420514014,
+      "compactness": 54.23045345705992
+    },
+    "stm32_devboard": {
+      "trace_length_excess": 2.997073759348795,
+      "weighted_via_count": 0.4386854101101125,
+      "turning_penalty": 0.059564322551612016,
+      "net_congestion_variance": 5.3948217340703115,
+      "match_group_skew": 6.957544958653826,
+      "diff_pair_clearance_margin": 0.19033775598962066,
+      "decoupling_proximity": 0.021374872883469766,
+      "crossing_count": 0.0149958777664182,
+      "thermal_spread": 0.3223221831324465,
+      "compactness": 0.010006986044523866
+    },
+    "bldc_controller": {
+      "trace_length_excess": 0.4461038567829693,
+      "weighted_via_count": 0.19025062085142835,
+      "turning_penalty": 0.30149783464314156,
+      "net_congestion_variance": 0.529467242288674,
+      "match_group_skew": 2.8322853734723283,
+      "diff_pair_clearance_margin": 0.02211976507084078,
+      "decoupling_proximity": 0.03173375424019609,
+      "crossing_count": 0.010462053212585306,
+      "thermal_spread": 0.08456760200208026,
+      "compactness": 93.01950966487283
+    },
+    "diffpair_test": {
+      "trace_length_excess": 2.5799619188197784,
+      "weighted_via_count": 0.013761251537223193,
+      "turning_penalty": 0.02871945634637406,
+      "net_congestion_variance": 2.1849587233948036,
+      "match_group_skew": 0.16573618285485117,
+      "diff_pair_clearance_margin": 19.93718977074287,
+      "decoupling_proximity": 2.4587762658099357,
+      "crossing_count": 0.02885606578000621,
+      "thermal_spread": 1.3359205233375917,
+      "compactness": 0.41411269954203817
+    },
+    "matchgroup_test": {
+      "trace_length_excess": 0.053729477697646376,
+      "weighted_via_count": 0.011635176472728652,
+      "turning_penalty": 0.03398459556662746,
+      "net_congestion_variance": 0.6024617958834398,
+      "match_group_skew": 0.05848909252051201,
+      "diff_pair_clearance_margin": 10.388451113219512,
+      "decoupling_proximity": 20.416436847893408,
+      "crossing_count": 0.02766979503942724,
+      "thermal_spread": 2.7553739461241555,
+      "compactness": 0.0349467046247798
+    }
+  },
+  "per_board_metrics": {
+    "voltage_divider": {
+      "rank_consistency": 0.6,
+      "discrimination": 16603.66761803299,
+      "saturation": 1.0,
+      "committed_sum": 10.09999177078549,
+      "score": 4.145252867589132
+    },
+    "charlieplex_3x3": {
+      "rank_consistency": 0.875,
+      "discrimination": 46848.52775576987,
+      "saturation": 1.0,
+      "committed_sum": 25.751223371442375,
+      "score": 6.045160431900818
+    },
+    "usb_joystick": {
+      "rank_consistency": 0.95,
+      "discrimination": 536148.1601061573,
+      "saturation": 1.0,
+      "committed_sum": 19.174250481319884,
+      "score": 6.563317040349459
+    },
+    "stm32_devboard": {
+      "rank_consistency": 1.0,
+      "discrimination": 46047.71154676698,
+      "saturation": 0.9791927497945119,
+      "committed_sum": 30.624217506164644,
+      "score": 6.765002590013647
+    },
+    "bldc_controller": {
+      "rank_consistency": 1.0,
+      "discrimination": 1.1420073898156842e+26,
+      "saturation": 0.469567997458031,
+      "committed_sum": 45.91296007625907,
+      "score": 3.2441301466516492
+    },
+    "diffpair_test": {
+      "rank_consistency": 0.65,
+      "discrimination": 11669.209010343142,
+      "saturation": 1.0,
+      "committed_sum": 28.436838231113924,
+      "score": 4.490690606554893
+    },
+    "matchgroup_test": {
+      "rank_consistency": 0.65,
+      "discrimination": 1424.6538701376649,
+      "saturation": 1.0,
+      "committed_sum": 25.278606233824924,
+      "score": 4.490690606554893
+    }
+  },
+  "global_weights": {
+    "trace_length_excess": 1.612574819085532,
+    "weighted_via_count": 0.01073178525648189,
+    "turning_penalty": 0.01162914957276498,
+    "net_congestion_variance": 0.22255073912214715,
+    "match_group_skew": 1.5236752608235522,
+    "diff_pair_clearance_margin": 0.999473674067633,
+    "decoupling_proximity": 0.01813304611348284,
+    "crossing_count": 0.014486508565732336,
+    "thermal_spread": 0.022051256117651373,
+    "compactness": 0.0968433156221014
+  },
+  "pareto_summary": {
+    "pareto_size": 80,
+    "selected_index": 37,
+    "selected_geo_mean_rc": 0.8220894914654194,
+    "selected_rc_per_board": {
+      "voltage_divider": 0.6,
+      "charlieplex_3x3": 0.85,
+      "usb_joystick": 0.775,
+      "stm32_devboard": 1.0,
+      "bldc_controller": 0.95
+    }
+  },
+  "train_metrics": {
+    "voltage_divider": {
+      "rank_consistency": 0.6,
+      "discrimination": 2.091695710197078
+    },
+    "charlieplex_3x3": {
+      "rank_consistency": 0.85,
+      "discrimination": 5.617222770156003
+    },
+    "usb_joystick": {
+      "rank_consistency": 0.775,
+      "discrimination": 149.69043035962932
+    },
+    "stm32_devboard": {
+      "rank_consistency": 1.0,
+      "discrimination": 118.41998469609022
+    },
+    "bldc_controller": {
+      "rank_consistency": 0.95,
+      "discrimination": 251.72758721226933
+    }
+  },
+  "holdout_metrics": {
+    "diffpair_test": {
+      "rank_consistency": 0.65,
+      "discrimination": 314.1815369822922
+    },
+    "matchgroup_test": {
+      "rank_consistency": 0.575,
+      "discrimination": 139963.16528942043
+    }
+  },
+  "uniform_train_metrics": {
+    "voltage_divider": {
+      "rank_consistency": 0.375,
+      "discrimination": 2172.1656640420174
+    },
+    "charlieplex_3x3": {
+      "rank_consistency": 0.85,
+      "discrimination": 128739.9638837808
+    },
+    "usb_joystick": {
+      "rank_consistency": 0.8,
+      "discrimination": 1.1420073898156842e+26
+    },
+    "stm32_devboard": {
+      "rank_consistency": 0.775,
+      "discrimination": 1.1420073898156842e+26
+    },
+    "bldc_controller": {
+      "rank_consistency": 0.7,
+      "discrimination": 1.1420073898156842e+26
+    }
+  },
+  "uniform_holdout_metrics": {
+    "diffpair_test": {
+      "rank_consistency": 0.475,
+      "discrimination": 1.1420073898156842e+26
+    },
+    "matchgroup_test": {
+      "rank_consistency": 0.65,
+      "discrimination": 1.1420073898156842e+26
+    }
+  }
+}

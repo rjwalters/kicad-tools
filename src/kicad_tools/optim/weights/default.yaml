@@ -1,22 +1,25 @@
-# Default FOM weights -- Phase 1 baseline, uniform 1.0 across all terms.
+# Calibrated default FOM weights (issue #3188).
 #
-# Issue #3186 ships this as the structural baseline.  Weight calibration
-# via Pareto sweep is the subject of issue #3188; do NOT hand-tune this
-# file in user PRs unless you know which boards you're tuning against.
+# These are the production default weights for the hybrid FOM (#3186).
+# They were derived via a Pareto sweep over 5 train boards
+# (voltage_divider, charlieplex_3x3, usb_joystick, stm32_devboard,
+# bldc_controller) and validated on 2 holdout boards (diffpair_test,
+# matchgroup_test). See docs/research/fom_calibration.md for the full
+# methodology, per-board weight breakdowns, and acceptance criteria
+# discussion.
 #
-# Each value is the marginal price-per-unit-violation for that term.
-# Terms whose normalised values are typically in [0, 1] need weights
-# around 1; terms whose values run higher (e.g. compactness in mm² per
-# pad on big boards, or turning_penalty in deg² per mm) need smaller
-# weights to avoid drowning out the rest.  Issue #3188 fixes this.
+# Use --fom-config legacy.yaml for the pre-#3188 wirelength-only baseline.
+#
+# Regenerate with:
+#   uv run python scripts/research/calibrate_fom.py
 weights:
-  trace_length_excess: 1.0
-  weighted_via_count: 1.0
-  turning_penalty: 1.0
-  net_congestion_variance: 1.0
-  match_group_skew: 1.0
-  diff_pair_clearance_margin: 1.0
-  decoupling_proximity: 1.0
-  crossing_count: 1.0
-  thermal_spread: 1.0
-  compactness: 1.0
+  trace_length_excess: 1.6126
+  weighted_via_count: 0.0107
+  turning_penalty: 0.0116
+  net_congestion_variance: 0.2226
+  match_group_skew: 1.5237
+  diff_pair_clearance_margin: 0.9995
+  decoupling_proximity: 0.0181
+  crossing_count: 0.0145
+  thermal_spread: 0.0221
+  compactness: 0.0968
