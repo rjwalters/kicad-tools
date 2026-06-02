@@ -410,13 +410,19 @@ RouteResult Pathfinder::route(
     std::unordered_map<std::tuple<int, int, int>, float, GridPosHash> g_scores;
     std::vector<AStarNode> closed_list;
 
+    // Issue #3144: monotonic insertion counter for deterministic
+    // tie-breaking when f_score is equal between heap entries.  See
+    // ``AStarNode::seq`` for the full rationale.
+    uint64_t seq_counter = 0;
+
     // Seed start nodes
     for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
         for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
             if (!grid_.is_valid(sgx, sgy, 0)) continue;
             for (int sl : valid_start_layers) {
                 float h = heuristic(sgx, sgy, sl, end_gx, end_gy, valid_end_layers[0]);
-                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0};
+                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0,
+                                     seq_counter++};
                 auto key = std::make_tuple(sgx, sgy, sl);
                 auto it = g_scores.find(key);
                 if (it == g_scores.end() || 0.0f < it->second) {
@@ -662,7 +668,8 @@ RouteResult Pathfinder::route(
                 float h = heuristic(nx, ny, nlayer, end_gx, end_gy, valid_end_layers[0]);
                 float f = new_g + weight * h;
 
-                AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy};
+                AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
+                                   seq_counter++};
                 open_set.push(neighbor);
             }
         }
@@ -714,7 +721,8 @@ RouteResult Pathfinder::route(
                 float f = new_g + weight * h;
 
                 AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
-                                   current_idx, true, current.dx, current.dy};
+                                   current_idx, true, current.dx, current.dy,
+                                   seq_counter++};
                 open_set.push(neighbor);
             }
         }
@@ -811,6 +819,13 @@ RouteResult Pathfinder::route_resumable(
                     start_gx, start_gy, end_gx, end_gy,
                     start_pad_bounds, end_pad_bounds);
 
+    // Issue #3144: reset the monotonic insertion counter at the start of
+    // every fresh resumable search.  ``resume()`` does NOT reset it; the
+    // counter must continue monotonically across (initial search + N
+    // resume attempts) so newly-pushed nodes never collide with older
+    // sequence numbers already sitting in ``search_open_set_``.
+    search_seq_counter_ = 0;
+
     // Seed start nodes into member open set
     const auto& sp = search_start_pad_bounds_;
     for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
@@ -819,7 +834,8 @@ RouteResult Pathfinder::route_resumable(
             for (int sl : search_valid_start_layers_) {
                 float h = heuristic(sgx, sgy, sl, end_gx, end_gy,
                                     search_valid_end_layers_[0]);
-                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0};
+                AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0,
+                                     search_seq_counter_++};
                 auto key = std::make_tuple(sgx, sgy, sl);
                 auto it = search_g_scores_.find(key);
                 if (it == search_g_scores_.end() || 0.0f < it->second) {
@@ -1124,7 +1140,8 @@ RouteResult Pathfinder::run_astar_loop() {
                                     search_valid_end_layers_[0]);
                 float f = new_g + search_weight_ * h;
 
-                AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy};
+                AStarNode neighbor{f, new_g, nx, ny, nlayer, current_idx, false, dx, dy,
+                                   search_seq_counter_++};
                 search_open_set_.push(neighbor);
             }
         }
@@ -1178,7 +1195,8 @@ RouteResult Pathfinder::run_astar_loop() {
                 float f = new_g + search_weight_ * h;
 
                 AStarNode neighbor{f, new_g, current.x, current.y, new_layer,
-                                   current_idx, true, current.dx, current.dy};
+                                   current_idx, true, current.dx, current.dy,
+                                   search_seq_counter_++};
                 search_open_set_.push(neighbor);
             }
         }

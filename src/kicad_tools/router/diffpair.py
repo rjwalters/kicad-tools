@@ -570,6 +570,27 @@ class DifferentialPairConfig:
             inside CI's 10-minute wall-clock cap even when the BGA-49
             USB3 escape on J3/J4 fails to converge.  ``None`` (default)
             preserves the legacy unbounded behaviour.
+        per_pair_max_iterations: Issue #3144: Optional per-pair
+            **iteration** budget applied to each
+            :meth:`CoupledPathfinder.route_coupled` call.  When the
+            iteration counter reaches this value the coupled search
+            abandons that pair the same way ``per_pair_timeout`` does
+            (logs a budget-exit warning, returns ``None``, sets
+            ``last_timeout_exceeded`` so callers can dispatch the
+            standard fallback path).  Unlike ``per_pair_timeout`` the
+            iteration budget is INDEPENDENT of CPU speed -- the same
+            pair always exits the same way on a 2-core CI runner as on
+            an 8-core development machine.  This eliminates the
+            timing-dependent budget-classification non-determinism
+            described in #3144 (different pairs land in
+            coupled-vs-deferred buckets on different runs because the
+            30s wall-clock deadline lands at different points in the
+            search depending on runner load).  ``None`` (default)
+            preserves the wall-clock-only behaviour.  Recommended
+            usage: set BOTH ``per_pair_timeout`` (as a safety net
+            against pathological cases) AND
+            ``per_pair_max_iterations`` (as the deterministic
+            classifier).  Whichever fires first triggers the exit.
     """
 
     enabled: bool = False
@@ -578,6 +599,7 @@ class DifferentialPairConfig:
     max_length_delta: float | None = None
     add_serpentines: bool = True
     per_pair_timeout: float | None = None
+    per_pair_max_iterations: int | None = None
 
     def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get rules with any config overrides applied."""

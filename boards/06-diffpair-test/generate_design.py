@@ -462,9 +462,36 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # non-diff-pair main strategy as ordinary nets.  When all 9
     # converge coupled (the happy path), the diff-pair phase is
     # observed at well under the budget.
+    # Issue #3144: also set a per-pair iteration budget alongside the
+    # wall-clock budget.  The iteration budget is the deterministic
+    # classifier -- it fires at the same iteration count regardless of
+    # CPU speed -- while the wall-clock budget remains as a safety net
+    # against pathological cases where memory pressure or grid layout
+    # makes an iteration extremely slow.
+    #
+    # Empirical calibration (commit 0bbe29a7, local 8-core M-series):
+    # the 9 board 06 pairs that exit the per-pair budget at the 30s
+    # wall-clock currently reach 3456-19968 iterations.  A pair that
+    # WAS going to converge inside the budget consumes <2000
+    # iterations (the historical "6 of 9 succeed in the first 5 min"
+    # case from Issue #3089).  Picking ``per_pair_max_iterations=4000``
+    # therefore preserves the budget-classification intent (slow pairs
+    # defer to the main strategy) while making that classification
+    # reproducible across CPU speeds: a 2-core CI runner reaches the
+    # same iteration ceiling as a 16-core dev machine, just slower
+    # in wall-clock terms.
+    #
+    # ``per_pair_timeout=60.0`` is the safety net.  Doubled from the
+    # historical 30.0s value because on a 2-core CI runner the
+    # iteration budget can take ~45s to reach -- the wall-clock budget
+    # must be > that or it would fire first and re-introduce the
+    # timing-dependent classification we are eliminating.  When the
+    # iteration budget fires (the deterministic path), wall-clock is
+    # always well under 60s so this is a safety net only.
     diffpair_config = DifferentialPairConfig(
         enabled=True,
-        per_pair_timeout=30.0,
+        per_pair_timeout=60.0,
+        per_pair_max_iterations=4000,
     )
 
     # Issue #3089: route the non-diff-pair tail (including any

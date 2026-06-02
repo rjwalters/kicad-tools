@@ -21,7 +21,15 @@ namespace router {
 // ``cpp_backend.py``; on import the two are compared and a mismatch
 // disables the C++ backend with a clear "kct build-native" error,
 // preventing silent ``AttributeError`` failures from a stale .so.
-constexpr int ROUTER_CPP_BUILD_VERSION = 5;
+//
+// Bump to 6 for Issue #3144 (A* tie-break determinism fix).  The
+// public binding surface is unchanged, but AStarNode gained a ``seq``
+// monotonic-insertion-counter field used for deterministic ordering
+// of equal-f_score nodes.  Existing .so files lack this field, so
+// stale builds running against the post-#3144 Python side would
+// produce a confusing ABI mismatch.  Bumping the version forces a
+// rebuild via ``kct build-native``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 6;
 
 // Grid cell state
 struct GridCell {
@@ -47,10 +55,29 @@ struct AStarNode {
     bool via_from_parent;
     int dx;  // Direction from parent
     int dy;
+    // Issue #3144: monotonic insertion counter for deterministic
+    // tie-breaking when ``f_score`` is equal between nodes.  Without
+    // this secondary key, ``std::priority_queue`` falls through to
+    // implementation-defined pop order for f_score-equal nodes; on a
+    // CI runner under load this manifests as run-to-run drift in the
+    // explored A* path, which propagates downstream into different
+    // diff-pair budget-classification outcomes and ultimately
+    // different DRC error counts.  ``seq`` is assigned at push-time
+    // from a search-local counter so older-pushed nodes (lower seq)
+    // pop first on f_score ties.  Comparison cost is one extra
+    // ``int`` compare per heap operation; negligible vs the
+    // surrounding heap reshuffle.
+    uint64_t seq = 0;
 
-    // Comparison for min-heap (lower f_score first)
+    // Comparison for min-heap (lower f_score first; on ties, lower seq
+    // first so the pop order is deterministic regardless of std::vector
+    // realloc behaviour or hash-map iteration order in surrounding
+    // bookkeeping structures).  Issue #3144.
     bool operator>(const AStarNode& other) const {
-        return f_score > other.f_score;
+        if (f_score != other.f_score) {
+            return f_score > other.f_score;
+        }
+        return seq > other.seq;
     }
 };
 

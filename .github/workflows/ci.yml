@@ -381,17 +381,21 @@ jobs:
     # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
     #
     #   * LATENCY: #3089 landed a per-pair wall-clock budget plumbed
-    #     through ``DifferentialPairConfig.per_pair_timeout`` (default
-    #     30.0s for board 06).  The re-route COMPLETES in ~9 min
-    #     wall-clock (vs the prior 10-min+ stall on the USB3 SS BGA-49
-    #     escape at J3/J4).  See ``boards/06-diffpair-test/generate_design.py``.
+    #     through ``DifferentialPairConfig.per_pair_timeout`` (now
+    #     60.0s for board 06, see #3144 for why the budget was doubled).
+    #     The re-route COMPLETES in ~9-12 min wall-clock (vs the prior
+    #     10-min+ stall on the USB3 SS BGA-49 escape at J3/J4).  See
+    #     ``boards/06-diffpair-test/generate_design.py``.
     #   * QUALITY: #3115 (PR #3140) landed a partner-aware A* heuristic
     #     for ``CoupledPathfinder._heuristic`` that eliminated the
     #     817-error ``diffpair_clearance_intra`` cluster from the
-    #     legacy Manhattan-sum heuristic.  The seed=42 re-route now
-    #     produces 34 total DRC errors (28 gate-blocking + 6 advisory
-    #     connectivity) which is within the 34-floor in
-    #     ``.github/routed-drc-tolerance.yml``.
+    #     legacy Manhattan-sum heuristic.
+    #   * DETERMINISM: #3144 fixed the A* tie-break defect in
+    #     ``CoupledNode`` / ``AStarNode`` (Python + C++) and switched
+    #     board 06 from a wall-clock budget classifier to an iteration
+    #     budget classifier, eliminating the timing-dependent
+    #     coupled-vs-deferred bucket drift that previously caused
+    #     CI runs to vary 35-43 errors on the same input + seed.
     #   * RESIDUAL: 1 ``diffpair_clearance_intra`` on USB2_D+/USB2_D-
     #     at the USB-C source footprint is a STRUCTURAL geometric
     #     constraint (the A6/B6 D+ pads and A7/B7 D- pads form
@@ -400,19 +404,20 @@ jobs:
     #     can resolve it; it is documented as an allowlist residual
     #     in ``.github/routed-drc-tolerance.yml``.
     #
-    # Soft-fail deferred until #3144 resolves CoupledPathfinder
-    # non-determinism under CI load.  Locally passes (28 blocking < 34
-    # floor, slack=6); CI shows variance 35-43 errors across the same
-    # input + ``--seed 42``.  PR #3141 (M-F closure) initially removed
-    # this soft-fail, but Judge round-4 review identified the variance
-    # as a substantive non-determinism bug (NOT a timeout) that cannot
-    # be papered over by bumping the floor.  Per user-approved Option A,
-    # the soft-fail is restored here; the strict gate will be re-enabled
-    # in the follow-up PR that closes #3144.  Scoped via a matrix
-    # expression so any future board added to the matrix (e.g. board 03
-    # per the comment below) remains a STRICT required check; only the
-    # board-06 entry soft-fails.
-    continue-on-error: ${{ matrix.board == 'boards/06-diffpair-test' }}
+    # Issue #3144: strict M-F gate is now re-enabled (soft-fail
+    # removed).  Two changes made the strict gate viable:
+    #
+    #   1. A* tie-break fix in Python ``CoupledNode`` and C++
+    #      ``AStarNode`` adds a monotonic insertion counter as the
+    #      secondary sort key, so equal-f_score nodes pop in a
+    #      deterministic, insertion-order-preserving order.
+    #   2. Per-pair iteration budget (new
+    #      ``DifferentialPairConfig.per_pair_max_iterations``) replaces
+    #      the wall-clock budget as the primary classifier of which
+    #      pairs the coupled pathfinder gives up on.  The iteration
+    #      budget is independent of CPU speed, so a slow 2-core CI
+    #      runner classifies the same pairs as a fast multi-core
+    #      development machine.
     strategy:
       # Don't abort the matrix on a single board failure -- each board
       # is independent and reviewers want all annotations at once.
@@ -445,6 +450,18 @@ jobs:
         run: uv run kct build-native
 
       - name: Re-route board + check diff-pair coverage
+        # Issue #3144: pin PYTHONHASHSEED so the Python interpreter's
+        # ``hash()`` returns the same values run-to-run.  CPython
+        # default behaviour is to randomise string hashes on every
+        # startup, which causes ``set[str]`` / ``dict[str, ...]``
+        # iteration order to vary -- a subtle non-determinism source
+        # in any upstream code path that iterates over a string-keyed
+        # collection.  The Phase 1 code-walk did not find such a path
+        # in the per-pair router itself, but pinning the seed is a
+        # cheap, broadly applicable belt-and-braces measure.  ``42``
+        # matches the ``--seed`` argument for consistency.
+        env:
+          PYTHONHASHSEED: "42"
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_diffpair_coverage.py \
