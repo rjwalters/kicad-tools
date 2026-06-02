@@ -18,6 +18,7 @@ different routing strategies. See heuristics.py for available options.
 """
 
 import heapq
+import itertools
 import math
 import os
 import sys
@@ -78,7 +79,27 @@ class _SegmentAdapter:
 
 @dataclass(order=True)
 class AStarNode:
-    """Node for A* priority queue."""
+    """Node for A* priority queue.
+
+    Issue #3144: ``seq`` is a monotonic insertion counter used as a
+    secondary tie-break key after ``f_score`` so that nodes with
+    identical f-scores pop in deterministic insertion order.  Without
+    this, ``heapq`` falls through to structural comparison on the next
+    compared field; previously all fields after ``f_score`` were
+    ``compare=False``, which left the heap-ordering invariant entirely
+    dependent on push order.  Under CI load (or any allocator-state
+    dependent execution) sibling f_score-equal nodes could pop in
+    varying order, propagating into different explored A* paths and
+    ultimately different DRC error counts.
+
+    Callers should pass ``seq`` explicitly (typically via
+    ``itertools.count()`` shared across the search).  The default of
+    ``0`` keeps the dataclass declaration well-formed but is unsafe
+    for production use -- two nodes sharing ``seq=0`` re-introduce
+    the ambiguity this field exists to remove.  The router callers
+    in this module pass ``seq`` explicitly; legacy tests that do not
+    are tolerated by the default.
+    """
 
     f_score: float
     g_score: float = field(compare=False)
@@ -88,6 +109,7 @@ class AStarNode:
     parent: Optional["AStarNode"] = field(compare=False, default=None)
     via_from_parent: bool = field(compare=False, default=False)
     direction: tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
+    seq: int = field(compare=True, default=0)
 
 
 class Router:
@@ -391,7 +413,11 @@ class Router:
         return key
 
     def _waypoint_grid_edges(
-        self, wp_key: tuple[int, int], pad: Pad, net: int, allow_sharing: bool = False,
+        self,
+        wp_key: tuple[int, int],
+        pad: Pad,
+        net: int,
+        allow_sharing: bool = False,
     ) -> list[tuple[int, int, float]]:
         """Return grid-cell neighbors reachable from a waypoint node.
 
@@ -520,9 +546,7 @@ class Router:
             return True
         return bool(cell.blocked and cell.pad_blocked)
 
-    def _detect_escape_hint(
-        self, pad: Pad, layers: list[int]
-    ) -> tuple[int, int] | None:
+    def _detect_escape_hint(self, pad: Pad, layers: list[int]) -> tuple[int, int] | None:
         """Return an escape direction ``(dx, dy)`` for a corner-flanked pad.
 
         Samples foreign-blocker density in each cardinal direction.  A
@@ -726,9 +750,7 @@ class Router:
         """
         # Fast path: use spatial grid index when available
         if self._crossing_grid is not None:
-            return self._count_edge_crossings_indexed(
-                cx, cy, nx, ny, nlayer, current_net
-            )
+            return self._count_edge_crossings_indexed(cx, cy, nx, ny, nlayer, current_net)
 
         count = 0
         for sx1, sy1, sx2, sy2, seg_layer, seg_net in self._routed_segments:
@@ -761,9 +783,7 @@ class Router:
         # _routed_segments.
         grid_idx: dict[int, dict[tuple[int, int], list[int]]] = {}
 
-        for seg_i, (sx1, sy1, sx2, sy2, seg_layer, _seg_net) in enumerate(
-            self._routed_segments
-        ):
+        for seg_i, (sx1, sy1, sx2, sy2, seg_layer, _seg_net) in enumerate(self._routed_segments):
             bx1 = min(sx1, sx2) // bucket_size
             by1 = min(sy1, sy2) // bucket_size
             bx2 = max(sx1, sx2) // bucket_size
@@ -920,8 +940,10 @@ class Router:
             for s in foreign_tracks:
                 track_adapters.append(
                     _SegmentAdapter(
-                        start_x=s.x1, start_y=s.y1,
-                        end_x=s.x2, end_y=s.y2,
+                        start_x=s.x1,
+                        start_y=s.y1,
+                        end_x=s.x2,
+                        end_y=s.y2,
                         width=s.width,
                     )
                 )
@@ -1095,7 +1117,9 @@ class Router:
                 )
                 self._clearance_radii[(tw, clearance)] = radius
 
-    def get_clearance_radius_cells(self, clearance_mm: float, trace_width: float | None = None) -> int:
+    def get_clearance_radius_cells(
+        self, clearance_mm: float, trace_width: float | None = None
+    ) -> int:
         """Get the trace clearance radius in grid cells for a given clearance.
 
         Args:
@@ -1257,7 +1281,12 @@ class Router:
         return (gx1, gy1, gx2, gy2)
 
     def _is_trace_blocked(
-        self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False,
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        allow_sharing: bool = False,
         radius: int | None = None,
         partner_net: int | None = None,
         partner_radius: int | None = None,
@@ -1450,7 +1479,12 @@ class Router:
         return False
 
     def _is_via_blocked(
-        self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False,
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        allow_sharing: bool = False,
         radius: int | None = None,
     ) -> bool:
         """Check if placing a via at this position would conflict.
@@ -1594,7 +1628,11 @@ class Router:
         self._layer_priority = None
 
     def _check_via_placement_cached(
-        self, gx: int, gy: int, net: int, allow_sharing: bool = False,
+        self,
+        gx: int,
+        gy: int,
+        net: int,
+        allow_sharing: bool = False,
         radius: int | None = None,
     ) -> bool:
         """Check if a via can be placed at (gx, gy) for the given net, using cache.
@@ -1630,8 +1668,7 @@ class Router:
         for check_layer in self._get_layer_priority():
             if self.grid.is_plane_layer(check_layer):
                 continue
-            if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing,
-                                     radius=radius):
+            if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing, radius=radius):
                 # Cache the negative result
                 if self._via_cache_enabled and not allow_sharing:
                     self._via_cache[(gx, gy, net, effective_radius)] = False
@@ -1835,7 +1872,9 @@ class Router:
         # Issue #2333: When EMA smoothing is active, use the smoothed
         # per-cell present cost instead of the raw usage * factor.
         if self.grid._present_cost_ema is not None:
-            present_costs = self.grid._present_cost_ema[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
+            present_costs = self.grid._present_cost_ema[
+                layer, ny_arr[valid_indices], nx_arr[valid_indices]
+            ]
         else:
             present_costs = present_cost_factor * usage_counts
         costs[valid_indices] = present_costs + history_costs
@@ -2003,7 +2042,8 @@ class Router:
         """
         if not self._per_call_timing_enabled:
             return self._route_impl(
-                start, end,
+                start,
+                end,
                 net_class=net_class,
                 negotiated_mode=negotiated_mode,
                 present_cost_factor=present_cost_factor,
@@ -2016,7 +2056,8 @@ class Router:
         succeeded = False
         try:
             result = self._route_impl(
-                start, end,
+                start,
+                end,
                 net_class=net_class,
                 negotiated_mode=negotiated_mode,
                 present_cost_factor=present_cost_factor,
@@ -2041,14 +2082,16 @@ class Router:
                 and per_net_timeout > 0
                 and elapsed > per_net_timeout * 1.2 + 1.0
             )
-            self._per_call_timings.append({
-                "net": start.net,
-                "net_name": start.net_name,
-                "elapsed": elapsed,
-                "per_net_timeout": per_net_timeout,
-                "deadline_violated": deadline_violated,
-                "succeeded": succeeded,
-            })
+            self._per_call_timings.append(
+                {
+                    "net": start.net,
+                    "net_name": start.net_name,
+                    "elapsed": elapsed,
+                    "per_net_timeout": per_net_timeout,
+                    "deadline_violated": deadline_violated,
+                    "succeeded": succeeded,
+                }
+            )
 
     def _route_impl(
         self,
@@ -2208,6 +2251,11 @@ class Router:
         # A* setup
         open_set: list[AStarNode] = []
 
+        # Issue #3144: monotonic insertion counter for deterministic
+        # tie-breaking when ``f_score`` is equal between heap entries.
+        # See ``AStarNode`` docstring for the full rationale.
+        seq_counter = itertools.count()
+
         # Issue #2430: Use NumPy arrays for closed_set and g_scores to avoid
         # Python dict/set overhead with 480K+ tuple keys.  Array indexing
         # (closed_arr[layer, y, x]) is significantly faster than dict hashing.
@@ -2243,7 +2291,9 @@ class Router:
         # Zone cells with a different net are blocked; same-net zones get
         # a cost discount.  This replaces per-neighbor Python object access
         # with direct NumPy lookups.
-        zone_blocked_arr = self.grid._is_zone & (self.grid._net != start.net) & (self.grid._net != 0)
+        zone_blocked_arr = (
+            self.grid._is_zone & (self.grid._net != start.net) & (self.grid._net != 0)
+        )
         zone_cost_arr = np.where(
             self.grid._is_zone & (self.grid._net == start.net),
             self.rules.cost_zone_same_net - 1.0,
@@ -2276,7 +2326,7 @@ class Router:
             for sgy in range(start_metal_gy1, start_metal_gy2 + 1):
                 for sl in start_layers:
                     start_h = self.heuristic.estimate(sgx, sgy, sl, (0, 0), heuristic_context)
-                    start_node = AStarNode(start_h, 0, sgx, sgy, sl)
+                    start_node = AStarNode(start_h, 0, sgx, sgy, sl, seq=next(seq_counter))
                     heapq.heappush(open_set, start_node)
                     g_scores_arr[sl, sgy, sgx] = 0
 
@@ -2287,13 +2337,18 @@ class Router:
         if self._is_pad_off_grid(start):
             start_wp_key = self._create_waypoint(start)
             wp_edges = self._waypoint_grid_edges(
-                start_wp_key, start, start.net, allow_sharing,
+                start_wp_key,
+                start,
+                start.net,
+                allow_sharing,
             )
             for gx, gy, edge_cost in wp_edges:
                 for sl in start_layers:
                     wp_g = edge_cost * self.rules.cost_straight
                     wp_h = self.heuristic.estimate(gx, gy, sl, (0, 0), heuristic_context)
-                    wp_node = AStarNode(wp_g + weight * wp_h, wp_g, gx, gy, sl)
+                    wp_node = AStarNode(
+                        wp_g + weight * wp_h, wp_g, gx, gy, sl, seq=next(seq_counter)
+                    )
                     if wp_g < g_scores_arr[sl, gy, gx]:
                         g_scores_arr[sl, gy, gx] = wp_g
                         heapq.heappush(open_set, wp_node)
@@ -2303,7 +2358,10 @@ class Router:
         if self._is_pad_off_grid(end):
             end_wp_key = self._create_waypoint(end)
             end_wp_grid_edges = self._waypoint_grid_edges(
-                end_wp_key, end, start.net, allow_sharing,
+                end_wp_key,
+                end,
+                start.net,
+                allow_sharing,
             )
             # Build set of grid cells reachable from end waypoint for goal check
             end_wp_goal_cells: set[tuple[int, int]] = {
@@ -2329,8 +2387,15 @@ class Router:
                     g_scores_arr[cl, cy, cx] = seed_g
                     heapq.heappush(
                         open_set,
-                        AStarNode(seed_g + weight * seed_h, seed_g, cx, cy, cl,
-                                  direction=escape_dir),
+                        AStarNode(
+                            seed_g + weight * seed_h,
+                            seed_g,
+                            cx,
+                            cy,
+                            cl,
+                            direction=escape_dir,
+                            seq=next(seq_counter),
+                        ),
                     )
 
         iterations = 0
@@ -2345,17 +2410,9 @@ class Router:
         # the global deadline, and nets whose pads don't trip the
         # predicate continue to honour ``per_net_timeout`` exactly.
         effective_timeout = per_net_timeout
-        if (
-            per_net_timeout is not None
-            and per_net_timeout > 0.0
-            and escape_dir is not None
-        ):
+        if per_net_timeout is not None and per_net_timeout > 0.0 and escape_dir is not None:
             effective_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
-        deadline = (
-            time.monotonic() + effective_timeout
-            if effective_timeout is not None
-            else None
-        )
+        deadline = time.monotonic() + effective_timeout if effective_timeout is not None else None
         timeout_check_interval = 1024
 
         while open_set and iterations < max_iterations:
@@ -2643,7 +2700,11 @@ class Router:
                 # Clamped at the positive cost components so g_score stays
                 # non-negative (preserves A* admissibility).
                 attractor_bonus = self.grid.get_corridor_attractor_bonus(
-                    nlayer, nx, ny, start.net, self.rules.cost_corridor_attractor,
+                    nlayer,
+                    nx,
+                    ny,
+                    start.net,
+                    self.rules.cost_corridor_attractor,
                 )
 
                 positive_step_cost = (
@@ -2667,7 +2728,15 @@ class Router:
                     f = new_g + weight * h  # Weighted A*
 
                     neighbor_node = AStarNode(
-                        f, new_g, nx, ny, nlayer, current, False, new_direction
+                        f,
+                        new_g,
+                        nx,
+                        ny,
+                        nlayer,
+                        current,
+                        False,
+                        new_direction,
+                        seq=next(seq_counter),
                     )
                     heapq.heappush(open_set, neighbor_node)
 
@@ -2686,7 +2755,10 @@ class Router:
                 # Issue #1692: Pass per-net via radius for wider net classes
                 self._via_diag_attempts += 1
                 if not self._check_via_placement_cached(
-                    current.x, current.y, start.net, allow_sharing,
+                    current.x,
+                    current.y,
+                    start.net,
+                    allow_sharing,
                     radius=net_via_half_cells,
                 ):
                     self._via_diag_blocked += 1
@@ -2751,7 +2823,10 @@ class Router:
                 # this bonus the pathfinder has zero reason to drop a via
                 # onto an empty inner layer that "happens" to be reserved.
                 attractor_bonus = self.grid.get_corridor_attractor_bonus(
-                    new_layer, current.x, current.y, start.net,
+                    new_layer,
+                    current.x,
+                    current.y,
+                    start.net,
                     self.rules.cost_corridor_attractor,
                 )
 
@@ -2791,7 +2866,14 @@ class Router:
                     f = new_g + weight * h  # Weighted A*
 
                     neighbor_node = AStarNode(
-                        f, new_g, current.x, current.y, new_layer, current, True
+                        f,
+                        new_g,
+                        current.x,
+                        current.y,
+                        new_layer,
+                        current,
+                        True,
+                        seq=next(seq_counter),
                     )
                     heapq.heappush(open_set, neighbor_node)
 
@@ -2960,7 +3042,9 @@ class Router:
             while True:
                 # Check this cell and clearance envelope
                 for cdy in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
-                    for cdx in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
+                    for cdx in range(
+                        -self._trace_half_width_cells, self._trace_half_width_cells + 1
+                    ):
                         cx, cy = gx + cdx, gy + cdy
                         if 0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows:
                             was_blocked = bool(saved_blocked[layer_idx, cy, cx])
@@ -3244,8 +3328,10 @@ class Router:
         """
         for seg in route.segments:
             is_valid, _clearance, _location = self.grid.validate_segment_clearance(
-                seg, exclude_net=exclude_net, component_pitches=component_pitches,
-                exclude_refs=exclude_refs
+                seg,
+                exclude_net=exclude_net,
+                component_pitches=component_pitches,
+                exclude_refs=exclude_refs,
             )
             if not is_valid:
                 return False
@@ -3266,7 +3352,8 @@ class Router:
                     if via.net == exclude_net:
                         continue  # Same-net via -- skipped by convention.
                     if not segment_clears_foreign_via(
-                        seg, via,
+                        seg,
+                        via,
                         trace_clearance=self.rules.trace_clearance,
                         hard_intersection_only=False,
                     ):
@@ -3329,8 +3416,7 @@ class Router:
         for i, new_via in enumerate(route.vias):
             for existing_via in existing_vias:
                 distance = math.sqrt(
-                    (new_via.x - existing_via.x) ** 2
-                    + (new_via.y - existing_via.y) ** 2
+                    (new_via.x - existing_via.x) ** 2 + (new_via.y - existing_via.y) ** 2
                 )
                 if distance < merge_threshold and distance > 1e-6:
                     # Merge: move the new via to the existing via's position
@@ -3362,8 +3448,10 @@ class Router:
                         new_via.layers[0].value,
                         new_via.layers[1].value,
                     )
-                    if (min_layer != existing_via.layers[0].value
-                            or max_layer != existing_via.layers[1].value):
+                    if (
+                        min_layer != existing_via.layers[0].value
+                        or max_layer != existing_via.layers[1].value
+                    ):
                         existing_via.layers = (Layer(min_layer), Layer(max_layer))
 
                     # Remove the new via since we're reusing the existing one
@@ -3434,8 +3522,10 @@ class Router:
         if end_pad.ref:
             exclude_refs.add(end_pad.ref)
         if not self._validate_route_clearance(
-            route, start_pad.net, component_pitches=self.component_pitches,
-            exclude_refs=exclude_refs if exclude_refs else None
+            route,
+            start_pad.net,
+            component_pitches=self.component_pitches,
+            exclude_refs=exclude_refs if exclude_refs else None,
         ):
             # Route has clearance violations - reject it
             # The caller will report "no path found" which is preferable
@@ -3596,6 +3686,13 @@ class Router:
             get_congestion_cost=self._get_congestion_cost,
         )
 
+        # Issue #3144: monotonic insertion counters for deterministic
+        # tie-breaking.  Forward and backward searches each get their own
+        # counter; they push into disjoint heaps so a shared counter would
+        # introduce unnecessary cross-direction coupling.
+        forward_seq_counter = itertools.count()
+        backward_seq_counter = itertools.count()
+
         # Initialize forward search (start -> end)
         # Issue #977: Initialize from ALL cells within start pad's metal area
         forward_open: list[AStarNode] = []
@@ -3607,7 +3704,7 @@ class Router:
             for sgy in range(start_metal_bounds[1], start_metal_bounds[3] + 1):
                 for sl in start_layers:
                     h = self.heuristic.estimate(sgx, sgy, sl, (0, 0), forward_context)
-                    node = AStarNode(h, 0, sgx, sgy, sl)
+                    node = AStarNode(h, 0, sgx, sgy, sl, seq=next(forward_seq_counter))
                     heapq.heappush(forward_open, node)
                     key = (sgx, sgy, sl)
                     forward_g[key] = 0
@@ -3617,12 +3714,22 @@ class Router:
         if self._is_pad_off_grid(start):
             bidir_start_wp = self._create_waypoint(start)
             for gx, gy, edge_cost in self._waypoint_grid_edges(
-                bidir_start_wp, start, start.net, allow_sharing,
+                bidir_start_wp,
+                start,
+                start.net,
+                allow_sharing,
             ):
                 for sl in start_layers:
                     wp_g = edge_cost * self.rules.cost_straight
                     wp_h = self.heuristic.estimate(gx, gy, sl, (0, 0), forward_context)
-                    wp_node = AStarNode(wp_g + weight * wp_h, wp_g, gx, gy, sl)
+                    wp_node = AStarNode(
+                        wp_g + weight * wp_h,
+                        wp_g,
+                        gx,
+                        gy,
+                        sl,
+                        seq=next(forward_seq_counter),
+                    )
                     fkey = (gx, gy, sl)
                     if fkey not in forward_g or wp_g < forward_g[fkey]:
                         forward_g[fkey] = wp_g
@@ -3640,7 +3747,7 @@ class Router:
             for egy in range(end_metal_bounds[1], end_metal_bounds[3] + 1):
                 for el in end_layers:
                     h = self.heuristic.estimate(egx, egy, el, (0, 0), backward_context)
-                    node = AStarNode(h, 0, egx, egy, el)
+                    node = AStarNode(h, 0, egx, egy, el, seq=next(backward_seq_counter))
                     heapq.heappush(backward_open, node)
                     key = (egx, egy, el)
                     backward_g[key] = 0
@@ -3650,12 +3757,22 @@ class Router:
         if self._is_pad_off_grid(end):
             bidir_end_wp = self._create_waypoint(end)
             for gx, gy, edge_cost in self._waypoint_grid_edges(
-                bidir_end_wp, end, end.net, allow_sharing,
+                bidir_end_wp,
+                end,
+                end.net,
+                allow_sharing,
             ):
                 for el in end_layers:
                     wp_g = edge_cost * self.rules.cost_straight
                     wp_h = self.heuristic.estimate(gx, gy, el, (0, 0), backward_context)
-                    wp_node = AStarNode(wp_g + weight * wp_h, wp_g, gx, gy, el)
+                    wp_node = AStarNode(
+                        wp_g + weight * wp_h,
+                        wp_g,
+                        gx,
+                        gy,
+                        el,
+                        seq=next(backward_seq_counter),
+                    )
                     bkey = (gx, gy, el)
                     if bkey not in backward_g or wp_g < backward_g[bkey]:
                         backward_g[bkey] = wp_g
@@ -3676,8 +3793,13 @@ class Router:
                 fkey = (cx, cy, cl)
                 if fkey not in forward_g or seed_g < forward_g[fkey]:
                     seed_node = AStarNode(
-                        seed_g + weight * seed_h, seed_g, cx, cy, cl,
+                        seed_g + weight * seed_h,
+                        seed_g,
+                        cx,
+                        cy,
+                        cl,
                         direction=forward_escape,
+                        seq=next(forward_seq_counter),
                     )
                     forward_g[fkey] = seed_g
                     forward_nodes[fkey] = seed_node
@@ -3693,8 +3815,13 @@ class Router:
                 bkey = (cx, cy, cl)
                 if bkey not in backward_g or seed_g < backward_g[bkey]:
                     seed_node = AStarNode(
-                        seed_g + weight * seed_h, seed_g, cx, cy, cl,
+                        seed_g + weight * seed_h,
+                        seed_g,
+                        cx,
+                        cy,
+                        cl,
                         direction=backward_escape,
+                        seq=next(backward_seq_counter),
                     )
                     backward_g[bkey] = seed_g
                     backward_nodes[bkey] = seed_node
@@ -3748,6 +3875,7 @@ class Router:
                         partner_net=partner_net_id,
                         partner_radius=net_partner_half_width_cells,
                         partner_active=partner_active_flag,
+                        seq_counter=forward_seq_counter,
                     )
 
             # Process backward step
@@ -3787,6 +3915,7 @@ class Router:
                         partner_net=partner_net_id,
                         partner_radius=net_partner_half_width_cells,
                         partner_active=partner_active_flag,
+                        seq_counter=backward_seq_counter,
                     )
 
             # Early termination: if we have a meeting point and both queues
@@ -3830,6 +3959,7 @@ class Router:
         partner_net: int | None = None,
         partner_radius: int | None = None,
         partner_active: bool | None = None,
+        seq_counter: "itertools.count[int] | None" = None,
     ) -> None:
         """Expand neighbors for bidirectional A* search.
 
@@ -3918,11 +4048,17 @@ class Router:
                 if cell.net == source_pad.net:
                     pass  # Same net - passable
                 elif cell.net == 0:
-                    if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
-                                              radius=trace_radius,
-                                              partner_net=partner_net,
-                                              partner_radius=partner_radius,
-                                              partner_active=partner_active):
+                    if self._is_trace_blocked(
+                        nx,
+                        ny,
+                        nlayer,
+                        source_pad.net,
+                        allow_sharing,
+                        radius=trace_radius,
+                        partner_net=partner_net,
+                        partner_radius=partner_radius,
+                        partner_active=partner_active,
+                    ):
                         continue
                 else:
                     # Different net's blocked cell
@@ -3946,11 +4082,17 @@ class Router:
                     or is_exiting_target_pad
                 )
                 if not is_pad_exit_or_approach:
-                    if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
-                                              radius=trace_radius,
-                                              partner_net=partner_net,
-                                              partner_radius=partner_radius,
-                                              partner_active=partner_active):
+                    if self._is_trace_blocked(
+                        nx,
+                        ny,
+                        nlayer,
+                        source_pad.net,
+                        allow_sharing,
+                        radius=trace_radius,
+                        partner_net=partner_net,
+                        partner_radius=partner_radius,
+                        partner_active=partner_active,
+                    ):
                         continue
 
             # Check zone blocking
@@ -3987,9 +4129,7 @@ class Router:
                 crossing_cost = self.rules.crossing_penalty * num_crossings
 
             # Issue #2275: Layer utilization cost
-            layer_util_cost = (
-                self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
-            )
+            layer_util_cost = self._layer_fill_ratios[nlayer] * self.rules.cost_layer_utilization
 
             # Issue #2288: Corridor deviation penalty from global routing
             corridor_cost = self.grid.get_corridor_cost(nx, ny, nlayer, source_pad.net)
@@ -3997,7 +4137,11 @@ class Router:
             # Issue #2911: Diff-pair / match-group corridor attractor (see
             # forward A* expansion for full rationale).
             attractor_bonus = self.grid.get_corridor_attractor_bonus(
-                nlayer, nx, ny, source_pad.net, self.rules.cost_corridor_attractor,
+                nlayer,
+                nx,
+                ny,
+                source_pad.net,
+                self.rules.cost_corridor_attractor,
             )
 
             positive_step_cost = (
@@ -4020,7 +4164,23 @@ class Router:
                 h = self.heuristic.estimate(nx, ny, nlayer, new_direction, heuristic_context)
                 f = new_g + weight * h
 
-                neighbor_node = AStarNode(f, new_g, nx, ny, nlayer, current, False, new_direction)
+                # Issue #3144: monotonic insertion tie-break.  When the
+                # legacy callers do not pass a counter, use the parent
+                # node's seq+1 as a stand-in (still strictly increasing
+                # along any expansion chain, which preserves heap
+                # determinism within a single search path).
+                neighbor_seq = next(seq_counter) if seq_counter is not None else current.seq + 1
+                neighbor_node = AStarNode(
+                    f,
+                    new_g,
+                    nx,
+                    ny,
+                    nlayer,
+                    current,
+                    False,
+                    new_direction,
+                    seq=neighbor_seq,
+                )
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
 
@@ -4037,7 +4197,10 @@ class Router:
             # Issue #1692: Pass per-net via radius for wider net classes
             self._via_diag_attempts += 1
             if not self._check_via_placement_cached(
-                current.x, current.y, source_pad.net, allow_sharing,
+                current.x,
+                current.y,
+                source_pad.net,
+                allow_sharing,
                 radius=via_radius,
             ):
                 self._via_diag_blocked += 1
@@ -4064,9 +4227,7 @@ class Router:
             layer_pref_mult = self._get_layer_preference_cost(new_layer, net_class)
 
             # Issue #2275: Layer utilization cost for target layer
-            layer_util_cost = (
-                self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
-            )
+            layer_util_cost = self._layer_fill_ratios[new_layer] * self.rules.cost_layer_utilization
 
             # Issue #2288: Corridor deviation penalty from global routing
             corridor_cost = self.grid.get_corridor_cost(
@@ -4076,7 +4237,10 @@ class Router:
             # Issue #2911: Corridor attractor bonus on the target layer
             # (see forward A* via transition for full rationale).
             attractor_bonus = self.grid.get_corridor_attractor_bonus(
-                new_layer, current.x, current.y, source_pad.net,
+                new_layer,
+                current.x,
+                current.y,
+                source_pad.net,
                 self.rules.cost_corridor_attractor,
             )
 
@@ -4106,7 +4270,18 @@ class Router:
                 )
                 f = new_g + weight * h
 
-                neighbor_node = AStarNode(f, new_g, current.x, current.y, new_layer, current, True)
+                # Issue #3144: see same-named comment for the 2D move case.
+                neighbor_seq = next(seq_counter) if seq_counter is not None else current.seq + 1
+                neighbor_node = AStarNode(
+                    f,
+                    new_g,
+                    current.x,
+                    current.y,
+                    new_layer,
+                    current,
+                    True,
+                    seq=neighbor_seq,
+                )
                 heapq.heappush(open_set, neighbor_node)
                 nodes[neighbor_key] = neighbor_node
 
@@ -4173,8 +4348,10 @@ class Router:
         if end_pad.ref:
             bidir_exclude_refs.add(end_pad.ref)
         if not self._validate_route_clearance(
-            route, start_pad.net, component_pitches=self.component_pitches,
-            exclude_refs=bidir_exclude_refs if bidir_exclude_refs else None
+            route,
+            start_pad.net,
+            component_pitches=self.component_pitches,
+            exclude_refs=bidir_exclude_refs if bidir_exclude_refs else None,
         ):
             return None
 

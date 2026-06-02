@@ -12,6 +12,7 @@ Key features:
 from __future__ import annotations
 
 import heapq
+import itertools
 import logging
 import math
 import time
@@ -296,13 +297,41 @@ class StubEdgeSpec:
 
 @dataclass(order=True)
 class CoupledNode:
-    """Node for coupled A* priority queue."""
+    """Node for coupled A* priority queue.
+
+    Issue #3144: ``seq`` is a monotonic insertion counter assigned at
+    push-time from a search-local counter.  It serves as a secondary
+    tie-break key after ``f_score`` so that nodes with identical f-scores
+    pop in a deterministic, insertion-order-preserving order.  Without
+    this, ``heapq`` falls through to structural comparison on the next
+    compared field, and a ``dataclass(order=True)`` containing
+    ``CoupledState`` values with no explicit ``__lt__`` would raise
+    ``TypeError``.  Previously all fields after ``f_score`` were
+    ``compare=False``, which left the heap-ordering invariant entirely
+    dependent on push order -- a non-deterministic property under CI
+    load (the Python interpreter's heap reshuffle visits sibling
+    f_score-equal nodes in an order that can vary with allocator state).
+
+    A monotonic counter is cheap (one ``int`` compare per heap op) and
+    eliminates this entire class of non-determinism without changing
+    A*'s optimality guarantees.  The convention "lower seq wins on
+    f_score tie" mirrors the C++ ``AStarNode::operator>`` invariant
+    introduced in the same fix.
+
+    Callers MUST pass ``seq`` explicitly at construction time
+    (typically ``seq=next(seq_iter)`` where ``seq_iter = itertools.count()``
+    is search-local).  A default of ``0`` is provided only to keep the
+    dataclass declaration well-formed; constructing two nodes with the
+    same default ``seq`` value would re-introduce the ordering ambiguity
+    this field exists to eliminate.
+    """
 
     f_score: float
     g_score: float = field(compare=False)
     state: CoupledState = field(compare=False)
     parent: CoupledNode | None = field(compare=False, default=None)
     via_from_parent: bool = field(compare=False, default=False)
+    seq: int = field(compare=True, default=0)
 
 
 class CoupledPathfinder:
@@ -981,6 +1010,7 @@ class CoupledPathfinder:
         n_start: Pad,
         n_end: Pad,
         timeout_seconds: float | None = None,
+        max_iterations_budget: int | None = None,
     ) -> tuple[Route, Route] | None:
         """Route a differential pair with coupled pathfinding.
 
@@ -1002,10 +1032,32 @@ class CoupledPathfinder:
                 routing or log a skipped-budget diagnostic).
                 ``None`` (default) preserves the legacy unbounded
                 behaviour.
+            max_iterations_budget: Issue #3144: Optional **iteration**
+                budget.  When set, the search aborts (returns ``None``,
+                sets ``last_timeout_exceeded=True``) once
+                ``iterations >= max_iterations_budget``.  Unlike
+                ``timeout_seconds``, the iteration budget is
+                independent of CPU speed -- the same pair always exits
+                the same way on a 2-core CI runner as on an 8-core
+                development machine.  This eliminates the
+                timing-dependent budget-classification non-determinism
+                described in #3144 (different pairs land in coupled-vs-
+                deferred buckets on different runs because the
+                wall-clock deadline lands at different points in the
+                search depending on runner load).  Whichever of
+                ``timeout_seconds`` and ``max_iterations_budget`` fires
+                first triggers the exit.  ``None`` (default) preserves
+                wall-clock-only behaviour.  Note this is distinct from
+                the unconditional ``max_iterations`` floor at line
+                ``self.grid.cols * self.grid.rows * 4`` which is the
+                memory backstop; ``max_iterations_budget`` is the
+                user-tunable classifier and is expected to fire much
+                earlier than the backstop.
 
         Returns:
             Tuple of (p_route, n_route) or None if routing failed (no
-            path found, ``max_iterations`` exhausted, or ``timeout_seconds``
+            path found, ``max_iterations`` exhausted,
+            ``max_iterations_budget`` exceeded, or ``timeout_seconds``
             wall-clock budget exceeded).
         """
         # Issue #3089: reset the timeout-exit flag.  Callers consult
@@ -1074,8 +1126,15 @@ class CoupledPathfinder:
         closed_set: set[tuple[GridPos, GridPos]] = set()
         g_scores: dict[tuple[GridPos, GridPos], float] = {}
 
+        # Issue #3144: monotonic insertion counter for deterministic
+        # tie-breaking when ``f_score`` is equal between heap entries.
+        # See ``CoupledNode`` docstring for the full rationale.  Using
+        # ``itertools.count()`` keeps the hot path branch-free: every
+        # ``CoupledNode`` constructor reads ``next(seq_counter)`` once.
+        seq_counter = itertools.count()
+
         start_h = self._heuristic(start_state, p_goal_pos, n_goal_pos)
-        start_node = CoupledNode(start_h, 0.0, start_state)
+        start_node = CoupledNode(start_h, 0.0, start_state, seq=next(seq_counter))
         heapq.heappush(open_set, start_node)
         g_scores[(p_start_pos, n_start_pos)] = 0.0
 
@@ -1089,8 +1148,35 @@ class CoupledPathfinder:
         if timeout_seconds is not None and timeout_seconds > 0:
             deadline = time.monotonic() + float(timeout_seconds)
 
+        # Issue #3144: optional iteration budget for deterministic
+        # budget classification.  ``None`` preserves wall-clock-only
+        # behaviour; a positive int aborts the search the same way
+        # the wall-clock branch does once ``iterations`` reaches it.
+        iter_budget: int | None = (
+            max_iterations_budget
+            if max_iterations_budget is not None and max_iterations_budget > 0
+            else None
+        )
+
         while open_set and iterations < max_iterations:
             iterations += 1
+
+            # Issue #3144: iteration budget classifier check.  Sits
+            # adjacent to the wall-clock check so a single ``if`` body
+            # owns the "abandon search and let caller dispatch
+            # fallback" exit path.  Checked on every iteration (no
+            # gating) because the check is a single integer compare.
+            if iter_budget is not None and iterations >= iter_budget:
+                logger.warning(
+                    "CoupledPathfinder.route_coupled iteration budget "
+                    "exceeded after %d iterations; abandoning "
+                    "search (p_net=%r n_net=%r)",
+                    iterations,
+                    p_start.net_name,
+                    n_start.net_name,
+                )
+                self.last_timeout_exceeded = True
+                return None
 
             # Issue #3089: periodic wall-clock check.  Exits with ``None``
             # so the caller can fall through to its existing "coupled
@@ -1194,7 +1280,9 @@ class CoupledPathfinder:
                     h = self._heuristic(new_state, p_goal_pos, n_goal_pos)
                     f = new_g + h
 
-                    neighbor_node = CoupledNode(f, new_g, new_state, current, is_via)
+                    neighbor_node = CoupledNode(
+                        f, new_g, new_state, current, is_via, seq=next(seq_counter)
+                    )
                     heapq.heappush(open_set, neighbor_node)
 
         # No path found
@@ -2081,6 +2169,7 @@ class DiffPairRouter:
         coupled_only: bool = False,
         extra_spacing_cells: int = 0,
         per_pair_timeout: float | None = None,
+        per_pair_max_iterations: int | None = None,
     ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair using coupled pathfinding.
 
@@ -2263,6 +2352,7 @@ class DiffPairRouter:
                 spec.n_start,
                 spec.n_end,
                 timeout_seconds=per_pair_timeout,
+                max_iterations_budget=per_pair_max_iterations,
             )
 
             if result is None:
@@ -3123,6 +3213,7 @@ class DiffPairRouter:
         spacing: float | None = None,
         use_coupled_routing: bool = True,
         per_pair_timeout: float | None = None,
+        per_pair_max_iterations: int | None = None,
     ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair.
 
@@ -3136,6 +3227,9 @@ class DiffPairRouter:
                 :meth:`route_differential_pair_coupled` when
                 ``use_coupled_routing`` is ``True``.  Ignored when the
                 independent fallback runs.
+            per_pair_max_iterations: Issue #3144: Optional per-pair
+                iteration budget forwarded the same way; see
+                :class:`DifferentialPairConfig` for rationale.
 
         Returns:
             Tuple of (routes, warning) where warning is set if
@@ -3143,7 +3237,10 @@ class DiffPairRouter:
         """
         if use_coupled_routing:
             return self.route_differential_pair_coupled(
-                pair, spacing, per_pair_timeout=per_pair_timeout
+                pair,
+                spacing,
+                per_pair_timeout=per_pair_timeout,
+                per_pair_max_iterations=per_pair_max_iterations,
             )
         else:
             return self.route_differential_pair_independent(pair, spacing)
@@ -3253,6 +3350,7 @@ class DiffPairRouter:
         non_diffpair_strategy: object = None,
         coupled_only: bool = False,
         per_pair_timeout: float | None = None,
+        per_pair_max_iterations: int | None = None,
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Route all nets with differential pair-aware routing.
 
@@ -3295,6 +3393,10 @@ class DiffPairRouter:
         effective_per_pair_timeout = per_pair_timeout
         if effective_per_pair_timeout is None and diffpair_config is not None:
             effective_per_pair_timeout = diffpair_config.per_pair_timeout
+        # Issue #3144: same precedence pattern for the iteration budget.
+        effective_per_pair_max_iterations = per_pair_max_iterations
+        if effective_per_pair_max_iterations is None and diffpair_config is not None:
+            effective_per_pair_max_iterations = diffpair_config.per_pair_max_iterations
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
 
@@ -3358,6 +3460,7 @@ class DiffPairRouter:
                     diffpair_config.spacing,
                     coupled_only=True,
                     per_pair_timeout=effective_per_pair_timeout,
+                    per_pair_max_iterations=effective_per_pair_max_iterations,
                 )
             else:
                 pair_routes, warning = self.route_differential_pair(
@@ -3365,6 +3468,7 @@ class DiffPairRouter:
                     diffpair_config.spacing,
                     use_coupled_routing=True,  # Use coupled routing by default
                     per_pair_timeout=effective_per_pair_timeout,
+                    per_pair_max_iterations=effective_per_pair_max_iterations,
                 )
             # Issue #3089: detect budget-exit via the pair's last_budget_exit
             # flag (set by route_differential_pair_coupled when the inner

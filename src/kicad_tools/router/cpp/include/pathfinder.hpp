@@ -292,6 +292,17 @@ private:
     std::chrono::steady_clock::time_point search_deadline_{};
     bool search_has_deadline_ = false;
     bool search_timed_out_ = false;
+
+    // Issue #3144: monotonic counter used as a secondary tie-break key for
+    // ``AStarNode`` insertions into the resumable ``search_open_set_``.  Two
+    // nodes with identical ``f_score`` would otherwise pop in
+    // implementation-defined order, producing run-to-run differences in the
+    // explored A* path under CI load.  The counter is reset at the top of
+    // ``route_resumable()`` and incremented on every ``search_open_set_.push``
+    // so older-pushed nodes pop first on f_score ties.  Shared with
+    // ``resume()`` via member scope so the ordering is consistent across
+    // multiple resume attempts on the same search.
+    uint64_t search_seq_counter_ = 0;
 };
 
 }  // namespace router

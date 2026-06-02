@@ -623,20 +623,31 @@ tolerances:
   # 06 has no committed ``net_class_map.json`` sidecar, so the
   # gate derives the map in-process from
   # ``generate_design.build_net_class_map()`` and threads it via
-  # ``--net-class-map`` (Option B in the issue).  The committed
-  # ``diffpair_test_routed.kicad_pcb`` now measures 39 BLOCKING
-  # errors (45 total - 6 advisory connectivity):
+  # ``--net-class-map`` (Option B in the issue).
+  #
+  # Floor remained at 39 (vs the deterministic 32 produced by Issue
+  # #3144's iteration-budget classifier) to give 7-error headroom
+  # for CI variance during the determinism stabilisation period.
+  # Issue #3144 demonstrated 32 blocking + 5 advisory connectivity
+  # across 5 consecutive seed=42 runs on local hardware -- byte-
+  # identical when KiCad UUIDs are stripped.  Once a CI run-history
+  # establishes the same exact-match across 5+ PRs the floor can
+  # tighten to 32; this PR keeps it at 39 because the M-F closure's
+  # tolerance allowlist + length-skew pass + structural USB-C
+  # residual rationale still applies and the slow CI re-route hasn't
+  # yet produced empirical CI-side data points.
+  #
+  # Historical (pre-#3144) composition of the 39 blocking floor:
   #   25 clearance_pad_segment + 2 clearance_pad_via
   #   + 1 diffpair_clearance_intra            (unchanged, was 28)
   #   + 5 diffpair_length_skew                (newly counted)
   #   + 6 diffpair_routing_continuity         (newly counted)
   #   = 39 blocking.
-  # The +11 is the previously-hidden diff-pair families now being
-  # counted -- NOT a routing regression.  Exit clause unchanged:
-  # the clearance_pad_segment cluster (general fine-grid escape)
-  # and the structural diffpair_clearance_intra residual are the
-  # tightening targets; the diff-pair length/continuity counts
-  # tighten as the board's coupled routing improves.
+  # Exit clause: the clearance_pad_segment cluster (general fine-
+  # grid escape) and the structural diffpair_clearance_intra
+  # residual are the tightening targets; the diff-pair length/
+  # continuity counts tighten as the board's coupled routing
+  # improves.  After #3144 the post-tightening floor is 32.
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 39
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
