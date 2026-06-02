@@ -49,6 +49,7 @@ If no output directory is specified, files are written to ./output/.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -529,13 +530,27 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--length-match-groups",
     ]
 
+    # Issue #3146: Pin PYTHONHASHSEED for the subprocess so any string-
+    # keyed dict/set iteration in the negotiated router (net_order
+    # construction, net_names lookup, etc.) is reproducible across
+    # runner environments.  Without this, CPython's per-process hash
+    # randomization makes the iteration order of any ``set[str]`` or
+    # ``dict[str, ...]`` non-deterministic between processes -- the
+    # primary remaining source of A* push-order drift after the C++
+    # tie-break fix (PR closing #3146 / #3144).  We force "42" rather
+    # than passing through whatever the parent has set so the inner
+    # routing process is reproducible even when the outer test harness
+    # leaves PYTHONHASHSEED unset (the common case on developer boxes).
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = "42"
+
     print(f"\n2. Input: {input_path}")
     print(f"   Output: {output_path}")
     print(f"   Skipping pour nets: {skip_nets}")
-    print(f"   Command: {' '.join(cmd)}")
+    print(f"   Command: PYTHONHASHSEED={env['PYTHONHASHSEED']} {' '.join(cmd)}")
     print("\n3. Routing...")
 
-    result = subprocess.run(cmd, capture_output=False, text=True)
+    result = subprocess.run(cmd, capture_output=False, text=True, env=env)
 
     # ``kct route`` returns 0 on full success and a non-zero code on
     # partial / failed routing.  Either way it writes a routed PCB to

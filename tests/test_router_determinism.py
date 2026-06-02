@@ -427,3 +427,55 @@ class TestActivatePerturbationSeed:
             "Distinct stagnation_count values must seed distinct RNG streams "
             "so successive perturbation episodes explore different orderings."
         )
+
+
+# ---------------------------------------------------------------------------
+# C++ build-version invariant
+# ---------------------------------------------------------------------------
+#
+# The Python ``_REQUIRED_CPP_BUILD_VERSION`` must equal the C++
+# ``ROUTER_CPP_BUILD_VERSION`` constant.  Both sides need to bump together
+# whenever the C++ binding surface gains/loses/renames a symbol or struct
+# field; otherwise stale .so files silently drift and produce ABI mismatches.
+# A* tie-break determinism is covered by ``tests/router/test_astar_tiebreak_determinism.py``
+# (Issue #3144 / PR #3192) -- this file only owns the version-match assertion.
+
+
+class TestCppPathfinderBuildVersionBumped:
+    """Cross-language invariant: Python ``_REQUIRED_CPP_BUILD_VERSION`` equals
+    the C++ ``ROUTER_CPP_BUILD_VERSION`` constant.
+
+    Both sides must be bumped together whenever the C++ binding surface
+    gains/loses/renames a symbol or struct field; otherwise stale .so files
+    silently drift and produce ABI mismatches (the bindings.cpp / .so
+    coordination protocol from Issue #2501).
+    """
+
+    def test_required_build_version_matches_types_hpp(self):
+        """Python-side required version equals the C++-side constant.
+
+        This is a deliberately fragile assertion: if either side bumps
+        without the other, this test fails and the next ``kct
+        build-native`` will surface the mismatch with an actionable
+        error.
+        """
+        import re
+        from pathlib import Path
+
+        from kicad_tools.router import cpp_backend
+
+        types_hpp = Path(cpp_backend.__file__).resolve().parent / "cpp" / "include" / "types.hpp"
+        text = types_hpp.read_text(encoding="utf-8")
+        m = re.search(r"constexpr int ROUTER_CPP_BUILD_VERSION\s*=\s*(\d+)\s*;", text)
+        assert m is not None, (
+            "Could not find ROUTER_CPP_BUILD_VERSION in types.hpp -- if you "
+            "renamed the constant, update this test and cpp_backend.py too."
+        )
+        cpp_version = int(m.group(1))
+        py_version = cpp_backend._REQUIRED_CPP_BUILD_VERSION
+        assert cpp_version == py_version, (
+            f"types.hpp ROUTER_CPP_BUILD_VERSION ({cpp_version}) does not "
+            f"match cpp_backend._REQUIRED_CPP_BUILD_VERSION ({py_version}). "
+            "Bump both constants together when changing the C++ binding "
+            "surface (added/removed/renamed symbols, struct fields)."
+        )

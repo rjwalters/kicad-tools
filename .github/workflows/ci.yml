@@ -544,28 +544,32 @@ jobs:
     # and --differential-pairs is re-enabled in
     # boards/07-matchgroup-test/generate_design.py.
     timeout-minutes: 15
-    # Soft-fail deferred until #3146 resolves matchgroup-routing
-    # non-determinism under CI load.  Same family of bug as #3144
-    # (CoupledPathfinder variant for board 06) but at a different
-    # layer: board 07 routes with ``--strategy negotiated`` (not
-    # ``--differential-pairs``), so the variance source is the
-    # negotiated A* per-net wall-clock budget, not the
-    # CoupledPathfinder per-pair timeout.
-    #
-    # Symptom: PR #3145 (M-G closure) Judge round-1 found the
-    # seed=42 re-route produces 27 DRC errors locally
-    # (macOS arm64, 8+ cores) vs 48 on CI (ubuntu-latest, 2 cores)
-    # -- a 21-error gap explained by 1 fewer net completing in
-    # the main pass which secondarily perturbs the match-group
-    # orchestrator's tuned/rolled_back/budget_exhausted verdicts.
-    #
-    # Per user-approved Option A (mirrors PR #3141's M-F closure
-    # pattern), the soft-fail is installed here and the strict
-    # gate will be re-enabled in the follow-up PR that closes
-    # #3146.  Scoped via a matrix expression so any future
-    # board added to the matrix remains a STRICT required check;
-    # only the board-07 entry soft-fails.
-    continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}
+    # Issue #3146 closure: the matrix-scoped soft-fail
+    # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
+    # that PR #3145 installed pending matchgroup-routing
+    # determinism work has been removed.  Determinism for board 07
+    # rests on three coordinated pieces:
+    #   1. C++ + Python A* tie-break:
+    #      ``AStarNode::operator>`` (``router/cpp/include/types.hpp``)
+    #      and ``AStarNode.__lt__`` (``router/pathfinder.py``) compare
+    #      on ``(f_score, seq)`` where ``seq`` is a monotonic
+    #      insertion counter assigned at heap-push time.  This was
+    #      landed by PR #3192 (Issue #3144 -- CoupledPathfinder /
+    #      board 06) and is the upstream determinism guarantee that
+    #      also makes board 07's negotiated A* main pass stable.
+    #      This PR (closing #3146) inherits that fix and adds the
+    #      board-07-side closure pieces below; it does not re-touch
+    #      the comparator.
+    #   2. PYTHONHASHSEED pinned to "42" in
+    #      ``boards/07-matchgroup-test/generate_design.py`` when
+    #      it spawns the ``kct route`` subprocess AND at the workflow
+    #      step env below, eliminating string-keyed dict/set iteration
+    #      drift between runners.
+    #   3. CI step below builds the C++ backend (matching the
+    #      diffpair-routing-regression job) so board 07 routes
+    #      against the same fast path locally and in CI -- the
+    #      10-100x slowdown of the pure-Python fallback was a major
+    #      contributor to wall-clock budget classification drift.
     strategy:
       # Don't abort the matrix on a single board failure -- each board
       # is independent and reviewers want all annotations at once.
@@ -591,7 +595,27 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Build C++ router backend
+        # Issue #3146: ``uv sync`` does NOT build the native extension
+        # (see repo CLAUDE.md "Routing performance: build the C++ backend
+        # first").  Without this step board 07 routing falls back to pure
+        # Python which is 10-100x slower; with a 2-core ubuntu-latest
+        # runner and 600s outer / 30s per-net budgets, the slowdown was
+        # the dominant source of the cross-platform DRC variance reported
+        # in PR #3145 (27 local vs 48 CI).  Mirrors the equivalent step in
+        # the diffpair-routing-regression job above.
+        run: uv run kct build-native
+
       - name: Re-route board + check match-group coverage
+        # Issue #3146: ``PYTHONHASHSEED`` pinned at the workflow-step
+        # level so any string-keyed dict/set iteration in the outer
+        # ``check_matchgroup_coverage.py`` (and in the
+        # ``generate_design.py`` subprocess it spawns) is reproducible
+        # across runner environments.  The board 07 ``generate_design.py``
+        # also re-pins it on its own ``kct route`` subprocess for the
+        # local-CLI case, but pinning here covers the CI path end-to-end.
+        env:
+          PYTHONHASHSEED: "42"
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_matchgroup_coverage.py \
