@@ -275,3 +275,74 @@ def list_available_libraries(paths: LibraryPaths) -> list[str]:
             libraries.append(item.name.removesuffix(".pretty"))
 
     return sorted(libraries)
+
+
+def list_project_libraries(
+    schematic_path: Path | None,
+    global_paths: LibraryPaths,
+    *,
+    use_project_table: bool = True,
+) -> list[tuple[str, Path, str]]:
+    """Return ``(nickname, .pretty_dir, origin)`` triples merged from sources.
+
+    Discovers the project ``fp-lib-table`` co-located with *schematic_path*
+    (walked upward to the ``.kicad_pro`` root) and merges it with the
+    global library scan (the existing ``footprints_path/*.pretty`` walker).
+
+    Project entries are listed first and "win" on nickname collision -- this
+    matches KiCad's own resolution order (project table is consulted before
+    the global table).  Each tuple's third element is ``"project"`` or
+    ``"global"`` so callers can surface provenance.
+
+    Args:
+        schematic_path: Path to a ``.kicad_sch`` or ``.kicad_pro`` file used
+            to locate the project fp-lib-table.  When ``None``, only the
+            global libraries are returned.
+        global_paths: Detected global library paths.
+        use_project_table: When ``False``, the project table is skipped
+            (useful for ``--no-project-lib`` and CI reproducibility).
+
+    Returns:
+        List of ``(nickname, library_dir, origin)``.  Empty when nothing is
+        discoverable in either source.
+    """
+    # Local import to avoid a top-level cycle (fp_lib_table imports the
+    # sexp parser, which is fine, but library_path is a low-level helper
+    # that other footprints code imports broadly).
+    from kicad_tools.footprints.fp_lib_table import (
+        find_project_fp_lib_table,
+        parse_fp_lib_table,
+    )
+
+    result: list[tuple[str, Path, str]] = []
+    seen: set[str] = set()
+
+    # Project libraries first -- they win on collision.
+    if use_project_table and schematic_path is not None:
+        table_path = find_project_fp_lib_table(Path(schematic_path))
+        if table_path is not None:
+            for entry in parse_fp_lib_table(table_path):
+                if entry.type != "KiCad":
+                    # Legacy/Github types are skipped silently here; callers
+                    # who need to warn can re-parse via parse_fp_lib_table.
+                    continue
+                if entry.resolved_path is None:
+                    continue
+                if not entry.resolved_path.is_dir():
+                    continue
+                if entry.name in seen:
+                    continue
+                seen.add(entry.name)
+                result.append((entry.name, entry.resolved_path, "project"))
+
+    # Global libraries from the directory scan.
+    for lib_name in list_available_libraries(global_paths):
+        if lib_name in seen:
+            continue
+        lib_dir = global_paths.get_library_path(lib_name)
+        if lib_dir is None:
+            continue
+        seen.add(lib_name)
+        result.append((lib_name, lib_dir, "global"))
+
+    return result

@@ -191,6 +191,7 @@ def run_sch_command(args) -> int:
             package=getattr(args, "package", None),
             output_format=getattr(args, "format", "text"),
             limit=getattr(args, "limit", 20),
+            no_project_lib=getattr(args, "no_project_lib", False),
         )
 
     elif args.sch_command == "set-value":
