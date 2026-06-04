@@ -894,6 +894,14 @@ class Autorouter:
         # escape stub segments.
         # Maps (ref, pin) -> virtual Pad at escape endpoint.
         self._escape_pad_overrides: dict[tuple[str, str], Pad] = {}
+        # Issue #3183: Net IDs whose escape rescue route must NOT be
+        # ripped up by ``_attempt_blocked_component_ripup``.  In-pad
+        # rescues are anchored to specific pad centers (the via lands
+        # dead-centre on the pad), so a sibling rip-up that removes the
+        # rescue strands the rescued net because the negotiated re-route
+        # can no longer reach the original pad through the inter-pad
+        # channel.  Populated by ``_apply_in_pad_escape_rescues``.
+        self._in_pad_escape_protected_nets: set[int] = set()
         # Fine-grid routing count (updated by route_all_multi_resolution)
         self.fine_grid_nets_count: int = 0
 
@@ -4872,6 +4880,8 @@ class Autorouter:
         timeout: float | None = None,
         per_net_timeout: float | None = None,
         suppress_no_timeout_warning: bool = False,
+        enable_in_pad_escape_rescues: bool = False,
+        in_pad_escape_rescue_pins: dict[str, list[str]] | None = None,
     ) -> list[Route]:
         """Route all nets in priority order.
 
@@ -4906,6 +4916,53 @@ class Autorouter:
                 that intentionally want bare ``route_all`` semantics
                 (e.g. unit tests on tiny boards where A* completes in
                 sub-second wall-clock).
+            enable_in_pad_escape_rescues: When True (default False), run
+                a contained in-pad-only escape rescue pre-pass before
+                the per-net A* loop.  Unlike the full
+                ``generate_escape_routes`` pre-pass run by
+                :meth:`route_with_escape`, this pre-pass emits *only*
+                via-in-pad rescues for the specific pins where surface
+                escape would violate clearance against an adjacent
+                same-edge pad -- every other pin on the dense package
+                is left untouched so the main per-net A* still routes
+                from the original pad location.  This preserves the
+                15/16 reach board 03 achieves under
+                :meth:`route_all` while eliminating the 9 +1 fine-pitch
+                clearance violations from U1's TQFP-32 inner-row pins
+                (Issue #3183).  Default off keeps legacy semantics
+                exactly for every existing caller.
+
+                Capability gating: the EscapeRouter still requires
+                ``via_in_pad_supported = True`` (resolved from
+                ``rules.manufacturer`` / ``mfr_limits``), so tier-0
+                manufacturers (e.g. plain ``jlcpcb``) are unaffected
+                even when this flag is set.
+
+                Pitch gating: the standard <= 0.55 mm fine-pitch band is
+                always covered.  Set the
+                ``KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK=1`` env
+                var to also rescue 0.65-0.8 mm-pitch packages (board
+                03's TQFP-32 at 0.8 mm pitch needs this).
+            in_pad_escape_rescue_pins: Optional explicit rescue map of
+                ``{component_ref: [pin_id, ...]}`` to restrict the
+                pre-pass to specific pins on specific packages.  Only
+                consulted when ``enable_in_pad_escape_rescues=True``.
+
+                When ``None``, every detected dense package whose pitch
+                clears the (possibly-extended) in-pad gate is rescued
+                using the auto-selection heuristic (adjacent-signal-
+                neighbour predicate).  This is the broad-coverage mode.
+
+                When provided, only the listed pins on the listed refs
+                are rescued; packages whose ref is not in the map are
+                skipped entirely, and pins not listed for an included
+                ref are left to the main per-net A*.  This is the
+                surgical-coverage mode and is the recommended setting
+                when the routing topology is known a priori (e.g.
+                board 03 supplies ``{"U1": ["13", "14", "26"]}`` --
+                BTN2/BTN3/USB_CC2 pins, the three pins whose main-route
+                direction is along the U1 south/east edge and would
+                otherwise clip an adjacent signal pad).
 
         Returns:
             List of Route objects for all nets
@@ -4992,9 +5049,33 @@ class Autorouter:
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
 
+        # Issue #3183: In-pad-only escape rescue pre-pass (opt-in,
+        # contained).  Unlike the full ``generate_escape_routes`` pre-pass
+        # run by ``route_with_escape``, this emits via-in-pad rescues
+        # ONLY for the specific pins on opted-in packages whose surface
+        # escape would violate clearance against an adjacent pad.  Every
+        # other pin is left untouched.  This is the minimal change that
+        # closes the board-03 TQFP-32 fine-pitch escape gap without
+        # disturbing the 15/16 reach the per-net A* already achieves.
+        in_pad_rescue_routes: list[Route] = []
+        if enable_in_pad_escape_rescues:
+            dense_packages = self.detect_dense_packages()
+            if in_pad_escape_rescue_pins is not None:
+                ref_filter = set(in_pad_escape_rescue_pins.keys())
+                dense_packages = [
+                    pkg for pkg in dense_packages if pkg.ref in ref_filter
+                ]
+            if dense_packages:
+                in_pad_rescue_routes = self._apply_in_pad_escape_rescues(
+                    dense_packages,
+                    pin_map=in_pad_escape_rescue_pins,
+                )
+
         nets_to_route = [n for n in net_order if n != 0]
         total_nets = len(nets_to_route)
-        all_routes: list[Route] = list(escape_routes)
+        # Note: in_pad_rescue_routes are already added to self.routes by
+        # the helper, so we only include them once in the return value.
+        all_routes: list[Route] = list(escape_routes) + list(in_pad_rescue_routes)
 
         for i, net in enumerate(nets_to_route):
             # Issue #2794: outer wall-clock budget.  Checked at the top of
@@ -5156,6 +5237,13 @@ class Autorouter:
         # components.  Restrict candidates to nets that already have routes
         # on the grid -- there's nothing to rip up otherwise.
         routed_net_ids = {r.net for r in self.routes if r.net != failed_net}
+        # Issue #3183: never displace a net whose route includes an
+        # in-pad escape rescue.  The rescue anchors the rescued net's
+        # escape at the pad center via a via; ripping it up forces the
+        # net back through the original surface escape, defeating the
+        # purpose of the rescue and triggering the very clearance
+        # violation it exists to prevent.
+        routed_net_ids -= self._in_pad_escape_protected_nets
         siblings = self._find_lower_priority_siblings_on_components(
             failed_net=failed_net,
             blocking_components=blocking_components,
@@ -10868,6 +10956,106 @@ class Autorouter:
             print(
                 f"  Escape endpoint overrides: {len(self._escape_pad_overrides)} pads "
                 f"remapped to escape endpoints"
+            )
+
+        return all_routes
+
+    def _apply_in_pad_escape_rescues(
+        self,
+        packages: list[PackageInfo],
+        pin_map: dict[str, list[str]] | None = None,
+    ) -> list[Route]:
+        """Apply in-pad-only escape rescues for the given dense packages.
+
+        Issue #3183: Wires
+        :meth:`escape.EscapeRouter.generate_in_pad_rescues_only` into the
+        per-net :meth:`route_all` path.  Unlike
+        :meth:`generate_escape_routes`, this emits no surface escape
+        stubs -- only via-in-pad rescues for the specific pins where
+        surface escape would violate clearance against an adjacent
+        same-edge pad.  Every other pin on the opted-in package is
+        left with its original pad location so the main per-net A* can
+        still route from the pad directly.
+
+        Args:
+            packages: List of dense packages to rescue.  Caller is
+                responsible for filtering (e.g. via
+                ``in_pad_escape_rescue_refs`` on
+                :meth:`route_all`).
+
+        Returns:
+            List of ``Route`` objects for the in-pad rescues.  The
+            rescues are also marked on the routing grid and appended to
+            ``self.routes`` so subsequent per-net A* searches see them
+            as occupied geometry.
+        """
+        all_routes: list[Route] = []
+        rescue_count = 0
+        for package in packages:
+            pin_filter = pin_map.get(package.ref) if pin_map else None
+            rescues = self._escape.generate_in_pad_rescues_only(
+                package, pin_filter=pin_filter
+            )
+            if not rescues:
+                continue
+            routes = self._escape.apply_escape_routes(rescues)
+            all_routes.extend(routes)
+
+            # Track these routes on the grid so per-net A* avoids them.
+            for route in routes:
+                self._mark_route(route)
+            self.routes.extend(routes)
+
+            # Build virtual pads at escape endpoints so the per-net
+            # A* (which keys on ``_escape_pad_overrides`` via
+            # ``_resolve_pad`` / ``_get_pad_for_routing``) routes to the
+            # escape endpoint rather than the original pad.  Without
+            # this the rescued pin keeps its original pad location and
+            # the main router lays down a second segment from the
+            # original pad through the inter-pad channel -- the exact
+            # violation we are trying to prevent.
+            for escape in rescues:
+                pad = escape.pad
+                pad_key = (pad.ref, pad.pin)
+                if pad_key in self.pads:
+                    ep_x, ep_y = escape.escape_point
+                    virtual_pad = Pad(
+                        x=ep_x,
+                        y=ep_y,
+                        width=pad.width,
+                        height=pad.height,
+                        net=pad.net,
+                        net_name=pad.net_name,
+                        layer=escape.escape_layer,
+                        ref=pad.ref,
+                        pin=pad.pin,
+                        through_hole=pad.through_hole,
+                        drill=pad.drill,
+                    )
+                    self._escape_pad_overrides[pad_key] = virtual_pad
+
+                # Issue #3183: protect this net's rescue from the
+                # sibling rip-up cascade that fires when a HIGHER-
+                # priority net (e.g. USB_D+) gets BLOCKED_BY_COMPONENT.
+                # The rip-up would otherwise remove the rescue via and
+                # the rescued net would re-route from the original pad
+                # location, putting the offending lateral trace back
+                # into the inter-pad channel -- defeating the whole
+                # purpose of the rescue.
+                if pad.net != 0:
+                    self._in_pad_escape_protected_nets.add(pad.net)
+
+            rescue_count += len(rescues)
+            flush_print(
+                f"  In-pad escape rescue: {package.ref} "
+                f"({package.package_type.name}) - "
+                f"{len(rescues)} pin(s) rescued"
+            )
+
+        if rescue_count:
+            flush_print(
+                f"  In-pad escape rescue pre-pass: "
+                f"{rescue_count} via-in-pad rescue(s) generated"
             )
 
         return all_routes

@@ -1031,6 +1031,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # can fit between adjacent pins.
         fine_pitch_clearance=0.08,
         fine_pitch_threshold=0.8,
+        # Issue #3183: declare the manufacturer profile so the
+        # EscapeRouter can resolve ``via_in_pad_supported`` from
+        # ``mfr_limits``.  Board 03's CI gate measures the routed PCB
+        # against ``jlcpcb-tier1`` (see ``.github/routed-drc-tolerance.yml``
+        # ``manufacturers:`` override at line ~1041 / Issue #3150), and the
+        # design ships against that tier's Capability-Plus process.
+        # Without this declaration the escape router would treat the
+        # board as "unknown manufacturer" and silently disable the in-pad
+        # rescue path -- exactly the failure mode #3183 closes.
+        manufacturer="jlcpcb-tier1",
     )
 
     net_class_map = create_net_class_map(
@@ -1138,7 +1148,66 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     if diffpair_config.enabled:
         router.route_all_with_diffpairs(diffpair_config=diffpair_config)
     else:
-        router.route_all()
+        # Issue #3183: Enable the dense-package escape pre-pass so U1
+        # (TQFP-32 at 0.8mm pitch) gets in-pad-fallback escape routes
+        # instead of routing inner signal pins (USB_CC1, BTN1, BTN4) through
+        # the 0.3mm inter-pad channel at <0.127mm clearance.
+        #
+        # The ``KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK`` env var raises
+        # the EscapeRouter's in-pad fallback gate from 0.55mm to 0.8mm so
+        # the TQFP-32 inner-row pins reach the fallback (capability gating
+        # is unchanged: ``via_in_pad_supported`` from
+        # ``manufacturer="jlcpcb-tier1"`` above is still required).  Set
+        # before ``load_pcb_for_routing`` would also work (the EscapeRouter
+        # is lazily constructed inside the Router), but setting it here
+        # makes the dependency on the route_all call explicit.
+        import os as _os
+
+        _prior_extended = _os.environ.get(
+            "KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"
+        )
+        _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = "1"
+        try:
+            # Force lazy escape router re-init now that the env var is set
+            # (it may already have been touched by an earlier helper).
+            router._escape_router = None
+            router.route_all(
+                enable_in_pad_escape_rescues=True,
+                # Issue #3183: explicit per-pin rescue map for U1's
+                # TQFP-32 (Package_QFP:TQFP-32_7x7mm_P0.8mm).  These
+                # pins are the cluster of adjacent signal pins on the
+                # U1 south + north edges whose F.Cu surface escape
+                # would route through the 0.3mm inter-pad channel at
+                # sub-clearance spacing (the issue body's table
+                # documents the 9 clearance_pad_segment near-misses
+                # this cluster produces under jlcpcb-tier1's 0.127mm
+                # rule):
+                #   - South edge: U1.12 BTN1, U1.13 BTN2, U1.14 BTN3,
+                #     U1.15 BTN4 -- four adjacent signal pins, each
+                #     pair clips the other.
+                #   - North edge: U1.26 USB_CC2, U1.27 USB_CC1 --
+                #     adjacent pair, USB_CC2 clips USB_CC1.
+                # Putting them on in-pad vias drops the escape onto
+                # B.Cu immediately, freeing the F.Cu inter-pad channel
+                # so the main per-net A* never lays a lateral trace
+                # through it.  J1 USB-C is also detected as a "dense"
+                # package by the auto-detector, but its escape
+                # geometry is handled by this board's diff-pair-aware
+                # routing path -- we omit it from the rescue map.
+                in_pad_escape_rescue_pins={
+                    "U1": ["12", "13", "14", "15", "26", "27"]
+                },
+                suppress_no_timeout_warning=True,
+            )
+        finally:
+            if _prior_extended is None:
+                _os.environ.pop(
+                    "KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", None
+                )
+            else:
+                _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = (
+                    _prior_extended
+                )
 
     stats_before = router.get_statistics()
 

@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-29 | jlcpcb"
+date: "Rev 1 | 2026-06-04 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 12 (0 SMD, 0 THT, 12 other) |
 | Nets | 16 |
-| Traces | 149 segments |
-| Vias | 18 |
+| Traces | 96 segments |
+| Vias | 22 |
 | Board Size | 60.0 x 40.0 mm |
 
 ## Design Overview
@@ -80,20 +80,20 @@ Demonstrates autolayout functionality
 
 | Metric | Count |
 |--------|-------|
-| Errors | 12 |
+| Errors | 9 |
 | Warnings | 0 |
-| Blocking | 12 |
+| Blocking | 9 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| clearance_pad_segment | 9 |
+| via_in_pad | 6 |
 | clearance_segment_via | 1 |
+| clearance_pad_via | 1 |
 | connectivity | 1 |
 | diffpair_clearance_intra | 1 |
-| via_in_pad | 1 |
 
 
 \newpage
@@ -104,7 +104,7 @@ Demonstrates autolayout functionality
 
 ### Action Items
 
-- **[CRITICAL]** Fix 12 blocking DRC violations (clearance_pad_segment (9), clearance_segment_via (1), diffpair_clearance_intra (1))
+- **[CRITICAL]** Fix 9 blocking DRC violations (via_in_pad (6), clearance_segment_via (1), clearance_pad_via (1))
 - **[OPTIONAL]** Verify zone fill in KiCad: 1 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 

@@ -960,6 +960,26 @@ class EscapeRouter:
         except (TypeError, ValueError):
             self.micro_via_drill = 0.15
 
+        # Issue #3183: extended-pitch in-pad fallback.  When enabled, the
+        # in-pad fallback gate (originally ``pin_pitch <= 0.55``) is raised
+        # to ``pin_pitch <= 0.8`` so 0.65-0.8 mm-pitch QFP/TQFP packages
+        # (e.g. board-03 U1 TQFP-32 at 0.8mm pitch) can route their inner
+        # signal pins via in-pad vias when the surface escape would clip
+        # an adjacent foreign-net pad's clearance.  This is opt-in to keep
+        # behaviour bit-identical for any board that does not request it
+        # -- the broader-blast-radius "raise the gate globally" alternative
+        # would have required cross-board validation on every 0.55-0.8 mm
+        # package in the repo.  Capability gating is unchanged: the
+        # fallback still requires ``self.via_in_pad_supported`` (i.e. a
+        # via-in-pad-capable manufacturer profile), so tier-0 jlcpcb
+        # remains unaffected even when this flag is set.  CLI/board knob:
+        # set ``KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK=1`` in the
+        # process env before invoking the router.  Default off preserves
+        # the pre-#3183 ``pin_pitch <= 0.55`` gate exactly.
+        self.extended_pitch_in_pad_fallback: bool = (
+            _os.environ.get("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "0") == "1"
+        )
+
         # Issue #2881: Counter for "would-have-rescued" events -- bumped
         # every time the escape router would have invoked
         # ``_try_in_pad_escape`` for a fine-pitch QFP/SSOP pin but the
@@ -2181,7 +2201,22 @@ class EscapeRouter:
         # the same strategy PR #2608 introduced for SSOP/TSSOP.  Plain
         # ``jlcpcb`` and unknown manufacturers continue to defer (no silent
         # surcharge for users who did not opt into via-in-pad).
-        try_in_pad_fallback = package.pin_pitch <= 0.55 and self.via_in_pad_supported
+        #
+        # Issue #3183: when the opt-in
+        # ``extended_pitch_in_pad_fallback`` flag is set, the gate is
+        # raised to ``pin_pitch <= 0.8`` so 0.65-0.8 mm-pitch packages
+        # (TQFP-32 at 0.8 mm, TQFP-48 at 0.5 mm, etc.) can also fall back
+        # to the in-pad escape when their surface escape would clip an
+        # adjacent foreign-net pad's clearance.  Without this, board-03's
+        # TQFP-32 inner-row signal pins (USB_CC1, BTN1, BTN4) end up
+        # routed through the 0.3 mm inter-pad channel at <0.127 mm
+        # clearance -- a footprint-pitch geometric ceiling that no router
+        # tuning can resolve.  Default off so all existing callers see
+        # the original gate exactly.
+        try_in_pad_fallback = (
+            (package.pin_pitch <= 0.55)
+            or (self.extended_pitch_in_pad_fallback and package.pin_pitch <= 0.8)
+        ) and self.via_in_pad_supported
 
         # Issue #2881: Track whether this package is a "would-have-rescued"
         # candidate -- fine-pitch enough to need via-in-pad rescue, but the
@@ -2191,7 +2226,17 @@ class EscapeRouter:
         # clearance.  The counter is consumed by ``--auto-mfr-tier`` to
         # decide whether escalating to a via-in-pad-capable tier would
         # help.
-        wants_in_pad_but_unavailable = package.pin_pitch <= 0.55 and not self.via_in_pad_supported
+        #
+        # Issue #3183: when the opt-in extended-pitch flag is set we widen
+        # the "would-have-rescued" pitch window to match the widened gate
+        # above (0.8 mm).  This keeps ``--auto-mfr-tier`` honest for boards
+        # that opted into the extended fallback but landed on a tier-0
+        # manufacturer profile: the counter still fires so the escalation
+        # loop can surface the upgrade.
+        in_pad_pitch_ceiling = 0.8 if self.extended_pitch_in_pad_fallback else 0.55
+        wants_in_pad_but_unavailable = (
+            package.pin_pitch <= in_pad_pitch_ceiling and not self.via_in_pad_supported
+        )
 
         # Effective clearance and escape width for the in-pad rescue
         # fallback.  We mirror the values used inside
@@ -2479,6 +2524,222 @@ class EscapeRouter:
             )
 
         return escapes
+
+    def generate_in_pad_rescues_only(
+        self,
+        package: PackageInfo,
+        pin_filter: list[str] | None = None,
+    ) -> list[EscapeRoute]:
+        """Generate in-pad-only escape rescues for pins on a dense QFP/QFN/TQFP package.
+
+        Issue #3183: A surgical variant of ``_escape_qfp_alternating`` that
+        emits *only* the in-pad via rescue for pins whose perpendicular
+        surface escape would violate clearance against an adjacent
+        same-edge pad, and skips every other pin (no surface escape
+        stub).  This is the "contained-blast-radius" companion to the
+        full QFP escape pre-pass: the main per-net router still picks up
+        the bulk of the package's pins from their original pad
+        locations, and only the violating pins get an in-pad via that
+        moves their escape onto the inner / back layer.
+
+        For board 03's TQFP-32 at 0.8 mm pitch, this rescues the inner
+        signal pins (USB_CC1 / BTN1 / BTN4) whose surface escape would
+        otherwise clip an adjacent pin's clearance, while leaving the
+        other 12 signal pins untouched so the existing 15/16 reach in
+        ``route_all`` is preserved.
+
+        Pre-conditions:
+        - ``self.via_in_pad_supported`` must be True (capability gate;
+          tier-0 jlcpcb returns an empty list).
+        - The opt-in ``extended_pitch_in_pad_fallback`` flag controls
+          whether 0.65-0.8 mm packages participate (in addition to the
+          original <= 0.55 mm fine-pitch band).  When False, this method
+          behaves identically to ``_escape_qfp_alternating``'s in-pad
+          rescue branch on the existing 0.55 mm gate.
+
+        Args:
+            package: QFP/QFN/TQFP package info from ``analyze_package``.
+            pin_filter: Optional explicit list of pin identifiers (e.g.
+                ``["13", "14", "26"]``) to restrict the rescue to.  When
+                ``None`` (default), the adjacent-signal-neighbour
+                predicate is used to auto-select pins.  When provided,
+                only the listed pins are rescued (still subject to the
+                capability + pitch gates above).  Useful when the
+                routing topology is known a priori (e.g. board 03's
+                BTN2/BTN3/USB_CC2 pins on U1) and the heuristic would
+                otherwise rescue too many or too few pins.
+
+        Returns:
+            List of ``EscapeRoute`` objects for the rescued pins only.
+            Empty when the manufacturer doesn't support via-in-pad, the
+            package pitch is outside the gate, or no pin would have
+            violated surface clearance.
+        """
+        # Capability gate
+        if not self.via_in_pad_supported:
+            return []
+
+        # Pitch gate (mirrors the gate in _escape_qfp_alternating,
+        # extended to 0.8mm via the opt-in flag).
+        in_pad_pitch_ceiling = 0.55
+        if self.extended_pitch_in_pad_fallback:
+            in_pad_pitch_ceiling = 0.8
+        if package.pin_pitch > in_pad_pitch_ceiling:
+            return []
+
+        rescues: list[EscapeRoute] = []
+        center_x, center_y = package.center
+        min_x, min_y, max_x, max_y = package.bounding_box
+
+        # Group pads by edge, mirroring _escape_qfp_alternating
+        north_pads: list[Pad] = []
+        south_pads: list[Pad] = []
+        east_pads: list[Pad] = []
+        west_pads: list[Pad] = []
+
+        edge_margin = min(max_x - min_x, max_y - min_y) * 0.2
+
+        for pad in package.pads:
+            # Skip thermal pad (center)
+            if abs(pad.x - center_x) < edge_margin and abs(pad.y - center_y) < edge_margin:
+                continue
+            # Skip plane-net pads -- they don't escape, they connect via plane stitching
+            if pad.net == 0:
+                continue
+
+            if abs(pad.y - max_y) < edge_margin:
+                north_pads.append(pad)
+            elif abs(pad.y - min_y) < edge_margin:
+                south_pads.append(pad)
+            elif abs(pad.x - max_x) < edge_margin:
+                east_pads.append(pad)
+            elif abs(pad.x - min_x) < edge_margin:
+                west_pads.append(pad)
+
+        # Sort each edge by position
+        north_pads.sort(key=lambda p: p.x)
+        south_pads.sort(key=lambda p: p.x)
+        east_pads.sort(key=lambda p: p.y)
+        west_pads.sort(key=lambda p: p.y)
+
+        # Mirror _escape_qfp_alternating's "use_perpendicular_only" rule:
+        # pitch >= 0.65 uses perpendicular-only (so direction = primary_dir
+        # for every pin); below that, alternating odd/even.
+        use_perpendicular_only = package.pin_pitch >= 0.65
+
+        effective_clearance = self.rules.get_clearance_for_component(
+            package.ref,
+            pin_pitch=package.pin_pitch,
+        )
+        escape_width = (
+            self.rules.min_trace_width
+            if self.rules.min_trace_width is not None
+            else self._get_trace_width_for_net(
+                package.pads[0].net_name if package.pads else ""
+            )
+        )
+
+        # Issue #3183: heuristic for "needs in-pad rescue".  The
+        # underlying failure mode is the per-net A* laying down a trace
+        # through the inter-pad channel (width 0.3 mm on a 0.8 mm-pitch
+        # TQFP with 0.5 mm pads) at sub-clearance spacing.  This happens
+        # to inner-row signal pins whose neighbour on the same edge is
+        # ALSO a signal pin (so both pins need lateral channel access),
+        # but NOT to pins whose neighbour is a plane pad (the plane
+        # carries no per-net trace, so its half of the channel is
+        # available).  Rescue exactly those pins: emit the via-in-pad
+        # so the signal escapes vertically, freeing the lateral channel.
+        #
+        # Corner pins (neighbour off the edge) and pins next to a plane
+        # neighbour can use the standard surface escape on F.Cu without
+        # violating clearance, so they are skipped to keep the rescue
+        # blast radius minimal.
+        for pads, primary_dir, alt_dir_cw, alt_dir_ccw in [
+            (north_pads, EscapeDirection.NORTH, EscapeDirection.EAST, EscapeDirection.WEST),
+            (south_pads, EscapeDirection.SOUTH, EscapeDirection.WEST, EscapeDirection.EAST),
+            (east_pads, EscapeDirection.EAST, EscapeDirection.SOUTH, EscapeDirection.NORTH),
+            (west_pads, EscapeDirection.WEST, EscapeDirection.NORTH, EscapeDirection.SOUTH),
+        ]:
+            # Build a same-edge index map that includes plane-net pads
+            # so the "adjacent signal pin" predicate can see them.  The
+            # ``pads`` list filtered them out above; we re-derive here
+            # from package.pads using the same edge bucketing.
+            edge_with_plane: list[Pad] = []
+            for p in package.pads:
+                if abs(p.x - center_x) < edge_margin and abs(p.y - center_y) < edge_margin:
+                    continue  # thermal pad
+                # Same edge as the loop's primary direction?
+                if primary_dir == EscapeDirection.NORTH and abs(p.y - max_y) < edge_margin:
+                    edge_with_plane.append(p)
+                elif primary_dir == EscapeDirection.SOUTH and abs(p.y - min_y) < edge_margin:
+                    edge_with_plane.append(p)
+                elif primary_dir == EscapeDirection.EAST and abs(p.x - max_x) < edge_margin:
+                    edge_with_plane.append(p)
+                elif primary_dir == EscapeDirection.WEST and abs(p.x - min_x) < edge_margin:
+                    edge_with_plane.append(p)
+            if primary_dir in (EscapeDirection.NORTH, EscapeDirection.SOUTH):
+                edge_with_plane.sort(key=lambda p: p.x)
+            else:
+                edge_with_plane.sort(key=lambda p: p.y)
+
+            for i, pad in enumerate(pads):
+                if use_perpendicular_only or i % 2 == 0:
+                    direction = primary_dir
+                else:
+                    direction = alt_dir_cw if (i // 2) % 2 == 0 else alt_dir_ccw
+
+                if pin_filter is not None:
+                    if pad.pin not in pin_filter:
+                        continue
+                else:
+                    # Find this pad's position in the edge_with_plane
+                    # list so we can identify its IMMEDIATE neighbours
+                    # (including plane pads).  Match by ref+pin.
+                    pad_key = (pad.ref, pad.pin)
+                    neighbour_signal = False
+                    for idx, p in enumerate(edge_with_plane):
+                        if (p.ref, p.pin) != pad_key:
+                            continue
+                        if idx > 0 and edge_with_plane[idx - 1].net != 0:
+                            neighbour_signal = True
+                        if (
+                            idx < len(edge_with_plane) - 1
+                            and edge_with_plane[idx + 1].net != 0
+                        ):
+                            neighbour_signal = True
+                        break
+
+                    if not neighbour_signal:
+                        # Pad has no same-edge signal neighbour (it's a
+                        # corner, or sandwiched between plane pads).
+                        # The surface escape can use the cleared
+                        # channel, so skip the rescue.
+                        continue
+
+                # Emit the in-pad rescue.  Tier-0 callers never reach
+                # here (via_in_pad_supported gate above).
+                in_pad_route = self._try_in_pad_escape(
+                    pad=pad,
+                    direction=direction,
+                    effective_clearance=effective_clearance,
+                    escape_width=escape_width,
+                    package=package,
+                    skip_on_clearance_violation=self.strict_in_pad_clearance,
+                )
+                if in_pad_route is not None:
+                    rescues.append(in_pad_route)
+                    logger.info(
+                        "In-pad rescue (#3183) for %s pin %s (net %s) "
+                        "on %s package at %.2fmm pitch (adjacent-signal "
+                        "neighbour predicate).",
+                        package.ref,
+                        pad.pin,
+                        pad.net_name,
+                        package.package_type.name,
+                        package.pin_pitch,
+                    )
+
+        return rescues
 
     def _create_alternating_escape(
         self,

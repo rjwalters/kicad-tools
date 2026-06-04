@@ -339,12 +339,46 @@ tolerances:
   # ``clearance_pad_segment`` cluster (lines 528+).  Tracked under the
   # #3150 follow-up issue #3165.
   #
-  # Exit clause: tighten 11 -> below once the deferred fine-pitch
-  # escape follow-up (#3165) lands (router DRC-nudge pass or J1 re-spin),
-  # dropping the 9 ``clearance_pad_segment`` + 1 ``clearance_segment_via``
-  # genuine cluster.  The 1 structural ``diffpair_clearance_intra`` stays
-  # allowlisted until the DRC rule grows a USB-C-crossover exception.
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 11
+  # Tightened 11 -> 5 by Issue #3183:
+  #   * 9 ``clearance_pad_segment`` 9 -> 0.  Wired the EscapeRouter's
+  #     in-pad rescue path into the per-net ``route_all`` ordering via
+  #     a new ``Router.route_all(enable_in_pad_escape_rescues=True,
+  #     in_pad_escape_rescue_pins={"U1": [...]})`` opt-in plus a
+  #     companion ``EscapeRouter.generate_in_pad_rescues_only`` helper.
+  #     Board-03's ``generate_design.py`` now lists the six TQFP-32
+  #     signal pins whose F.Cu surface escape would otherwise route
+  #     laterally through the 0.3mm inter-pad channel (U1.12-15
+  #     BTN1-BTN4, U1.26-27 USB_CC1/USB_CC2) and emits an in-pad via
+  #     for each one, dropping the escape onto B.Cu immediately.  The
+  #     ``KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK=1`` opt-in raises
+  #     the EscapeRouter's in-pad gate from 0.55mm to 0.8mm so the
+  #     TQFP-32's 0.8mm pitch clears the gate; the capability gate
+  #     (``via_in_pad_supported`` from ``manufacturer="jlcpcb-tier1"``)
+  #     is unchanged so tier-0 jlcpcb remains unaffected.
+  # Residual 5 blocking errors under jlcpcb-tier1:
+  #   * 1 ``clearance_pad_segment`` -- absorbed (count is 0 now).
+  #   * 1 ``clearance_segment_via`` (0.020mm gap) -- USB_D+/USB_D- diff-
+  #     pair via vs trace at J1's diff-pair landing area.  STRUCTURAL
+  #     (same USB-C diagonal-crossover geometry as the allowlisted
+  #     ``diffpair_clearance_intra`` below -- migrated from the 0.070mm
+  #     position to a 0.020mm position after the rescue pre-pass moved
+  #     U1 traces but the J1-internal geometry stays).
+  #   * 1 ``clearance_pad_via`` -- J1-A6 USB_D+ pad vs the diff-pair
+  #     landing via.  STRUCTURAL (same J1 USB-C reversible-orientation
+  #     constraint).
+  #   * 1 ``diffpair_clearance_intra`` (-0.200mm) -- STRUCTURAL,
+  #     allowlisted above (USB-C diagonal X-crossover).
+  #   * 1 ``diffpair_length_skew`` / 1 ``diffpair_routing_continuity``
+  #     fired via ``--net-class-map`` when the gate runs with the
+  #     committed sidecar -- both stem from the partially-stranded
+  #     USB_D+ A6 pad and share the same exit clause as the
+  #     ``connectivity`` advisory (also USB_D+ A6).
+  #
+  # Exit clause: tighten 5 -> 1 (structural ``diffpair_clearance_intra``
+  # only) once the J1 USB-C re-spin / DRC-rule USB-C-crossover
+  # exception lands -- they are the same J1-internal residuals already
+  # tracked in the structural commentary above (lines 312-330).
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 5
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
