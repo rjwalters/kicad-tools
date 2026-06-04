@@ -43,11 +43,12 @@ from typing import Any
 
 from kicad_tools.cli.lib_footprints import _count_pads
 from kicad_tools.core.sexp_file import load_footprint
+from kicad_tools.footprints.fp_lib_table import find_project_fp_lib_table
 from kicad_tools.footprints.library_path import (
     LibraryPaths,
     detect_kicad_library_path,
     guess_standard_library,
-    list_available_libraries,
+    list_project_libraries,
 )
 from kicad_tools.schema import Schematic
 
@@ -125,34 +126,44 @@ def _get_fp_filters(sch: Schematic, sym: Any) -> list[str]:
     return raw.split()
 
 
-def _candidate_library_paths(paths: LibraryPaths, keyword: str | None) -> list[tuple[str, Path]]:
-    """Return (library_name, library_dir) pairs to scan for candidates.
+def _candidate_library_paths(
+    paths: LibraryPaths,
+    keyword: str | None,
+    schematic_path: Path | None = None,
+    *,
+    use_project_table: bool = True,
+) -> list[tuple[str, Path, str]]:
+    """Return ``(library_name, library_dir, origin)`` triples to scan.
+
+    Sources are the project ``fp-lib-table`` (if *schematic_path* is given
+    and the table exists) plus the global library directory scan.  Project
+    entries always appear first and override global libraries on nickname
+    collision -- matching KiCad's own resolution order.
 
     When *keyword* is given, libraries whose name OR whose standard-library
-    mapping matches the keyword are preferred. If nothing matches (or no
-    keyword), all available libraries are returned.
+    mapping matches the keyword are preferred.  If nothing matches (or no
+    keyword), all merged libraries are returned in their merged order.
     """
-    all_libs = list_available_libraries(paths)
-    result: list[tuple[str, Path]] = []
+    merged = list_project_libraries(
+        schematic_path,
+        paths,
+        use_project_table=use_project_table,
+    )
+    result: list[tuple[str, Path, str]] = []
 
     if keyword:
         kw_lower = keyword.lower()
         # A keyword may itself be a footprint-name prefix (e.g. "SOT-23",
         # "R_0603"); map it to a standard library when possible.
         mapped_lib = guess_standard_library(keyword)
-        for lib in all_libs:
-            lib_lower = lib.lower()
-            if kw_lower in lib_lower or (mapped_lib and lib == mapped_lib):
-                lib_path = paths.get_library_path(lib)
-                if lib_path is not None:
-                    result.append((lib, lib_path))
+        for lib_name, lib_dir, origin in merged:
+            lib_lower = lib_name.lower()
+            if kw_lower in lib_lower or (mapped_lib and lib_name == mapped_lib):
+                result.append((lib_name, lib_dir, origin))
 
     if not result:
         # No keyword, or keyword did not match any library name: scan all.
-        for lib in all_libs:
-            lib_path = paths.get_library_path(lib)
-            if lib_path is not None:
-                result.append((lib, lib_path))
+        result = list(merged)
 
     return result
 
@@ -174,7 +185,13 @@ def _rank_key(
     keyword: str | None,
     fp_filters: list[str] | None = None,
 ) -> tuple:
-    """Sort key: filter matches, then keyword matches, non-hand-solder, A-Z."""
+    """Sort key: filter matches, project-origin, keyword, non-hand-solder, A-Z.
+
+    Project libraries rank above globals (after the strongest signals --
+    fp_filters and keyword -- have been applied) so that a designer's
+    intentional project nicknames are surfaced before sheer KiCad-stock
+    matches.  This mirrors KiCad's own table-precedence behavior.
+    """
     name = candidate["footprint"]
     name_lower = name.lower()
     # ki_fp_filters matches rank above everything else when filters are active.
@@ -184,8 +201,9 @@ def _rank_key(
     kw_match = 0
     if keyword and keyword.lower() in name_lower:
         kw_match = -1  # sorts before non-matches
+    origin_rank = 0 if candidate.get("origin") == "project" else 1
     hand = 1 if "handsolder" in name_lower.replace("_", "") else 0
-    return (filter_match, kw_match, hand, candidate["library"], name)
+    return (filter_match, kw_match, origin_rank, hand, candidate["library"], name)
 
 
 def find_footprint_candidates(
@@ -194,6 +212,9 @@ def find_footprint_candidates(
     keyword: str | None,
     limit: int,
     fp_filters: list[str] | None = None,
+    schematic_path: Path | None = None,
+    *,
+    use_project_table: bool = True,
 ) -> list[dict[str, Any]]:
     """Find footprints whose pad count matches *target_pins*.
 
@@ -208,14 +229,22 @@ def find_footprint_candidates(
             The patterns are intentionally broad (e.g. ``SOT?23*`` matches
             SOT-23-5, SOT-23-6, and SOT-23), so the pad-count filter is what
             disambiguates the correct variant.
+        schematic_path: Optional path to the source ``.kicad_sch``.  When
+            provided, candidate libraries are widened to include the
+            project's ``fp-lib-table`` entries (in addition to globals).
+        use_project_table: When ``False``, the project table is not
+            consulted (CI / reproducibility opt-out).
 
     Returns:
-        Ranked list of dicts with ``library``, ``footprint``, ``pads`` keys.
+        Ranked list of dicts with ``library``, ``footprint``, ``pads``,
+        ``origin`` keys.  ``origin`` is ``"project"`` or ``"global"``.
     """
     candidates: list[dict[str, Any]] = []
     scanned = 0
 
-    for lib_name, lib_dir in _candidate_library_paths(paths, keyword):
+    for lib_name, lib_dir, origin in _candidate_library_paths(
+        paths, keyword, schematic_path, use_project_table=use_project_table
+    ):
         for mod_file in sorted(lib_dir.glob("*.kicad_mod")):
             if scanned >= _MAX_SCANNED_FOOTPRINTS:
                 break
@@ -241,6 +270,7 @@ def find_footprint_candidates(
                     "library": lib_name,
                     "footprint": mod_file.stem,
                     "pads": pad_count,
+                    "origin": origin,
                 }
             )
         if scanned >= _MAX_SCANNED_FOOTPRINTS:
@@ -257,11 +287,17 @@ def run_suggest_footprint(
     output_format: str = "text",
     limit: int = 20,
     config_override: str | Path | None = None,
+    no_project_lib: bool = False,
 ) -> int:
     """Suggest library footprints for the symbol *ref*.
 
     Returns 0 when at least one candidate is found, 1 otherwise (including the
     no-library and symbol-not-found cases).
+
+    When the schematic's project carries an ``fp-lib-table``, its KiCad-type
+    entries are merged into the candidate library set ahead of the global
+    libraries; pass ``no_project_lib=True`` to disable that and restore
+    global-only behavior (CI / reproducibility opt-out).
     """
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
@@ -288,12 +324,17 @@ def run_suggest_footprint(
     # pin-count filter to disambiguate). Absent/empty filters -> Phase 1.
     fp_filters: list[str] = [] if package else _get_fp_filters(sch, sym)
 
-    # Detect KiCad library; degrade gracefully if absent.
+    # Detect KiCad library.  Even if the global library is missing, we
+    # can still serve candidates from the project's fp-lib-table.
     paths = detect_kicad_library_path(config_override)
-    if not paths.found:
+    project_table = (
+        find_project_fp_lib_table(schematic_path) if not no_project_lib else None
+    )
+    if not paths.found and project_table is None:
         print(
             "Error: No KiCad footprint library found. "
-            "suggest-footprint requires the standard KiCad footprint libraries.\n"
+            "suggest-footprint requires the standard KiCad footprint libraries "
+            "or a project fp-lib-table.\n"
             "Set the KICAD_FOOTPRINT_DIR environment variable to the directory "
             "containing your '*.pretty' footprint libraries, e.g.\n"
             "  export KICAD_FOOTPRINT_DIR="
@@ -303,7 +344,13 @@ def run_suggest_footprint(
         return 1
 
     candidates = find_footprint_candidates(
-        paths, target_pins, keyword, limit, fp_filters=fp_filters
+        paths,
+        target_pins,
+        keyword,
+        limit,
+        fp_filters=fp_filters,
+        schematic_path=schematic_path,
+        use_project_table=not no_project_lib,
     )
 
     if output_format == "json":
@@ -317,6 +364,9 @@ def run_suggest_footprint(
                     "package_keyword": keyword,
                     "fp_filters": fp_filters,
                     "library_source": paths.source,
+                    "project_lib_table": (
+                        str(project_table) if project_table is not None else None
+                    ),
                     "candidates": candidates,
                 },
                 indent=2,
@@ -327,11 +377,18 @@ def run_suggest_footprint(
         kw_desc = f", package hint '{keyword}'" if keyword else ""
         filt_desc = f", ki_fp_filters {fp_filters}" if fp_filters else ""
         print(f"Suggestions for {ref} ({sym.value or sym.lib_id}, {pin_desc}{kw_desc}{filt_desc}):")
+        if project_table is not None:
+            print(f"  (using project fp-lib-table: {project_table})")
         if not candidates:
             print("  (no matching footprints found)")
         else:
             for c in candidates:
-                print(f"  {c['library']}:{c['footprint']} ({c['pads']} pads)")
+                origin_tag = (
+                    " [project]" if c.get("origin") == "project" else ""
+                )
+                print(
+                    f"  {c['library']}:{c['footprint']} ({c['pads']} pads){origin_tag}"
+                )
 
     if not candidates:
         hint = ""
@@ -363,6 +420,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--limit", type=int, default=20, help="Maximum number of suggestions (default: 20)"
     )
+    parser.add_argument(
+        "--no-project-lib",
+        action="store_true",
+        help=(
+            "Ignore the project's fp-lib-table and only use global "
+            "footprint libraries (CI / reproducibility opt-out)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -372,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         package=args.package,
         output_format=args.format,
         limit=args.limit,
+        no_project_lib=args.no_project_lib,
     )
 
 

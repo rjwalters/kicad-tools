@@ -26,6 +26,10 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.footprints.library_path import (
+    detect_kicad_library_path,
+    list_project_libraries,
+)
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
 
@@ -48,18 +52,37 @@ _GENERIC_VALUES = frozenset({"R", "C", "L", "D", "Q", "U", "J", "FB", "LED"})
 
 
 def check_footprint_library_resolution(schematic_path: str) -> list[ValidationIssue]:
-    """Verify that every ``Library:Footprint`` reference resolves.
+    """Verify that every ``Library:Footprint`` reference resolves on disk.
 
-    This walks the schematic hierarchy and, for each symbol that has a
-    Footprint property of the form ``Library:Footprint``, verifies that both
-    parts are non-empty.  A missing library prefix (e.g. bare footprint name)
-    or obviously placeholder value is flagged.
+    This walks the schematic hierarchy and, for each symbol that carries a
+    Footprint property of the form ``Library:Footprint``:
 
-    Full filesystem resolution of ``.kicad_mod`` files is intentionally
-    deferred -- it requires ``fp-lib-table`` parsing which varies by
-    installation.  This check catches the most common authoring mistakes.
+    1. Sanity-checks the textual form (non-empty library and footprint parts,
+       presence of a ``:`` separator).
+    2. Resolves the library nickname through the merged
+       ``project fp-lib-table`` + global libraries, and confirms the
+       ``<footprint>.kicad_mod`` file exists in the resolved directory.
+
+    The on-disk check is only performed when the local environment has at
+    least one library source (project table or global libraries).  When
+    neither is available (e.g. CI runners), the check degrades to the
+    text-only sanity checks above so it does not produce false positives.
     """
     issues: list[ValidationIssue] = []
+
+    # Pre-compute the merged library map ONCE per call -- candidate
+    # discovery is the same for every symbol.  An empty list means we
+    # only run the cheap text-form checks.
+    sch_path = Path(schematic_path)
+    global_paths = detect_kicad_library_path()
+    lib_map: dict[str, Path] = {}
+    try:
+        for nick, lib_dir, _origin in list_project_libraries(sch_path, global_paths):
+            lib_map.setdefault(nick, lib_dir)
+    except Exception:
+        # Discovery failures are non-fatal -- fall back to text-only checks.
+        lib_map = {}
+
     try:
         hierarchy = build_hierarchy(schematic_path)
         for node in hierarchy.all_nodes():
@@ -87,20 +110,56 @@ def check_footprint_library_resolution(schematic_path: str) -> list[ValidationIs
                                 location=node.get_path_string(),
                             )
                         )
-                    else:
-                        lib, name = fp.split(":", 1)
-                        if not lib.strip() or not name.strip():
-                            issues.append(
-                                ValidationIssue(
-                                    severity="error",
-                                    category="footprint_resolution",
-                                    message=(
-                                        f"{sym.reference} footprint '{fp}' "
-                                        "has empty library or footprint name"
-                                    ),
-                                    location=node.get_path_string(),
-                                )
+                        continue
+
+                    lib, name = fp.split(":", 1)
+                    if not lib.strip() or not name.strip():
+                        issues.append(
+                            ValidationIssue(
+                                severity="error",
+                                category="footprint_resolution",
+                                message=(
+                                    f"{sym.reference} footprint '{fp}' "
+                                    "has empty library or footprint name"
+                                ),
+                                location=node.get_path_string(),
                             )
+                        )
+                        continue
+
+                    # On-disk resolution -- only when we have at least one
+                    # library source.  Absence of any source means the
+                    # environment cannot answer this question; do not flag.
+                    if not lib_map:
+                        continue
+                    lib_dir = lib_map.get(lib)
+                    if lib_dir is None:
+                        issues.append(
+                            ValidationIssue(
+                                severity="error",
+                                category="footprint_resolution",
+                                message=(
+                                    f"{sym.reference} footprint '{fp}': "
+                                    f"library nickname '{lib}' not found in "
+                                    "project or global fp-lib-table"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
+                        continue
+                    mod_file = lib_dir / f"{name}.kicad_mod"
+                    if not mod_file.is_file():
+                        issues.append(
+                            ValidationIssue(
+                                severity="error",
+                                category="footprint_resolution",
+                                message=(
+                                    f"{sym.reference} footprint '{fp}': "
+                                    f"file not found at {mod_file}"
+                                ),
+                                location=node.get_path_string(),
+                            )
+                        )
             except Exception:
                 pass
     except Exception as e:

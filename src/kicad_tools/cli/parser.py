@@ -692,6 +692,14 @@ def _add_sch_parser(subparsers) -> None:
     sch_suggest_fp.add_argument(
         "--limit", type=int, default=20, help="Maximum number of suggestions (default: 20)"
     )
+    sch_suggest_fp.add_argument(
+        "--no-project-lib",
+        action="store_true",
+        help=(
+            "Ignore the project's fp-lib-table and only use global "
+            "footprint libraries (CI / reproducibility opt-out)."
+        ),
+    )
 
     # sch set-value
     sch_set_val = sch_subparsers.add_parser("set-value", help="Set value property for symbols")

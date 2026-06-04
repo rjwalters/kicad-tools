@@ -277,3 +277,180 @@ def test_missing_schematic_file(capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "not found" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Project fp-lib-table integration (KiCad-INDEPENDENT, NOT gated)
+# ---------------------------------------------------------------------------
+
+# A minimal 2-pad footprint for the synthesized project library.
+_MINI_FP = """(footprint "MyPart"
+    (version 20240108)
+    (generator "kicadtools_test")
+    (layer "F.Cu")
+    (attr smd)
+    (pad "1" smd roundrect (at -1 0) (size 1 1) (layers "F.Cu"))
+    (pad "2" smd roundrect (at 1 0) (size 1 1) (layers "F.Cu"))
+)
+"""
+
+# A trivial 2-pin schematic with one Device:R reference R1.  Pure-resistor
+# symbol shape keeps the test KiCad-independent (no external libraries
+# touched -- only the project's fp-lib-table is consulted).
+_TRIVIAL_RC_SCH = """(kicad_sch
+    (version 20231120)
+    (generator "kicadtools_test")
+    (uuid "00000000-0000-0000-0000-0000000000bb")
+    (paper "A4")
+    (lib_symbols
+        (symbol "Device:R"
+            (pin_numbers hide)
+            (pin_names hide)
+            (symbol "R_0_1"
+                (rectangle
+                    (start -1.016 -2.54)
+                    (end 1.016 2.54)
+                    (stroke (width 0.254))
+                    (fill (type none))
+                )
+            )
+            (symbol "R_1_1"
+                (pin passive line
+                    (at 0 3.81 270)
+                    (length 1.27)
+                    (name "~")
+                    (number "1")
+                )
+                (pin passive line
+                    (at 0 -3.81 90)
+                    (length 1.27)
+                    (name "~")
+                    (number "2")
+                )
+            )
+        )
+    )
+    (symbol
+        (lib_id "Device:R")
+        (at 100 100 0)
+        (uuid "00000000-0000-0000-0000-0000000000b1")
+        (property "Reference" "R1" (at 0 0 0))
+        (property "Value" "10k" (at 0 0 0))
+        (property "Footprint" "" (at 0 0 0))
+        (property "Datasheet" "" (at 0 0 0))
+        (pin "1" (uuid "00000000-0000-0000-0000-0000000000b2"))
+        (pin "2" (uuid "00000000-0000-0000-0000-0000000000b3"))
+    )
+)
+"""
+
+
+def _make_project(tmp_path: Path, *, fp_filename: str = "MyPart.kicad_mod") -> Path:
+    """Build a tmp project with .kicad_pro, fp-lib-table, schematic and lib."""
+    (tmp_path / "proj.kicad_pro").write_text("{}", encoding="utf-8")
+    (tmp_path / "fp-lib-table").write_text(
+        '(fp_lib_table\n'
+        '  (version 7)\n'
+        '  (lib (name "CustomLib") (type "KiCad") (uri "${KIPRJMOD}/CustomLib.pretty")'
+        '       (options "") (descr "Project local"))\n'
+        ')',
+        encoding="utf-8",
+    )
+    lib_dir = tmp_path / "CustomLib.pretty"
+    lib_dir.mkdir()
+    (lib_dir / fp_filename).write_text(_MINI_FP, encoding="utf-8")
+    sch = tmp_path / "proj.kicad_sch"
+    sch.write_text(_TRIVIAL_RC_SCH, encoding="utf-8")
+    return sch
+
+
+def test_project_library_surfaces_local_footprint(tmp_path, capsys):
+    """AC: a project fp-lib-table makes its libraries visible to suggest."""
+    sch = _make_project(tmp_path)
+    rc = run_suggest_footprint(sch, ref="R1", output_format="json", limit=50)
+    out = capsys.readouterr().out
+    assert rc == 0
+    data = json.loads(out)
+    assert data["project_lib_table"] == str(tmp_path / "fp-lib-table")
+    names = [(c["library"], c["footprint"], c.get("origin")) for c in data["candidates"]]
+    assert ("CustomLib", "MyPart", "project") in names
+
+
+def test_no_project_lib_flag_hides_project_libraries(tmp_path, capsys):
+    """AC: --no-project-lib restores Phase-1 global-only behavior."""
+    sch = _make_project(tmp_path)
+    # Return code may be 0 or 1 depending on whether global libs are available;
+    # we only assert the project entry is absent from the JSON.
+    run_suggest_footprint(
+        sch, ref="R1", output_format="json", limit=50, no_project_lib=True
+    )
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["project_lib_table"] is None
+    libs = {(c["library"], c["footprint"]) for c in data["candidates"]}
+    assert ("CustomLib", "MyPart") not in libs
+
+
+def test_project_library_ranks_first_over_global_collision(
+    tmp_path, monkeypatch, capsys
+):
+    """AC: project entries win on nickname collision and rank ahead."""
+    # Two libraries sharing the nickname "CustomLib": one in the project,
+    # one in a fake "global" footprints root.  The project entry must win.
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "proj.kicad_pro").write_text("{}", encoding="utf-8")
+    (project / "fp-lib-table").write_text(
+        '(fp_lib_table (lib (name "CustomLib") (type "KiCad")'
+        ' (uri "${KIPRJMOD}/CustomLib.pretty") (options "") (descr "")))',
+        encoding="utf-8",
+    )
+    proj_lib = project / "CustomLib.pretty"
+    proj_lib.mkdir()
+    (proj_lib / "MyPart.kicad_mod").write_text(_MINI_FP, encoding="utf-8")
+    sch = project / "proj.kicad_sch"
+    sch.write_text(_TRIVIAL_RC_SCH, encoding="utf-8")
+
+    # Fake global root with a SAME-nickname library containing a different fp.
+    fake_global = tmp_path / "global_footprints"
+    fake_global_lib = fake_global / "CustomLib.pretty"
+    fake_global_lib.mkdir(parents=True)
+    fake_global_fp = (fake_global_lib / "GlobalPart.kicad_mod")
+    fake_global_fp.write_text(_MINI_FP.replace("MyPart", "GlobalPart"), encoding="utf-8")
+
+    def _global_paths(*_a, **_kw):
+        return LibraryPaths(footprints_path=fake_global, source="env")
+
+    monkeypatch.setattr(
+        sch_suggest_footprint, "detect_kicad_library_path", _global_paths
+    )
+
+    rc = run_suggest_footprint(sch, ref="R1", output_format="json", limit=50)
+    out = capsys.readouterr().out
+    assert rc == 0
+    data = json.loads(out)
+    # The project entry MyPart must appear; the colliding-nickname global
+    # entry must NOT appear because the project nickname wins.
+    libs = [(c["library"], c["footprint"], c.get("origin")) for c in data["candidates"]]
+    assert ("CustomLib", "MyPart", "project") in libs
+    assert ("CustomLib", "GlobalPart", "global") not in libs
+
+
+def test_project_library_works_without_global_kicad(tmp_path, monkeypatch, capsys):
+    """AC: project fp-lib-table alone is sufficient -- no global libs needed."""
+
+    def _no_global(*_a, **_kw):
+        return LibraryPaths(footprints_path=None, source="auto")
+
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global)
+
+    sch = _make_project(tmp_path)
+    rc = run_suggest_footprint(sch, ref="R1", output_format="json", limit=10)
+    out = capsys.readouterr().out
+    # Without project fp-lib-table this would fail with rc=1 (covered by
+    # test_no_library_graceful_degradation).  With a project table, the
+    # command should succeed and surface the local footprint.
+    assert rc == 0
+    data = json.loads(out)
+    names = [(c["library"], c["footprint"]) for c in data["candidates"]]
+    assert ("CustomLib", "MyPart") in names

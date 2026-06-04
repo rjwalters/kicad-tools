@@ -402,6 +402,117 @@ class TestCheckFootprintLibraryResolution:
         fp_issues = [i for i in issues if i.category == "footprint_resolution"]
         assert len(fp_issues) == 0
 
+    def test_on_disk_check_flags_missing_kicad_mod(self, tmp_path: Path):
+        """Project fp-lib-table + missing .kicad_mod => 'file not found' error."""
+        from kicad_tools.cli.sch_preflight import check_footprint_library_resolution
+
+        # Synthesize a project with a CustomLib in fp-lib-table but no
+        # actual .kicad_mod file -- the on-disk check must flag this.
+        (tmp_path / "proj.kicad_pro").write_text("{}", encoding="utf-8")
+        (tmp_path / "fp-lib-table").write_text(
+            '(fp_lib_table (lib (name "CustomLib") (type "KiCad")'
+            ' (uri "${KIPRJMOD}/CustomLib.pretty") (options "") (descr "")))',
+            encoding="utf-8",
+        )
+        (tmp_path / "CustomLib.pretty").mkdir()
+        # Note: NO MissingPart.kicad_mod -- this is the failure we want to flag.
+
+        sch = tmp_path / "proj.kicad_sch"
+        sch.write_text(
+            '(kicad_sch (version 20231120) (generator "test")'
+            ' (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")'
+            ' (lib_symbols)'
+            ' (symbol (lib_id "Device:R") (at 0 0 0)'
+            '   (uuid "00000000-0000-0000-0000-000000000002")'
+            '   (property "Reference" "R1" (at 0 0 0))'
+            '   (property "Value" "10k" (at 0 0 0))'
+            '   (property "Footprint" "CustomLib:MissingPart" (at 0 0 0))'
+            '   (property "Datasheet" "" (at 0 0 0))'
+            '   (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))'
+            '   (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))))',
+            encoding="utf-8",
+        )
+
+        issues = check_footprint_library_resolution(str(sch))
+        msgs = [i.message for i in issues if i.category == "footprint_resolution"]
+        assert any("file not found" in m for m in msgs), msgs
+        # The mod-file failure is an error, not just a warning.
+        assert any(
+            i.severity == "error" and "file not found" in i.message
+            for i in issues
+        )
+
+    def test_on_disk_check_flags_unknown_nickname(self, tmp_path: Path):
+        """Reference to a library nickname absent from both tables => error."""
+        from kicad_tools.cli.sch_preflight import check_footprint_library_resolution
+
+        # Project table exists but with a different nickname.  Symbol
+        # footprint references an unknown nickname.
+        (tmp_path / "proj.kicad_pro").write_text("{}", encoding="utf-8")
+        (tmp_path / "fp-lib-table").write_text(
+            '(fp_lib_table (lib (name "OtherLib") (type "KiCad")'
+            ' (uri "${KIPRJMOD}/OtherLib.pretty") (options "") (descr "")))',
+            encoding="utf-8",
+        )
+        (tmp_path / "OtherLib.pretty").mkdir()
+
+        sch = tmp_path / "proj.kicad_sch"
+        sch.write_text(
+            '(kicad_sch (version 20231120) (generator "test")'
+            ' (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")'
+            ' (lib_symbols)'
+            ' (symbol (lib_id "Device:R") (at 0 0 0)'
+            '   (uuid "00000000-0000-0000-0000-000000000002")'
+            '   (property "Reference" "R1" (at 0 0 0))'
+            '   (property "Value" "10k" (at 0 0 0))'
+            '   (property "Footprint" "TotallyUnknownLib:Foo" (at 0 0 0))'
+            '   (property "Datasheet" "" (at 0 0 0))'
+            '   (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))'
+            '   (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))))',
+            encoding="utf-8",
+        )
+
+        issues = check_footprint_library_resolution(str(sch))
+        msgs = [i.message for i in issues if i.category == "footprint_resolution"]
+        assert any("not found in" in m and "TotallyUnknownLib" in m for m in msgs), msgs
+
+    def test_on_disk_check_passes_for_valid_project_lib(self, tmp_path: Path):
+        """Synthesized project fp-lib-table + matching .kicad_mod => no errors."""
+        from kicad_tools.cli.sch_preflight import check_footprint_library_resolution
+
+        (tmp_path / "proj.kicad_pro").write_text("{}", encoding="utf-8")
+        (tmp_path / "fp-lib-table").write_text(
+            '(fp_lib_table (lib (name "CustomLib") (type "KiCad")'
+            ' (uri "${KIPRJMOD}/CustomLib.pretty") (options "") (descr "")))',
+            encoding="utf-8",
+        )
+        lib_dir = tmp_path / "CustomLib.pretty"
+        lib_dir.mkdir()
+        (lib_dir / "MyPart.kicad_mod").write_text(
+            '(footprint "MyPart" (version 20240108) (generator "test") (layer "F.Cu"))',
+            encoding="utf-8",
+        )
+
+        sch = tmp_path / "proj.kicad_sch"
+        sch.write_text(
+            '(kicad_sch (version 20231120) (generator "test")'
+            ' (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")'
+            ' (lib_symbols)'
+            ' (symbol (lib_id "Device:R") (at 0 0 0)'
+            '   (uuid "00000000-0000-0000-0000-000000000002")'
+            '   (property "Reference" "R1" (at 0 0 0))'
+            '   (property "Value" "10k" (at 0 0 0))'
+            '   (property "Footprint" "CustomLib:MyPart" (at 0 0 0))'
+            '   (property "Datasheet" "" (at 0 0 0))'
+            '   (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))'
+            '   (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))))',
+            encoding="utf-8",
+        )
+
+        issues = check_footprint_library_resolution(str(sch))
+        fp_issues = [i for i in issues if i.category == "footprint_resolution"]
+        assert fp_issues == [], [i.message for i in fp_issues]
+
 
 class TestCheckGenericValues:
     """Tests for check_generic_values."""
