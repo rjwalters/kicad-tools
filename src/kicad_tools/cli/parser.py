@@ -675,6 +675,75 @@ def _add_sch_parser(subparsers) -> None:
         help="Fail on any pin-count mismatch, even in batch mode",
     )
 
+    # sch assign-footprints
+    sch_assign_fp = sch_subparsers.add_parser(
+        "assign-footprints",
+        help="Bulk-assign footprints to symbols missing one (auto + dry-run + json)",
+    )
+    sch_assign_fp.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_assign_fp.add_argument(
+        "--auto",
+        action="store_true",
+        default=True,
+        help=(
+            "Assign only unambiguous candidates (default; only mode currently "
+            "supported)."
+        ),
+    )
+    sch_assign_fp.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Preview the proposed mapping without modifying files",
+    )
+    sch_assign_fp.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    sch_assign_fp.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Max candidates considered per symbol (default: 20)",
+    )
+    sch_assign_fp.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip backup files on write",
+    )
+    sch_assign_fp.add_argument(
+        "--no-validate",
+        dest="validate",
+        action="store_false",
+        default=True,
+        help="Skip pin-count validation on the resolved mapping",
+    )
+    sch_assign_fp.add_argument(
+        "--include-power",
+        action="store_true",
+        help="Also consider power: symbols (default: skip)",
+    )
+    sch_assign_fp.add_argument(
+        "--include-dnp",
+        action="store_true",
+        help="Also consider DNP symbols (default: skip)",
+    )
+    sch_assign_fp.add_argument(
+        "--force",
+        action="store_true",
+        help="Reconsider symbols that already have a non-empty footprint",
+    )
+    sch_assign_fp.add_argument(
+        "--no-project-lib",
+        action="store_true",
+        help=(
+            "Ignore the project's fp-lib-table and only use global "
+            "footprint libraries (CI / reproducibility opt-out)"
+        ),
+    )
+
     # sch suggest-footprint
     sch_suggest_fp = sch_subparsers.add_parser(
         "suggest-footprint",

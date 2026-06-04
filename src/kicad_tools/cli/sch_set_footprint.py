@@ -181,6 +181,7 @@ def run_set_footprint(
     validate: bool = True,
     strict: bool = False,
     config_override: str | Path | None = None,
+    mapping: dict[str, str] | None = None,
 ) -> int:
     """Run the set-footprint operation.
 
@@ -191,14 +192,30 @@ def run_set_footprint(
     mismatch only warns so existing bulk-assign workflows are unaffected.
     When no library is available, validation is silently skipped.
 
+    The ``mapping`` parameter lets in-process callers (e.g.
+    :func:`sch_assign_footprints.run_assign_footprints`) hand a pre-built
+    ``{ref: footprint}`` dict directly, skipping the JSON/CSV file round-trip.
+    It is treated as the same "batch mode" as ``--map``: validation warnings
+    do not abort unless ``strict=True``. ``ref``/``footprint``/``map_path``
+    are ignored when ``mapping`` is provided.
+
     Returns 0 on success, 1 on error.
     """
     if not schematic_path.exists():
         print(f"Error: File not found: {schematic_path}", file=sys.stderr)
         return 1
 
-    # Build the ref -> footprint mapping
-    if map_path is not None:
+    # Build the ref -> footprint mapping. Precedence:
+    #   1. explicit in-memory ``mapping`` dict (batch mode for in-process callers)
+    #   2. ``map_path`` JSON/CSV file (batch mode for CLI users)
+    #   3. ``ref`` + ``footprint`` single-symbol mode
+    batch_mode: bool
+    if mapping is not None:
+        if not mapping:
+            print("Error: mapping is empty", file=sys.stderr)
+            return 1
+        batch_mode = True
+    elif map_path is not None:
         if not map_path.exists():
             print(f"Error: Mapping file not found: {map_path}", file=sys.stderr)
             return 1
@@ -210,13 +227,15 @@ def run_set_footprint(
         if not mapping:
             print("Error: Mapping file is empty", file=sys.stderr)
             return 1
+        batch_mode = True
     elif ref is not None and footprint is not None:
         mapping = {ref: footprint}
+        batch_mode = False
     else:
         print("Error: Provide either --ref/--footprint or --map", file=sys.stderr)
         return 1
 
-    single_ref_mode = map_path is None
+    single_ref_mode = not batch_mode
 
     # --- Pin-count validation (best-effort, before any modification) ---
     if validate:

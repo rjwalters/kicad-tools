@@ -15,6 +15,7 @@ def run_sch_command(args) -> int:
         )
         print(
             "          connections, unconnected, set-footprint, suggest-footprint,"
+            " assign-footprints,"
             " set-value, set-reference,"
             " set-symbol-property, replace,"
             " sync-hierarchy, rename-signal,"
@@ -191,6 +192,22 @@ def run_sch_command(args) -> int:
             package=getattr(args, "package", None),
             output_format=getattr(args, "format", "text"),
             limit=getattr(args, "limit", 20),
+            no_project_lib=getattr(args, "no_project_lib", False),
+        )
+
+    elif args.sch_command == "assign-footprints":
+        from ..sch_assign_footprints import run_assign_footprints
+
+        return run_assign_footprints(
+            schematic_path=schematic_path,
+            dry_run=getattr(args, "dry_run", False),
+            output_format=getattr(args, "format", "text"),
+            limit=getattr(args, "limit", 20),
+            backup=not getattr(args, "no_backup", False),
+            validate=getattr(args, "validate", True),
+            include_power=getattr(args, "include_power", False),
+            include_dnp=getattr(args, "include_dnp", False),
+            force=getattr(args, "force", False),
             no_project_lib=getattr(args, "no_project_lib", False),
         )
 
