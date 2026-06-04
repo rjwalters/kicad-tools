@@ -11060,6 +11060,206 @@ class Autorouter:
 
         return all_routes
 
+    def _build_pad_channel_budgets(
+        self,
+        dense_packages: list[PackageInfo],
+    ) -> list:
+        """Compute per-pad lateral-channel budgets for dense packages (Issue #3143).
+
+        Iterates the ``_escape_pad_overrides`` map populated by the
+        :meth:`generate_escape_routes` pre-pass and tags each escape
+        endpoint with a small rectangular "lateral channel" region.
+        Each region carries a soft per-cell penalty (``overflow_penalty``)
+        that the C++ A* search consults on every neighbor expansion via
+        the ``pad_channel_budgets`` parameter on ``route_resumable()``.
+
+        The penalty is a *cost shaping* term, not a barrier: it does not
+        forbid any cell, it just makes contested cells proportionally
+        more expensive than detour-equivalent neighbors.  This nudges the
+        search toward less-contested escape paths in the lateral channel
+        adjacent to a dense package edge -- the exact failure mode that
+        capped softstart routing reach at 6/10 nets in PR #3142 (the
+        U1 east-side TSSOP cluster all wanted the same channel and the
+        negotiated rip-up loop could not resolve).
+
+        Geometry:
+          For each escape pad on a dense package's edge, a 3x3-cell box
+          centered on the escape endpoint is registered as a contested
+          channel cell at the escape layer.  This is intentionally narrow
+          -- we only want to penalise the immediate channel slot adjacent
+          to the escape endpoint, not the entire lateral corridor.
+          Adjacent escapes on the same edge produce adjacent budget
+          rectangles; cells covered by multiple budgets get their
+          penalties summed by the C++ helper.
+
+        Tuning:
+          ``overflow_penalty`` is set to ~3 cells worth of straight-cost
+          (``rules.cost_straight * 3``).  This is small enough to be
+          overcome by a directly-adjacent free channel, but large enough
+          (when accumulated across a multi-cell trace through a contested
+          channel) to redirect to a 2-3 cell detour.  Capacity is set to
+          0 (always-on penalty) because the contention is the dominant
+          failure mode -- the channel is contested whether or not we know
+          a priori how many nets will land in it.  Future work can
+          measure claim counts during routing and refine capacity, but
+          this is out of scope for #3143 (the budget is computed once
+          before the rip-up loop; see the "out of scope" clause in the
+          issue body).
+
+        Args:
+            dense_packages: The dense packages detected by
+                :meth:`detect_dense_packages`.  Used to scope the budget
+                to escape pads that belong to one of these packages; pads
+                escaped by sub-grid or in-pad-rescue paths (not part of a
+                dense package) are skipped.
+
+        Returns:
+            List of ``router_cpp.PadChannelBudget`` instances (empty when
+            no escape overrides were populated, or when the C++ backend
+            is not available).  The caller forwards the list to
+            :meth:`CppPathfinder.set_pad_channel_budgets`.
+        """
+        # Only the C++ backend implements the per-cell cost lookup
+        # (per the "out of scope" clause in the issue: Python pathfinder
+        # is too slow on softstart).  When the Python backend is active
+        # we return an empty list -- the Python pathfinder will route
+        # using its pre-#3143 cost function identically.
+        try:
+            from .cpp_backend import router_cpp as _router_cpp
+        except ImportError:
+            return []
+        if _router_cpp is None:
+            return []
+
+        if not self._escape_pad_overrides:
+            return []
+
+        # Build a set of (ref, pin) keys belonging to dense packages so
+        # we don't tag sub-grid or in-pad-rescue escape pads (which use
+        # the same ``_escape_pad_overrides`` map but should not get a
+        # per-pad budget).  Also map each pad key to its containing
+        # package's bounding-box centre so we can derive the lateral
+        # escape direction (the contested channel extends FROM the
+        # package edge AWAY from the centre).
+        dense_pad_keys: set[tuple[str, str]] = set()
+        package_center_by_key: dict[tuple[str, str], tuple[float, float]] = {}
+        for package in dense_packages:
+            cx, cy = package.center
+            for pad in package.pads:
+                key = (pad.ref, pad.pin)
+                dense_pad_keys.add(key)
+                package_center_by_key[key] = (cx, cy)
+
+        # Tunables.  ``rules.cost_straight`` is typically 1.0; the
+        # penalty needs to be small enough that legitimate routes
+        # through the channel still complete.  A per-cell 0.5 surcharge
+        # accumulated across a multi-cell channel transit (~2-3 cost
+        # units) tips the cost balance toward a 2-3 cell detour but
+        # still lets the search through when no alternative exists.
+        overflow_penalty = float(self.rules.cost_straight) * 0.5
+        # The channel extends along the lateral escape direction (away
+        # from the package center).  We approximate the corridor as a
+        # rectangle from the escape endpoint extending ``channel_length``
+        # cells in the dominant escape direction, with a narrow
+        # perpendicular extent.  This shape matches the contested-
+        # channel topology described in the issue body: a strip just
+        # outside the package edge where east-side (or west/north/south)
+        # escapes converge.
+        #
+        # Combined with the per-net filter in
+        # ``cpp_backend.py::_filter_pad_channel_budgets_for_net``, this
+        # means: when OTHER nets try to traverse pad P's escape corridor
+        # (typically a sibling east-side escape trying to turn through
+        # this y-row), they pay a small per-cell surcharge that nudges
+        # them onto a parallel y-row.
+        channel_length_cells = 4  # ~0.3mm at 0.075mm resolution
+        perp_half_width_cells = 2  # 5-cell-wide strip; ``+/-2`` so y±2 (five rows).
+
+        cols = self.grid.cols
+        rows = self.grid.rows
+
+        budgets: list = []
+        for (ref, pin), virtual_pad in self._escape_pad_overrides.items():
+            if (ref, pin) not in dense_pad_keys:
+                continue
+
+            # Convert escape endpoint to grid coordinates.  The virtual
+            # pad sits exactly at the escape endpoint by construction
+            # (see :meth:`generate_escape_routes`).
+            try:
+                cgx, cgy = self.grid.world_to_grid(virtual_pad.x, virtual_pad.y)
+            except (AttributeError, TypeError):
+                # Defensive: any conversion failure skips this pad.
+                continue
+
+            # Determine the dominant escape axis from the package centre
+            # to the escape endpoint.  Larger |dx| => east/west escape
+            # (lateral channel runs east-west, perpendicular extent is
+            # north-south); larger |dy| => north/south escape (channel
+            # runs north-south, perpendicular extent is east-west).
+            center_x, center_y = package_center_by_key[(ref, pin)]
+            dx = virtual_pad.x - center_x
+            dy = virtual_pad.y - center_y
+            if abs(dx) >= abs(dy):
+                # East/west escape: channel extends along x-axis.
+                sign_x = 1 if dx >= 0 else -1
+                cx_far = cgx + sign_x * channel_length_cells
+                gx1 = min(cgx, cx_far)
+                gx2 = max(cgx, cx_far)
+                gy1 = cgy - perp_half_width_cells
+                gy2 = cgy + perp_half_width_cells
+            else:
+                # North/south escape: channel extends along y-axis.
+                sign_y = 1 if dy >= 0 else -1
+                cy_far = cgy + sign_y * channel_length_cells
+                gy1 = min(cgy, cy_far)
+                gy2 = max(cgy, cy_far)
+                gx1 = cgx - perp_half_width_cells
+                gx2 = cgx + perp_half_width_cells
+
+            # Clamp to grid bounds.
+            gx1 = max(0, gx1)
+            gy1 = max(0, gy1)
+            gx2 = min(cols - 1, gx2)
+            gy2 = min(rows - 1, gy2)
+            if gx1 > gx2 or gy1 > gy2:
+                continue
+
+            # Layer index.  ``virtual_pad.layer`` is a ``Layer`` enum from
+            # ``escape.escape_layer``.  Use its grid-layer index when
+            # available; fall back to ``-1`` (all layers) otherwise.
+            layer_idx = -1
+            try:
+                layer_value = getattr(virtual_pad.layer, "value", None)
+                if layer_value is not None:
+                    # Match the convention used elsewhere in core.py:
+                    # ``layer.value % num_layers``.
+                    layer_idx = int(layer_value) % self.grid.num_layers
+            except (AttributeError, TypeError):
+                layer_idx = -1
+
+            budget = _router_cpp.PadChannelBudget()
+            budget.gx1 = int(gx1)
+            budget.gy1 = int(gy1)
+            budget.gx2 = int(gx2)
+            budget.gy2 = int(gy2)
+            budget.layer = layer_idx
+            # Capacity stays at 0 (always-on penalty).  See the
+            # docstring's "Tuning" note for rationale.
+            budget.capacity = 0
+            budget.overflow_penalty = overflow_penalty
+            budget.origin_pad_ref_hash = 0  # Reserved field; unused.
+            # Net id of the originating escape pad.  The cpp_backend
+            # adapter consults this to filter out the current net's own
+            # budget entries before passing the list to the C++ search,
+            # so a net is not penalised for routing through its OWN
+            # escape endpoint (which would defeat the purpose -- every
+            # net has to leave its own escape point).
+            budget.source_net = int(getattr(virtual_pad, "net", 0) or 0)
+            budgets.append(budget)
+
+        return budgets
+
     def route_with_escape(
         self,
         use_negotiated: bool = True,
@@ -11120,6 +11320,24 @@ class Autorouter:
         else:
             print("\n--- No dense packages detected, skipping escape routing ---")
             escape_routes = []
+
+        # Issue #3143: Compute per-pad lateral-channel budgets from the
+        # escape pad overrides registered above.  The budgets nudge the
+        # C++ A* main router away from contested escape channels adjacent
+        # to dense-package pad rows -- exactly the failure mode that
+        # capped softstart routing reach at 6/10 nets in PR #3142.  Empty
+        # list (no dense packages, no overrides, or Python backend in use)
+        # silently leaves the per-net cost function pre-#3143 identical.
+        if dense_packages:
+            pad_channel_budgets = self._build_pad_channel_budgets(dense_packages)
+            if pad_channel_budgets and hasattr(
+                self.router, "set_pad_channel_budgets"
+            ):
+                self.router.set_pad_channel_budgets(pad_channel_budgets)
+                print(
+                    f"  Pad-channel budgets: {len(pad_channel_budgets)} "
+                    f"escape channel(s) tagged (Issue #3143)"
+                )
 
         # Phase 2: Route remaining connections
         print("\n--- Phase 2: Main Routing ---")

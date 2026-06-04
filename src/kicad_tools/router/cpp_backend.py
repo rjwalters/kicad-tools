@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 6
+_REQUIRED_CPP_BUILD_VERSION = 7
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -805,6 +805,16 @@ class CppPathfinder:
         # commits).
         self._foreign_vias: list = []  # list[Via]
 
+        # Issue #3143: Per-pad lateral-channel budget storage.  Populated
+        # by :meth:`set_pad_channel_budgets` from
+        # ``router.core.Router.route_with_escape`` after the dense-package
+        # escape pre-pass runs.  Each entry is a ``PadChannelBudget`` that
+        # tags a rectangular escape-channel region with a soft per-cell
+        # penalty consulted on every A* neighbor expansion.  Empty (the
+        # default) means no per-pad budget is configured and the C++
+        # search uses the pre-#3143 cost function identically.
+        self._pad_channel_budgets: list = []  # list[router_cpp.PadChannelBudget]
+
     def set_segment_foreign_context(
         self,
         foreign_vias: list | None = None,
@@ -839,6 +849,65 @@ class CppPathfinder:
                 from the segment's own net.  Pass ``None`` to clear.
         """
         self._foreign_vias = list(foreign_vias) if foreign_vias else []
+
+    def _filter_pad_channel_budgets_for_net(self, net: int) -> list:
+        """Return the per-pad budget list with the current net's own
+        entries filtered out (Issue #3143).
+
+        The pad channel budget is a per-cell cost penalty that nudges the
+        A* search away from contested escape channels.  But the
+        originating net of each escape pad cannot legitimately route
+        anywhere except through its own escape endpoint -- so penalising
+        cells around its own endpoint just adds dead-weight cost to the
+        only valid exit.  We filter out budgets whose ``source_net``
+        equals the current net before forwarding.
+
+        Args:
+            net: The integer net id of the route being computed.
+
+        Returns:
+            A filtered copy of ``self._pad_channel_budgets`` (or the
+            original list when no filtering is needed -- the empty-list
+            short-circuit avoids allocating a copy on the hot path when
+            no budget is configured at all).
+        """
+        if not self._pad_channel_budgets:
+            return self._pad_channel_budgets
+        # Use list comprehension; the budget list is bounded by the
+        # number of dense-package escape pads (typically < 30) so even
+        # the O(N) scan is cheap relative to the surrounding A* cost.
+        return [
+            b for b in self._pad_channel_budgets
+            if getattr(b, "source_net", 0) != net
+        ]
+
+    def set_pad_channel_budgets(self, budgets: list | None) -> None:
+        """Inject the per-pad lateral-channel budget list (Issue #3143).
+
+        The budgets are consulted by the C++ A* search via the
+        ``pad_channel_budgets`` parameter on
+        :meth:`router_cpp.Pathfinder.route_resumable`.  Each budget tags
+        a rectangular escape-channel region with a soft per-cell
+        penalty; the search prefers less-contested escape paths in the
+        lateral channels adjacent to dense-package pad rows.
+
+        This setter is the per-board configuration entry point used by
+        :meth:`router.core.Router.route_with_escape` after the dense-
+        package escape pre-pass runs.  Calling with ``None`` or an empty
+        list disables the per-pad-budget cost term (the C++ search uses
+        the pre-#3143 cost function identically).
+
+        Idempotent and may be called multiple times.  Each call replaces
+        the previously-stored list.  The Python side stores the budgets
+        and forwards them on every subsequent :meth:`_route_impl` call
+        as a positional argument to ``route_resumable()``.
+
+        Args:
+            budgets: List of ``router_cpp.PadChannelBudget`` instances
+                (or anything duck-typed against the binding's struct).
+                Pass ``None`` or ``[]`` to clear.
+        """
+        self._pad_channel_budgets = list(budgets) if budgets else []
 
     def enable_per_call_timing(self, enabled: bool = True) -> None:
         """Enable or disable per-A*-call wall-clock instrumentation.
@@ -1261,6 +1330,17 @@ class CppPathfinder:
                 emit_trace_width,
                 emit_via_diameter,
                 emit_via_drill,
+                # Issue #3143: per-pad lateral-channel budget.  Populated
+                # once per board by ``Router.route_with_escape`` via
+                # :meth:`set_pad_channel_budgets`.  Empty list (the
+                # default) keeps the C++ cost function pre-#3143
+                # identical; populated list nudges the search away from
+                # contested escape channels adjacent to dense-package
+                # pad rows.  Filtered per-net so the originating net of
+                # an escape pad is not penalised for routing through its
+                # OWN escape endpoint -- only contention from OTHER nets
+                # is shaped.
+                self._filter_pad_channel_budgets_for_net(start.net),
             )
 
             if not result.success:
