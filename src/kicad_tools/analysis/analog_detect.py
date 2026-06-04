@@ -347,41 +347,95 @@ def detect_analog_nets(pcb: PCB) -> list[AnalogNet]:
 
 
 def check_analog_ground_bridge(pcb: PCB) -> list[str]:
-    """Flag an analog ground that has no discrete bridge to digital ground.
+    """Flag an analog-ground bond that is missing, floating, or a ground loop.
 
-    Local 2-pad heuristic (no connectivity graph required): when a board has
-    BOTH an analog-ground net (``GNDA`` / ``AGND``) AND a digital-ground net
-    (``GND`` / ``DGND`` / ``VSS``), this looks for a single 2-pad bridge
-    component -- a net-tie (footprint name contains ``NetTie``) or a ferrite
-    bead (value matches a ferrite pattern) -- with one pad on the analog
-    ground and one pad on the digital ground.  If no such component exists,
-    a missing-bridge message is returned for that analog ground.
+    Two-tier check:
 
-    Limitations (documented intentionally)
-    --------------------------------------
-    This is a *pad-membership scan only*.  It does NOT consult routed copper
-    or zone fills.  If a board ties the grounds with a 0R resistor that is
-    not recognised as a ferrite, or via a zone stitch / single bridge via
-    rather than a discrete net-tie or ferrite component, this check may emit
-    a false "no bridge" advisory.  Full connectivity-topology verification --
-    confirming GNDA and GND join through *exactly one* electrical path via
-    the copper/zone graph -- is deferred to Phase 2b (tracked separately) and
-    requires cross-net single-point-bridge modelling in
-    ``validate/connectivity.py``.
+    1. **Phase 2b — topology-aware** (preferred).  When the PCB has any
+       routed copper / vias / zones, delegate to
+       :func:`kicad_tools.analysis.ground_topology.analyze_ground_topology`.
+       This builds per-net connectivity graphs for the analog and digital
+       grounds, recognises bridge components (ferrites, 0Ω resistors with
+       ``R*`` reference, KiCad ``NetTie*`` footprints including N-pad
+       variants), verifies both pads of every bridge are reachable in
+       their respective ground graph, and counts distinct join points.
+       Emits one of:
 
-    The function never raises; on any failure it returns an empty list.
+       * "no bridge ..." (0 wired bridges, no floating bridges)
+       * "bridge present but not wired ..." (0 wired bridges, ≥1 floating)
+       * (nothing) — single-point bond (1 wired bridge)
+       * "ground loop: ... joined through N bridges ..." (≥2 wired bridges)
+
+    2. **Phase 2 local 2-pad scan** (fallback).  Used when the PCB has no
+       segments, vias or filled / boundary zones (e.g. schematic-only /
+       placement-only boards), or when Phase 2b returns no results due to
+       an internal error.  This is the original pad-membership heuristic:
+       look for a recognised 2-pad bridge component (net-tie or ferrite)
+       with one pad on each ground.
+
+    The function never raises; on any failure the local scan output (or an
+    empty list, if even that fails) is returned.
 
     Parameters
     ----------
     pcb:
-        A loaded PCB object exposing ``nets`` and ``footprints``.
+        A loaded PCB object exposing ``nets`` and ``footprints`` (and,
+        ideally, ``segments`` / ``vias`` / ``zones`` for Phase 2b).
 
     Returns
     -------
     list[str]
-        One advisory string per analog ground lacking a recognised bridge.
-        Empty when every analog ground is bridged, when no analog ground is
-        present, or when no digital ground exists to bridge to.
+        Advisory strings — one per problematic analog ground.  Empty when
+        every analog ground is correctly bridged, when no analog ground
+        exists, or when no digital ground exists to bridge to.
+    """
+    # ---- Phase 2b: topology-aware path -----------------------------------
+    try:
+        from kicad_tools.analysis.ground_topology import (
+            analyze_ground_topology,
+            pcb_has_copper_topology,
+        )
+
+        if pcb_has_copper_topology(pcb):
+            results = analyze_ground_topology(pcb)
+            # If the topology analyzer returned anything, walk its results.
+            # An empty result list with copper present means either no
+            # analog ground or no digital ground — both legitimately
+            # produce no advisories.
+            if results is not None:
+                findings: list[str] = []
+                # Selection: if any result asked us to fall back, drop down
+                # to the local scan rather than returning a partial answer.
+                if any(r.used_fallback for r in results):
+                    return _check_analog_ground_bridge_local(pcb)
+                for r in results:
+                    if r.advisory is not None:
+                        findings.append(r.advisory)
+                return findings
+    except Exception:  # noqa: BLE001 — never raise from advisory code
+        # Fall through to local scan on any topology-engine failure.
+        pass
+
+    # ---- Phase 2: local 2-pad fallback -----------------------------------
+    try:
+        return _check_analog_ground_bridge_local(pcb)
+    except Exception:  # noqa: BLE001 — advisory must never raise
+        return []
+
+
+def _check_analog_ground_bridge_local(pcb: PCB) -> list[str]:
+    """Phase 2 local 2-pad bridge scan (fallback path).
+
+    Original pad-membership heuristic, retained verbatim from the
+    pre-Phase-2b implementation: a recognised 2-pad bridge component
+    (net-tie or ferrite) with one pad on the analog ground and one pad on
+    a digital ground satisfies the check.
+
+    Returns
+    -------
+    list[str]
+        Advisory strings; empty when every analog ground has a recognised
+        2-pad bridge.
     """
     findings: list[str] = []
 
