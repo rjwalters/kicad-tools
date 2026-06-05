@@ -188,6 +188,99 @@ def _sync_pad_to_cpp_grid(
         return
 
 
+def _sync_pad_cells_to_cpp_grid(
+    py_grid: "RoutingGrid",
+    cpp_grid: Any,
+    layers_to_block: list[int],
+    gx1: int,
+    gy1: int,
+    gx2: int,
+    gy2: int,
+) -> None:
+    """Push a pad's blocked-cell envelope to the paired C++ grid.
+
+    Issue #3224: ``CppGrid.from_routing_grid`` snapshots the Python grid at
+    ``Autorouter.__init__`` time -- when no pads have been added yet (the
+    typical CLI flow constructs the empty grid, then ``add_component`` is
+    called per-component AFTER the C++ grid exists).  Without this
+    incremental sync, the C++ A* searches against an empty obstacle grid
+    and relies entirely on post-route validation to reject pad-clearance
+    violations.  That works for most patterns but leaks 16
+    ``clearance_pad_segment`` errors on board 05 (fine-pitch QFN-56 / LQFP-32)
+    because the pad-exit exemption at ``pathfinder.cpp:680`` / ``:1173``
+    can step the trace centerline through foreign pad metal when
+    ``cell.pad_blocked`` is uniformly ``false``.
+
+    This helper walks the rectangular envelope the pad just claimed on
+    the Python grid and forwards each blocked cell -- with its post-update
+    ``net``, ``is_obstacle``, and ``pad_blocked`` flags -- to the C++ grid.
+    The Python-side ``_add_pad_unsafe`` MUST have completed its in-place
+    array updates before this is called; we read the freshly-written
+    state out of ``py_grid._blocked``, ``py_grid._net``,
+    ``py_grid._is_obstacle``, and ``py_grid._pad_blocked``.
+
+    Args:
+        py_grid: The Python ``RoutingGrid`` whose pad-cells were just
+            updated by ``_add_pad_unsafe``.
+        cpp_grid: The paired ``CppGrid`` (back-reference established by
+            ``CppGrid.from_routing_grid``).
+        layers_to_block: Layer indices the pad affected (typically a
+            single layer for SMD pads, all routable layers for THT pads).
+        gx1, gy1, gx2, gy2: Inclusive grid-cell bounding box of the pad's
+            blocked envelope.  Already clamped to grid bounds by the
+            caller's ``_add_pad_unsafe`` loop.
+    """
+    try:
+        from . import router_cpp  # type: ignore[attr-defined]  # noqa: F401
+    except ImportError:
+        return
+
+    # Use numpy slices to read the post-update Python grid state.  Reading
+    # via the slow per-cell ``Cell`` proxy (``grid.grid[layer][y][x]``) for
+    # every cell would re-traverse the GPU-aware accessor path; the raw
+    # arrays are the same data source the proxy reads from.
+    py_blocked = py_grid._blocked
+    py_net = py_grid._net
+    py_is_obstacle = py_grid._is_obstacle
+    py_pad_blocked = py_grid._pad_blocked
+
+    # Clamp the envelope defensively -- callers already clamp, but the
+    # numpy slice would silently return empty arrays if the caller's
+    # ``_add_pad_unsafe`` ever shipped an unclamped rectangle.
+    gx1 = max(0, gx1)
+    gy1 = max(0, gy1)
+    gx2 = min(py_grid.cols - 1, gx2)
+    gy2 = min(py_grid.rows - 1, gy2)
+    if gx2 < gx1 or gy2 < gy1:
+        return
+
+    try:
+        impl_mark_blocked = cpp_grid._impl.mark_blocked
+    except AttributeError:
+        return
+
+    for layer_idx in layers_to_block:
+        # Iterate the envelope.  Per-cell ``mark_blocked`` calls match the
+        # bulk-sync pattern in ``CppGrid.from_routing_grid`` -- there is
+        # no rectangular bulk setter that takes per-cell ``pad_blocked``
+        # bits, so a small inner loop is the cleanest port.  The envelope
+        # is bounded (typically <= 30x30 cells for a 1mm pad at 0.1mm
+        # resolution) so the Python overhead is negligible relative to a
+        # full board's route time.
+        for gy in range(gy1, gy2 + 1):
+            for gx in range(gx1, gx2 + 1):
+                if not py_blocked[layer_idx, gy, gx]:
+                    continue
+                impl_mark_blocked(
+                    int(gx),
+                    int(gy),
+                    int(layer_idx),
+                    int(py_net[layer_idx, gy, gx]),
+                    bool(py_is_obstacle[layer_idx, gy, gx]),
+                    bool(py_pad_blocked[layer_idx, gy, gx]),
+                )
+
+
 def _is_plane_net_pad(pad: "Pad") -> bool:
     """Return True if ``pad`` belongs to a plane net (power/ground topology).
 
@@ -1443,6 +1536,36 @@ class RoutingGrid:
                 effective_height=effective_height,
                 pin_pitch=pin_pitch,
                 layers_to_block=layers_to_block,
+            )
+
+        # Issue #3224: Push the freshly-updated pad envelope into the paired
+        # C++ grid so the C++ A* sees the same blocked cells (including the
+        # ``pad_blocked`` metal bit) the Python A* does.  Without this, the
+        # ``Autorouter.__init__`` -> ``create_hybrid_router`` -> ``add_component``
+        # ordering leaves the C++ grid with zero pad obstacles -- relying on
+        # post-route validation to reject pad-clearance violations.  That
+        # works for most cases but leaks 16 ``clearance_pad_segment``
+        # errors on board 05 (QFN-56 / LQFP-32 fine-pitch corridors) because
+        # the pad-exit exemption at ``pathfinder.cpp:680`` / ``:1173`` can
+        # step the trace centerline through foreign pad metal when
+        # ``cell.pad_blocked`` is uniformly ``false``.
+        #
+        # The sync is intentionally done AFTER the same-component / stitch
+        # halo / narrow-channel helpers above so the C++ grid receives the
+        # FINAL post-update state (carve-outs applied, halos extended, etc.).
+        # The standard envelope ``(gx1, gy1) - (gx2, gy2)`` covers the pad
+        # metal and standard clearance; the auxiliary halo helpers
+        # (``_apply_stitch_via_halo``, ``_apply_narrow_channel_halo``)
+        # extend outward but only operate on plane-net or same-component
+        # pads -- those zones are visited again when their owning pads are
+        # added (or already covered by the standard envelope of the
+        # neighbour pad).  The pad-metal protection that closes the
+        # foreign-pad-metal A* gap is the standard-envelope zone, which is
+        # what we sync here.
+        cpp_grid = self._cpp_grid
+        if cpp_grid is not None:
+            _sync_pad_cells_to_cpp_grid(
+                self, cpp_grid, layers_to_block, gx1, gy1, gx2, gy2
             )
 
     def _apply_stitch_via_halo(
