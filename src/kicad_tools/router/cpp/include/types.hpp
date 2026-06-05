@@ -46,7 +46,21 @@ namespace router {
 // the post-#3199 (f_score, g_score, seq) comparison restores 6/10.
 // Bumping the version forces a rebuild so the regression fix takes
 // effect.
-constexpr int ROUTER_CPP_BUILD_VERSION = 8;
+//
+// Bump to 9 for Issue #3224 (foreign-pad-metal A* rejection).
+// ``Grid3D::mark_blocked`` gained an optional trailing ``pad_blocked``
+// parameter so the Python sync (``cpp_backend.py::from_routing_grid``
+// and ``grid.py::_sync_pad_to_cpp_grid``) can forward the
+// ``_pad_blocked[metal_slice] = True`` bit set by
+// ``RoutingGrid._add_pad_unsafe``.  Without the rebuild, ``cell.pad_blocked``
+// remains ``false`` for every cell, and the ``is_clearance_only =
+// !cell.pad_blocked`` check at ``pathfinder.cpp:680`` / ``pathfinder.cpp:1173``
+// always reports "clearance halo", allowing the A* pad-exit branch to
+// step trace centerlines through foreign pad metal -- the 16
+// ``clearance_pad_segment`` errors on board 05 with --backend cpp.
+// Bumping the build version forces ``kct build-native`` so the fix takes
+// effect.
+constexpr int ROUTER_CPP_BUILD_VERSION = 9;
 
 // Grid cell state
 struct GridCell {

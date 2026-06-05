@@ -35,12 +35,27 @@ Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
     congestion_.resize(static_cast<size_t>(layers) * congestion_rows_ * congestion_cols_, 0);
 }
 
-void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle) {
+void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
+                          bool pad_blocked) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
     cell.blocked = true;
     cell.net = net;
     cell.is_obstacle = is_obstacle;
+    // Issue #3224: Forward the pad-metal bit so the A* clearance branch in
+    // ``pathfinder.cpp`` can distinguish foreign-pad metal (where the trace
+    // centerline must NOT enter) from foreign-pad clearance halo (where
+    // pad-exit may step through to escape an adjacent same-net pad).  The
+    // OR keeps the bit "sticky" -- if a cell is touched by two pads and
+    // either is pad metal, the cell remains pad-blocked.  ``original_net``
+    // mirrors the Python grid's bookkeeping: ``unmark_segment`` /
+    // ``unmark_via`` consult it to restore the pad's net id when ripping
+    // up a route that crossed the pad's clearance halo (see grid.cpp:146,
+    // grid.cpp:188).
+    if (pad_blocked) {
+        cell.pad_blocked = true;
+        cell.original_net = net;
+    }
 }
 
 void Grid3D::mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,

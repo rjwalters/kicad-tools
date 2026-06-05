@@ -154,9 +154,21 @@ NB_MODULE(router_cpp, m) {
         // Coordinate conversion
         .def("world_to_grid", &Grid3D::world_to_grid, "x"_a, "y"_a)
         .def("grid_to_world", &Grid3D::grid_to_world, "gx"_a, "gy"_a)
-        // Blocking operations
+        // Blocking operations.
+        //
+        // Issue #3224: ``pad_blocked`` (default ``false``) marks the cell as
+        // foreign pad copper.  The A* clearance branch in
+        // ``pathfinder.cpp`` (lines 680 and 1173 -- the one-shot and
+        // resumable / negotiated paths) reads ``cell.pad_blocked`` to
+        // distinguish foreign-pad metal from foreign-pad clearance halo;
+        // only halo cells participate in the pad-exit exemption.
+        // Without the bit, the C++ A* accepted traces stepping through
+        // foreign pad copper.  Defaults to ``false`` so existing callers
+        // that mark obstacle cells (board outline, copper-pour clearance
+        // halos) preserve their pre-#3224 behavior.
         .def("mark_blocked", &Grid3D::mark_blocked,
-             "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
+             "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
+             "pad_blocked"_a = false)
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking

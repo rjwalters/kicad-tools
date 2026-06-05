@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 8
+_REQUIRED_CPP_BUILD_VERSION = 9
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -564,13 +564,36 @@ class CppGrid:
         # Copy routable layer indices from Python grid
         cpp_grid._routable_layers = grid.get_routable_indices()
 
-        # Copy blocked cells from Python grid to C++ grid
+        # Copy blocked cells from Python grid to C++ grid.
+        #
+        # Issue #3224: Forward the ``pad_blocked`` bit (set by
+        # ``RoutingGrid._add_pad_unsafe`` at grid.py:4458 for cells inside a
+        # pad's metal area) so the C++ A* clearance branch at
+        # ``pathfinder.cpp:680`` (one-shot) and ``pathfinder.cpp:1173``
+        # (resumable / negotiated) can distinguish pad metal from pad
+        # clearance halo.  Without this bit, ``cell.pad_blocked`` defaults to
+        # ``false`` on every C++ cell and the pad-exit exemption admits
+        # traces stepping through foreign pad copper -- the
+        # ``clearance_pad_segment`` regression on board 05 (16 errors at HEAD
+        # with --backend cpp vs 1 on python).  The bulk sync here is
+        # complemented by the incremental sync at
+        # ``grid.py::_sync_pad_to_cpp_grid`` for pads added AFTER this
+        # bulk-copy completes (the typical ``Autorouter.add_component``
+        # flow).
+        py_pad_blocked = grid._pad_blocked
         for layer in range(grid.num_layers):
             for y in range(grid.rows):
                 for x in range(grid.cols):
                     py_cell = grid.grid[layer][y][x]
                     if py_cell.blocked:
-                        cpp_grid._impl.mark_blocked(x, y, layer, py_cell.net, py_cell.is_obstacle)
+                        cpp_grid._impl.mark_blocked(
+                            x,
+                            y,
+                            layer,
+                            py_cell.net,
+                            py_cell.is_obstacle,
+                            bool(py_pad_blocked[layer, y, x]),
+                        )
 
         # Issue #2439: Populate pad data for C++ geometric validation.
         # Pre-compute per-component clearance overrides and FNV-1a ref hashes

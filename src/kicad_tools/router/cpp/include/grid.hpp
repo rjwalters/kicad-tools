@@ -53,8 +53,24 @@ public:
         return {origin_x_ + gx * resolution_, origin_y_ + gy * resolution_};
     }
 
-    // Bulk operations for obstacle marking
-    void mark_blocked(int x, int y, int layer, int net, bool is_obstacle = false);
+    // Bulk operations for obstacle marking.
+    //
+    // Issue #3224: ``pad_blocked`` (default ``false``) marks the cell as
+    // foreign pad copper -- the A* clearance branch in ``pathfinder.cpp``
+    // refuses to step the trace centerline into a foreign pad's metal
+    // even during pad-exit (where clearance-halo cells are otherwise
+    // allowed).  Without this bit, ``cell.pad_blocked`` defaults to
+    // ``false`` for every cell and the pad-exit exemption permits traces
+    // to step through foreign pad metal, producing the
+    // ``clearance_pad_segment`` regression on dense fine-pitch packages
+    // (board 05 / U3 QFN-56 / U10 LQFP-32).  The Python sync
+    // (``cpp_backend.py::from_routing_grid`` and
+    // ``grid.py::_sync_pad_to_cpp_grid``) sets this bit only for cells
+    // inside a pad's metal area (NOT the surrounding clearance halo),
+    // mirroring the Python grid's ``_pad_blocked[metal_slice] = True``
+    // at ``grid.py:4458``.
+    void mark_blocked(int x, int y, int layer, int net, bool is_obstacle = false,
+                      bool pad_blocked = false);
     void mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
                            bool is_obstacle = false);
 
