@@ -11089,22 +11089,36 @@ class Autorouter:
           the budget rectangle is a STRIP just OUTSIDE the package bbox
           along the pad's classified edge, spanning the full bbox
           extent in the perpendicular axis (with small corner padding),
-          and extending ``escape_strip_thickness_cells`` cells outward
-          in the escape direction.
+          and extending from one cell outside the package edge OUTWARD
+          to whichever is FARTHER: ``escape_strip_thickness_cells``
+          (the minimum-thickness floor) OR
+          (escape_endpoint_position + ``escape_endpoint_margin_cells``).
+
+          The endpoint-aware extension (added in the geometry-tuning
+          pass of #3201) addresses a previously-undocumented gap: on
+          softstart's U1 the F_CU east-even escapes terminate at
+          virtual_pad.x = center_x + 3.45 (~8 cells outside the package
+          edge), so the actually-contested post-escape turn column
+          where N/S detour traffic settles sits BEYOND the original
+          fixed 4-cell strip.  The previous fixed-thickness geometry
+          tagged cells 1-4 outside the package edge but missed the
+          contested column at cells 7-8.  Extending the strip to
+          (endpoint + 2 cells margin) ensures it covers BOTH the
+          immediate post-escape column AND the post-endpoint turn
+          region.
 
           On the standard 0.075mm grid this produces, for an east-side
-          pad, a vertical strip from (pkg_x_max + 1 cell) to
-          (pkg_x_max + 6 cells), spanning pkg_y_min - 2 to
-          pkg_y_max + 2.  The 6-cell thickness (0.45mm) was chosen so
-          the strip covers BOTH the immediate post-escape column (where
-          peer escape stubs terminate ~0.15mm outside the package edge)
-          AND the next 1-3 columns outward where vertical north/south
-          detour traffic settles after the escape stubs end.  This is
-          the actually-contested region for softstart's U1 east-side
-          TSSOP-20 cluster -- confirmed by the diagnostic dump in
-          Issue #3201 where multiple east-side nets (GATE_NEG,
-          I_SENSE_OUT, SWCLK, ZC_DETECT) all wanted to turn south
-          through the same column 1-2 cells outside the package edge.
+          pad with escape endpoint at (center_x + 3.45, pad_y), a
+          vertical strip from (pkg_x_max + 1 cell) to
+          (escape_endpoint_x + 2 cells) -- typically 10 cells thick
+          for F_CU pads, falling back to 4 cells (the thickness floor)
+          for B_CU corner-routed escapes whose endpoint sits INSIDE
+          the bbox.  Perpendicular extent spans
+          pkg_y_min - 2 to pkg_y_max + 2.  This is the
+          actually-contested region for softstart's U1 east-side
+          TSSOP-20 cluster -- multiple east-side nets (GATE_NEG,
+          I_SENSE_OUT, SWCLK, ZC_DETECT) all want to turn south
+          through the same column near the F_CU escape endpoint.
 
           Edge classification uses the ORIGINAL pad position (not the
           escape endpoint) relative to the package bounding box.  This
@@ -11136,23 +11150,41 @@ class Autorouter:
           caused an NRST regression because cumulative penalty on the
           west edge exceeded the cost of detouring entirely around U1.
 
-          Empirical sweep on softstart (Issue #3201, 2026-06-04):
+          Empirical sweep on softstart (Issue #3201):
 
+              [2026-06-04, fixed-thickness strip anchored at package edge]
               penalty=1.5x, thick=6 cells:  5/10 reach (regression)
               penalty=1.0x, thick=4 cells:  5/10 reach (regression)
               penalty=0.5x, thick=4 cells:  6/10 reach (parity)
               penalty=0.3x, thick=6 cells:  6/10 reach (parity)
               penalty=0.25x, thick=6 cells: 6/10 reach (parity)
 
-          The combination penalty=0.5x + thickness=4 cells matches the
-          pre-#3201 reach (6/10) while using correct edge
-          classification, anchoring at the package edge, and
-          all-layer tagging -- so the geometry is now a CORRECT base
-          on which future iteration can build.  The 8/10 AC1 target
-          requires additional work upstream of the budget (e.g.,
-          resolving the #3199 baseline regression to recover the 6/10
-          ceiling, or improving the negotiated rip-up loop to better
-          exploit budget hints).
+              [2026-06-05, endpoint-aware strip extension geometry]
+              penalty=0.25x, endpoint-extended: 6/10 reach (parity)
+              penalty=0.5x,  endpoint-extended: 6/10 reach (parity)
+              penalty=1.0x,  endpoint-extended: 4/10 reach (regression)
+              penalty=2.0x,  endpoint-extended: 5/10 reach (regression)
+              perp_extension_cells=8 + 0.5x: 6/10 reach (parity)
+
+          The combination penalty=0.5x + endpoint-aware strip extension
+          matches the pre-#3201 reach (6/10) while using correct edge
+          classification, anchoring at the package edge, all-layer
+          tagging, AND covering the contested post-escape column.
+          The 8/10 AC1 target was empirically confirmed UNREACHABLE
+          through budget-geometry tuning alone (across two sweep
+          generations and 4+ parameter combinations).  Additional work
+          upstream of the budget is required:
+
+            - Improve the negotiated rip-up loop's selection heuristic
+              to better exploit budget hints when picking which net to
+              rip up under congestion (the current "Initial pass stall"
+              path engages BLOCKED_BY_COMPONENT rip-up with a per-net
+              budget of 3 -- this loop is the bottleneck, not the
+              search cost function the budget shapes).
+            - Investigate diversifying escape-stub layer assignment so
+              that adjacent east-side pads do not all converge on the
+              same post-escape column (an upstream change to
+              ``generate_escape_routes`` rather than budget shaping).
 
           On softstart's U1 east edge (6 signal pads), the
           contested-cell overlap sums to ~(6-1) * 0.5 = 2.5 per cell
@@ -11278,6 +11310,21 @@ class Autorouter:
         # so peer-pad nets that want to escape near the package corners
         # still have a clean exit.
         perp_extension_cells = 2
+        # Issue #3201 geometry tuning: when the escape endpoint sits
+        # OUTSIDE the package bounding box (the common F_CU case --
+        # virtual_pad.x = center_x + 3.45 for softstart's U1 east-even
+        # pads, ~6-8 cells outside the package edge), the strip must
+        # extend OUTWARD past the endpoint column so it covers the
+        # contested post-escape turn region where peer nets settle
+        # after their stubs terminate.  Pre-#3201 the fixed 4-cell
+        # thickness anchored at the package edge missed this column
+        # entirely.  The margin past the endpoint catches the 1-2
+        # columns immediately outside where N/S detour traffic from
+        # adjacent escape stubs converges.  When the endpoint sits
+        # INSIDE the bbox (B_CU corner-routed escapes) the fallback
+        # is the original ``escape_strip_thickness_cells`` so the
+        # strip still appears outside the package.
+        escape_endpoint_margin_cells = 2
 
         cols = self.grid.cols
         rows = self.grid.rows
@@ -11331,16 +11378,53 @@ class Autorouter:
             else:
                 edge_axis = "x" if half_x <= half_y else "y"
 
+            # Compute the escape endpoint position to size the strip's
+            # outward extent.  The strip must reach AT LEAST to the
+            # escape endpoint column (where peer escape stubs terminate
+            # and N/S detour traffic settles) plus a small margin for
+            # the post-escape turn region.  Pre-#3201 the strip was
+            # fixed at 4 cells outward from the package edge, which
+            # missed the actually-contested column when the F_CU escape
+            # endpoints sit ~6-8 cells outside the package edge (the
+            # softstart U1 east-even pads' escape endpoint at
+            # center_x + 3.45 vs package edge at center_x + 2.85).  The
+            # geometry-tuning sweep in #3201 traced 6/10 -> 6/10
+            # stagnation to this gap: the strip lived adjacent to the
+            # package edge while the contested column was further out.
+            try:
+                end_gx, end_gy = self.grid.world_to_grid(
+                    virtual_pad.x, virtual_pad.y
+                )
+            except (AttributeError, TypeError):
+                end_gx = end_gy = None
+
             if edge_axis == "x":
                 try:
                     if pad_dx >= 0:
                         edge_gx, _ = self.grid.world_to_grid(max_x, center_y)
                         gx1 = edge_gx + 1
-                        gx2 = gx1 + escape_strip_thickness_cells - 1
+                        # Strip extends outward from the package edge to
+                        # AT LEAST escape_strip_thickness_cells, and far
+                        # enough to cover the escape endpoint column plus
+                        # the post-escape turn margin.  Endpoint inside
+                        # the package bbox (B_CU escape) falls back to
+                        # the minimum thickness so the strip is still
+                        # registered outside the package.
+                        gx2_min = gx1 + escape_strip_thickness_cells - 1
+                        if end_gx is not None and end_gx > edge_gx:
+                            gx2_endpoint = end_gx + escape_endpoint_margin_cells
+                            gx2 = max(gx2_min, gx2_endpoint)
+                        else:
+                            gx2 = gx2_min
                     else:
                         edge_gx, _ = self.grid.world_to_grid(min_x, center_y)
                         gx2 = edge_gx - 1
-                        gx1 = gx2 - escape_strip_thickness_cells + 1
+                        gx1_min = gx2 - escape_strip_thickness_cells + 1
+                        if end_gx is not None and end_gx < edge_gx:
+                            gx1_endpoint = end_gx - escape_endpoint_margin_cells
+                            gx1 = min(gx1_min, gx1_endpoint)
+                        else:
+                            gx1 = gx1_min
                     _gx_lo, gy_lo = self.grid.world_to_grid(center_x, min_y)
                     _gx_hi, gy_hi = self.grid.world_to_grid(center_x, max_y)
                 except (AttributeError, TypeError):
@@ -11354,13 +11438,23 @@ class Autorouter:
                             center_x, max_y
                         )
                         gy1 = edge_gy + 1
-                        gy2 = gy1 + escape_strip_thickness_cells - 1
+                        gy2_min = gy1 + escape_strip_thickness_cells - 1
+                        if end_gy is not None and end_gy > edge_gy:
+                            gy2_endpoint = end_gy + escape_endpoint_margin_cells
+                            gy2 = max(gy2_min, gy2_endpoint)
+                        else:
+                            gy2 = gy2_min
                     else:
                         _gx_dummy, edge_gy = self.grid.world_to_grid(
                             center_x, min_y
                         )
                         gy2 = edge_gy - 1
-                        gy1 = gy2 - escape_strip_thickness_cells + 1
+                        gy1_min = gy2 - escape_strip_thickness_cells + 1
+                        if end_gy is not None and end_gy < edge_gy:
+                            gy1_endpoint = end_gy - escape_endpoint_margin_cells
+                            gy1 = min(gy1_min, gy1_endpoint)
+                        else:
+                            gy1 = gy1_min
                     gx_lo, _gy_dummy1 = self.grid.world_to_grid(min_x, center_y)
                     gx_hi, _gy_dummy2 = self.grid.world_to_grid(max_x, center_y)
                 except (AttributeError, TypeError):
@@ -11466,7 +11560,14 @@ class Autorouter:
         # capped softstart routing reach at 6/10 nets in PR #3142.  Empty
         # list (no dense packages, no overrides, or Python backend in use)
         # silently leaves the per-net cost function pre-#3143 identical.
-        if dense_packages:
+        #
+        # Issue #3201 diagnostic: setting environment variable
+        # ``KCT_DISABLE_PAD_BUDGETS=1`` disables budget application to
+        # establish an A/B comparison without recompilation.  Useful for
+        # confirming whether a routing regression originates from the
+        # budget code path (per PR #3222's diagnostic pattern that
+        # confirmed board 05 does not invoke this code path).
+        if dense_packages and not os.environ.get("KCT_DISABLE_PAD_BUDGETS"):
             pad_channel_budgets = self._build_pad_channel_budgets(dense_packages)
             if pad_channel_budgets and hasattr(
                 self.router, "set_pad_channel_budgets"
