@@ -151,24 +151,34 @@ class TestNetlistSyncGate:
 class TestAdvisoryBanner:
     def test_plain_check_prints_banner_without_changing_exit(self, tmp_path, capsys):
         # Drift present but DRC clean -> banner appears, exit stays 0.
+        # The banner is routed to stderr (not stdout) so it does not pollute
+        # ``--format json`` payloads consumed by the CI gate at
+        # ``scripts/ci/check_routed_drc.py`` (see ``_emit_drift_banner``).
         pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, PCB_MISSING_R1)
         rc = check_main([str(pcb), "--format", "summary"])
-        out = capsys.readouterr().out
-        assert "PCB out of sync with schematic" in out
-        assert "1 schematic-only" in out
+        captured = capsys.readouterr()
+        assert "PCB out of sync with schematic" in captured.err
+        assert "1 schematic-only" in captured.err
+        # Stdout stays clean -- only the DRC report (or JSON body) lands there.
+        assert "PCB out of sync with schematic" not in captured.out
         # Banner alone does not flip the exit code (DRC found no errors).
         assert rc == 0
 
     def test_plain_check_no_banner_when_in_sync(self, tmp_path, capsys):
         pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, MINIMAL_PCB_MATCHING)
         check_main([str(pcb), "--format", "summary"])
-        assert "out of sync" not in capsys.readouterr().out.lower()
+        captured = capsys.readouterr()
+        # Banner is suppressed entirely on both streams when in sync.
+        assert "out of sync" not in captured.out.lower()
+        assert "out of sync" not in captured.err.lower()
 
     def test_plain_check_no_banner_when_no_schematic(self, tmp_path, capsys):
         pcb = tmp_path / "board.kicad_pcb"
         pcb.write_text(PCB_MISSING_R1)
         check_main([str(pcb), "--format", "summary"])
-        assert "out of sync" not in capsys.readouterr().out.lower()
+        captured = capsys.readouterr()
+        assert "out of sync" not in captured.out.lower()
+        assert "out of sync" not in captured.err.lower()
 
     def test_route_prints_banner(self, tmp_path, capsys):
         pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, PCB_MISSING_R1)

@@ -62,6 +62,13 @@ def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
 
     No-op when no schematic can be resolved or the PCB is in sync.  This is
     advisory only and never affects the caller's exit code (issue #3154).
+
+    The banner is routed to stderr so it does not pollute the stdout JSON
+    body produced by ``--format json`` consumers (the CI gate at
+    ``scripts/ci/check_routed_drc.py`` parses stdout as a single JSON document
+    and was choking on the leading WARNING line; routing to stderr keeps the
+    advisory visible in human/log output while leaving the structured payload
+    clean).
     """
     from kicad_tools.sync.drift import analyze_drift, format_drift_banner
 
@@ -70,7 +77,7 @@ def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
         return
     banner = format_drift_banner(analysis, pcb_path)
     if banner:
-        print(banner)
+        print(banner, file=sys.stderr)
 
 
 def run_netlist_sync_gate(

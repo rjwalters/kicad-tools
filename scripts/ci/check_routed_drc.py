@@ -324,12 +324,22 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
             f"{pcb_path}. stderr:\n{proc.stderr.strip()}"
         )
 
+    # Defensive: ``kct check``'s advisory drift banner is now routed to stderr
+    # (see ``_emit_drift_banner`` in ``check_cmd.py``), but historically it
+    # printed to stdout ahead of the JSON body and broke this parser.  Strip
+    # any leading non-``{`` lines so that an older ``kct`` (or a future
+    # regression) cannot re-introduce the same CI flake.  The JSON document
+    # ``kct check --format json`` emits is always a single top-level object,
+    # so the first ``{`` reliably marks the payload start.
+    raw_stdout = proc.stdout
+    first_brace = raw_stdout.find("{")
+    json_stdout = raw_stdout[first_brace:] if first_brace > 0 else raw_stdout
     try:
-        data: dict[str, Any] = json.loads(proc.stdout)
+        data: dict[str, Any] = json.loads(json_stdout)
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"kct check produced invalid JSON on {pcb_path}: {e}\n"
-            f"stdout (first 500 chars):\n{proc.stdout[:500]}"
+            f"stdout (first 500 chars):\n{raw_stdout[:500]}"
         ) from e
 
     try:
