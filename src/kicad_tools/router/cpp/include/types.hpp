@@ -29,7 +29,15 @@ namespace router {
 // stale builds running against the post-#3144 Python side would
 // produce a confusing ABI mismatch.  Bumping the version forces a
 // rebuild via ``kct build-native``.
-constexpr int ROUTER_CPP_BUILD_VERSION = 6;
+//
+// Bump to 7 for Issue #3143 (per-pad channel budget).  Adds a new
+// ``PadChannelBudget`` struct in this header, exposes it through the
+// nanobind layer, and threads a ``std::vector<PadChannelBudget>``
+// parameter into ``Pathfinder::route()`` / ``route_resumable()``.  Old
+// .so files lack the new struct definition and would mismatch the
+// Python-side caller; the build-version bump forces a rebuild via
+// ``kct build-native``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 7;
 
 // Grid cell state
 struct GridCell {
@@ -159,6 +167,71 @@ struct PadBounds {
     int approach_gy1 = 0;
     int approach_gx2 = 0;
     int approach_gy2 = 0;
+};
+
+// Per-pad lateral-channel budget (Issue #3143).
+//
+// Tags a rectangular "lateral channel" region adjacent to a dense-package
+// pad with a soft per-cell penalty proportional to how many distinct nets
+// are already routing through it.  The penalty is consulted on every A*
+// neighbor-expansion inside the cell box; nets that share the channel with
+// fewer prior occupants see a smaller cost, while nets that would push the
+// channel past ``capacity`` see ``overflow_penalty`` accumulated on each
+// cell.  This nudges the A* search toward a less-contested escape path,
+// without hard-blocking any route -- the budget is a *cost shaping* term,
+// not a barrier.
+//
+// Why this is needed:
+//   Dense packages like softstart's U1 (TSSOP-20, 0.65mm pitch) generate
+//   escape stubs that all terminate in the same narrow lateral channel
+//   adjacent to the package edge.  The standard A* cost function treats
+//   every cell equally, so the first net to enter the channel "wins" it
+//   for free; subsequent nets that COULD reach the goal via a slightly
+//   longer detour instead pile onto the same channel until the negotiated
+//   rip-up loop runs out of options.  The per-pad channel budget makes
+//   the contested channel proportionally more expensive as more nets
+//   claim it, so the search naturally redistributes onto adjacent
+//   channels.
+//
+// Fields:
+//   gx1/gy1/gx2/gy2 -- inclusive grid-coordinate bounding box of the
+//     channel cells (only cells inside this rect are penalised).
+//   layer -- routing layer this channel applies to.  -1 means "any layer".
+//   capacity -- soft capacity (number of distinct nets allowed to share
+//     this channel before overflow_penalty fires).  0 means the channel
+//     is unmetered; the budget is inert.
+//   overflow_penalty -- per-cell cost added to each cell expansion for
+//     nets that would push the channel beyond ``capacity``.  Tuned to
+//     be roughly equivalent to a few extra cells of detour -- large
+//     enough to redirect when a near-by alternative exists, small enough
+//     that no alternative path is preferred over a 2x-longer detour.
+//   origin_pad_ref_hash -- FNV-1a hash of the originating component's
+//     refdes (e.g. "U1").  Reserved for future per-package-aware budgets;
+//     not consumed by the current cost calculation.
+//
+// Used by:
+//   Pathfinder::run_astar_loop / Pathfinder::route (the per-cell cost
+//   helper ``get_pad_channel_cost`` consults a pre-built lookup table).
+struct PadChannelBudget {
+    int gx1 = 0;
+    int gy1 = 0;
+    int gx2 = 0;
+    int gy2 = 0;
+    int layer = -1;        // -1 = applies to all routing layers
+    int capacity = 0;      // 0 = inert (no penalty enforced)
+    float overflow_penalty = 0.0f;
+    uint32_t origin_pad_ref_hash = 0;  // Reserved for future per-package use.
+    // Source net of the originating escape pad.  When > 0, the cost
+    // shaping is "soft against this net" -- i.e. the penalty fires only
+    // on nets DIFFERENT from ``source_net``.  This is the per-pad-aware
+    // semantics that lets the budget gate cross-net contention without
+    // penalising the originating net's own A* expansion out of its
+    // escape endpoint.  The Python adapter filters by net before the
+    // C++ call (see ``cpp_backend.py::_route_impl``), so the C++ side
+    // does not need to inspect ``source_net`` directly -- it stays in
+    // the struct for diagnostics and so the Python side can round-trip
+    // the field without losing it.
+    int source_net = 0;
 };
 
 // Design rules (simplified for C++ core)

@@ -77,7 +77,15 @@ public:
         // is unchanged -- only the emit values are affected).
         float emit_trace_width = 0.0f,
         float emit_via_diameter = 0.0f,
-        float emit_via_drill = 0.0f
+        float emit_via_drill = 0.0f,
+        // Issue #3143: per-pad lateral-channel budget.  Empty (the default)
+        // disables the new cost term and preserves pre-#3143 behaviour
+        // identically.  When non-empty, each PadChannelBudget defines a
+        // grid-coordinate bbox + soft capacity + per-cell overflow penalty
+        // that nudges the A* search toward less-contested escape paths in
+        // the lateral channels adjacent to dense-package pad rows.  See
+        // ``types.hpp::PadChannelBudget`` for the per-field contract.
+        const std::vector<PadChannelBudget>& pad_channel_budgets = {}
     );
 
     // Resumable A* routing: initializes search state and runs to first goal.
@@ -115,7 +123,12 @@ public:
         // values across the (initial + resume*) sequence for a single net.
         float emit_trace_width = 0.0f,
         float emit_via_diameter = 0.0f,
-        float emit_via_drill = 0.0f
+        float emit_via_drill = 0.0f,
+        // Issue #3143: per-pad lateral-channel budget.  See ``route()``
+        // above for semantics.  Cached on the Pathfinder member fields
+        // (search_pad_budget_cost_lookup_) so resume() consults the same
+        // per-cell penalty map across an (initial + resume*) sequence.
+        const std::vector<PadChannelBudget>& pad_channel_budgets = {}
     );
 
     // Resume A* search after rejecting a goal cell.
@@ -186,6 +199,19 @@ private:
 
     // Get congestion cost for a cell
     float get_congestion_cost(int x, int y, int layer) const;
+
+    // Issue #3143: per-cell pad-channel cost lookup.
+    //
+    // Returns the cached overflow penalty for cell (x, y, layer) when the
+    // current search has a per-pad channel budget configured AND the cell
+    // falls inside one of the budget bboxes AND the channel is at-or-above
+    // capacity.  Returns 0.0 otherwise.  Hot-path constant-time lookup
+    // against a pre-built ``unordered_map`` keyed by (gx, gy, layer);
+    // populated once at the top of ``route_resumable()`` and held
+    // constant across resume() calls.  The penalty is additive on the
+    // A* g_score, so its scale is comparable to ``rules_.cost_straight``
+    // (typically 1.0) -- a penalty of 5.0 is roughly 5 cells of detour.
+    float get_pad_channel_cost(int x, int y, int layer) const;
 
     // Core A* loop shared by route(), route_resumable(), and resume().
     // Returns RouteResult with success=true if goal reached, or success=false
@@ -303,6 +329,24 @@ private:
     // ``resume()`` via member scope so the ordering is consistent across
     // multiple resume attempts on the same search.
     uint64_t search_seq_counter_ = 0;
+
+    // Issue #3143: Per-cell pad-channel cost lookup populated once at the
+    // top of ``route_resumable()`` and consulted by every A* neighbor
+    // expansion via ``get_pad_channel_cost``.  Empty (the default) means
+    // "no per-pad budget configured" and the cost helper returns 0 for
+    // every cell -- preserving pre-#3143 behaviour identically.  The map
+    // is held constant across ``resume()`` calls so the soft-budget cost
+    // shaping is consistent across the (initial + resume*) sequence.
+    //
+    // Pre-computation rationale: scanning ``pad_channel_budgets`` per cell
+    // expansion would be O(B) per cell where B = number of budgets; for
+    // dense packages B can reach 10+ pads.  Pre-building the lookup once
+    // amortises that scan over all expansions, and the membership check
+    // becomes a single hash lookup.  Cells outside all budget bboxes are
+    // never inserted, so the table stays small on typical boards (~few
+    // hundred cells per active dense package).
+    std::unordered_map<std::tuple<int, int, int>, float, GridPosHash>
+        search_pad_budget_cost_lookup_;
 };
 
 }  // namespace router

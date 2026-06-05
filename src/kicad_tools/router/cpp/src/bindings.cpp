@@ -71,6 +71,29 @@ NB_MODULE(router_cpp, m) {
         .def_rw("approach_gx2", &PadBounds::approach_gx2)
         .def_rw("approach_gy2", &PadBounds::approach_gy2);
 
+    // PadChannelBudget struct (Issue #3143)
+    //
+    // Soft per-cell penalty rectangle used to nudge the A* search toward
+    // less-contested escape paths in the lateral channels adjacent to
+    // dense-package pad rows.  See types.hpp::PadChannelBudget for the
+    // per-field contract and the cost-shaping rationale.  Python callers
+    // (cpp_backend.py / core.py) construct these once per net before
+    // dispatching to route_resumable().
+    nb::class_<PadChannelBudget>(m, "PadChannelBudget")
+        .def(nb::init<>())
+        .def_rw("gx1", &PadChannelBudget::gx1)
+        .def_rw("gy1", &PadChannelBudget::gy1)
+        .def_rw("gx2", &PadChannelBudget::gx2)
+        .def_rw("gy2", &PadChannelBudget::gy2)
+        .def_rw("layer", &PadChannelBudget::layer)
+        .def_rw("capacity", &PadChannelBudget::capacity)
+        .def_rw("overflow_penalty", &PadChannelBudget::overflow_penalty)
+        .def_rw("origin_pad_ref_hash", &PadChannelBudget::origin_pad_ref_hash)
+        // Issue #3143: ``source_net`` (origin net of the escape pad) lets
+        // the Python adapter filter out the current net's own budget
+        // entries before forwarding to the C++ pathfinder.
+        .def_rw("source_net", &PadChannelBudget::source_net);
+
     // Segment struct
     nb::class_<Segment>(m, "Segment")
         .def(nb::init<>())
@@ -226,7 +249,9 @@ NB_MODULE(router_cpp, m) {
              // Defaults preserve pre-#3130 emit behavior identically.
              "emit_trace_width"_a = 0.0f,
              "emit_via_diameter"_a = 0.0f,
-             "emit_via_drill"_a = 0.0f)
+             "emit_via_drill"_a = 0.0f,
+             // Issue #3143: per-pad lateral-channel budget (empty = inert).
+             "pad_channel_budgets"_a = std::vector<PadChannelBudget>{})
         .def("route_resumable", &Pathfinder::route_resumable,
              "start_x"_a, "start_y"_a, "start_layer"_a,
              "end_x"_a, "end_y"_a, "end_layer"_a,
@@ -251,7 +276,9 @@ NB_MODULE(router_cpp, m) {
              // Defaults preserve pre-#3130 emit behavior identically.
              "emit_trace_width"_a = 0.0f,
              "emit_via_diameter"_a = 0.0f,
-             "emit_via_drill"_a = 0.0f)
+             "emit_via_drill"_a = 0.0f,
+             // Issue #3143: per-pad lateral-channel budget (empty = inert).
+             "pad_channel_budgets"_a = std::vector<PadChannelBudget>{})
         .def("resume", &Pathfinder::resume,
              "reject_x"_a, "reject_y"_a, "reject_layer"_a)
         .def("clear_search_state", &Pathfinder::clear_search_state)

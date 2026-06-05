@@ -308,6 +308,85 @@ float Pathfinder::get_congestion_cost(int x, int y, int layer) const {
     return 0.0f;
 }
 
+float Pathfinder::get_pad_channel_cost(int x, int y, int layer) const {
+    // Issue #3143: hot-path per-cell lookup against the pre-built
+    // ``search_pad_budget_cost_lookup_`` populated once at the top of
+    // ``route_resumable()``.  Empty map (the default when no per-pad
+    // budget is configured) short-circuits to 0.0 with a single
+    // ``empty()`` test, so the cost contribution is zero-overhead for
+    // calls that don't use the new feature.
+    if (search_pad_budget_cost_lookup_.empty()) {
+        return 0.0f;
+    }
+    auto it = search_pad_budget_cost_lookup_.find(std::make_tuple(x, y, layer));
+    if (it == search_pad_budget_cost_lookup_.end()) {
+        return 0.0f;
+    }
+    return it->second;
+}
+
+// Issue #3143: Helper that materialises a per-cell pad-channel cost lookup
+// from the list of ``PadChannelBudget`` rectangles supplied by the caller.
+// Each cell inside a budget's bbox (intersected with the routing-grid
+// extent) is assigned the budget's ``overflow_penalty``; overlapping
+// budgets sum their penalties (so a cell inside two contested channels
+// pays for both).  Layer-specific budgets (``layer >= 0``) only register
+// cells on the matching layer; layer-agnostic budgets (``layer == -1``)
+// register cells on every routable layer the grid carries.
+//
+// Called once per route_resumable() entry; the resulting map is held
+// across resume() calls so the soft-budget cost shaping stays consistent
+// during a single net's (initial + N resume) sequence.
+static void build_pad_channel_cost_lookup(
+    const std::vector<PadChannelBudget>& budgets,
+    const Grid3D& grid,
+    std::unordered_map<std::tuple<int, int, int>, float, GridPosHash>& out
+) {
+    out.clear();
+    if (budgets.empty()) {
+        return;
+    }
+    const int cols = grid.cols();
+    const int rows = grid.rows();
+    const int layers = grid.layers();
+    for (const auto& b : budgets) {
+        // Inert budget: capacity == 0 OR overflow_penalty == 0.0 means
+        // the caller is intentionally passing a zero-cost budget (often
+        // a transient signal that the channel is not currently contested
+        // for this net).  Skip the cell registration entirely to keep
+        // the lookup table small.
+        if (b.overflow_penalty == 0.0f) {
+            continue;
+        }
+        int gx1 = std::max(0, b.gx1);
+        int gy1 = std::max(0, b.gy1);
+        int gx2 = std::min(cols - 1, b.gx2);
+        int gy2 = std::min(rows - 1, b.gy2);
+        if (gx1 > gx2 || gy1 > gy2) {
+            continue;
+        }
+        // Build a per-layer list once and then iterate.
+        std::vector<int> target_layers;
+        if (b.layer == -1) {
+            target_layers.reserve(layers);
+            for (int l = 0; l < layers; ++l) target_layers.push_back(l);
+        } else if (b.layer >= 0 && b.layer < layers) {
+            target_layers.push_back(b.layer);
+        } else {
+            continue;  // Out-of-range layer index -- ignore the budget.
+        }
+        for (int gx = gx1; gx <= gx2; ++gx) {
+            for (int gy = gy1; gy <= gy2; ++gy) {
+                for (int l : target_layers) {
+                    auto key = std::make_tuple(gx, gy, l);
+                    // Sum penalties for overlapping budgets.
+                    out[key] += b.overflow_penalty;
+                }
+            }
+        }
+    }
+}
+
 // Helper: Initialize pad bounds from arguments, applying default single-cell
 // fallback when no explicit bounds are provided (Issue #2427).
 static void init_pad_bounds(
@@ -360,7 +439,8 @@ RouteResult Pathfinder::route(
     int max_search_iterations,
     float emit_trace_width,
     float emit_via_diameter,
-    float emit_via_drill
+    float emit_via_drill,
+    const std::vector<PadChannelBudget>& pad_channel_budgets
 ) {
     // Non-resumable route: use local A* state, no member state touched.
     // This preserves backward compatibility for callers that don't need retry.
@@ -453,6 +533,13 @@ RouteResult Pathfinder::route(
     int last_blocking_net = 0;
     float last_block_world_x = 0.0f;
     float last_block_world_y = 0.0f;
+
+    // Issue #3143: Populate the per-cell pad-channel cost lookup so the
+    // one-shot route() path honours the budget identically to
+    // route_resumable().  Empty budget list (default) leaves the map
+    // empty; the per-cell helper short-circuits at the empty() check.
+    build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
+                                  search_pad_budget_cost_lookup_);
 
     // Inline A* loop (uses local variables, no rejected goals check)
     while (!open_set.empty() && last_iterations_ < max_iterations) {
@@ -657,10 +744,17 @@ RouteResult Pathfinder::route(
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
 
+            // Issue #3143: per-pad channel budget cost.  Returns 0.0 when
+            // the budget list is empty (the default) or when the candidate
+            // cell does not sit inside a configured budget bbox.  When
+            // active, the per-cell penalty accumulates into the A* g_score
+            // so the search prefers less-contested escape paths.
+            float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+
             float new_g = current.g_score +
                           cost_mult * rules_.cost_straight +
                           turn_cost + congestion_cost + negotiated_cost +
-                          avoidance;
+                          avoidance + pad_channel_cost;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
@@ -710,8 +804,15 @@ RouteResult Pathfinder::route(
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
 
+            // Issue #3143: per-pad channel budget cost (via expansion).
+            // Charged on the destination layer of the via so the search
+            // also redirects layer-change attempts that land in a
+            // contested channel.
+            float pad_channel_cost =
+                get_pad_channel_cost(current.x, current.y, new_layer);
+
             float new_g = current.g_score + rules_.cost_via + congestion_cost +
-                          negotiated_cost + avoidance;
+                          negotiated_cost + avoidance + pad_channel_cost;
 
             auto it = g_scores.find(neighbor_key);
             if (it == g_scores.end() || new_g < it->second) {
@@ -773,7 +874,8 @@ RouteResult Pathfinder::route_resumable(
     int max_search_iterations,
     float emit_trace_width,
     float emit_via_diameter,
-    float emit_via_drill
+    float emit_via_drill,
+    const std::vector<PadChannelBudget>& pad_channel_budgets
 ) {
     // Clear any previous search state
     clear_search_state();
@@ -863,6 +965,16 @@ RouteResult Pathfinder::route_resumable(
     search_last_blocking_net_ = 0;
     search_last_block_world_x_ = 0.0f;
     search_last_block_world_y_ = 0.0f;
+
+    // Issue #3143: Build the per-cell pad-channel cost lookup ONCE per
+    // resumable search.  Held across resume() calls so the soft-budget
+    // cost shaping is consistent during the (initial + N resume) sequence
+    // for this net.  Empty budget list (default) leaves the map empty;
+    // ``get_pad_channel_cost`` short-circuits via an ``empty()`` check
+    // and returns 0.0 on every cell -- preserving pre-#3143 behaviour
+    // identically.
+    build_pad_channel_cost_lookup(pad_channel_budgets, grid_,
+                                  search_pad_budget_cost_lookup_);
 
     // Issue #2610: Compute the per-net wall-clock deadline ONCE here and
     // share it with subsequent resume() calls.  This way a single per-net
@@ -1128,10 +1240,16 @@ RouteResult Pathfinder::run_astar_loop() {
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
 
+            // Issue #3143: per-pad channel budget cost.  Mirrors the
+            // one-shot ``route()`` cost contribution above; consults the
+            // lookup populated at ``route_resumable()`` entry.  Empty
+            // budget => returns 0.0 (zero overhead).
+            float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+
             float new_g = current.g_score +
                           cost_mult * rules_.cost_straight +
                           turn_cost + congestion_cost + negotiated_cost +
-                          avoidance;
+                          avoidance + pad_channel_cost;
 
             auto it = search_g_scores_.find(neighbor_key);
             if (it == search_g_scores_.end() || new_g < it->second) {
@@ -1183,8 +1301,14 @@ RouteResult Pathfinder::run_astar_loop() {
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
 
+            // Issue #3143: per-pad channel budget cost on via expansion.
+            // Charged on the destination layer of the via -- mirrors the
+            // one-shot route() via path.
+            float pad_channel_cost =
+                get_pad_channel_cost(current.x, current.y, new_layer);
+
             float new_g = current.g_score + rules_.cost_via + congestion_cost +
-                          negotiated_cost + avoidance;
+                          negotiated_cost + avoidance + pad_channel_cost;
 
             auto it = search_g_scores_.find(neighbor_key);
             if (it == search_g_scores_.end() || new_g < it->second) {
@@ -1253,6 +1377,9 @@ void Pathfinder::clear_search_state() {
     search_emit_trace_width_ = 0.0f;
     search_emit_via_diameter_ = 0.0f;
     search_emit_via_drill_ = 0.0f;
+    // Issue #3143: drop the per-cell pad-channel cost lookup so a stale
+    // budget from the previous net does not leak into the next route().
+    search_pad_budget_cost_lookup_.clear();
 }
 
 RouteResult Pathfinder::reconstruct_path(
