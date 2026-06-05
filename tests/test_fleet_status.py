@@ -60,6 +60,129 @@ CONNECTED_PCB = """(kicad_pcb
 """
 
 
+# PCB with one plane-net (GND) stitching residual: 4 GND pads but only 3
+# are connected via traces. The fourth GND pad has no trace -- exactly the
+# situation that produces an advisory ``connectivity`` finding in CI but
+# should NOT block routing-complete. The VCC signal net is fully routed.
+ADVISORY_ONLY_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+
+  (gr_rect
+    (start 0 0)
+    (end 40 40)
+    (stroke (width 0.1))
+    (layer "Edge.Cuts")
+  )
+
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 30 10)
+    (property "Reference" "R3")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 30 20)
+    (property "Reference" "R4")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+
+  (segment (start 9.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 19.5 10) (end 29.5 10) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 29.5 10) (end 29.5 20) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 10.5 10) (end 20.5 10) (width 0.25) (layer "F.Cu") (net 2))
+  (segment (start 20.5 10) (end 30.5 10) (width 0.25) (layer "F.Cu") (net 2))
+)
+"""
+
+
+# PCB with one signal-net incomplete: 3 SIG1 pads but only 2 are connected.
+# The unconnected pad is NOT a plane/pour residual -- it is a genuine signal-
+# net gap and MUST block routing-complete.
+BLOCKING_SIGNAL_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "GND")
+
+  (gr_rect
+    (start 0 0)
+    (end 40 40)
+    (stroke (width 0.1))
+    (layer "Edge.Cuts")
+  )
+
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 30 10)
+    (property "Reference" "R3")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+
+  (segment (start 9.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 10.5 10) (end 20.5 10) (width 0.25) (layer "F.Cu") (net 2))
+  (segment (start 20.5 10) (end 30.5 10) (width 0.25) (layer "F.Cu") (net 2))
+)
+"""
+
+
 # PCB with unrouted nets (no traces).
 UNROUTED_PCB = """(kicad_pcb
   (version 20240108)
@@ -118,9 +241,15 @@ def make_fake_board(
     bom_suffix: str = "jlcpcb",
     cpl_suffix: str = "jlcpcb",
     artifacts_older_than_routed: bool = False,
+    pcb_text: str | None = None,
 ) -> Path:
     """Build ``boards_dir/<name>/output/`` with a minimal routed PCB and
     optional manufacturing artifacts.
+
+    When ``pcb_text`` is provided it overrides the default
+    ``CONNECTED_PCB`` / ``UNROUTED_PCB`` selection (useful for the
+    advisory-only / blocking-signal fixtures used by the
+    routing_complete tests).
 
     Returns the path to the routed PCB file.
     """
@@ -128,7 +257,8 @@ def make_fake_board(
     output_dir = board_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pcb_text = CONNECTED_PCB if routed_complete else UNROUTED_PCB
+    if pcb_text is None:
+        pcb_text = CONNECTED_PCB if routed_complete else UNROUTED_PCB
     routed_pcb = output_dir / f"{name.replace('-', '_')}_routed.kicad_pcb"
     routed_pcb.write_text(pcb_text)
 
@@ -292,7 +422,7 @@ class TestFleetStatusBasics:
         data = json.loads(captured.out)
 
         # Top-level keys
-        assert data["schema_version"] == "1.0"
+        assert data["schema_version"] == "1.1"
         for key in ("schema_version", "surveyed_at", "boards_dir", "summary", "boards"):
             assert key in data
 
@@ -323,6 +453,7 @@ class TestFleetStatusBasics:
             "total_nets",
             "complete_nets",
             "incomplete_nets",
+            "blocking_incomplete_nets",
             "unrouted_nets",
             "routing_complete",
         }
@@ -552,3 +683,186 @@ class TestFleetStatusIntegration:
         assert "boards" in data
         # Exit code: 0 if all ship, 2 otherwise; both are valid for a smoke test.
         assert rc in (0, 2)
+
+
+class TestFleetStatusAdvisoryFilter:
+    """Issue #3206 -- ``routing_complete`` must honor ``ADVISORY_RULE_IDS``.
+
+    Plane/pour stitching residuals (advisory ``connectivity`` per
+    ``DRCChecker.ADVISORY_RULE_IDS``) must not flip ``routing_complete``
+    to NO; only genuine signal-net gaps should. Mirrors the filter
+    pattern at ``scripts/ci/check_routed_drc.py:_count_blocking_errors``.
+
+    Two layers of coverage:
+      * Analyzer level: ``NetStatusResult.blocking_incomplete_count``
+        zeroes out plane-net residuals but counts signal-net gaps.
+      * Fleet-cmd level: ``RoutingStatus.routing_complete`` (and the JSON
+        ship-ready verdict) honor the filtered count.
+    """
+
+    def test_analyzer_advisory_only_zero_blocking(self, tmp_path: Path):
+        """Plane-net residual: raw incomplete>0 but blocking==0."""
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        pcb_path = tmp_path / "advisory_only.kicad_pcb"
+        pcb_path.write_text(ADVISORY_ONLY_PCB)
+
+        result = NetStatusAnalyzer(pcb_path).analyze()
+        # Raw view (diagnostic) still shows the GND residual.
+        assert result.incomplete_count == 1
+        gnd = next(n for n in result.incomplete if n.net_name == "GND")
+        assert gnd.is_advisory_incomplete is True
+        # Filtered view (gating verdict) drops it.
+        assert result.blocking_incomplete_count == 0
+        assert "GND" in result.advisory_incomplete_names
+
+    def test_analyzer_blocking_signal_counts(self, tmp_path: Path):
+        """Signal-net gap: raw incomplete and blocking both nonzero."""
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        pcb_path = tmp_path / "blocking_signal.kicad_pcb"
+        pcb_path.write_text(BLOCKING_SIGNAL_PCB)
+
+        result = NetStatusAnalyzer(pcb_path).analyze()
+        assert result.incomplete_count == 1
+        sig = next(n for n in result.incomplete if n.net_name == "SIG1")
+        assert sig.is_advisory_incomplete is False
+        assert result.blocking_incomplete_count == 1
+        assert "SIG1" not in result.advisory_incomplete_names
+
+    def test_fleet_status_advisory_only_ships(self, tmp_path: Path, capsys):
+        """Board with only a GND stitching residual must report ship-ready."""
+        boards = tmp_path / "boards"
+        make_fake_board(
+            boards,
+            "advisory-only",
+            pcb_text=ADVISORY_ONLY_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+
+        result = main(
+            ["status", "--boards-dir", str(boards), "--format", "json"]
+        )
+        # All boards ship-ready -> exit 0.
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        b = data["boards"][0]
+        # Raw count preserved for diagnostic visibility.
+        assert b["routing"]["incomplete_nets"] == 1
+        # Blocking count drops it -> verdict is YES.
+        assert b["routing"]["blocking_incomplete_nets"] == 0
+        assert b["routing"]["routing_complete"] is True
+        assert b["ship_ready"] is True
+        assert b["blockers"] == []
+
+    def test_fleet_status_blocking_signal_does_not_ship(
+        self, tmp_path: Path, capsys
+    ):
+        """Board with a genuine signal-net gap must still fail ship-ready."""
+        boards = tmp_path / "boards"
+        make_fake_board(
+            boards,
+            "blocking-signal",
+            pcb_text=BLOCKING_SIGNAL_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+
+        result = main(
+            ["status", "--boards-dir", str(boards), "--format", "json"]
+        )
+        # Not ship-ready -> exit 2.
+        assert result == 2
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        b = data["boards"][0]
+        assert b["routing"]["incomplete_nets"] == 1
+        assert b["routing"]["blocking_incomplete_nets"] == 1
+        assert b["routing"]["routing_complete"] is False
+        # Blocker message should use the filtered count -- one blocking
+        # signal-net gap, not "0 nets" or the raw count.
+        assert any(
+            "incomplete routing (1/" in blocker for blocker in b["blockers"]
+        ), b["blockers"]
+
+    def test_fleet_status_advisory_table_shows_yes(
+        self, tmp_path: Path, capsys
+    ):
+        """The Ship? column reads YES even when the raw incomplete>0."""
+        boards = tmp_path / "boards"
+        make_fake_board(
+            boards,
+            "advisory-only",
+            pcb_text=ADVISORY_ONLY_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        result = main(["status", "--boards-dir", str(boards)])
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "advisory-only" in out
+        # The advisory row must show YES, not a "incomplete routing" blocker.
+        assert "YES" in out
+        assert "incomplete routing" not in out
+
+    def test_routing_status_dataclass_advisory_only(self):
+        """Unit test on RoutingStatus directly: advisory-only -> YES."""
+        from kicad_tools.cli.fleet_cmd import RoutingStatus
+
+        rs = RoutingStatus(
+            total_pads=8,
+            connected_pads=7,
+            total_nets=2,
+            complete_nets=1,
+            incomplete_nets=1,
+            blocking_incomplete_nets=0,
+            unrouted_nets=0,
+        )
+        # Raw incomplete shouldn't flip routing_complete to NO when the
+        # blocking-filtered count is 0.
+        assert rs.routing_complete is True
+
+    def test_routing_status_dataclass_blocking(self):
+        """Unit test on RoutingStatus directly: blocking -> NO."""
+        from kicad_tools.cli.fleet_cmd import RoutingStatus
+
+        rs = RoutingStatus(
+            total_pads=6,
+            connected_pads=5,
+            total_nets=2,
+            complete_nets=1,
+            incomplete_nets=1,
+            blocking_incomplete_nets=1,
+            unrouted_nets=0,
+        )
+        assert rs.routing_complete is False
+
+    def test_schema_version_bumped_to_1_1(self, tmp_path: Path, capsys):
+        """JSON ``schema_version`` is bumped to 1.1 alongside the new field."""
+        boards = tmp_path / "boards"
+        make_fake_board(
+            boards,
+            "advisory-only",
+            pcb_text=ADVISORY_ONLY_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["schema_version"] == "1.1"
+        # New field exposed on every board.
+        assert "blocking_incomplete_nets" in data["boards"][0]["routing"]
+        # Raw field preserved.
+        assert "incomplete_nets" in data["boards"][0]["routing"]

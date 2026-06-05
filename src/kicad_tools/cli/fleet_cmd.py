@@ -45,7 +45,7 @@ from pathlib import Path
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 # Default location for the per-board DRC tolerance allowlist (mirrors
 # ``scripts/ci/check_routed_drc.py``). Boards listed here have a
@@ -60,13 +60,25 @@ _DRC_TOLERANCE_PATH = Path(".github/routed-drc-tolerance.yml")
 
 @dataclass
 class RoutingStatus:
-    """Routing completion details for a single board."""
+    """Routing completion details for a single board.
+
+    ``incomplete_nets`` is the raw count (every net with one or more
+    unconnected pads) and is preserved for diagnostic continuity. The
+    ship-ready / ``routing_complete`` verdict uses
+    ``blocking_incomplete_nets`` instead, which drops plane/pour
+    stitching residuals that the audit pipeline already treats as
+    advisory (``DRCChecker.ADVISORY_RULE_IDS = {"connectivity"}``).
+
+    See ``scripts/ci/check_routed_drc.py:_count_blocking_errors`` for the
+    reference filter that this field mirrors.
+    """
 
     total_pads: int = 0
     connected_pads: int = 0
     total_nets: int = 0
     complete_nets: int = 0
     incomplete_nets: int = 0
+    blocking_incomplete_nets: int = 0
     unrouted_nets: int = 0
     error: str | None = None
 
@@ -81,8 +93,14 @@ class RoutingStatus:
         if self.error is not None:
             return False
         # A board is routing-complete iff every multi-pad net is fully
-        # connected. Single-pad nets are not counted by NetStatusAnalyzer.
-        return (self.incomplete_nets + self.unrouted_nets) == 0 and self.total_nets > 0
+        # connected -- with one exception: plane/pour stitching residuals
+        # (advisory connectivity per ``ADVISORY_RULE_IDS``) are excluded
+        # because the CI gate at ``check_routed_drc`` already ignores
+        # them. Single-pad nets are not counted by NetStatusAnalyzer.
+        return (
+            (self.blocking_incomplete_nets + self.unrouted_nets) == 0
+            and self.total_nets > 0
+        )
 
     def to_dict(self) -> dict:
         data: dict = {
@@ -92,6 +110,7 @@ class RoutingStatus:
             "total_nets": self.total_nets,
             "complete_nets": self.complete_nets,
             "incomplete_nets": self.incomplete_nets,
+            "blocking_incomplete_nets": self.blocking_incomplete_nets,
             "unrouted_nets": self.unrouted_nets,
             "routing_complete": self.routing_complete,
         }
@@ -537,6 +556,7 @@ def _compute_routing(routed_pcb: Path) -> RoutingStatus:
     status.total_nets = result.total_nets
     status.complete_nets = result.complete_count
     status.incomplete_nets = result.incomplete_count
+    status.blocking_incomplete_nets = result.blocking_incomplete_count
     status.unrouted_nets = result.unrouted_count
     return status
 
@@ -566,7 +586,10 @@ def _compute_blockers(
         blockers.append(f"routing analysis failed: {routing.error}")
         return blockers
     if not routing.routing_complete:
-        incomplete = routing.incomplete_nets + routing.unrouted_nets
+        # Use the advisory-filtered count so the blocker message agrees
+        # with the verdict (plane/pour stitching residuals do not show
+        # up here even though `incomplete_nets` may be non-zero).
+        incomplete = routing.blocking_incomplete_nets + routing.unrouted_nets
         blockers.append(f"incomplete routing ({incomplete}/{routing.total_nets} nets)")
     if not mfg.dir_exists:
         blockers.append("no manufacturing/ dir")
