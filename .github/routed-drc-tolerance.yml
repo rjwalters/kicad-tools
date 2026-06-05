@@ -128,22 +128,52 @@ tolerances:
   #       curator (no schematic changes).
   # Follow-up issue: TBD (filed during PR review for #3127).
   #
-  # NOTE 2026-06-05: Floor raised from 9 to 37 due to router-stack
-  # regression.  See follow-up issue #3221.  The {9, 9, 15} variance
-  # documented at lines 95-106 is no longer the prevailing distribution
-  # after #3193 (deterministic A* tie-break + PYTHONHASHSEED), #3198
-  # (C++ per-pad channel budget infrastructure), and #3201 (per-pad
-  # channel budget geometry tuning) landed.  Five independent
-  # ``rm -rf output/ && python design.py`` runs all produce 37 blocking
-  # errors with the new clearance distribution:
-  #   * 16 clearance_pad_segment
-  #   * 11 clearance_segment_segment
-  #   *  7 clearance_segment_via
-  #   *  3 clearance_pad_via
-  # (vs. the 9-blocking floor's 1 + 5 + 3 + 0 distribution).  Issue
-  # #3221 tracks bisect + remediation.  PR #3217 raises this floor as a
-  # workaround so the unrelated schematic<->PCB drift fix can land.
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 37
+  # NOTE 2026-06-05: Floor raised from 9 to 37 by PR #3217 as a
+  # workaround for the router regression tracked by Issue #3221.  The
+  # curator's pre-builder note for #3221 hypothesized the regression
+  # was introduced by #3193 (deterministic A* tie-break +
+  # PYTHONHASHSEED), #3198 (C++ per-pad channel budget infrastructure),
+  # and/or #3201 (per-pad channel budget geometry tuning).
+  #
+  # Bisect under #3221 (post-builder, 2026-06-05) refuted that
+  # hypothesis:
+  #   * pre-#3192 commit 0bbe29a7 (before all suspect PRs): 37 blocking
+  #     -- already broken, suspects are not the cause.
+  #   * post-#3204 HEAD with the per-pad budget short-circuited to
+  #     return [] from _build_pad_channel_budgets: 36 blocking --
+  #     budget code path is not the source.
+  #   * post-#3204 HEAD with C++ AStarNode comparator reverted to
+  #     pre-#3192 (f_score only): 36 blocking -- tie-break is not
+  #     the source either.
+  #
+  # The actual regression was introduced by PR #3131 (Issue #3130,
+  # commit f653033f, 2026-05-26).  That PR removed the
+  # ``--backend python`` pin from boards/05-bldc-motor-controller/
+  # design.py on the rationale that #3130's per-net trace-width /
+  # via-size emit landed in the C++ pathfinder.  The PR's own body
+  # documented the trade-off:
+  #
+  #     backend     reach           DRC errors    wall-clock
+  #     ---------------------------------------------------
+  #     python      15/32 (47%)     32            6m15s
+  #     cpp         17/32 (53%)     55            2m42s
+  #
+  # The C++ backend traded +2 routed nets for +23 DRC errors on this
+  # dense MOSFET-bridge layout, but the floor at the time (9) was
+  # never re-measured with cpp -- so the regression sat invisible
+  # until PR #3217's drift fix triggered a fresh regen that landed
+  # at 37 blocking.
+  #
+  # Issue #3221 / this PR re-pins ``--backend python`` in
+  # design.py.  Re-measured at HEAD with the pin restored:
+  # bisect c3cee787 (#3127 baseline) reproduced 3 blocking.
+  # Fresh regens with the python pin land at 6 blocking, well below
+  # the original 9-floor.
+  #
+  # Floor tightened 37 -> 9 (preserves the pre-#3131 measurement
+  # bracket; 3-blocking room for run-to-run variance documented in
+  # the {9, 9, 15} comment block above).
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 9
 
   # Board 03 (USB-C joystick) was 22 (post-#2753 coord-space fix), then
   # 19 ``clearance_pad_segment`` after PR #2762 re-route.  All 19

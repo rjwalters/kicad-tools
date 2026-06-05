@@ -2321,18 +2321,27 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--manufacturer",
         "jlcpcb",
         "--differential-pairs",
-        # Issue #3130: ``--backend`` pin removed.  The original (Issue #3096)
-        # pin to ``python`` cited "C++ backend currently uses a single
-        # rules.trace_width" -- a constraint resolved as of #3130's per-net
-        # ``emit_trace_width`` / ``emit_via_diameter`` / ``emit_via_drill``
-        # plumbing into ``Pathfinder::route_resumable``.  Empirically at
-        # HEAD post-#3117 (lex-tuple metric) + #3124 (finalize-phase fix)
-        # the C++ backend ALSO routes more nets than Python on this board
-        # (17 vs 15 signal nets at the same flag recipe) and finishes in
-        # ~3 minutes instead of ~6.  Letting the backend auto-resolve
-        # picks ``cpp`` whenever it is built (the default for builders
-        # using ``kct build-native``) while preserving the Python fallback
-        # for environments without the native extension.
+        # Issue #3221: re-pin ``--backend python``.  PR #3131 (Issue
+        # #3130) removed this pin on the rationale that #3130's per-net
+        # trace-width / via-size emit landed in the C++ pathfinder, but
+        # the empirical board-05 measurement captured in that PR's body
+        # (32 -> 55 DRC errors with cpp vs python) confirmed the C++
+        # backend produces substantially more clearance violations on
+        # this dense MOSFET-bridge layout in exchange for +2 routed
+        # nets.  Bisect under #3221 traced board 05's 9 -> 37 blocking
+        # regression directly to that pin removal (pre-#3131 c3cee787
+        # produced 3 blocking; post-#3131 f653033f jumped to 35 blocking)
+        # -- the per-pad channel budget work (#3198/#3201) and A* tie-
+        # break changes (#3192/#3204) did not contribute, since A/B
+        # measurements at HEAD with the budget short-circuited and the
+        # comparator reverted to pre-#3192 both stayed at 36 blocking.
+        # Re-pinning python recovers the original floor=9 baseline that
+        # the routed-drc tolerance file documents.  Letting the backend
+        # auto-resolve will be revisited under a follow-up issue once
+        # the C++ pathfinder's per-net per-clearance cost surface
+        # matches the Python backend's behaviour on this layout.
+        "--backend",
+        "python",
         "--seed",
         "42",
         "--timeout",
