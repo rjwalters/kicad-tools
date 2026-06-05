@@ -21,6 +21,7 @@ Example::
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -842,9 +843,15 @@ class PreflightChecker:
         if self._bom_source == "auto":
             # Try schematic first, fall back to PCB
             if self.schematic_path and self.schematic_path.exists():
-                from ..schema.bom import extract_bom
+                from ..schema.bom import backfill_footprints_from_pcb, extract_bom
 
                 self._bom = extract_bom(str(self.schematic_path))
+                # Mirror the BOM CSV pipeline: back-fill blank footprints
+                # from the PCB so the schematic-only preflight check sees
+                # the same footprint metadata that ships in the BOM CSV.
+                # Best-effort -- bom_fields will still flag any real gaps.
+                with contextlib.suppress(Exception):
+                    backfill_footprints_from_pcb(self._bom.items, self.pcb_path)
             else:
                 from ..schema.bom import extract_bom_from_pcb
 
@@ -855,9 +862,16 @@ class PreflightChecker:
         if self.schematic_path is None or not self.schematic_path.exists():
             raise FileNotFoundError("Schematic file not available for BOM extraction")
 
-        from ..schema.bom import extract_bom
+        from ..schema.bom import backfill_footprints_from_pcb, extract_bom
 
         self._bom = extract_bom(str(self.schematic_path))
+        # Mirror the BOM CSV pipeline: back-fill blank footprints from the
+        # PCB so the preflight bom_fields check matches what is actually
+        # written to bom_<manufacturer>.csv (spec-overlay-style schematics
+        # leave instance-level Footprint properties blank).
+        # Best-effort -- bom_fields will still flag any real gaps.
+        with contextlib.suppress(Exception):
+            backfill_footprints_from_pcb(self._bom.items, self.pcb_path)
         return self._bom
 
     def _get_manufacturer_limits(self) -> tuple[float, float]:
