@@ -11082,29 +11082,43 @@ class Autorouter:
         U1 east-side TSSOP cluster all wanted the same channel and the
         negotiated rip-up loop could not resolve).
 
-        Geometry:
-          For each escape pad on a dense package's edge, a 3x3-cell box
-          centered on the escape endpoint is registered as a contested
-          channel cell at the escape layer.  This is intentionally narrow
-          -- we only want to penalise the immediate channel slot adjacent
-          to the escape endpoint, not the entire lateral corridor.
-          Adjacent escapes on the same edge produce adjacent budget
-          rectangles; cells covered by multiple budgets get their
-          penalties summed by the C++ helper.
+        Geometry (revised post-#3198-judge-feedback, 2026-06-04):
+          For each escape pad on a dense package's edge, a NARROW STRIP
+          parallel to that edge is registered.  The strip is anchored at
+          the escape endpoint, extends a few cells outward (escape
+          direction) and spans the package's full bbox in the
+          perpendicular axis (with a small padding for corner pads).
+
+          Concretely: an east-side escape pad gets a vertical strip
+          (north-south) immediately outside the package's east edge,
+          spanning the package's y-min to y-max.  Adjacent east-side
+          escapes produce strips that fully overlap in y; cells covered
+          by N overlapping strips accumulate N * overflow_penalty per
+          cell.  Combined with the per-net filter (the originating net's
+          own budget is filtered out), this means: when ANOTHER net's
+          escape stub or vertical run lands in the column adjacent to
+          this pad's escape endpoint, the search incurs a per-cell
+          surcharge that nudges it to a column 2-3 cells further out.
+
+          The original geometry (4 cells outward * 5 cells perp) was
+          confirmed via judge debugging on softstart's U1 east-side
+          TSSOP-20 cluster to miss the actually-contested column (the
+          vertical run after escape stubs, not the outward escape
+          channel itself).  This revised geometry directly tags that
+          column.
 
         Tuning:
-          ``overflow_penalty`` is set to ~3 cells worth of straight-cost
-          (``rules.cost_straight * 3``).  This is small enough to be
-          overcome by a directly-adjacent free channel, but large enough
-          (when accumulated across a multi-cell trace through a contested
-          channel) to redirect to a 2-3 cell detour.  Capacity is set to
-          0 (always-on penalty) because the contention is the dominant
-          failure mode -- the channel is contested whether or not we know
-          a priori how many nets will land in it.  Future work can
+          ``overflow_penalty`` is set to ~1.5x ``cost_straight`` per
+          cell.  With 5-6 peer pads on a typical dense-package side
+          (e.g., the 6 signal-net east-side pads of softstart's
+          TSSOP-20), the strip overlap sums to ~7-9 per cell -- large
+          enough to dominate a 2-3 cell detour but small enough to be
+          overridden when no alternative exists.  Capacity is set to 0
+          (always-on penalty) because the contention is the dominant
+          failure mode -- the channel is contested whether or not we
+          know a priori how many nets will land in it.  Future work can
           measure claim counts during routing and refine capacity, but
-          this is out of scope for #3143 (the budget is computed once
-          before the rip-up loop; see the "out of scope" clause in the
-          issue body).
+          this is out of scope for #3143.
 
         Args:
             dense_packages: The dense packages detected by
@@ -11138,45 +11152,70 @@ class Autorouter:
         # we don't tag sub-grid or in-pad-rescue escape pads (which use
         # the same ``_escape_pad_overrides`` map but should not get a
         # per-pad budget).  Also map each pad key to its containing
-        # package's bounding-box centre so we can derive the lateral
-        # escape direction (the contested channel extends FROM the
-        # package edge AWAY from the centre).
+        # package's geometry (center + bounding box) so the budget can
+        # extend along the package edge in the perpendicular direction.
         dense_pad_keys: set[tuple[str, str]] = set()
         package_center_by_key: dict[tuple[str, str], tuple[float, float]] = {}
+        package_bbox_by_key: dict[
+            tuple[str, str], tuple[float, float, float, float]
+        ] = {}
         for package in dense_packages:
             cx, cy = package.center
+            bbox = package.bounding_box
             for pad in package.pads:
                 key = (pad.ref, pad.pin)
                 dense_pad_keys.add(key)
                 package_center_by_key[key] = (cx, cy)
+                package_bbox_by_key[key] = bbox
 
-        # Tunables.  ``rules.cost_straight`` is typically 1.0; the
-        # penalty needs to be small enough that legitimate routes
-        # through the channel still complete.  A per-cell 0.5 surcharge
-        # accumulated across a multi-cell channel transit (~2-3 cost
-        # units) tips the cost balance toward a 2-3 cell detour but
-        # still lets the search through when no alternative exists.
-        overflow_penalty = float(self.rules.cost_straight) * 0.5
-        # The channel extends along the lateral escape direction (away
-        # from the package center).  We approximate the corridor as a
-        # rectangle from the escape endpoint extending ``channel_length``
-        # cells in the dominant escape direction, with a narrow
-        # perpendicular extent.  This shape matches the contested-
-        # channel topology described in the issue body: a strip just
-        # outside the package edge where east-side (or west/north/south)
-        # escapes converge.
+        # Tuning (revised post-judge-feedback 2026-06-04 for #3143):
         #
-        # Combined with the per-net filter in
-        # ``cpp_backend.py::_filter_pad_channel_budgets_for_net``, this
-        # means: when OTHER nets try to traverse pad P's escape corridor
-        # (typically a sibling east-side escape trying to turn through
-        # this y-row), they pay a small per-cell surcharge that nudges
-        # them onto a parallel y-row.
-        channel_length_cells = 4  # ~0.3mm at 0.075mm resolution
-        perp_half_width_cells = 2  # 5-cell-wide strip; ``+/-2`` so y±2 (five rows).
+        # The original geometry (4 cells along escape direction x 5 cells
+        # perpendicular) was anchored on the escape endpoint and extended
+        # OUTWARD.  Judge review confirmed it does not intersect the
+        # actually-contested cells: softstart's east-side TSSOP-20 cluster
+        # has the escape endpoints ~0.5mm east of the package edge, then
+        # nets immediately turn north or south through the *vertical*
+        # column adjacent to the package edge.  That vertical column is
+        # the real contested channel; the outward-extending rectangle
+        # never touched it.
+        #
+        # Revised geometry: anchor the budget at the escape endpoint and
+        # extend it along the PERPENDICULAR axis (i.e., parallel to the
+        # package edge) so it covers the full vertical extent of the
+        # package's edge.  Add a small extension along the escape
+        # direction (~3 cells = ~0.225mm) so the strip is 3-4 cells thick
+        # in escape direction.  Each pad's budget thus forms a strip that
+        # extends roughly from y_min to y_max of the package, immediately
+        # outside the package edge.  When OTHER nets (per-net filter
+        # active) try to route through the column adjacent to a peer pad,
+        # they pay the per-cell surcharge.
+        #
+        # Penalty calibration: ~1.5x cost_straight per cell.  With ~6
+        # other east-side pads on a TSSOP-20, the worst-case overlap
+        # sums to ~9.0 per cell, which dominates a 2-3 cell detour --
+        # exactly what the contested-channel scenario needs.  Lower
+        # penalties (the original 0.5x) sum to ~3.0 which the search
+        # treats as a wash against an 8-9 cell detour.
+        overflow_penalty = float(self.rules.cost_straight) * 1.5
+        # ``escape_strip_thickness_cells`` controls how thick the budget
+        # strip is in the *escape* direction (i.e., how far outward from
+        # the package edge).  4 cells = 0.3mm at the standard 0.075mm
+        # resolution; this is enough to cover the cells where a peer
+        # pad's escape stub terminates AND the column 1-2 cells further
+        # outward where a vertical run would land.
+        escape_strip_thickness_cells = 4
+        # Cell padding outside the package bounding box along the
+        # perpendicular axis -- so the strip extends a bit past the end
+        # pin of the package row (catches pin 11 and pin 20 of a
+        # 10-pin-per-side TSSOP which sit AT the corners).  Kept small
+        # so peer-pad nets that want to escape near the package corners
+        # still have a clean exit.
+        perp_extension_cells = 2
 
         cols = self.grid.cols
         rows = self.grid.rows
+        resolution = float(self.rules.grid_resolution)
 
         budgets: list = []
         for (ref, pin), virtual_pad in self._escape_pad_overrides.items():
@@ -11194,28 +11233,58 @@ class Autorouter:
 
             # Determine the dominant escape axis from the package centre
             # to the escape endpoint.  Larger |dx| => east/west escape
-            # (lateral channel runs east-west, perpendicular extent is
-            # north-south); larger |dy| => north/south escape (channel
-            # runs north-south, perpendicular extent is east-west).
+            # (lateral channel runs north-south, perpendicular extent
+            # spans the package's y-range); larger |dy| => north/south
+            # escape (channel runs east-west, perpendicular extent
+            # spans the package's x-range).
             center_x, center_y = package_center_by_key[(ref, pin)]
+            min_x, min_y, max_x, max_y = package_bbox_by_key[(ref, pin)]
             dx = virtual_pad.x - center_x
             dy = virtual_pad.y - center_y
             if abs(dx) >= abs(dy):
-                # East/west escape: channel extends along x-axis.
+                # East/west escape: lateral channel runs along the y-axis
+                # (the column of escape stubs from this side of the
+                # package).  The budget is a vertical strip from the
+                # package's y_min to y_max, with thickness in x covering
+                # the escape endpoint and a small outward extension.
                 sign_x = 1 if dx >= 0 else -1
-                cx_far = cgx + sign_x * channel_length_cells
+                # Strip thickness along x: from one cell *inside* the
+                # escape endpoint to ``escape_strip_thickness_cells``
+                # cells further outward.  Anchoring at the escape
+                # endpoint catches the immediate post-escape column;
+                # extending outward catches the column where vertical
+                # runs would settle after the stub terminates.
+                cx_far = cgx + sign_x * (escape_strip_thickness_cells - 1)
                 gx1 = min(cgx, cx_far)
                 gx2 = max(cgx, cx_far)
-                gy1 = cgy - perp_half_width_cells
-                gy2 = cgy + perp_half_width_cells
+                # Perpendicular extent: full y-range of the package
+                # bounding box, padded by ``perp_extension_cells`` so the
+                # corner pads (which sit at y_min and y_max of the
+                # package) are still covered for nets routing past them.
+                try:
+                    _gx_lo, gy1_pkg = self.grid.world_to_grid(virtual_pad.x, min_y)
+                    _gx_hi, gy2_pkg = self.grid.world_to_grid(virtual_pad.x, max_y)
+                except (AttributeError, TypeError):
+                    gy1_pkg = cgy
+                    gy2_pkg = cgy
+                gy1 = min(gy1_pkg, gy2_pkg) - perp_extension_cells
+                gy2 = max(gy1_pkg, gy2_pkg) + perp_extension_cells
             else:
-                # North/south escape: channel extends along y-axis.
+                # North/south escape: lateral channel runs along the
+                # x-axis (the row of escape stubs from this side of the
+                # package).  Mirror of the east/west case.
                 sign_y = 1 if dy >= 0 else -1
-                cy_far = cgy + sign_y * channel_length_cells
+                cy_far = cgy + sign_y * (escape_strip_thickness_cells - 1)
                 gy1 = min(cgy, cy_far)
                 gy2 = max(cgy, cy_far)
-                gx1 = cgx - perp_half_width_cells
-                gx2 = cgx + perp_half_width_cells
+                try:
+                    gx1_pkg, _gy_dummy = self.grid.world_to_grid(min_x, virtual_pad.y)
+                    gx2_pkg, _gy_dummy2 = self.grid.world_to_grid(max_x, virtual_pad.y)
+                except (AttributeError, TypeError):
+                    gx1_pkg = cgx
+                    gx2_pkg = cgx
+                gx1 = min(gx1_pkg, gx2_pkg) - perp_extension_cells
+                gx2 = max(gx1_pkg, gx2_pkg) + perp_extension_cells
 
             # Clamp to grid bounds.
             gx1 = max(0, gx1)
