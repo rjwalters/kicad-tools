@@ -1380,7 +1380,19 @@ class TestZoneConnectedNets:
 )
 """
 
-    # PCB with no zones — incomplete nets should still be flagged normally.
+    # PCB with no zones — incomplete signal nets should still be flagged normally.
+    #
+    # Net layout:
+    # - GND (net 1): a pour net.  Per PR #1440 it is reclassified as
+    #   zone-connected even without a zone definition, so it does NOT
+    #   block READY.
+    # - SIG (net 2): a non-pour signal net.  With no zone, no trace, and no
+    #   pour-net classification, it must remain truly incomplete and drive
+    #   the NOT_READY verdict.  Previously this slot used "+3V3", but
+    #   PR #2533 added the +NVN voltage pattern, so +3V3 now classifies
+    #   as a pour net and stopped being the incomplete signal here
+    #   (issue #3200).  Swapping to a plain signal name preserves the
+    #   regression invariant the test was written to guard.
     PCB_NO_ZONES = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -1395,7 +1407,7 @@ class TestZoneConnectedNets:
   (setup (pad_to_mask_clearance 0))
   (net 0 "")
   (net 1 "GND")
-  (net 2 "+3V3")
+  (net 2 "SIG")
   (gr_rect (start 0 0) (end 100 100)
     (stroke (width 0.15) (type default)) (fill none)
     (layer "Edge.Cuts") (uuid "edge"))
@@ -1408,7 +1420,7 @@ class TestZoneConnectedNets:
     (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
     (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
-      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "SIG"))
   )
   (footprint "R_0402"
     (layer "F.Cu")
@@ -1419,7 +1431,7 @@ class TestZoneConnectedNets:
     (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
     (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
-      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "SIG"))
   )
 )
 """
@@ -1472,9 +1484,20 @@ class TestZoneConnectedNets:
     def test_no_zones_regression(self, tmp_path):
         """PCB with no zones and incomplete signal nets still yields NOT_READY.
 
-        GND is reclassified as zone-connected via pour-net detection,
-        but +3V3 remains truly incomplete because it does not match
-        power-net patterns in classify_and_apply_rules.
+        Regression guard for the zone-connected logic: a board that has
+        only pour nets (GND/power) auto-reclassified as zone-connected
+        must NOT pass when there is also a genuinely incomplete signal
+        net with no zone definition.
+
+        GND is reclassified as zone-connected via pour-net detection
+        (PR #1440), but SIG is a non-pour signal net and must remain
+        truly incomplete — driving the NOT_READY verdict.
+
+        Note: this test previously used "+3V3" as the incomplete signal
+        net.  After PR #2533 added the +NVN voltage pattern, +3V3 now
+        classifies as POWER (is_pour_net=True) and is also reclassified
+        as zone-connected, which silently weakened the guard.  Issue
+        #3200 swapped to a plain signal name to preserve the invariant.
         """
         pcb_path = tmp_path / "no_zone_board.kicad_pcb"
         pcb_path.write_text(self.PCB_NO_ZONES)
@@ -1484,9 +1507,9 @@ class TestZoneConnectedNets:
 
         # GND is reclassified as zone-connected via pour-net detection
         assert result.connectivity.zone_connected_nets >= 1
-        # +3V3 has no zone and is not a pour net — truly incomplete
+        # SIG has no zone and is not a pour net — truly incomplete
         assert result.connectivity.incomplete_nets >= 1
-        # Connectivity should fail due to +3V3
+        # Connectivity should fail due to SIG
         assert result.connectivity.passed is False
         # Verdict should be NOT_READY
         assert result.verdict == AuditVerdict.NOT_READY
