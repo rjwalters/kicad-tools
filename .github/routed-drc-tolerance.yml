@@ -818,78 +818,114 @@ tolerances:
   #     disabled per the route_pcb commentary in generate_design.py).
   #
   # Floor 27 -> 48 by PR #3145 round 2 (Judge cross-platform
-  # variance finding).  Issue #3146 tracks the underlying
-  # non-determinism.  The 27 figure was set against a single
-  # macOS arm64 (8+ core) local re-route; the ubuntu-latest CI
-  # runner (x86_64, 2 cores) produces 48 errors on the same
-  # seed=42 input.  Variance analysis (Judge PR #3145 round-1):
+  # variance finding) -- THIS WAS A PARKING SPOT pending #3146.
+  # Issue #3146 closed by the PR that lowered this floor again
+  # to 26 (the binding raw-errors count; see the gate-counting
+  # block below for why the lower 16-blocking count is not the
+  # binding constraint).  Historic context preserved here so the
+  # tightening trajectory is reviewable:
   #
   #   Environment       | Nets routed | Orchestrator                                  | DRC total
   #   ------------------+-------------+-----------------------------------------------+----------
   #   macOS arm64 8c    | 27/31       | 2 tuned, 5 clean, 6 rolled back, 8 budget-ex. | 27
   #   ubuntu-latest 2c  | 26/31       | 3 tuned, 5 clean, 5 rolled back, 7 budget-ex. | 48
+  #   (pre-#3146)
   #
-  # Root cause (per #3146 hypothesis): the negotiated A* per-net
-  # wall-clock budget (``per_net_timeout`` plumbed through
-  # ``Router.route_all_negotiated`` at ``core.py:5771-5914``)
-  # classifies different nets as completing-vs-bailing under
-  # the 2-core CI runner's ~5-10x slower Python performance
-  # without the C++ negotiated-strategy acceleration.  One
-  # fewer net completes the main pass; the match-group
-  # orchestrator (insertion-count-budgeted, NOT wall-clock-
-  # budgeted in ``match_group_tuning.py``) then sees a
-  # different pre-tuning state and lands different groups in
-  # the ``tuned``/``rolled_back``/``budget_exhausted`` buckets.
-  # The 21-error gap is downstream: serpentines from rolled-
-  # back-but-attempted insertions land in conflict with the
-  # unrouted-partner geometry.
+  # Root cause: the negotiated A* tie-break compared only
+  # ``f_score`` (Python ``@dataclass(order=True)`` AStarNode,
+  # C++ ``AStarNode::operator>``); on equal-f ties heap pop
+  # order was unspecified -> different nets completed the main
+  # pass under different load profiles, secondarily perturbing
+  # the match-group orchestrator's tuned/rolled-back/budget-
+  # exhausted verdicts.  Compounded by:
+  #   * PYTHONHASHSEED unpinned -> string-keyed dict/set
+  #     iteration drifted between processes.
+  #   * CI matchgroup-routing-regression job missing
+  #     ``uv run kct build-native`` -> board 07 ran in Python
+  #     fallback (10-100x slower) under 2-core ubuntu-latest,
+  #     which made the wall-clock budget classification differ
+  #     dramatically from the C++-accelerated local box.
   #
-  # This is the SAME family as #3144's CoupledPathfinder
-  # variance on board 06, but a different code path -- the
-  # ``CoupledPathfinder`` per-pair timeout is not in the
-  # board-07 critical path because the recipe uses
-  # ``--strategy negotiated`` not ``--differential-pairs``.
-  # Filed as a SIBLING issue (#3146) rather than extending
-  # #3144 because the fix surfaces are distinct (negotiated
-  # single-net A* tie-break + wall-clock-vs-iteration budget
-  # in ``Router.route_all_negotiated`` vs. ``CoupledNode`` tie-
-  # break + ``per_pair_timeout`` in ``CoupledPathfinder``).
-  # The A* tie-break fix from #3144's AC3 SHOULD apply
-  # verbatim to single-net A* and land in one PR if convenient,
-  # but the validation matrix (AC4: board 06 vs board 07) and
-  # the floor calibration are independent.
+  # Fix (this PR + upstream tie-break already in main):
+  #   1. The Python ``AStarNode.__lt__`` and C++
+  #      ``AStarNode::operator>`` already compare on
+  #      ``(f_score, seq)`` with ``seq`` a monotonic
+  #      heap-push counter (landed by PR #3192 closing #3144,
+  #      the CoupledPathfinder / board 06 sibling).  This
+  #      board 07 closure inherits that fix -- the C++
+  #      ``Pathfinder`` used as the negotiated fallback when
+  #      ``CoupledPathfinder`` pairs exceed their budget is
+  #      the same code path the negotiated main pass uses for
+  #      board 07.  No further tie-break changes are made by
+  #      this PR.
+  #   2. PYTHONHASHSEED=42 pinned at the workflow step and in
+  #      ``boards/07-matchgroup-test/generate_design.py``
+  #      subprocess call.
+  #   3. ``uv run kct build-native`` step added to the CI
+  #      matchgroup-routing-regression job (mirrors
+  #      diffpair-routing-regression).
+  #   4. ``continue-on-error: ${{ matrix.board == ... }}``
+  #      removed from the matchgroup-routing-regression job.
   #
-  # CI matrix-scoped soft-fail
-  # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
-  # installed at ``.github/workflows/ci.yml`` for the
-  # ``matchgroup-routing-regression`` job, mirroring PR #3141's
-  # M-F closure pattern for board 06.  Exit clause: drop floor
-  # back to the deterministic count (which AC4 of #3146 will
-  # establish) and remove the soft-fail in the follow-up PR
-  # that closes #3146.
+  # Validation (PR closing #3146, post-#3192 rebase):
+  #   * Local re-route at seed=42 with PYTHONHASHSEED=42
+  #     against main's ``seq`` tie-break produces
+  #     **24 raw / 16 blocking** DRC errors (8 advisory
+  #     connectivity excluded from the blocking-gate count
+  #     per the connectivity-rule policy).
+  #   * Normalized PCB content (segments, vias, modulo
+  #     ``(uuid ...)`` lines and emit ordering) was
+  #     md5-identical across local re-runs -- the strongest
+  #     possible local determinism evidence short of the
+  #     gold-standard CI re-route.  See
+  #     ``boards/07-matchgroup-test/diagnostic-runs/README.md``
+  #     for the evidence trail.
   #
-  # Issue #3151 (DRC parity) note: this floor is SHARED by two
-  # gates that measure different artifacts:
-  #   * ``check_matchgroup_coverage.py`` RE-ROUTES from source and
-  #     can land at 48 on the ubuntu-latest 2-core CI runner (the
-  #     cross-platform variance documented above, tracked by #3146).
-  #     This re-route count is the BINDING constraint on this floor.
-  #   * ``check_routed_drc.py`` measures the COMMITTED
-  #     ``matchgroup_test_routed.kicad_pcb`` artifact.  Issue #3151
-  #     made that gate net-class-map-aware: it now resolves board
-  #     07's committed ``output/net_class_map.json`` sidecar and
-  #     threads it via ``--net-class-map``, so it counts the 3
-  #     previously-missing families (diffpair_length_skew=4,
-  #     diffpair_routing_continuity=4, match_group_length_skew=1).
-  #     The committed-artifact blocking count rose 11 -> 20 (27
-  #     total - 7 advisory connectivity).  20 <= 48, so the gate
-  #     passes; it emits a drift warning (slack=28) flagging the
-  #     gap between the committed artifact and the re-route ceiling.
-  # The floor stays at 48 because it must accommodate the higher
-  # re-route count.  Exit clause: once #3146 lands a deterministic
-  # re-route count, split the committed-artifact floor (~20) from
-  # the re-route floor, or drop both to the deterministic value.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 48
+  # Floor 48 -> 26 reflects the post-fix count plus a 2-error
+  # slack over the observed 24 raw, intentionally absorbing the
+  # narrow drift the post-#3192 rebase introduced relative to
+  # the pre-rebase 5-run validation.  Board 06's strict gate
+  # post-#3144 is the model -- if a future tightening pass
+  # confirms the floor can drop to 24 (raw) without flakiness,
+  # do so in a dedicated cleanup PR rather than mixing it with
+  # closure work.
+  #
+  # Issue #3151 (DRC parity) caveat -- IMPORTANT, this floor is
+  # shared by TWO gates that measure the same deterministic
+  # artifact under DIFFERENT counting policies:
+  #
+  #   * ``check_routed_drc.py`` calls ``_count_blocking_errors``
+  #     which filters out ``ADVISORY_RULE_IDS`` (currently just
+  #     ``connectivity``).  On the post-#3146 board-07 artifact
+  #     this lands at **16 blocking** (24 raw - 8 connectivity
+  #     advisory).
+  #
+  #   * ``check_matchgroup_coverage.py`` reads the raw
+  #     ``summary.errors`` integer from the ``kct check`` JSON
+  #     envelope (no advisory filter -- the match-group gate
+  #     was designed before the advisory split landed and was
+  #     never updated, see #3151).  On the same artifact this
+  #     lands at **24 raw**.
+  #
+  # The binding gate must accommodate BOTH callers, so the
+  # floor is set to **26** (the higher / raw-errors count
+  # plus 2-error slack).  The first PR attempt at #3146 set
+  # this to 18 (the pre-rebase blocking count) and the
+  # matchgroup CI gate failed because 26 > 18 on the raw
+  # path.  Tracked as a follow-up: port
+  # ``_count_blocking_errors`` into
+  # ``check_matchgroup_coverage.py`` so both gates use the
+  # same blocking-vs-advisory policy, at which point this
+  # floor can drop back to the blocking count (16).  See #3151.
+  #
+  # Post-#3146 determinism evidence: the re-route lands at
+  # 24 raw / 16 blocking on the macOS arm64 local box, with
+  # byte-identical normalized PCB md5 across local re-runs.
+  # CI re-runs are expected to land within the 2-error slack
+  # of this floor; AC4 (5x CI re-route at this strict gate
+  # without continue-on-error) gets validated when this PR
+  # lands and the workflow runs without the soft-fail.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 26
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
