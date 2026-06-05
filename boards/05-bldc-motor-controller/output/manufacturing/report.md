@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 55 (0 SMD, 0 THT, 55 other) |
 | Nets | 40 |
-| Traces | 190 segments |
-| Vias | 38 |
+| Traces | 265 segments |
+| Vias | 33 |
 | Board Size | 80.0 x 100.0 mm |
 
 ## Design Overview
@@ -67,23 +67,22 @@ Thermal analysis and high-current routing demo
 | Value | Package | Qty | References |
 |-------|---------|-----|------------|
 | 100nF | C_0805_2012Metric | 7 | C2, C7, C8, C12, C13, C14, C15 |
-| 100uF | C_0805_2012Metric | 1 | C3 |
 | 10nF |  | 3 | C30, C31, C32 |
 | 10uF | C_0805_2012Metric | 3 | C5, C6, C16 |
 | 20pF |  | 2 | C10, C11 |
-| 220uF | C_0805_2012Metric | 1 | C4 |
+| 220uF |  | 2 | C3, C4 |
 | 4.7uF | C_0805_2012Metric | 1 | C9 |
 | 470uF | C_0805_2012Metric | 1 | C1 |
 | PWR |  | 1 | D3 |
 | SMBJ24A | D_SMA | 1 | D1 |
-| SS34 | D_SMA | 1 | D2 |
+| SS34 |  | 1 | D2 |
 | STATUS |  | 1 | D4 |
 | 15A | Fuse_1206_3216Metric | 1 | F1 |
 | Hall Sensors | PinHeader_1x05_P2.54mm_Vertical | 1 | J3 |
 | Motor Output | PinHeader_1x03_P2.54mm_Vertical | 1 | J2 |
 | Power Input | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
 | SWD-6 |  | 1 | J4 |
-| 33uH | L_1210_3225Metric | 1 | L1 |
+| 33uH |  | 1 | L1 |
 | IRLZ44N |  | 6 | Q1, Q2, Q3, Q4, Q5, Q6 |
 | 10k |  | 3 | R30, R31, R32 |
 | 1k |  | 2 | R3, R4 |
@@ -91,7 +90,7 @@ Thermal analysis and high-current routing demo
 | 5mR |  | 3 | R10, R11, R12 |
 | AMS1117-3.3 | SOT-223-3_TabPin2 | 1 | U2 |
 | DRV8301 |  | 1 | U3 |
-| LM2596-5.0 | TO-263-5_TabPin3 | 1 | U1 |
+| LM2596-5.0 |  | 1 | U1 |
 | STM32G431K8Tx | LQFP-32_7x7mm_P0.8mm | 1 | U10 |
 | 8MHz |  | 1 | Y1 |
 
@@ -102,9 +101,9 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 9 |
+| Errors | 15 |
 | Warnings | 56 |
-| Blocking | 9 |
+| Blocking | 15 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -112,10 +111,10 @@ Thermal analysis and high-current routing demo
 | Violation Type | Count |
 |----------------|-------|
 | pad_grid | 56 |
-| connectivity | 23 |
-| clearance_segment_segment | 5 |
-| clearance_segment_via | 3 |
-| clearance_pad_segment | 1 |
+| connectivity | 21 |
+| clearance_pad_segment | 12 |
+| clearance_pad_via | 2 |
+| clearance_segment_via | 1 |
 
 
 \newpage
@@ -126,8 +125,8 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[CRITICAL]** Fix 9 blocking DRC violations (clearance_segment_segment (5), clearance_segment_via (3), clearance_pad_segment (1))
-- **[OPTIONAL]** Verify zone fill in KiCad: 22 nets appear incomplete but may be connected via zone fills
+- **[CRITICAL]** Fix 15 blocking DRC violations (clearance_pad_segment (12), clearance_pad_via (2), clearance_segment_via (1))
+- **[OPTIONAL]** Verify zone fill in KiCad: 20 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
 - **[OPTIONAL]** Review 56 DRC warnings
 - **[OPTIONAL]** Analog net: ISENSE_A+ — analog signal; noise-sensitive, avoid crossing digital signals
@@ -144,12 +143,12 @@ Thermal analysis and high-current routing demo
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 37.1% (13/35) |
-| Overall Completion | 42.5% |
-| Complete Nets | 17 / 40 |
+| Signal Net Completion | 42.9% (15/35) |
+| Overall Completion | 47.5% |
+| Complete Nets | 19 / 40 |
 | Zone-Connected Nets | 5 |
-| Incomplete Nets | 23 |
-| Unconnected Pads | 80 |
+| Incomplete Nets | 21 |
+| Unconnected Pads | 76 |
 
 ### Zone-Connected Nets
 
@@ -163,51 +162,47 @@ Thermal analysis and high-current routing demo
 
 - GATE_AL
 - GATE_BL
-- GATE_CL
-- GATE_DRV_AH
-- GATE_DRV_CH
+- GATE_DRV_BH
 - HALL_A
-- HALL_B
-- HALL_C
 - ISENSE_A+
 - ISENSE_A-
 - ISENSE_B+
 - ISENSE_B-
 - ISENSE_C-
-- OSC_OUT
+- NRST
 - PHASE_A
 - PHASE_B
 - PHASE_C
+- PWM_AH
 - PWM_AL
 - PWM_BH
 - PWM_BL
 - PWM_CH
 - PWM_CL
+- SW_OUT
 
 ### Unrouted Signal Nets
 
 - GATE_AL
 - GATE_BL
-- GATE_CL
-- GATE_DRV_AH
-- GATE_DRV_CH
+- GATE_DRV_BH
 - HALL_A
-- HALL_B
-- HALL_C
 - ISENSE_A+
 - ISENSE_A-
 - ISENSE_B+
 - ISENSE_B-
 - ISENSE_C-
-- OSC_OUT
+- NRST
 - PHASE_A
 - PHASE_B
 - PHASE_C
+- PWM_AH
 - PWM_AL
 - PWM_BH
 - PWM_BL
 - PWM_CH
 - PWM_CL
+- SW_OUT
 
 
 ## Cost Estimate

@@ -20,13 +20,13 @@ C8,100nF,Capacitor_SMD:C_0805_2012Metric,40.0000mm,37.0000mm,0.0,Top
 C9,4.7uF,Capacitor_SMD:C_0805_2012Metric,46.0000mm,37.0000mm,0.0,Top
 D1,SMBJ24A,Diode_SMD:D_SMA,22.0000mm,8.0000mm,0.0,Top
 D2,SS34,Diode_SMD:D_SMA,19.0000mm,30.0000mm,0.0,Top
-D3,LED,LED_SMD:LED_0805_2012Metric,56.0000mm,8.0000mm,0.0,Top
-D4,LED,LED_SMD:LED_0805_2012Metric,62.0000mm,8.0000mm,0.0,Top
+D3,PWR,LED_SMD:LED_0805_2012Metric,56.0000mm,8.0000mm,0.0,Top
+D4,STATUS,LED_SMD:LED_0805_2012Metric,62.0000mm,8.0000mm,0.0,Top
 F1,15A,Fuse:Fuse_1206_3216Metric,14.0000mm,8.0000mm,0.0,Top
 J1,Power Input,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,5.0000mm,8.0000mm,0.0,Top
 J2,Motor Output,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,65.0000mm,76.0000mm,0.0,Top
 J3,Hall Sensors,Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical,65.0000mm,58.0000mm,0.0,Top
-J4,SWD Debug,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,65.0000mm,22.0000mm,0.0,Top
+J4,SWD-6,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,65.0000mm,22.0000mm,0.0,Top
 L1,33uH,Inductor_SMD:L_1210_3225Metric,26.0000mm,22.0000mm,0.0,Top
 Q1,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,8.0000mm,68.0000mm,0.0,Top
 Q2,IRLZ44N,Package_TO_SOT_THT:TO-220-3_Vertical,8.0000mm,76.0000mm,0.0,Top
