@@ -331,10 +331,29 @@ class AssemblyPackage:
                     ],
                 )
 
-            from ..schema.bom import extract_bom
+            from ..schema.bom import backfill_footprints_from_pcb, extract_bom
 
             bom = extract_bom(self.schematic_path)
             items = bom.items
+
+            # Back-fill empty BOMItem.footprint values from the PCB.
+            # Spec-overlay / programmatically generated schematics often
+            # leave the instance-level Footprint property blank; without
+            # this fallback the BOM CSV's Footprint column ends up empty.
+            # The helper never overwrites a non-empty footprint, so
+            # schematic-driven boards (e.g. board 01) are unaffected.
+            try:
+                filled = backfill_footprints_from_pcb(items, self.pcb_path)
+                if filled:
+                    logger.info(
+                        "Back-filled %d footprint ref(s) from PCB (schematic metadata was blank)",
+                        filled,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Footprint back-fill from PCB failed (continuing without): %s",
+                    e,
+                )
 
         # Filter excluded references
         if self.config.exclude_references:

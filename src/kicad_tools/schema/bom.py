@@ -7,6 +7,7 @@ Extracts component information from schematics for manufacturing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .hierarchy import build_hierarchy
 from .schematic import Schematic
@@ -386,3 +387,46 @@ def extract_bom_from_pcb(pcb_path: str) -> BOM:
         items.append(item)
 
     return BOM(items=items, source=pcb_path)
+
+
+def backfill_footprints_from_pcb(items: list[BOMItem], pcb_path: str | Path) -> int:
+    """Fill blank ``BOMItem.footprint`` fields from the PCB's footprint refs.
+
+    This is a strict fallback: only items whose ``footprint`` is empty or
+    whitespace are touched.  Items with any non-empty footprint string
+    (typically populated by the schematic-side ``Footprint`` property) are
+    preserved verbatim, so schematic-driven boards see no change.
+
+    Use case: schematics produced by spec-overlay / programmatic-generation
+    workflows often leave the instance-level ``Footprint`` property empty
+    on each symbol, even though the PCB has the correct footprint assigned.
+    The CPL writer reads ``fp.name`` directly off the PCB and is therefore
+    immune; the BOM writer reads ``BOMItem.footprint`` and ends up emitting
+    blank ``Footprint`` columns.  Calling this helper right after
+    :func:`extract_bom` repairs the BOM stream before grouping and CSV
+    output.
+
+    Args:
+        items: BOM items to back-fill in place.
+        pcb_path: Path to the ``.kicad_pcb`` file to source footprint refs
+            from.
+
+    Returns:
+        Number of items whose ``footprint`` field was populated.  Useful
+        for logging and test assertions; never raises on a no-op.
+    """
+    from .pcb import PCB
+
+    pcb = PCB.load(str(pcb_path))
+    ref_to_fp_name: dict[str, str] = {fp.reference: fp.name for fp in pcb.footprints}
+
+    filled = 0
+    for item in items:
+        if (item.footprint or "").strip():
+            # Preserve any existing schematic-side metadata.
+            continue
+        fp_name = ref_to_fp_name.get(item.reference)
+        if fp_name:
+            item.footprint = fp_name
+            filled += 1
+    return filled

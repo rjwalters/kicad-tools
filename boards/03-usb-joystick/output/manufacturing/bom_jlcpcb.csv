@@ -1,7 +1,7 @@
 Comment,Designator,Footprint,LCSC Part #
-100nF,"C1,C2,C3,C4",,C1525
-16MHz,Y1,,C13738
-Button,"SW1,SW2,SW3,SW4",,C318884
-Joystick,J2,,C50950
-MCU,U1,,C44854
-USB-C,J1,,C165948
+100nF,"C1,C2,C3,C4",Capacitor_SMD:C_0402_1005Metric,C1525
+16MHz,Y1,Crystal:Crystal_HC49-U_Vertical,C13738
+Button,"SW1,SW2,SW3,SW4",Button_Switch_SMD:SW_SPST_TL3342,C318884
+Joystick,J2,Module:Joystick_Analog,C50950
+MCU,U1,Package_QFP:TQFP-32_7x7mm_P0.8mm,C44854
+USB-C,J1,Connector_USB:USB_C_Receptacle_GCT_USB4105,C165948
