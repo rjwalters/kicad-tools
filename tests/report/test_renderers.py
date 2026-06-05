@@ -583,3 +583,90 @@ class TestWeasprintAvailable:
                 sys.modules["weasyprint"] = saved
             else:
                 sys.modules.pop("weasyprint", None)
+
+    def test_weasyprint_oserror_treated_as_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """libgobject dlopen failure (OSError) must degrade like ImportError.
+
+        Regression test for issue #3205: on macOS / minimal Linux hosts where
+        libgobject-2.0-0 is missing, ``import weasyprint`` raises ``OSError``
+        from ``ctypes.CDLL`` rather than ``ImportError``. The guard in
+        ``_weasyprint_available()`` must catch both so the whole export
+        pipeline degrades gracefully instead of bubbling an unhandled
+        exception that taints ``result.errors``.
+        """
+        import builtins
+        import sys
+
+        import kicad_tools.report.renderers as renderers_mod
+
+        # Reset the one-shot hint guard so this test always exercises the warn path.
+        monkeypatch.setattr(renderers_mod, "_LIBGOBJECT_HINT_LOGGED", False)
+
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "weasyprint":
+                raise OSError(
+                    "cannot load library 'libgobject-2.0-0': "
+                    "dlopen(libgobject-2.0.dylib, 0x0002): tried: ..."
+                )
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        # Ensure the import is re-attempted (not served from sys.modules cache)
+        saved = sys.modules.pop("weasyprint", None)
+        try:
+            from kicad_tools.report.renderers import (
+                _weasyprint_available,
+                pdf_renderer_available,
+            )
+
+            # Must not raise — the OSError must be caught and converted to False.
+            assert _weasyprint_available() is False
+
+            # And pdf_renderer_available must not raise either: it falls
+            # through to pandoc (if installed) or returns None.
+            renderer = pdf_renderer_available()
+            assert renderer in (None, "pandoc")
+        finally:
+            if saved is not None:
+                sys.modules["weasyprint"] = saved
+
+    def test_libgobject_hint_logged_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The libgobject install hint is emitted once per process, not on every call."""
+        import builtins
+        import logging
+        import sys
+
+        import kicad_tools.report.renderers as renderers_mod
+
+        monkeypatch.setattr(renderers_mod, "_LIBGOBJECT_HINT_LOGGED", False)
+
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "weasyprint":
+                raise OSError("cannot load library 'libgobject-2.0-0'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        sys.modules.pop("weasyprint", None)
+
+        from kicad_tools.report.renderers import _weasyprint_available
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.report.renderers"):
+            _weasyprint_available()
+            _weasyprint_available()
+            _weasyprint_available()
+
+        libgobject_warnings = [
+            r for r in caplog.records if "libgobject" in r.getMessage()
+        ]
+        assert len(libgobject_warnings) == 1, (
+            f"Expected exactly one libgobject hint, got {len(libgobject_warnings)}: "
+            f"{[r.getMessage() for r in libgobject_warnings]}"
+        )
