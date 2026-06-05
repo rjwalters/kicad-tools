@@ -572,6 +572,403 @@ class TestSoftstartRealisticCluster:
 
 
 @requires_cpp
+class TestBuildPadChannelBudgetsU1Mirror:
+    """Test ``Autorouter._build_pad_channel_budgets()`` directly on a
+    fixture that mirrors softstart's U1 TSSOP-20 footprint (Issue #3201).
+
+    This test exists because the pre-#3201 geometry passed the synthetic
+    fixture in :class:`TestSoftstartRealisticCluster` (the empty-grid
+    proof that the cost function works) but failed end-to-end on softstart
+    -- the edge-classification heuristic
+    (``abs(dx) >= abs(dy)`` from escape-endpoint-vs-center) misclassified
+    corner pads and produced budget rectangles that did not intersect
+    the actually-contested cells.
+
+    The fixture here is structured to expose four specific failure
+    modes the pre-#3201 code had on U1:
+
+      (a) B_CU east-side escape endpoints sit INSIDE the package bbox
+          (the via is between the pin rows by design).  A strip anchored
+          at the escape endpoint, extending 3 cells east, never crosses
+          the package edge -- the budget rectangle lives inside the
+          package and the contested column outside is untouched.
+
+      (b) Corner pads (e.g., pin 11 / pin 19 on a TSSOP-20) have escape
+          endpoints far enough from the package y-center that
+          ``abs(dy) > abs(dx)``.  The pre-#3201 code took the north/south
+          branch, producing a HORIZONTAL strip across the package's
+          x-range instead of a vertical strip across the y-range.  The
+          horizontal strip blocks legitimate east-bound traffic for
+          corner pads and does NOT cover the east-side contested column.
+
+      (c) Per-layer tagging on a 2-layer board with alternating-layer
+          escapes left half the contested cells untaxed.
+
+      (d) Per-pad budgets stacked overlap-style (10 east + 10 west pads
+          at 1.5x cost_straight each) summed to a per-cell penalty so
+          large that foreign nets needing legitimate access to U1 pads
+          detoured entirely around the package, causing NRST to become
+          unrouted.  The fix (#3201) emits ONE budget per (package,
+          edge) with ``source_net = 0`` so the penalty is bounded at
+          ``overflow_penalty`` per cell regardless of pad count.
+
+    Acceptance: the budgets produced by ``_build_pad_channel_budgets()``
+    on this U1-mirror fixture satisfy all of:
+
+      1. Exactly one budget per occupied edge (east, west) when only
+         east/west sides have pads (TSSOP-20 shape).  No duplicate
+         per-pad budgets.
+      2. The east-side budget rectangle covers cells JUST OUTSIDE the
+         package east edge (gx > pkg_x_max in grid cells), regardless
+         of escape layer.
+      3. The strip spans the package y-range (gy1 <= pkg_y_min,
+         gy2 >= pkg_y_max in grid cells).
+      4. The budget layer is -1 (all routable layers) so traffic on
+         either F_CU or B_CU sees the penalty.
+      5. Budgets use ``source_net = 0`` so a single budget applies to
+         every net's route.
+    """
+
+    def _build_u1_mirror_router_with_overrides(self):
+        """Construct an ``Autorouter`` with a TSSOP-20-shaped dense
+        package and pre-populate ``_escape_pad_overrides`` with virtual
+        pads matching the alternating-layer escape pattern that
+        ``generate_escape_routes`` would produce on U1.
+
+        Returns ``(router, package_info)``.
+        """
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.escape import PackageInfo, PackageType
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules(
+            trace_width=0.15,
+            trace_clearance=0.1,
+            via_diameter=0.6,
+            via_clearance=0.15,
+            grid_resolution=0.075,
+        )
+        router = Autorouter(
+            width=50.0,
+            height=50.0,
+            origin_x=200.0,
+            origin_y=160.0,
+            rules=rules,
+        )
+
+        # U1-mirror footprint: TSSOP-20 at center (215, 175), pad pitch
+        # 0.65mm, 10 pads per side.  Pad sizes 1.5 (x) x 0.4 (y), pad
+        # centers at +/- 2.85 from package centerline.  Bbox derived from
+        # pad extents: x in [212.15, 217.85], y in [172.075, 177.925].
+        pads_list: list[Pad] = []
+        center_x, center_y = 215.0, 175.0
+        # West side (pins 1-10).
+        for i in range(10):
+            py = -2.925 + i * 0.65
+            net = i + 1  # Non-zero so the budget loop sees them.
+            pad = Pad(
+                x=center_x - 2.85,
+                y=center_y + py,
+                width=1.5,
+                height=0.4,
+                net=net,
+                net_name=f"WSIG_{i + 1}",
+                layer=Layer.F_CU,
+                ref="U1",
+                pin=str(i + 1),
+            )
+            pads_list.append(pad)
+            router.pads[("U1", str(i + 1))] = pad
+        # East side (pins 11-20).
+        for i in range(10):
+            # Pin 11 at y=+2.925 (south corner), pin 20 at y=-2.925
+            # (north corner).
+            py = 2.925 - i * 0.65
+            net = 11 + i
+            pad = Pad(
+                x=center_x + 2.85,
+                y=center_y + py,
+                width=1.5,
+                height=0.4,
+                net=net,
+                net_name=f"ESIG_{i + 1}",
+                layer=Layer.F_CU,
+                ref="U1",
+                pin=str(11 + i),
+            )
+            pads_list.append(pad)
+            router.pads[("U1", str(11 + i))] = pad
+
+        bbox = (
+            center_x - 2.85,
+            center_y - 2.925,
+            center_x + 2.85,
+            center_y + 2.925,
+        )
+        package = PackageInfo(
+            ref="U1",
+            package_type=PackageType.SSOP,
+            center=(center_x, center_y),
+            pads=pads_list,
+            pin_count=20,
+            pin_pitch=0.65,
+            bounding_box=bbox,
+            is_dense=True,
+        )
+
+        # Populate ``_escape_pad_overrides`` with the alternating-layer
+        # escape endpoints that ``generate_escape_routes`` would produce
+        # on this footprint (matching the diagnostic dump from Issue
+        # #3201).  East-side odd pads escape on B_CU with endpoint INSIDE
+        # the package bbox (x = center_x + 1.788); east-side even pads
+        # escape on F_CU with endpoint OUTSIDE the package bbox
+        # (x = center_x + 3.45).  The alternation is what produced the
+        # corner-pad misclassification and per-layer-tagging failure modes
+        # the pre-#3201 geometry had.
+        for pad in pads_list:
+            on_east = pad.x > center_x
+            # Alternate by pin number (pin 11 = B_CU, pin 12 = F_CU, ...).
+            pin_num = int(pad.pin)
+            if on_east:
+                # East side: B_CU on odd-index east-side pads, F_CU on
+                # even-index east-side pads (matches the diagnostic).
+                if (pin_num - 11) % 2 == 0:
+                    escape_x = center_x + 1.788
+                    escape_layer = Layer.B_CU
+                else:
+                    escape_x = center_x + 3.45
+                    escape_layer = Layer.F_CU
+                escape_y = pad.y
+            else:
+                # West side mirror.
+                if (pin_num - 1) % 2 == 0:
+                    escape_x = center_x - 3.45
+                    escape_layer = Layer.F_CU
+                else:
+                    escape_x = center_x - 1.788
+                    escape_layer = Layer.B_CU
+                escape_y = pad.y
+            virtual = Pad(
+                x=escape_x,
+                y=escape_y,
+                width=pad.width,
+                height=pad.height,
+                net=pad.net,
+                net_name=pad.net_name,
+                layer=escape_layer,
+                ref=pad.ref,
+                pin=pad.pin,
+            )
+            router._escape_pad_overrides[(pad.ref, pad.pin)] = virtual
+
+        return router, package
+
+    def test_one_budget_per_signal_pad(self):
+        """For each signal-net escape pad, expect one budget.  NC pads
+        (net=0) do NOT produce budgets.
+
+        In this U1-mirror fixture every pin has a non-zero net (the
+        ``_build_u1_mirror_router_with_overrides`` helper assigns
+        sequential net ids 1..20 to the 20 pads).  So we expect
+        exactly 20 budgets.
+        """
+        router, package = self._build_u1_mirror_router_with_overrides()
+        budgets = router._build_pad_channel_budgets([package])
+        signal_pads = [p for p in package.pads if p.net != 0]
+        assert len(budgets) == len(signal_pads), (
+            f"Expected one budget per signal pad ({len(signal_pads)}), "
+            f"got {len(budgets)}."
+        )
+
+    def test_nc_pads_do_not_produce_budgets(self):
+        """NC pads (net=0) must NOT produce budgets even though they
+        appear in ``_escape_pad_overrides``.
+
+        Including NC budgets adds dead-weight cumulative penalty to
+        every other net's route with no upside (NC pads cannot
+        legitimately compete for routing).  This is part of the #3201
+        calibration: pre-#3201 the code blindly emitted budgets for
+        every pad in ``_escape_pad_overrides`` including NC pads.
+        """
+        router, package = self._build_u1_mirror_router_with_overrides()
+
+        # Re-tag every other east-side pad's net to 0 so we have a
+        # mix of signal and NC pads (matching softstart's U1 layout
+        # where ~7 of 10 east-side pads are NC).
+        nc_pin_set = {"12", "16", "17", "20"}
+        nc_nets: set[int] = set()
+        for pin in nc_pin_set:
+            pad = router.pads[("U1", pin)]
+            nc_nets.add(pad.net)
+            pad.net = 0
+            pad.net_name = ""
+            # Also flip the virtual pad's net so the escape override
+            # carries net=0.
+            v = router._escape_pad_overrides[("U1", pin)]
+            v.net = 0
+            v.net_name = ""
+        # Update package.pads so they reflect the new net=0 attribution.
+        for pad in package.pads:
+            if pad.pin in nc_pin_set:
+                pad.net = 0
+                pad.net_name = ""
+
+        budgets = router._build_pad_channel_budgets([package])
+        # No budget should reference a net that was zeroed.
+        for b in budgets:
+            assert b.source_net not in nc_nets, (
+                f"Budget with source_net={b.source_net} corresponds to "
+                "an NC-pad-now -- NC pads must not produce budgets."
+            )
+            assert b.source_net != 0, (
+                "No budget should have source_net=0 (NC) under the "
+                "per-pad model -- net=0 pads must be skipped."
+            )
+
+    def test_east_side_budgets_outside_package_edge(self):
+        """Every east-side signal pad's budget rectangle must sit
+        OUTSIDE the package east edge in grid cells.
+
+        Pre-#3201 the B_CU east-side pads got strips inside the package
+        (cells covering x = 216.78 .. 217.00 -- before the package edge
+        at x_max = 217.85).  The new geometry anchors at the package
+        edge so all east-side budgets land at cells whose x corresponds
+        to x > 217.85.
+        """
+        router, package = self._build_u1_mirror_router_with_overrides()
+        budgets = router._build_pad_channel_budgets([package])
+
+        # The package east edge is at x = center_x + 2.85 = 217.85.
+        # Convert to grid cells.
+        edge_gx, _ = router.grid.world_to_grid(
+            package.bounding_box[2], package.center[1]
+        )
+
+        east_pad_nets = {
+            p.net for p in package.pads
+            if p.x > package.center[0] and p.net != 0
+        }
+        east_budgets = [b for b in budgets if b.source_net in east_pad_nets]
+        assert len(east_budgets) == len(east_pad_nets), (
+            f"Expected {len(east_pad_nets)} east-side budgets, got "
+            f"{len(east_budgets)}."
+        )
+        for b in east_budgets:
+            assert b.gx1 > edge_gx, (
+                f"East-side budget for net {b.source_net} starts at "
+                f"gx1={b.gx1} which is NOT east of the package edge "
+                f"(gx={edge_gx}).  Pre-#3201 regression: budget lives "
+                "inside the package."
+            )
+
+    def test_east_side_budgets_span_package_y_range(self):
+        """Every east-side budget's y-range must span the package's
+        y-range (with padding).  This ensures the strip covers the
+        contested vertical column for all peer pads on the same edge.
+        """
+        router, package = self._build_u1_mirror_router_with_overrides()
+        budgets = router._build_pad_channel_budgets([package])
+
+        # Convert package y-range to grid cells.
+        _gx_lo, pkg_gy_min = router.grid.world_to_grid(
+            package.center[0], package.bounding_box[1]
+        )
+        _gx_hi, pkg_gy_max = router.grid.world_to_grid(
+            package.center[0], package.bounding_box[3]
+        )
+        min_pkg_gy = min(pkg_gy_min, pkg_gy_max)
+        max_pkg_gy = max(pkg_gy_min, pkg_gy_max)
+
+        east_pad_nets = {
+            p.net for p in package.pads
+            if p.x > package.center[0] and p.net != 0
+        }
+        east_budgets = [b for b in budgets if b.source_net in east_pad_nets]
+        assert east_budgets, "Expected east-side budgets"
+        for b in east_budgets:
+            assert b.gy1 <= min_pkg_gy, (
+                f"East-side budget for net {b.source_net} y-min "
+                f"({b.gy1}) does not cover package y_min ({min_pkg_gy})."
+            )
+            assert b.gy2 >= max_pkg_gy, (
+                f"East-side budget for net {b.source_net} y-max "
+                f"({b.gy2}) does not cover package y_max ({max_pkg_gy})."
+            )
+
+    def test_corner_pads_classified_to_short_edge(self):
+        """Corner pads on a TSSOP-20 (pin 11 at y_max, pin 20 at y_min
+        on the east edge) must be classified as east-side, NOT
+        north/south side.
+
+        Pre-#3201 the heuristic used escape-endpoint vs package-center
+        offsets, which produced a HORIZONTAL strip for corner pads.
+        With the original-pad-position classifier, corner pads with
+        norm_x == norm_y break the tie in favour of the SHORT axis
+        (east/west on a TSSOP-20 which is taller than wide).
+        """
+        router, package = self._build_u1_mirror_router_with_overrides()
+        budgets = router._build_pad_channel_budgets([package])
+
+        # Pin 11 (south-east corner) and pin 20 (north-east corner).
+        corner_pins = ["11", "20"]
+        corner_nets = {router.pads[("U1", p)].net for p in corner_pins}
+
+        for b in budgets:
+            if b.source_net not in corner_nets:
+                continue
+            x_span = b.gx2 - b.gx1
+            y_span = b.gy2 - b.gy1
+            assert y_span > x_span, (
+                f"Corner pad budget (net {b.source_net}) has x_span="
+                f"{x_span} > y_span={y_span} -- classified as "
+                "horizontal strip (north/south), expected vertical "
+                "(east/west).  Pre-#3201 corner-pad regression."
+            )
+
+    def test_budgets_target_all_layers(self):
+        """Every budget must have ``layer == -1`` (all routable layers).
+
+        Pre-#3201 the budget layer was set from the escape layer of the
+        originating pad.  On a 2-layer board with alternating-layer
+        escapes (B_CU / F_CU on adjacent pads of the same side), only
+        half the contested cells were tagged per layer -- the search
+        could escape penalties by switching layers in the contested
+        column.
+        """
+        router, package = self._build_u1_mirror_router_with_overrides()
+        budgets = router._build_pad_channel_budgets([package])
+        assert budgets, "Expected non-empty budget list"
+        for b in budgets:
+            assert b.layer == -1, (
+                f"Budget targets layer {b.layer}, expected -1 (all "
+                "routable layers)."
+            )
+
+    def test_budgets_carry_originating_pad_net(self):
+        """Every budget's ``source_net`` matches its originating pad's
+        net id.
+
+        The per-pad budget model (#3143 / #3201) retains the per-net
+        filter -- the C++ search skips the budget for the routing net
+        when ``budget.source_net == route_net`` so that a net is not
+        penalised for routing through its own escape endpoint.
+        """
+        router, package = self._build_u1_mirror_router_with_overrides()
+        budgets = router._build_pad_channel_budgets([package])
+        assert budgets, "Expected non-empty budget list"
+        signal_pad_nets = {p.net for p in package.pads if p.net != 0}
+        for b in budgets:
+            assert b.source_net in signal_pad_nets, (
+                f"Budget source_net={b.source_net} does not match any "
+                "signal-pad net id.  Per-pad model requires the budget "
+                "to carry its originating pad's net for per-net "
+                "filtering."
+            )
+
+
+@requires_cpp
 class TestSetPadChannelBudgetsAdapter:
     """Verify the Python-side ``CppPathfinder.set_pad_channel_budgets()``
     setter persists the budget across multiple ``_route_impl`` calls.
