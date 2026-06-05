@@ -350,12 +350,25 @@ def create_bldc_controller(output_dir: Path) -> Path:
 
     # Patch footprints on the LDO stage so the BOM matches the
     # pre-refactor design exactly (the cascade leaves footprints unset by
-    # default; the buck stage already runs without footprints under
-    # ``create_5v_buck``).
+    # default).
     cascade.ldo.ldo.footprint = "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
     cascade.ldo.input_cap.footprint = "Capacitor_SMD:C_0805_2012Metric"
     for cap in cascade.ldo.output_caps:
         cap.footprint = "Capacitor_SMD:C_0805_2012Metric"
+
+    # Patch footprints on the buck stage so the BOM (extracted from the
+    # schematic) reports the parts the PCB actually places. Strings must
+    # mirror the PCB-side hard-codes in ``generate_d2pak`` /
+    # ``generate_cap_0805`` / ``generate_inductor_smd`` /
+    # ``generate_diode_sma`` (see design.py:1433, 1758, 1851, 1870) so the
+    # schematic↔PCB drift checker stays clean. Without these, the
+    # manufacturing preflight ``bom_fields`` check fails with "missing
+    # footprint" warnings on U1/C3/C4/L1/D2 (issue #3211).
+    cascade.buck.regulator.footprint = "Package_TO_SOT_SMD:TO-263-5_TabPin3"
+    cascade.buck.input_cap.footprint = "Capacitor_SMD:C_0805_2012Metric"
+    cascade.buck.output_cap.footprint = "Capacitor_SMD:C_0805_2012Metric"
+    cascade.buck.inductor.footprint = "Inductor_SMD:L_1210_3225Metric"
+    cascade.buck.diode.footprint = "Diode_SMD:D_SMA"
 
     # Wire each stage to its rails in one call (buck VIN -> VMOTOR,
     # buck VOUT == LDO VIN -> 5V rail, LDO VOUT -> 3V3 rail).
