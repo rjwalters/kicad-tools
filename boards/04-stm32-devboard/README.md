@@ -71,25 +71,20 @@ Open the schematic in KiCad to view and continue the design.
 
 ## Manufacturing readiness status
 
-As of the 2026-05-11 audit, board 04 routes **8/9 nets (89%)** with two residuals
-tracked as upstream issues — both with concrete, documented root causes:
+For the current readiness state, run:
 
-| Residual | Pads / nets affected | Tracking issue | Status |
-|---|---|---|---|
-| OSC_OUT 2/3 pad completion | Y1.2 + C11.1 route; U2.6 (LQFP-48 0.5mm-pitch pin) defers | [#2695](https://github.com/rjwalters/kicad-tools/issues/2695) | In-pad via escape for fine-pitch LQFP/QFP (extends the #2605/#2608 pattern from 0.65mm SSOP to 0.5mm QFP) |
-| 5 ImpedanceRule errors on SWCLK | 50Ω target on a 2-layer stackup requires ~2.812mm width on F.Cu | [#2696](https://github.com/rjwalters/kicad-tools/issues/2696) | Either upgrade board 04 to 4-layer (Option A) or suppress validator's default `*CLK*` 50Ω spec for 2-layer hobbyist boards (Option C) |
-| U2.8 stranded GND pad (17/18 stitched) | LQFP-48 west-side VSS pin; OSC_OUT B.Cu escape stub at `(126.8375, 121.75..122.4)` blocks any micro-via at U2.8 `(126.8375, 122.75)` (gap=0.10mm vs jlcpcb-tier1 min 0.20mm) | [#3075](https://github.com/rjwalters/kicad-tools/issues/3075) / [#3080](https://github.com/rjwalters/kicad-tools/issues/3080) | Advisory only: connectivity rule is in `DRCChecker.ADVISORY_RULE_IDS` (filtered from CI gate per #3074). The other 3 of 4 VSS pads (U2.23, U2.35, U2.47) are stitched, so the MCU VSS rail is bonded to plane through three independent paths. Resolution depends on extending the PR #3079 surface-stub channel-fit necking from strict-mode to the default escape path (router-side, tracked under #3080), or on the #2834 OSC_OUT escape rework. |
+```bash
+uv run kct fleet status --boards-dir boards/04-stm32-devboard
+```
 
-Board 04's `generate_design.py` does **not** set `target_single_impedance` on
-any net class. The 5 ImpedanceRule errors come from
-`ImpedanceRule._get_default_specs()` matching `SWCLK` via the regex `.*CLK.*`
-and asserting a 50Ω default. Per PR #2680's caveat, that target is physically
-infeasible on the 2-layer JLCPCB default stackup.
+**Last verified 2026-06-05**: routing 9/9 signal nets (100%), DRC clean against
+`--mfr jlcpcb-tier1` (PR #3218). One advisory connectivity finding at U2.8 (GND
+stitching) is filtered from the CI gate per #3074; the other 3 of 4 LQFP-48 VSS
+pads (U2.23, U2.35, U2.47) are stitched, so the MCU VSS rail bonds to plane
+through three independent paths.
 
-Both #2695 and #2696 must resolve before board 04 reaches 0 DRC + 0 ERC.
-Until then, board 04 is **partial-mfg-ready**: the routed PCB is structurally
-valid except for the OSC_OUT escape gap, and the impedance errors reflect a
-spec-vs-stackup mismatch rather than a wiring or sizing bug.
+The 2026-05-11 audit table (router 8/9, #2695/#2696/#3075/#3080) was removed
+when those issues closed — see issue #3212 for the rationale.
 
 ## Schematic Layout
 
