@@ -131,6 +131,35 @@ class NetStatus:
         return "signal"
 
     @property
+    def is_advisory_incomplete(self) -> bool:
+        """Return True iff this net is incomplete only because of an advisory
+        residual (plane/pour stitching), not a genuine signal-net gap.
+
+        Mirrors the audit-pipeline classifier (``DRCChecker.ADVISORY_RULE_IDS``
+        contains ``connectivity``) and the auditor's ``_check_connectivity``
+        logic that splits incomplete nets into ``truly_incomplete`` vs
+        ``zone_connected``/``pour`` categories. A net is treated as advisory-
+        incomplete when it is currently flagged ``incomplete`` AND any of:
+
+        * It is connected to a copper zone (``is_plane_net`` is True), so the
+          residual is a thermal-relief / stitching artifact rather than a
+          missing signal trace.
+        * Its ``net_type`` is ``plane`` or ``power`` (power nets are expected
+          to be zone-filled regardless of whether a zone exists yet).
+
+        The pour-classifier check via :mod:`kicad_tools.router.net_class` is
+        threaded in at the :class:`NetStatusResult` level (it needs the full
+        net-id map), so this property covers only the name/zone-based cases.
+        """
+        if self.status != "incomplete":
+            return False
+        if self.is_plane_net:
+            return True
+        if self.net_type in ("plane", "power"):
+            return True
+        return False
+
+    @property
     def suggested_fix(self) -> str:
         """Suggest fix based on net type."""
         if self.is_plane_net:
@@ -152,6 +181,7 @@ class NetStatus:
             "unconnected_count": self.unconnected_count,
             "connection_percentage": round(self.connection_percentage, 1),
             "is_plane_net": self.is_plane_net,
+            "is_advisory_incomplete": self.is_advisory_incomplete,
             "plane_layer": self.plane_layer,
             "plane_layers": list(self.plane_layers),
             "has_routing": self.has_routing,
@@ -181,10 +211,16 @@ class NetStatusResult:
     Attributes:
         nets: List of all analyzed net statuses
         total_nets: Total number of nets analyzed
+        advisory_incomplete_names: Names of incomplete nets reclassified as
+            advisory-only (plane/pour stitching residuals). Populated by
+            :class:`NetStatusAnalyzer` after the router pour-net classifier
+            runs; consulted by :attr:`blocking_incomplete` to filter the
+            raw ``incomplete`` list down to genuine signal-net gaps.
     """
 
     nets: list[NetStatus] = field(default_factory=list)
     total_nets: int = 0
+    advisory_incomplete_names: set[str] = field(default_factory=set)
 
     @property
     def complete(self) -> list[NetStatus]:
@@ -193,8 +229,30 @@ class NetStatusResult:
 
     @property
     def incomplete(self) -> list[NetStatus]:
-        """Nets that are partially connected."""
+        """Nets that are partially connected (raw count, includes advisory).
+
+        Diagnostic consumers (e.g. ``kct net-status``) rely on this
+        unfiltered view so plane-net stitching residuals remain visible.
+        Gating verdicts should consult :attr:`blocking_incomplete` instead.
+        """
         return [n for n in self.nets if n.status == "incomplete"]
+
+    @property
+    def blocking_incomplete(self) -> list[NetStatus]:
+        """Incomplete nets that block routing-completion (advisory removed).
+
+        Mirrors ``scripts/ci/check_routed_drc.py:_count_blocking_errors``:
+        an incomplete net is dropped from this list when it is classified
+        as a plane/pour residual (advisory connectivity), matching the
+        ``DRCChecker.ADVISORY_RULE_IDS`` policy.
+        """
+        return [
+            n
+            for n in self.nets
+            if n.status == "incomplete"
+            and n.net_name not in self.advisory_incomplete_names
+            and not n.is_advisory_incomplete
+        ]
 
     @property
     def unrouted(self) -> list[NetStatus]:
@@ -208,8 +266,17 @@ class NetStatusResult:
 
     @property
     def incomplete_count(self) -> int:
-        """Number of incomplete nets."""
+        """Number of incomplete nets (raw, includes advisory)."""
         return len(self.incomplete)
+
+    @property
+    def blocking_incomplete_count(self) -> int:
+        """Number of incomplete nets that block routing-complete verdict.
+
+        Excludes plane/pour stitching residuals (``ADVISORY_RULE_IDS``
+        connectivity) so the ship-ready gate matches ``check_routed_drc``.
+        """
+        return len(self.blocking_incomplete)
 
     @property
     def unrouted_count(self) -> int:
@@ -242,8 +309,10 @@ class NetStatusResult:
             "total_nets": self.total_nets,
             "complete_count": self.complete_count,
             "incomplete_count": self.incomplete_count,
+            "blocking_incomplete_count": self.blocking_incomplete_count,
             "unrouted_count": self.unrouted_count,
             "total_unconnected_pads": self.total_unconnected_pads,
+            "advisory_incomplete_names": sorted(self.advisory_incomplete_names),
             "nets": [n.to_dict() for n in self.nets],
         }
 
@@ -334,6 +403,39 @@ class NetStatusAnalyzer:
         # Sort by status (incomplete first, then unrouted, then complete)
         status_order = {"incomplete": 0, "unrouted": 1, "complete": 2}
         result.nets.sort(key=lambda n: (status_order.get(n.status, 3), n.net_name))
+
+        # Reclassify pour-net residuals as advisory (mirrors the audit
+        # pipeline's `_check_connectivity` second pass and the
+        # `ADVISORY_RULE_IDS` policy at the CI gate). The router's
+        # `classify_and_apply_rules` walks net names through the pour
+        # classifier; nets it tags `is_pour_net=True` are expected to be
+        # zone-filled even when no zone definition exists yet, so a
+        # stranded pad on such a net is a stitching residual rather than
+        # a missing signal trace.
+        incomplete_names = {n.net_name for n in result.incomplete}
+        if incomplete_names:
+            try:
+                from kicad_tools.router.net_class import classify_and_apply_rules
+
+                net_id_by_name = {
+                    net.name: net_id
+                    for net_id, net in self.pcb.nets.items()
+                    if net_id > 0 and net.name
+                }
+                pending_ids = {
+                    net_id_by_name[n]: n for n in incomplete_names if n in net_id_by_name
+                }
+                if pending_ids:
+                    rules = classify_and_apply_rules(pending_ids)
+                    result.advisory_incomplete_names = {
+                        n
+                        for n in incomplete_names
+                        if rules.get(n) and rules[n].is_pour_net
+                    }
+            except Exception:
+                # Conservative: leave advisory_incomplete_names empty so
+                # the gate stays strict if the classifier is unavailable.
+                pass
 
         return result
 
