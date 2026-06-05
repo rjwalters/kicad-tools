@@ -570,6 +570,364 @@ class TestSoftstartRealisticCluster:
             f"{with_budget_results}."
         )
 
+    def test_softstart_endpoint_anchored_strip_diverts_post_endpoint_turn(self):
+        """U1 east-side failure pattern (Issue #3201): nets escaping on
+        F_CU all converge on the same post-escape column ~8 cells
+        outside the package edge (where the escape stub ends) and turn
+        N/S through that column.  The endpoint-aware strip extension
+        added in #3201 covers cells from (pkg_edge + 1) to
+        (escape_endpoint + 2) -- a 10-cell-thick strip in this fixture
+        -- so the budget penalises the contested post-endpoint column
+        in addition to the immediate-adjacent edge column.
+
+        This test exercises the failure pattern that pre-#3201's
+        4-cell fixed-thickness strip missed: a net whose target sits
+        in the column JUST EAST of the escape endpoint (cells 8-10
+        outside the package edge).  Without the endpoint-aware
+        extension, the strip lives at cells 1-4 outside the package
+        edge and the net routes straight through the contested
+        cells 8-10 unhindered.  With the extension, the strip covers
+        cells 1-10 outside the edge, so the net is steered to a
+        different path.
+        """
+        # 12mm x 12mm grid at 0.075mm resolution.
+        rules = DesignRules(
+            trace_width=0.15,
+            trace_clearance=0.1,
+            via_diameter=0.6,
+            via_clearance=0.15,
+            grid_resolution=0.075,
+        )
+        layer_stack = LayerStack.two_layer()
+        grid = RoutingGrid(
+            width=12.0,
+            height=12.0,
+            rules=rules,
+            layer_stack=layer_stack,
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
+
+        # Package edge at x=6.0.  Escape endpoint at x=6.6 (8 cells
+        # outside the package edge at 0.075mm resolution).  Test net
+        # routes from (6.6, 5.0) -- the escape endpoint -- to (6.825,
+        # 10.0) -- a destination immediately south of the post-endpoint
+        # column, forcing the route to turn south through cells near
+        # the escape endpoint.
+        pkg_edge_x = 6.0
+        escape_x = 6.6
+        edge_gx, _ = grid.world_to_grid(pkg_edge_x, 5.0)
+        end_gx, _ = grid.world_to_grid(escape_x, 5.0)
+        # Confirm our cell-distance math (should be 8 cells outside).
+        assert end_gx - edge_gx >= 5, (
+            "Test setup error: escape endpoint should be at least 5 "
+            f"cells past package edge, got {end_gx - edge_gx}."
+        )
+
+        # Build a fixed-thickness 4-cell strip (pre-#3201 geometry)
+        # vs an endpoint-extended strip (post-#3201 geometry).
+        fixed_strip = router_cpp.PadChannelBudget()
+        fixed_strip.gx1 = edge_gx + 1
+        fixed_strip.gx2 = edge_gx + 4
+        fixed_strip.gy1 = 30
+        fixed_strip.gy2 = 90
+        fixed_strip.layer = -1
+        fixed_strip.overflow_penalty = float(rules.cost_straight) * 0.5
+        fixed_strip.source_net = 999  # Not the routing net -- penalty applies.
+
+        extended_strip = router_cpp.PadChannelBudget()
+        extended_strip.gx1 = edge_gx + 1
+        extended_strip.gx2 = end_gx + 2  # Endpoint + margin
+        extended_strip.gy1 = 30
+        extended_strip.gy2 = 90
+        extended_strip.layer = -1
+        extended_strip.overflow_penalty = float(rules.cost_straight) * 0.5
+        extended_strip.source_net = 999
+
+        # Route a net from the escape endpoint south-east to a target
+        # at (6.9, 9.5) -- the route must traverse the post-endpoint
+        # column.
+        start_x, start_y = escape_x, 5.0
+        end_x, end_y = 6.9, 9.5
+
+        # Pre-#3201 fixed-thickness strip baseline.
+        r_fixed = pathfinder._impl.route_resumable(
+            start_x, start_y, 0,
+            end_x, end_y, 0,
+            1,
+            pad_channel_budgets=[fixed_strip],
+        )
+        assert r_fixed.success, "Fixed-strip baseline must route"
+        fixed_iter = pathfinder._impl.iterations
+        pathfinder._impl.clear_search_state()
+
+        # Post-#3201 endpoint-extended strip.
+        r_extended = pathfinder._impl.route_resumable(
+            start_x, start_y, 0,
+            end_x, end_y, 0,
+            1,
+            pad_channel_budgets=[extended_strip],
+        )
+        assert r_extended.success, "Endpoint-extended strip must still route"
+        extended_iter = pathfinder._impl.iterations
+        pathfinder._impl.clear_search_state()
+
+        # The endpoint-extended strip must produce a different search
+        # behaviour than the fixed-thickness strip (more iterations,
+        # different segment count, or different length).  If both
+        # behave identically, the extension is silently inert and the
+        # post-endpoint contested column is not being covered.
+        fixed_seg_count = len(r_fixed.segments)
+        extended_seg_count = len(r_extended.segments)
+        fixed_length = sum(
+            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
+            for s in r_fixed.segments
+        )
+        extended_length = sum(
+            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
+            for s in r_extended.segments
+        )
+        diverged = (
+            fixed_seg_count != extended_seg_count
+            or fixed_iter != extended_iter
+            or fixed_length != pytest.approx(extended_length, abs=0.05)
+        )
+        assert diverged, (
+            "Endpoint-extended strip must produce different search "
+            "behaviour than fixed-thickness strip on a route that "
+            "traverses the post-endpoint column.  If they behave "
+            "identically the extension is silently inert. "
+            f"fixed: segs={fixed_seg_count} iter={fixed_iter} "
+            f"len={fixed_length:.3f}; "
+            f"extended: segs={extended_seg_count} iter={extended_iter} "
+            f"len={extended_length:.3f}."
+        )
+
+    def test_b_cu_corner_routed_endpoint_falls_back_to_thickness_floor(self):
+        """B_CU east-side escape endpoints sit INSIDE the package bbox
+        (the via is positioned between the pin rows by design).  Under
+        the endpoint-aware extension, an endpoint that does NOT lie
+        outside the package edge must fall back to the
+        ``escape_strip_thickness_cells`` floor so the budget still
+        appears OUTSIDE the package.  Otherwise the strip would extend
+        INWARD past the edge and live inside the package -- the
+        pre-#3201 misclassification (a) reintroduced.
+
+        Acceptance: when a budget is built for a B_CU east-side pad
+        whose escape endpoint sits inside the bbox, the budget's
+        gx2 equals (gx1 + escape_strip_thickness_cells - 1).  No part
+        of the budget extends past the package edge inward.
+        """
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.escape import PackageInfo, PackageType
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Pad
+
+        rules = DesignRules(
+            trace_width=0.15,
+            trace_clearance=0.1,
+            via_diameter=0.6,
+            via_clearance=0.15,
+            grid_resolution=0.075,
+        )
+        router = Autorouter(
+            width=50.0,
+            height=50.0,
+            origin_x=200.0,
+            origin_y=160.0,
+            rules=rules,
+        )
+
+        # Single east-side TSSOP pad with B_CU escape endpoint INSIDE
+        # the bbox (matches the diagnostic for softstart U1 odd-index
+        # east pads).
+        center_x, center_y = 215.0, 175.0
+        pad = Pad(
+            x=center_x + 2.85,
+            y=center_y,
+            width=1.5,
+            height=0.4,
+            net=11,
+            net_name="ESIG_TEST",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="11",
+        )
+        router.pads[("U1", "11")] = pad
+
+        bbox = (
+            center_x - 2.85,
+            center_y - 2.925,
+            center_x + 2.85,
+            center_y + 2.925,
+        )
+        package = PackageInfo(
+            ref="U1",
+            package_type=PackageType.SSOP,
+            center=(center_x, center_y),
+            pads=[pad],
+            pin_count=20,
+            pin_pitch=0.65,
+            bounding_box=bbox,
+            is_dense=True,
+        )
+
+        # Escape endpoint INSIDE bbox (B_CU corner-routed).
+        virtual = Pad(
+            x=center_x + 1.788,
+            y=center_y,
+            width=pad.width,
+            height=pad.height,
+            net=pad.net,
+            net_name=pad.net_name,
+            layer=Layer.B_CU,
+            ref=pad.ref,
+            pin=pad.pin,
+        )
+        router._escape_pad_overrides[("U1", "11")] = virtual
+
+        budgets = router._build_pad_channel_budgets([package])
+        assert len(budgets) == 1, (
+            f"Expected exactly one budget, got {len(budgets)}."
+        )
+        b = budgets[0]
+
+        # Compute the expected gx1 / gx2 if the floor applied (4-cell
+        # thickness anchored at package edge).
+        edge_gx, _ = router.grid.world_to_grid(bbox[2], center_y)
+        expected_gx1 = edge_gx + 1
+        expected_gx2_floor = edge_gx + 4
+
+        assert b.gx1 == expected_gx1, (
+            f"B_CU endpoint-inside-bbox: expected gx1={expected_gx1} "
+            f"(one cell outside package edge), got {b.gx1}."
+        )
+        assert b.gx2 == expected_gx2_floor, (
+            f"B_CU endpoint-inside-bbox: expected gx2={expected_gx2_floor} "
+            f"(4-cell thickness floor), got {b.gx2}.  If the strip "
+            "extends further outward than the floor, the endpoint-aware "
+            "extension is incorrectly applying to an endpoint that "
+            "sits INSIDE the bbox."
+        )
+        # And the strip must not extend inward past the edge.
+        assert b.gx1 > edge_gx, (
+            f"B_CU budget gx1={b.gx1} is not strictly east of package "
+            f"edge gx={edge_gx}.  Pre-#3201 regression: budget lives "
+            "inside the package."
+        )
+
+    def test_f_cu_outside_endpoint_extends_strip_to_endpoint_margin(self):
+        """F_CU east-side escape endpoints sit OUTSIDE the package bbox
+        (the stub terminates ~0.6mm east of the package edge -- 8 cells
+        at 0.075mm grid resolution).  Under the endpoint-aware
+        extension, the strip must extend OUTWARD to at least
+        (endpoint_gx + escape_endpoint_margin_cells) so the contested
+        post-escape turn column is covered.
+
+        Acceptance: a budget built for an F_CU east-side pad whose
+        escape endpoint sits outside the bbox has gx2 equal to
+        max(gx1 + thickness - 1, endpoint_gx + margin).
+        """
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.escape import PackageInfo, PackageType
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import Pad
+
+        rules = DesignRules(
+            trace_width=0.15,
+            trace_clearance=0.1,
+            via_diameter=0.6,
+            via_clearance=0.15,
+            grid_resolution=0.075,
+        )
+        router = Autorouter(
+            width=50.0,
+            height=50.0,
+            origin_x=200.0,
+            origin_y=160.0,
+            rules=rules,
+        )
+
+        # Single east-side TSSOP pad with F_CU escape endpoint OUTSIDE
+        # the bbox (matches diagnostic for softstart U1 even-index
+        # east pads).
+        center_x, center_y = 215.0, 175.0
+        pad = Pad(
+            x=center_x + 2.85,
+            y=center_y,
+            width=1.5,
+            height=0.4,
+            net=12,
+            net_name="ESIG_TEST",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="12",
+        )
+        router.pads[("U1", "12")] = pad
+
+        bbox = (
+            center_x - 2.85,
+            center_y - 2.925,
+            center_x + 2.85,
+            center_y + 2.925,
+        )
+        package = PackageInfo(
+            ref="U1",
+            package_type=PackageType.SSOP,
+            center=(center_x, center_y),
+            pads=[pad],
+            pin_count=20,
+            pin_pitch=0.65,
+            bounding_box=bbox,
+            is_dense=True,
+        )
+
+        # Escape endpoint OUTSIDE bbox (F_CU direct-east stub).
+        virtual = Pad(
+            x=center_x + 3.45,
+            y=center_y,
+            width=pad.width,
+            height=pad.height,
+            net=pad.net,
+            net_name=pad.net_name,
+            layer=Layer.F_CU,
+            ref=pad.ref,
+            pin=pad.pin,
+        )
+        router._escape_pad_overrides[("U1", "12")] = virtual
+
+        budgets = router._build_pad_channel_budgets([package])
+        assert len(budgets) == 1
+        b = budgets[0]
+
+        # Compute expected extension: the gx2 must reach AT LEAST
+        # (endpoint_gx + 2).  The actual constant in core.py is
+        # escape_endpoint_margin_cells = 2.
+        endpoint_gx, _ = router.grid.world_to_grid(virtual.x, virtual.y)
+        edge_gx, _ = router.grid.world_to_grid(bbox[2], center_y)
+
+        assert b.gx2 >= endpoint_gx + 2, (
+            f"F_CU endpoint-outside-bbox: expected gx2 >= "
+            f"{endpoint_gx + 2} (escape endpoint + 2-cell margin), "
+            f"got {b.gx2}.  Pre-#3201 fixed-thickness regression: "
+            "the strip lived at the package edge and missed the "
+            "contested post-endpoint column."
+        )
+        # The strip must still start one cell outside the package edge.
+        assert b.gx1 == edge_gx + 1, (
+            f"F_CU budget gx1={b.gx1} should anchor at "
+            f"(package_edge_gx + 1) = {edge_gx + 1}."
+        )
+        # And the strip must cover MORE cells than the 4-cell floor.
+        thickness = b.gx2 - b.gx1 + 1
+        assert thickness > 4, (
+            f"F_CU endpoint-extended strip thickness={thickness} <= "
+            "4 -- the endpoint extension is inert.  The strip should "
+            "exceed the fixed-thickness floor when the escape endpoint "
+            "sits outside the bbox."
+        )
+
 
 @requires_cpp
 class TestBuildPadChannelBudgetsU1Mirror:
