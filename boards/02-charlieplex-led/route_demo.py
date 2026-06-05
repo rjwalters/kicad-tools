@@ -2,11 +2,24 @@
 """
 Demonstrate autorouting on the charlieplexed LED grid PCB.
 
-This script:
-1. Loads the generated PCB file
-2. Creates an Autorouter instance
-3. Routes all nets
-4. Saves the routed result
+This script invokes ``kct route`` with the proven flag recipe used by
+``generate_design.py:route_pcb()``.  Using the orchestrator path
+(rather than a bare in-process ``router.route_all()`` call) is what
+unlocks ≥ 8/10 nets DRC-clean on this geometry, because ``kct route``:
+
+  1. uses the negotiated congestion router with adaptive rip-up,
+  2. emits auto-pour zones for GND/VCC after routing (so power pads
+     reach ``status=complete`` via plane connectivity),
+  3. runs auto-layer-escalation when 1-layer routing is blocked, and
+  4. runs ``drc_verify_and_nudge`` post-route (Issue #3112) to slide
+     same-net via-in-pad escape vias off offending pads.
+
+Issue #3207: this script previously called the bare ``router.route_all()``
+in-process path, which regressed to 4/8 nets routed with 6 DRC errors
+on board 02 even though ``kct route`` direct on the same PCB reaches
+8/10 + DRC-clean.  Replacing the in-process path with a subprocess
+call to ``kct route`` (matching ``generate_design.py:route_pcb()``)
+guarantees the two recipes can't drift again.
 
 Usage:
     python route_demo.py [input_pcb] [output_pcb]
@@ -16,7 +29,6 @@ Example:
 """
 
 import contextlib
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,8 +37,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from kicad_tools.dev import warn_if_stale
-from kicad_tools.router import DesignRules, load_pcb_for_routing, show_routing_summary
-from kicad_tools.router.optimizer import GridCollisionChecker, OptimizationConfig, TraceOptimizer
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -66,27 +76,31 @@ def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
         return False, -1, -1
 
 
-def _get_routing_params() -> dict[str, float]:
-    """Get routing parameters from environment variables (set by kct build) or defaults.
+def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
+    """Extract ``Nets routed: N/M`` (or equivalent) from ``kct route`` output.
 
-    When run via 'kct build', routing parameters from project.kct are passed as
-    environment variables. This allows custom route scripts to use project settings
-    while still supporting standalone execution with defaults.
+    ``kct route`` emits a summary block of the form::
 
-    Returns:
-        Dict with grid_resolution, trace_width, trace_clearance, via_drill, via_diameter
+        Nets routed: 8/10
+        ...
+
+    Returns ``(routed, total)`` or ``None`` if no match.
     """
-    return {
-        "grid_resolution": float(os.environ.get("KCT_ROUTE_GRID", "0.1")),
-        "trace_width": float(os.environ.get("KCT_ROUTE_TRACE_WIDTH", "0.3")),
-        "trace_clearance": float(os.environ.get("KCT_ROUTE_CLEARANCE", "0.2")),
-        "via_drill": float(os.environ.get("KCT_ROUTE_VIA_DRILL", "0.3")),
-        "via_diameter": float(os.environ.get("KCT_ROUTE_VIA_DIAMETER", "0.6")),
-    }
+    import re
+
+    for pattern in (
+        r"Nets routed:\s+(\d+)/(\d+)",
+        r"Routed\s+(\d+)/(\d+)\s+nets",
+        r"(\d+)/(\d+)\s+nets\s+complete",
+    ):
+        m = re.search(pattern, stdout)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return None
 
 
 def main():
-    """Run the routing demo."""
+    """Run the routing demo via ``kct route`` (matching generate_design.py)."""
     # Parse arguments
     demo_dir = Path(__file__).parent
     input_pcb = sys.argv[1] if len(sys.argv) > 1 else "output/charlieplex_3x3.kicad_pcb"
@@ -106,111 +120,73 @@ def main():
     print(f"\nInput:  {input_path}")
     print(f"Output: {output_path}")
 
-    # Configure design rules for this board
-    # Parameters come from project.kct (via env vars when run by kct build)
-    # or fall back to sensible defaults for standalone execution
-    params = _get_routing_params()
-    rules = DesignRules(
-        grid_resolution=params["grid_resolution"],
-        trace_width=params["trace_width"],
-        trace_clearance=params["trace_clearance"],
-        via_drill=params["via_drill"],
-        via_diameter=params["via_diameter"],
-    )
+    # GND is a pour net (auto-poured into a copper zone by ``kct route``).
+    # Excluded from the per-net pathfinder to avoid wasted iterations.
+    # This matches ``generate_design.py:route_pcb()`` exactly.
+    skip_nets = ["GND"]
 
-    # Skip power nets (we won't route VCC/GND in this demo)
-    skip_nets = ["VCC", "GND"]
-
-    print("\n--- Loading PCB ---")
-    print(f"  Grid resolution: {rules.grid_resolution}mm")
-    print(f"  Trace width: {rules.trace_width}mm")
-    print(f"  Clearance: {rules.trace_clearance}mm")
-    print(f"  Skipping nets: {skip_nets}")
-
-    # Load the PCB and create autorouter
-    router, net_map = load_pcb_for_routing(
+    # Same recipe as ``boards/02-charlieplex-led/generate_design.py:route_pcb()``.
+    # Keeping these two recipes byte-identical is the whole point of Issue #3207:
+    # the in-process ``router.route_all()`` path drifted from the orchestrator
+    # path and silently regressed board 02 to 4/8 nets + 6 DRC errors.  This
+    # subprocess invocation re-uses the same code path that ``kct build``,
+    # ``kct route``, and the canonical board-05 / board-07 recipes use.
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
         str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
-    )
+        "--output",
+        str(output_path),
+        "--strategy",
+        "negotiated",
+        "--iterations",
+        "30",
+        "--per-net-timeout",
+        "30",
+        "--timeout",
+        "240",
+        "--seed",
+        "42",
+        "--skip-nets",
+        ",".join(skip_nets),
+        # Issue #3112: pass the manufacturer through so the post-route
+        # ``drc_verify_and_nudge`` sweep can consult ``via_in_pad_supported``
+        # and slide any same-net via-in-pad escape vias off the offending pad.
+        # The default jlcpcb profile does NOT support via-in-pad, so this is
+        # the case that exercises the sweep.
+        "--manufacturer",
+        "jlcpcb",
+    ]
 
-    print(f"\n  Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"  Nets loaded: {len(net_map)}")
-    print(f"  Nets to route: {len([n for n in router.nets if n > 0])}")
+    print("\n--- Routing via `kct route` (orchestrator path) ---")
+    print(f"  Skipping nets: {skip_nets}")
+    print(f"  Command: {' '.join(cmd)}")
 
-    # Route all nets using standard routing (DRC-safe)
-    print("\n--- Routing (standard mode) ---")
-    router.route_all()
+    # ``kct route`` streams its own progress output; do NOT capture it.
+    # It returns 0 on full success and a non-zero code on partial routing
+    # (in which case it still writes the partially-routed PCB).  We capture
+    # stdout for net-count parsing by tee-ing through subprocess.PIPE.
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Echo subprocess output so users can see routing progress, errors, etc.
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
 
-    # Get statistics before optimization
-    stats_before = router.get_statistics()
+    if not output_path.exists():
+        print(
+            f"\nERROR: `kct route` did not produce {output_path} (exit code {result.returncode})",
+            file=sys.stderr,
+        )
+        return 1
 
-    print("\n--- Raw Results (before optimization) ---")
-    print(f"  Routes created: {stats_before['routes']}")
-    print(f"  Segments: {stats_before['segments']}")
-    print(f"  Vias: {stats_before['vias']}")
-    print(f"  Total length: {stats_before['total_length_mm']:.2f}mm")
-    print(f"  Nets routed: {stats_before['nets_routed']}")
+    # Parse the routed-net summary so the demo can print a final tally.
+    parsed = _parse_routed_net_count(result.stdout)
+    routed, total = parsed if parsed is not None else (None, None)
 
-    # Optimize traces - merge collinear segments, eliminate zigzags, etc.
-    # Use collision checker to prevent optimizations that create DRC violations
-    print("\n--- Optimizing traces ---")
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-    )
-    collision_checker = GridCollisionChecker(router.grid)
-    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_route = optimizer.optimize_route(route)
-        optimized_routes.append(optimized_route)
-    router.routes = optimized_routes
-
-    # Get statistics after optimization
-    stats = router.get_statistics()
-
-    segments_before = stats_before["segments"]
-    segments_after = stats["segments"]
-    reduction = (1 - segments_after / segments_before) * 100 if segments_before > 0 else 0
-
-    print(f"  Segments: {segments_before} -> {segments_after} ({reduction:.1f}% reduction)")
-    print(f"  Vias: {stats_before['vias']} -> {stats['vias']}")
-
-    print("\n--- Final Results ---")
-    print(f"  Routes created: {stats['routes']}")
-    print(f"  Segments: {stats['segments']}")
-    print(f"  Vias: {stats['vias']}")
-    print(f"  Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"  Nets routed: {stats['nets_routed']}")
-
-    # Generate output PCB with routes
-    print("\n--- Saving routed PCB ---")
-
-    # Read original PCB content
-    original_content = input_path.read_text()
-
-    # Get route S-expressions
-    route_sexp = router.to_sexp()
-
-    # Insert routes before final closing parenthesis
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
-    else:
-        output_content = original_content
-        print("  Warning: No routes generated!")
-
-    output_path.write_text(output_content)
-    print(f"  Saved to: {output_path}")
-
-    # Run DRC validation
+    # Run DRC validation on the routed output.
     print("\n--- DRC Validation ---")
     drc_passed, drc_errors, drc_warnings = run_drc(output_path)
     if drc_passed:
@@ -224,16 +200,12 @@ def main():
 
     # Summary
     print("\n" + "=" * 60)
-    # Issue #2498: Restrict the routing-summary target population to multi-pad
-    # nets that are still routable post-skip.  ``router.nets`` reflects the
-    # state after ``load_pcb_for_routing`` rewrote skip-net pads to net=0, so
-    # this matches the convention used by ``cli/route_cmd.py`` and prevents
-    # skipped power nets (VCC/GND) from being mis-reported as "No path found".
-    multi_pad_net_ids = {
-        net_id for net_id, pads in router.nets.items() if net_id > 0 and len(pads) >= 2
-    }
-    total_nets = len(multi_pad_net_ids)
-    all_nets_routed = stats["nets_routed"] == total_nets
+    if parsed is None:
+        print("WARNING: Could not parse routed-net count from `kct route` output")
+        all_nets_routed = result.returncode == 0
+    else:
+        all_nets_routed = routed == total
+        print(f"Nets routed: {routed}/{total}")
 
     if all_nets_routed and drc_passed:
         print("SUCCESS: All nets routed, DRC passed!")
@@ -241,19 +213,15 @@ def main():
         print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
         print("  Review DRC errors before manufacturing.")
     else:
-        print(f"PARTIAL: Routed {stats['nets_routed']}/{total_nets} nets")
+        if parsed is not None:
+            print(f"PARTIAL: Routed {routed}/{total} nets")
+        else:
+            print(f"PARTIAL: `kct route` exited with code {result.returncode}")
         if not drc_passed:
             print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
-        # Show comprehensive routing summary with successes, failures, and suggestions
-        show_routing_summary(
-            router,
-            net_map,
-            total_nets,
-            nets_to_route_ids=multi_pad_net_ids,
-        )
     print("=" * 60)
 
-    # Return success only if all nets routed AND DRC passed
+    # Return success only if all nets routed AND DRC passed.
     return 0 if all_nets_routed and drc_passed else 1
 
 
