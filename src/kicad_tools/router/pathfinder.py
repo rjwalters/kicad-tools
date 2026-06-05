@@ -77,20 +77,32 @@ class _SegmentAdapter:
     width: float
 
 
-@dataclass(order=True)
+@dataclass
 class AStarNode:
     """Node for A* priority queue.
 
     Issue #3144: ``seq`` is a monotonic insertion counter used as a
-    secondary tie-break key after ``f_score`` so that nodes with
-    identical f-scores pop in deterministic insertion order.  Without
-    this, ``heapq`` falls through to structural comparison on the next
-    compared field; previously all fields after ``f_score`` were
-    ``compare=False``, which left the heap-ordering invariant entirely
-    dependent on push order.  Under CI load (or any allocator-state
-    dependent execution) sibling f_score-equal nodes could pop in
-    varying order, propagating into different explored A* paths and
-    ultimately different DRC error counts.
+    tie-break key for nodes with identical ``(f_score, g_score)`` so
+    heap pop order is deterministic.  Without it, ``heapq`` falls
+    through to structural comparison on the next compared field;
+    previously all fields after ``f_score`` were ``compare=False``,
+    which left the heap-ordering invariant entirely dependent on push
+    order.  Under CI load (or any allocator-state dependent execution)
+    sibling f_score-equal nodes could pop in varying order,
+    propagating into different explored A* paths and ultimately
+    different DRC error counts.
+
+    Issue #3199: comparison key is now
+    ``(f_score asc, -g_score asc, seq asc)`` -- i.e. on ``f_score``
+    ties we prefer the node with HIGHER ``g_score`` (= lower
+    ``h_score`` = closer to the goal).  This is the standard
+    "greedy on ties" A* optimisation that pushes the search toward
+    the goal frontier faster.  The post-#3144 FIFO-on-seq tie-break
+    (without the ``g_score`` key) regressed softstart unaided routing
+    reach from 6/10 -> 5/10 on dense packages; the ``g_score``
+    tertiary key restores the 6/10 baseline while keeping the
+    run-to-run determinism property #3144 required (board 06 / #3144
+    and board 07 / #3146 determinism tests still pass).
 
     Callers should pass ``seq`` explicitly (typically via
     ``itertools.count()`` shared across the search).  The default of
@@ -109,7 +121,25 @@ class AStarNode:
     parent: Optional["AStarNode"] = field(compare=False, default=None)
     via_from_parent: bool = field(compare=False, default=False)
     direction: tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
-    seq: int = field(compare=True, default=0)
+    seq: int = field(compare=False, default=0)
+
+    def __lt__(self, other: "AStarNode") -> bool:
+        """Issue #3144 + #3199 tie-break.
+
+        Sort key: ``(f_score asc, -g_score asc, seq asc)``.  Lower
+        ``f_score`` pops first; on ``f_score`` ties the node with
+        HIGHER ``g_score`` pops first (= the one with smaller
+        remaining heuristic distance, closer to the goal).  ``seq``
+        is the final deterministic tie-break used when both
+        ``f_score`` and ``g_score`` are equal.
+        """
+        if self.f_score != other.f_score:
+            return self.f_score < other.f_score
+        if self.g_score != other.g_score:
+            # Higher g_score pops first -> ``self < other`` iff
+            # ``self.g_score > other.g_score``.
+            return self.g_score > other.g_score
+        return self.seq < other.seq
 
 
 class Router:

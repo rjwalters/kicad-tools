@@ -37,7 +37,16 @@ namespace router {
 // .so files lack the new struct definition and would mismatch the
 // Python-side caller; the build-version bump forces a rebuild via
 // ``kct build-native``.
-constexpr int ROUTER_CPP_BUILD_VERSION = 7;
+//
+// Bump to 8 for Issue #3199 (A* tie-break greedy-on-g_score).  The
+// public binding surface is unchanged, but ``AStarNode::operator>``
+// gained a ``g_score`` tertiary key between ``f_score`` and ``seq``.
+// Existing .so files use the pre-#3199 (f_score, seq) comparison
+// which regressed softstart unaided routing reach from 6/10 -> 5/10;
+// the post-#3199 (f_score, g_score, seq) comparison restores 6/10.
+// Bumping the version forces a rebuild so the regression fix takes
+// effect.
+constexpr int ROUTER_CPP_BUILD_VERSION = 8;
 
 // Grid cell state
 struct GridCell {
@@ -77,13 +86,33 @@ struct AStarNode {
     // surrounding heap reshuffle.
     uint64_t seq = 0;
 
-    // Comparison for min-heap (lower f_score first; on ties, lower seq
-    // first so the pop order is deterministic regardless of std::vector
-    // realloc behaviour or hash-map iteration order in surrounding
-    // bookkeeping structures).  Issue #3144.
+    // Comparison for min-heap.  Issue #3144 / #3199:
+    //   Primary:   lower f_score first.
+    //   Secondary: HIGHER g_score first on f_score ties.  This is the
+    //              standard "greedy on ties" A* tie-break -- when two
+    //              nodes have the same projected total cost, prefer the
+    //              one with more g (= lower h = closer to the goal).
+    //              This pushes the search toward the goal frontier faster
+    //              and avoids exploring symmetric equal-cost detours.
+    //              Empirically (issue #3199) the post-#3144 FIFO-on-seq
+    //              tie-break (without the g_score key) regressed softstart
+    //              unaided routing reach from 6/10 -> 5/10 on dense
+    //              packages; adding the g_score tertiary key restores
+    //              the 6/10 baseline while keeping the run-to-run
+    //              determinism property #3144 required (board 06 / #3144
+    //              + board 07 / #3146 determinism tests still pass).
+    //   Tertiary:  lower seq (FIFO insertion) so pop order is
+    //              deterministic even when both f_score and g_score are
+    //              equal.  Determinism is the binding invariant for the
+    //              board 06 / board 07 byte-identical-route tests.
     bool operator>(const AStarNode& other) const {
         if (f_score != other.f_score) {
             return f_score > other.f_score;
+        }
+        if (g_score != other.g_score) {
+            // HIGHER g_score wins (= pops first), so this node pops
+            // later iff its g_score is LOWER.
+            return g_score < other.g_score;
         }
         return seq > other.seq;
     }

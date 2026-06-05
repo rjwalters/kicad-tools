@@ -122,10 +122,16 @@ class TestCoupledNodeTiebreak:
 
 
 class TestAStarNodeTiebreak:
-    """``AStarNode`` heap-ordering invariants (Issue #3144)."""
+    """``AStarNode`` heap-ordering invariants (Issues #3144, #3199).
 
-    def test_equal_f_score_lower_seq_wins(self) -> None:
-        """Two ``AStarNode``s with identical f_score pop by seq order."""
+    Sort key is ``(f_score asc, -g_score asc, seq asc)`` per #3199:
+    on f_score ties the node with HIGHER g_score (= closer to the
+    goal) pops first; ``seq`` is the final deterministic tertiary
+    key used when both f_score and g_score are equal.
+    """
+
+    def test_equal_f_score_and_g_score_lower_seq_wins(self) -> None:
+        """Equal ``(f_score, g_score)`` falls through to ``seq``."""
         node_high_seq = AStarNode(1.0, 0.0, 0, 0, 0, seq=10)
         node_low_seq = AStarNode(1.0, 0.0, 5, 5, 0, seq=0)
 
@@ -136,10 +142,56 @@ class TestAStarNodeTiebreak:
         assert heapq.heappop(heap).seq == 0
         assert heapq.heappop(heap).seq == 10
 
-    def test_stable_pop_order_across_pushes(self) -> None:
-        """50 equal-f_score nodes pop in monotonic seq order."""
+    def test_equal_f_score_higher_g_score_wins(self) -> None:
+        """Issue #3199: HIGHER g_score pops first on f_score ties.
+
+        Two nodes share ``f_score = 1.0`` but differ in ``g_score``;
+        the one with the larger ``g_score`` (closer to the goal in
+        the standard A* "greedy on ties" sense) must pop first
+        regardless of ``seq``.
+        """
+        # Push the "should pop second" node first to make the test
+        # sensitive to the comparator (a heap that only used seq would
+        # pop low_g first because we push it first).
+        node_low_g = AStarNode(1.0, 0.0, 0, 0, 0, seq=0)
+        node_high_g = AStarNode(1.0, 5.0, 5, 5, 0, seq=1)
+
+        heap: list[AStarNode] = []
+        heapq.heappush(heap, node_low_g)
+        heapq.heappush(heap, node_high_g)
+
+        # Higher g_score must win (greedy on ties).
+        first = heapq.heappop(heap)
+        second = heapq.heappop(heap)
+        assert first.g_score == 5.0
+        assert second.g_score == 0.0
+
+    def test_stable_pop_order_across_pushes_with_distinct_g_score(self) -> None:
+        """50 equal-f_score nodes with distinct g_score pop by descending g_score.
+
+        Issue #3199: with distinct g_score values the deterministic
+        order is "highest g_score first", not "lowest seq first".
+        seq is the final tertiary tie-break only when g_score is
+        equal too.
+        """
         seq_counter = itertools.count()
         nodes = [AStarNode(2.5, float(i), i, i + 1, 0, seq=next(seq_counter)) for i in range(50)]
+        heap: list[AStarNode] = []
+        for n in nodes:
+            heapq.heappush(heap, n)
+
+        popped_g = []
+        while heap:
+            popped_g.append(heapq.heappop(heap).g_score)
+        # Descending g_score order: 49.0, 48.0, ..., 0.0.
+        assert popped_g == sorted(popped_g, reverse=True)
+        assert popped_g[0] == 49.0
+        assert popped_g[-1] == 0.0
+
+    def test_stable_pop_order_with_equal_g_score_uses_seq(self) -> None:
+        """50 nodes with equal ``(f_score, g_score)`` pop by monotonic seq."""
+        seq_counter = itertools.count()
+        nodes = [AStarNode(2.5, 1.0, i, i + 1, 0, seq=next(seq_counter)) for i in range(50)]
         heap: list[AStarNode] = []
         for n in nodes:
             heapq.heappush(heap, n)
@@ -148,6 +200,20 @@ class TestAStarNodeTiebreak:
         while heap:
             popped_seqs.append(heapq.heappop(heap).seq)
         assert popped_seqs == list(range(50))
+
+    def test_f_score_beats_g_score_and_seq(self) -> None:
+        """``f_score`` is still the primary key (issue #3144 invariant)."""
+        # Higher g_score AND lower seq on the high-f_score node; still
+        # the low-f_score node MUST pop first.
+        node_high_f = AStarNode(10.0, 100.0, 0, 0, 0, seq=0)
+        node_low_f = AStarNode(1.0, 0.0, 5, 5, 0, seq=999)
+
+        heap: list[AStarNode] = []
+        heapq.heappush(heap, node_high_f)
+        heapq.heappush(heap, node_low_f)
+
+        assert heapq.heappop(heap).f_score == 1.0
+        assert heapq.heappop(heap).f_score == 10.0
 
 
 class TestCppAStarTiebreak:
@@ -161,13 +227,19 @@ class TestCppAStarTiebreak:
     """
 
     def test_cpp_build_version_includes_tiebreak_fix(self) -> None:
-        """``router_cpp.BUILD_VERSION`` was bumped to 6 by Issue #3144."""
+        """``router_cpp.BUILD_VERSION`` was bumped to >=8 by Issue #3199.
+
+        Version 6 added ``AStarNode::seq`` (Issue #3144); version 8
+        added the ``g_score`` greedy tertiary key (Issue #3199).  A
+        stale ``.so`` without either field would report a lower
+        version, which we surface with an actionable rebuild hint.
+        """
         try:
             from kicad_tools.router import router_cpp
         except ImportError:
             pytest.skip("C++ extension not built")
 
-        assert router_cpp.BUILD_VERSION >= 6, (
-            "C++ router .so predates the Issue #3144 A* tie-break fix.  "
+        assert router_cpp.BUILD_VERSION >= 8, (
+            "C++ router .so predates the Issue #3199 A* tie-break fix.  "
             "Run `uv run kct build-native` to rebuild."
         )
