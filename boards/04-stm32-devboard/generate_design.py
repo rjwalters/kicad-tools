@@ -1288,8 +1288,24 @@ def run_drc(pcb_path: Path) -> bool:
     print("=" * 60)
 
     try:
+        # Issue #3208: align the local DRC summary with the jlcpcb-tier1
+        # profile this board ships and is gated against (--micro-via GND
+        # stitching; see export_manufacturing_bundle and the
+        # manufacturers: override in .github/routed-drc-tolerance.yml).
+        # Mirrors the board-03 #3150 pattern.  Without this flag, `kct
+        # check` defaults to jlcpcb (tier-0) which forbids via-in-pad,
+        # producing 3 spurious via_in_pad errors that the CI gate does
+        # not see (CI passes --mfr jlcpcb-tier1 per the tolerance YAML).
         result = subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--mfr",
+                "jlcpcb-tier1",
+            ],
             capture_output=True,
             text=True,
         )
