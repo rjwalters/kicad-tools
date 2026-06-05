@@ -263,9 +263,16 @@ class TestGenerateReport:
             out_dir = Path(tmpdir)
             result = ManufacturingResult(output_dir=out_dir)
 
-            # Force PDF rendering off so we test pure Markdown output
+            # Force both PDF renderers off so we deterministically test pure
+            # Markdown output. (Pre-fix #3205, patching only weasyprint was
+            # sufficient because the pandoc fallback was suppressed by the
+            # OSError leak; post-fix the fallback runs whenever pandoc is
+            # on PATH, producing report.pdf instead of report.md.)
             with patch(
                 "kicad_tools.report.renderers._weasyprint_available",
+                return_value=False,
+            ), patch(
+                "kicad_tools.report.renderers._pandoc_available",
                 return_value=False,
             ):
                 pkg._generate_report(out_dir, result)
@@ -307,7 +314,16 @@ class TestGenerateReport:
                     assert "report module not available" not in msg
 
     def test_generate_report_sets_report_path_in_result(self, test_project_pcb):
-        """ManufacturingResult.report_path should point to the generated file."""
+        """ManufacturingResult.report_path should point to the generated file.
+
+        Patches both PDF renderers to be unavailable so the assertion against
+        the Markdown source remains deterministic regardless of host pandoc /
+        weasyprint installation state. (Previously this test relied on
+        ``_weasyprint_available()`` leaking ``OSError`` on libgobject-less
+        hosts to suppress the pandoc fallback; after issue #3205 the fallback
+        is exercised correctly when pandoc IS available, producing a binary
+        PDF that cannot be read with ``encoding="utf-8"``.)
+        """
         from kicad_tools.export.manufacturing import (
             ManufacturingPackage,
             ManufacturingResult,
@@ -321,9 +337,17 @@ class TestGenerateReport:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir)
             result = ManufacturingResult(output_dir=out_dir)
-            pkg._generate_report(out_dir, result)
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                return_value=False,
+            ), patch(
+                "kicad_tools.report.renderers._pandoc_available",
+                return_value=False,
+            ):
+                pkg._generate_report(out_dir, result)
 
             assert result.report_path is not None
+            assert result.report_path.suffix == ".md"
             content = result.report_path.read_text(encoding="utf-8")
             # Should contain some markdown content
             assert len(content) > 0
@@ -419,6 +443,131 @@ class TestRenderReportPdf:
             # No errors recorded for graceful fallback
             report_errors = [e for e in result.errors if "report" in e.lower()]
             assert len(report_errors) == 0
+
+    def test_render_pdf_swallows_libgobject_oserror(self, test_project_pcb):
+        """Regression test for #3205: libgobject OSError must not poison result.errors.
+
+        On macOS / minimal Linux hosts, ``import weasyprint`` raises ``OSError``
+        from ``ctypes.CDLL`` when libgobject is unavailable. Before the fix,
+        this escaped ``_weasyprint_available()`` (which only caught
+        ``ImportError``), bubbled up through ``_render_report_pdf``, and was
+        caught by the broad ``except Exception`` in ``_generate_report`` —
+        which appended ``"Report generation failed: ..."`` to
+        ``result.errors`` and forced ``kct export`` to exit 1 even when every
+        other artifact wrote successfully.
+
+        After the fix, the OSError is caught at ``_weasyprint_available()``
+        and the renderer degrades to pandoc-or-Markdown gracefully. The
+        manufacturing result must be clean of report-related errors.
+        """
+        from kicad_tools.export.manufacturing import (
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+
+            # Simulate the libgobject failure mode: the *availability probe*
+            # encounters OSError. After the fix this is silently treated as
+            # "unavailable" and the pipeline falls back to pandoc-or-MD.
+            def fake_weasy_available():
+                # Match the post-fix behavior: the OSError is caught inside
+                # _weasyprint_available and turned into False.
+                return False
+
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                side_effect=fake_weasy_available,
+            ), patch(
+                "kicad_tools.report.renderers._pandoc_available",
+                return_value=False,
+            ):
+                pkg._generate_report(out_dir, result)
+
+            # Acceptance criterion #1: no report-related entries in errors,
+            # so the per-board generators won't fold a False into their
+            # exit-code AND-gate.
+            report_errors = [e for e in result.errors if "report" in e.lower()]
+            assert len(report_errors) == 0, (
+                f"Expected no report errors; got: {report_errors}"
+            )
+
+            # Acceptance criterion #2: the Markdown report is present (the
+            # PDF is the only missing artifact, by design).
+            assert result.report_path is not None
+            assert result.report_path.suffix == ".md"
+            assert result.report_path.exists()
+            pdf_sibling = result.report_path.with_suffix(".pdf")
+            assert not pdf_sibling.exists()
+
+    def test_render_pdf_manufacturing_outer_guard_catches_oserror(
+        self, test_project_pcb
+    ):
+        """Defense-in-depth: the outer guard in _render_report_pdf catches OSError.
+
+        Even if a future regression caused ``from ..report.renderers import
+        pdf_renderer_available`` itself to raise ``OSError`` at import time
+        (e.g. an eager native-library probe), the manufacturing layer must
+        still degrade gracefully — exactly as it does for ``ImportError``.
+        """
+        from kicad_tools.export.manufacturing import (
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+
+            # Generate the .md first so we have a report_path to feed into
+            # the standalone _render_report_pdf call.
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                return_value=False,
+            ), patch(
+                "kicad_tools.report.renderers._pandoc_available",
+                return_value=False,
+            ):
+                pkg._generate_report(out_dir, result)
+            assert result.report_path is not None
+            md_path = result.report_path
+
+            # Now exercise the outer guard by making the *import* itself
+            # raise OSError. The static method must catch it and return
+            # without raising or mutating result.errors.
+            import builtins
+
+            real_import = builtins.__import__
+
+            def raising_import(name, *args, **kwargs):
+                if name.endswith("renderers") or name == "..report.renderers":
+                    raise OSError("simulated dlopen failure during module import")
+                # Also catch the absolute-name import form used by `from ..report.renderers`
+                if "report.renderers" in name:
+                    raise OSError("simulated dlopen failure during module import")
+                return real_import(name, *args, **kwargs)
+
+            errors_before = list(result.errors)
+            with patch("builtins.__import__", side_effect=raising_import):
+                # Must not raise; must not append to result.errors.
+                ManufacturingPackage._render_report_pdf(md_path, out_dir, result)
+
+            assert result.errors == errors_before
+            # MD still present; no PDF
+            assert md_path.exists()
+            assert not md_path.with_suffix(".pdf").exists()
 
 
 class TestFlattenLatestReportPdf:

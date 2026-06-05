@@ -9,12 +9,57 @@ reports with embedded PCB visualization via :func:`render_interactive_html`.
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+logger = logging.getLogger(__name__)
+
+# Guard against repeated emission of the libgobject install hint when
+# _weasyprint_available() is called many times in a single process (e.g.
+# fleet exports over multiple boards). The hint is informational, not an
+# error — it points the operator to the missing system library.
+_LIBGOBJECT_HINT_LOGGED = False
+
+
+def _log_libgobject_hint(exc: BaseException) -> None:
+    """Emit a one-shot, platform-aware install hint for the libgobject failure.
+
+    WeasyPrint depends on native libraries (libgobject, pango, cairo,
+    gdk-pixbuf, libffi) that it dlopen's at import time via ``ctypes.CDLL``.
+    When any of those libraries is missing from the host, ``import weasyprint``
+    raises ``OSError`` (not ``ImportError``). This helper surfaces a single
+    actionable warning per process so the operator can install the missing
+    system dependencies if they want PDF reports.
+    """
+    global _LIBGOBJECT_HINT_LOGGED
+    if _LIBGOBJECT_HINT_LOGGED:
+        return
+    _LIBGOBJECT_HINT_LOGGED = True
+
+    if sys.platform == "darwin":
+        install_hint = "brew install glib pango cairo gdk-pixbuf libffi"
+    elif sys.platform.startswith("linux"):
+        install_hint = (
+            "apt install libglib2.0-0 libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0"
+        )
+    else:
+        install_hint = (
+            "install glib/pango/cairo/gdk-pixbuf system libraries for your platform"
+        )
+
+    logger.warning(
+        "weasyprint unavailable: missing system library (likely libgobject). "
+        "PDF report rendering will be skipped. To enable: %s. "
+        "Underlying error: %s",
+        install_hint,
+        exc,
+    )
 
 
 def render_html(
@@ -102,7 +147,19 @@ def render_pdf(html_content: str, output_path: Path | str) -> None:
             "PDF output requires weasyprint. Install with: pip install 'kicad-tools[report]'"
         )
 
-    import weasyprint
+    try:
+        import weasyprint
+    except OSError as exc:
+        # Defense in depth: if libgobject/pango/cairo became unavailable
+        # between the _weasyprint_available() check and this import, surface
+        # the same actionable hint as the availability probe and re-raise as
+        # ImportError so callers' existing ``except ImportError`` paths
+        # degrade gracefully.
+        _log_libgobject_hint(exc)
+        raise ImportError(
+            "PDF output requires weasyprint and its system libraries "
+            "(libgobject/pango/cairo/gdk-pixbuf). See warning above for install hint."
+        ) from exc
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     weasyprint.HTML(string=html_content).write_pdf(str(output_path))
@@ -150,12 +207,24 @@ def _pandoc_available() -> bool:
 
 
 def _weasyprint_available() -> bool:
-    """Check whether weasyprint can be imported."""
+    """Check whether weasyprint can be imported AND its native deps load.
+
+    WeasyPrint dlopen's libgobject/pango/cairo/gdk-pixbuf at import time. On
+    hosts where those system libraries are missing (common on macOS without
+    Homebrew installs, or on stripped-down Linux containers), the ``import
+    weasyprint`` statement raises ``OSError`` from ``ctypes.CDLL`` rather than
+    ``ImportError``. Both modes mean the renderer is unavailable, so we
+    catch them together and degrade gracefully to pandoc or to the Markdown
+    report alone (see :func:`pdf_renderer_available`).
+    """
     try:
         import weasyprint  # noqa: F401
 
         return True
     except ImportError:
+        return False
+    except OSError as exc:
+        _log_libgobject_hint(exc)
         return False
 
 

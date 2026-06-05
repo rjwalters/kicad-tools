@@ -593,7 +593,11 @@ class ManufacturingPackage:
         """
         try:
             from ..report.renderers import pdf_renderer_available
-        except ImportError:
+        except (ImportError, OSError):
+            # OSError can surface here on hosts where the renderers module
+            # eagerly probes a native library (libgobject/pango/cairo) at
+            # import time. Treat it the same as a missing package: degrade
+            # to Markdown-only and keep the manufacturing bundle successful.
             logger.warning(
                 "PDF report rendering skipped: install 'kicad-tools[report]' for PDF output"
             )
