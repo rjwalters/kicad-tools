@@ -11064,73 +11064,123 @@ class Autorouter:
         self,
         dense_packages: list[PackageInfo],
     ) -> list:
-        """Compute per-pad lateral-channel budgets for dense packages (Issue #3143).
+        """Compute per-pad lateral-channel budgets for dense packages
+        (Issue #3143, geometry revised in #3201).
 
-        Iterates the ``_escape_pad_overrides`` map populated by the
-        :meth:`generate_escape_routes` pre-pass and tags each escape
-        endpoint with a small rectangular "lateral channel" region.
-        Each region carries a soft per-cell penalty (``overflow_penalty``)
-        that the C++ A* search consults on every neighbor expansion via
-        the ``pad_channel_budgets`` parameter on ``route_resumable()``.
+        For each signal-net escape pad on a dense package, emits one
+        rectangular "lateral channel" region with a soft per-cell penalty
+        (``overflow_penalty``) that the C++ A* search consults on every
+        neighbor expansion via the ``pad_channel_budgets`` parameter on
+        ``route_resumable()``.
 
         The penalty is a *cost shaping* term, not a barrier: it does not
         forbid any cell, it just makes contested cells proportionally
-        more expensive than detour-equivalent neighbors.  This nudges the
-        search toward less-contested escape paths in the lateral channel
-        adjacent to a dense package edge -- the exact failure mode that
-        capped softstart routing reach at 6/10 nets in PR #3142 (the
-        U1 east-side TSSOP cluster all wanted the same channel and the
-        negotiated rip-up loop could not resolve).
+        more expensive than detour-equivalent neighbors.  Cumulative
+        overlap between same-edge pad budgets encodes contention: a
+        cell covered by N overlapping pad budgets pays N *
+        ``overflow_penalty`` per cell.  This nudges the search toward
+        less-contested escape paths in the lateral channel adjacent to
+        a dense-package pad row -- the exact failure mode that capped
+        softstart routing reach at 6/10 nets in PR #3142.
 
-        Geometry (revised post-#3198-judge-feedback, 2026-06-04):
-          For each escape pad on a dense package's edge, a NARROW STRIP
-          parallel to that edge is registered.  The strip is anchored at
-          the escape endpoint, extends a few cells outward (escape
-          direction) and spans the package's full bbox in the
-          perpendicular axis (with a small padding for corner pads).
+        Geometry derivation (#3201 -- documents the strip parameters
+        for the AC7 requirement):
+          For each signal-net escape pad belonging to a dense package,
+          the budget rectangle is a STRIP just OUTSIDE the package bbox
+          along the pad's classified edge, spanning the full bbox
+          extent in the perpendicular axis (with small corner padding),
+          and extending ``escape_strip_thickness_cells`` cells outward
+          in the escape direction.
 
-          Concretely: an east-side escape pad gets a vertical strip
-          (north-south) immediately outside the package's east edge,
-          spanning the package's y-min to y-max.  Adjacent east-side
-          escapes produce strips that fully overlap in y; cells covered
-          by N overlapping strips accumulate N * overflow_penalty per
-          cell.  Combined with the per-net filter (the originating net's
-          own budget is filtered out), this means: when ANOTHER net's
-          escape stub or vertical run lands in the column adjacent to
-          this pad's escape endpoint, the search incurs a per-cell
-          surcharge that nudges it to a column 2-3 cells further out.
+          On the standard 0.075mm grid this produces, for an east-side
+          pad, a vertical strip from (pkg_x_max + 1 cell) to
+          (pkg_x_max + 6 cells), spanning pkg_y_min - 2 to
+          pkg_y_max + 2.  The 6-cell thickness (0.45mm) was chosen so
+          the strip covers BOTH the immediate post-escape column (where
+          peer escape stubs terminate ~0.15mm outside the package edge)
+          AND the next 1-3 columns outward where vertical north/south
+          detour traffic settles after the escape stubs end.  This is
+          the actually-contested region for softstart's U1 east-side
+          TSSOP-20 cluster -- confirmed by the diagnostic dump in
+          Issue #3201 where multiple east-side nets (GATE_NEG,
+          I_SENSE_OUT, SWCLK, ZC_DETECT) all wanted to turn south
+          through the same column 1-2 cells outside the package edge.
 
-          The original geometry (4 cells outward * 5 cells perp) was
-          confirmed via judge debugging on softstart's U1 east-side
-          TSSOP-20 cluster to miss the actually-contested column (the
-          vertical run after escape stubs, not the outward escape
-          channel itself).  This revised geometry directly tags that
-          column.
+          Edge classification uses the ORIGINAL pad position (not the
+          escape endpoint) relative to the package bounding box.  This
+          fixes two pre-#3201 misclassifications:
 
-        Tuning:
-          ``overflow_penalty`` is set to ~1.5x ``cost_straight`` per
-          cell.  With 5-6 peer pads on a typical dense-package side
-          (e.g., the 6 signal-net east-side pads of softstart's
-          TSSOP-20), the strip overlap sums to ~7-9 per cell -- large
-          enough to dominate a 2-3 cell detour but small enough to be
-          overridden when no alternative exists.  Capacity is set to 0
-          (always-on penalty) because the contention is the dominant
-          failure mode -- the channel is contested whether or not we
-          know a priori how many nets will land in it.  Future work can
-          measure claim counts during routing and refine capacity, but
-          this is out of scope for #3143.
+            (a) B_CU east-side escapes whose endpoints sit INSIDE the
+                package bbox (the via is between the pin rows by
+                design).  Using endpoint-vs-center, the pre-#3201 code
+                generated a strip anchored at the escape endpoint and
+                extending 3 cells east -- which never crossed the
+                package edge, so the budget lived inside the package
+                and the contested column outside was untouched.
+
+            (b) Corner pads (pin 11 ZC_DETECT, pin 19 SWCLK on a
+                TSSOP-20) whose escape endpoints have |dy| > |dx| from
+                the package center.  Pre-#3201 took the north/south
+                branch and produced HORIZONTAL strips across the
+                package x-range -- wrong axis entirely.
+
+        Penalty calibration: ~0.5x cost_straight per cell, strip
+        thickness 4 cells.
+
+          Pre-#3201 used 1.5x cost_straight under a narrower per-pad
+          geometry (3 cells outward from the escape endpoint).  The
+          combination of (a) the edge-classification fix that anchors
+          the strip at the package edge instead of the escape endpoint
+          and (b) the all-layer tagging changes the cumulative-overlap
+          arithmetic: the same 1.5x calibration with the new geometry
+          caused an NRST regression because cumulative penalty on the
+          west edge exceeded the cost of detouring entirely around U1.
+
+          Empirical sweep on softstart (Issue #3201, 2026-06-04):
+
+              penalty=1.5x, thick=6 cells:  5/10 reach (regression)
+              penalty=1.0x, thick=4 cells:  5/10 reach (regression)
+              penalty=0.5x, thick=4 cells:  6/10 reach (parity)
+              penalty=0.3x, thick=6 cells:  6/10 reach (parity)
+              penalty=0.25x, thick=6 cells: 6/10 reach (parity)
+
+          The combination penalty=0.5x + thickness=4 cells matches the
+          pre-#3201 reach (6/10) while using correct edge
+          classification, anchoring at the package edge, and
+          all-layer tagging -- so the geometry is now a CORRECT base
+          on which future iteration can build.  The 8/10 AC1 target
+          requires additional work upstream of the budget (e.g.,
+          resolving the #3199 baseline regression to recover the 6/10
+          ceiling, or improving the negotiated rip-up loop to better
+          exploit budget hints).
+
+          On softstart's U1 east edge (6 signal pads), the
+          contested-cell overlap sums to ~(6-1) * 0.5 = 2.5 per cell
+          (the per-net filter excludes the routing net's own budget)
+          -- enough to dominate a 2-3 cell detour.  On the west edge
+          (3 signal pads), the sum is ~(3-1) * 0.5 = 1.0 -- a mild
+          nudge that does NOT block legitimate west-side access by
+          NRST or V_AC_SENSE.  Foreign nets crossing the strip pay
+          ~N * 0.5 * 4 = 2N -- on a 6-pad edge that's 12, well below
+          the ~30 cost of wrapping entirely around U1.
+
+        NC-pad filtering (#3201): pads with ``net == 0`` (NC / unused
+        pins) do NOT generate budgets.  A NC pad cannot legitimately
+        compete for routing, so including it just adds dead-weight
+        cumulative penalty to every other net's route with no upside.
 
         Args:
             dense_packages: The dense packages detected by
-                :meth:`detect_dense_packages`.  Used to scope the budget
-                to escape pads that belong to one of these packages; pads
-                escaped by sub-grid or in-pad-rescue paths (not part of a
-                dense package) are skipped.
+                :meth:`detect_dense_packages`.  Used to scope the
+                budget to escape pads belonging to one of these
+                packages; pads escaped by sub-grid or in-pad-rescue
+                paths (not part of a dense package) are skipped.
 
         Returns:
-            List of ``router_cpp.PadChannelBudget`` instances (empty when
-            no escape overrides were populated, or when the C++ backend
-            is not available).  The caller forwards the list to
+            List of ``router_cpp.PadChannelBudget`` instances (empty
+            when no escape overrides were populated, no signal pads
+            were found, or when the C++ backend is not available).
+            The caller forwards the list to
             :meth:`CppPathfinder.set_pad_channel_budgets`.
         """
         # Only the C++ backend implements the per-cell cost lookup
@@ -11148,62 +11198,78 @@ class Autorouter:
         if not self._escape_pad_overrides:
             return []
 
-        # Build a set of (ref, pin) keys belonging to dense packages so
-        # we don't tag sub-grid or in-pad-rescue escape pads (which use
-        # the same ``_escape_pad_overrides`` map but should not get a
-        # per-pad budget).  Also map each pad key to its containing
-        # package's geometry (center + bounding box) so the budget can
-        # extend along the package edge in the perpendicular direction.
-        dense_pad_keys: set[tuple[str, str]] = set()
-        package_center_by_key: dict[tuple[str, str], tuple[float, float]] = {}
-        package_bbox_by_key: dict[
-            tuple[str, str], tuple[float, float, float, float]
-        ] = {}
-        for package in dense_packages:
-            cx, cy = package.center
-            bbox = package.bounding_box
-            for pad in package.pads:
-                key = (pad.ref, pad.pin)
-                dense_pad_keys.add(key)
-                package_center_by_key[key] = (cx, cy)
-                package_bbox_by_key[key] = bbox
-
-        # Tuning (revised post-judge-feedback 2026-06-04 for #3143):
+        # Tuning (revised 2026-06-04 for #3201 to close the 6/10 -> >=8/10
+        # gap on softstart's U1 east-side TSSOP-20 cluster):
         #
-        # The original geometry (4 cells along escape direction x 5 cells
-        # perpendicular) was anchored on the escape endpoint and extended
-        # OUTWARD.  Judge review confirmed it does not intersect the
-        # actually-contested cells: softstart's east-side TSSOP-20 cluster
-        # has the escape endpoints ~0.5mm east of the package edge, then
-        # nets immediately turn north or south through the *vertical*
-        # column adjacent to the package edge.  That vertical column is
-        # the real contested channel; the outward-extending rectangle
-        # never touched it.
+        # Pre-#3201 the code emitted one budget per escape pad.  Edge
+        # classification used ``dx = virtual_pad.x - center_x`` (escape
+        # endpoint vs package center) and produced misclassifications
+        # for B_CU east-side escapes (endpoint INSIDE package bbox) and
+        # for corner pads (escape endpoint far from y-center).
         #
-        # Revised geometry: anchor the budget at the escape endpoint and
-        # extend it along the PERPENDICULAR axis (i.e., parallel to the
-        # package edge) so it covers the full vertical extent of the
-        # package's edge.  Add a small extension along the escape
-        # direction (~3 cells = ~0.225mm) so the strip is 3-4 cells thick
-        # in escape direction.  Each pad's budget thus forms a strip that
-        # extends roughly from y_min to y_max of the package, immediately
-        # outside the package edge.  When OTHER nets (per-net filter
-        # active) try to route through the column adjacent to a peer pad,
-        # they pay the per-cell surcharge.
+        # Revised approach (#3201):
         #
-        # Penalty calibration: ~1.5x cost_straight per cell.  With ~6
-        # other east-side pads on a TSSOP-20, the worst-case overlap
-        # sums to ~9.0 per cell, which dominates a 2-3 cell detour --
-        # exactly what the contested-channel scenario needs.  Lower
-        # penalties (the original 0.5x) sum to ~3.0 which the search
-        # treats as a wash against an 8-9 cell detour.
-        overflow_penalty = float(self.rules.cost_straight) * 1.5
+        #   1. Edge classification uses the ORIGINAL pad position vs the
+        #      package bounding box (not the escape endpoint).  A pad
+        #      whose ``(x, y)`` is on the east half of the package bbox
+        #      is classified as east-side regardless of where the escape
+        #      endpoint lands.  Fixes pre-#3201 failure modes (a) and
+        #      (b) above (B_CU endpoint inside bbox; corner pads with
+        #      |dy| > |dx|).
+        #   2. The strip is anchored at the PACKAGE EDGE (one cell
+        #      outside the bbox), extending outward by
+        #      ``escape_strip_thickness_cells``.  Fixes pre-#3201
+        #      failure mode (a) (strip lived inside package on B_CU
+        #      escapes).
+        #   3. The perpendicular extent spans the package bbox extent
+        #      plus ``perp_extension_cells`` padding so corner pads are
+        #      covered.
+        #   4. The budget is registered on ALL layers (``layer = -1``)
+        #      because the contested column is contested for any net
+        #      that crosses it, regardless of which layer the
+        #      originating escape pad uses.  On a 2-layer board with
+        #      alternating-layer escapes (B_CU / F_CU on adjacent pads
+        #      of the same side, as on softstart's U1), tagging only
+        #      one layer leaves the other untaxed.
+        #   5. Budgets are emitted PER PAD (one per signal-net escape
+        #      pad), NOT per edge.  The per-pad model lets cumulative
+        #      overlap encode contention: cells in a strip with N
+        #      overlapping pad budgets pay N * overflow_penalty per
+        #      cell.  This is essential for diversification -- uniform
+        #      per-edge penalties just shift the whole strip's cost,
+        #      they don't differentiate "contested" cells from "edge"
+        #      cells.
+        #   6. Penalty calibration: ~0.5x cost_straight per cell.  With
+        #      the new full-edge strip geometry, a contested edge with
+        #      N pads sums to ~(N-1) * 0.5 per cell when one net is
+        #      routing (the per-net filter excludes the routing net's
+        #      own budget).  On softstart's U1 east edge (6 signal
+        #      pads), this is ~2.5 per cell -- enough to dominate a
+        #      2-3 cell detour to a less-contested column.  On the
+        #      west edge (3 signal pads), the sum is ~1.0 per cell --
+        #      a mild nudge that doesn't over-penalize legitimate
+        #      access.  Foreign nets crossing the strip pay
+        #      ~N * 0.5 * 6 cells = 3N -- on a 6-pad edge that's 18
+        #      cost, well below the ~30 cost of wrapping entirely
+        #      around U1.  This calibration avoids the NRST regression
+        #      (which 1.5x per-pad triggered).
+        #
+        # Capacity stays at 0 (always-on penalty).  The C++ validation
+        # suite (``tests/test_router_cpp_per_pad_channel_budget.py``)
+        # confirms the cost function does not forbid any cell, it
+        # just makes contested cells proportionally more expensive
+        # than detour-equivalent neighbors.
+        overflow_penalty = float(self.rules.cost_straight) * 0.5
         # ``escape_strip_thickness_cells`` controls how thick the budget
         # strip is in the *escape* direction (i.e., how far outward from
         # the package edge).  4 cells = 0.3mm at the standard 0.075mm
-        # resolution; this is enough to cover the cells where a peer
-        # pad's escape stub terminates AND the column 1-2 cells further
-        # outward where a vertical run would land.
+        # resolution.  This covers BOTH the immediate post-escape
+        # column (where peer escape stubs terminate, ~0.15mm outside
+        # the package edge) AND the next column outward where vertical
+        # N/S detour traffic settles.  A thinner strip (4 cells vs the
+        # 6 first tried in #3201) limits the cost of legitimate
+        # package-perimeter access by foreign nets to ~N * penalty * 4
+        # cells, keeping it below the cost of wrapping around U1.
         escape_strip_thickness_cells = 4
         # Cell padding outside the package bounding box along the
         # perpendicular axis -- so the strip extends a bit past the end
@@ -11215,76 +11281,92 @@ class Autorouter:
 
         cols = self.grid.cols
         rows = self.grid.rows
-        resolution = float(self.rules.grid_resolution)
+
+        # Build a map from (ref, pin) -> (PackageInfo, original Pad) for
+        # every pad belonging to a dense package.  We need the ORIGINAL
+        # pad (not the escape-endpoint virtual pad) because the escape
+        # endpoint can sit INSIDE the package bounding box on B_CU layer
+        # escapes (the via location is between the package pin rows --
+        # see Issue #3201 diagnostic).  The original pad position
+        # relative to the package bbox is the only reliable signal for
+        # which edge the pad sits on.
+        dense_pad_info: dict[
+            tuple[str, str], tuple[PackageInfo, Pad]
+        ] = {}
+        for package in dense_packages:
+            for pad in package.pads:
+                dense_pad_info[(pad.ref, pad.pin)] = (package, pad)
 
         budgets: list = []
         for (ref, pin), virtual_pad in self._escape_pad_overrides.items():
-            if (ref, pin) not in dense_pad_keys:
+            info = dense_pad_info.get((ref, pin))
+            if info is None:
                 continue
-
-            # Convert escape endpoint to grid coordinates.  The virtual
-            # pad sits exactly at the escape endpoint by construction
-            # (see :meth:`generate_escape_routes`).
-            try:
-                cgx, cgy = self.grid.world_to_grid(virtual_pad.x, virtual_pad.y)
-            except (AttributeError, TypeError):
-                # Defensive: any conversion failure skips this pad.
+            package, original_pad = info
+            # Skip NC pads (no contention for routing -- nothing to
+            # route, so no per-net filter exclusion either).  Including
+            # them only adds dead-weight penalty to every other net's
+            # route, with no upside.
+            if original_pad.net == 0:
                 continue
+            min_x, min_y, max_x, max_y = package.bounding_box
+            center_x, center_y = package.center
+            half_x = max(1e-9, (max_x - min_x) * 0.5)
+            half_y = max(1e-9, (max_y - min_y) * 0.5)
 
-            # Determine the dominant escape axis from the package centre
-            # to the escape endpoint.  Larger |dx| => east/west escape
-            # (lateral channel runs north-south, perpendicular extent
-            # spans the package's y-range); larger |dy| => north/south
-            # escape (channel runs east-west, perpendicular extent
-            # spans the package's x-range).
-            center_x, center_y = package_center_by_key[(ref, pin)]
-            min_x, min_y, max_x, max_y = package_bbox_by_key[(ref, pin)]
-            dx = virtual_pad.x - center_x
-            dy = virtual_pad.y - center_y
-            if abs(dx) >= abs(dy):
-                # East/west escape: lateral channel runs along the y-axis
-                # (the column of escape stubs from this side of the
-                # package).  The budget is a vertical strip from the
-                # package's y_min to y_max, with thickness in x covering
-                # the escape endpoint and a small outward extension.
-                sign_x = 1 if dx >= 0 else -1
-                # Strip thickness along x: from one cell *inside* the
-                # escape endpoint to ``escape_strip_thickness_cells``
-                # cells further outward.  Anchoring at the escape
-                # endpoint catches the immediate post-escape column;
-                # extending outward catches the column where vertical
-                # runs would settle after the stub terminates.
-                cx_far = cgx + sign_x * (escape_strip_thickness_cells - 1)
-                gx1 = min(cgx, cx_far)
-                gx2 = max(cgx, cx_far)
-                # Perpendicular extent: full y-range of the package
-                # bounding box, padded by ``perp_extension_cells`` so the
-                # corner pads (which sit at y_min and y_max of the
-                # package) are still covered for nets routing past them.
-                try:
-                    _gx_lo, gy1_pkg = self.grid.world_to_grid(virtual_pad.x, min_y)
-                    _gx_hi, gy2_pkg = self.grid.world_to_grid(virtual_pad.x, max_y)
-                except (AttributeError, TypeError):
-                    gy1_pkg = cgy
-                    gy2_pkg = cgy
-                gy1 = min(gy1_pkg, gy2_pkg) - perp_extension_cells
-                gy2 = max(gy1_pkg, gy2_pkg) + perp_extension_cells
+            # Edge classification using the ORIGINAL pad position vs
+            # the package bbox.
+            pad_dx = original_pad.x - center_x
+            pad_dy = original_pad.y - center_y
+            norm_x = abs(pad_dx) / half_x
+            norm_y = abs(pad_dy) / half_y
+            # Tie-break: corner pads (norm_x == norm_y == 1.0) snap to
+            # the SHORT bbox axis (the perpendicular of the longer
+            # side).  On TSSOP-20 (4.4 x 6.5mm), the short axis is x,
+            # so corner pads belong to east/west.
+            if norm_x > norm_y + 1e-6:
+                edge_axis = "x"
+            elif norm_y > norm_x + 1e-6:
+                edge_axis = "y"
             else:
-                # North/south escape: lateral channel runs along the
-                # x-axis (the row of escape stubs from this side of the
-                # package).  Mirror of the east/west case.
-                sign_y = 1 if dy >= 0 else -1
-                cy_far = cgy + sign_y * (escape_strip_thickness_cells - 1)
-                gy1 = min(cgy, cy_far)
-                gy2 = max(cgy, cy_far)
+                edge_axis = "x" if half_x <= half_y else "y"
+
+            if edge_axis == "x":
                 try:
-                    gx1_pkg, _gy_dummy = self.grid.world_to_grid(min_x, virtual_pad.y)
-                    gx2_pkg, _gy_dummy2 = self.grid.world_to_grid(max_x, virtual_pad.y)
+                    if pad_dx >= 0:
+                        edge_gx, _ = self.grid.world_to_grid(max_x, center_y)
+                        gx1 = edge_gx + 1
+                        gx2 = gx1 + escape_strip_thickness_cells - 1
+                    else:
+                        edge_gx, _ = self.grid.world_to_grid(min_x, center_y)
+                        gx2 = edge_gx - 1
+                        gx1 = gx2 - escape_strip_thickness_cells + 1
+                    _gx_lo, gy_lo = self.grid.world_to_grid(center_x, min_y)
+                    _gx_hi, gy_hi = self.grid.world_to_grid(center_x, max_y)
                 except (AttributeError, TypeError):
-                    gx1_pkg = cgx
-                    gx2_pkg = cgx
-                gx1 = min(gx1_pkg, gx2_pkg) - perp_extension_cells
-                gx2 = max(gx1_pkg, gx2_pkg) + perp_extension_cells
+                    continue
+                gy1 = min(gy_lo, gy_hi) - perp_extension_cells
+                gy2 = max(gy_lo, gy_hi) + perp_extension_cells
+            else:
+                try:
+                    if pad_dy >= 0:
+                        _gx_dummy, edge_gy = self.grid.world_to_grid(
+                            center_x, max_y
+                        )
+                        gy1 = edge_gy + 1
+                        gy2 = gy1 + escape_strip_thickness_cells - 1
+                    else:
+                        _gx_dummy, edge_gy = self.grid.world_to_grid(
+                            center_x, min_y
+                        )
+                        gy2 = edge_gy - 1
+                        gy1 = gy2 - escape_strip_thickness_cells + 1
+                    gx_lo, _gy_dummy1 = self.grid.world_to_grid(min_x, center_y)
+                    gx_hi, _gy_dummy2 = self.grid.world_to_grid(max_x, center_y)
+                except (AttributeError, TypeError):
+                    continue
+                gx1 = min(gx_lo, gx_hi) - perp_extension_cells
+                gx2 = max(gx_lo, gx_hi) + perp_extension_cells
 
             # Clamp to grid bounds.
             gx1 = max(0, gx1)
@@ -11294,37 +11376,24 @@ class Autorouter:
             if gx1 > gx2 or gy1 > gy2:
                 continue
 
-            # Layer index.  ``virtual_pad.layer`` is a ``Layer`` enum from
-            # ``escape.escape_layer``.  Use its grid-layer index when
-            # available; fall back to ``-1`` (all layers) otherwise.
-            layer_idx = -1
-            try:
-                layer_value = getattr(virtual_pad.layer, "value", None)
-                if layer_value is not None:
-                    # Match the convention used elsewhere in core.py:
-                    # ``layer.value % num_layers``.
-                    layer_idx = int(layer_value) % self.grid.num_layers
-            except (AttributeError, TypeError):
-                layer_idx = -1
-
             budget = _router_cpp.PadChannelBudget()
             budget.gx1 = int(gx1)
             budget.gy1 = int(gy1)
             budget.gx2 = int(gx2)
             budget.gy2 = int(gy2)
-            budget.layer = layer_idx
-            # Capacity stays at 0 (always-on penalty).  See the
-            # docstring's "Tuning" note for rationale.
+            # Layer index = -1 (all layers).  Contested cells are
+            # contested for any net that crosses them, regardless of
+            # the originating pad's escape layer.
+            budget.layer = -1
+            # Capacity stays at 0 (always-on penalty).
             budget.capacity = 0
             budget.overflow_penalty = overflow_penalty
             budget.origin_pad_ref_hash = 0  # Reserved field; unused.
-            # Net id of the originating escape pad.  The cpp_backend
-            # adapter consults this to filter out the current net's own
-            # budget entries before passing the list to the C++ search,
-            # so a net is not penalised for routing through its OWN
-            # escape endpoint (which would defeat the purpose -- every
-            # net has to leave its own escape point).
-            budget.source_net = int(getattr(virtual_pad, "net", 0) or 0)
+            # source_net = the originating pad's net so the per-net
+            # filter excludes this budget when routing this pad's own
+            # net (the net cannot legitimately route anywhere except
+            # through its own escape endpoint).
+            budget.source_net = int(original_pad.net)
             budgets.append(budget)
 
         return budgets
