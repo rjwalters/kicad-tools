@@ -820,7 +820,9 @@ tolerances:
   # Floor 27 -> 48 by PR #3145 round 2 (Judge cross-platform
   # variance finding) -- THIS WAS A PARKING SPOT pending #3146.
   # Issue #3146 closed by the PR that lowered this floor again
-  # to 18 (see below).  Historic context preserved here so the
+  # to 26 (the binding raw-errors count; see the gate-counting
+  # block below for why the lower 16-blocking count is not the
+  # binding constraint).  Historic context preserved here so the
   # tightening trajectory is reviewable:
   #
   #   Environment       | Nets routed | Orchestrator                                  | DRC total
@@ -865,22 +867,28 @@ tolerances:
   #   4. ``continue-on-error: ${{ matrix.board == ... }}``
   #      removed from the matchgroup-routing-regression job.
   #
-  # Validation (PR closing #3146):
-  #   * 4 consecutive local re-routes at seed=42 produced
-  #     identical DRC counts (18 blocking; 8 advisory
-  #     connectivity excluded from the gate per the
-  #     connectivity-rule policy).
-  #   * Normalized PCB content (segments, vias, modulo UUIDs
-  #     and emit ordering) was md5-identical across all 4
-  #     runs -- the strongest possible local determinism
-  #     evidence short of the gold-standard CI re-route.
-  #   * Orchestrator summary identical across all 4 runs:
-  #     "2 tuned, 5 clean, 5 rolled back, 8 budget-exhausted".
+  # Validation (PR closing #3146, post-#3192 rebase):
+  #   * Local re-route at seed=42 with PYTHONHASHSEED=42
+  #     against main's ``seq`` tie-break produces
+  #     **24 raw / 16 blocking** DRC errors (8 advisory
+  #     connectivity excluded from the blocking-gate count
+  #     per the connectivity-rule policy).
+  #   * Normalized PCB content (segments, vias, modulo
+  #     ``(uuid ...)`` lines and emit ordering) was
+  #     md5-identical across local re-runs -- the strongest
+  #     possible local determinism evidence short of the
+  #     gold-standard CI re-route.  See
+  #     ``boards/07-matchgroup-test/diagnostic-runs/README.md``
+  #     for the evidence trail.
   #
-  # Floor 48 -> 26 reflects the post-fix deterministic count.
-  # This is a STRICT floor: any drift > 0 will fail the gate
-  # (no soft-fail, no slack), matching how board 06's strict
-  # gate works post-#3144.
+  # Floor 48 -> 26 reflects the post-fix count plus a 2-error
+  # slack over the observed 24 raw, intentionally absorbing the
+  # narrow drift the post-#3192 rebase introduced relative to
+  # the pre-rebase 5-run validation.  Board 06's strict gate
+  # post-#3144 is the model -- if a future tightening pass
+  # confirms the floor can drop to 24 (raw) without flakiness,
+  # do so in a dedicated cleanup PR rather than mixing it with
+  # closure work.
   #
   # Issue #3151 (DRC parity) caveat -- IMPORTANT, this floor is
   # shared by TWO gates that measure the same deterministic
@@ -889,7 +897,7 @@ tolerances:
   #   * ``check_routed_drc.py`` calls ``_count_blocking_errors``
   #     which filters out ``ADVISORY_RULE_IDS`` (currently just
   #     ``connectivity``).  On the post-#3146 board-07 artifact
-  #     this lands at **18 blocking** (26 raw - 8 connectivity
+  #     this lands at **16 blocking** (24 raw - 8 connectivity
   #     advisory).
   #
   #   * ``check_matchgroup_coverage.py`` reads the raw
@@ -897,21 +905,26 @@ tolerances:
   #     envelope (no advisory filter -- the match-group gate
   #     was designed before the advisory split landed and was
   #     never updated, see #3151).  On the same artifact this
-  #     lands at **26 raw**.
+  #     lands at **24 raw**.
   #
   # The binding gate must accommodate BOTH callers, so the
-  # floor is set to **26** (the higher / raw-errors count).
-  # The first PR attempt at #3146 set this to 18 (the blocking
-  # count) and the matchgroup CI gate failed because 26 > 18.
-  # Tracked as a follow-up: port ``_count_blocking_errors``
-  # into ``check_matchgroup_coverage.py`` so both gates use the
-  # same blocking-vs-advisory policy, at which point this floor
-  # can drop back to 18.  See #3151.
+  # floor is set to **26** (the higher / raw-errors count
+  # plus 2-error slack).  The first PR attempt at #3146 set
+  # this to 18 (the pre-rebase blocking count) and the
+  # matchgroup CI gate failed because 26 > 18 on the raw
+  # path.  Tracked as a follow-up: port
+  # ``_count_blocking_errors`` into
+  # ``check_matchgroup_coverage.py`` so both gates use the
+  # same blocking-vs-advisory policy, at which point this
+  # floor can drop back to the blocking count (16).  See #3151.
   #
-  # Post-#3146 determinism evidence (unchanged from prior block):
-  # the re-route lands at 26 raw / 18 blocking on both macOS
-  # arm64 and ubuntu-latest x86_64 runners, with byte-identical
-  # normalized PCB md5 across local re-runs.
+  # Post-#3146 determinism evidence: the re-route lands at
+  # 24 raw / 16 blocking on the macOS arm64 local box, with
+  # byte-identical normalized PCB md5 across local re-runs.
+  # CI re-runs are expected to land within the 2-error slack
+  # of this floor; AC4 (5x CI re-route at this strict gate
+  # without continue-on-error) gets validated when this PR
+  # lands and the workflow runs without the soft-fail.
   boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 26
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
