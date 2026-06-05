@@ -315,3 +315,61 @@ class TestCheckFileAdvisoryFiltering:
         assert passed
         assert errors == 1
         assert "advisory" not in msg.lower()
+
+
+class TestStdoutPrefixTolerance:
+    """Defensive: ``count_errors`` must tolerate stdout that has any
+    non-JSON prefix before the ``kct check --format json`` payload.
+
+    The advisory drift banner from ``_emit_drift_banner`` is now routed
+    to stderr (so the gate no longer hits this path in practice), but a
+    stale ``kct`` binary in CI, or a future regression that re-introduces
+    a stdout warning, would otherwise crash the gate with
+    ``json.JSONDecodeError`` -- a brittle failure mode the original PR
+    #3217 cycle hit on board 05.  These tests pin the strip-to-first-brace
+    behaviour so we never re-regress.
+    """
+
+    def setup_method(self) -> None:
+        self.helper = _load_helper_module()
+
+    def _stub_kct(self, stdout: str, returncode: int = 2):
+        mock_proc = MagicMock()
+        mock_proc.returncode = returncode
+        mock_proc.stdout = stdout
+        mock_proc.stderr = ""
+        return patch.object(subprocess, "run", return_value=mock_proc)
+
+    def test_leading_warning_line_is_stripped(self) -> None:
+        """The exact stdout shape observed on board 05 PR #3217 CI run
+        27026666522: one warning line, then the JSON body.  The gate must
+        parse the JSON and return the correct error count."""
+        payload = _make_kct_json([_make_violation("clearance_pad_segment")])
+        polluted = (
+            "  WARNING: PCB out of sync with schematic -- 4 PCB-only. "
+            "Run 'kct sync --analyze foo.kicad_pcb' to inspect.\n" + payload
+        )
+        with self._stub_kct(polluted):
+            blocking, advisory = self.helper.count_errors(Path("synthetic.kicad_pcb"))
+        assert blocking == 1
+        assert advisory == {}
+
+    def test_clean_stdout_still_parses(self) -> None:
+        """A pristine JSON-only stdout (the post-fix steady state) must
+        still parse identically -- the strip is a no-op when no prefix
+        is present."""
+        payload = _make_kct_json([_make_violation("clearance_segment_via")])
+        with self._stub_kct(payload):
+            blocking, advisory = self.helper.count_errors(Path("synthetic.kicad_pcb"))
+        assert blocking == 1
+        assert advisory == {}
+
+    def test_unparseable_payload_still_raises_with_raw_preview(self) -> None:
+        """If the stripped output still is not valid JSON, the gate must
+        surface a clear RuntimeError with the *raw* stdout preview so the
+        reviewer sees the actual offending bytes (not a post-strip slice
+        that hides the prefix)."""
+        polluted = "totally not json at all"
+        with self._stub_kct(polluted):
+            with pytest.raises(RuntimeError, match="invalid JSON"):
+                self.helper.count_errors(Path("synthetic.kicad_pcb"))

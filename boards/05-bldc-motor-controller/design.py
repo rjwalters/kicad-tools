@@ -370,6 +370,17 @@ def create_bldc_controller(output_dir: Path) -> Path:
     cascade.buck.inductor.footprint = "Inductor_SMD:L_1210_3225Metric"
     cascade.buck.diode.footprint = "Diode_SMD:D_SMA"
 
+    # Patch the buck input cap value to match the PCB silkscreen.  The
+    # ``create_dual_supply_cascade`` factory pulls ``buck_input_cap`` from
+    # ``_BUCK_COMPONENTS_TABLE`` (100uF for the 24V->5V row), but the
+    # board-05 PCB generator hardcodes a 220uF input cap (a reasonable
+    # ripple choice for a 24V LM2596).  Without this post-construction
+    # patch the schematic emits 100uF for C3 while the PCB emits 220uF,
+    # producing a value-drift mismatch on every fresh build.  Patching
+    # here rather than touching the SDK default keeps other boards
+    # unaffected.  See issue #3210.
+    cascade.buck.input_cap.value = "220uF"
+
     # Wire each stage to its rails in one call (buck VIN -> VMOTOR,
     # buck VOUT == LDO VIN -> 5V rail, LDO VOUT -> 3V3 rail).
     cascade.connect_to_rails(
@@ -1820,8 +1831,15 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
   )"""
 
-    def generate_led_0805(ref: str, pos: tuple, net_a: str, net_k: str) -> str:
-        """Generate 0805 LED footprint."""
+    def generate_led_0805(ref: str, pos: tuple, value: str, net_a: str, net_k: str) -> str:
+        """Generate 0805 LED footprint.
+
+        The ``value`` argument is emitted as the ``fp_text value`` field
+        so the PCB silkscreen matches the schematic-side semantic label
+        (e.g. ``"PWR"`` / ``"STATUS"``).  Hardcoding ``"LED"`` here
+        previously caused a schematic<->PCB value drift on every fresh
+        build — see issue #3210.
+        """
         x, y = pos
         net_a_num = NETS.get(net_a, 0)
         net_k_num = NETS.get(net_k, 0)
@@ -1832,7 +1850,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "LED" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net_a_num} "{net_a}"))
@@ -2061,19 +2079,22 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         )
     )
     print(f"   J3 (Hall Sensors) at {J3_POS}")
-    # J4: Debug header (6-pin SWD)
+    # J4: Debug header (6-pin SWD).  The schematic-side ``DebugHeader``
+    # block emits its value as ``f"SWD-{self.pins}"`` (i.e. ``"SWD-6"``);
+    # match that here so the schematic<->PCB value field stays in sync.
+    # Issue #3210.
     parts.append(
         generate_pin_header(
-            "J4", J4_POS, 6, "SWD Debug", ["+3.3V", "SWDIO", "SWCLK", "SWO", "NRST", "GND"]
+            "J4", J4_POS, 6, "SWD-6", ["+3.3V", "SWDIO", "SWCLK", "SWO", "NRST", "GND"]
         )
     )
-    print(f"   J4 (SWD Debug) at {J4_POS}")
+    print(f"   J4 (SWD-6) at {J4_POS}")
 
     print("\n11. Adding LEDs...")
     parts.append(generate_resistor_0805("R3", R3_POS, "1k", "+3.3V", "PWR_LED"))
-    parts.append(generate_led_0805("D3", D3_POS, "PWR_LED", "GND"))
+    parts.append(generate_led_0805("D3", D3_POS, "PWR", "PWR_LED", "GND"))
     parts.append(generate_resistor_0805("R4", R4_POS, "1k", "+3.3V", "STATUS_LED"))
-    parts.append(generate_led_0805("D4", D4_POS, "STATUS_LED", "GND"))
+    parts.append(generate_led_0805("D4", D4_POS, "STATUS", "STATUS_LED", "GND"))
     print(f"   D3 (PWR), D4 (STATUS) with resistors R3, R4")
 
     print("\n11b. Adding Hall sensor filter network...")
