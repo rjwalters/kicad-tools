@@ -620,6 +620,12 @@ class GridAutoSelection:
             memory constraints (None if no capping occurred)
         origin_offset: Optimal grid origin offset (x_mm, y_mm) that maximizes
             on-grid pad count. Default (0.0, 0.0) means no offset.
+        clearance_compliant_at_clearance_over_2: True if the selected resolution
+            is <= clearance/2, satisfying the recommended DRC margin. Set by
+            the clearance-aware retry path (issue #3239).
+        memory_budget_used: The effective ``max_cells`` value the selector
+            converged on. Equals the input ``max_cells`` for normal selection,
+            or the bumped budget if the clearance-aware retry was applied.
     """
 
     resolution: float
@@ -630,6 +636,8 @@ class GridAutoSelection:
     memory_capped: bool = False
     uncapped_resolution: float | None = None
     origin_offset: tuple[float, float] = (0.0, 0.0)
+    clearance_compliant_at_clearance_over_2: bool = False
+    memory_budget_used: int = 0
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
@@ -1040,21 +1048,88 @@ def auto_select_grid_resolution(
     # Further filter by memory constraint if board dimensions provided
     memory_capped = False
     pre_memory_candidates = list(valid_candidates)
-    if board_width is not None and board_height is not None:
-        board_area = board_width * board_height
-        memory_valid = []
-        for res in valid_candidates:
-            cells = board_area / (res * res)
-            if cells <= max_cells:
-                memory_valid.append(res)
-        if memory_valid:
-            if len(memory_valid) < len(valid_candidates):
-                memory_capped = True
-            valid_candidates = memory_valid
-        # If all are too memory-intensive, keep the coarsest DRC-compliant one
-        elif valid_candidates:
-            memory_capped = True
-            valid_candidates = [valid_candidates[0]]
+    effective_max_cells = max_cells
+
+    def _apply_memory_filter(
+        cands: list[float], budget: int
+    ) -> tuple[list[float], bool]:
+        """Apply memory filter to a candidate list with the given budget.
+
+        Returns (filtered_candidates, capped_flag).
+        """
+        if board_width is None or board_height is None:
+            return cands, False
+        board_area_local = board_width * board_height
+        memory_valid_local = [
+            res for res in cands if board_area_local / (res * res) <= budget
+        ]
+        if memory_valid_local:
+            return memory_valid_local, len(memory_valid_local) < len(cands)
+        # All are too memory-intensive, keep the coarsest DRC-compliant one
+        if cands:
+            return [cands[0]], True
+        return cands, False
+
+    valid_candidates, memory_capped = _apply_memory_filter(
+        valid_candidates, effective_max_cells
+    )
+
+    # ------------------------------------------------------------------
+    # Issue #3239: clearance-aware retry.
+    #
+    # The DRC filter above accepts any candidate ``<= clearance`` (issue
+    # #2387 relaxation), but a grid coarser than ``clearance / 2`` is at
+    # higher risk of clearance violations because the router's discrete
+    # quantisation can shift traces by up to ``resolution / 2`` per axis.
+    # If the memory cap forced the selector to a coarse-but-DRC-compliant
+    # grid AND a finer ``<= clearance/2`` candidate was available before
+    # the memory filter, try a one-shot budget bump (up to 4M cells, the
+    # same ceiling ``compute_multi_resolution_plan`` already uses).
+    #
+    # This makes the memory budget self-correcting: instead of silently
+    # picking a clearance-risky grid and letting the downstream warning
+    # in ``validate_grid_resolution`` paper over the regression, the
+    # auto-selector bumps the budget when (and only when) doing so unlocks
+    # a clearance-safe grid.  If even 4M cells can't reach ``clearance/2``,
+    # we keep the coarser-but-DRC-compliant selection -- the caller's
+    # ``validate_grid_resolution`` still fires the original warning so
+    # nothing is silently lost, plus we emit our own actionable warning
+    # naming the memory cap as the cause.
+    # ------------------------------------------------------------------
+    BUMP_CEILING = 4_000_000  # Matches compute_multi_resolution_plan ceiling
+    recommended_max = clearance / 2
+    bumped = False
+    if (
+        memory_capped
+        and board_width is not None
+        and board_height is not None
+        and valid_candidates
+        and min(valid_candidates) > recommended_max
+        and any(c <= recommended_max for c in pre_memory_candidates)
+    ):
+        # The memory cap is excluding candidates that would satisfy
+        # clearance/2.  Try a budget bump.
+        bumped_budget = min(max(max_cells * 4, max_cells + 1), BUMP_CEILING)
+        if bumped_budget > effective_max_cells:
+            bumped_candidates, bumped_capped = _apply_memory_filter(
+                pre_memory_candidates, bumped_budget
+            )
+            if bumped_candidates and min(bumped_candidates) <= recommended_max:
+                # The bump unlocked a clearance-safe grid -- adopt it.
+                old_cells = effective_max_cells
+                valid_candidates = bumped_candidates
+                memory_capped = bumped_capped
+                effective_max_cells = bumped_budget
+                bumped = True
+                logger.info(
+                    "Auto-grid: bumped memory cap from %s to %s cells "
+                    "to keep grid <= %.4fmm (clearance/2 = %.4f/2). "
+                    "Reason: memory cap was forcing a clearance-risky grid.",
+                    f"{old_cells:,}",
+                    f"{bumped_budget:,}",
+                    recommended_max,
+                    clearance,
+                )
 
     # Analyze off-grid pads for each candidate, using optimal origin offset.
     # For each candidate resolution, we find the grid origin offset that
@@ -1107,6 +1182,28 @@ def auto_select_grid_resolution(
         # (pre_memory_candidates is sorted coarsest-first)
         uncapped_resolution = pre_memory_candidates[-1]
 
+    # Issue #3239: if the memory cap (even after any bump) forced a grid
+    # coarser than clearance/2 AND there was a finer candidate available
+    # before memory filtering, emit an actionable warning that names the
+    # specific knob the user can turn.  This is more informative than the
+    # generic "may cause clearance violations" warning from
+    # validate_grid_resolution -- it tells the user that the memory budget,
+    # not the candidate list, is the binding constraint.
+    if (
+        memory_capped
+        and best_resolution > recommended_max
+        and any(c <= recommended_max for c in pre_memory_candidates)
+    ):
+        warnings.warn(
+            f"Auto-grid: memory budget cap forces grid {best_resolution}mm > "
+            f"clearance/2 ({recommended_max}mm) even at "
+            f"max_cells={effective_max_cells:,}. Routing may produce clearance "
+            f"violations at fine-pitch pads. Increase max_cells (currently "
+            f"capped at {BUMP_CEILING:,} by the auto-grid retry) or use a "
+            f"looser manufacturer profile.",
+            stacklevel=2,
+        )
+
     return GridAutoSelection(
         resolution=best_resolution,
         off_grid_pads=best_off_grid,
@@ -1116,6 +1213,8 @@ def auto_select_grid_resolution(
         memory_capped=memory_capped,
         uncapped_resolution=uncapped_resolution,
         origin_offset=best_offset,
+        clearance_compliant_at_clearance_over_2=best_resolution <= recommended_max,
+        memory_budget_used=effective_max_cells,
     )
 
 

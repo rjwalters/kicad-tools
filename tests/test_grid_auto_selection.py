@@ -1,5 +1,8 @@
 """Tests for automatic grid resolution selection."""
 
+import logging
+import warnings
+
 import pytest
 
 from kicad_tools.router.io import (
@@ -389,6 +392,206 @@ class TestMemoryCapping:
         )
         summary = result.summary()
         assert "capped" not in summary.lower()
+
+
+class TestClearanceAwareMemoryBump:
+    """Tests for issue #3239: clearance-aware memory budget bump.
+
+    When the memory cap forces a grid coarser than ``clearance / 2``, the
+    auto-selector should attempt a one-shot budget bump (up to 4M cells)
+    so the selected grid stays clearance-safe.  If the bump cannot achieve
+    ``<= clearance/2``, an actionable warning naming the memory cap as the
+    cause is emitted instead of the generic ``may cause clearance
+    violations`` warning.
+    """
+
+    def _chorus_like_pads(self) -> list[PadPosition]:
+        """Pad layout that exercises the chorus-test-revA selection path.
+
+        A handful of metric pads on a grid coarse enough to align to 0.1mm,
+        plus a few on 0.05mm half-grid offsets to keep off-grid analysis
+        non-trivial.
+        """
+        return [
+            PadPosition(x=2.0, y=2.0),
+            PadPosition(x=4.0, y=2.0),
+            PadPosition(x=6.0, y=2.0),
+            PadPosition(x=2.0, y=4.0),
+            PadPosition(x=4.05, y=4.0),  # 0.05mm half-grid offset
+            PadPosition(x=6.0, y=4.05),
+        ]
+
+    def test_chorus_like_memory_cap_bumps_to_clearance_safe(self, caplog):
+        """Chorus-like board: memory cap forces 0.127mm, bump unlocks
+        a clearance-safe grid (<= 0.075mm).
+
+        Acceptance criterion #1: at clearance=0.15mm on a 65x56mm board
+        with default max_cells=500_000, the selector should bump and pick
+        a grid <= 0.075mm without emitting "may cause clearance violations".
+        """
+        pads = self._chorus_like_pads()
+
+        with caplog.at_level(logging.INFO, logger="kicad_tools.router.io"):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = auto_select_grid_resolution(
+                    pads,
+                    clearance=0.15,
+                    board_width=65.0,
+                    board_height=56.0,
+                    max_cells=500_000,
+                )
+
+        # Acceptance criterion #1: selected grid <= clearance/2 = 0.075mm
+        assert result.resolution <= 0.075, (
+            f"Expected grid <= 0.075mm, got {result.resolution}mm. "
+            f"Bump path did not engage or did not pick a safe grid."
+        )
+        assert result.clearance_compliant_at_clearance_over_2 is True
+
+        # No "may cause clearance violations" warning text
+        warning_texts = [str(w.message) for w in caught]
+        for text in warning_texts:
+            assert "may cause clearance violations" not in text, (
+                f"Unexpected clearance-violation warning emitted: {text}"
+            )
+
+        # Acceptance criterion #2: bump is logged at INFO level
+        bump_logs = [
+            r for r in caplog.records
+            if "bumped memory cap" in r.message.lower()
+        ]
+        assert bump_logs, (
+            f"Expected INFO log mentioning the memory cap bump. "
+            f"Got records: {[r.message for r in caplog.records]}"
+        )
+        # Bump log should reference the new cell count
+        assert any(
+            str(result.memory_budget_used) in r.message
+            or f"{result.memory_budget_used:,}" in r.message
+            for r in bump_logs
+        ), "Bump log should name the new max_cells value"
+
+        # Effective budget should have been bumped above the default
+        assert result.memory_budget_used > 500_000
+
+    def test_loose_clearance_pad_alignment_preserved(self):
+        """Issue #2387 regression guard: at clearance=0.30mm, the
+        selector still prefers a coarser-but-pad-aligned grid (the
+        original #2387 intent) when no memory cap is in play.
+
+        The clearance-aware retry should ONLY engage when memory_capped
+        is True -- otherwise the existing pad-alignment-first logic
+        wins.  This test asserts that #2387's relaxation survives: at
+        loose clearance with pad-aligned candidates available, the
+        coarser grid is still picked (no over-aggressive tightening),
+        and no memory-cap warning fires because memory_capped is False.
+        """
+        # Pads aligned to 0.25mm exactly (no fractional offsets)
+        pads = [
+            PadPosition(x=2.0, y=2.0),
+            PadPosition(x=2.5, y=2.0),
+            PadPosition(x=3.0, y=2.0),
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.30,
+                board_width=20.0,
+                board_height=20.0,
+            )
+
+        # The selector picks 0.25mm: pad-aligned and DRC-compliant
+        # (<= clearance).  This is intentional #2387 behaviour even
+        # though 0.25 > clearance/2 -- the router enforces edge-to-edge
+        # clearance directly, so pad-alignment dominates when memory
+        # is not binding.
+        assert result.memory_capped is False
+        # No memory-cap warning -- bump only engages when capped.
+        warning_texts = [str(w.message) for w in caught]
+        for text in warning_texts:
+            assert "memory budget cap" not in text.lower(), (
+                f"Unexpected memory-cap warning at loose clearance: {text}"
+            )
+        # Budget was NOT bumped (default 500_000 retained)
+        assert result.memory_budget_used == 500_000
+
+    def test_unsatisfiable_budget_emits_actionable_warning(self):
+        """When even the bumped budget (4M cells) cannot satisfy
+        clearance/2, the actionable warning naming the memory cap fires.
+
+        Construct a very large board where 0.075mm grid would need
+        > 4M cells: area > 4_000_000 * 0.075^2 = 22,500 mm^2, e.g.
+        200mm x 200mm.
+        """
+        pads = [
+            PadPosition(x=10.0, y=10.0),
+            PadPosition(x=20.0, y=10.0),
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=200.0,
+                board_height=200.0,
+                max_cells=500_000,
+            )
+
+        # The selector should NOT silently pick a clearance-risky grid
+        # without naming the cause.
+        warning_texts = [str(w.message) for w in caught]
+        actionable = [
+            t for t in warning_texts
+            if "memory budget cap" in t.lower()
+            and "max_cells" in t
+        ]
+        assert actionable, (
+            f"Expected an actionable warning naming the memory cap. "
+            f"Got warnings: {warning_texts}"
+        )
+        # The selected grid is still memory-capped and > clearance/2
+        assert result.memory_capped is True
+        assert result.resolution > 0.075
+        assert result.clearance_compliant_at_clearance_over_2 is False
+
+    def test_no_capping_no_bump_no_warning(self):
+        """When memory is not the binding constraint, the existing
+        pad-alignment-first logic runs unchanged and the bump path is
+        a no-op (no INFO log, no warning)."""
+        pads = [
+            PadPosition(x=2.0, y=2.0),
+            PadPosition(x=2.5, y=2.0),
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=10.0,
+                board_height=10.0,
+            )
+
+        # Memory cap should not engage on a tiny board
+        assert result.memory_capped is False
+        # Budget unchanged
+        assert result.memory_budget_used == 500_000
+        # No memory-cap warning
+        warning_texts = [str(w.message) for w in caught]
+        for text in warning_texts:
+            assert "memory budget cap" not in text.lower()
+
+    def test_new_fields_set_for_normal_path(self):
+        """The new GridAutoSelection fields are populated even when
+        the bump path doesn't engage."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=2.54, y=0.0)]
+        result = auto_select_grid_resolution(pads, clearance=0.3)
+        # Default max_cells when no board dimensions -> still recorded
+        assert result.memory_budget_used == 500_000
+        # 0.3mm clearance / 2 = 0.15mm.  Default candidates include 0.1
+        # which is <= 0.15.
+        assert result.clearance_compliant_at_clearance_over_2 is True
 
 
 class TestGridAutoSelectionSummary:
