@@ -2532,6 +2532,28 @@ def route_with_layer_escalation(
     prev_nets_routed: int | None = None
     prev_overflow: int | None = None
 
+    # Issue #3241: Track monotonic regression across attempts (cross-attempt
+    # decrease in nets_routed).  Unlike the #2412 stagnation heuristic above,
+    # which is gated by the #2673 50% completion floor, the regression-exit
+    # fires regardless of floor because "more layers + fewer routed nets" is
+    # structurally backwards -- adding still more layers cannot cure it.
+    # See issue #3241 (chorus-test-revA 15% -> 12% -> 10% observation).
+    #
+    # Thresholds (intentionally tunable as named constants for readability):
+    #   - REGRESSION_TOLERANCE: small flicker (default 2 nets) does NOT count
+    #     as a regression.  PR #3193 made A* tie-break deterministic, so most
+    #     flicker is gone -- but routing-order changes across stacks still
+    #     produce 1-2 net jitter even on equivalent topologies.
+    #   - HARD_DROP_NETS: a single-attempt drop of >=5 nets is severe enough
+    #     to exit immediately without waiting for a second regression.
+    #   - CONSECUTIVE_REGRESSIONS: otherwise, require 2 consecutive regression
+    #     observations before exiting (avoids false-positive on a single
+    #     unlucky attempt).
+    REGRESSION_TOLERANCE = 2
+    HARD_DROP_NETS = 5
+    CONSECUTIVE_REGRESSIONS = 2
+    regression_streak: int = 0
+
     # Issue #2388: Track power-net stall across escalation attempts.  When
     # a 2-layer attempt aborts due to power-net stall, the next attempt
     # is biased toward a stack with dedicated planes for those nets, and
@@ -2864,8 +2886,66 @@ def route_with_layer_escalation(
                 "continuing escalation (issue #2673)"
             )
 
+        # Issue #3241: Monotonic-regression early-exit.  Unlike the #2412
+        # stagnation check above, this is NOT gated by the #2673 50% floor.
+        # "More layers + strictly fewer routed nets" is structurally
+        # backwards -- adding still more layers cannot cure it -- so we
+        # break the ladder even when both attempts are below 50%.  The
+        # check requires either (a) a hard drop of >=HARD_DROP_NETS on a
+        # single attempt, or (b) CONSECUTIVE_REGRESSIONS consecutive
+        # regressions each exceeding REGRESSION_TOLERANCE.  ``best_result``
+        # is already tracked via the #2396 ``_is_better_result`` rule above,
+        # so the loop just breaks; the caller receives the pre-regression
+        # best attempt's router state.
+        regression_exit = False
+        if prev_nets_routed is not None:
+            drop = prev_nets_routed - nets_routed
+            if drop >= HARD_DROP_NETS:
+                if not quiet:
+                    flush_print(
+                        f"  Escalation stopped: monotonic regression -- "
+                        f"hard drop of {drop} nets vs previous attempt "
+                        f"(>={HARD_DROP_NETS} threshold, issue #3241)"
+                    )
+                regression_exit = True
+            elif drop > REGRESSION_TOLERANCE:
+                regression_streak += 1
+                if regression_streak >= CONSECUTIVE_REGRESSIONS:
+                    if not quiet:
+                        flush_print(
+                            f"  Escalation stopped: monotonic regression -- "
+                            f"{regression_streak} consecutive attempts with "
+                            f"nets_routed decreasing by >{REGRESSION_TOLERANCE} "
+                            "(issue #3241)"
+                        )
+                    regression_exit = True
+                elif not quiet:
+                    flush_print(
+                        f"  Regression observed: {drop} fewer nets routed "
+                        f"than previous attempt (streak={regression_streak}/"
+                        f"{CONSECUTIVE_REGRESSIONS}, issue #3241)"
+                    )
+            else:
+                # Improvement or flicker within tolerance -- reset streak.
+                regression_streak = 0
+
         prev_nets_routed = nets_routed
         prev_overflow = overflow
+
+        if regression_exit:
+            # Report attempt result before breaking, mirroring the #2412
+            # exit paths above.  ``best_result`` already retains the
+            # pre-regression best per the #2396 selector.
+            if not quiet:
+                flush_print(
+                    f"\n  Routed: {nets_routed}/{nets_to_route} nets "
+                    f"({completion * 100:.0f}%)"
+                )
+                flush_print("  Status: INSUFFICIENT - early stop (regression)")
+                # Issue #3241 (Option D): emit failure-cause histogram so
+                # future investigations of the same regression have data.
+                _log_failure_cause_histogram(router, quiet=quiet)
+            break
 
         # Issue #2388: Record any power-net stall for the next attempt's
         # bias logic.  ``power_stall_nets`` is populated by
@@ -2884,6 +2964,10 @@ def route_with_layer_escalation(
         if not quiet:
             flush_print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
             flush_print(f"  Status: {status}")
+            # Issue #3241 (Option D): per-attempt failure-cause histogram.
+            # Helps diagnose why a higher-layer attempt can land at a worse
+            # local optimum (the trigger for this issue's regression-exit).
+            _log_failure_cause_histogram(router, quiet=quiet)
 
         # Check for success
         if result.success:
@@ -3768,6 +3852,52 @@ def route_with_rule_relaxation(
     return 1
 
 
+def _log_failure_cause_histogram(router, quiet: bool = False) -> None:
+    """Emit a per-attempt failure-cause histogram.
+
+    Issue #3241 (Option D): when the auto-layers escalation ladder
+    produces decreasing results across attempts, the operator log should
+    make the *why* legible.  Currently each attempt prints a "Best result
+    so far" line and the run ends with a Status line — no breakdown of
+    which failure causes are dominant on the failed nets.
+
+    This helper aggregates ``router.routing_failures`` by
+    :class:`FailureCause` and prints a single ``Failure causes: {...}``
+    line in machine-parseable format.  It is intentionally low-cost
+    (~5 lines of Counter + dict() formatting) so it is safe to call on
+    every attempt, not just the regression-exit path.
+
+    Args:
+        router: Inner ``Autorouter`` instance from the latest attempt.
+            May be ``None`` or a mock without ``routing_failures``.
+        quiet: Suppress all output when ``True``.
+    """
+    if quiet or router is None:
+        return
+    from collections import Counter
+
+    from kicad_tools.cli.progress import flush_print
+
+    failures = getattr(router, "routing_failures", None)
+    if not failures:
+        return
+
+    causes: list[str] = []
+    for f in failures:
+        cause = getattr(f, "failure_cause", None)
+        if cause is None:
+            continue
+        # ``cause`` is a FailureCause enum; ``.value`` is the snake_case
+        # string already used elsewhere in the codebase (route_cmd.py
+        # _classify_dominant_failure_cause).
+        causes.append(getattr(cause, "value", str(cause)))
+    if not causes:
+        return
+
+    histogram = dict(Counter(causes).most_common())
+    flush_print(f"  Failure causes: {histogram}")
+
+
 def _classify_dominant_failure_cause(router):
     """Pick the most-common FailureCause across ``router.routing_failures``.
 
@@ -4413,6 +4543,21 @@ def route_with_combined_escalation(
     # divide the remaining wall-clock budget fairly across the entire 2D
     # matrix (not just within one layer column).
     _combined_max_attempts = max(1, len(layer_configs) * len(tiers))
+    # Issue #3241: cross-layer regression tracking.  The combined-escalation
+    # 2D search already has an intra-layer regression guard at line ~4770
+    # (skip remaining tiers when a tier underperforms the layer's best so
+    # far).  But the cross-layer case ("4L wins, 6L loses") is structurally
+    # identical to the layer-escalation ladder regression filed as #3241,
+    # and the same fix applies: when the best completion at layer N+1 drops
+    # below layer N's best, exit before starting layer N+2.  Best-result
+    # tracking already uses the #2396 ``_is_better_result`` rule so this
+    # break preserves the pre-regression winner.
+    prev_layer_best_completion: float | None = None
+    layer_regression_streak: int = 0
+    CL_REGRESSION_TOLERANCE = 0.02  # 2 percentage points (cross-layer noise)
+    CL_HARD_DROP = 0.10  # 10 percentage points triggers immediate exit
+    CL_CONSECUTIVE = 2
+
     for _layer_idx, (layer_count, layer_stack) in enumerate(layer_configs):
         # Issue #2802: honor the total wall-clock deadline before starting
         # another layer-stack column of the 2D search.
@@ -4651,6 +4796,48 @@ def route_with_combined_escalation(
         # If we found a successful config at this layer count, stop
         if successful_result:
             break
+
+        # Issue #3241: cross-layer monotonic-regression check.  If this
+        # column's best completion regressed materially vs the prior
+        # column's best, abort the ladder.  Mirrors the same logic used
+        # by ``route_with_layer_escalation`` but expressed in fractional
+        # completion rather than absolute nets_routed since tier-relaxed
+        # routes can produce a slightly different net-set per cell.
+        if (
+            prev_layer_best_completion is not None
+            and best_completion_for_layer is not None
+            and not getattr(args, "no_early_stop", False)
+        ):
+            drop = prev_layer_best_completion - best_completion_for_layer
+            if drop >= CL_HARD_DROP:
+                if not quiet:
+                    flush_print(
+                        f"\n  Escalation stopped: {layer_count}L best "
+                        f"({best_completion_for_layer * 100:.0f}%) regressed "
+                        f"by {drop * 100:.0f}pp vs previous layer "
+                        f"({prev_layer_best_completion * 100:.0f}%); "
+                        "hard cross-layer drop (issue #3241)"
+                    )
+                break
+            elif drop > CL_REGRESSION_TOLERANCE:
+                layer_regression_streak += 1
+                if layer_regression_streak >= CL_CONSECUTIVE:
+                    if not quiet:
+                        flush_print(
+                            f"\n  Escalation stopped: {layer_regression_streak} "
+                            "consecutive cross-layer regressions "
+                            f"(latest {drop * 100:.0f}pp drop, issue #3241)"
+                        )
+                    break
+            else:
+                layer_regression_streak = 0
+        # Track best across layers for cross-layer comparison.
+        if best_completion_for_layer is not None:
+            if (
+                prev_layer_best_completion is None
+                or best_completion_for_layer > prev_layer_best_completion
+            ):
+                prev_layer_best_completion = best_completion_for_layer
 
     # Restore original signal handlers
     signal.signal(signal.SIGINT, prev_sigint)
