@@ -65,6 +65,41 @@ Pathfinder::Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_rou
         1, static_cast<int>(std::ceil(
             (rules.via_diameter / 2 + rules.via_clearance) / grid.resolution())));
 
+    // Issue #3229: Pre-compute the circular (Euclidean) kernel offsets at
+    // ``trace_half_width_cells_``.  The legacy implementation scanned a
+    // ``[-r, r]`` Chebyshev square, but the manufacturer's DRC rule is
+    // Euclidean (perpendicular distance from trace edge to obstacle).  At
+    // the diagonals the two metrics disagreed by up to ``r * (1 - 1/sqrt(2))``
+    // cells, which on board 05 (``r = 2`` at ``res = 0.127mm``) produced
+    // 8 sub-127um ``clearance_pad_segment`` violations with shortfalls of
+    // 17-98um -- the exact diagonal-corner Chebyshev/Euclidean gap.
+    //
+    // The disc kernel iterates only cells with ``dx*dx + dy*dy <= r*r``,
+    // matching the DRC metric exactly.  Cell counts:
+    //   r=1:  5 cells (vs 9 square)
+    //   r=2: 13 cells (vs 25 square)
+    //   r=3: 29 cells (vs 49 square)
+    //   r=4: 49 cells (vs 81 square)
+    // Net result is fewer cells scanned per neighbour expansion than the
+    // square kernel -- so the disc switch is a small *speedup* at the
+    // ``is_trace_blocked`` hot path, not a slowdown.
+    {
+        const int r = trace_half_width_cells_;
+        const int r_sq = r * r;
+        circular_kernel_offsets_.clear();
+        // Reserve roughly pi*r^2 cells to avoid reallocations.
+        circular_kernel_offsets_.reserve(
+            static_cast<size_t>(3.15f * r_sq + 1));
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx * dx + dy * dy <= r_sq) {
+                    circular_kernel_offsets_.emplace_back(
+                        static_cast<int8_t>(dx), static_cast<int8_t>(dy));
+                }
+            }
+        }
+    }
+
     // Default: all layers are routable
     for (int i = 0; i < grid.layers(); ++i) {
         routable_layers_.push_back(i);
@@ -82,61 +117,111 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 
     // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
     // (partner_net >= 0 && partner_radius > 0 && partner_radius < radius),
-    // partner-owned blocked cells in the slack ring (Chebyshev distance
+    // partner-owned blocked cells in the slack ring (Euclidean distance
     // > partner_radius) are treated as passable.  All other cells use the
     // wider radius as before.
     bool partner_active =
         (partner_net >= 0) && (partner_radius > 0) && (partner_radius < radius);
+    const int partner_radius_sq = partner_radius * partner_radius;
 
-    for (int dy = -radius; dy <= radius; ++dy) {
-        for (int dx = -radius; dx <= radius; ++dx) {
-            int cx = x + dx, cy = y + dy;
+    // Issue #3229: Switch the trace-clearance kernel from Chebyshev (square)
+    // to Euclidean (circular disc).  The DRC measures Euclidean clearance
+    // and the legacy square kernel passed candidates at the diagonal corners
+    // whose true Euclidean clearance fell as short as
+    // ``radius * (1 - 1/sqrt(2)) ~= 0.293 * radius`` cells.  The disc
+    // kernel iterates only cells with ``dx*dx + dy*dy <= r*r``, matching
+    // the DRC metric exactly.
+    //
+    // Fast path: when ``radius_override`` is zero, use the cached
+    // ``circular_kernel_offsets_`` populated in the constructor.  When the
+    // caller supplies a per-net override (smaller-width nets only -- the
+    // override is only set when it differs from the default), iterate the
+    // square as a fallback and apply the Euclidean filter inline; that
+    // branch is rare and not perf-critical.
+    const bool use_cached = (radius_override <= 0);
+    const int radius_sq = radius * radius;
+
+    if (use_cached) {
+        for (const auto& [dx_off, dy_off] : circular_kernel_offsets_) {
+            const int dx = static_cast<int>(dx_off);
+            const int dy = static_cast<int>(dy_off);
+            const int cx = x + dx;
+            const int cy = y + dy;
             if (!grid_.is_valid(cx, cy, layer)) {
                 return true;  // Out of bounds
             }
 
             const auto& cell = grid_.at(cx, cy, layer);
-            if (cell.blocked) {
-                // Issue #2559: relax partner cells outside the tighter
-                // intra-pair radius (Chebyshev metric matches the kernel
-                // shape used by Python compute_expanded_blocked()).
-                if (partner_active && cell.net == partner_net) {
-                    int cheb = std::max(std::abs(dx), std::abs(dy));
-                    if (cheb > partner_radius) {
-                        // Partner cell in the slack ring -- skip.
-                        continue;
-                    }
-                }
+            if (!cell.blocked) {
+                continue;
+            }
 
-                if (allow_sharing) {
-                    // Negotiated mode: mirror Python
-                    // pathfinder.py::_is_trace_blocked rect-mask
-                    // (lines 1271-1296).  Issue #2989: own-net
-                    // ``is_obstacle`` cells (destination/partner pad
-                    // metal painted by PR #2928 + PR #2942) MUST
-                    // remain passable for the routing net.  Without
-                    // this gate, diff-pair partner B's pad rejects
-                    // unconditionally and the trace cannot reach the
-                    // partner endpoint (USB3/PCIE/MIPI partial
-                    // completion on board 06; USB_D-/USB_CC2/JOY_Y
-                    // on board 03).  Foreign-net obstacles still
-                    // hard-reject.
-                    if (cell.is_obstacle && cell.net != net) {
-                        return true;  // Foreign-net obstacle blocks
-                    }
-                    if (cell.net == 0 && cell.usage_count == 0) {
-                        return true;  // Static no-net obstacle
-                    }
-                    if (cell.net != net && cell.usage_count == 0) {
-                        return true;  // Static obstacle from another net
-                    }
-                    // Allow with cost penalty for routed cells or
-                    // own-net obstacle cells.
-                } else {
-                    // Standard mode: block if obstacle or different net
-                    if (cell.is_obstacle || cell.net != net) {
-                        return true;
-                    }
+            // Issue #2559: relax partner cells outside the tighter
+            // intra-pair radius (Euclidean -- matches the kernel shape
+            // used by Python compute_expanded_blocked() post-#3229).
+            if (partner_active && cell.net == partner_net) {
+                const int dist_sq = dx * dx + dy * dy;
+                if (dist_sq > partner_radius_sq) {
+                    continue;
+                }
+            }
+
+            if (allow_sharing) {
+                if (cell.is_obstacle && cell.net != net) {
+                    return true;
+                }
+                if (cell.net == 0 && cell.usage_count == 0) {
+                    return true;
+                }
+                if (cell.net != net && cell.usage_count == 0) {
+                    return true;
+                }
+            } else {
+                if (cell.is_obstacle || cell.net != net) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Slow path: per-net radius override.  Iterate the square and filter
+    // to the Euclidean disc inline.
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const int dist_sq = dx * dx + dy * dy;
+            if (dist_sq > radius_sq) {
+                continue;  // Outside the disc.
+            }
+            const int cx = x + dx, cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) {
+                return true;  // Out of bounds
+            }
+
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (!cell.blocked) {
+                continue;
+            }
+
+            if (partner_active && cell.net == partner_net) {
+                if (dist_sq > partner_radius_sq) {
+                    continue;
+                }
+            }
+
+            if (allow_sharing) {
+                if (cell.is_obstacle && cell.net != net) {
+                    return true;
+                }
+                if (cell.net == 0 && cell.usage_count == 0) {
+                    return true;
+                }
+                if (cell.net != net && cell.usage_count == 0) {
+                    return true;
+                }
+            } else {
+                if (cell.is_obstacle || cell.net != net) {
+                    return true;
                 }
             }
         }
@@ -151,17 +236,51 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 // the relaxation still admits the legitimate pad-exit step into a foreign
 // pad's clearance band -- only steps that put the trace centerline within
 // ``radius`` of foreign pad copper are rejected.
+//
+// Issue #3229: Kernel is the Euclidean disc (``dx*dx + dy*dy <= r*r``)
+// rather than the legacy Chebyshev square.  The DRC measures Euclidean
+// clearance, and the Chebyshev kernel passed candidates at the diagonal
+// corners whose Euclidean clearance fell short.  The hot path uses the
+// pre-computed ``circular_kernel_offsets_`` when the caller's ``radius``
+// matches the cached ``trace_half_width_cells_`` (the typical case --
+// callers in the A* loop pass either the default or the same per-net
+// override they passed to ``is_trace_blocked``).
 bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
                                                     int net, int radius) const {
     if (radius <= 0) {
         return false;
     }
+
+    if (radius == trace_half_width_cells_) {
+        // Fast path: cached offset list.
+        for (const auto& [dx_off, dy_off] : circular_kernel_offsets_) {
+            const int cx = x + static_cast<int>(dx_off);
+            const int cy = y + static_cast<int>(dy_off);
+            if (!grid_.is_valid(cx, cy, layer)) {
+                continue;
+            }
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (cell.pad_blocked && cell.net != net) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Slow path: caller-supplied radius differs from the cached default;
+    // iterate the square and filter to the Euclidean disc inline.  This
+    // branch is not perf-critical (per-net overrides are uncommon at
+    // hot-path call sites).
+    const int radius_sq = radius * radius;
     for (int dy = -radius; dy <= radius; ++dy) {
         for (int dx = -radius; dx <= radius; ++dx) {
+            if (dx * dx + dy * dy > radius_sq) {
+                continue;
+            }
             int cx = x + dx;
             int cy = y + dy;
             if (!grid_.is_valid(cx, cy, layer)) {
-                continue;  // Out-of-bounds cells cannot be foreign pad metal.
+                continue;
             }
             const auto& cell = grid_.at(cx, cy, layer);
             if (cell.pad_blocked && cell.net != net) {

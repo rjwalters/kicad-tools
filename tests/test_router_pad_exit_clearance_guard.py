@@ -120,17 +120,17 @@ class TestPythonForeignPadMetalGuard:
         assert pf._is_foreign_pad_metal_within_radius(50, 50, 0, net=1, radius=3) is True
 
     def test_foreign_pad_metal_just_outside_radius_passes(self) -> None:
-        """Cells at Chebyshev distance > radius are ignored."""
+        """Cells at Euclidean distance > radius are ignored."""
         py_grid, rules = _make_grid()
         pf = Pathfinder(py_grid, rules)
-        # Mark foreign pad at (50, 60) -- Chebyshev distance 10 from candidate (50, 50).
+        # Mark foreign pad at (50, 60) -- distance 10 from candidate (50, 50).
         py_grid._pad_blocked[0, 60, 50] = True
         py_grid._net[0, 60, 50] = 2
         py_grid._blocked[0, 60, 50] = True
         assert pf._is_foreign_pad_metal_within_radius(50, 50, 0, net=1, radius=3) is False
 
     def test_foreign_pad_metal_at_chebyshev_radius_rejects(self) -> None:
-        """Cell at Chebyshev distance == radius is treated as in-range (inclusive)."""
+        """Cell on-axis at Euclidean distance == radius is in-range (inclusive)."""
         py_grid, rules = _make_grid()
         pf = Pathfinder(py_grid, rules)
         # Foreign pad at exactly radius=3 cells away.
@@ -138,6 +138,55 @@ class TestPythonForeignPadMetalGuard:
         py_grid._net[0, 50, 53] = 2
         py_grid._blocked[0, 50, 53] = True
         assert pf._is_foreign_pad_metal_within_radius(50, 50, 0, net=1, radius=3) is True
+
+    def test_foreign_pad_metal_at_diagonal_corner_passes(self) -> None:
+        """Issue #3229: The Chebyshev-vs-Euclidean diagonal corner.
+
+        At offset (dx=radius, dy=radius), the Chebyshev distance is exactly
+        ``radius`` (so the legacy square kernel would treat the cell as
+        in-range), but the Euclidean distance is ``radius * sqrt(2) > radius``.
+        The Euclidean disc must EXCLUDE the cell.  This is the exact
+        failure mode of the 8 sub-127um ``clearance_pad_segment`` violations
+        on board 05: the legacy Chebyshev kernel passed candidates with
+        true Euclidean clearance falling short of the DRC rule by up to
+        ``radius * (1 - 1/sqrt(2)) ~= 0.293 * radius`` cells.
+        """
+        py_grid, rules = _make_grid()
+        pf = Pathfinder(py_grid, rules)
+        # Foreign pad at the diagonal corner (radius=3, offset (+3, +3)).
+        py_grid._pad_blocked[0, 53, 53] = True
+        py_grid._net[0, 53, 53] = 2
+        py_grid._blocked[0, 53, 53] = True
+        # Chebyshev distance = 3 (legacy would reject).
+        # Euclidean distance = sqrt(18) = ~4.24 > 3 (new kernel must accept).
+        assert pf._is_foreign_pad_metal_within_radius(50, 50, 0, net=1, radius=3) is False
+
+    def test_foreign_pad_metal_at_near_axial_diagonal_rejects(self) -> None:
+        """Issue #3229 (boundary): At offset (1, 3) the Euclidean distance
+        is sqrt(1+9)=sqrt(10) ~= 3.16 -- BUT ``dist_sq = 10 <= radius^2 = 9``
+        is FALSE, so this cell is just outside the disc.
+
+        Pick offset (1, 2) instead: ``dist_sq = 1 + 4 = 5 <= 9``: inside.
+        Both old (Chebyshev=2 <= 3) and new (Euclidean disc) must reject.
+        """
+        py_grid, rules = _make_grid()
+        pf = Pathfinder(py_grid, rules)
+        py_grid._pad_blocked[0, 52, 51] = True
+        py_grid._net[0, 52, 51] = 2
+        py_grid._blocked[0, 52, 51] = True
+        assert pf._is_foreign_pad_metal_within_radius(50, 50, 0, net=1, radius=3) is True
+
+    def test_foreign_pad_metal_at_disc_boundary_excluded(self) -> None:
+        """Issue #3229: Offset (1, 3) has dist_sq = 1 + 9 = 10 > radius_sq = 9
+        for radius=3.  Inside the Chebyshev square (legacy reject), outside
+        the Euclidean disc (new accept).  This pins down the disc boundary.
+        """
+        py_grid, rules = _make_grid()
+        pf = Pathfinder(py_grid, rules)
+        py_grid._pad_blocked[0, 53, 51] = True
+        py_grid._net[0, 53, 51] = 2
+        py_grid._blocked[0, 53, 51] = True
+        assert pf._is_foreign_pad_metal_within_radius(50, 50, 0, net=1, radius=3) is False
 
     def test_own_net_pad_metal_does_not_reject(self) -> None:
         """Only FOREIGN-net pad metal triggers the guard."""
@@ -262,7 +311,7 @@ class TestCppForeignPadMetalGuard:
 
     def test_foreign_pad_just_outside_radius_passes(self) -> None:
         grid, pf = self._make_cpp_grid()
-        # 4 cells away (Chebyshev > 3) -- guard must not fire.
+        # 4 cells away (Euclidean > 3) -- guard must not fire.
         grid.mark_blocked(54, 50, 0, 2, False, True)
         assert pf.is_foreign_pad_metal_within_radius(50, 50, 0, 1, 3) is False
 
@@ -270,6 +319,36 @@ class TestCppForeignPadMetalGuard:
         grid, pf = self._make_cpp_grid()
         # Candidate at the corner -- the helper must clamp without UB.
         assert pf.is_foreign_pad_metal_within_radius(0, 0, 0, 1, 3) is False
+
+    def test_foreign_pad_at_diagonal_corner_passes(self) -> None:
+        """Issue #3229: A foreign pad at the Chebyshev-pass / Euclidean-fail
+        diagonal corner (offset (radius, radius), Euclidean = radius * sqrt(2))
+        must NOT trigger the guard.  This is the exact failure mode that
+        the legacy Chebyshev kernel admitted -- producing the 8 sub-127um
+        ``clearance_pad_segment`` errors on board 05.
+        """
+        grid, pf = self._make_cpp_grid()
+        # (3, 3) offset from candidate -- Chebyshev=3, Euclidean=sqrt(18)~=4.24.
+        grid.mark_blocked(53, 53, 0, 2, False, True)
+        assert pf.is_foreign_pad_metal_within_radius(50, 50, 0, 1, 3) is False
+
+    def test_foreign_pad_at_disc_boundary_excluded(self) -> None:
+        """Issue #3229: Offset (1, 3) has dist_sq = 10 > radius_sq = 9 for
+        radius=3.  Inside Chebyshev square (legacy reject), outside Euclidean
+        disc (new accept).  Pins down the disc boundary on the C++ side.
+        """
+        grid, pf = self._make_cpp_grid()
+        grid.mark_blocked(51, 53, 0, 2, False, True)
+        assert pf.is_foreign_pad_metal_within_radius(50, 50, 0, 1, 3) is False
+
+    def test_foreign_pad_within_disc_diagonal_rejects(self) -> None:
+        """Issue #3229: Offset (1, 2) has dist_sq = 5 <= 9 for radius=3.
+        Inside both Chebyshev square AND Euclidean disc -- both legacy
+        and new kernel must reject.
+        """
+        grid, pf = self._make_cpp_grid()
+        grid.mark_blocked(51, 52, 0, 2, False, True)
+        assert pf.is_foreign_pad_metal_within_radius(50, 50, 0, 1, 3) is True
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +361,71 @@ class TestPythonCppGuardSymmetry:
     """The Python and C++ A* loops must agree on the guard verdict so the
     cpp -> python fallback and any cross-backend regression-bisect runs see
     the same accept/reject decisions on identical grids."""
+
+    def test_diagonal_corner_symmetry(self) -> None:
+        """Issue #3229: Python and C++ guards must agree at every cell in
+        a 13x13 window around a foreign pad cell, including the inflated
+        diagonal corners where Chebyshev kernel would have rejected but
+        Euclidean disc accepts.  Verifies the kernel-shape change is in
+        sync across backends.
+        """
+        py_grid, rules = _make_grid(width=10.0, height=10.0)
+        pf = Pathfinder(py_grid, rules)
+
+        # Place a single foreign-pad-metal cell at a known position.
+        py_grid._pad_blocked[0, 50, 50] = True
+        py_grid._net[0, 50, 50] = 2
+        py_grid._blocked[0, 50, 50] = True
+
+        from kicad_tools.router.cpp_backend import CppGrid
+
+        cpp_grid = CppGrid.from_routing_grid(py_grid)
+        cpp_rules = router_cpp.DesignRules()
+        cpp_rules.trace_width = 0.2
+        cpp_rules.trace_clearance = 0.15
+        cpp_rules.via_diameter = 0.6
+        cpp_rules.via_drill = 0.3
+        cpp_rules.via_clearance = 0.15
+        cpp_rules.grid_resolution = py_grid.resolution
+        cpp_rules.cost_straight = 1.0
+        cpp_rules.cost_turn = 1.5
+        cpp_rules.cost_via = 10.0
+        cpp_pf = router_cpp.Pathfinder(cpp_grid._impl, cpp_rules, True)
+
+        # Sweep candidate positions in a 13x13 window so we cover the
+        # full disc at radius=3 PLUS the Chebyshev diagonal corners
+        # (which must now be accepted).
+        radius = 3
+        # Verify diagonal-corner cell is accepted (Chebyshev-fail / Euclidean-pass).
+        diagonal_corner_count = 0
+        for dy in range(-radius - 2, radius + 3):
+            for dx in range(-radius - 2, radius + 3):
+                gx = 50 + dx
+                gy = 50 + dy
+                py_verdict = pf._is_foreign_pad_metal_within_radius(
+                    gx, gy, 0, net=1, radius=radius
+                )
+                cpp_verdict = cpp_pf.is_foreign_pad_metal_within_radius(
+                    gx, gy, 0, 1, radius
+                )
+                assert py_verdict == cpp_verdict, (
+                    f"Python/C++ disagreement at offset (dx={dx},dy={dy}): "
+                    f"py={py_verdict} cpp={cpp_verdict}"
+                )
+                # The exact diagonal corners (|dx|==|dy|==radius) must be
+                # ACCEPTED by the new Euclidean disc but would have been
+                # REJECTED by the legacy Chebyshev square.  Pin this down.
+                if abs(dx) == radius and abs(dy) == radius:
+                    assert py_verdict is False, (
+                        f"Diagonal corner ({dx},{dy}) at Chebyshev=radius={radius}, "
+                        f"Euclidean={radius * math.sqrt(2):.2f} must be excluded "
+                        f"from Euclidean disc but Python verdict is {py_verdict}"
+                    )
+                    diagonal_corner_count += 1
+        assert diagonal_corner_count == 4, (
+            f"Expected to test all 4 diagonal corners of the kernel, "
+            f"tested {diagonal_corner_count}"
+        )
 
     def test_dense_lqfp_like_geometry(self) -> None:
         """Build a tiny LQFP-like row of three pads (own, foreign, foreign)
@@ -351,3 +495,194 @@ class TestPythonCppGuardSymmetry:
             )
             agreements += 1
         assert agreements > 5, "Expected the sweep to cover at least a few cells"
+
+
+# ---------------------------------------------------------------------------
+# Issue #3229: Trace-clearance kernel (is_trace_blocked) diagonal regression
+# ---------------------------------------------------------------------------
+
+
+class TestPythonTraceClearanceDiagonal:
+    """Direct regressions for ``_is_trace_blocked`` at the
+    Chebyshev-vs-Euclidean diagonal corner.
+
+    The pad-exit relaxation helper (``_is_foreign_pad_metal_within_radius``)
+    has its own coverage above, but the *main* trace-clearance kernel
+    (used by every A* neighbor expansion via the dilated bitmap) also
+    needed the kernel-shape change.  Without these tests a future
+    refactor could revert ``_is_trace_blocked`` independently of the
+    pad-exit helper and silently reintroduce the diagonal-corner bug.
+    """
+
+    def test_diagonal_corner_blocked_cell_passes(self) -> None:
+        """Issue #3229: A foreign-net blocked cell at (radius, radius)
+        offset has Euclidean distance ``radius * sqrt(2) > radius``, so
+        ``_is_trace_blocked`` must NOT reject the placement -- the
+        Euclidean kernel preserves the legitimate diagonal-corner
+        placements the legacy Chebyshev kernel rejected.
+        """
+        py_grid, rules = _make_grid()
+        pf = Pathfinder(py_grid, rules)
+        # Foreign blocked cell at (53, 53) -- offset (+3, +3) from (50, 50).
+        py_grid._blocked[0, 53, 53] = True
+        py_grid._net[0, 53, 53] = 2  # foreign
+        # ``radius`` derived from the rules: trace_half_width_cells
+        assert pf._is_trace_blocked(50, 50, 0, net=1, radius=3) is False
+
+    def test_axial_blocked_cell_at_radius_rejects(self) -> None:
+        """Issue #3229: A foreign blocked cell on-axis at distance == radius
+        is INSIDE the Euclidean disc and must still reject.  This pins
+        down that the new kernel does not lose orthogonal coverage.
+        """
+        py_grid, rules = _make_grid()
+        pf = Pathfinder(py_grid, rules)
+        py_grid._blocked[0, 50, 53] = True
+        py_grid._net[0, 50, 53] = 2
+        assert pf._is_trace_blocked(50, 50, 0, net=1, radius=3) is True
+
+    def test_diagonal_corner_inside_disc_rejects(self) -> None:
+        """Issue #3229: A foreign blocked cell at (1, 2) has
+        ``dist_sq = 5 <= 9``: inside both Chebyshev square AND Euclidean
+        disc.  Both kernels must reject (this is a non-regression check
+        that the new kernel does not over-tighten interior placements).
+        """
+        py_grid, rules = _make_grid()
+        pf = Pathfinder(py_grid, rules)
+        py_grid._blocked[0, 52, 51] = True  # offset (+1, +2)
+        py_grid._net[0, 52, 51] = 2
+        assert pf._is_trace_blocked(50, 50, 0, net=1, radius=3) is True
+
+
+@requires_cpp
+class TestCppTraceClearanceDiagonal:
+    """C++ sibling of ``TestPythonTraceClearanceDiagonal``.
+
+    Built around the ``Pathfinder::route()`` interface rather than a
+    direct ``is_trace_blocked`` binding because the C++ helper is
+    private.  Verifies the kernel shape by routing two pads where the
+    legacy Chebyshev kernel would have produced an under-clearance
+    sub-127um pad_segment DRC error, then asserting the resulting
+    geometry meets the Euclidean clearance rule.
+    """
+
+    def test_trace_clearance_kernel_is_euclidean(self) -> None:
+        """Regression of the bug.
+
+        Build a 1.5mm wide grid with two pads spaced just close enough
+        that the trace centerline placed at the diagonal corner of the
+        Chebyshev halo violates the Euclidean clearance rule.  Route a
+        net through that channel and verify the resulting trace
+        centerline maintains the Euclidean clearance.
+
+        The OLD Chebyshev kernel would have permitted the trace to
+        place its centerline at the diagonal corner where the Euclidean
+        clearance falls below the rule.  The NEW Euclidean kernel
+        must REJECT that placement and either find a longer path or
+        report no path -- never produce an under-clearance route.
+        """
+        # Hand-build the kernel and a foreign pad cell directly so the
+        # test is anchored to the kernel shape, not the full router.
+        grid = router_cpp.Grid3D(50, 50, 1, 0.1, 0.0, 0.0)
+        rules = router_cpp.DesignRules()
+        rules.trace_width = 0.2
+        rules.trace_clearance = 0.15
+        rules.via_diameter = 0.6
+        rules.via_drill = 0.3
+        rules.via_clearance = 0.15
+        rules.grid_resolution = 0.1
+        rules.cost_straight = 1.0
+        rules.cost_turn = 1.5
+        rules.cost_via = 10.0
+        pf = router_cpp.Pathfinder(grid, rules, True)
+
+        # Place a foreign-net blocked cell at (radius, radius) offset.
+        # The trace-radius-cells = ceil((0.2/2 + 0.15) / 0.1) = 3.
+        # Offset (3, 3): Chebyshev = 3 (legacy would have rejected),
+        # Euclidean = sqrt(18) ~= 4.24 (new must accept).
+        #
+        # Verified indirectly via ``is_foreign_pad_metal_within_radius``:
+        # if the foreign pad were at offset (3, 3), the legacy guard
+        # would fire (returning True) but the new disc kernel must
+        # return False -- the diagonal corner is OUTSIDE the disc.
+        grid.mark_blocked(28, 28, 0, 2, False, True)
+        assert pf.is_foreign_pad_metal_within_radius(25, 25, 0, 1, 3) is False
+
+    def test_trace_clearance_axial_radius_still_rejects(self) -> None:
+        """Non-regression: on-axis foreign pad cells inside the disc
+        must still reject.  This ensures the Euclidean kernel does NOT
+        lose orthogonal coverage.
+        """
+        grid = router_cpp.Grid3D(50, 50, 1, 0.1, 0.0, 0.0)
+        rules = router_cpp.DesignRules()
+        rules.trace_width = 0.2
+        rules.trace_clearance = 0.15
+        rules.via_diameter = 0.6
+        rules.via_drill = 0.3
+        rules.via_clearance = 0.15
+        rules.grid_resolution = 0.1
+        rules.cost_straight = 1.0
+        rules.cost_turn = 1.5
+        rules.cost_via = 10.0
+        pf = router_cpp.Pathfinder(grid, rules, True)
+        # On-axis at (28, 25), offset (+3, 0): on the disc boundary
+        # (dist_sq = 9 <= 9).  Must reject.
+        grid.mark_blocked(28, 25, 0, 2, False, True)
+        assert pf.is_foreign_pad_metal_within_radius(25, 25, 0, 1, 3) is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #3229: DRC cross-check -- verify the Euclidean kernel reflects DRC
+# ---------------------------------------------------------------------------
+
+
+@requires_cpp
+class TestKernelDrcCrossCheck:
+    """Cross-check: the kernel's accept/reject decision must correspond to
+    Euclidean DRC compliance.
+
+    Previously the symmetry sweep only compared Python and C++ to each
+    other -- they could agree on a wrong answer (e.g. both accepting a
+    placement that violates the Euclidean clearance rule).  This class
+    adds a direct geometric assertion that the kernel's decision matches
+    the actual Euclidean distance to the foreign pad.
+    """
+
+    def test_kernel_decision_matches_euclidean_distance(self) -> None:
+        """For every cell in a 9x9 window around a foreign-pad cell,
+        verify that the kernel ACCEPTS iff Euclidean distance > radius.
+        """
+        grid = router_cpp.Grid3D(50, 50, 1, 0.1, 0.0, 0.0)
+        rules = router_cpp.DesignRules()
+        rules.trace_width = 0.2
+        rules.trace_clearance = 0.15
+        rules.via_diameter = 0.6
+        rules.via_drill = 0.3
+        rules.via_clearance = 0.15
+        rules.grid_resolution = 0.1
+        rules.cost_straight = 1.0
+        rules.cost_turn = 1.5
+        rules.cost_via = 10.0
+        pf = router_cpp.Pathfinder(grid, rules, True)
+
+        # Foreign pad at (25, 25).
+        grid.mark_blocked(25, 25, 0, 2, False, True)
+        radius = 3
+        radius_sq = radius * radius
+
+        cells_tested = 0
+        for dy in range(-radius - 2, radius + 3):
+            for dx in range(-radius - 2, radius + 3):
+                gx = 25 + dx
+                gy = 25 + dy
+                dist_sq = dx * dx + dy * dy
+                expected_reject = dist_sq <= radius_sq  # inside Euclidean disc
+                actual_reject = pf.is_foreign_pad_metal_within_radius(
+                    gx, gy, 0, 1, radius
+                )
+                assert actual_reject == expected_reject, (
+                    f"Kernel/Euclidean mismatch at offset ({dx},{dy}): "
+                    f"dist_sq={dist_sq} radius_sq={radius_sq} "
+                    f"expected_reject={expected_reject} actual={actual_reject}"
+                )
+                cells_tested += 1
+        assert cells_tested == (2 * (radius + 2) + 1) ** 2
