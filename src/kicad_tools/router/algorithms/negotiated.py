@@ -1875,6 +1875,135 @@ class NegotiatedRouter:
 
         return blocker_scores
 
+    def score_foreign_budget_overlap(
+        self,
+        candidate_nets: list[int],
+        net_routes: dict[int, list[Route]],
+        pad_channel_budgets: list,
+    ) -> dict[int, int]:
+        """Score nets by how many cells of their committed routes lie in
+        *foreign* pad-channel-budget rectangles (Issue #3230).
+
+        A per-pad channel budget (#3143) tags a rectangular escape-channel
+        region with a soft per-cell penalty.  Each budget has a
+        ``source_net`` — the net for which that channel is reserved.
+        Cells of a route belonging to ``net != budget.source_net`` that
+        fall inside the rectangle indicate the route is *parked in
+        someone else's escape strip*, contributing to the stalemate
+        observed on softstart where stuck nets cannot escape their pad
+        cluster because foreign nets are camping in their channels.
+
+        Selecting such a net for rip-up frees the channel for its
+        rightful source-net, which is exactly the lever the issue
+        describes.  This signal is consumed by :meth:`neighborhood_ripup`
+        as a TIE-BREAK between candidates already ranked by
+        :meth:`find_blocking_nets_relaxed`'s stuck-nets count — a
+        minimally-invasive change that preserves the existing primary
+        ordering on non-softstart boards while letting the budget hint
+        do work when counts tie.
+
+        Args:
+            candidate_nets: Net IDs to score (typically the keys of the
+                blocker_scores dict from ``find_blocking_nets_relaxed``).
+            net_routes: Dict of net_id -> committed routes (segments).
+            pad_channel_budgets: List of ``PadChannelBudget`` objects
+                with ``gx1/gy1/gx2/gy2/layer/source_net`` attributes.
+                Empty list yields all-zero scores (no signal available).
+
+        Returns:
+            Dict mapping net_id -> integer cell-overlap count.  Higher
+            score = camping in more foreign escape channels.
+        """
+        if not pad_channel_budgets or not candidate_nets:
+            return {n: 0 for n in candidate_nets}
+
+        # Pre-extract budget rectangles into plain tuples to avoid
+        # attribute lookups in the inner loop.  Layer = -1 means "all
+        # layers" (matches the C++ side's convention -- see
+        # router.core.Router._build_pad_channel_budgets where the field
+        # is set to -1 unconditionally).
+        budget_rects: list[tuple[int, int, int, int, int, int]] = []
+        for b in pad_channel_budgets:
+            try:
+                budget_rects.append((
+                    int(b.gx1),
+                    int(b.gy1),
+                    int(b.gx2),
+                    int(b.gy2),
+                    int(getattr(b, "layer", -1)),
+                    int(b.source_net),
+                ))
+            except (AttributeError, TypeError):
+                continue
+
+        if not budget_rects:
+            return {n: 0 for n in candidate_nets}
+
+        scores: dict[int, int] = {n: 0 for n in candidate_nets}
+
+        for net_id in candidate_nets:
+            routes = net_routes.get(net_id, [])
+            if not routes:
+                continue
+
+            cell_count = 0
+            for route in routes:
+                for seg in route.segments:
+                    # Convert segment endpoints to grid coordinates and
+                    # walk a coarse-sampled set of midpoint cells.  Full
+                    # Bresenham would be more accurate but the budget
+                    # rectangles are O(10-30 cells) in extent and the
+                    # candidate list is bounded by the rip-up max_attempts
+                    # (default 3), so coarse sampling at endpoints +
+                    # midpoint already discriminates "parked inside" from
+                    # "just clipping a corner".
+                    try:
+                        gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                        gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                    except (AttributeError, TypeError):
+                        continue
+
+                    try:
+                        seg_layer_idx = self.grid.layer_to_index(
+                            seg.layer.value
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        seg_layer_idx = -1
+
+                    # Sample three cells: both endpoints and the midpoint.
+                    sample_cells = (
+                        (int(gx1), int(gy1)),
+                        ((int(gx1) + int(gx2)) // 2,
+                         (int(gy1) + int(gy2)) // 2),
+                        (int(gx2), int(gy2)),
+                    )
+                    for sx, sy in sample_cells:
+                        for bgx1, bgy1, bgx2, bgy2, b_layer, b_src in (
+                            budget_rects
+                        ):
+                            # Skip budgets owned by this net -- the
+                            # rip-up should NOT penalise a net for
+                            # occupying its OWN escape strip.
+                            if b_src == net_id:
+                                continue
+                            # Layer match: -1 means any layer.
+                            if (
+                                b_layer != -1
+                                and seg_layer_idx != -1
+                                and b_layer != seg_layer_idx
+                            ):
+                                continue
+                            if bgx1 <= sx <= bgx2 and bgy1 <= sy <= bgy2:
+                                cell_count += 1
+                                # A single budget hit per sample cell is
+                                # enough; further budgets on the same
+                                # cell would double-count.  Break inner.
+                                break
+
+            scores[net_id] = cell_count
+
+        return scores
+
     def neighborhood_ripup(
         self,
         failed_nets: list[int],
@@ -1941,8 +2070,36 @@ class NegotiatedRouter:
             # No relaxed path found for any stuck net -- truly unroutable
             return False, _count_routed()
 
-        # Sort blockers by score descending (block the most stuck nets first)
-        sorted_blockers = sorted(blocker_scores.items(), key=lambda x: -x[1])
+        # Issue #3230: Pull the per-pad channel budget list from the
+        # underlying pathfinder (C++ backend exposes this as
+        # ``_pad_channel_budgets``; Python backend lacks it -- both
+        # tolerated via ``getattr`` returning ``[]``).  The budget signal
+        # is used below as a strict TIE-BREAK after the primary
+        # stuck-nets count, so non-softstart boards whose blocker counts
+        # don't tie see identical ordering and zero behaviour change.
+        # When ``KCT_DISABLE_PAD_BUDGETS=1`` was set at the pre-pass, the
+        # backend's budget list will be empty and ``foreign_overlap``
+        # below collapses to all-zero -- this is the A/B knob (AC #5).
+        pad_channel_budgets = getattr(
+            self.router, "_pad_channel_budgets", []
+        ) or []
+        foreign_overlap = self.score_foreign_budget_overlap(
+            list(blocker_scores.keys()),
+            net_routes,
+            pad_channel_budgets,
+        )
+
+        # Sort blockers by (count desc, foreign_budget_overlap desc).
+        # The primary key is unchanged from pre-#3230 behaviour.  The
+        # secondary key is a tie-break: when two blockers obstruct the
+        # same number of stuck nets, prefer the one parked in more
+        # foreign escape channels (it's the more disruptive squatter).
+        # Deterministic third key (-net id) preserves PYTHONHASHSEED
+        # determinism in case both prior keys tie.
+        sorted_blockers = sorted(
+            blocker_scores.items(),
+            key=lambda x: (-x[1], -foreign_overlap.get(x[0], 0), -x[0]),
+        )
 
         for blocker_net, score in sorted_blockers:
             if attempts >= max_attempts:
