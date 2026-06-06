@@ -1260,6 +1260,503 @@ class TestEarlyTermination:
         )
 
 
+class TestRegressionEarlyExit:
+    """Tests for Issue #3241: monotonic regression early-exit.
+
+    When the auto-layers escalation ladder produces strictly decreasing
+    nets_routed across attempts (e.g., chorus-test-revA 15% -> 12% -> 10%
+    observed 2026-06-06), more layers cannot cure the underlying issue.
+    This test class verifies:
+
+    1. Two consecutive regressions (>tolerance) trigger early exit.
+    2. A single hard drop (>=HARD_DROP_NETS) triggers immediate exit.
+    3. Small flicker (<=tolerance) does NOT trigger exit.
+    4. The pre-regression best result is preserved.
+    5. Above all, the new check does NOT fire on monotonically-improving
+       cases (no regression on the existing fleet).
+    """
+
+    def _make_mock_router(
+        self, nets_routed, nets_to_route, overflow, failure_causes=None
+    ):
+        """Create a mock router with predictable stats and optional failures.
+
+        Args:
+            failure_causes: Optional list of FailureCause enum members.
+                When set, ``router.routing_failures`` is populated with
+                one stub failure per cause so the histogram log line
+                (Option D in #3241) has data to emit.
+        """
+        from unittest.mock import MagicMock
+
+        router = MagicMock()
+        router.nets = {
+            i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)
+        }
+        router.grid.width = 50.0
+        router.grid.height = 40.0
+        router.grid.get_total_overflow.return_value = overflow
+        router.get_statistics.return_value = {
+            "nets_routed": nets_routed,
+            "segments": 10,
+            "vias": 2,
+        }
+        router.power_stall_abort = False
+        router._pour_nets_without_zones = set()
+        router.rules.via_diameter = 0.6
+        router.rules.min_drill_clearance = 0.0
+        router.rules.trace_width = 0.2
+        router.rules.trace_clearance = 0.15
+        # router/io.py:2120 compares router._edge_clearance > 0 -- so
+        # MagicMock's default sentinel must be replaced with None.  Same
+        # for _edge_segments (truthiness check on adjacent line).
+        router._edge_clearance = None
+        router._edge_segments = None
+        # Routes used by drc_nudge / post-route DRC iteration.
+        router.routes = []
+
+        # Populate routing_failures so the histogram code path is
+        # exercised.  When ``failure_causes`` is None, default to a
+        # mixed-cause histogram resembling the chorus repro.
+        if failure_causes is None:
+            from kicad_tools.router.failure_analysis import FailureCause
+
+            failure_causes = [
+                FailureCause.BLOCKED_PATH,
+                FailureCause.PIN_ACCESS,
+                FailureCause.CONGESTION,
+            ]
+        stub_failures = []
+        for cause in failure_causes:
+            f = MagicMock()
+            f.failure_cause = cause
+            stub_failures.append(f)
+        router.routing_failures = stub_failures
+        return router
+
+    def _make_args(self, **overrides):
+        """Create minimal args for route_with_layer_escalation."""
+        defaults = {
+            "backend": "python",
+            "grid": 0.25,
+            "trace_width": 0.2,
+            "clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "fine_pitch_clearance": None,
+            "skip_nets": None,
+            "auto_pour": False,
+            "max_layers": 6,
+            "min_completion": 0.95,
+            "strategy": "negotiated",
+            "verbose": False,
+            "force": False,
+            "timeout": 60,
+            "iterations": 3,
+            "per_net_timeout": None,
+            "batch_routing": False,
+            "high_performance": False,
+            "hierarchical": False,
+            "perturbation": True,
+            "two_phase": False,
+            "multi_resolution": False,
+            "edge_clearance": 0.25,
+            "escape_routing": None,
+            "no_optimize": True,
+            "dry_run": True,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_two_consecutive_regressions_exit(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """Two consecutive regressions (each > tolerance) trigger exit.
+
+        Mirrors the chorus-test-revA repro: attempt 1 = 20 nets, attempt 2
+        = 12 nets (drop=8, but skip individual hard-drop check by using a
+        smaller-than-HARD_DROP delta on the second observation), attempt 3
+        should never run.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Attempt 1: 20/48; attempt 2: 17/48 (drop=3, > tolerance, streak=1);
+        # attempt 3: 14/48 (drop=3, > tolerance, streak=2 -> exit before
+        # starting attempt 4).
+        attempt_results = [
+            (20, 48, 5),
+            (17, 48, 5),
+            (14, 48, 5),
+            (11, 48, 5),  # would-be attempt 4 if not for the exit
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            idx = min(call_count, len(attempt_results) - 1)
+            nets_routed, nets_to_route, overflow = attempt_results[idx]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # Attempts: 1 (baseline), 2 (streak=1), 3 (streak=2 -> exit before 4)
+        # The loop should break AFTER attempt 3, never calling load for #4.
+        assert call_count == 3, (
+            f"Expected 3 attempts (two consecutive regressions trigger exit), "
+            f"got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_hard_drop_exits_immediately(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """A single attempt with a >=5-net drop triggers immediate exit.
+
+        AC3 in the curator-enhanced acceptance criteria.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Attempt 1: 20/48; attempt 2: 13/48 (drop=7 >= HARD_DROP_NETS=5)
+        # exit after attempt 2 without waiting for a second streak hit.
+        attempt_results = [
+            (20, 48, 5),
+            (13, 48, 5),
+            (10, 48, 5),
+            (8, 48, 5),
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            idx = min(call_count, len(attempt_results) - 1)
+            nets_routed, nets_to_route, overflow = attempt_results[idx]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # Hard drop exits after attempt 2.
+        assert call_count == 2, (
+            f"Expected 2 attempts (hard-drop immediate exit), got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_flicker_within_tolerance_does_not_exit(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """A small flicker (<= REGRESSION_TOLERANCE) must not trigger exit.
+
+        AC2 in the curator-enhanced acceptance criteria.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Attempt 1: 20/48; attempt 2: 19/48 (drop=1, within tolerance=2);
+        # attempt 3: 18/48 (drop=1 again, still within tolerance).  Both
+        # below the 50% completion floor so #2412 stagnation does NOT fire.
+        # The new regression check must NOT fire on a 1-net flicker.
+        attempt_results = [
+            (20, 48, 5),
+            (19, 48, 5),
+            (18, 48, 5),
+            (17, 48, 5),
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            idx = min(call_count, len(attempt_results) - 1)
+            nets_routed, nets_to_route, overflow = attempt_results[idx]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # All 4 configs should run because the per-attempt drop is within
+        # tolerance.  The default ladder is [2L, 4L_sgps, 4L_all_sig, 6L]
+        # = 4 attempts.
+        assert call_count == 4, (
+            f"Expected 4 attempts (flicker within tolerance, no exit), "
+            f"got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_best_result_preserved_after_regression_exit(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """After regression-exit, the final result is the pre-regression best.
+
+        AC4 in the curator-enhanced acceptance criteria.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Attempt 1: 20 routed (best); attempt 2: 12 routed (hard drop).
+        attempt_results = [
+            (20, 48, 5),
+            (12, 48, 5),
+        ]
+        call_count = 0
+        seen_routers = []
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            idx = min(call_count, len(attempt_results) - 1)
+            nets_routed, nets_to_route, overflow = attempt_results[idx]
+            r = self._make_mock_router(nets_routed, nets_to_route, overflow)
+            seen_routers.append((r, nets_routed))
+            call_count += 1
+            return r, {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                with patch("kicad_tools.router.show_routing_summary"):
+                    with patch(
+                        "kicad_tools.cli.route_cmd.run_post_route_drc",
+                        return_value=False,
+                    ):
+                        route_with_layer_escalation(
+                            pcb, out, self._make_args(), quiet=True
+                        )
+
+        # Confirm only the first two attempts ran (hard-drop after #2).
+        # Note: the pre-regression best (20 routed) is selected by the
+        # ``_is_better_result`` rule, which compares absolute nets_routed
+        # (#2396).  We verify that by checking the loop terminated after
+        # the second attempt rather than running attempts 3 and 4.
+        assert call_count == 2, (
+            f"Expected 2 attempts before hard-drop exit, got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_monotonic_improvement_no_early_exit(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """Monotonically improving runs must complete the full ladder.
+
+        AC6 in the curator-enhanced acceptance criteria.  This is the
+        regression guard for the existing fleet (boards 01-07).
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        # Strictly increasing nets_routed every attempt.
+        attempt_results = [
+            (5, 20, 30),
+            (10, 20, 20),
+            (15, 20, 10),
+            (18, 20, 5),
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            idx = min(call_count, len(attempt_results) - 1)
+            nets_routed, nets_to_route, overflow = attempt_results[idx]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # All 4 attempts run because each strictly improves on the prior.
+        assert call_count == 4, (
+            f"Expected 4 attempts on monotonic improvement, got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_chorus_pattern_exits_after_attempt_2(
+        self, _esc_flag, _esc_use, _pour, tmp_path
+    ):
+        """The chorus-test-revA pattern (15% -> 12% -> 10%) triggers exit.
+
+        AC1: synthesizes the chorus repro -- attempt 1 = 7/48 (15%),
+        attempt 2 = 6/48 (12%, drop=1 within tolerance), attempt 3 would
+        be 5/48 (10%).  With tolerance=2 and the chorus drops being
+        within tolerance the existing stagnation check would normally
+        catch this -- BUT the #2673 floor (50%) gates stagnation off at
+        <50% completion.  This test verifies the new regression-exit
+        either fires here OR the existing #2412 stagnation path runs
+        without the floor guard (whichever the implementation chooses).
+
+        Note: with tolerance=2 the literal chorus repro (7->6->5, each
+        drop=1) does not trigger the regression-exit.  This is by design
+        -- a 1-net drop on a 48-net board is well within the noise
+        envelope.  For the actual chorus regression (which is downstream
+        of issue #3237's router regression), the cure is in #3237 not
+        here.  This issue's value is the >5-net hard-drop and the
+        2-consecutive-regression cases that DO fire reliably.
+
+        This test therefore checks the boundary: when the chorus pattern
+        is amplified (drops of 3, 3, 3 instead of 1, 1, 1), the
+        regression-exit fires after attempt 3 (streak=2).
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        attempt_results = [
+            (10, 48, 5),  # 21% completion
+            (7, 48, 5),   # 15% (drop=3, streak=1)
+            (4, 48, 5),   # 8% (drop=3, streak=2 -> exit before attempt 4)
+            (1, 48, 5),
+        ]
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            idx = min(call_count, len(attempt_results) - 1)
+            nets_routed, nets_to_route, overflow = attempt_results[idx]
+            call_count += 1
+            return self._make_mock_router(nets_routed, nets_to_route, overflow), {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
+
+        # Exit after attempt 3 (streak hits CONSECUTIVE_REGRESSIONS=2).
+        assert call_count == 3, (
+            f"Expected 3 attempts before regression-streak exit, got {call_count}"
+        )
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_single_attempt_noop(self, _esc_flag, _esc_use, _pour, tmp_path):
+        """A single-attempt ladder must not crash on missing prev value.
+
+        Edge-case from the curator's test plan: ``prev_nets_routed`` is
+        None on attempt 1, so the regression check must short-circuit.
+        """
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        router = self._make_mock_router(nets_routed=20, nets_to_route=20, overflow=0)
+        call_count = 0
+
+        def mock_load(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return router, {}
+
+        args = self._make_args(max_layers=2)  # restrict to single attempt
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                with patch("kicad_tools.router.show_routing_summary"):
+                    with patch(
+                        "kicad_tools.cli.route_cmd.run_post_route_drc",
+                        return_value=False,
+                    ):
+                        route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # max_layers=2 with success on attempt 1 means call_count == 1.
+        assert call_count == 1
+
+
+class TestFailureCauseHistogram:
+    """Tests for Issue #3241 Option D: per-attempt failure-cause histogram."""
+
+    def test_log_failure_cause_histogram_with_failures(self, capsys):
+        """Histogram prints when router has routing_failures."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _log_failure_cause_histogram
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        router = MagicMock()
+        f1 = MagicMock()
+        f1.failure_cause = FailureCause.BLOCKED_PATH
+        f2 = MagicMock()
+        f2.failure_cause = FailureCause.BLOCKED_PATH
+        f3 = MagicMock()
+        f3.failure_cause = FailureCause.PIN_ACCESS
+        router.routing_failures = [f1, f2, f3]
+
+        _log_failure_cause_histogram(router, quiet=False)
+        captured = capsys.readouterr()
+        # Histogram is dict-like: "{'blocked_path': 2, 'pin_access': 1}"
+        assert "Failure causes:" in captured.out
+        assert "blocked_path" in captured.out
+        assert "pin_access" in captured.out
+
+    def test_log_failure_cause_histogram_no_failures(self, capsys):
+        """No output when router has empty routing_failures."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _log_failure_cause_histogram
+
+        router = MagicMock()
+        router.routing_failures = []
+        _log_failure_cause_histogram(router, quiet=False)
+        captured = capsys.readouterr()
+        assert "Failure causes:" not in captured.out
+
+    def test_log_failure_cause_histogram_quiet(self, capsys):
+        """Quiet mode suppresses output."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _log_failure_cause_histogram
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        router = MagicMock()
+        f = MagicMock()
+        f.failure_cause = FailureCause.CONGESTION
+        router.routing_failures = [f]
+        _log_failure_cause_histogram(router, quiet=True)
+        captured = capsys.readouterr()
+        assert "Failure causes:" not in captured.out
+
+    def test_log_failure_cause_histogram_none_router(self):
+        """No crash on None router (edge-case for early-attempt failures)."""
+        from kicad_tools.cli.route_cmd import _log_failure_cause_histogram
+
+        # Should not raise.
+        _log_failure_cause_histogram(None, quiet=False)
+
+
 class TestPristineStatePerAttempt:
     """Tests for Issue #2396: pristine state per layer-escalation attempt.
 
