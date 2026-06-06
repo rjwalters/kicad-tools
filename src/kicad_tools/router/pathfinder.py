@@ -1441,6 +1441,48 @@ class Router:
                 blocked_different_net = blocked_different_net & ~partner_relax_mask
             return bool(np.any(blocked_different_net))
 
+    def _is_foreign_pad_metal_within_radius(
+        self,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        radius: int,
+    ) -> bool:
+        """Pad-exit relaxation safety check (Issue #3226).
+
+        Returns True when any cell within Chebyshev ``radius`` of
+        ``(gx, gy, layer)`` is FOREIGN-net pad copper -- that is,
+        ``grid._pad_blocked[layer, cy, cx]`` is True AND
+        ``grid._net[layer, cy, cx] != net``.
+
+        Pure clearance-halo cells, copper-pour cells, and routed-trace
+        cells are skipped so the legitimate pad-exit step into a
+        foreign pad's clearance band remains allowed; only candidate
+        centerline placements that would put the trace edge (radius
+        cells beyond the centerline) inside foreign pad copper are
+        rejected.
+
+        This is the Python sibling of
+        ``Pathfinder::is_foreign_pad_metal_within_radius`` in
+        ``cpp/src/pathfinder.cpp``.  Both backends share the same
+        grid-cell-level pad-exit-relaxation guard.
+        """
+        if radius <= 0:
+            return False
+        x1 = max(0, gx - radius)
+        y1 = max(0, gy - radius)
+        x2 = min(self.grid.cols, gx + radius + 1)
+        y2 = min(self.grid.rows, gy + radius + 1)
+        if x1 >= x2 or y1 >= y2:
+            return False
+        pad_region = self.grid._pad_blocked[layer, y1:y2, x1:x2]
+        if not bool(np.any(pad_region)):
+            return False
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+        # Foreign pad metal == pad_blocked AND net != routing net.
+        return bool(np.any(pad_region & (net_region != net)))
+
     def _is_diagonal_corner_blocked(
         self, gx: int, gy: int, dx: int, dy: int, layer: int, net: int, allow_sharing: bool = False
     ) -> bool:
@@ -2631,8 +2673,28 @@ class Router:
                         is_pad_exit = is_exiting_start_pad or is_exiting_end_pad
                         if is_clearance_only and is_pad_exit:
                             # Clearance zone cell while exiting pad - allow this move
-                            # to enable the first step out of the pad
-                            pass
+                            # to enable the first step out of the pad, BUT only when
+                            # the trace centerline placement here does NOT bring its
+                            # ``net_trace_half_width_cells`` radius envelope within
+                            # touching distance of any FOREIGN pad metal.
+                            # Issue #3226: dense pin packages (LQFP-32 0.8mm pitch
+                            # on board 05's STM32G431 / DRV8301 row) admit a pad-exit
+                            # step into the *inner* part of an adjacent foreign pad's
+                            # halo, leaving the trace edge inside the foreign pad's
+                            # required-clearance band and producing
+                            # ``clearance_pad_segment`` DRC errors (8 sub-127um
+                            # positive + 1 -0.265mm severe at U10-17 / PWM_AH).
+                            if self._is_foreign_pad_metal_within_radius(
+                                nx, ny, nlayer, start.net, net_trace_half_width_cells
+                            ):
+                                if _ASTAR_TRACE_ENABLED:
+                                    _astar_trace(
+                                        f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                                        f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                                        f"reason=pad_exit_clearance_too_tight "
+                                        f"radius={net_trace_half_width_cells}"
+                                    )
+                                continue
                         else:
                             # Actual pad copper or not exiting a pad - block
                             if _ASTAR_TRACE_ENABLED:
@@ -4099,8 +4161,16 @@ class Router:
                     is_clearance_only = not cell.pad_blocked
                     is_pad_exit = is_exiting_source_pad or is_exiting_target_pad
                     if is_clearance_only and is_pad_exit:
-                        # Clearance zone cell while exiting pad - allow this move
-                        pass
+                        # Clearance zone cell while exiting pad - allow this move,
+                        # but only when the trace centerline placement here does
+                        # NOT bring its radius envelope within touching distance
+                        # of any FOREIGN pad metal (Issue #3226).  See companion
+                        # comment in :meth:`route` for the dense-package failure
+                        # mode this guards against.
+                        if trace_radius is not None and self._is_foreign_pad_metal_within_radius(
+                            nx, ny, nlayer, source_pad.net, trace_radius
+                        ):
+                            continue
                     else:
                         continue  # Actual pad copper or not exiting a pad - block
             else:

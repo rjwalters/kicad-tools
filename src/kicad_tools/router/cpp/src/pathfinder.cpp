@@ -144,6 +144,34 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
     return false;
 }
 
+// Issue #3226: Pad-exit relaxation safety check.  See header for the full
+// rationale.  Equivalent to ``is_trace_blocked`` restricted to FOREIGN-net
+// pad-metal cells (``cell.pad_blocked == true && cell.net != net``).
+// Pure halo cells, copper-pour cells, and routed-trace cells are skipped so
+// the relaxation still admits the legitimate pad-exit step into a foreign
+// pad's clearance band -- only steps that put the trace centerline within
+// ``radius`` of foreign pad copper are rejected.
+bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
+                                                    int net, int radius) const {
+    if (radius <= 0) {
+        return false;
+    }
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            int cx = x + dx;
+            int cy = y + dy;
+            if (!grid_.is_valid(cx, cy, layer)) {
+                continue;  // Out-of-bounds cells cannot be foreign pad metal.
+            }
+            const auto& cell = grid_.at(cx, cy, layer);
+            if (cell.pad_blocked && cell.net != net) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
                                      int net, bool allow_sharing) const {
     // Only check for diagonal moves
@@ -680,7 +708,31 @@ RouteResult Pathfinder::route(
                     bool is_clearance_only = !cell.pad_blocked;
                     bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
                     if (is_clearance_only && is_pad_exit) {
-                        // Clearance zone cell while exiting pad - allow
+                        // Clearance zone cell while exiting pad - allow,
+                        // but only when the trace centerline placement
+                        // here does NOT bring its radius envelope within
+                        // touching distance of any FOREIGN pad metal.
+                        // Issue #3226: without this guard, dense pin
+                        // packages (LQFP-32 0.8mm pitch on board 05's
+                        // STM32G431 / DRV8301 row) admit a pad-exit step
+                        // into the *inner* part of an adjacent foreign
+                        // pad's halo, leaving the trace edge inside the
+                        // foreign pad's required-clearance band and
+                        // producing ``clearance_pad_segment`` DRC errors
+                        // (8 sub-127um positive + 1 -0.265mm severe at
+                        // U10-17 / PWM_AH).
+                        if (is_foreign_pad_metal_within_radius(
+                                nx, ny, nlayer, net, trace_radius_cells)) {
+                            if (astar_trace_enabled()) {
+                                std::fprintf(stderr,
+                                    "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                    "REJECT reason=pad_exit_clearance_too_tight "
+                                    "radius=%d\n",
+                                    current.x, current.y, current.layer,
+                                    nx, ny, nlayer, trace_radius_cells);
+                            }
+                            continue;
+                        }
                     } else {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,
@@ -1173,7 +1225,26 @@ RouteResult Pathfinder::run_astar_loop() {
                     bool is_clearance_only = !cell.pad_blocked;
                     bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
                     if (is_clearance_only && is_pad_exit) {
-                        // Clearance zone cell while exiting pad - allow
+                        // Clearance zone cell while exiting pad - allow,
+                        // but only when the trace centerline placement
+                        // here does NOT bring its radius envelope within
+                        // touching distance of any FOREIGN pad metal.
+                        // Issue #3226: see comment in the one-shot path
+                        // above for the dense-pin-package failure mode.
+                        if (is_foreign_pad_metal_within_radius(
+                                nx, ny, nlayer, search_net_,
+                                search_trace_radius_cells_)) {
+                            if (astar_trace_enabled()) {
+                                std::fprintf(stderr,
+                                    "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                    "reason=pad_exit_clearance_too_tight "
+                                    "radius=%d net=%d\n",
+                                    current.x, current.y, current.layer,
+                                    nx, ny, nlayer,
+                                    search_trace_radius_cells_, search_net_);
+                            }
+                            continue;
+                        }
                     } else {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,

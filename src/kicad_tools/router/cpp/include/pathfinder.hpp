@@ -176,6 +176,30 @@ public:
                              float& out_world_x,
                              float& out_world_y) const;
 
+    // Issue #3226: Check whether any foreign-net pad-metal cell sits within
+    // ``radius`` Chebyshev cells of (x, y, layer).  This is a strict subset
+    // of ``is_trace_blocked`` -- it only treats cells with
+    // ``pad_blocked == true`` AND ``cell.net != net`` as obstacles, ignoring
+    // pure clearance-halo cells, copper-pour cells, and routed-trace cells.
+    //
+    // Used by the pad-exit relaxation in the A* loop.  The relaxation lets
+    // the trace step into a foreign-pad clearance halo cell while exiting
+    // a same-net pad, but must still refuse to land a trace centerline so
+    // close to FOREIGN pad metal that the trace edge (radius cells beyond
+    // the centerline) would encroach on the foreign pad copper.
+    //
+    // Returns true when there is at least one foreign-pad-metal cell within
+    // ``radius`` (i.e. the centerline placement here would violate
+    // pad clearance).  Returns false when the relaxation is safe.
+    //
+    // Public for binding + unit-test access; the pad-exit relaxation in the
+    // A* loop calls this internally, but having it on the public surface
+    // lets the regression tests assert symmetry with the Python sibling
+    // ``Router._is_foreign_pad_metal_within_radius`` without forcing the
+    // tests to drive a full route() call.
+    bool is_foreign_pad_metal_within_radius(int x, int y, int layer, int net,
+                                            int radius) const;
+
 private:
     // Check if trace placement is blocked (accounts for trace width)
     // radius_override: if > 0, use this instead of trace_half_width_cells_

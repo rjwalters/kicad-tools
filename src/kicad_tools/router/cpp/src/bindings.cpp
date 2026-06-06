@@ -300,6 +300,13 @@ NB_MODULE(router_cpp, m) {
              "Check if a via placement at (x, y) is blocked. "
              "Includes both grid-cell blocking and geometric via-vs-via "
              "clearance against stored_vias_ (Issue #2466).")
+        .def("is_foreign_pad_metal_within_radius",
+             &Pathfinder::is_foreign_pad_metal_within_radius,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "radius"_a,
+             "Return True if any cell within Chebyshev ``radius`` of (x, y, layer) "
+             "has pad_blocked=True and a foreign net.  Used by the pad-exit "
+             "clearance guard (Issue #3226) to refuse a relaxation step into the "
+             "inner part of an adjacent foreign pad's halo.")
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
 
