@@ -35,6 +35,7 @@ from .generator import (
     ZoneConfig,
     ZoneGenerator,
     ZoneOverlapWarning,
+    ZonePartitionError,
     auto_create_zones_for_pour_nets,
     parse_power_nets,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "ZoneConfig",
     "ZoneGenerator",
     "ZoneOverlapWarning",
+    "ZonePartitionError",
     "auto_create_zones_for_pour_nets",
     "parse_power_nets",
 ]
