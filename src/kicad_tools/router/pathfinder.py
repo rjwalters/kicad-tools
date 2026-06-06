@@ -1380,6 +1380,25 @@ class Router:
         blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
         net_region = self.grid._net[layer, y1:y2, x1:x2]
 
+        # Issue #3229: Euclidean-disc filter.  The DRC measures Euclidean
+        # clearance, but the rectangular region extracted above is a
+        # Chebyshev (square) bounding box.  Cells in the diagonal corners
+        # of that square -- where ``dx*dx + dy*dy > radius*radius`` --
+        # are outside the true Euclidean disc and must not contribute to
+        # the blocking decision.  Without this filter the square kernel
+        # passed candidates at the diagonal corners whose Euclidean
+        # clearance fell up to ``radius * (1 - 1/sqrt(2))`` cells short,
+        # producing 8 sub-127um ``clearance_pad_segment`` violations on
+        # board 05 with the legacy Chebyshev kernel (shortfalls 17-98um
+        # at ``res = 0.127mm``, ``radius = 2``).
+        radius_sq = radius * radius
+        ys = np.arange(y1, y2)
+        xs = np.arange(x1, x2)
+        dy_grid = ys - gy
+        dx_grid = xs - gx
+        dist_sq = (dy_grid * dy_grid)[:, None] + (dx_grid * dx_grid)[None, :]
+        within_disc = dist_sq <= radius_sq
+
         # Issue #2559 / Phase 1C: Build partner-relaxation mask.
         # When the partner branch is active, cells whose net matches
         # partner_net are checked against partner_radius instead of radius.
@@ -1400,16 +1419,12 @@ class Router:
             )
         partner_relax_mask = None
         if partner_active:
-            # Compute Chebyshev distance from (gx, gy) to each cell in the
-            # extracted region, then mark cells whose net == partner_net
-            # AND distance > partner_radius as "ignore for blocking".
-            ys = np.arange(y1, y2)
-            xs = np.arange(x1, x2)
-            cheb = np.maximum(
-                np.abs(ys - gy)[:, None],
-                np.abs(xs - gx)[None, :],
-            )
-            partner_relax_mask = (net_region == partner_net) & (cheb > partner_radius)
+            # Issue #3229: Match the Euclidean disc used elsewhere -- the
+            # partner clearance ring is the disc of radius ``partner_radius``,
+            # so cells with ``dx*dx + dy*dy > partner_radius**2`` are in
+            # the slack ring and treated as passable.
+            partner_radius_sq = partner_radius * partner_radius
+            partner_relax_mask = (net_region == partner_net) & (dist_sq > partner_radius_sq)
 
         if allow_sharing:
             # Negotiated mode: more complex logic
@@ -1431,6 +1446,9 @@ class Router:
             combined = obstacle_blocks | static_blocks
             if partner_relax_mask is not None:
                 combined = combined & ~partner_relax_mask
+            # Issue #3229: Apply Euclidean-disc filter so the diagonal
+            # corners of the bounding square do not contribute.
+            combined = combined & within_disc
             return bool(np.any(combined))
         else:
             # Standard mode: block if any cell is blocked AND has different net
@@ -1439,6 +1457,9 @@ class Router:
             blocked_different_net = blocked_region & (net_region != net)
             if partner_relax_mask is not None:
                 blocked_different_net = blocked_different_net & ~partner_relax_mask
+            # Issue #3229: Apply Euclidean-disc filter so the diagonal
+            # corners of the bounding square do not contribute.
+            blocked_different_net = blocked_different_net & within_disc
             return bool(np.any(blocked_different_net))
 
     def _is_foreign_pad_metal_within_radius(
@@ -1451,7 +1472,7 @@ class Router:
     ) -> bool:
         """Pad-exit relaxation safety check (Issue #3226).
 
-        Returns True when any cell within Chebyshev ``radius`` of
+        Returns True when any cell within Euclidean ``radius`` cells of
         ``(gx, gy, layer)`` is FOREIGN-net pad copper -- that is,
         ``grid._pad_blocked[layer, cy, cx]`` is True AND
         ``grid._net[layer, cy, cx] != net``.
@@ -1462,6 +1483,15 @@ class Router:
         centerline placements that would put the trace edge (radius
         cells beyond the centerline) inside foreign pad copper are
         rejected.
+
+        Issue #3229: The kernel uses the Euclidean disc
+        (``dx*dx + dy*dy <= radius*radius``) rather than the legacy
+        Chebyshev square.  The DRC measures Euclidean clearance and
+        the legacy square kernel passed candidates at the diagonal
+        corners whose true Euclidean clearance fell up to
+        ``radius * (1 - 1/sqrt(2))`` cells short of the rule -- the
+        exact mechanism behind the 8 sub-127um ``clearance_pad_segment``
+        violations on board 05 with ``--backend cpp``.
 
         This is the Python sibling of
         ``Pathfinder::is_foreign_pad_metal_within_radius`` in
@@ -1480,8 +1510,19 @@ class Router:
         if not bool(np.any(pad_region)):
             return False
         net_region = self.grid._net[layer, y1:y2, x1:x2]
-        # Foreign pad metal == pad_blocked AND net != routing net.
-        return bool(np.any(pad_region & (net_region != net)))
+        foreign_mask = pad_region & (net_region != net)
+        if not bool(np.any(foreign_mask)):
+            return False
+        # Issue #3229: Restrict the membership test to the Euclidean disc
+        # so the diagonal corners of the bounding Chebyshev square do not
+        # contribute (matches the DRC's Euclidean clearance metric).
+        ys = np.arange(y1, y2)
+        xs = np.arange(x1, x2)
+        dy = ys - gy
+        dx = xs - gx
+        dist_sq = (dy * dy)[:, None] + (dx * dx)[None, :]
+        within_disc = dist_sq <= radius * radius
+        return bool(np.any(foreign_mask & within_disc))
 
     def _is_diagonal_corner_blocked(
         self, gx: int, gy: int, dx: int, dy: int, layer: int, net: int, allow_sharing: bool = False

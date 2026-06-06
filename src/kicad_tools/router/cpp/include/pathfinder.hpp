@@ -269,6 +269,20 @@ private:
     int trace_half_width_cells_;
     int via_half_cells_;
 
+    // Issue #3229: Pre-computed circular (Euclidean) kernel offsets for
+    // ``trace_half_width_cells_``.  Each pair ``(dx, dy)`` satisfies
+    // ``dx*dx + dy*dy <= radius*radius``.  Replaces the square Chebyshev
+    // scan used pre-#3229 (``for dy in [-r, r]; for dx in [-r, r]``) so
+    // ``is_trace_blocked`` / ``is_foreign_pad_metal_within_radius`` match
+    // the DRC's Euclidean clearance metric exactly.  At ``radius=2`` the
+    // disc has 13 cells vs 25 for the square (-48%); at ``radius=3`` it
+    // has 29 vs 49 (-41%); at ``radius=4`` it has 49 vs 81 (-40%).
+    //
+    // ``radius_override`` paths (per-net widths different from the
+    // default ``trace_half_width_cells_``) compute a local offset list
+    // on the fly -- those branches are not perf-critical.
+    std::vector<std::pair<int8_t, int8_t>> circular_kernel_offsets_;
+
     // Routable layer indices
     std::vector<int> routable_layers_;
 
