@@ -4,8 +4,8 @@ Zone generator for creating copper pour zones on PCBs.
 This module provides a high-level API for generating copper pour zones,
 with automatic board outline detection and sensible defaults for power nets.
 
-Outline allocator (#2771, #3043)
---------------------------------
+Outline allocator (#2771, #3043, #3240)
+---------------------------------------
 
 In addition to the layer/priority allocator (:func:`_assign_layers_for_pour_nets`),
 this module owns the *outline* allocator (:func:`_compute_pour_outlines`).
@@ -26,10 +26,24 @@ The original PR #2771 only computed each net's bbox independently and
 relied on pad-cluster separation to keep the bboxes disjoint.  On real
 boards where power-net pads are *spatially interleaved* (e.g. board 06's
 ``+3V3``/``+1V8``/``+1V2`` cluster on a BGA), the bboxes overlap and the
-silent-override returns.  Issue #3043 extends the allocator with a
+silent-override returns.  Issue #3043 extended the allocator with a
 second pass that *subtracts higher-priority bboxes from lower-priority
-outlines* (using Shapely's polygon difference), so the resulting
-outlines are disjoint regardless of pad layout.
+outlines* (using Shapely's polygon difference).
+
+Issue #3240 reported a remaining gap: when a lower-priority net's pads
+sit fully *inside* a higher-priority net's bbox, the Shapely difference
+returns empty and the legacy fallback returned the raw bbox -- producing
+zero copper for the failing net.  The fix adds:
+
+* A pad-safe-bbox fallback (tight 0.3 mm margin around the failing net's
+  own pads) used when the standard carve returns empty.
+* A "subtrahend downgrade" rule: the higher-priority net is allowed to
+  yield space by using its own pad-safe bbox (instead of the full
+  inflated raw bbox) whenever the raw bbox would over-claim a
+  lower-priority sibling's region.
+* :class:`ZonePartitionError` raised when neither fallback can produce
+  disjoint outlines (e.g. truly coincident pad layouts), so the user
+  sees an actionable error instead of a silent zero-copper failure.
 """
 
 from __future__ import annotations
@@ -66,6 +80,49 @@ class ZoneOverlapWarning:
     existing_net: str
     layer: str
     message: str
+
+
+class ZonePartitionError(RuntimeError):
+    """Raised when the outline allocator cannot produce disjoint per-net outlines.
+
+    Indicates that two or more zones sharing a layer would receive zero
+    copper because no carved-out outline can be derived for one of them.
+    This typically happens when a lower-priority net's pads sit fully
+    inside the higher-priority net's bounding region and even a tight
+    pad-bbox fallback would still overlap.
+
+    The error message lists the failing net, the layer, and the
+    higher-priority nets that fully cover it, together with suggested
+    remediations (e.g., move the failing net to another layer, shrink
+    the per-net margin, or accept routing the net as traces).
+    """
+
+    def __init__(
+        self,
+        failing_net: str,
+        layer: str,
+        covering_nets: list[str],
+        suggestion: str | None = None,
+    ):
+        self.failing_net = failing_net
+        self.layer = layer
+        self.covering_nets = list(covering_nets)
+        covering_list = ", ".join(self.covering_nets) if self.covering_nets else "(none)"
+        msg = (
+            f"Auto-pour: zone '{failing_net}' on {layer} would receive ZERO copper "
+            f"because its pad region is fully covered by higher-priority zones "
+            f"({covering_list}). "
+        )
+        if suggestion:
+            msg += suggestion
+        else:
+            msg += (
+                "Suggested fixes: (a) move one of the conflicting nets to a different "
+                "copper layer via manual zone assignment, (b) reduce the per-net pour "
+                "margin (currently ~1.5 mm), or (c) accept that this net should be "
+                "routed as traces rather than zone-filled."
+            )
+        super().__init__(msg)
 
 
 @dataclass
@@ -967,6 +1024,14 @@ def _assign_layers_for_pour_nets(
 # during the curator analysis of board 05.
 DEFAULT_POUR_BBOX_MARGIN_MM = 1.5
 
+# Tight pad-only margin used as a *fallback* when the normal carve pass
+# (#3043) would leave a zone with zero copper.  At 0.3 mm it just clears
+# typical KiCad fill rules around the pads themselves -- enough to give
+# the lower-priority net *some* copper, while staying inside the inflated
+# bbox of higher-priority neighbours (which use the 1.5 mm default).  See
+# issue #3240 for the failure shape this addresses.
+PAD_SAFE_MARGIN_MM = 0.3
+
 # Default side length of the fallback square emitted when a net has only a
 # single pad (or all its pads coincide).  Slightly larger than the margin
 # alone so single-pad nets still receive a usable copper patch.
@@ -1188,10 +1253,14 @@ def _compute_pour_outlines(
 
     outlines: dict[str, list[tuple[float, float]] | None] = {}
 
-    # First pass: compute the raw bbox for every shared-layer zone.
-    # ``raw_bboxes[net]`` is the per-net AABB polygon (or ``None`` if the net
-    # has no pads -- the fallback case at the bottom of the loop).
+    # First pass: compute the raw bbox AND a tighter pad-safe bbox for
+    # every shared-layer zone.  The pad-safe bbox is a fallback used when
+    # the carve subtraction would leave a zone with zero area; it tracks
+    # the actual pads with a minimal margin so even a fully-covered
+    # lower-priority net can still receive *some* copper around its own
+    # pads (issue #3240).
     raw_bboxes: dict[str, list[tuple[float, float]] | None] = {}
+    pad_safe_bboxes: dict[str, list[tuple[float, float]] | None] = {}
     for net_name, layer, _ in assignments:
         if layer_counts[layer] < 2:
             # Sole zone on its layer -- keep the full board outline so
@@ -1211,6 +1280,14 @@ def _compute_pour_outlines(
             continue
 
         raw_bboxes[net_name] = _clip_polygon_to_outline(bbox, board_outline)
+
+        # Pad-safe bbox: tight margin around the same pad positions.  Used
+        # as the carve fallback when the normal subtraction returns empty.
+        pad_safe = _bbox_polygon(positions, PAD_SAFE_MARGIN_MM)
+        if pad_safe is not None:
+            pad_safe_bboxes[net_name] = _clip_polygon_to_outline(
+                pad_safe, board_outline
+            )
 
     # Second pass (#3043): for each layer that hosts multiple zones, subtract
     # higher-priority zone bboxes from lower-priority zones so the final
@@ -1234,25 +1311,144 @@ def _compute_pour_outlines(
         # Sort highest priority first -- those zones "win" the overlap.
         nets_on_layer.sort(key=lambda np: np[1], reverse=True)
 
-        # Accumulate the union of higher-priority bboxes; each lower-priority
-        # zone has this union subtracted from its own bbox to keep outlines
-        # disjoint.
+        # Issue #3240 fix: when a high-priority net's RAW bbox (inflated
+        # by 1.5 mm) fully contains the pad clusters of lower-priority
+        # siblings, the legacy carve subtraction empties those siblings
+        # and they receive zero copper.  The cleanest disambiguation is
+        # to use the higher-priority net's PAD-SAFE bbox (tight 0.3 mm
+        # margin around the pads) as the subtrahend whenever the raw bbox
+        # would over-claim space that lower-priority siblings need.
+        #
+        # Strategy:
+        # 1. Each net's final outline starts as its raw bbox.
+        # 2. For each lower-priority sibling, if subtracting the
+        #    higher-priority RAW bbox would empty the sibling, we
+        #    instead subtract the higher-priority PAD-SAFE bbox.  KiCad
+        #    zones do not support holes in the outline, so we cannot
+        #    carve the higher-priority zone to make room; instead we
+        #    SHRINK its outline to the pad-safe bbox in the contested
+        #    region.
+        # 3. After the shrink decision, run the standard carve pass with
+        #    each net's "effective subtrahend" (raw or pad-safe).
+        #
+        # Note that this means the highest-priority zone may end up with
+        # a SMALLER (pad-safe) outline than its raw bbox -- but it still
+        # covers its own pads, and now the lower-priority siblings can
+        # claim the area between the pad clusters.
+
+        # Step 1: for each net, decide its "effective outline subtrahend"
+        # used when carving lower-priority siblings.  Default = raw bbox.
+        # If the raw bbox fully covers any lower-priority sibling's
+        # pad-safe bbox, downgrade this net's subtrahend to its OWN
+        # pad-safe bbox so the lower sibling can keep its copper.
+        effective_subtrahend: dict[str, list[tuple[float, float]] | None] = {}
+        for idx, (net_name, _priority) in enumerate(nets_on_layer):
+            raw = raw_bboxes.get(net_name)
+            if raw is None:
+                continue
+            pad_safe = pad_safe_bboxes.get(net_name)
+            downgrade = False
+            for lower_name, _lower_pri in nets_on_layer[idx + 1 :]:
+                lower_pad_safe = pad_safe_bboxes.get(lower_name)
+                if lower_pad_safe is None:
+                    continue
+                # Would subtracting RAW from lower_pad_safe leave empty?
+                test = _subtract_polygon(lower_pad_safe, raw)
+                if test is None:
+                    # Yes: the raw bbox over-claims this lower sibling's
+                    # pad region.  Downgrade to pad-safe so the lower
+                    # sibling survives.
+                    downgrade = True
+                    break
+            if downgrade and pad_safe is not None:
+                effective_subtrahend[net_name] = pad_safe
+            else:
+                effective_subtrahend[net_name] = raw
+
+        # Step 2: accumulate winners_union from EFFECTIVE subtrahends,
+        # not raw bboxes.  Each net's own outline is also clipped against
+        # the running winners_union.
         winners_union = None
+        winners_so_far: list[str] = []
         for net_name, _ in nets_on_layer:
             current = raw_bboxes[net_name]
+
+            # The net's own outline: start with its raw bbox, but if its
+            # effective subtrahend was downgraded to pad-safe (meaning the
+            # raw bbox was too greedy), use the pad-safe bbox so the
+            # outline matches what we subtract from siblings.
+            self_outline = effective_subtrahend.get(net_name) or current
+
+            # Subtract higher-priority effective subtrahends from this
+            # net's outline.
             if winners_union is None:
-                # Highest-priority zone keeps its bbox unchanged.
-                outlines[net_name] = current
+                final_outline = self_outline
             else:
-                outlines[net_name] = _subtract_polygon(
-                    current,
-                    winners_union,
-                    fallback=current,
-                )
-            # Add this zone's bbox to the winners-union for the next iteration.
-            winners_union = _union_polygons(winners_union, current)
+                carved = _subtract_polygon(self_outline, winners_union)
+                final_outline = carved  # may be None
+
+            if final_outline is not None:
+                outlines[net_name] = final_outline
+            else:
+                # Carve emptied the self-outline.  Try the strict pad-safe
+                # bbox of this net (in case self_outline was already the
+                # pad-safe bbox, this is redundant but cheap).
+                pad_safe = pad_safe_bboxes.get(net_name)
+                if pad_safe is None:
+                    raise ZonePartitionError(
+                        failing_net=net_name,
+                        layer=layer,
+                        covering_nets=list(winners_so_far),
+                        suggestion=(
+                            f"Net '{net_name}' has no physical pads on the "
+                            f"board; remove it from the pour-net list or "
+                            f"add the pads it needs."
+                        ),
+                    )
+
+                if winners_union is None:
+                    outlines[net_name] = pad_safe
+                else:
+                    pad_carved = _subtract_polygon(pad_safe, winners_union)
+                    if pad_carved is not None:
+                        outlines[net_name] = pad_carved
+                    else:
+                        # Numerical edge case: tiny but positive non-overlap
+                        # area below Shapely's empty-threshold.
+                        non_overlap_area = (
+                            _polygon_area_simple(pad_safe)
+                            - _polygon_overlap_area(pad_safe, winners_union)
+                        )
+                        if non_overlap_area > 1e-6:
+                            outlines[net_name] = pad_safe
+                        else:
+                            raise ZonePartitionError(
+                                failing_net=net_name,
+                                layer=layer,
+                                covering_nets=list(winners_so_far),
+                            )
+
+            # Use the EFFECTIVE subtrahend (raw or pad-safe) for the
+            # winners union, so lower-priority siblings can claim the
+            # space the higher-priority net yielded.
+            subtrahend_for_winners = effective_subtrahend.get(net_name) or current
+            winners_union = _union_polygons(winners_union, subtrahend_for_winners)
+            winners_so_far.append(net_name)
 
     return outlines
+
+
+def _polygon_area_simple(polygon: list[tuple[float, float]] | None) -> float:
+    """Shoelace polygon area (mm²); 0 for None/degenerate input."""
+    if not polygon or len(polygon) < 3:
+        return 0.0
+    area = 0.0
+    n = len(polygon)
+    for i in range(n):
+        x0, y0 = polygon[i]
+        x1, y1 = polygon[(i + 1) % n]
+        area += x0 * y1 - x1 * y0
+    return abs(area) / 2.0
 
 
 def _union_polygons(
@@ -1287,22 +1483,40 @@ def _union_polygons(
 def _subtract_polygon(
     minuend: list[tuple[float, float]],
     subtrahend,
-    fallback: list[tuple[float, float]],
-) -> list[tuple[float, float]]:
-    """Return ``minuend - subtrahend`` as a polygon.
+) -> list[tuple[float, float]] | None:
+    """Return ``minuend - subtrahend`` as a hole-free polygon, or ``None`` on failure.
 
     ``subtrahend`` may be a list of ``(x, y)`` tuples or a Shapely geometry
     (the latter is what ``_union_polygons`` returns).  KiCad zones do not
-    natively support polygon holes in the *outline*; when the subtraction
-    produces a polygon with holes, we approximate by returning the largest
-    exterior ring (which is still strictly inside ``minuend``).
+    natively support polygon holes in the *outline* (single-contour
+    polygons only).  This function therefore returns ``None`` in any of
+    these failure cases:
 
-    When the result is empty or Shapely is missing, returns ``fallback``.
+    * The difference is empty (minuend fully covered by subtrahend).
+    * The result is a MultiPolygon (multiple disjoint pieces -- only
+      the largest is returned to avoid silently dropping copper area).
+    * The result is a Polygon WITH interior holes (KiCad can't represent
+      the hole, and just using the exterior would silently overlap the
+      subtrahend -- precisely the issue #3240 failure mode).
+    * Shapely is unavailable.
+
+    Returning ``None`` lets the caller decide -- try a pad-safe fallback
+    or raise ``ZonePartitionError``.  The legacy behavior of returning
+    the un-carved minuend silently let the zone-priority resolver award
+    the entire region to higher-priority siblings, producing zero copper
+    for the failing net (issue #3240).
+
+    For the MultiPolygon case, we keep only the largest piece (a
+    pragmatic compromise -- KiCad zones can be defined multiple times
+    for the same net to cover multiple regions, but the current API
+    emits one zone per (net, layer) tuple).
     """
     try:
         from shapely.geometry import Polygon
     except ImportError:
-        return fallback
+        # Shapely unavailable: caller decides whether to keep the raw
+        # minuend (legacy behavior) or treat as failure.
+        return None
 
     minuend_poly = Polygon(minuend)
     if hasattr(subtrahend, "geom_type"):
@@ -1314,10 +1528,10 @@ def _subtract_polygon(
 
     if diff.is_empty:
         # The minuend was completely covered by higher-priority zones.
-        # Return ``fallback`` so the zone still has *some* outline (KiCad's
-        # fill resolver will still award zero copper, but the zone exists
-        # in the file for tooling that inspects declared geometry).
-        return fallback
+        # Returning None lets the caller try a pad-safe fallback or raise
+        # an actionable ZonePartitionError -- the legacy ``return fallback``
+        # path silently produced zero-copper zones (issue #3240).
+        return None
 
     if diff.geom_type == "MultiPolygon":
         # Keep only the largest piece -- KiCad zone outlines are single
@@ -1326,15 +1540,54 @@ def _subtract_polygon(
         diff = max(diff.geoms, key=lambda g: g.area)
 
     if diff.geom_type != "Polygon":
-        return fallback
+        return None
+
+    # Issue #3240: if the result has interior holes, the exterior ring
+    # alone overlaps the subtrahend (the hole is in the contested area).
+    # Returning the exterior would silently re-create the zero-copper bug
+    # -- KiCad would render the full exterior, which overlaps the
+    # subtrahend and gets zero copper from the priority resolver.  Signal
+    # failure so the caller can fall back to a pad-safe bbox that lives
+    # strictly outside the subtrahend.
+    if list(diff.interiors):
+        return None
 
     coords = list(diff.exterior.coords)
     if len(coords) > 1 and coords[0] == coords[-1]:
         coords = coords[:-1]
     if len(coords) < 3:
-        return fallback
+        return None
 
     return [(round(x, 6), round(y, 6)) for x, y in coords]
+
+
+def _polygon_overlap_area(
+    a: list[tuple[float, float]],
+    b,
+) -> float:
+    """Return the intersection area (mm²) of two polygons.
+
+    ``b`` may be a list of ``(x, y)`` tuples or a Shapely geometry.
+    Returns ``0.0`` if either operand is missing/invalid or Shapely is
+    not available.
+    """
+    if a is None or b is None:
+        return 0.0
+    try:
+        from shapely.geometry import Polygon
+    except ImportError:
+        return 0.0
+    try:
+        poly_a = Polygon(a)
+        if hasattr(b, "geom_type"):
+            poly_b = b
+        else:
+            poly_b = Polygon(b)
+        if not poly_a.is_valid or not poly_b.is_valid:
+            return 0.0
+        return poly_a.intersection(poly_b).area
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def auto_create_zones_for_pour_nets(
@@ -1397,6 +1650,33 @@ def auto_create_zones_for_pour_nets(
     copper despite the file containing a zone definition for each
     (see #2771 for the board 05 reproduction).
 
+    Nested pad clusters (#3240)
+    ---------------------------
+
+    The carve pass (#3043) handles spatially-separated pad clusters
+    correctly.  Issue #3240 reported a different failure shape: when
+    a lower-priority net's pads sit fully *inside* the higher-priority
+    net's inflated bbox (chorus-test-revA case where ``+5V`` and
+    ``+3.3VA`` pads cluster inside the ``+3.3V`` bbox), the carve
+    subtraction returns empty and the legacy fallback was to return
+    the raw bbox -- which silently overlapped the higher-priority zone
+    and got zero copper from the fill resolver.
+
+    The fix has two pieces:
+
+    1. The higher-priority zone's effective subtrahend is *downgraded*
+       to its pad-safe bbox (a tight 0.3 mm margin around its pads
+       only) whenever its raw bbox would over-claim space that a
+       lower-priority sibling needs.  The higher-priority zone keeps
+       its pad-adjacent copper; the lower-priority siblings get the
+       inter-pad regions.
+    2. When even the pad-safe carve cannot produce a disjoint outline
+       (e.g. truly coincident pad layouts), the allocator raises
+       :class:`ZonePartitionError` naming the failing net, the layer,
+       and the higher-priority nets that cover it.  This replaces the
+       previous silent "zone exists but receives zero copper" behavior
+       with an actionable error.
+
     Args:
         pcb_path: Path to .kicad_pcb file (modified in place)
         pour_nets: List of (net_name, NetClass) tuples identifying
@@ -1409,6 +1689,11 @@ def auto_create_zones_for_pour_nets(
 
     Returns:
         Number of zones created
+
+    Raises:
+        ZonePartitionError: When the outline allocator cannot produce
+            disjoint per-net outlines and at least one zone would
+            receive zero copper (issue #3240).
     """
     pcb_path = Path(pcb_path)
     gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=edge_clearance)
