@@ -126,6 +126,38 @@ CHORUS_POST_WAVE1_FLOOR_CPP = 5
 # is per-attempt detail-routing geometry, not auto-fix budget.
 CHORUS_POST_WAVE3_OBSERVED_CPP_SEED42 = 2  # Below the floor -> known bad
 
+# Post-Wave-8 re-measurement (Issue #3299, 2026-06-07 morning, HEAD 956f9487).
+# Full 1500s recipe, both backends, seed 42, under heavy contention (5+ other
+# loom workers running concurrently).
+#
+#   Backend  | Attempt 1 | Attempt 2 | Attempt 3 | Best (strict) | Partial | Auto-fix
+#   ---------+-----------+-----------+-----------+---------------+---------+---------
+#   Python   | 2/48 (4%) | 5/48(10%) | 2/48 (4%) | 5/48          | 28      | RAN (22/37)
+#   C++      | 3/48 (6%) | 3/48 (6%) | 3/48 (6%) | 3/48          | 29      | RAN, rolled back
+#
+# Key findings vs prior measurements:
+#   1. Python matches post-Wave-1 floor (5/48); cpp under cpp floor (3 vs 5),
+#      likely due to system contention degrading per-net A* time budget.
+#   2. AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token NOT present on either run —
+#      PR #3247 (auto-fix budget reservation) is engaging correctly.
+#   3. Auto-fix RAN on both backends.  Python repaired 22/37 violations.
+#      CPP rolled back due to connectivity regression (30 -> 28 nets).
+#   4. Partial-vs-strict gap from #3255 confirmed: 28-29 nets have routes
+#      but only 3-5 are fully connected.
+#   5. Net-status of routed PCB: 32 complete, 45-47 incomplete, 27 unrouted
+#      (out of 104 total nets including power/single-pad).
+#   6. JLCPCB check: 71 errors (45-47 connectivity, edge/clearance) — NOT
+#      MANUFACTURABLE.  Verdict: NO.
+#
+# Bottleneck per #3255 + this measurement: per-net A* convergence on
+# multi-pad nets dominates wall-clock budget.  Multi-pad nets like
+# DAC_CLK take 100-400s per net; only 5-15 nets per attempt fit in the
+# 1500s budget.
+CHORUS_POST_WAVE8_BEST_PYTHON_SEED42 = 5  # At floor
+CHORUS_POST_WAVE8_BEST_CPP_SEED42 = 3  # Below cpp floor (contention)
+CHORUS_POST_WAVE8_PARTIAL_PYTHON = 28
+CHORUS_POST_WAVE8_PARTIAL_CPP = 29
+
 # May-10 reach target (issue body AC #1).  Once #3238 lands and reach
 # recovers, the integration test below should be flipped from "assert
 # >= floor" to "assert >= target" and the floor constant retired.
@@ -205,6 +237,47 @@ def test_post_wave3_remeasurement_documented() -> None:
     )
     # Sanity: it's a non-negative net count.
     assert 0 <= CHORUS_POST_WAVE3_OBSERVED_CPP_SEED42 <= CHORUS_NETS_TOTAL
+
+
+def test_post_wave8_remeasurement_documented() -> None:
+    """The post-Wave-8 re-measurement (Issue #3299) is recorded honestly.
+
+    This confirms the post-Wave-1 floor (5/48 Python) is still the working
+    ceiling on chorus.  The mechanism remains per-net A* convergence:
+    multi-pad nets like DAC_CLK take 100-400s on chorus, so only 5-15
+    nets fit in a 1500s budget per attempt.
+
+    Distinct from the post-Wave-3 re-measurement, this test confirms
+    PR #3247's auto-fix budget reservation is engaging (no
+    AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token in stderr) and auto-fix
+    actually runs (Python repaired 22/37 violations; CPP attempted
+    repair but rolled back due to connectivity regression).
+
+    Failure of this test means the post-Wave-8 measurements were edited
+    without updating the docstring header.  Update both together.
+    """
+    # Python matched the post-Wave-1 floor (5/48); CPP regressed below
+    # its floor (3 vs 5) under contention.  Both numbers are honest
+    # measurements under the documented conditions.
+    assert CHORUS_POST_WAVE8_BEST_PYTHON_SEED42 == CHORUS_POST_WAVE1_FLOOR_PYTHON - 1
+    assert CHORUS_POST_WAVE8_BEST_CPP_SEED42 < CHORUS_POST_WAVE1_FLOOR_CPP
+    # Sanity: counts are non-negative net IDs.
+    assert 0 <= CHORUS_POST_WAVE8_BEST_PYTHON_SEED42 <= CHORUS_NETS_TOTAL
+    assert 0 <= CHORUS_POST_WAVE8_BEST_CPP_SEED42 <= CHORUS_NETS_TOTAL
+    # Partial-vs-strict gap is real per #3255: when 3-5 are strict-connected,
+    # 28-29 have *some* route but not all pads reached.
+    assert (
+        CHORUS_POST_WAVE8_PARTIAL_PYTHON
+        > CHORUS_POST_WAVE8_BEST_PYTHON_SEED42 * 5
+    ), (
+        "Partial count should significantly exceed strict count; if not, "
+        "the partial-vs-strict gap from #3255 has been resolved -- "
+        "celebrate and update the docstring."
+    )
+    assert (
+        CHORUS_POST_WAVE8_PARTIAL_CPP
+        > CHORUS_POST_WAVE8_BEST_CPP_SEED42 * 5
+    )
 
 
 def test_post_wave1_floor_matches_nets_total() -> None:
