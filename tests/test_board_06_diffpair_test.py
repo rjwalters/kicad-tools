@@ -399,3 +399,158 @@ class TestNetCountBudget:
         for p_name, n_name in diffpairs.items():
             assert p_name in nets, f"Diff pair positive net {p_name!r} not in NETS"
             assert n_name in nets, f"Diff pair negative net {n_name!r} not in NETS"
+
+
+# =============================================================================
+# Manufacturability floor (Issue #3262)
+# =============================================================================
+
+
+class TestManufacturabilityFloor:
+    """Pin the committed routed PCB's signal-net completion floor.
+
+    These assertions are about the *artifact* committed in
+    ``boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb`` --
+    not the routing algorithm's worst-case output.  The CI gate
+    ``check_diffpair_coverage.py`` re-routes the board from scratch and
+    enforces a DRC error allowlist + rule-coverage assertion.  These
+    tests are the complementary "what we shipped" assertions: they catch
+    a PR that accidentally commits a worse routed PCB even if the
+    algorithm itself is fine.
+
+    The floor is pinned at the Issue #3262 baseline.  When the routing
+    algorithm improves and a tighter floor lands, raise these values in
+    the same PR that improves the route.
+    """
+
+    @pytest.fixture(scope="class")
+    def pcb_segments_by_net(self) -> dict[str, int]:
+        """Count segments per net name in the committed routed PCB.
+
+        Returns a dict of ``{net_name: segment_count}``.  A net with
+        ``>= 1`` segment is considered to have at least begun routing;
+        a net with ``0`` is unrouted.  This is a structural check (the
+        connectivity-based ``kct net-status`` check is what the fleet
+        report uses, but it requires a heavier loader); for a regression
+        floor, "has at least one segment" is a cheap, stable proxy.
+        """
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        assert routed.exists(), f"Routed PCB artifact missing: {routed}"
+        text = routed.read_text()
+
+        # Build a (net_number, net_name) map.
+        net_id_to_name: dict[int, str] = {}
+        for m in re.finditer(r'\(net (\d+) "([^"]+)"\)', text):
+            net_id_to_name[int(m.group(1))] = m.group(2)
+
+        # Count segments per net id.  KiCad segments are emitted as
+        # multi-line s-expressions:
+        #
+        #     (segment
+        #         (start X Y)
+        #         (end   X Y)
+        #         (width W)
+        #         (layer "F.Cu")
+        #         (net N)
+        #         (uuid "...")
+        #     )
+        #
+        # so we find each ``(segment`` opener and capture the
+        # subsequent ``(net N)`` on a later line.  DOTALL is needed
+        # because the body spans newlines; the non-greedy match keeps
+        # each capture scoped to one segment.
+        counts_by_id: dict[int, int] = {}
+        seg_pattern = re.compile(r"\(segment\b.*?\(net (\d+)\)", re.DOTALL)
+        for m in seg_pattern.finditer(text):
+            nid = int(m.group(1))
+            counts_by_id[nid] = counts_by_id.get(nid, 0) + 1
+        # Also count via-only nets (occur for pad-bottom escapes).
+        via_pattern = re.compile(r"\(via\b.*?\(net (\d+)\)", re.DOTALL)
+        for m in via_pattern.finditer(text):
+            nid = int(m.group(1))
+            counts_by_id[nid] = counts_by_id.get(nid, 0) + 1
+
+        return {
+            net_id_to_name[nid]: count
+            for nid, count in counts_by_id.items()
+            if nid in net_id_to_name
+        }
+
+    def test_at_least_17_signal_nets_have_segments(
+        self, pcb_segments_by_net: dict[str, int]
+    ) -> None:
+        """At least 17 of the 21 declared signal nets carry routing.
+
+        Per the #3262 baseline:
+        - 18 diff-pair nets (9 pairs)
+        - 3 single-ended sideband nets (USB_CC1, USB_CC2, MIPI_RST)
+        = 21 signal nets
+
+        At the baseline, 20 of 21 route (USB3_TX1+ at U2.B2 is the
+        residual BGA-49 escape — see #3270).  We pin the floor at 17
+        so a regression that drops 4+ nets gets flagged while leaving
+        headroom for minor seed-dependent variance.
+        """
+        signal_nets = [
+            "USB2_D+",
+            "USB2_D-",
+            "USB3_TX1+",
+            "USB3_TX1-",
+            "USB3_RX1+",
+            "USB3_RX1-",
+            "USB3_TX2+",
+            "USB3_TX2-",
+            "USB3_RX2+",
+            "USB3_RX2-",
+            "PCIE_TX+",
+            "PCIE_TX-",
+            "PCIE_RX+",
+            "PCIE_RX-",
+            "MIPI_CLK+",
+            "MIPI_CLK-",
+            "MIPI_D0+",
+            "MIPI_D0-",
+            "USB_CC1",
+            "USB_CC2",
+            "MIPI_RST",
+        ]
+        routed = [n for n in signal_nets if pcb_segments_by_net.get(n, 0) >= 1]
+        assert len(routed) >= 17, (
+            f"Manufacturability floor: only {len(routed)}/21 signal nets "
+            f"have segments in the committed routed PCB.  Baseline is 20/21 "
+            f"(see #3262).  Unrouted nets: "
+            f"{[n for n in signal_nets if n not in routed]}"
+        )
+
+    def test_each_diffpair_has_at_least_one_side_routed(
+        self, pcb_segments_by_net: dict[str, int]
+    ) -> None:
+        """Every declared diff pair has at least one half (P or N) routed.
+
+        A pair with NEITHER half routed indicates the diff-pair
+        detection or coupled-routing path failed catastrophically.
+        With both halves unrouted, the diff-pair DRC rules cannot fire
+        on the pair at all -- a silent regression that would slip past
+        the rule-coverage gate.
+        """
+        pairs = [
+            ("USB2_D+", "USB2_D-"),
+            ("USB3_TX1+", "USB3_TX1-"),
+            ("USB3_RX1+", "USB3_RX1-"),
+            ("USB3_TX2+", "USB3_TX2-"),
+            ("USB3_RX2+", "USB3_RX2-"),
+            ("PCIE_TX+", "PCIE_TX-"),
+            ("PCIE_RX+", "PCIE_RX-"),
+            ("MIPI_CLK+", "MIPI_CLK-"),
+            ("MIPI_D0+", "MIPI_D0-"),
+        ]
+        dropped: list[tuple[str, str]] = []
+        for p, n in pairs:
+            if pcb_segments_by_net.get(p, 0) < 1 and pcb_segments_by_net.get(n, 0) < 1:
+                dropped.append((p, n))
+        assert not dropped, (
+            "Manufacturability floor: the following diff pair(s) have "
+            f"NEITHER side routed in the committed PCB: {dropped}.  "
+            "This usually indicates a regression in diff-pair detection "
+            "or the coupled-routing path."
+        )
