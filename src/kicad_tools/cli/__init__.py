@@ -520,6 +520,8 @@ def _run_stitch_command(args) -> int:
         sub_argv.extend(["--micro-via-size", str(args.stitch_micro_via_size)])
     if hasattr(args, "stitch_micro_via_drill") and args.stitch_micro_via_drill != 0.15:
         sub_argv.extend(["--micro-via-drill", str(args.stitch_micro_via_drill)])
+    if hasattr(args, "stitch_avoid_pad_overlap") and args.stitch_avoid_pad_overlap:
+        sub_argv.append("--avoid-pad-overlap")
     if hasattr(args, "stitch_spacing") and args.stitch_spacing != 3.0:
         sub_argv.extend(["--spacing", str(args.stitch_spacing)])
     if hasattr(args, "stitch_thermal") and args.stitch_thermal:

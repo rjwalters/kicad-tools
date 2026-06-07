@@ -242,6 +242,13 @@ class StitchResult:
     skip_details: list[tuple[PadInfo, SkipDetail]] = field(default_factory=list)
     # Micro-via tracking: count of vias placed using micro-via retry
     micro_vias_placed: int = 0
+    # Via-in-pad post-filter (issue #3271): count of via placements that
+    # were dropped because they would have produced a via_in_pad DRC
+    # violation under manufacturer profiles that forbid via-in-pad (e.g.
+    # JLCPCB standard tier).  Only populated when ``avoid_pad_overlap`` is
+    # enabled in ``run_stitch``.  The corresponding pads are recorded in
+    # ``pads_skipped`` with a ``via_in_pad`` reason.
+    via_in_pad_filtered: int = 0
 
 
 @dataclass
@@ -708,6 +715,137 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
             )
 
     return pads
+
+
+def find_smd_pad_bboxes_on_nets(
+    sexp: SExp,
+    net_numbers: set[int],
+) -> list[tuple[int, float, float, float, float]]:
+    """Return axis-aligned bounding boxes for SMD pads on the given nets.
+
+    Issue #3271: the stitch ``--avoid-pad-overlap`` post-filter (see
+    ``run_stitch``) drops via placements whose drill circle would be fully
+    contained inside an SMD pad on the same net.  This mirrors the
+    geometry used by
+    :class:`kicad_tools.validate.rules.via_in_pad.ViaInPadRule` so the
+    stitch tool can pre-empt the same DRC violations that rule would later
+    flag under manufacturer profiles that forbid via-in-pad processing
+    (e.g. ``jlcpcb`` standard tier).
+
+    Through-hole pads are excluded because they have their own plated hole
+    -- a via inside them is not a manufacturability concern.
+
+    Args:
+        sexp: PCB S-expression.
+        net_numbers: Net numbers to include (typically the same set the
+            stitcher targets).
+
+    Returns:
+        List of ``(net_num, min_x, min_y, max_x, max_y)`` tuples in board
+        coordinates (mm).  Bbox is the AABB of the rotated rectangle
+        matching ``via_in_pad._pad_absolute_bbox`` for cardinal rotations
+        (and the conservative AABB-of-rotated-rect for non-cardinal
+        angles).
+    """
+    bboxes: list[tuple[int, float, float, float, float]] = []
+
+    for fp in sexp.iter_children():
+        if fp.tag != "footprint":
+            continue
+
+        at_node = fp.find_child("at")
+        if not at_node:
+            continue
+        fp_x = at_node.get_float(0) or 0.0
+        fp_y = at_node.get_float(1) or 0.0
+        fp_rotation_deg = at_node.get_float(2) or 0.0
+        rad = math.radians(fp_rotation_deg)
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+
+        for pad in fp.find_children("pad"):
+            pad_type = pad.get_string(1)
+            # Only SMD pads carry the via-in-pad concern -- a through-hole
+            # pad is already a plated hole.
+            if pad_type != "smd":
+                continue
+
+            net_node = pad.find_child("net")
+            if not net_node:
+                continue
+            net_num = net_node.get_int(0)
+            if net_num is None or net_num not in net_numbers:
+                continue
+
+            pad_at = pad.find_child("at")
+            if not pad_at:
+                continue
+            rel_x = pad_at.get_float(0) or 0.0
+            rel_y = pad_at.get_float(1) or 0.0
+            board_x = fp_x + rel_x * cos_r - rel_y * sin_r
+            board_y = fp_y + rel_x * sin_r + rel_y * cos_r
+
+            size_node = pad.find_child("size")
+            if not size_node:
+                continue
+            width = size_node.get_float(0) or 0.0
+            height = size_node.get_float(1) or 0.0
+
+            # Mirror the bbox computation used by
+            # ``via_in_pad._pad_absolute_bbox``: cardinal rotations
+            # swap dimensions; other rotations conservatively use the
+            # AABB of the rotated rectangle.
+            total_rotation = fp_rotation_deg % 360
+            if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
+                bbox_w, bbox_h = height, width
+            elif abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
+                bbox_w, bbox_h = width, height
+            else:
+                abs_cos = abs(cos_r)
+                abs_sin = abs(sin_r)
+                bbox_w = width * abs_cos + height * abs_sin
+                bbox_h = width * abs_sin + height * abs_cos
+
+            half_w = bbox_w / 2
+            half_h = bbox_h / 2
+            bboxes.append(
+                (
+                    net_num,
+                    board_x - half_w,
+                    board_y - half_h,
+                    board_x + half_w,
+                    board_y + half_h,
+                )
+            )
+
+    return bboxes
+
+
+def _via_drill_inside_pad_bbox(
+    via_x: float,
+    via_y: float,
+    drill: float,
+    bbox: tuple[float, float, float, float],
+    tolerance: float = 1e-6,
+) -> bool:
+    """Return True iff the via's drill circle is fully inside ``bbox``.
+
+    Issue #3271: mirrors
+    ``kicad_tools.validate.rules.via_in_pad._via_inside_pad`` so the
+    stitch post-filter classifies vias identically to the DRC rule it is
+    pre-empting.  ``bbox`` is ``(min_x, min_y, max_x, max_y)``.  The
+    drill circle is "fully inside" when every point on it lies on or
+    inside the bbox edge, i.e. the drill's bounding box fits inside
+    ``bbox`` (minus a tolerance so edge-touching drills are not flagged).
+    """
+    radius = drill / 2.0
+    min_x, min_y, max_x, max_y = bbox
+    return (
+        via_x - radius >= min_x - tolerance
+        and via_x + radius <= max_x + tolerance
+        and via_y - radius >= min_y - tolerance
+        and via_y + radius <= max_y + tolerance
+    )
 
 
 def find_existing_vias(sexp: SExp, net_numbers: set[int]) -> list[tuple[float, float, int]]:
@@ -3386,6 +3524,7 @@ def run_stitch(
     micro_via: bool = False,
     micro_via_size: float = 0.3,
     micro_via_drill: float = 0.15,
+    avoid_pad_overlap: bool = False,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -3403,6 +3542,18 @@ def run_stitch(
         micro_via: If True, retry failed pads with smaller micro-vias
         micro_via_size: Micro-via pad diameter in mm (default 0.3)
         micro_via_drill: Micro-via drill diameter in mm (default 0.15)
+        avoid_pad_overlap: Issue #3271 -- when True, drop via placements
+            whose drill circle would be fully contained inside an SMD pad
+            on the same net (i.e., would produce a ``via_in_pad`` DRC
+            violation under manufacturer profiles that forbid via-in-pad
+            processing).  Without this guard, the standard placement
+            offset (``pad_radius + offset``) can land the via on top of a
+            neighbouring same-net pad on dense QFN / BGA footprints --
+            the via is geometrically clear of other-net copper, but the
+            JLCPCB standard tier (and similar) treat any via-in-pad as a
+            manufacturability failure.  Dropped pads are recorded in
+            ``StitchResult.pads_skipped`` with a ``via_in_pad`` reason and
+            counted in ``StitchResult.via_in_pad_filtered``.
 
     Returns:
         StitchResult with details of what was done
@@ -3765,6 +3916,68 @@ def run_stitch(
             # Add to existing vias list
             existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
 
+    # Issue #3271: pad-aware post-filter for manufacturers that forbid
+    # via-in-pad (e.g. JLCPCB standard tier).
+    #
+    # The placement strategies above push the via off the originating pad
+    # by ``pad_radius + offset`` but do NOT consider neighbouring same-net
+    # pads on the same footprint.  On dense QFN / BGA components the
+    # standard offset can land the via on top of a neighbour pad on the
+    # same net -- geometrically clear of other-net copper, but rejected by
+    # the JLCPCB tier-1 manufacturability rule because plated-over
+    # via-in-pad processing is not supported.  See ``ViaInPadRule`` and
+    # issue #3271 for the pre-emption rationale.
+    #
+    # We use the same SMD-pad-bbox containment geometry the DRC rule
+    # uses, so this filter drops exactly the placements the rule would
+    # later flag.  Through-hole pads are intentionally excluded: they
+    # already have a plated hole, so a via inside them is not a
+    # manufacturability concern.
+    if avoid_pad_overlap and result.vias_added:
+        net_numbers_local = {
+            num for num, name in get_net_map(sexp).items() if name in set(net_names)
+        }
+        pad_bboxes = find_smd_pad_bboxes_on_nets(sexp, net_numbers_local)
+        # Group bboxes by net for O(N+M) scan rather than O(N*M).
+        bboxes_by_net: dict[int, list[tuple[float, float, float, float]]] = {}
+        for net_num, min_x, min_y, max_x, max_y in pad_bboxes:
+            bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
+
+        kept_vias: list[ViaPlacement] = []
+        kept_traces: list[TraceSegment] = []
+        # Index traces by their pad object identity so we can drop the
+        # trace alongside the via when the placement is filtered out.
+        # Multiple placements per pad are not produced by ``run_stitch``
+        # (one via per skipped pad), so id-keying is sufficient.
+        for placement, trace in zip(result.vias_added, result.traces_added, strict=True):
+            candidate_bboxes = bboxes_by_net.get(placement.pad.net_number, [])
+            in_pad = any(
+                _via_drill_inside_pad_bbox(
+                    placement.via_x, placement.via_y, placement.drill, bbox
+                )
+                for bbox in candidate_bboxes
+            )
+            if in_pad:
+                result.via_in_pad_filtered += 1
+                if placement.pad.net_number == trace.pad.net_number:
+                    # The pad whose escape we just filtered loses its
+                    # stitch; record so the user-facing summary makes the
+                    # trade-off explicit.  The diagnostic reason mirrors
+                    # the DRC rule's wording.
+                    result.pads_skipped.append(
+                        (
+                            placement.pad,
+                            "via_in_pad: standard placement would land drill "
+                            "inside same-net SMD pad (avoid_pad_overlap=True); "
+                            "pad relies on the plane pour for connectivity",
+                        )
+                    )
+                continue
+            kept_vias.append(placement)
+            kept_traces.append(trace)
+        result.vias_added = kept_vias
+        result.traces_added = kept_traces
+
     # Apply changes if not dry run
     if not dry_run and result.vias_added:
         for placement in result.vias_added:
@@ -3991,6 +4204,14 @@ def output_result(
             )
     if result.already_connected:
         print(f"  = {result.already_connected} pads already connected")
+    if result.via_in_pad_filtered:
+        # Issue #3271: surface the pad-aware post-filter so users see why
+        # the via count is below what naive placement would have produced.
+        print(
+            f"  ~ Filtered {result.via_in_pad_filtered} via placement(s) "
+            "that would have produced via_in_pad violations "
+            "(--avoid-pad-overlap; pads rely on the plane pour for connectivity)"
+        )
     if result.pads_skipped:
         print(f"  ! Skipped {len(result.pads_skipped)} pads (manual placement needed)")
 
@@ -4082,6 +4303,21 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.15,
         help="Micro-via drill diameter in mm (default: 0.15). Only used with --micro-via.",
+    )
+    parser.add_argument(
+        "--avoid-pad-overlap",
+        action="store_true",
+        dest="avoid_pad_overlap",
+        help=(
+            "Issue #3271: drop via placements whose drill circle would be "
+            "fully contained inside an SMD pad on the same net.  Required "
+            "on manufacturer profiles that forbid via-in-pad processing "
+            "(e.g. JLCPCB standard tier) -- without this guard, the "
+            "standard placement offset can land vias on top of neighbouring "
+            "same-net pads on dense QFN / BGA footprints, producing "
+            "via_in_pad DRC violations.  Has no effect under --blanket or "
+            "--thermal (those modes already check same-net pads)."
+        ),
     )
     parser.add_argument(
         "--blanket",
@@ -4295,6 +4531,7 @@ def main(argv: list[str] | None = None) -> int:
                 micro_via=args.micro_via,
                 micro_via_size=args.micro_via_size,
                 micro_via_drill=args.micro_via_drill,
+                avoid_pad_overlap=args.avoid_pad_overlap,
             )
 
         output_result(result, dry_run=args.dry_run, run_drc=args.drc, edited_path=pcb_path)

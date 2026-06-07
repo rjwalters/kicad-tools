@@ -614,6 +614,53 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   Zone generation skipped: {exc}")
 
+    # Issue #3271: pad-aware post-route stitching for plane-net pad
+    # connectivity.  GND and VBUS_USB are pour nets -- the router skips
+    # them on the signal layer and they rely on the In1.Cu / In2.Cu
+    # pours for power-plane connectivity.  Without per-pad stitching
+    # vias, SMD pads on those nets stay stranded (no copper between
+    # the pad and the pour) and the connectivity DRC rule flags them.
+    #
+    # A NAIVE ``kct stitch --net GND --net VBUS_USB`` invocation placed
+    # 27 vias on top of neighbouring same-net QFN / BGA pads (the
+    # standard placement offset ``pad_radius + offset`` lands inside
+    # the next pad on dense fine-pitch fields).  Those would be
+    # ``via_in_pad`` DRC errors under JLCPCB standard tier (which does
+    # not support plated-over via-in-pad processing).  The
+    # ``--avoid-pad-overlap`` flag (issue #3271) post-filters such
+    # placements so the stitched PCB stays manufacturable under the
+    # ``jlcpcb`` profile this board targets.  Pads whose ideal via
+    # would land in a same-net pad keep their pour-side connection
+    # via the zone fill's thermal relief.
+    print("\n10. Pad-aware post-route stitching for plane nets (issue #3271)...")
+    try:
+        stitch_nets = ["GND", "VBUS_USB"]
+        stitch_argv = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "stitch",
+            str(output_path),
+            "--mfr",
+            "jlcpcb",
+            "--avoid-pad-overlap",
+        ]
+        for net_name in stitch_nets:
+            stitch_argv.extend(["--net", net_name])
+        stitch_result = subprocess.run(stitch_argv, capture_output=True, text=True)
+        if stitch_result.returncode == 0:
+            # Surface the last few lines of the stitch summary so the
+            # build log records how many vias were added and how many
+            # were filtered as would-be via-in-pad placements.
+            for line in stitch_result.stdout.strip().split("\n")[-12:]:
+                print(f"   {line}")
+        else:
+            print(f"   Stitch failed (rc={stitch_result.returncode}):")
+            if stitch_result.stderr:
+                print(f"   stderr: {stitch_result.stderr.strip()}")
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        print(f"   Stitch step skipped: {exc}")
+
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets
     if success:

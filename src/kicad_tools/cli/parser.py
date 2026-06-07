@@ -2347,6 +2347,18 @@ def _add_stitch_parser(subparsers) -> None:
         help="Micro-via drill diameter in mm (default: 0.15). Only used with --micro-via.",
     )
     stitch_parser.add_argument(
+        "--avoid-pad-overlap",
+        action="store_true",
+        dest="stitch_avoid_pad_overlap",
+        help=(
+            "Issue #3271: drop via placements whose drill circle would be "
+            "fully contained inside an SMD pad on the same net.  Required "
+            "on manufacturer profiles that forbid via-in-pad processing "
+            "(e.g. JLCPCB standard tier).  Has no effect under --blanket "
+            "or --thermal."
+        ),
+    )
+    stitch_parser.add_argument(
         "--spacing",
         type=float,
         default=3.0,
