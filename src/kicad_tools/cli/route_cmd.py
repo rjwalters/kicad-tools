@@ -107,6 +107,39 @@ logger = logging.getLogger(__name__)
 # behaviour.
 
 
+_AUTO_FIX_RESERVE_FRACTION = 0.20
+_AUTO_FIX_RESERVE_FLOOR_SEC = 60.0
+
+
+def _auto_fix_budget(args) -> float:
+    """Return the auto-fix reserve in seconds (issue #3238).
+
+    Returns ``0.0`` when auto-fix is not requested (no reserve needed) or
+    when ``--timeout`` is unset (legacy unbounded runs preserve their
+    existing behaviour: routing gets unlimited time, auto-fix runs after
+    routing finishes naturally).
+
+    When auto-fix is requested AND ``--timeout`` is set, returns
+    ``max(60s, 0.20 * timeout)`` so the negotiated router cannot consume
+    the entire budget and silently leave auto-fix with zero time.  See
+    issue #3238 for the chorus-test regression that motivated this.
+
+    The reserve is also capped at half of ``--timeout`` so the routing
+    budget never drops below 50% of what the user asked for; on extremely
+    small ``--timeout`` values (e.g. ``--timeout 30``) the floor of 60s
+    would otherwise leave the routing loop with effectively zero budget.
+    """
+    timeout = getattr(args, "timeout", None)
+    if not timeout or timeout <= 0:
+        return 0.0
+    if not _should_auto_fix(args):
+        return 0.0
+    reserve = max(_AUTO_FIX_RESERVE_FLOOR_SEC, _AUTO_FIX_RESERVE_FRACTION * float(timeout))
+    # Cap at half of --timeout so the routing budget always sees at least
+    # 50% of what the user asked for, even with very tight timeouts.
+    return min(reserve, 0.5 * float(timeout))
+
+
 def _set_wall_clock_deadline(args) -> None:
     """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
 
@@ -114,20 +147,59 @@ def _set_wall_clock_deadline(args) -> None:
     ``args.timeout`` is falsy (None, 0, or negative) the deadline is set
     to ``None`` so the rest of the orchestration treats the run as
     unbounded.
+
+    Issue #3238: When ``--auto-fix`` is requested, an additional
+    ``_routing_deadline`` is stamped at ``now + (timeout - auto_fix_reserve)``
+    so outer routing loops bail early enough to leave a guaranteed budget
+    for auto-fix.  The original ``_wall_clock_deadline`` continues to
+    bound the *total* wall-clock budget.
     """
     timeout = getattr(args, "timeout", None)
+    now = time.monotonic()
     if timeout and timeout > 0:
-        args._wall_clock_deadline = time.monotonic() + float(timeout)
+        args._wall_clock_deadline = now + float(timeout)
+        reserve = _auto_fix_budget(args)
+        args._auto_fix_reserve = reserve
+        # Routing deadline is the wall-clock deadline minus the auto-fix
+        # reserve.  When no reserve is held (no --auto-fix, or no
+        # --timeout) routing deadline collapses to the wall-clock
+        # deadline -- existing behaviour is preserved bit-for-bit.
+        args._routing_deadline = now + float(timeout) - reserve
     else:
         args._wall_clock_deadline = None
+        args._auto_fix_reserve = 0.0
+        args._routing_deadline = None
 
 
 def _remaining_budget(args) -> float | None:
-    """Return seconds remaining vs the total wall-clock deadline.
+    """Return seconds remaining vs the *routing* deadline.
 
+    Routing-loop callers use this helper so the auto-fix reserve is
+    transparently carved out of their effective budget (issue #3238).
     Returns ``None`` when no deadline is configured (legacy unbounded
     behaviour).  Returns a non-negative float otherwise; callers should
-    treat zero as "deadline expired."
+    treat zero as "routing deadline reached, hand off to auto-fix".
+    """
+    # Issue #3238: prefer the routing deadline (which bounds the routing
+    # loops with the auto-fix reserve already subtracted).  Fall back to
+    # the wall-clock deadline for callers that may have stamped only the
+    # original field (defensive against future refactors / older test
+    # fixtures that don't go through ``_set_wall_clock_deadline``).
+    deadline = getattr(args, "_routing_deadline", None)
+    if deadline is None:
+        deadline = getattr(args, "_wall_clock_deadline", None)
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _total_remaining_budget(args) -> float | None:
+    """Return seconds remaining vs the *total* wall-clock deadline.
+
+    Used by ``_run_auto_fix`` to determine whether it has *any* time to
+    run -- the routing deadline may already be expired (that's expected;
+    it's why auto-fix is being invoked) but the total deadline still
+    leaves the carved-out reserve for auto-fix to do its work.
     """
     deadline = getattr(args, "_wall_clock_deadline", None)
     if deadline is None:
@@ -136,8 +208,25 @@ def _remaining_budget(args) -> float | None:
 
 
 def _deadline_expired(args) -> bool:
-    """True iff a deadline is configured and has been reached or passed."""
+    """True iff a deadline is configured and has been reached or passed.
+
+    Issue #3238: This checks the *routing* deadline -- outer loops should
+    stop routing when the routing budget is gone (leaving the auto-fix
+    reserve untouched).  Use ``_total_deadline_expired`` to check the
+    *total* wall-clock deadline (which is what ``_run_auto_fix`` needs).
+    """
     rem = _remaining_budget(args)
+    return rem is not None and rem <= 0.0
+
+
+def _total_deadline_expired(args) -> bool:
+    """True iff the *total* wall-clock deadline has been reached.
+
+    Issue #3238: ``_run_auto_fix`` uses this instead of ``_deadline_expired``
+    so it can run within the reserved auto-fix budget even after the
+    routing deadline has fired.
+    """
+    rem = _total_remaining_budget(args)
     return rem is not None and rem <= 0.0
 
 
@@ -1399,8 +1488,11 @@ def _run_auto_fix(
         args: Parsed ``route`` CLI args.  When provided, the function
             honors ``args._wall_clock_deadline`` (issue #2802) and skips
             the auto-fix invocation entirely if the total budget has been
-            consumed.  Optional for backward compatibility with callers
-            that do not have the args namespace handy.
+            consumed.  Issue #3238: also stamps ``args._auto_fix_status``
+            with one of ``"ran"`` / ``"skipped_deadline"`` /
+            ``"not_invoked"`` so callers can distinguish silent skips
+            from benign no-ops.  Optional for backward compatibility
+            with callers that do not have the args namespace handy.
 
     Returns:
         Exit code from fix_drc_cmd.main() (0 = all violations fixed).
@@ -1409,16 +1501,44 @@ def _run_auto_fix(
     """
     from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
 
-    # Issue #2802: skip auto-fix when the total wall-clock budget has
-    # already been exhausted by upstream routing stages.  ``fix-drc``
-    # itself has no ``--timeout`` flag and runs unbounded per pass, so
-    # without this guard a single auto-fix invocation can easily double
-    # the user's configured ``--timeout``.
-    if args is not None and _deadline_expired(args):
+    # Issue #2802 + #3238: skip auto-fix when the *total* wall-clock
+    # budget has been exhausted.  We deliberately check the total
+    # deadline (not the routing deadline) here because the routing
+    # deadline is *supposed* to be expired by the time we reach this
+    # function -- that's exactly when the reserved auto-fix budget
+    # (issue #3238) is meant to kick in.  Only when the entire wall-clock
+    # budget is gone do we have to skip.
+    if args is not None and _total_deadline_expired(args):
+        # Issue #3238: stamp structured state so callers (and tests) can
+        # distinguish a silent skip from the "fix-drc found nothing to
+        # do" no-op (both used to return 1).
+        with contextlib.suppress(AttributeError):
+            args._auto_fix_status = "skipped_deadline"
         if not quiet:
             print("\n--- Auto-Fix DRC Violations ---")
             print("  Skipping: total wall-clock deadline reached (--timeout, issue #2802)")
+            print(
+                "  AUTOFIX_SKIPPED_BUDGET_EXHAUSTED: routing consumed the entire "
+                "--timeout budget; auto-fix received zero seconds to clean DRC "
+                "violations.  Consider raising --timeout or reducing the routing "
+                "workload (e.g. --max-layers, --strategy).  See issue #3238."
+            )
+        # Issue #3238: also emit a stable machine-readable token to
+        # stderr so CI gates can grep without parsing the full route
+        # log.  The token is intentionally separate from the friendlier
+        # stdout message so log parsers can rely on it.
+        print(
+            "AUTOFIX_SKIPPED_BUDGET_EXHAUSTED: --timeout exhausted by routing; "
+            "auto-fix did not run (issue #3238)",
+            file=sys.stderr,
+        )
         return 1
+
+    # Issue #3238: stamp "ran" before invoking fix-drc so even an
+    # exception path leaves a defensible state on args.
+    if args is not None:
+        with contextlib.suppress(AttributeError):
+            args._auto_fix_status = "ran"
 
     if not quiet:
         print("\n--- Auto-Fix DRC Violations ---")
@@ -3248,6 +3368,11 @@ def route_with_layer_escalation(
         args._last_router = final_result.router
 
     if final_result.success:
+        # Issue #3238: propagate auto-fix-skipped-by-deadline so the
+        # caller exits with the distinct exit code (7) rather than the
+        # generic exit-0 success path.
+        if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
+            return 7
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.  The
         # documented exit-3 contract ("meets threshold but DRC violations
@@ -3840,6 +3965,9 @@ def route_with_rule_relaxation(
             )
 
     if final_result.success:
+        # Issue #3238: propagate auto-fix-skipped-by-deadline.
+        if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
+            return 7
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
@@ -5081,6 +5209,9 @@ def route_with_combined_escalation(
             )
 
     if final_result.success:
+        # Issue #3238: propagate auto-fix-skipped-by-deadline.
+        if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
+            return 7
         # Issue #2852: propagate --auto-fix rollback (exit 3) so callers can
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
@@ -6163,15 +6294,6 @@ def main(argv: list[str] | None = None) -> int:
         _os.environ["KICAD_TOOLS_MICRO_VIA_SIZE"] = str(getattr(args, "micro_via_size", 0.3))
         _os.environ["KICAD_TOOLS_MICRO_VIA_DRILL"] = str(getattr(args, "micro_via_drill", 0.15))
 
-    # Issue #2802: Stamp a single monotonic wall-clock deadline derived from
-    # ``--timeout`` onto ``args`` so every orchestration site (layer-escalation
-    # loop, rule-relaxation tiers, combined-escalation 2D search, placement
-    # feedback, auto-fix passes, inner negotiated/two-phase/escape calls)
-    # shares the same budget rather than receiving a fresh per-stage copy of
-    # ``args.timeout``.  See ``_set_wall_clock_deadline`` / ``_remaining_budget``
-    # / ``_deadline_expired`` for the helpers that consume it.
-    _set_wall_clock_deadline(args)
-
     # Issue #2589: Seed the global ``random`` module for reproducible runs.
     # When ``--seed`` is supplied, all unseeded ``random.shuffle`` /
     # ``random.sample`` callsites in the negotiated router
@@ -6258,6 +6380,31 @@ def main(argv: list[str] | None = None) -> int:
     else:
         # Default to 3 passes when --auto-fix is used without explicit --auto-fix-passes
         args.auto_fix_passes = 3
+
+    # Issue #2802 / #3238: Stamp a single monotonic wall-clock deadline derived
+    # from ``--timeout`` onto ``args`` so every orchestration site (layer-
+    # escalation loop, rule-relaxation tiers, combined-escalation 2D search,
+    # placement feedback, auto-fix passes, inner negotiated/two-phase/escape
+    # calls) shares the same budget rather than receiving a fresh per-stage
+    # copy of ``args.timeout``.
+    #
+    # Order note (issue #3238): this MUST run after the --auto-fix-passes
+    # normalization above, because the deadline helper consults
+    # ``_should_auto_fix(args)`` to decide whether to reserve an auto-fix
+    # budget.  Reordering this call to run earlier silently disables the
+    # reserve for users who pass ``--auto-fix-passes N`` without also
+    # passing ``--auto-fix`` explicitly.
+    #
+    # See ``_set_wall_clock_deadline`` / ``_remaining_budget`` /
+    # ``_deadline_expired`` / ``_auto_fix_budget`` for the helpers that
+    # consume it.
+    _set_wall_clock_deadline(args)
+    # Issue #3238: initialize the structured auto-fix status field to
+    # ``"not_invoked"`` so the final exit-code branches can distinguish
+    # "auto-fix never reached" (drc-clean route, or --skip-drc) from
+    # "auto-fix was skipped due to deadline" (the failure mode we now
+    # surface with exit code 7).
+    args._auto_fix_status = "not_invoked"
 
     # Issue #2388: --auto-layers is now enabled by default.  When --layers
     # is explicitly set, silently disable auto-escalation so existing
@@ -8068,6 +8215,13 @@ def main(argv: list[str] | None = None) -> int:
     #     the optimize / DRC nudge phases reduced the number of fully-
     #     connected nets (issue #2596) or post-save output verification
     #     reported disconnected pads (issue #2264).
+    # 7 = Auto-fix was requested but skipped because the total --timeout
+    #     budget was exhausted by routing (issue #3238).  Distinct from
+    #     exit 3 ("routing succeeded but DRC is dirty after auto-fix
+    #     tried and failed") so CI gates can detect silent skip-on-deadline
+    #     regressions without parsing the full route log.  The
+    #     AUTOFIX_SKIPPED_BUDGET_EXHAUSTED stderr token is emitted on
+    #     this path.
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.
@@ -8077,6 +8231,16 @@ def main(argv: list[str] | None = None) -> int:
     # --strict: output connectivity verification failure is fatal
     if getattr(args, "strict", False) and output_has_disconnected:
         return 6
+
+    # Issue #3238: distinct exit code when auto-fix was requested but
+    # skipped because the total wall-clock budget was exhausted.  This
+    # has to be checked *before* the generic exit-3 ("DRC dirty") path
+    # because skip-on-deadline always leaves DRC dirty (auto-fix never
+    # ran), and we want the caller to see "the user asked for auto-fix
+    # and it didn't happen" as a distinct signal from "auto-fix ran and
+    # couldn't clean everything".
+    if getattr(args, "_auto_fix_status", None) == "skipped_deadline":
+        return 7
 
     # Issue #2852: make the --auto-fix rollback path explicit.  Today this
     # case already falls through to the ``return 3`` branch below because

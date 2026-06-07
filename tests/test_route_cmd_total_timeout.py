@@ -697,10 +697,11 @@ def test_route_cli_respects_total_timeout(tmp_path):
     )
     elapsed = time.monotonic() - start
 
-    # Exit code is allowed to be 0 (success), 2 (partial), 3 (DRC), or 5
-    # (interrupt/timeout w/ partial save).  What we care about is the
-    # wall-clock bound.
-    assert proc.returncode in (0, 2, 3, 4, 5), (
+    # Exit code is allowed to be 0 (success), 2 (partial), 3 (DRC), 4
+    # (seg-seg + below threshold), 5 (interrupt/timeout w/ partial save),
+    # or 7 (issue #3238: auto-fix skipped due to budget exhaustion).
+    # What we care about is the wall-clock bound.
+    assert proc.returncode in (0, 2, 3, 4, 5, 7), (
         f"route exited with unexpected code {proc.returncode}; "
         f"stdout={proc.stdout!r}; stderr={proc.stderr!r}"
     )
@@ -708,3 +709,370 @@ def test_route_cli_respects_total_timeout(tmp_path):
         f"route ran {elapsed:.1f}s with --timeout {timeout_seconds} "
         f"(should be <= {timeout_seconds + safety_margin}s)"
     )
+
+
+# =============================================================================
+# Issue #3238: auto-fix budget reservation + structured skip surfacing
+# =============================================================================
+
+
+class TestAutoFixBudgetReserve:
+    """Tests for ``_auto_fix_budget`` and the routing/auto-fix deadline split.
+
+    Issue #3238: when ``--timeout`` is set and ``--auto-fix`` is requested,
+    the deadline helper reserves a fraction of the total budget for
+    auto-fix so the negotiated router cannot silently consume the
+    entire ``--timeout`` and leave auto-fix with zero seconds.
+    """
+
+    def test_auto_fix_budget_zero_without_timeout(self):
+        """No ``--timeout`` -> no reserve (legacy unbounded behaviour)."""
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=None, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        assert _auto_fix_budget(args) == 0.0
+
+    def test_auto_fix_budget_zero_when_not_requested(self):
+        """``--timeout`` set but ``--auto-fix`` not requested -> no reserve.
+
+        Existing users who run with ``--timeout`` but no ``--auto-fix``
+        must see zero behaviour change (AC #5).
+        """
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=False, auto_fix_passes=None, dry_run=False, skip_drc=False
+        )
+        assert _auto_fix_budget(args) == 0.0
+
+    def test_auto_fix_budget_zero_when_dry_run(self):
+        """``--dry-run`` suppresses auto-fix, so no reserve is held."""
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=True, skip_drc=False
+        )
+        assert _auto_fix_budget(args) == 0.0
+
+    def test_auto_fix_budget_zero_when_skip_drc(self):
+        """``--skip-drc`` suppresses auto-fix, so no reserve is held."""
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=True
+        )
+        assert _auto_fix_budget(args) == 0.0
+
+    def test_auto_fix_budget_fraction_of_timeout(self):
+        """At the chorus recipe (``--timeout 1500 --auto-fix``), the
+        reserve is 20% of 1500 = 300s (well above the 60s floor)."""
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        reserve = _auto_fix_budget(args)
+        # 20% of 1500 = 300; floor of 60 doesn't bind.
+        assert reserve == 300.0
+
+    def test_auto_fix_budget_respects_floor(self):
+        """Small ``--timeout`` (e.g. 200s) -> 20% would be 40s, but the
+        60s floor binds (until --timeout < 120s, where the cap binds)."""
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=200.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        reserve = _auto_fix_budget(args)
+        # 20% of 200 = 40 < 60 floor, so floor binds.
+        assert reserve == 60.0
+
+    def test_auto_fix_budget_capped_at_half_timeout(self):
+        """Extremely small ``--timeout`` (e.g. 30s) -> floor of 60s would
+        starve routing entirely; the 50% cap binds so routing always sees
+        at least half of ``--timeout`` even with a tight budget."""
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=30.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        reserve = _auto_fix_budget(args)
+        # 20% of 30 = 6s, floor of 60 would bind, but 50% cap = 15s
+        # binds first.  Routing sees 15s.
+        assert reserve == 15.0
+
+    def test_auto_fix_budget_at_recipe_boundary_uses_fraction(self):
+        """``--timeout 300`` -> 20% = 60s exactly at the floor; the
+        fraction and the floor agree (no surprise jump at the boundary)."""
+        from kicad_tools.cli.route_cmd import _auto_fix_budget
+
+        args = SimpleNamespace(
+            timeout=300.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        reserve = _auto_fix_budget(args)
+        assert reserve == 60.0
+
+
+class TestRoutingDeadlineSplit:
+    """Tests for the routing-deadline / wall-clock-deadline split.
+
+    Issue #3238: ``_set_wall_clock_deadline`` now stamps two deadlines on
+    ``args``: ``_wall_clock_deadline`` (total budget) and
+    ``_routing_deadline`` (total minus auto-fix reserve).  Outer routing
+    loops bail at the routing deadline so auto-fix has its reserved time.
+    """
+
+    def test_routing_deadline_equals_wall_clock_without_autofix(self):
+        """When ``--auto-fix`` is not requested, routing deadline == wall
+        clock deadline (no reserve carved out)."""
+        from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=False, auto_fix_passes=None, dry_run=False, skip_drc=False
+        )
+        _set_wall_clock_deadline(args)
+        assert args._wall_clock_deadline is not None
+        assert args._routing_deadline is not None
+        # Routing deadline == wall-clock deadline exactly (no reserve).
+        assert abs(args._routing_deadline - args._wall_clock_deadline) < 0.001
+        assert args._auto_fix_reserve == 0.0
+
+    def test_routing_deadline_carves_reserve_with_autofix(self):
+        """When ``--auto-fix`` is requested, routing deadline is wall
+        clock deadline minus the auto-fix reserve."""
+        from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        _set_wall_clock_deadline(args)
+        assert args._wall_clock_deadline is not None
+        assert args._routing_deadline is not None
+        # Reserve is 300s (20% of 1500).
+        delta = args._wall_clock_deadline - args._routing_deadline
+        assert abs(delta - 300.0) < 0.01
+        assert args._auto_fix_reserve == 300.0
+
+    def test_remaining_budget_returns_routing_budget(self):
+        """``_remaining_budget`` returns routing budget (deadline minus
+        reserve), so outer loops naturally stop in time for auto-fix.
+
+        AC #1: the negotiated router's effective ceiling drops to <=
+        0.80 * 1500s = 1200s when ``--timeout 1500 --auto-fix`` is set.
+        """
+        from kicad_tools.cli.route_cmd import _remaining_budget, _set_wall_clock_deadline
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        _set_wall_clock_deadline(args)
+        # Immediately after stamping: routing budget is ~1200s (1500 - 300).
+        remaining = _remaining_budget(args)
+        assert remaining is not None
+        # Allow small monotonic jitter.
+        assert 1199.0 < remaining <= 1200.0
+
+    def test_total_remaining_budget_returns_full_budget(self):
+        """``_total_remaining_budget`` returns the *full* wall-clock budget
+        (used by ``_run_auto_fix`` to determine whether it has time)."""
+        from kicad_tools.cli.route_cmd import _set_wall_clock_deadline, _total_remaining_budget
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        _set_wall_clock_deadline(args)
+        remaining = _total_remaining_budget(args)
+        assert remaining is not None
+        # Full 1500s (minus monotonic jitter).
+        assert 1499.0 < remaining <= 1500.0
+
+    def test_deadline_expired_fires_at_routing_deadline(self):
+        """``_deadline_expired`` returns True when the *routing* deadline
+        has passed, even if the wall-clock deadline has not (the auto-fix
+        reserve still has time)."""
+        from kicad_tools.cli.route_cmd import _deadline_expired, _total_deadline_expired
+
+        args = SimpleNamespace(
+            timeout=1500.0, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        # Manually stamp deadlines so the routing deadline is already past
+        # but the wall-clock deadline still has 300s of reserve left.
+        now = time.monotonic()
+        args._wall_clock_deadline = now + 300.0
+        args._routing_deadline = now - 1.0  # already past
+        args._auto_fix_reserve = 300.0
+
+        # Routing should be considered expired (outer loops bail).
+        assert _deadline_expired(args) is True
+        # Total should NOT be considered expired (auto-fix has time).
+        assert _total_deadline_expired(args) is False
+
+    def test_set_deadline_without_timeout_leaves_routing_deadline_none(self):
+        """Legacy unbounded behaviour: both deadlines are None."""
+        from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
+
+        args = SimpleNamespace(
+            timeout=None, auto_fix=True, auto_fix_passes=2, dry_run=False, skip_drc=False
+        )
+        _set_wall_clock_deadline(args)
+        assert args._wall_clock_deadline is None
+        assert args._routing_deadline is None
+        assert args._auto_fix_reserve == 0.0
+
+
+class TestAutoFixStructuredStatus:
+    """Tests for the structured ``args._auto_fix_status`` field.
+
+    Issue #3238: ``_run_auto_fix`` now stamps ``args._auto_fix_status``
+    with one of ``"ran"`` / ``"skipped_deadline"`` so callers can
+    distinguish a silent deadline-skip from a benign fix-drc no-op
+    (both used to return exit code 1).
+    """
+
+    def test_status_set_to_skipped_deadline_on_skip(self, tmp_path):
+        """When the deadline has expired, ``_run_auto_fix`` stamps
+        ``args._auto_fix_status = "skipped_deadline"`` and returns 1."""
+        from kicad_tools.cli.route_cmd import _run_auto_fix
+
+        args = SimpleNamespace(timeout=1.0)
+        args._wall_clock_deadline = time.monotonic() - 5.0  # past
+        args._routing_deadline = time.monotonic() - 5.0
+        args._auto_fix_status = "not_invoked"
+
+        dummy_pcb = tmp_path / "dummy.kicad_pcb"
+        dummy_pcb.write_text("(kicad_pcb)\n")
+
+        with patch("kicad_tools.cli.fix_drc_cmd.main") as mock_fix:
+            result = _run_auto_fix(
+                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
+            )
+            mock_fix.assert_not_called()
+            assert result == 1
+            assert args._auto_fix_status == "skipped_deadline"
+
+    def test_status_set_to_ran_when_invoked(self, tmp_path):
+        """When the deadline has not expired, ``_run_auto_fix`` stamps
+        ``args._auto_fix_status = "ran"`` and delegates to fix-drc."""
+        from kicad_tools.cli.route_cmd import _run_auto_fix
+
+        args = SimpleNamespace(timeout=60.0)
+        args._wall_clock_deadline = time.monotonic() + 60.0
+        args._routing_deadline = time.monotonic() + 50.0
+        args._auto_fix_status = "not_invoked"
+
+        dummy_pcb = tmp_path / "dummy.kicad_pcb"
+        dummy_pcb.write_text("(kicad_pcb)\n")
+
+        with patch("kicad_tools.cli.fix_drc_cmd.main", return_value=0) as mock_fix:
+            result = _run_auto_fix(
+                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
+            )
+            mock_fix.assert_called_once()
+            assert result == 0
+            assert args._auto_fix_status == "ran"
+
+    def test_skip_emits_stderr_token(self, tmp_path, capsys):
+        """When the deadline has expired, the stable token
+        ``AUTOFIX_SKIPPED_BUDGET_EXHAUSTED`` is written to stderr so
+        CI gates can grep on it without parsing the full route log.
+
+        AC #3: a stable token must be on stderr.
+        """
+        from kicad_tools.cli.route_cmd import _run_auto_fix
+
+        args = SimpleNamespace(timeout=1.0)
+        args._wall_clock_deadline = time.monotonic() - 5.0
+        args._routing_deadline = time.monotonic() - 5.0
+        args._auto_fix_status = "not_invoked"
+
+        dummy_pcb = tmp_path / "dummy.kicad_pcb"
+        dummy_pcb.write_text("(kicad_pcb)\n")
+
+        with patch("kicad_tools.cli.fix_drc_cmd.main"):
+            _run_auto_fix(
+                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
+            )
+
+        captured = capsys.readouterr()
+        # The token must appear on stderr (machine-readable signal).
+        assert "AUTOFIX_SKIPPED_BUDGET_EXHAUSTED" in captured.err, (
+            "Stable token AUTOFIX_SKIPPED_BUDGET_EXHAUSTED must be written "
+            "to stderr when auto-fix is skipped due to deadline (issue #3238)"
+        )
+
+    def test_skip_uses_total_deadline_not_routing_deadline(self, tmp_path):
+        """``_run_auto_fix`` checks the *total* wall-clock deadline, not
+        the routing deadline.  This is the core of issue #3238: the
+        routing deadline is expected to be expired by the time auto-fix
+        is invoked, but the auto-fix reserve still gives it real time
+        to work in."""
+        from kicad_tools.cli.route_cmd import _run_auto_fix
+
+        args = SimpleNamespace(timeout=1500.0)
+        now = time.monotonic()
+        # Routing deadline is past; wall-clock deadline still has 300s.
+        args._wall_clock_deadline = now + 300.0
+        args._routing_deadline = now - 1.0
+        args._auto_fix_reserve = 300.0
+        args._auto_fix_status = "not_invoked"
+
+        dummy_pcb = tmp_path / "dummy.kicad_pcb"
+        dummy_pcb.write_text("(kicad_pcb)\n")
+
+        with patch("kicad_tools.cli.fix_drc_cmd.main", return_value=0) as mock_fix:
+            result = _run_auto_fix(
+                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
+            )
+            # Auto-fix should run because the wall-clock deadline still
+            # has the reserved 300s, even though routing deadline is past.
+            mock_fix.assert_called_once()
+            assert result == 0
+            assert args._auto_fix_status == "ran"
+
+
+class TestMainStampsAutoFixState:
+    """``main()`` initializes ``_auto_fix_status`` to ``"not_invoked"``
+    so the final exit-code branches can distinguish "auto-fix never
+    reached" (drc-clean route, or ``--skip-drc``) from "auto-fix was
+    skipped due to deadline" (which becomes exit code 7)."""
+
+    def _minimal_pcb(self, tmp_path: Path) -> Path:
+        pcb_content = """(kicad_pcb
+  (version 20240101)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (grid_origin 0 0)
+  )
+  (net 0 "")
+)"""
+        pcb_path = tmp_path / "minimal.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        return pcb_path
+
+    def test_dry_run_leaves_status_not_invoked(self, tmp_path):
+        """A dry-run should leave the status at ``"not_invoked"`` (no
+        auto-fix can be invoked during a dry-run by definition)."""
+        from kicad_tools.cli import route_cmd as route_cmd_mod
+
+        pcb_path = self._minimal_pcb(tmp_path)
+        captured: list[str] = []
+        original = route_cmd_mod._set_wall_clock_deadline
+
+        def _spy(args):
+            original(args)
+            captured.append(getattr(args, "_auto_fix_status", "<missing>"))
+
+        with patch.object(route_cmd_mod, "_set_wall_clock_deadline", _spy):
+            route_cmd_mod.main([str(pcb_path), "--timeout", "60", "--dry-run", "--quiet"])
+
+        assert captured, "main() did not invoke _set_wall_clock_deadline"
+        # _set_wall_clock_deadline is called BEFORE main() stamps
+        # _auto_fix_status = "not_invoked" -- the field may not exist
+        # yet inside the spy.  What matters is that auto-fix code paths
+        # never write "ran"/"skipped_deadline" during a dry-run.

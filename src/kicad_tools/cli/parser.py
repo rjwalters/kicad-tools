@@ -2770,7 +2770,14 @@ def _add_route_parser(subparsers) -> None:
         action="store_true",
         help=(
             "Automatically run 'kct fix-drc' after routing if DRC violations are "
-            "detected. Suppressed by --dry-run and --skip-drc."
+            "detected. Suppressed by --dry-run and --skip-drc. "
+            "Issue #3238: when combined with --timeout, reserves "
+            "max(60s, 20%% of --timeout) of the total budget so auto-fix "
+            "never gets silently skipped when routing exhausts the timeout. "
+            "If auto-fix is requested but still skipped due to budget "
+            "exhaustion (the routing portion overran its 80%% share), the "
+            "route command exits with code 7 and writes "
+            "AUTOFIX_SKIPPED_BUDGET_EXHAUSTED to stderr."
         ),
     )
     route_parser.add_argument(

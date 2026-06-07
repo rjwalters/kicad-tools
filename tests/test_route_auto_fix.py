@@ -1018,3 +1018,68 @@ class TestAutoFixNoRegressionForCodes1And2:
             f"fix-drc exit 2 (partial) must not override route exit "
             f"in route_with_layer_escalation, got {result}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #3238: exit code 7 for "auto-fix requested but skipped by deadline"
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAutoFixSkippedExitCode:
+    """Issue #3238: when auto-fix is requested but skipped due to
+    ``--timeout`` exhaustion, the route command exits with the distinct
+    code 7 (not the generic exit 3 "DRC dirty" or exit 0 "success").
+
+    This is the structural guard that prevents the chorus regression
+    from hiding again: CI can gate on exit-code 7 OR on the stderr
+    token ``AUTOFIX_SKIPPED_BUDGET_EXHAUSTED`` to detect silent
+    skip-on-deadline regressions without parsing the full route log.
+    """
+
+    def test_layer_escalation_exit7_on_skipped_deadline(self, tmp_path):
+        """``route_with_layer_escalation`` returns 7 when
+        ``args._auto_fix_status == "skipped_deadline"`` on a successful
+        routing run -- the skip overrides the would-be exit 0.
+        """
+        from contextlib import ExitStack
+
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20240101))")
+        out = tmp_path / "out.kicad_pcb"
+
+        args = _make_routing_args()
+        # Simulate the deadline-skip path having been hit during DRC.
+        args._auto_fix_status = "skipped_deadline"
+        router = _make_success_router(nets_routed=3, nets_to_route=3)
+
+        with ExitStack() as stack:
+            _patch_routing_engine_for_success(stack, router)
+            # DRC reports violations so auto-fix would normally be invoked.
+            stack.enter_context(
+                patch(
+                    "kicad_tools.cli.route_cmd.run_post_route_drc",
+                    return_value=(5, 0),
+                )
+            )
+            # Auto-fix is "called" but returns 1 (skipped) AND leaves
+            # args._auto_fix_status as "skipped_deadline".  We model
+            # this by patching the helper to a function that preserves
+            # the pre-set status field.
+            def _mock_skipped(output_path, max_passes, quiet, args=None):
+                # Simulate the real _run_auto_fix skip path.
+                return 1
+
+            stack.enter_context(
+                patch("kicad_tools.cli.route_cmd._run_auto_fix", side_effect=_mock_skipped)
+            )
+            result = route_with_layer_escalation(pcb, out, args, quiet=True)
+
+        # Issue #3238: the skipped-by-deadline status must produce
+        # exit code 7, not exit 0 (which would silently hide the skip).
+        assert result == 7, (
+            f"Expected exit 7 (auto-fix skipped by deadline, issue #3238), "
+            f"got {result}.  This is the regression guard against silent "
+            f"skip-on-deadline failures (chorus regression mechanism)."
+        )
