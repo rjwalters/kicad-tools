@@ -1329,14 +1329,81 @@ class RoutingGrid:
         # Issue #996: Use ceil/floor to ensure we only mark cells whose CENTER
         # is inside the metal area, not cells that are merely nearby.
         # round() would include cells whose center is outside the metal area.
+        #
+        # Two boundaries are computed:
+        #   - Inner (un-inflated) bound: ``metal_gx1`` .. ``metal_gx2``.  Cells
+        #     in this rectangle have their CENTER inside the continuous metal.
+        #     These get the full ``pad_blocked = True`` + ``is_obstacle = True``
+        #     treatment (per #2915 / #2920 / #2940) -- preserving foreign-net
+        #     reject AND blocking the negotiated-mode ``static_blocks`` loophole
+        #     AND making the same-component carve-out (#2452) skip these cells.
+        #
+        #   - Issue #3233 outer (inflated by ``resolution/2``) bound:
+        #     ``pad_gx1`` .. ``pad_gx2``.  Cells in the band between the inner
+        #     and outer rectangles have their EXTENT overlapping continuous
+        #     pad metal but their CENTER outside it.  These get
+        #     ``pad_blocked = True`` ONLY -- ``is_obstacle`` is NOT forced.
+        #
+        # Why the asymmetry: the pad-exit relaxation at
+        # ``pathfinder.py:2713`` (#996 + #3226) keys off ``pad_blocked`` to
+        # distinguish "actual pad copper" from "clearance halo".  Pre-fix,
+        # cells in the outer band looked like halo (``pad_blocked = False``)
+        # but their extent contained continuous pad copper, so the
+        # Euclidean kernel (#3232) admitted trace centerlines whose edges
+        # brushed real pad metal -- 17 sub-127um ``clearance_pad_segment``
+        # violations on board 05 with ``--backend cpp``.  Marking the
+        # outer-band cells ``pad_blocked = True`` lets the pad-exit guard
+        # refuse those placements.
+        #
+        # But ``is_obstacle`` is intentionally NOT inflated: the
+        # same-component clearance carve-out (#2452 / line 2253 below)
+        # ``continue``s on ``is_obstacle = True`` so it cannot unblock
+        # those cells.  Forcing ``is_obstacle = True`` on the outer band
+        # would shrink the corridor between fine-pitch same-component
+        # pads (LQFP-48 0.5mm pitch on board 05's U3 DRV8301) and regress
+        # the routing-reach acceptance criterion (AC #3: nets routed must
+        # not drop).  The outer-band cells keep their pre-#3233
+        # ``is_obstacle`` semantics (set by the existing #2940 isolated-
+        # pad halo path), which preserves carve-out eligibility while
+        # closing the pad-exit relaxation gap.
+        half_res = self.resolution / 2.0
         metal_x1 = pad.x - effective_width / 2
         metal_y1 = pad.y - effective_height / 2
         metal_x2 = pad.x + effective_width / 2
         metal_y2 = pad.y + effective_height / 2
+
+        # Inner (un-inflated) metal bound: cells whose center is inside
+        # continuous metal.  Pre-#3233 behavior.
         metal_gx1 = int(math.ceil((metal_x1 - self.origin_x) / self.resolution))
         metal_gy1 = int(math.ceil((metal_y1 - self.origin_y) / self.resolution))
         metal_gx2 = int(math.floor((metal_x2 - self.origin_x) / self.resolution))
         metal_gy2 = int(math.floor((metal_y2 - self.origin_y) / self.resolution))
+
+        # Issue #3233 outer (inflated by ``resolution/2``) metal bound:
+        # cells whose EXTENT overlaps continuous metal.  A grid cell at
+        # ``gx`` occupies ``[gx*res - res/2, gx*res + res/2]`` (in origin-
+        # shifted coordinates).  Its extent overlaps continuous metal
+        # ``[mx1, mx2]`` iff ``gx*res - res/2 <= mx2`` AND
+        # ``gx*res + res/2 >= mx1``, which rearranges to
+        # ``gx <= (mx2 + res/2)/res`` AND ``gx >= (mx1 - res/2)/res``
+        # -- i.e. ceil/floor applied to the inflated rectangle.
+        pad_gx1 = int(math.ceil((metal_x1 - half_res - self.origin_x) / self.resolution))
+        pad_gy1 = int(math.ceil((metal_y1 - half_res - self.origin_y) / self.resolution))
+        pad_gx2 = int(math.floor((metal_x2 + half_res - self.origin_x) / self.resolution))
+        pad_gy2 = int(math.floor((metal_y2 + half_res - self.origin_y) / self.resolution))
+
+        # Issue #3233: For fine-pitch pads where the trace-only clearance
+        # has been shrunk below ``resolution/2`` by ``_clearance_for_pin_pitch``,
+        # the inflated pad-blocked rectangle can extend beyond the halo loop
+        # bounds ``(gx1, gx2, gy1, gy2)`` -- the cells just outside the
+        # halo would not be visited by the ``for gy in range(gy1, gy2+1)``
+        # loop below, so the inflated marker would silently lose those
+        # cells.  Expand the outer loop bounds (and the C++ sync envelope)
+        # so they always enclose the inflated pad-blocked rectangle.
+        gx1 = min(gx1, pad_gx1)
+        gy1 = min(gy1, pad_gy1)
+        gx2 = max(gx2, pad_gx2)
+        gy2 = max(gy2, pad_gy2)
 
         for layer_idx in layers_to_block:
             for gy in range(gy1, gy2 + 1):
@@ -1346,6 +1413,32 @@ class RoutingGrid:
                         cell.blocked = True
                         cell.original_net = pad.net
 
+                        # Issue #3233: Two-tier pad-metal classification.
+                        #
+                        # ``is_pad_blocked_band`` covers cells whose EXTENT
+                        # overlaps continuous metal (the union of inner and
+                        # outer-band cells -- ceil/floor of the inflated
+                        # rectangle).  These get ``cell.pad_blocked = True``
+                        # so the pad-exit relaxation guard
+                        # (``pathfinder.py:2713``) refuses foreign-net
+                        # placements where the trace edge would brush real
+                        # pad metal.
+                        #
+                        # ``is_metal_area`` covers ONLY cells whose CENTER is
+                        # inside continuous metal (pre-#3233 semantics).
+                        # These additionally get
+                        # ``cell.is_obstacle = True`` (#2915 / #2920 / #2940).
+                        # The outer-band cells (in pad_blocked_band but NOT
+                        # in metal_area) keep their pre-#3233 ``is_obstacle``
+                        # semantics (set by the existing isolated-pad halo
+                        # path #2940 only when ``cell.net`` is already
+                        # foreign), so the same-component clearance carve-out
+                        # (#2452) can still unblock them for adjacent
+                        # different-net same-component traces -- preserving
+                        # fine-pitch escape routing on LQFP/QFN packages.
+                        is_pad_blocked_band = (
+                            pad_gx1 <= gx <= pad_gx2 and pad_gy1 <= gy <= pad_gy2
+                        )
                         is_metal_area = (
                             metal_gx1 <= gx <= metal_gx2 and metal_gy1 <= gy <= metal_gy2
                         )
@@ -1401,6 +1494,20 @@ class RoutingGrid:
                             if pad.net != 0:
                                 cell.is_obstacle = True
                         else:
+                            # Issue #3233: outer-band cells (extent overlaps
+                            # continuous metal but center is outside it) get
+                            # ``pad_blocked = True`` so the pad-exit relaxation
+                            # guard at ``pathfinder.py:2713`` refuses
+                            # foreign-net trace placements whose edge would
+                            # brush real pad copper.  ``is_obstacle`` is left
+                            # to the halo branch below (handled per-cell-net,
+                            # same as pre-#3233): forcing it here would block
+                            # the same-component clearance carve-out (#2452)
+                            # from unblocking these cells for adjacent
+                            # different-net same-component traces, regressing
+                            # fine-pitch escape routing.
+                            if is_pad_blocked_band:
+                                cell.pad_blocked = True
                             # Issue #2940: rect-aware full-footprint obstacle
                             # marking for isolated pads.  The pre-fix code only
                             # flipped ``is_obstacle = True`` on clearance-halo
