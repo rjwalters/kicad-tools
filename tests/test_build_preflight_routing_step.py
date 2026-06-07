@@ -430,16 +430,20 @@ class TestPreflightRoutingBlocksManufacturing:
 
         assert rc == 0, "--force must allow the step to succeed"
 
-    def test_real_fixture_voltage_divider_routed_pcb_is_rejected(self) -> None:
-        """Real fixture: board 01-voltage-divider's routed PCB.
+    def test_real_fixture_voltage_divider_routed_pcb_is_accepted(self) -> None:
+        """Real fixture: board 01-voltage-divider's routed PCB is complete.
 
-        Surveyed 2026-05-12: 2/3 nets routed.  This is the exact failure
-        surface the issue's bug report names, so we use it as the
-        incomplete-routing fixture rather than synthesising one.
+        Updated 2026-06-07 (#3291): board 01 was surveyed at 2/3 nets at
+        the time this test was written. After the #3291 refresh, board 01
+        routes 3/3 nets cleanly. Per this test's original docstring
+        ("if the fixture board is later repaired, this test will fail
+        loudly"), the assertion was inverted: the preflight gate must
+        now classify the fixture as **complete**, pinning the gold-
+        standard status for the fleet.
 
-        If the fixture board is later repaired (full routing), this
-        test will fail loudly -- which is the correct signal that the
-        bug-reproducer should be updated.
+        A separate synthetic-fixture test in this module exercises the
+        incomplete-routing failure path so we don't lose coverage of the
+        gate's rejection logic.
         """
         repo_root = Path(__file__).resolve().parent.parent
         fixture = (
@@ -455,13 +459,12 @@ class TestPreflightRoutingBlocksManufacturing:
         # Run the analyser in-process against the real fixture.  We do
         # NOT monkey-patch here; we want to verify the real net-status
         # analyser, the real dispatch path, and the real exit code all
-        # agree that this board is not manufacturable as-is.
+        # agree that this board is manufacturable as-is.
         ctx = _make_ctx(pcb=fixture)
         result = _run_step_preflight_routing(ctx, Console(quiet=True))
 
-        assert result.success is False, (
-            f"Real fixture {fixture} should be classified as incomplete; "
-            f"if it has been repaired, update this test's expectations."
+        assert result.success is True, (
+            f"Board 01 (gold standard, #3291) must pass the preflight "
+            f"routing gate; got {result.message!r}"
         )
-        assert "--allow-incomplete" in result.message
-        assert "kct route" in result.message
+        assert "3/3 nets complete" in result.message

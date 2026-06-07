@@ -133,7 +133,10 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
         sch.add_wire((gnd_x_points[i], rail_gnd_y), (gnd_x_points[i + 1], rail_gnd_y))
 
     # Add power symbols at rail start
-    sch.add_power("power:+5V", x=X_LEFT, y=RAIL_VIN, rotation=0)
+    # Use synthesized "VIN" symbol so the schematic's published net name
+    # matches the project.kct interface convention and the PCB net name
+    # (fixes schematic-vs-PCB drift detected by `kct fleet status`).
+    sch.add_pwr_symbol("VIN", x=X_LEFT, y=RAIL_VIN, rotation=0)
     sch.add_power("power:GND", x=X_LEFT, y=RAIL_GND, rotation=180)
 
     # Add PWR_FLAG symbols to indicate power entry points
@@ -142,7 +145,7 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     sch.add_power("power:PWR_FLAG", x=x_j1, y=RAIL_GND, rotation=0)
 
     # Add net labels
-    sch.add_label("+5V", X_LEFT, RAIL_VIN)
+    sch.add_label("VIN", X_LEFT, RAIL_VIN)
     sch.add_label("GND", X_LEFT, RAIL_GND)
 
     print(f"   VIN rail with {len(vin_x_points) - 1} segments")
@@ -331,8 +334,15 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     (uuid "{generate_uuid()}")
   )"""
 
-    def generate_connector(ref: str, pos: tuple, pin1_net: str, pin2_net: str) -> str:
-        """Generate a 2-pin through-hole connector (2.54mm pitch)."""
+    def generate_connector(
+        ref: str, pos: tuple, pin1_net: str, pin2_net: str, value: str = "Conn_01x02"
+    ) -> str:
+        """Generate a 2-pin through-hole connector (2.54mm pitch).
+
+        ``value`` is the footprint-value text written on F.Fab; pass the
+        schematic-side connector value (e.g. ``"IN"`` / ``"OUT"``) so the
+        sync analyzer doesn't flag a spurious value mismatch.
+        """
         x, y = pos
         pin1_num = NETS[pin1_net]
         pin2_num = NETS[pin2_net]
@@ -347,7 +357,7 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     (fp_text reference "{ref}" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "Conn_01x02" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" thru_hole rect (at 0 {-pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin1_num} "{pin1_net}"))
@@ -390,7 +400,9 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     print("\n1. Adding footprints...")
 
     # J1: Input connector (pin1=VIN, pin2=GND)
-    parts.append(generate_connector("J1", J1_POS, "VIN", "GND"))
+    # Match the schematic-side connector value ("IN") so sync analysis
+    # doesn't flag a spurious value mismatch.
+    parts.append(generate_connector("J1", J1_POS, "VIN", "GND", value="IN"))
     print(f"   J1 (input) at {J1_POS}")
 
     # R1: Top resistor (pin1=VIN, pin2=VOUT)
@@ -402,7 +414,7 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     print(f"   R2 (10k) at {R2_POS}")
 
     # J2: Output connector (pin1=VOUT, pin2=GND)
-    parts.append(generate_connector("J2", J2_POS, "VOUT", "GND"))
+    parts.append(generate_connector("J2", J2_POS, "VOUT", "GND", value="OUT"))
     print(f"   J2 (output) at {J2_POS}")
 
     parts.append(")")  # Close kicad_pcb

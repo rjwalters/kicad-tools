@@ -218,9 +218,16 @@ class TestBoard01NoRegression:
         bom = extract_bom(str(BOARD_01_SCH))
         items = bom.items
 
-        # Board 01 schematic populates Footprint for every instance.
-        assert all((it.footprint or "").strip() for it in items), (
-            "Precondition: board 01 schematic should populate all footprints"
+        # Board 01 schematic populates Footprint for every *placed*
+        # instance. Virtual items (power symbols like #PWR01 for the
+        # synthesized VIN rail introduced by #3291) are global net
+        # labels, not real footprints, so they're excluded from the
+        # precondition.
+        real_items = [it for it in items if not it.is_virtual]
+        assert real_items, "Precondition: board 01 must have non-virtual BOM items"
+        assert all((it.footprint or "").strip() for it in real_items), (
+            "Precondition: board 01 schematic should populate all footprints "
+            "for non-virtual items"
         )
 
         snapshot = [(it.reference, it.footprint) for it in items]

@@ -465,13 +465,19 @@ class TestConnectivityRuleCli:
 class TestConnectivityRuleBoard01:
     """Integration test against the committed board 01 routed PCB.
 
-    Board 01 (voltage-divider) is the headline #3041 example: it routes
-    only 1 of 2 nets but ``kct check`` previously reported PASS.  After
-    this rule lands, board 01 must produce at least one connectivity
-    error.
+    Board 01 (voltage-divider) was the headline #3041 example: it had
+    been routing only 1 of 2 nets while ``kct check`` reported PASS. The
+    fix landed and the connectivity rule was wired into ``kct check``.
+    Since #3291 the board now routes cleanly (3/3 nets, 0 connectivity
+    errors), so this test pins the post-fix invariant: connectivity is
+    OK on the committed routed PCB.
+
+    To exercise the rule's failure path itself, see
+    ``TestConnectivityRuleCLI`` above, which builds a synthetic 2-pad
+    unrouted PCB and asserts the rule fires.
     """
 
-    def test_board_01_routed_pcb_has_connectivity_errors(self, capsys) -> None:
+    def test_board_01_routed_pcb_passes_connectivity(self, capsys) -> None:
         from kicad_tools.cli.check_cmd import main
 
         board_pcb = (
@@ -492,13 +498,14 @@ class TestConnectivityRuleBoard01:
             pytest.skip(f"{board_pcb} not present in this checkout")
 
         rc = main([str(board_pcb), "--only", "connectivity", "--mfr", "jlcpcb"])
-        assert rc == 2, (
-            "Board 01 routes 1/2 nets (Issue #3041); connectivity rule "
-            "must flag the unrouted net.  Pre-fix this returned 0."
+        assert rc == 0, (
+            "Board 01 must route cleanly with no connectivity errors "
+            "after #3291 (gold-standard fleet board). Pre-#3291 this "
+            "intentionally returned 2 to pin the #3041 regression."
         )
 
         captured = capsys.readouterr()
-        assert "connectivity" in captured.out
+        assert "DRC PASSED" in captured.out
 
 
 class TestConnectivityRuleRegistry:

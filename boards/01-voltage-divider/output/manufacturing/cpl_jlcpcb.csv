@@ -1,5 +1,5 @@
 Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
-J1,Conn_01x02,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,5.0000mm,12.5000mm,0.0,Top
-J2,Conn_01x02,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,25.0000mm,12.5000mm,0.0,Top
+J1,IN,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,5.0000mm,12.5000mm,0.0,Top
+J2,OUT,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,25.0000mm,12.5000mm,0.0,Top
 R1,10k,Resistor_SMD:R_0805_2012Metric,15.0000mm,8.0000mm,0.0,Top
 R2,10k,Resistor_SMD:R_0805_2012Metric,15.0000mm,17.0000mm,0.0,Top

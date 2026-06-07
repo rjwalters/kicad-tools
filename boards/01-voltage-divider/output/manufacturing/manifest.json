@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-05-22T03:02:07.164552+00:00",
+  "generated_at": "2026-06-07T15:47:57.012281+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -9,27 +9,27 @@
       "size": 240
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "ff420b9797b32ee7f5f7d0fa8000e9b3fb570940644b3951fc8dbe7749fc876c",
-      "size": 387
+      "sha256": "52266c589d3ef382c2a672dd4fcae912513c0a57a818ab0e3b3ba484f48fe17a",
+      "size": 372
     },
     "gerbers.zip": {
-      "sha256": "6128fd461994e270e781b7a0f4d6a36182167c503f6078363e25b5bed22d7654",
-      "size": 13589
+      "sha256": "7d40220cd7b93e22de7819203d88db0f8b5bd7f1e217be333a8dbdf6d916e025",
+      "size": 10821
     },
     "report.pdf": {
-      "sha256": "e844ef5cfcffd23ca643d7f99a53579b695650f55ef8b5a538b8fedf327ac9bf",
-      "size": 29617
+      "sha256": "9dd690dc7d549c024439d0d7db2970f5720a842dec679e5a2e2786d284e9f12c",
+      "size": 29434
     },
     "report.md": {
-      "sha256": "2dcc45fd46dcc11d0aeb382a35046987347431437aff5a3f200ebd8fd5e99175",
-      "size": 1946
+      "sha256": "25c8a51c0778288bc95a62ee56374f11b5fe0c01a46d549338e022e86f681730",
+      "size": 1940
     },
     "kicad_project.zip": {
-      "sha256": "dfb6bba7a417c9153c03c2812136cdb960d9784730110f16557c5c2921e703fc",
-      "size": 13495
+      "sha256": "a0f5d3da605dc856d9fc3f761ed8c0a56bc301ce9c20320b44a4d9ee27869ccb",
+      "size": 10693
     },
     "README.txt": {
-      "sha256": "b1ebae26bb78281fddbf1bbcf311eff178a7db8ea5bbd3ae5201a060a3a41a18",
+      "sha256": "5cf2ae252cd547ff89724792a07294fa2684d4b7350bc275ea8f39a44affb0b7",
       "size": 764
     }
   },
@@ -67,7 +67,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (3 vias, 4 TH pads)"
+      "message": "Drill holes present (0 vias, 4 TH pads)"
     },
     {
       "name": "tht_in_cpl",
