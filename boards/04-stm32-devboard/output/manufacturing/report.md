@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-26 | jlcpcb"
+date: "Rev 1 | 2026-06-07 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 17 (0 SMD, 0 THT, 17 other) |
 | Nets | 12 |
-| Traces | 105 segments |
-| Vias | 28 |
+| Traces | 390 segments |
+| Vias | 25 |
 | Board Size | 60.0 x 40.0 mm |
 
 ## Design Overview
@@ -36,7 +36,7 @@ Demonstrates circuit blocks API
 
 ### Power Architecture
 
-**Power Rails**: +3V3, +5V, GND
+**Power Rails**: +3V3, +5V, GND, PWR_FLAG
 
 | Regulator | Device |
 |-----------|--------|
@@ -84,9 +84,9 @@ Demonstrates circuit blocks API
 
 | Metric | Count |
 |--------|-------|
-| Errors | 4 |
+| Errors | 3 |
 | Warnings | 48 |
-| Blocking | 4 |
+| Blocking | 3 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -95,8 +95,7 @@ Demonstrates circuit blocks API
 |----------------|-------|
 | pad_grid | 48 |
 | via_in_pad | 3 |
-| clearance_segment_via | 1 |
-| connectivity | 1 |
+| connectivity | 2 |
 
 
 \newpage
@@ -107,8 +106,9 @@ Demonstrates circuit blocks API
 
 ### Action Items
 
-- **[CRITICAL]** Fix 4 blocking DRC violations (via_in_pad (3), clearance_segment_via (1))
+- **[CRITICAL]** Fix 3 blocking DRC violations (via_in_pad (3))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.300mm required
+- **[OPTIONAL]** Verify zone fill in KiCad: 1 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 - **[OPTIONAL]** Review 48 DRC warnings
 
@@ -119,12 +119,12 @@ Demonstrates circuit blocks API
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 100.0% (9/9) |
-| Overall Completion | 91.7% |
-| Complete Nets | 11 / 12 |
+| Signal Net Completion | 88.9% (8/9) |
+| Overall Completion | 83.3% |
+| Complete Nets | 10 / 12 |
 | Zone-Connected Nets | 3 |
-| Incomplete Nets | 1 |
-| Unconnected Pads | 1 |
+| Incomplete Nets | 2 |
+| Unconnected Pads | 3 |
 
 ### Zone-Connected Nets
 
@@ -132,9 +132,13 @@ Demonstrates circuit blocks API
 - +5V
 - GND
 
-### Incomplete Nets
+### Unrouted Signal Nets
 
-- GND
+- NRST
+
+### Unrouted Signal Nets
+
+- NRST
 
 
 ## Cost Estimate

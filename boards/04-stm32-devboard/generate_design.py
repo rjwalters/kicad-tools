@@ -1073,6 +1073,23 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     edge (OSC_IN/OSC_OUT/NRST). The --auto-mfr-tier flag is required to
     close the NRST gap on the default recipe (issue #2988).
 
+    Note (Issue #3266, 2026-06-06): The post-#3128 clearance-tightening
+    cluster (#3225/#3227 foreign-pad clearance, #3232/#3248 Chebyshev ->
+    Euclidean disc kernel, #3250 sub-cell pad-metal margin) correctly
+    closes a ~0.125mm pad-clearance corridor between U2.7 (NRST) and
+    U2.8 (GND) that the prior committed PCB exploited.  Re-running this
+    recipe now lands 8/9 signal nets routed (NRST stranded at J1.5).
+    The dropped net is the U2.7 -> J1.5 reset path; the router
+    correctly refuses to thread through the U2.7/U2.8 channel under
+    the tightened clearance kernel.  Per the issue analysis the prior
+    committed PCB was a marginal-clearance artifact (~0.125mm vs
+    jlcpcb-tier1 minimum 0.127mm).  The CI gate accepts the new state
+    as advisory connectivity (see ``.github/routed-drc-tolerance.yml``;
+    floor 1 -> 0 since the new PCB has 0 blocking errors).  Functional
+    implication: SWD hardware reset is unavailable; software-mediated
+    reset through the SWD probe is unaffected.  Recovery options
+    documented in the tolerance YAML.
+
     Issue #3039: pins ``--seed 42`` so the routed PCB is byte-identical
     across runs.  The board's ``--seed 42`` reference run is the
     regression baseline (9/9 signal nets, ~6 DRC errors).
@@ -1392,17 +1409,20 @@ def main() -> int:
         print("  - J1: 6-pin SWD debug header")
 
         # For this demo board, partial routing and partial GND stitching
-        # are acceptable.  Per #3075 (2026-05-18), only 1 of 18 GND pads
-        # remains stranded: U2.8 (LQFP-48 west-side VSS) is blocked by
-        # the OSC_OUT B.Cu escape stub that runs through its escape
-        # window -- the same root cause cluster as the 4 clearance
-        # errors at U2 tracked under #2834.  The connectivity rule is
-        # advisory (in DRCChecker.ADVISORY_RULE_IDS, filtered from the
-        # CI gate per #3074), and the other 3 VSS pads (U2.23, U2.35,
-        # U2.47) are stitched so the MCU VSS rail is bonded to the
-        # plane through three independent paths.  Success requires ERC
-        # pass, routing success, stitch step executed, and manufacturing
-        # artifacts produced.
+        # are acceptable.  Per #3075 (2026-05-18), U2.8 (LQFP-48 west-side
+        # VSS) is blocked by the OSC_OUT B.Cu escape stub that runs
+        # through its escape window.  Per #3267 (2026-06-06), the
+        # post-#3128 clearance-tightening cluster also strands U2.35.
+        # Per #3266 (2026-06-06), the same cluster strands NRST at J1.5
+        # (the prior 9/9 route exploited a ~0.125mm clearance corridor
+        # between U2.7 and U2.8 that is now correctly refused).  All
+        # three findings are advisory ``connectivity`` rule outputs (in
+        # DRCChecker.ADVISORY_RULE_IDS, filtered from the CI gate per
+        # #3074); 2 of 4 VSS pads (U2.23, U2.47) are still stitched so
+        # the MCU VSS rail is bonded to the plane through two
+        # independent paths.  Success requires ERC pass, routing success,
+        # stitch step executed, and manufacturing artifacts produced.
+        # Underlying recovery cluster: #2834 (manufacturing-ready).
         return 0 if (erc_success and route_success and stitch_success and mfr_success) else 1
 
     except Exception as e:

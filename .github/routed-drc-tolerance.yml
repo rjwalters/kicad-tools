@@ -1186,7 +1186,57 @@ tolerances:
   # historically-unstable cluster), not the OSC_OUT cluster this
   # entry was originally floored for.  Tracking the SWDIO/BOOT0
   # residual under #2834 (manufacturing-ready cluster).
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 1
+  #
+  # Issue #3266: NRST routing regression refresh (2026-06-06).  The
+  # cumulative effect of the post-#3128 clearance-tightening changes
+  # (#3225/#3227 foreign-pad clearance, #3232/#3248 Chebyshev ->
+  # Euclidean disc kernel, #3250 sub-cell pad-metal margin) closed a
+  # ~0.125mm clearance corridor between U2.7 (NRST) and U2.8 (GND)
+  # that the prior committed PCB exploited.  The previous 9/9 route
+  # ran NRST F.Cu through that 0.45mm-wide channel at ~0.125mm pad
+  # clearance -- BELOW the jlcpcb-tier1 0.127mm minimum.  The
+  # committed PCB at PR #3128 was therefore a marginal-clearance
+  # artifact (the same recipe at 62918dfb already produced 8/9 in
+  # fresh re-runs; the committed PCB was hand-preserved from an
+  # earlier router state).
+  #
+  # Post-refresh state (this PR): re-running the production recipe
+  # (``--mfr jlcpcb-tier1 --backend cpp --auto-fix --auto-layers
+  # --auto-mfr-tier --placement-feedback --micro-via-in-pad-fallback
+  # --seed 42``) lands 8/9 signal nets routed with 0 clearance
+  # violations.  The dropped net is NRST (U2.7 -> J1.5); the router
+  # correctly refuses to thread through the 0.125mm U2.7/U2.8
+  # channel under the tightened clearance kernel.  The stitch step
+  # now reports U2.8 + U2.35 stranded (vs U2.8 only on the prior
+  # committed PCB); the U2.35 case is the sibling B.Cu-clearance
+  # follow-up tracked under #3267.
+  #
+  # The refreshed PCB is GEOMETRICALLY CLEANER than the prior
+  # committed artifact: 0 blocking errors (was 1
+  # ``clearance_segment_via`` at SWDIO/BOOT0) + 2 advisory
+  # ``connectivity`` (NRST + GND U2.8/U2.35 stitch skips).  The CI
+  # gate's blocking-only count drops 1 -> 0.  The advisory
+  # connectivity findings surface in the diagnostic output but are
+  # excluded from the gate per ``DRCChecker.ADVISORY_RULE_IDS``
+  # (issue #3074).
+  #
+  # Functional implication: NRST stranding breaks SWD hardware reset
+  # of the MCU (the J1.5 -> U2.7 reset path).  This is the documented
+  # functional regression and rides with the #2834 manufacturing-
+  # ready cluster.  Recovering NRST connectivity requires either:
+  #   (a) a router improvement that finds an alternative escape path
+  #       (e.g. via U2.7 south-edge escape into the C12/C16 channel),
+  #   (b) a placement nudge that widens the U2.7/U2.8 corridor (the
+  #       LQFP-48 pad pitch is fixed but U2 can move toward the
+  #       board interior),
+  #   (c) a footprint substitution to a wider-pitch package
+  #       (LQFP-48 0.5mm -> LQFP-32 0.8mm or QFN-48), or
+  #   (d) accepting the SWD-reset gap as a documented limitation
+  #       (NRST has a weak internal pull-up; the SWD probe can still
+  #       reset via the software-mediated path).
+  # Floor 1 -> 0 (the SWDIO/BOOT0 clearance_segment_via that drove
+  # the prior 1-floor is GONE from the refreshed PCB).
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 0
 
 # Per-board manufacturer overrides for the CI gate (optional).
 #
