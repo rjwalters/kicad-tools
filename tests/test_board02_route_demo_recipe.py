@@ -57,6 +57,7 @@ GENERATE_DESIGN_SCRIPT = BOARD_DIR / "generate_design.py"
 OUTPUT_DIR = BOARD_DIR / "output"
 UNROUTED_PCB = OUTPUT_DIR / "charlieplex_3x3.kicad_pcb"
 ROUTED_PCB = OUTPUT_DIR / "charlieplex_3x3_routed.kicad_pcb"
+MFG_MANIFEST = OUTPUT_DIR / "manufacturing" / "manifest.json"
 
 # Minimum number of signal nets ``route_demo.py`` must route on board 02.
 # Issue #3207 acceptance criterion #1: ">= 8/10 routed nets on board 02
@@ -242,6 +243,93 @@ def unrouted_pcb_present() -> Path:
             "regenerate via `python3 boards/02-charlieplex-led/generate_pcb.py`."
         )
     return UNROUTED_PCB
+
+
+def test_route_demo_invokes_mfg_bundle_export() -> None:
+    """``route_demo.py`` invokes ``kct export`` after routing (Issue #3264).
+
+    Issue #3264 regression guard: ``kct fleet status`` reports
+    ``ship_ready=false`` with blocker ``"artifacts stale"`` whenever the
+    routed PCB's mtime is newer than ``manufacturing/manifest.json``'s
+    mtime.  Re-running ``route_demo.py`` always rewrites the routed PCB,
+    so the demo MUST also regenerate the manufacturing bundle to keep
+    the manifest current.
+
+    This static test pins the existence of an ``export`` subprocess
+    invocation in ``route_demo.py`` that mirrors
+    ``generate_design.py:export_manufacturing_bundle()``.
+    """
+    assert ROUTE_DEMO_SCRIPT.exists(), f"route_demo.py missing: {ROUTE_DEMO_SCRIPT}"
+    source = ROUTE_DEMO_SCRIPT.read_text()
+
+    # The script must invoke ``kct export`` as a subprocess.
+    assert '"export"' in source or "'export'" in source, (
+        "route_demo.py does not invoke `kct export` — Issue #3264 fix "
+        "is missing.  Re-running the demo will leave manufacturing/"
+        "manifest.json older than the freshly-routed PCB, which makes "
+        "`kct fleet status` report ship_ready=false with blocker "
+        "'artifacts stale'.  Mirror "
+        "generate_design.py:export_manufacturing_bundle()."
+    )
+    # And it must call ``--mfr jlcpcb`` to match the canonical recipe.
+    assert "--mfr" in source and "jlcpcb" in source, (
+        "route_demo.py's mfg-bundle export must use `--mfr jlcpcb` to "
+        "match the canonical recipe in "
+        "generate_design.py:export_manufacturing_bundle()."
+    )
+
+
+def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path) -> None:
+    """After ``route_demo.py`` runs, ``manifest.json`` mtime is newer
+    than the routed PCB's mtime (Issue #3264).
+
+    This is the load-bearing invariant that ``kct fleet status`` checks
+    at ``cli/fleet_cmd.py:634-639`` to decide whether to flag the board
+    ``ship_ready=false`` with blocker ``"artifacts stale"``.  Pre-fix
+    the demo re-routed the PCB but never re-exported the bundle, so the
+    manifest would be left older than the routed PCB and the board would
+    drop to non-ship-ready immediately after running the demo.
+
+    A hard timeout of 300 s guards against router or export hangs.
+    """
+    # Run the demo.  Exit code 0 (full success) or 1 (partial routing /
+    # DRC errors) are both acceptable here -- we pin freshness, not
+    # routing completion (the next test covers that).
+    proc = subprocess.run(
+        [sys.executable, str(ROUTE_DEMO_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        cwd=str(BOARD_DIR),
+    )
+    assert proc.returncode in (0, 1), (
+        f"route_demo.py returned unexpected exit code {proc.returncode}\n"
+        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}\n"
+        f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
+    )
+
+    assert ROUTED_PCB.exists(), (
+        f"route_demo.py did not produce routed PCB at {ROUTED_PCB}.\n"
+        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
+    )
+    assert MFG_MANIFEST.exists(), (
+        f"route_demo.py did not produce manufacturing manifest at "
+        f"{MFG_MANIFEST}.  Issue #3264 fix expects the demo to invoke "
+        f"`kct export` after routing.\n"
+        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
+    )
+
+    routed_mtime = ROUTED_PCB.stat().st_mtime
+    manifest_mtime = MFG_MANIFEST.stat().st_mtime
+    assert manifest_mtime >= routed_mtime, (
+        f"Issue #3264 regression: manifest.json ({manifest_mtime}) is "
+        f"older than routed PCB ({routed_mtime}) after running "
+        f"route_demo.py.  `kct fleet status` will report "
+        f"ship_ready=false with blocker 'artifacts stale'.  The demo "
+        f"must call `kct export` after `kct route` to refresh the "
+        f"manufacturing bundle."
+    )
 
 
 def test_route_demo_achieves_minimum_completion(unrouted_pcb_present: Path) -> None:
