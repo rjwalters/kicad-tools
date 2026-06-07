@@ -3274,11 +3274,40 @@ class EscapeRouter:
         # packages. The escape segments are short and only need to clear the
         # pad congestion zone -- using the full trace width would violate
         # clearances between adjacent pads at 0.65mm pitch.
-        escape_width = (
-            self.rules.min_trace_width
-            if self.rules.min_trace_width is not None
-            else self._get_trace_width_for_net(pads[0].net_name if pads else "")
-        )
+        #
+        # Issue #3278: When pads in the same row belong to DIFFERENT net
+        # classes (e.g. a USB-C row with GND/Power pads next to
+        # USB_D+/USB_D- HighSpeed pads), the historical code used
+        # ``pads[0].net_name`` to choose the escape width for the entire
+        # row.  If ``pads[0]`` happened to land on a fat-class net (e.g.
+        # GND in Power class at 0.5mm), every escape segment in the row
+        # inherited that width, producing clearance violations on
+        # adjacent fine-class pads (e.g. USB_D+/USB_D- at 0.2mm) whose
+        # own net class would have allowed a much narrower escape.
+        #
+        # The fix splits the width into two values:
+        #   - ``row_max_width`` -- worst-case trace width across all
+        #     pads in the row, used for ``lateral_offset`` and any
+        #     other GEOMETRY that must remain a row-scope constant
+        #     (so cross-row via clearance is preserved for the
+        #     widest pin in the row).
+        #   - per-pad ``pad_escape_width`` (computed inside the loop)
+        #     -- used for the ``Segment.width`` of each pin's own
+        #     escape geometry and forwarded to the in-pad / lateral
+        #     rescue helpers so they emit traces sized for the pad
+        #     they're rescuing.
+        #
+        # When ``min_trace_width`` is set (neck-down path) BOTH values
+        # collapse back to that necked width, preserving the
+        # manufacturer-minimum behaviour the neck-down path expects.
+        if self.rules.min_trace_width is not None:
+            row_max_width = self.rules.min_trace_width
+        elif pads:
+            row_max_width = max(
+                self._get_trace_width_for_net(p.net_name or "") for p in pads
+            )
+        else:
+            row_max_width = self.rules.trace_width
 
         # For fine-pitch, use minimal escape distance
         # Vias placed just outside pad clearance zone
@@ -3293,9 +3322,16 @@ class EscapeRouter:
         # an even pin, one surface-segment from an odd pin) have edge-to-edge
         # gap = pin_pitch - escape_width.  When that gap is less than
         # trace_clearance we must shift the odd-pin via laterally.
-        lateral_clearance = package.pin_pitch - escape_width
+        #
+        # Issue #3278: Use ``row_max_width`` here (NOT the per-pad width)
+        # so the lateral offset is sized for the worst-case pin in the
+        # row.  A per-pad lateral offset collapses to 0 on the
+        # narrow-class pad, which then collides with the via from its
+        # fat-class neighbour (the exact regression the issue spec
+        # warns about for USB_D+/USB_D- on board 03).
+        lateral_clearance = package.pin_pitch - row_max_width
         if lateral_clearance < effective_clearance:
-            lateral_offset = (effective_clearance - lateral_clearance + escape_width) / 2
+            lateral_offset = (effective_clearance - lateral_clearance + row_max_width) / 2
         else:
             lateral_offset = 0.0
 
@@ -3306,6 +3342,22 @@ class EscapeRouter:
         skipped_count = 0
 
         for i, pad in enumerate(pads):
+            # Issue #3278: per-pad escape width, sized for THIS pad's
+            # own net class.  Only the geometry that must remain a
+            # row-scope constant (``lateral_offset``) uses
+            # ``row_max_width``; everything else (the four
+            # ``Segment(width=...)`` sites below and the
+            # ``_try_in_pad_escape`` / ``_try_lateral_via_escape``
+            # rescue calls) uses ``pad_escape_width``.  This
+            # prevents fat-class pads (e.g. GND at 0.5mm) from
+            # forcing adjacent fine-class pads (e.g. USB_D+ at
+            # 0.2mm) into 0-gap clearance violations.
+            pad_escape_width = (
+                self.rules.min_trace_width
+                if self.rules.min_trace_width is not None
+                else self._get_trace_width_for_net(pad.net_name or "")
+            )
+
             # Determine if this pin needs layer transition.
             # Issue #3235: ``phase_offset`` flips the parity so the second
             # row/column of a dual-row package can use the opposite layer
@@ -3373,7 +3425,7 @@ class EscapeRouter:
                     y1=pad.y,
                     x2=via_x,
                     y2=via_y,
-                    width=escape_width,
+                    width=pad_escape_width,
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -3403,7 +3455,7 @@ class EscapeRouter:
                         pad=pad,
                         direction=direction,
                         effective_clearance=effective_clearance,
-                        escape_width=escape_width,
+                        escape_width=pad_escape_width,
                         package=package,
                         skip_on_clearance_violation=self.strict_in_pad_clearance,
                     )
@@ -3421,7 +3473,7 @@ class EscapeRouter:
                         pad=pad,
                         direction=direction,
                         effective_clearance=effective_clearance,
-                        escape_width=escape_width,
+                        escape_width=pad_escape_width,
                         package=package,
                     )
                     if lateral_route is not None:
@@ -3454,7 +3506,7 @@ class EscapeRouter:
                         y1=via_y,
                         x2=escape_x,
                         y2=escape_y,
-                        width=escape_width,
+                        width=pad_escape_width,
                         layer=escape_layer,
                         net=pad.net,
                         net_name=pad.net_name,
@@ -3486,7 +3538,7 @@ class EscapeRouter:
                     y1=pad.y,
                     x2=escape_x,
                     y2=escape_y,
-                    width=escape_width,
+                    width=pad_escape_width,
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -3513,7 +3565,7 @@ class EscapeRouter:
                         pad=pad,
                         direction=direction,
                         effective_clearance=effective_clearance,
-                        escape_width=escape_width,
+                        escape_width=pad_escape_width,
                         package=package,
                         skip_on_clearance_violation=self.strict_in_pad_clearance,
                     )
@@ -3531,7 +3583,7 @@ class EscapeRouter:
                         pad=pad,
                         direction=direction,
                         effective_clearance=effective_clearance,
-                        escape_width=escape_width,
+                        escape_width=pad_escape_width,
                         package=package,
                     )
                     if lateral_route is not None:
