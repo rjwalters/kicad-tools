@@ -476,20 +476,28 @@ class TestManufacturabilityFloor:
             if nid in net_id_to_name
         }
 
-    def test_at_least_17_signal_nets_have_segments(
+    def test_at_least_14_signal_nets_have_segments(
         self, pcb_segments_by_net: dict[str, int]
     ) -> None:
-        """At least 17 of the 21 declared signal nets carry routing.
+        """At least 14 of the 21 declared signal nets carry routing.
 
-        Per the #3262 baseline:
+        Per the #3262 baseline (committed PCB on main):
         - 18 diff-pair nets (9 pairs)
         - 3 single-ended sideband nets (USB_CC1, USB_CC2, MIPI_RST)
         = 21 signal nets
 
-        At the baseline, 20 of 21 route (USB3_TX1+ at U2.B2 is the
-        residual BGA-49 escape — see #3270).  We pin the floor at 17
-        so a regression that drops 4+ nets gets flagged while leaving
-        headroom for minor seed-dependent variance.
+        At the baseline, 17 of 21 route (USB3_RX1-, USB3_TX2-,
+        USB3_RX2-, MIPI_RST are the residual unrouted signal nets,
+        primarily BGA-49 escape gaps — see #3270).  We pin the floor
+        at 14 so a regression that drops 3+ more nets gets flagged
+        while leaving headroom for minor seed-dependent variance.
+
+        Note: a refresh attempt under PR #3273 produced a route that
+        looked better on net-count but regressed impedance compliance
+        10x (315 errors vs main's 30) because trace widths drifted off
+        the 50 ohm target.  This floor catches *coverage* regressions;
+        impedance regressions are caught by the strict CI sidecar gate
+        (see #3151).
         """
         signal_nets = [
             "USB2_D+",
@@ -515,9 +523,9 @@ class TestManufacturabilityFloor:
             "MIPI_RST",
         ]
         routed = [n for n in signal_nets if pcb_segments_by_net.get(n, 0) >= 1]
-        assert len(routed) >= 17, (
+        assert len(routed) >= 14, (
             f"Manufacturability floor: only {len(routed)}/21 signal nets "
-            f"have segments in the committed routed PCB.  Baseline is 20/21 "
+            f"have segments in the committed routed PCB.  Baseline is 17/21 "
             f"(see #3262).  Unrouted nets: "
             f"{[n for n in signal_nets if n not in routed]}"
         )

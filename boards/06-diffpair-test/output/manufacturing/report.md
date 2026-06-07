@@ -2,7 +2,7 @@
 title: "diffpair_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-07 | jlcpcb"
+date: "Rev 1 | 2026-05-13 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 7 (0 SMD, 0 THT, 7 other) |
 | Nets | 26 |
-| Traces | 1525 segments |
-| Vias | 32 |
+| Traces | 130 segments |
+| Vias | 24 |
 | Board Size | 100.0 x 80.0 mm |
 
 ## Design Overview
@@ -38,7 +38,7 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Protocol | Signals |
 |----------|---------|
-| UART | USB3_RX2-, USB3_TX2- |
+| UART | PCIE_TX+, USB3_RX1- |
 | USB | USB2_D+, USB2_D-, VBUS_USB |
 
 ### Power Architecture
@@ -82,22 +82,22 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 3 |
-| Warnings | 12 |
-| Blocking | 3 |
+| Errors | 32 |
+| Warnings | 8 |
+| Blocking | 32 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
+| impedance | 25 |
 | zone_unfilled | 5 |
-| pad_grid | 4 |
-| connectivity | 3 |
-| clearance_segment_segment | 2 |
+| clearance_pad_segment | 3 |
+| diffpair_clearance_intra | 3 |
 | silkscreen_text_height | 2 |
-| diffpair_clearance_intra | 1 |
 | silkscreen_over_pad | 1 |
+| via_in_pad | 1 |
 
 
 \newpage
@@ -108,10 +108,10 @@ Epic #2556 Phase 4L (issue #2658)
 
 ### Action Items
 
-- **[CRITICAL]** Fix 3 blocking DRC violations (clearance_segment_segment (2), diffpair_clearance_intra (1))
-- **[OPTIONAL]** Verify zone fill in KiCad: 1 nets appear incomplete but may be connected via zone fills
+- **[CRITICAL]** Fix 32 blocking DRC violations (impedance (25), clearance_pad_segment (3), diffpair_clearance_intra (3))
+- **[OPTIONAL]** Verify zone fill in KiCad: 2 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
-- **[OPTIONAL]** Review 12 DRC warnings
+- **[OPTIONAL]** Review 8 DRC warnings
 
 
 \newpage
@@ -120,12 +120,12 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 95.2% (20/21) |
-| Overall Completion | 88.5% |
-| Complete Nets | 23 / 26 |
+| Signal Net Completion | 90.5% (19/21) |
+| Overall Completion | 84.6% |
+| Complete Nets | 22 / 26 |
 | Zone-Connected Nets | 5 |
-| Incomplete Nets | 3 |
-| Unconnected Pads | 123 |
+| Incomplete Nets | 4 |
+| Unconnected Pads | 124 |
 
 ### Zone-Connected Nets
 
@@ -138,10 +138,12 @@ Epic #2556 Phase 4L (issue #2658)
 ### Unrouted Signal Nets
 
 - USB3_TX1+
+- USB3_TX1-
 
 ### Unrouted Signal Nets
 
 - USB3_TX1+
+- USB3_TX1-
 
 
 ## Cost Estimate
