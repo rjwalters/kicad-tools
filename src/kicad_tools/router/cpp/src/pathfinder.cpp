@@ -136,6 +136,57 @@ void Pathfinder::set_routable_layers(const std::vector<int>& layers) {
     routable_layers_ = layers;
 }
 
+// Issue #3309: Size the flat A* arrays for the current grid and bump
+// the generation counter so every prior cell's stamp is invalidated
+// in O(1).  Called at the top of every fresh search (one-shot route()
+// and resumable route_resumable()) before any g_score / closed-set
+// access.
+//
+// The arrays are sized to ``cols * rows * layers`` floats / uint32s.
+// For a chorus-grade 1.5K x 1.5K x 4L grid that's 9M floats + 9M
+// uint32s = 72MB total -- well within typical worker memory and a
+// one-time allocation per Pathfinder lifetime.  Subsequent searches
+// reuse the same memory; only the generation counter advances.
+//
+// Wraparound: ``search_current_gen_`` is a uint32_t.  If we reach
+// ``UINT32_MAX`` searches on the same Pathfinder instance (~4B), we
+// must zero the stamp arrays before reusing the counter so a stale
+// cell does not falsely match the new generation 0.  On a router that
+// runs maybe 100 searches per board, this branch is effectively
+// dead code -- but defending against it makes the invariant explicit.
+void Pathfinder::ensure_search_arrays_sized() {
+    const int cols = grid_.cols();
+    const int rows = grid_.rows();
+    const int layers = grid_.layers();
+    const size_t total = static_cast<size_t>(cols) *
+                         static_cast<size_t>(rows) *
+                         static_cast<size_t>(layers);
+
+    if (cols != search_flat_cols_ ||
+        rows != search_flat_rows_ ||
+        layers != search_flat_layers_) {
+        // Grid resized (or first use).  Reallocate and reset stamps.
+        search_g_scores_flat_.assign(total, 0.0f);
+        search_g_score_gen_.assign(total, 0);
+        search_closed_gen_.assign(total, 0);
+        search_flat_cols_ = cols;
+        search_flat_rows_ = rows;
+        search_flat_layers_ = layers;
+        search_current_gen_ = 0;
+    }
+
+    // Advance the generation counter.  On wraparound, clear the stamps
+    // to avoid a stale-cell false positive on generation 0.
+    if (search_current_gen_ == std::numeric_limits<uint32_t>::max()) {
+        std::fill(search_g_score_gen_.begin(),
+                  search_g_score_gen_.end(), 0u);
+        std::fill(search_closed_gen_.begin(),
+                  search_closed_gen_.end(), 0u);
+        search_current_gen_ = 0;
+    }
+    ++search_current_gen_;
+}
+
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                                   bool allow_sharing, int radius_override,
                                   int partner_net, int partner_radius) const {
@@ -1171,20 +1222,31 @@ RouteResult Pathfinder::route_resumable(
     // sequence numbers already sitting in ``search_open_set_``.
     search_seq_counter_ = 0;
 
+    // Issue #3309: Size the flat g_score / closed-set arrays for the
+    // current grid and bump the generation counter so all prior cell
+    // stamps are invalidated in O(1).  Must run before any
+    // ``set_g_score`` / ``is_closed`` access during seeding below.
+    ensure_search_arrays_sized();
+
     // Seed start nodes into member open set
     const auto& sp = search_start_pad_bounds_;
     for (int sgx = sp.metal_gx1; sgx <= sp.metal_gx2; ++sgx) {
         for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
             if (!grid_.is_valid(sgx, sgy, 0)) continue;
             for (int sl : search_valid_start_layers_) {
+                if (!grid_.is_valid(sgx, sgy, sl)) continue;
                 float h = heuristic(sgx, sgy, sl, end_gx, end_gy,
                                     search_valid_end_layers_[0]);
                 AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0,
                                      search_seq_counter_++};
-                auto key = std::make_tuple(sgx, sgy, sl);
-                auto it = search_g_scores_.find(key);
-                if (it == search_g_scores_.end() || 0.0f < it->second) {
-                    search_g_scores_[key] = 0.0f;
+                // Issue #3309: flat-array g_score seed.  Skip if a
+                // shorter (or equal) path to this cell has already been
+                // seeded in this generation -- preserves the pre-#3309
+                // observational semantics where the hashmap branch fell
+                // through when ``g_scores[key] <= 0.0f``.
+                const size_t idx = flat_index(sgx, sgy, sl);
+                if (g_score_at(idx) > 0.0f) {
+                    set_g_score(idx, 0.0f);
                     search_open_set_.push(start_node);
                 }
             }
@@ -1280,11 +1342,16 @@ RouteResult Pathfinder::run_astar_loop() {
         AStarNode current = search_open_set_.top();
         search_open_set_.pop();
 
+        // Issue #3309: flat-array closed-set check.  The pre-#3309 path
+        // built a tuple, hashed it, walked an unordered_set bucket --
+        // 4 ops + 1 allocation per pop.  The flat-array path is a
+        // single integer compare against the generation stamp.
         auto current_key = std::make_tuple(current.x, current.y, current.layer);
-        if (search_closed_set_.count(current_key)) {
+        const size_t cur_idx = flat_index(current.x, current.y, current.layer);
+        if (is_closed(cur_idx)) {
             continue;
         }
-        search_closed_set_.insert(current_key);
+        mark_closed(cur_idx);
 
         int current_idx = static_cast<int>(search_closed_list_.size());
         search_closed_list_.push_back(current);
@@ -1302,6 +1369,8 @@ RouteResult Pathfinder::run_astar_loop() {
             if (layer_ok) {
                 // Issue #2447: Skip rejected goals (mirrors Python pathfinder's
                 // continue at line 1553 when _reconstruct_route fails).
+                // rejected_goals_ stays a small set (one entry per resume()
+                // call) -- not worth flattening; hashmap is fine here.
                 if (!rejected_goals_.count(current_key)) {
                     // Issue #3130: forward cached per-net emit widths so
                     // the reconstructed Segment/Via carry per-net values
@@ -1481,8 +1550,9 @@ RouteResult Pathfinder::run_astar_loop() {
                     cell.blocked ? 1 : 0, cell.net, cell.is_obstacle ? 1 : 0);
             }
 
-            auto neighbor_key = std::make_tuple(nx, ny, nlayer);
-            if (search_closed_set_.count(neighbor_key)) continue;
+            // Issue #3309: flat-array closed-set check on neighbour expansion.
+            const size_t nbr_idx = flat_index(nx, ny, nlayer);
+            if (is_closed(nbr_idx)) continue;
 
             float turn_cost = 0.0f;
             if (current.dx != 0 || current.dy != 0) {
@@ -1513,9 +1583,12 @@ RouteResult Pathfinder::run_astar_loop() {
                           turn_cost + congestion_cost + negotiated_cost +
                           avoidance + pad_channel_cost;
 
-            auto it = search_g_scores_.find(neighbor_key);
-            if (it == search_g_scores_.end() || new_g < it->second) {
-                search_g_scores_[neighbor_key] = new_g;
+            // Issue #3309: flat-array g_score relax.  ``g_score_at`` returns
+            // +infinity if the cell has not been touched in this generation,
+            // so the ``new_g < ...`` compare matches the pre-#3309 semantics
+            // of the ``find() == end()`` branch.
+            if (new_g < g_score_at(nbr_idx)) {
+                set_g_score(nbr_idx, new_g);
                 float h = heuristic(nx, ny, nlayer, search_end_gx_, search_end_gy_,
                                     search_valid_end_layers_[0]);
                 float f = new_g + search_weight_ * h;
@@ -1547,8 +1620,9 @@ RouteResult Pathfinder::run_astar_loop() {
                 continue;
             }
 
-            auto neighbor_key = std::make_tuple(current.x, current.y, new_layer);
-            if (search_closed_set_.count(neighbor_key)) continue;
+            // Issue #3309: flat-array closed-set check on via expansion.
+            const size_t via_idx = flat_index(current.x, current.y, new_layer);
+            if (is_closed(via_idx)) continue;
 
             float congestion_cost = get_congestion_cost(current.x, current.y, new_layer);
             float negotiated_cost = 0.0f;
@@ -1572,9 +1646,9 @@ RouteResult Pathfinder::run_astar_loop() {
             float new_g = current.g_score + rules_.cost_via + congestion_cost +
                           negotiated_cost + avoidance + pad_channel_cost;
 
-            auto it = search_g_scores_.find(neighbor_key);
-            if (it == search_g_scores_.end() || new_g < it->second) {
-                search_g_scores_[neighbor_key] = new_g;
+            // Issue #3309: flat-array g_score relax for via expansion.
+            if (new_g < g_score_at(via_idx)) {
+                set_g_score(via_idx, new_g);
                 float h = heuristic(current.x, current.y, new_layer,
                                     search_end_gx_, search_end_gy_,
                                     search_valid_end_layers_[0]);
@@ -1615,8 +1689,12 @@ RouteResult Pathfinder::run_astar_loop() {
 void Pathfinder::clear_search_state() {
     // Clear all A* member state to release memory
     search_open_set_ = PQ();  // priority_queue has no clear(); swap with empty
-    search_closed_set_.clear();
-    search_g_scores_.clear();
+    // Issue #3309: The flat g_score / closed-gen arrays are reused across
+    // searches; reset by bumping ``search_current_gen_`` in
+    // ``ensure_search_arrays_sized()`` on the next call.  We do NOT
+    // ``assign(0)`` here because that would defeat the O(1) reset
+    // optimization that was the whole point of the flat-array switch.
+    // The vectors themselves stay sized so the next search reuses memory.
     search_closed_list_.clear();
     rejected_goals_.clear();
     search_state_active_ = false;
