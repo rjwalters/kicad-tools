@@ -742,3 +742,185 @@ class TestIssue2498SkipNetFallback:
         assert "GND" not in output
         assert "SIG_B" in output  # genuine failure shown
         assert "1/2" in output  # 1 routed of 2 candidates
+
+
+# ---------------------------------------------------------------------------
+# Issue #3311 / #3255: partial-route count surfaced alongside strict-connect
+# ---------------------------------------------------------------------------
+
+
+class TestPartialRouteHeadline:
+    """The route summary must report partial-route count alongside the
+    strict-connect headline so CI and humans see the full picture instead
+    of the misleading "X/Y routed" snapshot that hides 28 partial routes
+    behind a 5/48 strict-connect number (chorus Wave 8 motivating case).
+    """
+
+    def _make_route(self, net_id):
+        route = MagicMock()
+        route.net = net_id
+        route.segments = []
+        route.vias = []
+        return route
+
+    def test_summary_always_includes_partial_routes_line(self, capsys):
+        """Even when there are no partial nets, the breakdown line MUST
+        be emitted so scrapers can pin both values."""
+        router = _make_router(routes=[self._make_route(1)])
+        net_map = {"NetA": 1}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=1,
+        )
+
+        output = capsys.readouterr().out
+        # The new lines must always appear so consumers can pin them.
+        assert "Nets routed:" in output
+        assert "Partial routes:" in output
+        assert "Unrouted:" in output
+
+    def test_summary_includes_unrouted_line(self, capsys):
+        """The Unrouted: line should report nets with no segments at all."""
+        # 2 nets requested, 1 routed, 1 unrouted (no route, no pad data)
+        router = _make_router(routes=[self._make_route(1)])
+        net_map = {"NetA": 1, "NetB": 2}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+        )
+
+        output = capsys.readouterr().out
+        # 1 unrouted of 2 total
+        assert "Unrouted: 1/2" in output
+
+    def test_summary_counts_partial_separately(self, capsys):
+        """A net with at least one routed segment but not all pads
+        connected must be counted as 'partial', not strict-connect."""
+        # Build a Pad-like object so connectivity validation runs.
+        @dataclass
+        class _Pad:
+            x: float
+            y: float
+
+        # Net 1: 2 pads at (0,0) and (10,0).  A route segment at
+        # (0,0)-(2,0) covers only pad 1 — pad 2 is far away, so the
+        # net is "partial".
+        seg = MagicMock()
+        seg.x1, seg.y1, seg.x2, seg.y2 = 0.0, 0.0, 2.0, 0.0
+        seg.layer.value = 0
+        route = MagicMock()
+        route.net = 1
+        route.segments = [seg]
+        route.vias = []
+
+        router = _make_router(routes=[route])
+        # Real dicts so the partially-connected branch runs.
+        router.pads = {
+            ("U1", "1"): _Pad(0.0, 0.0),
+            ("U1", "2"): _Pad(10.0, 0.0),
+        }
+        router.nets = {1: [("U1", "1"), ("U1", "2")]}
+        net_map = {"NetA": 1}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=1,
+            nets_to_route_ids={1},
+        )
+
+        output = capsys.readouterr().out
+        # Net 1 has a segment but its 2 pads are not in the same
+        # connected component, so it must be counted as PARTIAL, not
+        # strict-connect.
+        assert "Nets routed: 0/1" in output
+        assert "Partial routes: 1/1" in output
+
+    def test_json_summary_includes_partial_and_unrouted_keys(self):
+        """get_routing_diagnostics_json must include nets_partial and
+        nets_unrouted keys at the top level so dashboards can read them."""
+        router = _make_router(routes=[self._make_route(1)])
+        net_map = {"NetA": 1, "NetB": 2}
+
+        result = get_routing_diagnostics_json(
+            router,
+            net_map,
+            nets_to_route=2,
+        )
+
+        assert "nets_partial" in result["summary"]
+        assert "nets_unrouted" in result["summary"]
+        assert "partial_rate" in result["summary"]
+        assert "unrouted_rate" in result["summary"]
+        # No pad data here, so all 1 missing net is "unrouted", not "partial".
+        assert result["summary"]["nets_partial"] == 0
+        assert result["summary"]["nets_unrouted"] == 1
+
+    def test_chorus_wave8_style_breakdown(self, capsys):
+        """Reproduce the chorus Wave 8 motivating case in miniature:
+        out of 4 multi-pad nets, 1 is strict-connect, 2 are partial
+        (have geometry but not all pads), 1 is fully unrouted.  The
+        headline alone would say 1/4 (25%); the new breakdown surfaces
+        the 2 partials that the strict number hides.
+        """
+        @dataclass
+        class _Pad:
+            x: float
+            y: float
+
+        def _seg(x1, y1, x2, y2, net):
+            seg = MagicMock()
+            seg.x1, seg.y1, seg.x2, seg.y2 = x1, y1, x2, y2
+            seg.layer.value = 0
+            return seg
+
+        def _route(net, segments):
+            r = MagicMock()
+            r.net = net
+            r.segments = segments
+            r.vias = []
+            return r
+
+        # Net 1: fully connected (segment runs pad-to-pad)
+        # Net 2: partial (segment only covers one pad)
+        # Net 3: partial (segment only covers one pad)
+        # Net 4: no segment at all -> unrouted
+        routes = [
+            _route(1, [_seg(0.0, 0.0, 5.0, 0.0, 1)]),
+            _route(2, [_seg(0.0, 0.0, 1.0, 0.0, 2)]),
+            _route(3, [_seg(0.0, 0.0, 1.0, 0.0, 3)]),
+        ]
+        router = _make_router(routes=routes)
+        router.pads = {
+            ("U1", "1"): _Pad(0.0, 0.0),
+            ("U1", "2"): _Pad(5.0, 0.0),
+            ("U2", "1"): _Pad(0.0, 0.0),
+            ("U2", "2"): _Pad(20.0, 0.0),
+            ("U3", "1"): _Pad(0.0, 0.0),
+            ("U3", "2"): _Pad(30.0, 0.0),
+            ("U4", "1"): _Pad(0.0, 0.0),
+            ("U4", "2"): _Pad(40.0, 0.0),
+        }
+        router.nets = {
+            1: [("U1", "1"), ("U1", "2")],
+            2: [("U2", "1"), ("U2", "2")],
+            3: [("U3", "1"), ("U3", "2")],
+            4: [("U4", "1"), ("U4", "2")],
+        }
+        net_map = {"NetA": 1, "NetB": 2, "NetC": 3, "NetD": 4}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=4,
+            nets_to_route_ids={1, 2, 3, 4},
+        )
+
+        output = capsys.readouterr().out
+        assert "Nets routed: 1/4" in output
+        assert "Partial routes: 2/4" in output
+        assert "Unrouted: 1/4" in output

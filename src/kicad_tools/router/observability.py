@@ -205,6 +205,12 @@ def compute_routing_statistics(
           :func:`validate_net_connectivity`
         - ``nets_fully_connected``: count of nets where all pads are in
           one connected component
+        - ``nets_partial``: count of nets that have at least one
+          routed segment but not all pads connected (Issue #3311 /
+          #3255).  These nets contribute geometry to the PCB but are
+          not strictly complete.
+        - ``nets_unrouted``: count of multi-pad target nets that have
+          no segments at all
         - ``has_disconnected_islands``: ``True`` when any targeted net
           has pads that are not connected
     """
@@ -220,6 +226,8 @@ def compute_routing_statistics(
     # --- Connectivity-aware routing count ---
     connectivity: dict[int, dict] | None = None
     nets_fully_connected = 0
+    nets_partial = 0
+    nets_unrouted = 0
     has_disconnected_islands = False
 
     if net_pads is not None:
@@ -237,14 +245,37 @@ def compute_routing_statistics(
             not info["connected"] for info in connectivity.values()
             if info["total_pads"] >= 2
         )
+
+        # Issue #3311 / #3255: partial vs unrouted breakdown.
+        # A "partial" net has at least one routed segment but not all
+        # pads in a single connected component.  An "unrouted" net has
+        # no segments at all.  Single-pad nets (total_pads < 2) are
+        # trivially "connected" and excluded from both buckets.
+        for nid, info in connectivity.items():
+            if info["total_pads"] < 2:
+                continue
+            if info["connected"]:
+                continue
+            # Not fully connected — partial if it has any geometry,
+            # otherwise unrouted.
+            if nid in all_routed_nets:
+                nets_partial += 1
+            else:
+                nets_unrouted += 1
         # nets_routed = only nets that are fully connected
         nets_routed = nets_fully_connected
     else:
         # Legacy path: count any net with at least one route
         if nets_to_route_ids is not None:
             nets_routed = len(all_routed_nets & nets_to_route_ids)
+            # In legacy mode (no pad info) we cannot distinguish
+            # partial from strict-connect.  Anything that has a route
+            # is counted as routed; everything else is "unrouted".
+            nets_unrouted = len(nets_to_route_ids - all_routed_nets)
         else:
             nets_routed = len(all_routed_nets)
+            nets_unrouted = 0
+        nets_partial = 0
 
     result = {
         "routes": len(routes),
@@ -252,6 +283,8 @@ def compute_routing_statistics(
         "vias": sum(len(r.vias) for r in routes),
         "total_length_mm": total_length,
         "nets_routed": nets_routed,
+        "nets_partial": nets_partial,
+        "nets_unrouted": nets_unrouted,
         "max_congestion": congestion_stats["max_congestion"],
         "avg_congestion": congestion_stats["avg_congestion"],
         "congested_regions": congestion_stats["congested_regions"],
