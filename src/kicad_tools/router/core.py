@@ -10523,6 +10523,7 @@ class Autorouter:
         net_order: list[int] | None = None,
         non_diffpair_strategy: object = None,
         coupled_only: bool = False,
+        timeout: float | None = None,
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Route all nets with differential pair-aware routing.
 
@@ -10536,12 +10537,57 @@ class Autorouter:
                 routes pairs that the CoupledPathfinder can handle (no
                 fall-back to independent routing); pairs that fall through
                 are deferred to the main strategy.
+            timeout: Issue #3321: Optional total wall-clock budget (seconds)
+                for the entire diff-pair pre-pass.  When set AND
+                ``diffpair_config.per_pair_timeout`` is not explicitly
+                configured, a per-pair budget is auto-derived as
+                ``min(timeout * 0.3, 60.0)`` (capped at 60s, never less
+                than 5s).  This guarantees that a CLI caller passing
+                ``--timeout 600`` without ``--diffpair-per-pair-timeout``
+                still gets a bounded CoupledPathfinder, preventing the
+                pathological >40min CPU peg observed on board 07's MIPI
+                lanes.  Pairs that exceed the derived budget fall through
+                to the negotiated single-ended router via the standard
+                budget-exit path (see ``route_all_with_diffpairs`` in
+                ``diffpair_routing.py``).  When ``None`` (default) the
+                legacy unbounded behaviour is preserved for back-compat.
         """
+        # Issue #3321: derive a per-pair budget from --timeout when the
+        # caller has not explicitly configured one.  This protects the
+        # CoupledPathfinder from running unbounded just because the CLI's
+        # --diffpair-per-pair-timeout is unset.  The derivation matches
+        # the rationale in the issue: at most 30 % of the overall
+        # routing budget per pair, capped at 60 s (the per-pair search
+        # tail rarely needs more), and floored at 5 s (so the budget
+        # cannot collapse to a trivially short value that aborts every
+        # pair unnecessarily when --timeout is tiny).
+        derived_per_pair_timeout: float | None = None
+        if (
+            timeout is not None
+            and timeout > 0
+            and diffpair_config is not None
+            and diffpair_config.enabled
+            and diffpair_config.per_pair_timeout is None
+        ):
+            derived_per_pair_timeout = max(5.0, min(float(timeout) * 0.3, 60.0))
+            # AUTOFIX_SKIPPED-style structured signal (PR #3247 pattern):
+            # surface the auto-derivation so log readers can distinguish
+            # explicit configuration from default fallback when triaging
+            # diff-pair routing behaviour.
+            logger.info(
+                "DIFFPAIR_PER_PAIR_TIMEOUT_AUTODERIVED: --timeout=%.1fs but "
+                "--diffpair-per-pair-timeout unset; deriving per-pair budget "
+                "of %.1fs to bound CoupledPathfinder (issue #3321)",
+                float(timeout),
+                derived_per_pair_timeout,
+            )
+
         result = self._diffpair.route_all_with_diffpairs(
             diffpair_config,
             net_order,
             non_diffpair_strategy=non_diffpair_strategy,
             coupled_only=coupled_only,
+            per_pair_timeout=derived_per_pair_timeout,
         )
 
         # Issue #3040 Phase B: rip-up and retry any pairs whose coupled

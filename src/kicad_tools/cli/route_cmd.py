@@ -7339,10 +7339,17 @@ def main(argv: list[str] | None = None) -> int:
                         # etc.) fall through to the main strategy
                         # rather than being half-routed independently
                         # and then skipped.  Issue #2464.
+                        # Issue #3321: forward --timeout so the diff-pair
+                        # pre-pass derives a per-pair budget when the user
+                        # has not opted in via --diffpair-per-pair-timeout.
+                        # Without this, the CoupledPathfinder could peg
+                        # CPU for >40min on board 07's MIPI lanes despite
+                        # --timeout being set.
                         result, dp_warnings = router.route_all_with_diffpairs(
                             diffpair_config,
                             non_diffpair_strategy=_phase2_strategy,
                             coupled_only=(args.strategy == "negotiated"),
+                            timeout=_budgeted_timeout(args),
                         )
                         diffpair_warnings.extend(dp_warnings)
                         return result
@@ -7467,10 +7474,14 @@ def main(argv: list[str] | None = None) -> int:
                         best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                     )
 
+                # Issue #3321: forward --timeout so the diff-pair
+                # pre-pass derives a per-pair budget when the user
+                # has not opted in via --diffpair-per-pair-timeout.
                 result, dp_warnings = router.route_all_with_diffpairs(
                     diffpair_config,
                     non_diffpair_strategy=_neg_strategy,
                     coupled_only=True,
+                    timeout=_budgeted_timeout(args),
                 )
                 diffpair_warnings.extend(dp_warnings)
                 return result
@@ -7499,7 +7510,13 @@ def main(argv: list[str] | None = None) -> int:
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
                 )
             elif args.differential_pairs and args.strategy == "basic":
-                result, dp_warnings = router.route_all_with_diffpairs(diffpair_config)
+                # Issue #3321: forward --timeout so the diff-pair pre-pass
+                # derives a per-pair budget when the user has not opted in
+                # via --diffpair-per-pair-timeout.
+                result, dp_warnings = router.route_all_with_diffpairs(
+                    diffpair_config,
+                    timeout=_budgeted_timeout(args),
+                )
                 diffpair_warnings.extend(dp_warnings)
                 return result
             elif args.bus_routing and args.strategy == "basic":
