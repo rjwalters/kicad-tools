@@ -1,4 +1,4 @@
-"""Tests for the build pipeline stitch step (issue #2747).
+"""Tests for the build pipeline stitch step (issue #2747, #3279).
 
 Covers:
 - ``BuildStep.STITCH`` enum membership and value.
@@ -6,7 +6,11 @@ Covers:
 - ``--step`` argparse choice (``stitch``).
 - ``--help`` lists ``stitch`` as a choice.
 - ``_run_step_stitch`` behaviour:
-  * 2-layer board -> skipped with descriptive message.
+  * 2-layer board with no zones -> skipped (no plane nets detected).
+  * 2-layer board where every plane-net pad is already on the pour
+    layer -> skipped (no cross-layer plane pads).  Issue #3279.
+  * 2-layer board with B.Cu pour and F.Cu GND pads -> stitches
+    successfully.  Issue #3279 regression guard.
   * No-PCB -> graceful no-op success.
   * No-plane-nets -> skipped.
   * 4-layer board with plane-net pads -> vias added.
@@ -37,8 +41,11 @@ from kicad_tools.core.sexp_file import load_pcb
 # Fixtures
 # ---------------------------------------------------------------------------
 
-# Minimal 2-layer board: GND + +3.3V nets, NO inner planes.  The stitch
-# step must skip 2-layer boards because there is nothing to stitch to.
+# Minimal 2-layer board: GND + +3.3V nets, NO zones at all.  The stitch
+# step must skip with the "no plane nets detected" branch -- no pour =
+# no work.  (Pre-#3279 this fixture exercised the now-removed
+# layer_count <= 2 blanket skip; the test below documents the new
+# expected message.)
 TWO_LAYER_PCB = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -61,6 +68,86 @@ TWO_LAYER_PCB = """(kicad_pcb
     (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1"))
     (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
     (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+)
+"""
+
+# 2-layer board reproducing the #3279 bug: GND pour on B.Cu, and the
+# only GND pad is an SMD on F.Cu.  Stitch MUST run (not skip on layer
+# count) and place a F.Cu -> B.Cu via stack to connect the pad.
+TWO_LAYER_WITH_BCU_POUR_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000300")
+    (at 110 110)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "SIG"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000400")
+    (at 120 110)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c2"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "SIG"))
+  )
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "zone-gnd-bcu-uuid")
+    (name "GND_pour_bcu")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
+  )
+)
+"""
+
+# 2-layer board where every GND pad is *already* on the pour layer
+# (B.Cu).  The pad-layer-mismatch probe must report no work needed and
+# skip with the new "no cross-layer plane pads" message.
+TWO_LAYER_PADS_MATCH_POUR_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-000000000500")
+    (at 110 110)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "B.SilkS") (uuid "ref-uuid-c1b"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "B.Cu" "B.Paste" "B.Mask") (net 2 "SIG"))
+  )
+  (zone (net 1) (net_name "GND") (layer "B.Cu") (uuid "zone-gnd-bcu-uuid-2")
+    (name "GND_pour_bcu_match")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
   )
 )
 """
@@ -152,6 +239,22 @@ FOUR_LAYER_WITH_ZONES_PCB = """(kicad_pcb
 def two_layer_pcb(tmp_path: Path) -> Path:
     p = tmp_path / "two_layer.kicad_pcb"
     p.write_text(TWO_LAYER_PCB)
+    return p
+
+
+@pytest.fixture
+def two_layer_with_bcu_pour_pcb(tmp_path: Path) -> Path:
+    """2L board reproducing #3279: GND pour on B.Cu + F.Cu GND SMD pads."""
+    p = tmp_path / "two_layer_bcu_pour.kicad_pcb"
+    p.write_text(TWO_LAYER_WITH_BCU_POUR_PCB)
+    return p
+
+
+@pytest.fixture
+def two_layer_pads_match_pour_pcb(tmp_path: Path) -> Path:
+    """2L board where every plane-net pad already sits on the pour layer."""
+    p = tmp_path / "two_layer_pads_match_pour.kicad_pcb"
+    p.write_text(TWO_LAYER_PADS_MATCH_POUR_PCB)
     return p
 
 
@@ -291,13 +394,81 @@ class TestRunStepStitchBehaviour:
         assert result.success is True
         assert "no pcb" in result.message.lower()
 
-    def test_skip_on_two_layer_board(self, two_layer_pcb: Path):
-        """2-layer boards have no internal planes; stitch must skip."""
+    def test_skip_on_two_layer_board_without_pour(self, two_layer_pcb: Path):
+        """2-layer boards with no zones skip on the 'no plane nets' branch.
+
+        Pre-#3279 the gate keyed off ``layer_count <= 2``; the new
+        condition is "no plane-net pad layers differ from the pour
+        layer".  A 2L PCB with no zones at all has no plane nets, so
+        the earlier ``not plane_nets`` short-circuit fires and the
+        message reads "no plane nets detected".
+        """
         ctx = _make_ctx(pcb_file=two_layer_pcb)
         result = _run_step_stitch(ctx, Console())
         assert result.success is True
-        assert "2-layer" in result.message
+        assert "no plane nets" in result.message.lower()
         assert "skipped" in result.message.lower()
+
+    def test_2l_board_with_cross_layer_plane_pads_runs_stitch(
+        self, two_layer_with_bcu_pour_pcb: Path
+    ):
+        """Issue #3279 regression guard.
+
+        2L PCB with GND pour on B.Cu and F.Cu GND SMD pads MUST NOT
+        skip on layer count -- the stitcher must run and place vias
+        (or report that the existing copper already connects them).
+        """
+        # Sanity check: probe sees one plane net (GND on B.Cu) with
+        # pads that are NOT already on B.Cu.
+        sexp = load_pcb(two_layer_with_bcu_pour_pcb)
+        plane_nets = find_all_plane_nets(sexp)
+        assert plane_nets == {"GND": "B.Cu"}
+
+        ctx = _make_ctx(pcb_file=two_layer_with_bcu_pour_pcb)
+        result = _run_step_stitch(ctx, Console(quiet=True))
+        assert result.success is True
+        # Critical: must NOT skip.  In particular the old
+        # "2-layer board — skipped (no internal planes)" message must
+        # not appear, nor the new "no cross-layer plane pads" skip.
+        msg_lower = result.message.lower()
+        assert "skipped" not in msg_lower, (
+            f"#3279 regression: 2L board with cross-layer plane pads "
+            f"skipped instead of stitching (message: {result.message!r})"
+        )
+        assert "2-layer" not in result.message
+        # Either "added N via(s)" (the normal happy path on a fresh
+        # PCB with no existing copper) or "no via candidates found"
+        # are both valid -- the gate has been crossed.
+        assert "stitching complete" in msg_lower
+        # Independently verify the stitcher actually placed a via on
+        # the F.Cu GND pads using the in-process API.
+        receipt = run_stitch(
+            two_layer_with_bcu_pour_pcb,
+            net_names=["GND"],
+        )
+        # The two F.Cu GND pads should produce at least one via.
+        # (Both pads are stranded F.Cu copper on a fresh PCB, so
+        # neither is_pad_connected nor is_already_stitched apply.)
+        assert len(receipt.vias_added) + receipt.already_connected > 0, (
+            "Stitcher must connect F.Cu GND pads to B.Cu pour"
+        )
+
+    def test_2l_board_with_no_cross_layer_pads_skips_stitch(
+        self, two_layer_pads_match_pour_pcb: Path
+    ):
+        """When every plane-net pad already sits on the pour layer
+        the pad-layer-mismatch probe must report no work needed and
+        return the new 'no cross-layer plane pads' skip message.
+        """
+        ctx = _make_ctx(pcb_file=two_layer_pads_match_pour_pcb)
+        result = _run_step_stitch(ctx, Console())
+        assert result.success is True
+        msg_lower = result.message.lower()
+        assert "skipped" in msg_lower
+        assert "no cross-layer plane pads" in msg_lower
+        # Sanity: this branch should not claim "no plane nets" -- the
+        # zone is present, it just has no cross-layer pads.
+        assert "no plane nets" not in msg_lower
 
     def test_skip_when_no_plane_nets(self, four_layer_no_zones_pcb: Path):
         """4-layer board with no zones -> 'no plane nets detected'."""

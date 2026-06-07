@@ -1535,8 +1535,11 @@ def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
 
     Skips gracefully when:
     - No PCB to stitch (no route output) — succeeds as a no-op.
-    - The board has only 2 layers (no internal planes to stitch to).
     - The PCB has no plane-net zones to stitch onto.
+    - Every plane-net pad already sits on the pour layer for its net
+      (no cross-layer stitching work needed).  Issue #3279: this
+      replaced the prior ``layer_count <= 2`` blanket skip so that
+      2-layer boards with a B.Cu pour and F.Cu SMD pads get stitched.
 
     Operates on :attr:`BuildContext.routed_pcb_file` when present (the
     output of the route step), falling back to :attr:`BuildContext.pcb_file`
@@ -1570,22 +1573,25 @@ def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
             message="stitch: no PCB file found — skipped",
         )
 
-    # Layer-count check.  On 2-layer boards there are no internal planes
-    # to stitch to, so the step is a no-op.
-    layer_count = _detect_layer_count(pcb_to_stitch)
-    if layer_count <= 2:
-        return BuildResult(
-            step="stitch",
-            success=True,
-            message="stitch: 2-layer board — skipped (no internal planes)",
-            output_file=pcb_to_stitch,
-        )
-
     # Probe the PCB for plane nets before invoking the stitcher.  This
     # avoids any work when there is nothing to stitch (e.g. a multi-layer
     # board whose zones step did not run, or a board with no power pours).
+    #
+    # Historical note (#3279): previously this step short-circuited on any
+    # board with <= 2 copper layers under the assumption that "no internal
+    # planes" means "nothing to stitch."  That holds for the 4-layer case
+    # the skip was introduced for (#2747) but **not** for the 2-layer
+    # cross-layer case: e.g. a 2L board with the GND pour on B.Cu and
+    # F.Cu SMD GND pads needs a same-layer via stack (F.Cu -> B.Cu) to
+    # connect the pads to the pour.  ``run_stitch`` already handles the
+    # 2L fallback correctly (see stitch_cmd.py "fall back to B.Cu"), so
+    # the only fix needed here is to gate on "is there real work to do?"
+    # rather than layer count.
     try:
-        from kicad_tools.cli.stitch_cmd import find_all_plane_nets
+        from kicad_tools.cli.stitch_cmd import (
+            find_all_plane_nets,
+            find_pads_on_nets,
+        )
         from kicad_tools.core.sexp_file import load_pcb as _load_pcb
 
         sexp = _load_pcb(pcb_to_stitch)
@@ -1593,12 +1599,46 @@ def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
     except Exception as exc:
         logger.debug("Could not probe plane nets: %s", exc)
         plane_nets = {}
+        sexp = None
 
     if not plane_nets:
         return BuildResult(
             step="stitch",
             success=True,
             message="stitch: no plane nets detected — skipped",
+            output_file=pcb_to_stitch,
+        )
+
+    # Pad-layer-mismatch probe (#3279).  Skip only when every plane-net
+    # pad already sits on the pour layer for its net -- nothing to
+    # stitch.  Otherwise (including the 2L F.Cu-pad-with-B.Cu-pour case)
+    # fall through to ``run_stitch`` and let it place the vias.
+    #
+    # Through-hole pads carry their own ``*.Cu`` barrel and are
+    # effectively present on every layer, so their footprint ``layer``
+    # value should not count as a mismatch.  We treat ``thru_hole`` pads
+    # as already-on-the-pour-layer for this gate.
+    layer_count = _detect_layer_count(pcb_to_stitch)
+    try:
+        pads = find_pads_on_nets(sexp, set(plane_nets.keys())) if sexp else []
+    except Exception as exc:
+        logger.debug("Could not probe plane-net pads: %s", exc)
+        pads = []
+
+    needs_stitch = any(
+        pad.pad_type != "thru_hole" and pad.layer != plane_nets.get(pad.net_name)
+        for pad in pads
+    )
+
+    if not needs_stitch:
+        return BuildResult(
+            step="stitch",
+            success=True,
+            message=(
+                "stitch: no cross-layer plane pads — skipped"
+                if pads
+                else "stitch: no plane-net pads found — skipped"
+            ),
             output_file=pcb_to_stitch,
         )
 
