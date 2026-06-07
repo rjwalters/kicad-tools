@@ -5017,6 +5017,84 @@ class TestIdentifyNearestObstacle:
         )
         assert detail.obstacle_type == "unknown"
 
+    def test_track_reason_includes_net_name_when_net_map_provided(self):
+        """Issue #3267: when net_map is provided, the reason string should
+        include the resolved net name in addition to the net number so
+        stitch diagnostics name the offending signal (e.g. SWO) instead
+        of forcing the operator to chase net numbers."""
+        pad = PadInfo(
+            reference="U2", pad_number="35", net_number=3, net_name="GND",
+            x=135.162, y=119.75, layer="F.Cu", width=0.3, height=1.5,
+        )
+        # SWO trace passing very close to U2.35 (mirrors the board 04 case)
+        track = TrackSegment(
+            start_x=133.0357, start_y=117.9143,
+            end_x=137.7357, end_y=122.6143,
+            width=0.2, layer="B.Cu", net_number=8,
+        )
+        net_map = {0: "", 1: "+5V", 2: "+3.3V", 3: "GND", 8: "SWO"}
+
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.3, clearance=0.2,
+            existing_vias=[], other_net_tracks=[track],
+            net_map=net_map,
+        )
+        assert detail.obstacle_type == "track"
+        assert detail.obstacle_net == 8
+        # Reason must contain BOTH the net number and the resolved name
+        # so log greps work for either form.
+        assert "net 8" in detail.reason
+        assert "SWO" in detail.reason
+
+    def test_track_reason_falls_back_when_no_net_map(self):
+        """Without net_map, the reason string should still include the
+        net number (legacy behaviour preserved)."""
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+        track = TrackSegment(
+            start_x=100.2, start_y=99.0, end_x=100.2, end_y=101.0,
+            width=0.2, layer="F.Cu", net_number=3,
+        )
+
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2,
+            existing_vias=[], other_net_tracks=[track],
+        )
+        assert detail.obstacle_type == "track"
+        assert "net 3" in detail.reason
+        # No quoted name when net_map is omitted
+        assert "'" not in detail.reason
+
+    def test_via_and_pad_reasons_include_net_name(self):
+        """Issue #3267: net name should appear for via and pad obstacles too."""
+        pad = PadInfo(
+            reference="C1", pad_number="1", net_number=1, net_name="GND",
+            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+        )
+        net_map = {1: "GND", 4: "+3.3V", 5: "SCK"}
+
+        # via obstacle case
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2,
+            existing_vias=[],
+            other_net_vias=[(100.3, 100.0, 0.45, 5)],
+            net_map=net_map,
+        )
+        assert detail.obstacle_type == "via"
+        assert "SCK" in detail.reason
+
+        # pad obstacle case
+        detail = identify_nearest_obstacle(
+            pad, via_size=0.45, clearance=0.2,
+            existing_vias=[],
+            other_net_pads=[(100.2, 100.0, 0.3, 4)],
+            net_map=net_map,
+        )
+        assert detail.obstacle_type == "pad"
+        assert "+3.3V" in detail.reason
+
 
 class TestMicroViaStitching:
     """Tests for micro-via retry in run_stitch."""

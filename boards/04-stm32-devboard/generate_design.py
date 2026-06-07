@@ -1186,21 +1186,40 @@ def stitch_pcb(routed_path: Path) -> bool:
     clearance_segment_via / clearance_pad_via violations at the U2 west
     pads).
 
+    **Regression note (per #3267 analysis, 2026-06-06):** a *second*
+    LQFP-48 GND pad -- ``U2.35`` -- now also fails to stitch on fresh
+    routes from current main.  The router places the SWO (net 8) B.Cu
+    escape as a single long diagonal from U2.39 at ``(132.75, 117.84)``
+    up to ``(137.74, 122.61)``, which grazes the U2.35 pad centre at
+    only 0.21 mm (gap=-0.04 mm vs the 0.20 mm jlcpcb-tier1 trace-to-via
+    clearance).  This *only* happens on fresh builds; the committed
+    PCB at ``output/stm32_devboard_routed.kicad_pcb`` (PR #3128) routes
+    SWO via a southern detour ``(133.83, 117.07) -> (138.60, 121.84)``
+    that keeps 0.95 mm clear of U2.35 and stitches cleanly.  The U2.35
+    failure is a *downstream symptom* of the NRST routing regression
+    tracked under #3266 -- with NRST no longer competing for the
+    south-east channel, the router selects a more aggressive SWO
+    escape that intrudes on the U2.35 pad halo.  Once #3266 lands,
+    re-routing this board should restore the U2.35 stitch as a side
+    effect; see #3267 for the verification step.
+
     **Design-intent justification:** the LQFP-48 STM32F103C8T6 has 4
-    VSS pads (U2.8, U2.23, U2.35, U2.47).  With 17/18 GND pads
-    successfully stitched (3 of 4 VSS pads connected, plus 14 other GND
-    pads), the MCU's VSS rail is bonded to the GND plane through three
-    independent paths.  Per ST AN2586 the multi-VSS design tolerates a
-    single non-bonded VSS pad without functional degradation; the
+    VSS pads (U2.8, U2.23, U2.35, U2.47).  Even in the worst-case
+    fresh-build state (U2.8 + U2.35 stranded, 16/18 stitched), 2 of
+    the 4 VSS pads remain connected to the GND plane through
+    independent vias plus all 14 capacitor / connector / regulator GND
+    pads.  Per ST AN2586 the multi-VSS design tolerates a small
+    number of non-bonded VSS pads without functional degradation; the
     package geometry itself electrically ties all VSS pads together
     internally via the die paddle.  The connectivity violation is
     therefore **advisory** (the validate.connectivity rule is in
     ``DRCChecker.ADVISORY_RULE_IDS`` and is filtered from the CI gate
     per #3074), and resolving it cleanly requires either the OSC_OUT
-    escape rework tracked under #2834 or extending PR #3079's
-    surface-stub channel-fit necking from strict-mode to the
-    default-mode escape path (tracked under #3080) -- both out of
-    scope for this routing pipeline step.
+    escape rework tracked under #2834, the NRST regression fix tracked
+    under #3266 (which is expected to auto-resolve U2.35 per #3267),
+    or extending PR #3079's surface-stub channel-fit necking from
+    strict-mode to the default-mode escape path (tracked under #3080)
+    -- all out of scope for this routing pipeline step.
 
     Returns True if the stitch step ran (even if some pads were skipped).
     """
