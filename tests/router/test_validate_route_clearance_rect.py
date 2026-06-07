@@ -287,15 +287,40 @@ class TestIsPlaneNetPad:
         )
         assert _is_plane_net_pad(pad) is False
 
-    def test_skipped_pour_net_is_plane(self) -> None:
-        """``pad.net == 0`` is the skipped-pour-net convention (set by
-        ``io.py`` when the user passes ``--skip-nets GND,+3.3V``).
-        It always classifies as a plane regardless of net_name."""
+    def test_skipped_pour_net_with_name_is_plane(self) -> None:
+        """``pad.net == 0`` with a power/ground ``net_name`` (the skipped-
+        pour-net convention used by ``io.py`` when ``--skip-nets GND,+3.3V``
+        is passed) classifies as a plane.  ``io.py`` preserves the
+        ``net_name`` field even when it rewrites ``net_num`` to ``0``,
+        so the name-based check still fires.
+
+        Issue #3281: Pre-fix code returned ``True`` for ALL ``net == 0``
+        pads regardless of ``net_name``, silently misclassifying NC pins
+        (which have ``net == 0`` AND ``net_name == ""`` inherently) as
+        plane pads.  On board 04's STM32 LQFP-48 this rejected SWDIO /
+        NRST / SWO / BOOT0 escape routes that pass next to NC pins, and
+        dropped 2L routing from 9/9 to 4/9.  The fix narrows the
+        classifier to require an explicit plane-net ``net_name``.
+        """
         pad = Pad(
             x=0.0, y=0.0, width=1.0, height=1.0,
-            net=0, net_name="", ref="U1", pin="1", layer=Layer.F_CU,
+            net=0, net_name="GND", ref="U1", pin="1", layer=Layer.F_CU,
         )
         assert _is_plane_net_pad(pad) is True
+
+    def test_no_connect_pin_is_not_plane(self) -> None:
+        """Issue #3281: NC pins (no schematic connection) inherently have
+        ``net == 0`` and ``net_name == ""``.  They must NOT classify as
+        plane pads -- the same-component carve-out applies to them so
+        signal escapes can route through the NC-channel between active
+        pins (e.g. SWDIO escape east past NC pin 33 on board 04's STM32
+        LQFP-48).
+        """
+        pad = Pad(
+            x=0.0, y=0.0, width=1.0, height=1.0,
+            net=0, net_name="", ref="U1", pin="33", layer=Layer.F_CU,
+        )
+        assert _is_plane_net_pad(pad) is False
 
 
 # -----------------------------------------------------------------------------
