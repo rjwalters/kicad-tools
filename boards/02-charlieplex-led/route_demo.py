@@ -76,6 +76,57 @@ def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
         return False, -1, -1
 
 
+def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
+    """Regenerate the manufacturing bundle so ``kct fleet status`` stays fresh.
+
+    Issue #3264: ``kct fleet status`` flags a board ``ship_ready=false``
+    with the ``"artifacts stale"`` blocker whenever the routed PCB is
+    newer than ``output/manufacturing/manifest.json``.  Re-running
+    ``route_demo.py`` always rewrites the routed PCB, so the demo must
+    also regenerate the manufacturing bundle to keep the manifest current
+    (mirrors what ``generate_design.py:export_manufacturing_bundle()``
+    already does at the end of the full design flow).
+
+    ``kct export`` runs the standard JLCPCB recipe (gerbers + drill + BOM
+    + CPL + report.{md,pdf} + manifest.json).  ``--skip-preflight`` skips
+    the strict pre-flight DRC/ERC gate so the bundle is produced even for
+    boards that ship with allowlisted tolerances; for clean boards (like
+    board 02 post-#3207) it is harmless.
+    """
+    print("\n" + "=" * 60)
+    print("Exporting manufacturing bundle (Issue #3264)...")
+    print("=" * 60)
+
+    mfg_dir = output_dir / "manufacturing"
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "export",
+        str(routed_path),
+        "--output",
+        str(mfg_dir),
+        "--mfr",
+        "jlcpcb",
+        "--skip-preflight",
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n")[-15:]:
+            print(f"   {line}")
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Error: {result.stderr}")
+        return False
+    manifest = mfg_dir / "manifest.json"
+    if manifest.exists():
+        print(f"\n   Manifest: {manifest}")
+        return True
+    print("\n   WARNING: manifest.json not produced")
+    return False
+
+
 def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
     """Extract ``Nets routed: N/M`` (or equivalent) from ``kct route`` output.
 
@@ -186,6 +237,14 @@ def main():
     parsed = _parse_routed_net_count(result.stdout)
     routed, total = parsed if parsed is not None else (None, None)
 
+    # Issue #3264: regenerate the manufacturing bundle so its
+    # ``manifest.json`` mtime is newer than the freshly-routed PCB.
+    # Otherwise ``kct fleet status`` reports ``ship_ready=false`` with
+    # blocker ``"artifacts stale"`` even though the route succeeded.
+    # This mirrors the post-route step in
+    # ``generate_design.py:export_manufacturing_bundle()``.
+    mfg_success = export_manufacturing_bundle(output_path, output_path.parent)
+
     # Run DRC validation on the routed output.
     print("\n--- DRC Validation ---")
     drc_passed, drc_errors, drc_warnings = run_drc(output_path)
@@ -219,6 +278,9 @@ def main():
             print(f"PARTIAL: `kct route` exited with code {result.returncode}")
         if not drc_passed:
             print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
+    # Issue #3264: surface mfg bundle freshness so users can see whether
+    # fleet status will report ship_ready=true.
+    print(f"MFG bundle: {'FRESH' if mfg_success else 'STALE (fleet status will block)'}")
     print("=" * 60)
 
     # Return success only if all nets routed AND DRC passed.
