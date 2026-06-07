@@ -175,6 +175,22 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
     (``tests/test_board_06_diffpair_test.py::test_phase_features_exercised``).
     Importing this function from the test guarantees test/implementation
     parity --- the test cannot drift from the routing config.
+
+    Known trap (PR #3273 / refresh attempt 2026-06-07 verified):
+        The ``trace_width=0.2`` settings above produce ~68 ohm against the
+        50/90/100 ohm impedance targets at the JLCPCB tier-1 stackup, so
+        ``kct check --net-class-map`` reports ~30 impedance violations on
+        the committed PCB.  A naive ``--step route`` refresh extends those
+        violations across every newly-routed segment, producing 500+
+        impedance errors WITH SIDECAR even though the count WITHOUT
+        SIDECAR looks like an improvement (3 vs 34).  PR #3273 fell into
+        this trap; the strict CI gate (``check_routed_drc.py``) catches it
+        but only on PRs that touch the committed PCB.  Fix requires
+        router trace-width-by-impedance work (tracking #3313) that picks
+        ~0.387mm widths for 50-ohm SE and proportionally for the diff-pair
+        targets.  Until that work lands, DO NOT refresh
+        ``diffpair_test_routed.kicad_pcb`` without re-running
+        ``check_routed_drc.py`` WITH the sidecar.
     """
     usb2 = usb2_net_class()
     usb3 = usb3_net_class()

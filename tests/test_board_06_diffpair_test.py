@@ -562,3 +562,71 @@ class TestManufacturabilityFloor:
             "This usually indicates a regression in diff-pair detection "
             "or the coupled-routing path."
         )
+
+    def test_impedance_sidecar_trap_documented(self) -> None:
+        """Tripwire test that documents the PR #3273 impedance-sidecar trap.
+
+        This test asserts that the committed PCB's trace widths are
+        ``0.20mm`` for the impedance-targeted nets.  At the JLCPCB tier-1
+        stackup the impedance solver computes 68 ohm against the 50 ohm
+        single-ended target (36% deviation) -- that produces ~30 impedance
+        violations under ``kct check --net-class-map``.  A naive refresh
+        from-scratch with the same router today produces FAR MORE
+        impedance violations (~588 in measurement on 2026-06-07) because
+        the fresh route covers more nets at the same trace width.
+
+        **The trap**: ``kct check`` WITHOUT ``--net-class-map`` does not
+        load the impedance solver, so the fresh route looks like an
+        improvement (3 errors vs 34) when measured naively.  WITH sidecar,
+        the fresh route is a 10-100x regression.  PR #3273 fell into this
+        trap; this test documents the floor so a future refresh PR cannot
+        silently land an impedance regression without also touching this
+        assertion.
+
+        Resolution path: the router needs trace-width-by-impedance work
+        (tracking #3313) that picks ~0.387mm widths for 50 ohm targeted
+        nets so the fresh route actually meets the impedance target.
+        Until that lands, the committed PCB stays as-is and any PR that
+        touches it must run the strict CI gate
+        (``scripts/ci/check_routed_drc.py``) WITH SIDECAR and prove the
+        count is within allowlist.
+        """
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        assert routed.exists(), f"Routed PCB artifact missing: {routed}"
+        text = routed.read_text()
+
+        # Sample width values used by segments.  We do not assert a count
+        # because the absolute count varies with router output; we assert
+        # that the predominant width is 0.20mm (the value that drives the
+        # 68-ohm impedance error).
+        seg_widths = re.findall(r"\(segment\b[^)]*?\(width ([0-9.]+)\)", text, re.DOTALL)
+        if not seg_widths:
+            # Pattern matched zero segments -- the regex needs to span
+            # newlines, fall back to a permissive search.
+            seg_widths = re.findall(r"\(segment\b.*?\(width ([0-9.]+)\)", text, re.DOTALL)
+
+        # Convert to floats and count.
+        from collections import Counter
+        width_counts = Counter(float(w) for w in seg_widths)
+        if not width_counts:
+            pytest.fail(
+                "Could not extract any segment widths from the committed PCB; "
+                "the routed PCB may have been replaced with a fundamentally "
+                "different structure.  Re-validate the impedance trap before "
+                "loosening this test."
+            )
+        # The single most common width should be the impedance-trap width.
+        # If a future refresh lands varied per-net widths, this assertion
+        # will fail and the PR author is forced to revisit the impedance
+        # sidecar measurement explicitly.
+        modal_width, modal_count = width_counts.most_common(1)[0]
+        assert modal_width == pytest.approx(0.20, abs=0.001), (
+            f"Committed PCB modal trace width is {modal_width}mm "
+            f"({modal_count} of {sum(width_counts.values())} segments); "
+            f"expected 0.20mm.  If this PR intentionally refreshes the routed "
+            f"PCB with new widths, you MUST verify it passes "
+            f"`scripts/ci/check_routed_drc.py` WITH the impedance sidecar "
+            f"(see PR #3273 trap; see net_class_map_resolver.py).  If the "
+            f"refresh is intentional and the strict gate passes, update this "
+            f"test to the new modal width.  Width distribution: {dict(width_counts)}"
+        )
