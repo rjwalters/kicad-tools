@@ -294,11 +294,24 @@ def _is_plane_net_pad(pad: "Pad") -> bool:
     validator, allowing trace clips against U2.1 / U2.8 / U2.23 / U2.24
     (Issue #2880).
 
-    The plane-net check is keyed on ``pad.net_name`` (exact match
-    against ``_PLANE_NET_EXACT`` or starts with a member of
-    ``_PLANE_NET_PREFIXES``) so the semantics are consistent
-    regardless of whether the schematic uses ``skip_nets``
-    (``pad.net == 0``) or not (``pad.net != 0``).
+    Issue #3281: The original PR #2931 fix treated ALL ``pad.net == 0``
+    pads as plane pads on the assumption that ``net == 0`` was always
+    the ``skip_nets`` convention.  This silently misclassified
+    no-connect (NC) pins -- which have ``net == 0`` AND ``net_name == ""``
+    inherently, NOT because they were rewritten by ``skip_nets`` -- as
+    plane pads.  On board 04's STM32 LQFP-48 east edge, NC pin 33 sits
+    between SWDIO (pad 34) and an escape channel; classifying it as
+    plane caused the validator to reject the SWDIO escape, dropping
+    board 04 from 9/9 to 4/9 nets routed on the stripped 2L recipe.
+
+    The plane-net check is now keyed exclusively on ``pad.net_name``
+    (exact match against ``_PLANE_NET_EXACT`` or starts with a member
+    of ``_PLANE_NET_PREFIXES``).  The ``net_name`` field is preserved
+    on the pad whether the net was rewritten to ``0`` by ``skip_nets``
+    (``net = 0, net_name = "GND"``) or kept as a real net (``net = 2,
+    net_name = "+3.3V"``), so the same predicate works in both
+    conventions.  NC pads (``net = 0, net_name = ""``) correctly return
+    ``False`` and remain subject to the same-component carve-out.
 
     Args:
         pad: The pad to classify.
@@ -306,11 +319,14 @@ def _is_plane_net_pad(pad: "Pad") -> bool:
     Returns:
         True if the pad's net name matches the plane-net classification.
     """
-    if pad.net == 0:
-        # The skipped-pour-net convention already marks this as a plane.
-        return True
     name = pad.net_name.upper() if pad.net_name else ""
     if not name:
+        # No net_name means either:
+        # (a) NC pin (pad.net == 0 inherently, no schematic net) -- NOT a plane.
+        # (b) A real net but the netlist parser dropped the name -- defensive
+        #     fallback to treating it as signal (non-plane) so we do not
+        #     over-block escape routing.  Pre-#3281 code returned True
+        #     unconditionally for ``pad.net == 0``, which broke board 04.
         return False
     if name in _PLANE_NET_EXACT:
         return True
