@@ -76,6 +76,26 @@ HOT_SPOT_REFS = frozenset({"U3", "U10", "R10", "R11", "R12"})
 # shortfall, with a tracking-issue link in the PR description.
 MAX_SHORTFALL_UM = 130
 
+# Rule families that the committed PCB at HEAD does NOT exhibit (Issue
+# #3294 measurement, 2026-06-07): a fresh re-route from current main
+# introduces ``clearance_segment_segment`` and ``clearance_segment_via``
+# violations that the committed file does not have, because the
+# committed file is a better-than-average snapshot of board-05's
+# stochastic routing (the design pins ``--backend python``).  Pinning
+# the absence of these rule families on the committed file makes the
+# "fresh re-route accidentally got committed" regression loud -- the
+# refresh would widen the blocking-error band from 6 (only
+# ``clearance_pad_segment``) to 11 (adding segment-segment + segment-
+# via), and the regression would still be under the allowlist of 9 only
+# if measured at the wrong cut.  Refresh policy: when a router
+# improvement legitimately makes the fresh re-route strictly better
+# than the committed snapshot, re-route AND drop the entries below in
+# the same PR; the hot-spot count test above will then re-pin the new
+# floor.
+ABSENT_RULES_ON_COMMITTED_PCB = frozenset(
+    {"clearance_segment_segment", "clearance_segment_via"}
+)
+
 
 @pytest.fixture(scope="module")
 def routed_pcb_path() -> Path:
@@ -228,3 +248,42 @@ class TestBoard05DRCHotspotRegression:
                 f"items={v.get('items')!r}.  Likely a new mechanism — "
                 f"investigate before merge (Issue #3251 hot-spot table)."
             )
+
+    def test_committed_pcb_has_no_segment_segment_or_segment_via(
+        self,
+        routed_pcb_path: Path,
+    ) -> None:
+        """No ``clearance_segment_segment`` / ``clearance_segment_via`` on the committed PCB.
+
+        Issue #3294 measurement (2026-06-07): a fresh re-route from
+        current main produces 4 ``clearance_segment_segment`` and
+        3 ``clearance_segment_via`` violations on top of 4
+        ``clearance_pad_segment``, which is *worse* than the committed
+        snapshot's 0 + 0 + 6.  Pinning the absence of these two rule
+        families on the committed file makes the "fresh re-route
+        accidentally got committed" regression loud — without this
+        guard a refresh that widened blocking errors from 6 to 11 would
+        still pass the allowlist if the allowlist were ever raised
+        above 11 for unrelated reasons.
+
+        Refresh policy: when a router improvement legitimately makes
+        the fresh re-route strictly better than the committed snapshot,
+        re-route AND drop the entries in
+        :data:`ABSENT_RULES_ON_COMMITTED_PCB` in the same PR.
+        """
+        viols = _kct_check_violations(routed_pcb_path)
+        offenders: dict[str, int] = {}
+        for v in viols:
+            rid = v.get("rule_id")
+            if rid in ABSENT_RULES_ON_COMMITTED_PCB:
+                offenders[rid] = offenders.get(rid, 0) + 1
+        assert not offenders, (
+            f"Board 05 committed routed PCB now reports rule families "
+            f"that the historical snapshot does not have: {offenders!r}. "
+            f"This usually means an unintended re-route was committed — "
+            f"the fresh ``--backend python`` re-route under current main "
+            f"introduces these mechanisms (Issue #3294 measurement).  "
+            f"Either revert the routed-PCB change or, if the re-route is "
+            f"intentional and strictly better, remove the offending "
+            f"rule(s) from ABSENT_RULES_ON_COMMITTED_PCB in the same PR."
+        )
