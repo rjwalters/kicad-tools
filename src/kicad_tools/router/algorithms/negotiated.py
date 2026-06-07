@@ -1031,6 +1031,135 @@ class NegotiatedRouter:
 
         return nets_to_reroute
 
+    def find_nets_in_foreign_budgets(
+        self,
+        net_routes: dict[int, list[Route]],
+        pad_channel_budgets: list,
+        stranded_nets: set[int],
+        skip_nets: set[int] | None = None,
+    ) -> list[int]:
+        """Find nets squatting in foreign budgets whose source-net is stranded.
+
+        Issue #3235 (direction 1, "extend ``find_nets_through_overused_cells``
+        to also fire on nets occupying high-budget cells even if those cells
+        aren't 'overused' in the current iteration"):  The negotiated rip-up
+        loop only picks rerouting candidates from cells whose
+        ``usage_count > 1``.  But on softstart-style east-edge clusters, a
+        squatter can park in a foreign pad-channel budget without ever
+        triggering ``usage_count > 1`` (the cell is only used by the squatter
+        plus the budget metadata; the actual source-net is STUCK, so it never
+        commits a route there).  PR #3231's builder demonstrated that the
+        squatter signal is real (Iter 1: net 20 overlap=30, etc.) but that
+        applying it as a reorder hint to the existing dict-insertion rip-up
+        order regresses softstart 8/10 to 7/10 in both ASC and DESC variants.
+
+        Negative-results note (from the #3235 spike): using this method as an
+        AUGMENTATION (additional violators appended to the cohort) did not
+        lift softstart's reach in measurements at PYTHONHASHSEED=42; the
+        augmented cohort triggered the existing rip-up-set Jaccard stagnation
+        detector with an unchanged set across consecutive iterations, and the
+        rollback restored iter 1's pre-augmentation state.  The infrastructure
+        is preserved so future spike attempts can wire it into the rip-up
+        loop with a tighter gate (e.g. excluding partial-routed nets from the
+        squatter set, gating on the stagnation detector's Jaccard
+        threshold so the cohort grows monotonically).  See `two_phase.py:709`
+        for the intended hook point.
+
+        Args:
+            net_routes: Dict of net_id -> committed routes (segments + vias).
+            pad_channel_budgets: List of ``PadChannelBudget`` objects with
+                ``gx1/gy1/gx2/gy2/layer/source_net`` attributes (Issue #3143
+                geometry).  Empty list yields an empty result.
+            stranded_nets: Set of net IDs that have failed to commit a route
+                in the current iteration.  Only budgets whose
+                ``source_net`` is in this set produce augmentation.
+            skip_nets: Optional set of net IDs to skip from the squatter
+                output (typically partial-routed nets the caller does not
+                want to rip up again, or nets already in the rip-up cohort).
+
+        Returns:
+            List of net IDs that route through foreign budgets belonging to
+            stranded source-nets.  Excludes any net in ``skip_nets`` and any
+            net equal to the budget's ``source_net`` (a net cannot squat in
+            its own budget).
+        """
+        if not pad_channel_budgets or not stranded_nets:
+            return []
+
+        skip = skip_nets or set()
+
+        # Filter to budgets whose source-net is currently stranded.  Each
+        # surviving budget represents a contested channel; routes that pass
+        # through it (other than the source-net's own route) are blocking
+        # the source-net.
+        relevant_rects: list[tuple[int, int, int, int, int, int]] = []
+        for b in pad_channel_budgets:
+            try:
+                src = int(b.source_net)
+            except (AttributeError, TypeError):
+                continue
+            if src not in stranded_nets:
+                continue
+            try:
+                relevant_rects.append((
+                    int(b.gx1),
+                    int(b.gy1),
+                    int(b.gx2),
+                    int(b.gy2),
+                    int(getattr(b, "layer", -1)),
+                    src,
+                ))
+            except (AttributeError, TypeError):
+                continue
+
+        if not relevant_rects:
+            return []
+
+        squatters: list[int] = []
+        seen: set[int] = set()
+
+        for net_id, routes in net_routes.items():
+            if net_id in seen or net_id in skip:
+                continue
+            for route in routes:
+                hit = False
+                for seg in route.segments:
+                    try:
+                        gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+                        gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+                    except (AttributeError, TypeError):
+                        continue
+                    try:
+                        seg_layer_idx = self.grid.layer_to_index(seg.layer.value)
+                    except (AttributeError, TypeError, KeyError):
+                        seg_layer_idx = seg.layer.value
+                    # Sample a few points along the segment to cheaply
+                    # detect rectangle overlap (matches the discretisation
+                    # used by ``score_foreign_budget_overlap``).
+                    steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
+                    for i in range(steps + 1):
+                        t = i / steps
+                        gx = int(gx1 + t * (gx2 - gx1))
+                        gy = int(gy1 + t * (gy2 - gy1))
+                        for rx1, ry1, rx2, ry2, rlayer, src in relevant_rects:
+                            if src == net_id:
+                                continue
+                            if rlayer != -1 and rlayer != seg_layer_idx:
+                                continue
+                            if rx1 <= gx <= rx2 and ry1 <= gy <= ry2:
+                                hit = True
+                                break
+                        if hit:
+                            break
+                    if hit:
+                        break
+                if hit:
+                    squatters.append(net_id)
+                    seen.add(net_id)
+                    break
+
+        return squatters
+
     def find_nets_with_segment_via_violations(
         self,
         net_routes: dict[int, list[Route]],

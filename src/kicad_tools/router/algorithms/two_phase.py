@@ -708,6 +708,33 @@ class TwoPhaseRouter:
                 overused = self.grid.find_overused_cells()
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
 
+                # Issue #3235 (negative-results note): This is the hook point
+                # the #3235 issue body flagged for the 8/10 → 10/10 softstart
+                # reach lift.  A direction-1 spike here tried augmenting the
+                # cohort with :meth:`NegotiatedRouter.find_nets_in_foreign_budgets`
+                # output (nets squatting in pad-channel budgets of currently-
+                # stranded source nets, regardless of ``usage_count``).  On
+                # softstart at PYTHONHASHSEED=42 the augmentation correctly
+                # surfaced SWCLK / SWDIO / GATE_POS as squatters in iter 1/2
+                # but did not lift reach above 8/10: the augmented cohort
+                # carried across iterations unchanged, triggered the existing
+                # rip-up-set Jaccard stagnation detector (iter 2 overflow
+                # 8→20 vs baseline 8→14), and the stagnation rollback
+                # restored iter 1's pre-augmentation state.  Future spike
+                # attempts should either:
+                #   - Tighten the augmentation gate (e.g. EXCLUDE partial-
+                #     routed nets like the iter-1 SWCLK/SWDIO 2/3 pad state
+                #     -- ripping a partial net wastes the per-net timeout
+                #     and tends to keep it partial), OR
+                #   - Pre-empt stagnation rollback by widening the cohort
+                #     monotonically across iterations so the Jaccard score
+                #     trends down naturally, OR
+                #   - Apply the squatter signal to the present-cost factor
+                #     instead of the cohort membership (cost-only nudge,
+                #     not rip-up policy).
+                # The infrastructure (:meth:`find_nets_in_foreign_budgets`
+                # in `negotiated.py`) is preserved for that work.
+                #
                 # Issue #3002: Live re-validation hook for segment-vs-
                 # foreign-via clearance violations (see core.py negotiated
                 # loop for the full rationale).  Feeds violators back

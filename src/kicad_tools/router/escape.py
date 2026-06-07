@@ -3110,6 +3110,7 @@ class EscapeRouter:
         pads: list[Pad],
         direction: EscapeDirection,
         package: PackageInfo,
+        phase_offset: int = 0,
     ) -> list[EscapeRoute]:
         """Create escape routes for fine-pitch SSOP/TSSOP with alternating layers.
 
@@ -3130,10 +3131,32 @@ class EscapeRouter:
         pad, the escape for that pin is omitted (deferred to the main router).
         The escape router also uses ``fine_pitch_clearance`` when configured.
 
+        Issue #3235 (escape layer diversification, negative-results note):
+        the ``phase_offset`` parameter flips the alternation parity for this
+        row.  With ``phase_offset=0`` (default, historical) even indices stay
+        on F.Cu and odd indices via to the inner layer.  With
+        ``phase_offset=1`` the parity flips so even indices via to the inner
+        layer.  The :meth:`_escape_fine_pitch_dual_row` dispatcher currently
+        calls all rows with ``phase_offset=0`` (preserving historical
+        behaviour).  A direction-2 spike on the softstart 8/10 → 10/10 lift
+        evaluated passing ``phase_offset=1`` to the SECOND row/column (so the
+        two halves of a dual-row TSSOP-20 do not converge on the same
+        post-escape layer); that REGRESSED softstart to 7/10 across all of
+        PYTHONHASHSEED=42/43/44.  Filtering NC pads (``net == 0``) from the
+        row buckets before the alternation index assignment ALSO regressed
+        softstart to 7/10 (the NC stubs apparently shield signal pads from
+        same-layer collisions even though they carry no net).  The parameter
+        is preserved as infrastructure so future per-board / per-package
+        gating can explore the lever without re-introducing the regression
+        on the default path.
+
         Args:
             pads: Row of pads sorted by position along the row
             direction: Primary escape direction (perpendicular to row)
             package: Package info for bounds
+            phase_offset: 0 (default) for ``i % 2 == 1`` via-down behaviour
+                (historical), or 1 to flip the parity so ``i % 2 == 0`` via
+                down.  See class docstring for rationale.
 
         Returns:
             List of escape routes with alternating layer assignment
@@ -3215,8 +3238,12 @@ class EscapeRouter:
         skipped_count = 0
 
         for i, pad in enumerate(pads):
-            # Determine if this pin needs layer transition
-            needs_via = i % 2 == 1  # Odd pins via down
+            # Determine if this pin needs layer transition.
+            # Issue #3235: ``phase_offset`` flips the parity so the second
+            # row/column of a dual-row package can use the opposite layer
+            # assignment.  Default is 0 (historical strict-by-position
+            # alternation).
+            needs_via = (i + phase_offset) % 2 == 1
 
             if needs_via:
                 # Odd pin: Via to inner layer
