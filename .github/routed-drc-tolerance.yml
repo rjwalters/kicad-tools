@@ -173,7 +173,32 @@ tolerances:
   # Floor tightened 37 -> 9 (preserves the pre-#3131 measurement
   # bracket; 3-blocking room for run-to-run variance documented in
   # the {9, 9, 15} comment block above).
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 9
+  #
+  # Floor tightened 9 -> 6 by Issue #3294 (2026-06-07).  Re-measured
+  # the committed routed PCB at HEAD with current main:
+  #   * 29 total violations (under ``kct check --mfr jlcpcb``)
+  #   * 23 connectivity (advisory; excluded from the gate)
+  #   *  6 blocking = 6 clearance_pad_segment
+  # All 6 ``clearance_pad_segment`` are at the documented hot-spots
+  # (U3-30 ISENSE_B+, U10-12 HALL_B, U10-3 OSC_OUT) with shortfalls
+  # in 21-113um band -- pinned by
+  # ``tests/test_board_05_drc_hotspot_regression.py::MAX_PAD_SEGMENT=6``
+  # (PR #3258).  The CI gate's slack-tightening warning
+  # (``annotate_drift_warning``) was firing every PR with "actual=6,
+  # allowlist=9, slack=3"; this tightening closes that drift loop.
+  #
+  # A fresh re-route from current main produces 11 blocking errors
+  # (4 clearance_pad_segment + 4 clearance_segment_segment + 3
+  # clearance_segment_via) -- WORSE than the committed snapshot,
+  # confirming the committed file is the better-than-average snapshot
+  # documented in PR #3258.  ``test_board_05_drc_hotspot_regression.py
+  # ::test_committed_pcb_has_no_segment_segment_or_segment_via``
+  # added in this PR makes that asymmetry loud if a fresh re-route
+  # is ever committed by accident.  Therefore regenerating board 05
+  # requires care; see also Issue #2944 (U3 in-pad rescue "Proceeding
+  # anyway" mechanism, the underlying cause of the residual 6,
+  # explicitly out of scope for #3294).
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 6
 
   # Board 03 (USB-C joystick) was 22 (post-#2753 coord-space fix), then
   # 19 ``clearance_pad_segment`` after PR #2762 re-route.  All 19
