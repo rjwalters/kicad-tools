@@ -381,6 +381,12 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--diffpair-spacing", str(args.diffpair_spacing)])
     if getattr(args, "diffpair_max_delta", None) is not None:
         sub_argv.extend(["--diffpair-max-delta", str(args.diffpair_max_delta)])
+    # Issue #3275: forward --diffpair-per-pair-timeout (Issue #3089
+    # per-pair budget) so callers can bound the CoupledPathfinder's
+    # coupled A* search on dense BGA/QFN escape geometry.  Both outer
+    # and inner default to None; only forward when the user set it.
+    if getattr(args, "diffpair_per_pair_timeout", None) is not None:
+        sub_argv.extend(["--diffpair-per-pair-timeout", str(args.diffpair_per_pair_timeout)])
     # Issue #2648 (Epic #2556 Phase 3I): forward the length-match-diffpairs flag
     if getattr(args, "length_match_diffpairs", False):
         sub_argv.append("--length-match-diffpairs")

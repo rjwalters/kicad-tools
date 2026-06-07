@@ -5572,6 +5572,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum length mismatch for differential pairs in mm (default: auto based on type)",
     )
     parser.add_argument(
+        "--diffpair-per-pair-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per-pair wall-clock budget for the CoupledPathfinder in "
+            "seconds (Issue #3089).  When set, each diff-pair coupled "
+            "A* search abandons after this many seconds and the pair "
+            "is deferred to the main strategy (single-ended A*).  "
+            "Required for boards with dense BGA/QFN escape geometry "
+            "where the unbounded coupled search can hang for many "
+            "minutes per pair (e.g. board 07's MIPI lanes, Issue "
+            "#3275).  Default: no per-pair budget (bounded only by "
+            "the overall --timeout and the C++ grid-cell*4 iteration "
+            "ceiling)."
+        ),
+    )
+    parser.add_argument(
         "--length-match-diffpairs",
         action="store_true",
         help=(
@@ -7126,6 +7143,13 @@ def main(argv: list[str] | None = None) -> int:
             enabled=True,
             spacing=args.diffpair_spacing,
             max_length_delta=args.diffpair_max_delta,
+            # Issue #3275: forward the optional per-pair wall-clock
+            # budget so callers (boards/07-matchgroup-test) can bound
+            # the CoupledPathfinder's per-pair coupled A* search and
+            # let pairs that exceed the budget fall through to the
+            # main strategy.  Default ``None`` preserves the
+            # unbounded behaviour the rest of the CLI relies on.
+            per_pair_timeout=getattr(args, "diffpair_per_pair_timeout", None),
         )
 
         # Show detected differential pairs
