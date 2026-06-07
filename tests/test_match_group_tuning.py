@@ -30,6 +30,7 @@ from kicad_tools.router.match_group_tuning import (
     MAX_INSERTS_PER_GROUP_MEMBER,
     MAX_INSERTS_PER_GROUP_MEMBER_LARGE,
     MAX_INSERTS_PER_GROUP_MEMBER_SMALL,
+    MAX_SEGMENT_RETRY_CANDIDATES,
     MAX_TOTAL_INSERTS_PER_GROUP,
     TuneResult,
     _outer_normal_hint_group,
@@ -773,6 +774,255 @@ class TestUnroutedMembers:
         assert results[3][1].success is False
         # Net 4 is the longest among the routed -> already_within_tolerance.
         assert results[4][1].reason == "already_within_tolerance"
+
+
+# =============================================================================
+# 10.5. Per-segment retry (Issue #3274) -- multi-candidate fan-out
+# =============================================================================
+
+
+class TestPerSegmentRetry:
+    """Issue #3274: cascade tries up to ``MAX_SEGMENT_RETRY_CANDIDATES``
+    segments before declaring ``post_insertion_drc_violation``.
+
+    Before #3274 the single DRC failure on the top-ranked segment
+    aborted the whole member's cascade (one unlucky candidate
+    disqualified the whole member).  After #3274 the cascade tries up
+    to ``MAX_SEGMENT_RETRY_CANDIDATES`` ranked segments per attempt
+    and commits the first that passes -- significantly improving
+    tuner yield on dense boards (e.g. board 07's ADDR_BUS).
+    """
+
+    def _multi_segment_route(
+        self,
+        net_id: int,
+        name: str,
+        legs: list[tuple[float, float, float, float]],
+    ) -> Route:
+        """Build a route with multiple straight segments stitched end-to-end."""
+        segs = []
+        for x1, y1, x2, y2 in legs:
+            segs.append(
+                Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net_id,
+                    net_name=name,
+                )
+            )
+        return Route(net=net_id, net_name=name, segments=segs)
+
+    def test_constant_is_three(self):
+        """``MAX_SEGMENT_RETRY_CANDIDATES`` MUST be 3 by default."""
+        from kicad_tools.router.match_group_tuning import MAX_SEGMENT_RETRY_CANDIDATES
+
+        assert MAX_SEGMENT_RETRY_CANDIDATES == 3
+
+    def test_rank_candidate_segments_returns_top_k(self):
+        """Helper returns segments sorted by score, capped at K."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        # Multi-segment route with varying lengths; longest-with-middle-bonus
+        # should rank first.
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 3.0, 0.0),  # idx 0, length 3 (edge -- no 1.2x bonus)
+                (3.0, 0.0, 13.0, 0.0),  # idx 1, length 10 (middle, axis -- 1.2 * 1.5)
+                (13.0, 0.0, 19.0, 0.0),  # idx 2, length 6 (middle, axis -- 1.2 * 1.5)
+                (19.0, 0.0, 21.0, 0.0),  # idx 3, length 2 (edge -- no 1.2x)
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=3)
+        assert len(ranked) == 3
+        # Best score: idx 1 (10mm * 1.2 * 1.5 = 18.0).
+        assert ranked[0][0] == 1
+        # Second: idx 2 (6mm * 1.2 * 1.5 = 10.8).
+        assert ranked[1][0] == 2
+        # Third: idx 0 (3mm * 1.5 = 4.5; idx 3 is exactly 2mm and tied below).
+        assert ranked[2][0] == 0
+
+    def test_rank_candidate_segments_filters_short_segments(self):
+        """Segments below ``min_segment_length`` are excluded."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 5.0, 0.0),  # 5mm -- kept
+                (5.0, 0.0, 6.0, 0.0),  # 1mm -- filtered (below 2mm floor)
+                (6.0, 0.0, 16.0, 0.0),  # 10mm -- kept
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=5)
+        # Only two segments are >= 2mm.
+        assert len(ranked) == 2
+
+    def test_rank_candidate_segments_empty_route(self):
+        """Empty route yields empty candidate list."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        route = Route(net=1, net_name="D0", segments=[])
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0)
+        assert ranked == []
+
+    def test_rank_candidate_segments_deterministic_tiebreak(self):
+        """Ties are broken by ascending segment index (deterministic)."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        # Three middle segments with identical length and orientation -->
+        # identical score.  Tie-break: ascending index.
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 1.0, 0.0),  # 1mm edge filtered
+                (1.0, 0.0, 11.0, 0.0),  # idx 1 -- middle
+                (11.0, 0.0, 21.0, 0.0),  # idx 2 -- middle, same length
+                (21.0, 0.0, 31.0, 0.0),  # idx 3 -- middle, same length
+                (31.0, 0.0, 32.0, 0.0),  # 1mm edge filtered
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=3)
+        # All three middle segments have score 10 * 1.2 * 1.5 = 18.0.
+        # Tie-break: ascending index --> [1, 2, 3].
+        assert [idx for (idx, _seg) in ranked] == [1, 2, 3]
+
+    def test_per_segment_retry_falls_back_to_next_candidate(self):
+        """When best segment is blocked, the next-best is tried.
+
+        This is the core Issue #3274 fix: a single DRC failure on the
+        top-ranked segment used to abort the member's cascade.  Now
+        the cascade falls back to the next-best segment.
+        """
+        # Net 1 has a multi-segment route -- two viable serpentine
+        # segments at different y coordinates.  We place a non-group
+        # neighbor RIGHT next to the segment that ``find_best_segment``
+        # would pick FIRST (the middle, ranked higher by middle-bonus).
+        # The fallback segment (also long, but at a different y) is
+        # clear, so the per-segment retry should pick it.
+        group = _ddr_group(name="DDR_DATA", net_ids=[1, 2], tolerance=0.05)
+
+        # Net 1: 3 horizontal legs glued by short jogs.
+        #   leg A: y=0, x=0..8 (index 0, edge)
+        #   jog:  y=0->5, x=8 (index 1, vertical 5mm, gets axis bonus)
+        #   leg B: y=5, x=8..16 (index 2, middle, horizontal)
+        # The "best" segment is the middle jog (idx 1, 5mm, vertical, middle bonus 1.2 * 1.5).
+        # Wait, lengths matter most: idx 2 leg (8mm * 1.5 = 12 vs idx 1 jog 5mm * 1.2 * 1.5 = 9).
+        # So idx 2 wins.  Place a hostile neighbor near y=5 (leg B's y).
+        route1 = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 8.0, 0.0),  # idx 0: leg A, 8mm, edge, horizontal
+                (8.0, 0.0, 8.0, 5.0),  # idx 1: jog, 5mm, middle, vertical
+                (8.0, 5.0, 18.0, 5.0),  # idx 2: leg B, 10mm, edge, horizontal
+            ],
+        )
+        # Net 2 (reference, longer).
+        route2 = self._straight_route(2, "D1", 25.0, y=10.0)
+        routes = {1: route1, 2: route2}
+
+        # Hostile neighbor right above leg B at y=5.4 (within
+        # intra_group_clearance_mm=0.5 of the bulge that goes y=5 -> y=5+amplitude).
+        # The outer-normal hint vs net 2 (y=10) will point AWAY from
+        # net 2 -- so leg B's bulge goes to y < 5 (toward decreasing y).
+        # That means leg B's bulge is at y in [4, 5], NOT colliding with
+        # neighbor at y=5.4.  Hmm, need to redesign.
+        #
+        # Better setup: place the hostile neighbor at y=4.5 (below leg B
+        # by 0.5mm).  Net 2 at y=10 (above).  Outer-normal vs net 2:
+        # bulge goes DOWN.  Bulge from leg B at y=5 amplitude 0.5 -->
+        # serpentine at y in [4.5, 5].  Neighbor at y=4.5 -- collision.
+        #
+        # For leg A (idx 0, also a candidate): y=0.  Outer-normal vs
+        # net 2 (y=10) points DOWN (y<0).  Neighbor at y=4.5 doesn't
+        # interfere.  So leg A is a clean fallback.
+        hostile = self._straight_route(99, "HOSTILE", 25.0, y=4.5)
+        routes[99] = hostile
+
+        # Use a tiny amplitude so the bulge is geometrically realizable.
+        cfg = SerpentineConfig(amplitude=0.3, min_spacing=0.2, gap_factor=2.0)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.05,
+            intra_group_clearance_mm=0.4,
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        # The key assertion: net 1 should NOT be marked as
+        # ``post_insertion_drc_violation`` because the fallback
+        # segment (leg A) is clear.  Either ``tuned`` (if a single
+        # insert sufficed) or ``exceeded_max_inserts`` (delta was
+        # too big for 1 insert) is acceptable -- what we're proving
+        # is that the cascade no longer immediately rolls back.
+        assert results[1][1].reason != "post_insertion_drc_violation", (
+            f"Issue #3274: cascade should have tried the fallback segment, "
+            f"got reason={results[1][1].reason!r} "
+            f"message={results[1][1].message!r}"
+        )
+        # And at least one insert was committed (i.e. the fallback
+        # actually fired).
+        assert results[1][1].inserts_applied >= 1, (
+            f"Issue #3274: per-segment retry should have committed >=1 insert, "
+            f"got inserts_applied={results[1][1].inserts_applied}"
+        )
+
+    def _straight_route(
+        self,
+        net_id: int,
+        name: str,
+        length_mm: float,
+        y: float = 0.0,
+        layer: Layer = Layer.F_CU,
+    ) -> Route:
+        return _straight_route(net_id, name, length_mm, y=y, layer=layer)
+
+    def test_all_candidates_fail_still_rolls_back(self):
+        """When every candidate fails DRC, the member is rolled back.
+
+        Preserves the legacy contract: if NO candidate passes, the
+        member's cascade rolls back byte-for-byte and reports
+        ``post_insertion_drc_violation``.
+        """
+        # Single straight segment route -- only one candidate available.
+        # Hostile geometry on both sides of net 1 means the single
+        # candidate's only bulge direction collides.  Equivalent to
+        # the existing ``test_intra_group_rollback`` but explicit
+        # about the new contract.
+        group = _ddr_group(net_ids=[1, 2, 3], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 10.0, y=2.0),
+            3: _straight_route(3, "D2", 15.0, y=-0.3),
+        }
+        original_net1 = routes[1]
+        original_net1_segments = routes[1].segments
+
+        cfg = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.4,
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        assert results[1][1].reason == "post_insertion_drc_violation"
+        # Drift-prevention: byte-for-byte rollback to original.
+        assert results[1][0] is original_net1
+        assert results[1][0].segments is original_net1_segments
+        assert results[1][1].inserts_applied == 0
 
 
 # =============================================================================
