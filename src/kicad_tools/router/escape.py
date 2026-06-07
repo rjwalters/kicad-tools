@@ -4252,6 +4252,43 @@ class EscapeRouter:
 
         Works for 2xN, 3xN, and 4xN through-hole arrangements.
 
+        Issue #3310: When the connector is board-edge-aligned (one side
+        has dramatically less routing space than the other -- e.g. chorus
+        J2 is the 40-pin RPi GPIO header on the east board edge with 0
+        foreign-component pads east of it and 251 west), the original
+        "outermost first" sort produces an inverted escape pattern: the
+        row closest to the populated side escapes toward the populated
+        side (correct), but the far-side row escapes AWAY from the
+        populated side into empty/edge space, AND its 20 vias all land
+        in a single 47mm-tall column just outside the package edge.
+        The escape endpoints sit OFF the board with no destinations to
+        reach -- the main router fails with ``blocked_path`` because
+        the destination side is on the OPPOSITE side of the via wall.
+
+        For board-edge-aligned connectors the rebuilt geometry:
+          - Both rows escape toward the populated side.
+          - The closer row escapes on F_CU (no via -- shortest path).
+          - The far row uses a SHORT-trace via escape: a short trace
+            from the pad to a via placed on the empty side, then a
+            short stub (one trace-clearance) past the via on the inner
+            layer.  The endpoint sits adjacent to the via, on the same
+            side, so the inner-layer trace stays short (~0.5 mm) and
+            does NOT run along the via column.  Long inner-layer
+            traces would intersect peer pads' vias and get dropped by
+            the apply_escape_routes foreign-via gate.
+          - Adjacent inner-row pads ALTERNATE between two inner layers
+            (e.g. In1.Cu and B.Cu on a 4-layer board).  Layer
+            alternation gives the main router two independent routing
+            planes through the connector region for cross-traffic.
+          - Via positions are staggered PERPENDICULAR to the row axis
+            (one row at via_offset_base + perp_stagger, the other at
+            via_offset_base) so the via wall has lateral gaps the
+            main router can squeeze through.  The perpendicular
+            stagger amount accounts for the widest trace any row pad
+            might produce (power-net trace widths) so inner-layer
+            escape segments still meet edge-to-edge clearance against
+            adjacent escapes.
+
         Args:
             package: MULTI_ROW_CONNECTOR package info (>= 20 pins, multi-row, TH)
 
@@ -4287,29 +4324,118 @@ class EscapeRouter:
             for rc in row_coords:
                 rows_map[rc].sort(key=lambda p: p.y)
 
-        # Sort rows by distance from center (outermost first)
-        if is_horizontal:
-            sorted_coords = sorted(row_coords, key=lambda c: abs(c - center_y), reverse=True)
+        # Issue #3310: Board-edge detection.  When the connector is
+        # asymmetrically positioned (board edge, panel mount, etc.) we
+        # need to route ALL rows toward the populated side rather than
+        # away from the package center.  ``populated_dir`` is +1 if
+        # populated side is the high-coord side, -1 if the low-coord
+        # side, 0 if balanced (use original center-based strategy).
+        populated_dir = self._detect_populated_routing_side(
+            package, is_horizontal
+        )
+
+        if populated_dir != 0:
+            # Sort rows in the OPPOSITE direction from the populated
+            # side so the closest-to-populated row is processed last and
+            # treated as the surface-layer outer row.
+            if is_horizontal:
+                sorted_coords = sorted(
+                    row_coords,
+                    key=lambda c: (c - center_y) * populated_dir,
+                )
+            else:
+                sorted_coords = sorted(
+                    row_coords,
+                    key=lambda c: (c - center_x) * populated_dir,
+                )
         else:
-            sorted_coords = sorted(row_coords, key=lambda c: abs(c - center_x), reverse=True)
+            # Symmetric case: sort rows by distance from center (outermost
+            # first) and let each row escape outward.
+            if is_horizontal:
+                sorted_coords = sorted(
+                    row_coords, key=lambda c: abs(c - center_y), reverse=True
+                )
+            else:
+                sorted_coords = sorted(
+                    row_coords, key=lambda c: abs(c - center_x), reverse=True
+                )
 
         # Select inner escape layer once (not hardcoded)
         inner_escape_layer = self._select_inner_escape_layer(Layer.F_CU)
+
+        # Issue #3310: For board-edge-aligned multi-row connectors, the
+        # end-exit pattern routes ALL same-half inner-row pads to the
+        # same connector end on a single inner layer.  Their inner-layer
+        # traces would overlap if forced to the same layer.  When a
+        # second routable inner layer (B.Cu on a 4-layer board) is
+        # available, alternate between layers so adjacent pads land on
+        # DIFFERENT layers and don't conflict on the long inner-layer
+        # run.
+        alt_inner_escape_layer: Layer | None = None
+        if populated_dir != 0 and inner_escape_layer != Layer.B_CU:
+            # Verify the alt layer is actually routable in this stack
+            # (signal or mixed).  Plane layers (e.g. In2.Cu on chorus)
+            # are excluded.
+            if self.grid.layer_stack is not None:
+                try:
+                    alt_def = self.grid.layer_stack.get_layer_by_name(
+                        Layer.B_CU.kicad_name
+                    )
+                    if alt_def is not None and alt_def.layer_type in (
+                        LayerType.SIGNAL,
+                        LayerType.MIXED,
+                    ):
+                        alt_inner_escape_layer = Layer.B_CU
+                except Exception:  # noqa: BLE001
+                    alt_inner_escape_layer = None
+            else:
+                # No layer stack info -- assume B.Cu is usable.
+                alt_inner_escape_layer = Layer.B_CU
 
         escape_dist = self.escape_clearance + self.rules.trace_width
         via_offset_base = (
             self.rules.via_diameter / 2 + self.rules.via_clearance + self.rules.trace_clearance
         )
 
+        # Issue #3310: For board-edge-aligned connectors, the "outer"
+        # role goes to the row CLOSEST to the populated side.  This is
+        # the LAST element in ``sorted_coords`` under the
+        # populated-side sort.  All earlier rows are "far rows" that
+        # need vias + short-trace inner-layer escapes.  Reverse so
+        # ring_idx semantics are preserved (ring_idx 0 = outer
+        # surface row).
+        if populated_dir != 0:
+            sorted_coords = list(reversed(sorted_coords))
+
         for ring_idx, coord in enumerate(sorted_coords):
             row_pads = rows_map[coord]
             is_outer = ring_idx == 0
 
-            # Determine perpendicular escape direction for this row
-            if is_horizontal:
-                direction = EscapeDirection.NORTH if coord > center_y else EscapeDirection.SOUTH
+            # Determine perpendicular escape direction for this row.
+            if populated_dir != 0:
+                # Issue #3310: all rows escape toward the populated side.
+                if is_horizontal:
+                    direction = (
+                        EscapeDirection.NORTH if populated_dir > 0
+                        else EscapeDirection.SOUTH
+                    )
+                else:
+                    direction = (
+                        EscapeDirection.EAST if populated_dir > 0
+                        else EscapeDirection.WEST
+                    )
             else:
-                direction = EscapeDirection.EAST if coord > center_x else EscapeDirection.WEST
+                # Symmetric center-sorted strategy.
+                if is_horizontal:
+                    direction = (
+                        EscapeDirection.NORTH if coord > center_y
+                        else EscapeDirection.SOUTH
+                    )
+                else:
+                    direction = (
+                        EscapeDirection.EAST if coord > center_x
+                        else EscapeDirection.WEST
+                    )
 
             dx, dy = self._direction_to_vector(direction)
 
@@ -4345,21 +4471,110 @@ class EscapeRouter:
                         )
                     )
                 else:
-                    # Inner row: via down to alternate layer with staggered
-                    # via placement.  Alternate vias toward pin-1 / pin-N
-                    # along the row axis, offset by via_spacing / 2.
+                    # Inner row: via to alternate layer.  Lateral stagger
+                    # along the row axis prevents adjacent vias from
+                    # colliding.
+                    # Issue #3310: When alt_inner_escape_layer is set,
+                    # alternate between two inner layers so adjacent
+                    # pads' long inner-layer traces (running to the
+                    # connector end on the same column) land on
+                    # different layers and don't conflict.
+                    if alt_inner_escape_layer is not None:
+                        effective_inner_layer = (
+                            inner_escape_layer if i % 2 == 0
+                            else alt_inner_escape_layer
+                        )
+                    else:
+                        effective_inner_layer = inner_escape_layer
                     stagger = (self.via_spacing / 2) * (1.0 if i % 2 == 0 else -1.0)
+                    # Issue #3310: ALSO stagger perpendicular to the
+                    # row axis so adjacent inner-layer traces don't
+                    # violate clearance.  We must account for the
+                    # widest trace any pad in this row might produce
+                    # (e.g. power nets at 0.5mm vs signals at 0.2mm)
+                    # so two adjacent inner-layer escapes -- one wide
+                    # power trace, one narrow signal -- still meet
+                    # edge-to-edge clearance.  Compute the max trace
+                    # width across the row and size the stagger to
+                    # max_trace + clearance + a small safety margin.
+                    row_max_trace_width = max(
+                        (
+                            self._get_trace_width_for_net(rp.net_name)
+                            for rp in row_pads
+                        ),
+                        default=self.rules.trace_width,
+                    )
+                    perp_stagger_amount = (
+                        row_max_trace_width
+                        + self.rules.trace_clearance
+                        + self.rules.via_clearance
+                    )
+                    perp_stagger = (
+                        perp_stagger_amount if i % 2 == 0 else 0.0
+                    )
+
+                    if populated_dir != 0:
+                        # Issue #3310: For board-edge connectors, place
+                        # the via on the side OPPOSITE the populated
+                        # direction (i.e., away from where routing must
+                        # exit).  This keeps the via out of the
+                        # populated-side escape lane.
+                        via_perp_sign = -populated_dir
+                    else:
+                        # Symmetric case: via on the escape side (same
+                        # as direction).
+                        via_perp_sign = 1 if (dx + dy) > 0 else -1
+                        if is_horizontal:
+                            via_perp_sign = 1 if dy > 0 else -1
+                        else:
+                            via_perp_sign = 1 if dx > 0 else -1
 
                     if is_horizontal:
+                        # Long axis = X.  Vias offset in +/- Y direction.
                         via_x = pad.x + stagger
-                        via_y = pad.y + dy * via_offset_base
+                        via_y = pad.y + via_perp_sign * (
+                            via_offset_base + perp_stagger
+                        )
                     else:
-                        via_x = pad.x + dx * via_offset_base
+                        # Long axis = Y.  Vias offset in +/- X direction.
+                        via_x = pad.x + via_perp_sign * (
+                            via_offset_base + perp_stagger
+                        )
                         via_y = pad.y + stagger
 
-                    # Escape point beyond via on the inner layer
-                    ep_x = via_x + dx * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
-                    ep_y = via_y + dy * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
+                    if populated_dir != 0:
+                        # Issue #3310: For board-edge connectors the
+                        # via sits on the OPPOSITE side from the
+                        # populated direction.  The escape endpoint is
+                        # placed SHORT (immediately adjacent to the via,
+                        # on the via's offset side away from the pad).
+                        # The main router then routes from this endpoint
+                        # on the inner layer -- it can navigate around
+                        # the connector's pads via the inner-layer gaps
+                        # between vias OR exit past the connector ends.
+                        # A SHORT inner-layer escape trace is critical
+                        # because long traces (one running the full row
+                        # length to a connector end) would intersect
+                        # other pads' vias and get dropped by the
+                        # apply_escape_routes foreign-via gate.
+                        endpoint_offset = (
+                            self.rules.via_diameter / 2
+                            + self.rules.trace_clearance
+                        )
+                        if is_horizontal:
+                            ep_x = via_x
+                            ep_y = via_y + via_perp_sign * endpoint_offset
+                        else:
+                            ep_x = via_x + via_perp_sign * endpoint_offset
+                            ep_y = via_y
+                    else:
+                        # Symmetric: escape point beyond via on inner layer
+                        ep_x = via_x + dx * (
+                            self.rules.via_diameter / 2 + self.rules.trace_clearance
+                        )
+                        ep_y = via_y + dy * (
+                            self.rules.via_diameter / 2 + self.rules.trace_clearance
+                        )
 
                     segments: list[Segment] = [
                         Segment(
@@ -4378,7 +4593,7 @@ class EscapeRouter:
                             x2=ep_x,
                             y2=ep_y,
                             width=trace_width,
-                            layer=inner_escape_layer,
+                            layer=effective_inner_layer,
                             net=pad.net,
                             net_name=pad.net_name,
                         ),
@@ -4389,7 +4604,7 @@ class EscapeRouter:
                         y=via_y,
                         drill=self.rules.via_drill,
                         diameter=self.rules.via_diameter,
-                        layers=(pad.layer, inner_escape_layer),
+                        layers=(pad.layer, effective_inner_layer),
                         net=pad.net,
                         net_name=pad.net_name,
                     )
@@ -4399,7 +4614,7 @@ class EscapeRouter:
                             pad=pad,
                             direction=direction,
                             escape_point=(ep_x, ep_y),
-                            escape_layer=inner_escape_layer,
+                            escape_layer=effective_inner_layer,
                             via_pos=(via_x, via_y),
                             segments=segments,
                             via=via,
@@ -4411,6 +4626,79 @@ class EscapeRouter:
         self._validate_escape_clearances(escapes, self.rules.trace_clearance)
 
         return escapes
+
+    def _detect_populated_routing_side(
+        self,
+        package: PackageInfo,
+        is_horizontal: bool,
+    ) -> int:
+        """Detect which side of a multi-row connector has the populated
+        routing area (Issue #3310).
+
+        Returns +1 if the populated side is the high-coord side of the
+        perpendicular axis (east for vertical, north for horizontal),
+        -1 if the low-coord side (west / south), or 0 when the routing
+        space is roughly balanced.
+
+        Detection uses board-wide foreign-component pad counts.  If one
+        side has < 10% of the total foreign pads OR fewer than 5 pads,
+        the connector is classified as edge-aligned and the populated
+        direction is the opposite side.
+
+        Args:
+            package: The multi-row connector package being escaped.
+            is_horizontal: Whether the connector's long axis is X.  When
+                True, "sides" are north / south; when False, east / west.
+
+        Returns:
+            +1, -1, or 0.
+        """
+        # Need foreign-pad access via the grid's pad registry.  When the
+        # registry is empty (synthetic test fixtures) or unavailable,
+        # fall back to the symmetric center-based strategy.
+        pads = getattr(self.grid, "_pads", None)
+        if not pads:
+            return 0
+
+        package_pad_ids = {id(p) for p in package.pads}
+        center_x, center_y = package.center
+
+        low_count = 0
+        high_count = 0
+        for p in pads:
+            if id(p) in package_pad_ids:
+                continue
+            if is_horizontal:
+                # Perpendicular axis = Y.
+                if p.y < center_y:
+                    low_count += 1
+                else:
+                    high_count += 1
+            else:
+                # Perpendicular axis = X.
+                if p.x < center_x:
+                    low_count += 1
+                else:
+                    high_count += 1
+
+        total = low_count + high_count
+        if total < 10:
+            # Not enough foreign pads to make a confident classification.
+            return 0
+
+        # Threshold: < 10% on one side OR fewer than 5 pads -> edge-aligned.
+        low_frac = low_count / total
+        high_frac = high_count / total
+        edge_pad_threshold = 5
+        edge_frac_threshold = 0.10
+
+        if low_count < edge_pad_threshold or low_frac < edge_frac_threshold:
+            # Low-coord side is empty; populated side is high.
+            return 1
+        if high_count < edge_pad_threshold or high_frac < edge_frac_threshold:
+            # High-coord side is empty; populated side is low.
+            return -1
+        return 0
 
     def _escape_radial(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate simple radial escapes for non-dense packages.
