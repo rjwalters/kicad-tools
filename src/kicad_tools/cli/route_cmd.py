@@ -1115,6 +1115,19 @@ def _finalize_routes(
         flush_print(f"  Vias:            {stats['vias']}")
         flush_print(f"  Total length:    {stats['total_length_mm']:.2f}mm")
         flush_print(f"  Nets routed:     {stats['nets_routed']}/{nets_to_route}")
+        # Issue #3311 / #3255: partial-route count is meaningful signal
+        # that today's strict-connect headline hides.  Surfaced here so
+        # CI / loom-summary scrapers see both numbers next to each other.
+        partial_count = stats.get("nets_partial", 0)
+        unrouted_count = stats.get("nets_unrouted", 0)
+        flush_print(
+            f"  Partial routes:  {partial_count}/{nets_to_route} "
+            f"-- have segments, not all pads connected"
+        )
+        flush_print(
+            f"  Unrouted:        {unrouted_count}/{nets_to_route} "
+            f"-- no segments at all"
+        )
 
     return route_sexp, stats, cleanup_stats
 
@@ -1349,6 +1362,22 @@ def show_preview(
     print("SUMMARY")
     print("=" * 60)
     print(f"  Nets routed:  {nets_routed}/{nets_to_route} ({success_rate:.0f}%)")
+    # Issue #3311 / #3255: surface partial / unrouted breakdown alongside
+    # the strict-connect headline so dashboards and humans see the full
+    # picture (e.g. chorus: 5/48 strict but 28/48 partial -- meaningful
+    # work that the headline alone obscures).
+    partial_count = overall_stats.get("nets_partial", 0)
+    unrouted_count = overall_stats.get("nets_unrouted", 0)
+    partial_pct = (partial_count / nets_to_route * 100) if nets_to_route > 0 else 0
+    unrouted_pct = (unrouted_count / nets_to_route * 100) if nets_to_route > 0 else 0
+    print(
+        f"  Partial routes: {partial_count}/{nets_to_route} ({partial_pct:.0f}%) "
+        f"-- have segments, not all pads connected"
+    )
+    print(
+        f"  Unrouted:     {unrouted_count}/{nets_to_route} ({unrouted_pct:.0f}%) "
+        f"-- no segments at all"
+    )
     print(f"  Total length: {overall_stats['total_length_mm']:.2f}mm")
     print(f"  Total vias:   {overall_stats['vias']}")
     print(f"  Segments:     {overall_stats['segments']}")

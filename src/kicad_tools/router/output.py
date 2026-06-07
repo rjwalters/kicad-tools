@@ -156,6 +156,28 @@ def show_routing_summary(
         routed_line += f" -- {single_pad_count} single-pad net(s) excluded"
     print(routed_line)
 
+    # Issue #3311 / #3255: surface partial-route count alongside the
+    # strict-connect headline.  Distinguishing "partial" (has segments
+    # but not all pads connected) from "unrouted" (no segments at all)
+    # turns a single misleading "5/48 routed" number into the more
+    # informative "5 strict / 28 partial / 15 unrouted" breakdown.
+    partial_count = len(partially_connected_nets)
+    unrouted_count = len(unrouted_ids)
+    if nets_to_route > 0:
+        partial_pct = partial_count / nets_to_route * 100
+        unrouted_pct = unrouted_count / nets_to_route * 100
+    else:
+        partial_pct = 0.0
+        unrouted_pct = 0.0
+    print(
+        f"  Partial routes: {partial_count}/{nets_to_route} "
+        f"({partial_pct:.0f}%) -- have segments, not all pads connected"
+    )
+    print(
+        f"  Unrouted: {unrouted_count}/{nets_to_route} "
+        f"({unrouted_pct:.0f}%) -- no segments at all"
+    )
+
     # Show partially-connected nets (have segments but not all pads connected)
     if partially_connected_nets:
         print(f"\n  Partially connected nets ({len(partially_connected_nets)}):")
@@ -789,11 +811,24 @@ def get_routing_diagnostics_json(
             }
         )
 
+    # Issue #3311 / #3255: surface partial / unrouted breakdown in JSON
+    # so machine-readable consumers (CI, dashboards, agent prompts) can
+    # report something more honest than the strict-connect headline.
+    partial_count = len(partially_connected)
+    unrouted_count = len(unrouted_ids)
     summary_dict: dict = {
         "nets_requested": nets_to_route,
         "nets_routed": len(routed_net_ids),
-        "nets_failed": len(unrouted_ids),
+        "nets_partial": partial_count,
+        "nets_unrouted": unrouted_count,
+        "nets_failed": unrouted_count,
         "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1)
+        if nets_to_route > 0
+        else 0,
+        "partial_rate": round(partial_count / nets_to_route * 100, 1)
+        if nets_to_route > 0
+        else 0,
+        "unrouted_rate": round(unrouted_count / nets_to_route * 100, 1)
         if nets_to_route > 0
         else 0,
         "has_disconnected_islands": has_disconnected_islands,
