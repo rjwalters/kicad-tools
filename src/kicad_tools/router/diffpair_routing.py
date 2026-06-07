@@ -2399,6 +2399,87 @@ class DiffPairRouter:
 
             p_route, n_route = result
 
+            # Issue #3320: Pre-mark intra-pair clearance audit.  Before
+            # we commit the coupled-route to the grid and the route list,
+            # check whether the reconstructed geometry actually meets the
+            # per-pair clearance threshold.  A SEVERE violation
+            # (centerlines overlap by more than ``trace_width / 2`` --
+            # i.e., the partner trace's centerline lies on or inside our
+            # trace's body) means the coupled search produced an
+            # unrouteable swap-via / crossover geometry that the
+            # ``min_spacing_cells`` floor (PR #3022) could not prevent.
+            # The canonical failure mode is the board-07 DQS_N/DQS_P
+            # pair: the polarity-swap-via at the U1 vias places both
+            # traces with swapped y-coordinates on the same inner layer,
+            # producing a long diagonal that crosses the partner's start
+            # cell with -0.150 mm edge-to-edge clearance (the full trace
+            # width).  When this happens we reject the coupled route,
+            # do NOT commit it to the grid, and fall back to the
+            # independent router which routes P and N as separate
+            # single-ended nets -- a worse outcome for skew but a
+            # routable one that doesn't produce shorting overlaps.
+            violation = find_intra_pair_clearance_violations(
+                p_route,
+                n_route,
+                threshold_mm=pair_intra_clearance,
+                pair_name=pair.name,
+            )
+            # Severity gate: any actual centerline overlap (negative
+            # edge-to-edge clearance) is "severe" -- the partner trace's
+            # body literally intersects ours.  Pure quantization slack
+            # (clearance in ``[0, threshold)``) is logged but kept
+            # because the trace-optimizer / serpentine shim can still
+            # nudge it into compliance.
+            severe_violation = (
+                violation is not None
+                and violation.actual_clearance_mm < 0.0
+            )
+            if severe_violation:
+                assert violation is not None  # for type-checkers
+                print(
+                    f"    WARNING: Coupled route produced centerline overlap "
+                    f"(worst={violation.actual_clearance_mm:+.3f}mm < 0); "
+                    "rejecting coupled route and falling back to independent "
+                    "routing."
+                )
+                logger.warning(
+                    "diffpair coupled-route REJECTED due to centerline overlap: "
+                    "pair=%r p_net=%r n_net=%r worst_clearance=%.4fmm "
+                    "threshold=%.4fmm offending_segments=%d",
+                    violation.pair_name,
+                    violation.positive_net_name,
+                    violation.negative_net_name,
+                    violation.actual_clearance_mm,
+                    violation.expected_clearance_mm,
+                    len(violation.segment_violations),
+                )
+                # Do NOT commit p_route/n_route to grid or
+                # ``autorouter.routes``.  Fall back to independent
+                # routing for the whole pair (single source of truth
+                # for the fallback path).  For the n-pad case where
+                # earlier specs in this loop may already have committed
+                # routes, unmark them and remove from the autorouter's
+                # route list so the independent router starts from a
+                # clean grid state for this pair.  ``coupled_only``
+                # callers short-circuit out without a fallback -- they
+                # will see the pair as unrouted and the negotiated
+                # strategy picks it up on the main pass.
+                for prev_route in routes:
+                    try:
+                        self.autorouter.grid.unmark_route(prev_route)
+                    except Exception:
+                        pass
+                    if prev_route in self.autorouter.routes:
+                        self.autorouter.routes.remove(prev_route)
+                if coupled_only:
+                    print(
+                        "    Skipping diff-pair pre-pass: coupled route "
+                        "rejected (centerline overlap) and ``coupled_only`` "
+                        "is set."
+                    )
+                    return [], None
+                return self.route_differential_pair_independent(pair, spacing)
+
             # Mark routes on grid (use the unified helper that updates
             # both the Python and C++ grids — issue #1250).
             self.autorouter._mark_route(p_route)
@@ -2419,13 +2500,9 @@ class DiffPairRouter:
             # segments against the per-pair threshold and emit a
             # diagnostic so Phase B (fine-grid repair, separate PR) can
             # rip-and-replace just the offenders.  No behavioural change
-            # here -- detection only.
-            violation = find_intra_pair_clearance_violations(
-                p_route,
-                n_route,
-                threshold_mm=pair_intra_clearance,
-                pair_name=pair.name,
-            )
+            # here -- detection only.  Note: severe overlaps that would
+            # have triggered the #3320 rejection above never reach this
+            # diagnostic because they fall back to independent routing.
             if violation is not None:
                 logger.info(
                     "diffpair intra-clearance violation: pair=%r "
