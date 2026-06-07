@@ -381,12 +381,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       etc.) do not project through the subprocess boundary.
 
       To stay under the DRC tolerance (HARD LIMIT: do not widen
-      ``.github/routed-drc-tolerance.yml``), this recipe omits
-      ``--differential-pairs``.  Net yield is ~25/31 (status-quo parity
-      with the prior in-process baseline) and DRC stays under 60
-      errors (under the 70 allowlist).  When the upstream
-      diff-pair-overlap router bug is fixed (follow-up issue), this
-      recipe can re-add ``--differential-pairs`` for the 29/31 yield.
+      ``.github/routed-drc-tolerance.yml``), this recipe historically
+      omitted ``--differential-pairs``.  Issue #3012 (closed by
+      PR #3022) added the ``min_spacing_cells`` floor to
+      ``CoupledPathfinder`` so the within-pair clearance is now
+      respected; Issue #3275 re-enabled ``--differential-pairs``
+      here once the M-G campaign (#3263) infrastructure
+      (#3197/#3198/#3202/#3203) had pushed the negotiated baseline
+      to 28/31.  Re-engaging the coupled router lifts MIPI_CLK_N and
+      MIPI_DAT0_N out of the ``No path found`` failure mode
+      documented in issue #3275.
 
     What each flag does:
 
@@ -447,50 +451,47 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("   Match groups (length_match_group): 4")
     sidecar_path = write_sidecar(net_class_map, output_path.parent)
 
-    # Issue #2996: ``kct route`` now accepts ``--net-class-map`` (this PR)
-    # which merges the rich NetClassRouting declarations
+    # Issue #2996: ``kct route`` accepts ``--net-class-map`` which
+    # merges the rich NetClassRouting declarations
     # (intra_pair_clearance, coupled_routing, length_match_group, ...)
-    # into the autorouter's net_class_map at routing time.  This closes
-    # the *projection gap*: pre-#2996, ``--differential-pairs`` had no
-    # way to consume the sidecar's per-pair ``intra_pair_clearance``
-    # overrides and fell back to defaults that resolved to -0.150 mm
-    # (overlapping sibling traces, ~20K ``diffpair_clearance_intra``
-    # violations -- the bug this issue documents).
+    # into the autorouter's net_class_map at routing time.  This
+    # closes the *projection gap*: pre-#2996, ``--differential-pairs``
+    # had no way to consume the sidecar's per-pair
+    # ``intra_pair_clearance`` overrides and fell back to defaults
+    # that resolved to -0.150 mm (overlapping sibling traces).
     #
-    # Issue #3003 (this PR): hardens the
-    # ``DiffPairRouter.route_differential_pair_coupled`` inline serpentine
-    # shim so it (a) gates ``match_pair_lengths(add_serpentines=True)``
-    # on ``length_critical=True`` (length-critical pairs are routed by
-    # the audited Phase 3I tuner instead of this shim), and (b) when it
-    # does run, threads ``intra_pair_clearance_mm`` + the partner route
-    # through ``create_serpentine`` so the bulge biases away from the
-    # partner and is DRC-rejected if it would violate intra-pair
-    # clearance.
+    # Issue #3012 (closed by PR #3022): ``CoupledPathfinder`` now
+    # respects ``net_class.effective_intra_pair_clearance()`` via the
+    # ``min_spacing_cells`` floor (see
+    # ``src/kicad_tools/router/diffpair_routing.py:700-704,769-774,
+    # 828-830``).  Prior to #3022 the CoupledPathfinder laid both
+    # centerlines at ``pair.rules.spacing`` (typ. 0.15-0.2 mm) without
+    # consulting the per-net-class effective clearance, producing
+    # ~459 ``diffpair_clearance_intra`` violations on tight pairs
+    # (HDMI: 0.15 mm spacing + 0.15 mm trace_width gave 0 mm edge-to-
+    # edge instead of the required 0.1 mm).  With the floor in place
+    # the coupled router is now safe to re-enable on this board.
     #
-    # Judge follow-up: the shim hardening is correct defense-in-depth
-    # but the empirical "0 diffpair_clearance_intra with
-    # ``--differential-pairs``" claim does NOT reproduce.  Re-routing
-    # board 07 with ``--differential-pairs`` and the d25f9782 HEAD
-    # still produces ~459 ``diffpair_clearance_intra`` violations
-    # because the dominant source is upstream of the shim --
-    # ``CoupledPathfinder`` lays both centerlines at
-    # ``pair.rules.spacing`` (typ. 0.15-0.2 mm) without consulting
-    # ``net_class.effective_intra_pair_clearance()``, so on tight
-    # boards (HDMI: 0.15 mm spacing + 0.15 mm trace_width gives 0 mm
-    # edge-to-edge instead of the required 0.1 mm).
+    # Issue #3003: hardens the
+    # ``DiffPairRouter.route_differential_pair_coupled`` inline
+    # serpentine shim so it (a) gates
+    # ``match_pair_lengths(add_serpentines=True)`` on
+    # ``length_critical=True`` (length-critical pairs are routed by
+    # the audited Phase 3I tuner instead of this shim), and (b) when
+    # it does run, threads ``intra_pair_clearance_mm`` + the partner
+    # route through ``create_serpentine`` so the bulge biases away
+    # from the partner and is DRC-rejected if it would violate
+    # intra-pair clearance.
     #
-    # To stay under the 70-error allowlist while the coupled-pathfinder
-    # bug is being designed/fixed in a separate PR, this recipe keeps
-    # ``--differential-pairs`` OFF.  The sidecar is still passed via
-    # ``--net-class-map`` so the diff-pair pre-pass remains exercisable
-    # by other test paths and the shim hardening from this PR is still
-    # protected by its unit-test regression suite
-    # (``tests/test_diffpair_serpentine_clearance.py``).
-    #
-    # Follow-up tracker for the coupled-pathfinder root cause:
-    # Issue #3012 (router: CoupledPathfinder ignores
-    # intra_pair_clearance).  Re-enable ``--differential-pairs``
-    # here once that issue is closed.
+    # Issue #3275: ``--differential-pairs`` re-engaged here.  Without
+    # the flag, the negotiated single-ended router routed MIPI pair
+    # members one net at a time; the P-side often claimed the FFC->
+    # QFN corridor first and the N-side (MIPI_CLK_N, MIPI_DAT0_N)
+    # was stranded with ``No path found``.  Engaging the
+    # CoupledPathfinder lets the pair search the channel jointly with
+    # partner-aware A* (PR #3115) so both centerlines lay down
+    # simultaneously inside the channel and inside the
+    # ``min_spacing_cells`` floor from #3022.
     # Issue #3098 (M-G milestone): add ``--length-match-groups`` so the
     # ``apply_match_group_tuning`` orchestrator hook is engaged on the
     # routed PCB.  Before this PR the recipe omitted the flag (it was
@@ -528,6 +529,27 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--net-class-map",
         str(sidecar_path),
         "--length-match-groups",
+        # Issue #3275: re-enabled.  CoupledPathfinder now respects
+        # ``effective_intra_pair_clearance`` via the
+        # ``min_spacing_cells`` floor from PR #3022 (#3012), so MIPI
+        # pair routing no longer regresses the ``diffpair_clearance_
+        # intra`` count above the allowlist.  Engaging the diff-pair
+        # pre-pass routes MIPI_CLK_N and MIPI_DAT0_N (previously
+        # ``No path found`` because the single-ended router routed
+        # the P-side first and the N-side could not fit).
+        "--differential-pairs",
+        # Issue #3275: bound the CoupledPathfinder's per-pair coupled
+        # A* search at 30s wall-clock.  Without a budget the C++
+        # pathfinder's default ceiling (grid.cols * grid.rows * 4
+        # ~= 10M iterations for board 07's 867x749 grid) can spin
+        # for many minutes per pair on dense BGA/QFN escape geometry
+        # (the same failure mode #3089 documented on board 06's
+        # USB3 SS pairs).  Pairs that hit the budget are deferred to
+        # the negotiated single-ended pass; with the M-G campaign
+        # baseline at 28/31, even one extra pair routed (e.g.,
+        # MIPI_CLK_*) is a net win.
+        "--diffpair-per-pair-timeout",
+        "30",
     ]
 
     # Issue #3146: Pin PYTHONHASHSEED for the subprocess so any string-

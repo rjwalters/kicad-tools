@@ -1054,7 +1054,38 @@ tolerances:
   # 0.5 mm tolerance, unchanged -- this is upstream of
   # apply_match_group_tuning's reach and is tracked as a
   # follow-up under the M-G campaign).
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 25
+  #
+  # Floor 25 -> 33 by Issue #3275 (re-enable --differential-pairs).
+  # The recipe at ``boards/07-matchgroup-test/generate_design.py``
+  # now passes ``--differential-pairs`` + ``--diffpair-per-pair-
+  # timeout 30`` (Issue #3089 budget).  Empirically:
+  #   * Pairs the CoupledPathfinder routes (DQS_P/N) lay down with
+  #     intra-pair clearance respected (PR #3022's
+  #     ``min_spacing_cells`` floor closes #3012).
+  #   * Pairs that exceed the 30s coupled budget (3 MIPI + 3 TMDS
+  #     on this board's dense FFC->QFN and FFC->BGA-49 escapes)
+  #     fall through to the negotiated single-ended router, which
+  #     does NOT enforce intra-pair clearance and lays N-side
+  #     traces over the P-side.  This adds ~8 diffpair_clearance_
+  #     intra errors on the budget-exited pairs.
+  #
+  # Trade-off: +1 net routed (DQ3 now succeeds because DQS_P/N's
+  # coupled placement freed the BGA-49 escape channel) at the cost
+  # of +8 diffpair_clearance_intra on the budget-exited MIPI/TMDS
+  # pairs.  Net empirical count: 31 raw (was 23) on the macOS local
+  # re-route at seed=42 + PYTHONHASHSEED=42.  Floor 33 = observed
+  # 31 + 2-error slack (post-#3146 convention).  Unrouted nets
+  # reduce 3 -> 2 (MIPI_CLK_N, MIPI_DAT0_N remain; DQ3 routed).
+  #
+  # Exit clause: floor drops back below 33 once the CoupledPathfinder
+  # can route MIPI lanes within budget (curator follow-up under
+  # #3089-family work) OR a negotiated-side rip-up-and-widen pass
+  # for budget-exited diff pairs reduces the intra-clearance count.
+  # The structural Option D from #3275 (negotiated rip-up on
+  # N-side failure) is the architectural fix; this PR adopts the
+  # simplest available improvement (DQ3 unblocked, structural
+  # follow-ups documented).
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 33
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874

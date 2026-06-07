@@ -685,10 +685,7 @@ def _add_sch_parser(subparsers) -> None:
         "--auto",
         action="store_true",
         default=True,
-        help=(
-            "Assign only unambiguous candidates (default; only mode currently "
-            "supported)."
-        ),
+        help=("Assign only unambiguous candidates (default; only mode currently supported)."),
     )
     sch_assign_fp.add_argument(
         "--dry-run",
@@ -3023,6 +3020,21 @@ def _add_route_parser(subparsers) -> None:
         help=(
             "Override maximum length mismatch for differential pairs in mm. "
             "Default: auto based on detected pair type."
+        ),
+    )
+    route_parser.add_argument(
+        "--diffpair-per-pair-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per-pair wall-clock budget for the CoupledPathfinder in "
+            "seconds (Issue #3089).  When set, each diff-pair coupled A* "
+            "search abandons after this many seconds and the pair is "
+            "deferred to the main strategy (single-ended A*).  Required "
+            "for boards with dense BGA/QFN escape geometry where the "
+            "unbounded coupled search can hang for many minutes per "
+            "pair (e.g. board 07's MIPI lanes, Issue #3275).  Default: "
+            "no per-pair budget."
         ),
     )
     route_parser.add_argument(

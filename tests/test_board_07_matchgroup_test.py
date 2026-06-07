@@ -449,6 +449,46 @@ class TestMatchGroupTrackerQueryable:
             "so the eventual tuning-step wiring is easy to find."
         )
 
+    def test_issue_3275_differential_pairs_engaged(self) -> None:
+        """Issue #3275: recipe passes ``--differential-pairs`` to ``kct route``.
+
+        Pins the M-G campaign progress: the recipe historically
+        disabled the diff-pair pre-pass while #3012 was pending
+        (lines 482-493 of the pre-#3275 generate_design.py body).
+        PR #3022 closed #3012 by adding the ``min_spacing_cells``
+        floor to ``CoupledPathfinder``; Issue #3275 re-enabled the
+        flag here so DQS_P/N coupled routing engages and DQ3 escapes
+        the BGA-49 corridor (lifts the seeded re-route from 28/31
+        to 29/31).  A future revert that disables the flag without
+        explaining the regression will fail this assertion.
+        """
+        gd_path = BOARD_DIR / "generate_design.py"
+        text = gd_path.read_text()
+        # The flag must appear inside the cmd list (not just in a
+        # comment).  The cmd list block starts at ``cmd = [`` and
+        # ends at the next ``]``; pick the surrounding 60-line
+        # window after ``cmd = [`` and assert the flag is present.
+        cmd_start = text.find("cmd = [")
+        assert cmd_start >= 0, "Recipe missing the ``cmd = [`` block"
+        cmd_end = text.find("]", cmd_start)
+        cmd_block = text[cmd_start:cmd_end]
+        assert '"--differential-pairs"' in cmd_block, (
+            "Issue #3275: the ``kct route`` cmd list must include "
+            "``--differential-pairs``.  Restore it (see PR closing "
+            "#3275 for the rationale + the floor update in "
+            "``.github/routed-drc-tolerance.yml``)."
+        )
+        # Companion: the per-pair budget must accompany the flag so
+        # the CoupledPathfinder's per-pair search is bounded.
+        # Without the budget the C++ pathfinder can spin for many
+        # minutes per pair on dense BGA/QFN escapes (the failure
+        # mode #3275 builder hit on the first re-route attempt).
+        assert '"--diffpair-per-pair-timeout"' in cmd_block, (
+            "Issue #3275: ``--differential-pairs`` requires "
+            "``--diffpair-per-pair-timeout`` to avoid unbounded "
+            "CoupledPathfinder search on tight pair escapes."
+        )
+
 
 # =============================================================================
 # Sanity: net-count budget and diff-pair partner consistency
