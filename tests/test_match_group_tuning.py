@@ -30,6 +30,7 @@ from kicad_tools.router.match_group_tuning import (
     MAX_INSERTS_PER_GROUP_MEMBER,
     MAX_INSERTS_PER_GROUP_MEMBER_LARGE,
     MAX_INSERTS_PER_GROUP_MEMBER_SMALL,
+    MAX_SEGMENT_RETRY_CANDIDATES,
     MAX_TOTAL_INSERTS_PER_GROUP,
     TuneResult,
     _outer_normal_hint_group,
@@ -610,6 +611,571 @@ class TestPostInsertionDRC:
 
 
 # =============================================================================
+# 6b. Issue #3317 follow-up -- broader DRC self-check passes
+# =============================================================================
+
+
+class TestPostInsertionBroaderDRC:
+    """Issue #3317 follow-up (judge change-request on PR #3317).
+
+    The legacy two-pass self-check (intra-group + inter-net segment-only)
+    let trombone inserts pass that subsequently failed the full DRC
+    validator on board 07.  The expanded helper adds:
+
+    * **Pass 3** -- segment-vs-other-net-via clearance at
+      ``via_clearance_mm`` (typically 0.2 mm).  Catches the
+      ``[via] DM0 vs DQ6`` class of underflow.
+    * **Pass 4** -- segment-vs-diff-pair-partner clearance at
+      ``intra_pair_clearance_mm`` (typically 0.1 mm).  Catches the
+      ``[segment] TMDS_D0_N vs TMDS_D0_P`` underflow.
+
+    Both passes are gated behind explicit optional arguments so legacy
+    callers / tests retain byte-for-byte behavior when they don't supply
+    the thresholds.
+    """
+
+    def test_via_clearance_pass_skipped_when_threshold_omitted(self):
+        """Legacy behavior preserved: omitting ``via_clearance_mm`` skips
+        the via-clearance pass even when a foreign via sits beneath the
+        new segment.
+        """
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Foreign route owns a via that sits ON the new segment (so its
+        # center-to-segment distance is 0 mm, well below any via_clearance
+        # floor).  With pass 3 disabled (legacy), the helper must accept.
+        other_via = Via(
+            x=2.5,
+            y=0.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            # via_clearance_mm intentionally omitted -- legacy path.
+        )
+        assert ok is True
+
+    def test_via_clearance_pass_rejects_segment_near_foreign_via(self):
+        """When ``via_clearance_mm`` is supplied, a new segment that lands
+        within the via-clearance floor of a foreign-net via is rejected.
+
+        Mirrors the board 07 ``[via] DM0 vs DQ6 ... -0.096mm (required
+        0.200mm)`` failure: the segment-only legacy check missed the
+        underflow because there is no FOREIGN SEGMENT at the same XY --
+        only a foreign via.
+        """
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Foreign via at (2.5, 0.4) with diameter 0.7 (radius 0.35).
+        # Distance from via center to segment line = 0.4 mm.
+        # Edge clearance = 0.4 - 0.35 - 0.1 = -0.05 mm (underflow).
+        # With via_clearance_mm=0.2 mm the check must reject.
+        other_via = Via(
+            x=2.5,
+            y=0.4,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            via_clearance_mm=0.2,
+        )
+        assert ok is False
+
+    def test_via_clearance_pass_passes_when_via_far_away(self):
+        """Sanity: a foreign via well outside via_clearance_mm passes."""
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Foreign via on the other side of the board; edge clearance
+        # >> via_clearance_mm.
+        other_via = Via(
+            x=2.5,
+            y=2.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            via_clearance_mm=0.2,
+        )
+        assert ok is True
+
+    def test_via_clearance_pass_skips_when_via_layers_disjoint(self):
+        """The segment-vs-via pass only fires when the new segment's
+        layer is one of the via's layers (a via on B.Cu/In1.Cu does not
+        clash with a segment on F.Cu)."""
+        from kicad_tools.router.primitives import Via
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="D0",
+        )
+        # Via spans B.Cu <-> In1.Cu only; the F.Cu segment must not
+        # conflict regardless of XY proximity.
+        other_via = Via(
+            x=2.5,
+            y=0.4,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.B_CU, Layer.IN1_CU),
+            net=2,
+            net_name="OTHER",
+        )
+        other_route = Route(net=2, net_name="OTHER", segments=[], vias=[other_via])
+        routes_by_net = {
+            1: _straight_route(1, "D0", 10.0, y=5.0),
+            2: other_route,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            via_clearance_mm=0.2,
+        )
+        assert ok is True
+
+    def test_diff_pair_intra_pass_skipped_when_partner_omitted(self):
+        """Legacy behavior preserved: omitting ``diff_pair_partners``
+        skips the intra-pair clearance pass even when the candidate has
+        a partner-shaped neighbor that would violate
+        ``intra_pair_clearance_mm`` -- the legacy intra-group threshold
+        does the gating instead.
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner sits at y=0.15 (edge clearance = 0.05 mm).  Without
+        # the intra-pair pass, the helper still rejects because the
+        # candidate's partner is a NON-GROUP NET (or it's omitted from
+        # the group set) so the inter-net pass at 0.2 mm fires.  For
+        # this test the partner is NOT in group_net_ids: the inter-net
+        # pass catches it at the 0.2 mm threshold.  We're checking that
+        # the SKIPPED intra-pair pass does not double-fire.
+        partner = _straight_route(2, "TMDS_D0_N", 5.0, y=0.15)
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+            2: partner,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},  # partner is NOT a group member
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            # diff_pair_partners + intra_pair_clearance_mm intentionally
+            # omitted.  The legacy inter-net pass at 0.2 mm STILL fires
+            # against partner at 0.05 mm edge clearance.
+        )
+        assert ok is False
+
+    def test_diff_pair_intra_pass_isolates_partner_check(self):
+        """Pass 4 fires in isolation when pass 1 + 2 are lax enough.
+
+        Verifies the new pass is independently effective -- not merely
+        coincidentally co-firing with pass 1 / pass 2.
+
+        Setup: partner is NOT in group_net_ids (so pass 1 skips it).
+        Inter-net threshold (pass 2) is set to a NEGATIVE value so pass
+        2 trivially passes (the helper compares ``clearance + 1e-9 <
+        threshold``; with threshold = -1.0 mm, no real geometry can
+        trip it).  Pass 4 with intra_pair_clearance_mm = 0.1 mm fires
+        against the partner whose edge clearance is 0.02 mm.
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner at y=0.22 -- edge clearance = 0.22 - 0.1 - 0.1 = 0.02 mm.
+        # Below the 0.1 mm intra-pair floor -> pass 4 must reject.
+        partner = _straight_route(2, "TMDS_D0_N", 5.0, y=0.22)
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+            2: partner,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            # Partner net 2 is NOT in group_net_ids so pass 1 skips it.
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            # Pass 2 (inter-net) threshold set to a value the actual
+            # 0.02 mm edge clearance comfortably exceeds.
+            intra_group_clearance_mm=0.01,
+            diff_pair_partners={1: 2, 2: 1},
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is False  # rejected by pass 4 only
+
+    def test_diff_pair_intra_pass_passes_when_partner_within_floor(self):
+        """When the candidate's partner is at >= intra_pair_clearance_mm
+        edge distance, the new pass accepts.
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner at y=0.35 -- edge clearance = 0.35 - 0.1 - 0.1 = 0.15 mm
+        # >= 0.1 mm floor.  Pass 4 must accept.
+        partner = _straight_route(2, "TMDS_D0_N", 5.0, y=0.35)
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+            2: partner,
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            # Partner NOT in group_net_ids so pass 1 skips.
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            # Lax intra-group threshold so pass 2 accepts the 0.15 mm
+            # edge clearance.
+            intra_group_clearance_mm=0.05,
+            diff_pair_partners={1: 2, 2: 1},
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is True
+
+    def test_diff_pair_intra_pass_skips_when_partner_not_routed(self):
+        """When the candidate's diff-pair partner is in the partners map
+        but NOT in ``routes_by_net``, the intra-pair pass is silently
+        skipped (no spurious rejections).
+        """
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TMDS_D0_P",
+        )
+        # Partner net 2 NOT in routes_by_net.
+        routes_by_net = {
+            1: _straight_route(1, "TMDS_D0_P", 5.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            diff_pair_partners={1: 2, 2: 1},
+            intra_pair_clearance_mm=0.1,
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_skipped_when_threshold_omitted(self):
+        """Legacy behavior preserved: omitting ``pad_clearance_mm`` skips
+        the pad-clearance pass even when a foreign pad sits beneath the
+        new segment.
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # Foreign pad on net 2 sits ON the segment (well below any
+        # pad-clearance floor).  Without the pad-clearance pass the
+        # helper must accept.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.F_CU,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.2,
+            foreign_pads=[foreign_pad],
+            # pad_clearance_mm intentionally omitted -- legacy path.
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_rejects_segment_near_foreign_pad(self):
+        """When ``pad_clearance_mm`` is supplied, a new segment that
+        lands within the pad-clearance floor of a foreign-net pad is
+        rejected.
+
+        Mirrors the board 07 ``[pad] A1 vs J3-4 ... -0.116 mm (required
+        0.102 mm)`` failure: the segment-only legacy check missed the
+        underflow because the segment was near a PAD, not a foreign
+        segment.
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # Foreign pad at (2.5, 0.4) with 0.5 mm diameter (radius 0.25).
+        # center-to-segment distance = 0.4 mm.
+        # Edge clearance = 0.4 - 0.25 - 0.1 = 0.05 mm.
+        # With pad_clearance_mm = 0.2 mm the check must reject.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.4,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.F_CU,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,  # lax so pass 1/2 don't fire
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is False
+
+    def test_pad_clearance_pass_passes_when_pad_far_away(self):
+        """Sanity: a foreign pad well outside pad_clearance_mm passes."""
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        foreign_pad = Pad(
+            x=2.5,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.F_CU,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_skips_when_pad_layer_disjoint(self):
+        """Layer-aware: an SMD pad on B.Cu does not collide with an
+        F.Cu segment regardless of XY proximity.
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # SMD pad on B.Cu sitting under the F.Cu segment must pass.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.B_CU,
+            through_hole=False,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is True
+
+    def test_pad_clearance_pass_pth_pad_blocks_all_layers(self):
+        """A PTH (through-hole) pad blocks every routing layer, so the
+        segment-vs-pad clearance pass must fire on F.Cu even if the
+        pad's ``layer`` attribute happens to be set to a different
+        layer (PTH pads are present on all copper layers by
+        manufacturing definition).
+        """
+        from kicad_tools.router.primitives import Pad
+
+        new_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=5.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="A1",
+        )
+        # PTH pad on B.Cu attribute but ``through_hole=True``: must
+        # still collide with the F.Cu segment.
+        foreign_pad = Pad(
+            x=2.5,
+            y=0.4,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="A2",
+            layer=Layer.B_CU,
+            through_hole=True,
+        )
+        routes_by_net = {
+            1: _straight_route(1, "A1", 10.0, y=5.0),
+        }
+        ok = _post_insertion_clearance_ok_group(
+            new_segments=[new_seg],
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=0.0,
+            foreign_pads=[foreign_pad],
+            pad_clearance_mm=0.2,
+        )
+        assert ok is False
+
+
+# =============================================================================
 # 7. Already within tolerance -- byte-for-byte unchanged
 # =============================================================================
 
@@ -773,6 +1339,255 @@ class TestUnroutedMembers:
         assert results[3][1].success is False
         # Net 4 is the longest among the routed -> already_within_tolerance.
         assert results[4][1].reason == "already_within_tolerance"
+
+
+# =============================================================================
+# 10.5. Per-segment retry (Issue #3274) -- multi-candidate fan-out
+# =============================================================================
+
+
+class TestPerSegmentRetry:
+    """Issue #3274: cascade tries up to ``MAX_SEGMENT_RETRY_CANDIDATES``
+    segments before declaring ``post_insertion_drc_violation``.
+
+    Before #3274 the single DRC failure on the top-ranked segment
+    aborted the whole member's cascade (one unlucky candidate
+    disqualified the whole member).  After #3274 the cascade tries up
+    to ``MAX_SEGMENT_RETRY_CANDIDATES`` ranked segments per attempt
+    and commits the first that passes -- significantly improving
+    tuner yield on dense boards (e.g. board 07's ADDR_BUS).
+    """
+
+    def _multi_segment_route(
+        self,
+        net_id: int,
+        name: str,
+        legs: list[tuple[float, float, float, float]],
+    ) -> Route:
+        """Build a route with multiple straight segments stitched end-to-end."""
+        segs = []
+        for x1, y1, x2, y2 in legs:
+            segs.append(
+                Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net_id,
+                    net_name=name,
+                )
+            )
+        return Route(net=net_id, net_name=name, segments=segs)
+
+    def test_constant_is_three(self):
+        """``MAX_SEGMENT_RETRY_CANDIDATES`` MUST be 3 by default."""
+        from kicad_tools.router.match_group_tuning import MAX_SEGMENT_RETRY_CANDIDATES
+
+        assert MAX_SEGMENT_RETRY_CANDIDATES == 3
+
+    def test_rank_candidate_segments_returns_top_k(self):
+        """Helper returns segments sorted by score, capped at K."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        # Multi-segment route with varying lengths; longest-with-middle-bonus
+        # should rank first.
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 3.0, 0.0),  # idx 0, length 3 (edge -- no 1.2x bonus)
+                (3.0, 0.0, 13.0, 0.0),  # idx 1, length 10 (middle, axis -- 1.2 * 1.5)
+                (13.0, 0.0, 19.0, 0.0),  # idx 2, length 6 (middle, axis -- 1.2 * 1.5)
+                (19.0, 0.0, 21.0, 0.0),  # idx 3, length 2 (edge -- no 1.2x)
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=3)
+        assert len(ranked) == 3
+        # Best score: idx 1 (10mm * 1.2 * 1.5 = 18.0).
+        assert ranked[0][0] == 1
+        # Second: idx 2 (6mm * 1.2 * 1.5 = 10.8).
+        assert ranked[1][0] == 2
+        # Third: idx 0 (3mm * 1.5 = 4.5; idx 3 is exactly 2mm and tied below).
+        assert ranked[2][0] == 0
+
+    def test_rank_candidate_segments_filters_short_segments(self):
+        """Segments below ``min_segment_length`` are excluded."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 5.0, 0.0),  # 5mm -- kept
+                (5.0, 0.0, 6.0, 0.0),  # 1mm -- filtered (below 2mm floor)
+                (6.0, 0.0, 16.0, 0.0),  # 10mm -- kept
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=5)
+        # Only two segments are >= 2mm.
+        assert len(ranked) == 2
+
+    def test_rank_candidate_segments_empty_route(self):
+        """Empty route yields empty candidate list."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        route = Route(net=1, net_name="D0", segments=[])
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0)
+        assert ranked == []
+
+    def test_rank_candidate_segments_deterministic_tiebreak(self):
+        """Ties are broken by ascending segment index (deterministic)."""
+        from kicad_tools.router.match_group_tuning import _rank_candidate_segments
+
+        # Three middle segments with identical length and orientation -->
+        # identical score.  Tie-break: ascending index.
+        route = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 1.0, 0.0),  # 1mm edge filtered
+                (1.0, 0.0, 11.0, 0.0),  # idx 1 -- middle
+                (11.0, 0.0, 21.0, 0.0),  # idx 2 -- middle, same length
+                (21.0, 0.0, 31.0, 0.0),  # idx 3 -- middle, same length
+                (31.0, 0.0, 32.0, 0.0),  # 1mm edge filtered
+            ],
+        )
+        ranked = _rank_candidate_segments(route, min_segment_length=2.0, max_candidates=3)
+        # All three middle segments have score 10 * 1.2 * 1.5 = 18.0.
+        # Tie-break: ascending index --> [1, 2, 3].
+        assert [idx for (idx, _seg) in ranked] == [1, 2, 3]
+
+    def test_per_segment_retry_falls_back_to_next_candidate(self):
+        """When best segment is blocked, the next-best is tried.
+
+        This is the core Issue #3274 fix: a single DRC failure on the
+        top-ranked segment used to abort the member's cascade.  Now
+        the cascade falls back to the next-best segment.
+        """
+        # Net 1 has a multi-segment route -- two viable serpentine
+        # segments at different y coordinates.  We place a non-group
+        # neighbor RIGHT next to the segment that ``find_best_segment``
+        # would pick FIRST (the middle, ranked higher by middle-bonus).
+        # The fallback segment (also long, but at a different y) is
+        # clear, so the per-segment retry should pick it.
+        group = _ddr_group(name="DDR_DATA", net_ids=[1, 2], tolerance=0.05)
+
+        # Net 1: 3 horizontal legs glued by short jogs.
+        #   leg A: y=0, x=0..8 (index 0, edge)
+        #   jog:  y=0->5, x=8 (index 1, vertical 5mm, gets axis bonus)
+        #   leg B: y=5, x=8..16 (index 2, middle, horizontal)
+        # The "best" segment is the middle jog (idx 1, 5mm, vertical, middle bonus 1.2 * 1.5).
+        # Wait, lengths matter most: idx 2 leg (8mm * 1.5 = 12 vs idx 1 jog 5mm * 1.2 * 1.5 = 9).
+        # So idx 2 wins.  Place a hostile neighbor near y=5 (leg B's y).
+        route1 = self._multi_segment_route(
+            1,
+            "D0",
+            [
+                (0.0, 0.0, 8.0, 0.0),  # idx 0: leg A, 8mm, edge, horizontal
+                (8.0, 0.0, 8.0, 5.0),  # idx 1: jog, 5mm, middle, vertical
+                (8.0, 5.0, 18.0, 5.0),  # idx 2: leg B, 10mm, edge, horizontal
+            ],
+        )
+        # Net 2 (reference, longer).
+        route2 = self._straight_route(2, "D1", 25.0, y=10.0)
+        routes = {1: route1, 2: route2}
+
+        # Hostile neighbor right above leg B at y=5.4 (within
+        # intra_group_clearance_mm=0.5 of the bulge that goes y=5 -> y=5+amplitude).
+        # The outer-normal hint vs net 2 (y=10) will point AWAY from
+        # net 2 -- so leg B's bulge goes to y < 5 (toward decreasing y).
+        # That means leg B's bulge is at y in [4, 5], NOT colliding with
+        # neighbor at y=5.4.  Hmm, need to redesign.
+        #
+        # Better setup: place the hostile neighbor at y=4.5 (below leg B
+        # by 0.5mm).  Net 2 at y=10 (above).  Outer-normal vs net 2:
+        # bulge goes DOWN.  Bulge from leg B at y=5 amplitude 0.5 -->
+        # serpentine at y in [4.5, 5].  Neighbor at y=4.5 -- collision.
+        #
+        # For leg A (idx 0, also a candidate): y=0.  Outer-normal vs
+        # net 2 (y=10) points DOWN (y<0).  Neighbor at y=4.5 doesn't
+        # interfere.  So leg A is a clean fallback.
+        hostile = self._straight_route(99, "HOSTILE", 25.0, y=4.5)
+        routes[99] = hostile
+
+        # Use a tiny amplitude so the bulge is geometrically realizable.
+        cfg = SerpentineConfig(amplitude=0.3, min_spacing=0.2, gap_factor=2.0)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.05,
+            intra_group_clearance_mm=0.4,
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        # The key assertion: net 1 should NOT be marked as
+        # ``post_insertion_drc_violation`` because the fallback
+        # segment (leg A) is clear.  Either ``tuned`` (if a single
+        # insert sufficed) or ``exceeded_max_inserts`` (delta was
+        # too big for 1 insert) is acceptable -- what we're proving
+        # is that the cascade no longer immediately rolls back.
+        assert results[1][1].reason != "post_insertion_drc_violation", (
+            f"Issue #3274: cascade should have tried the fallback segment, "
+            f"got reason={results[1][1].reason!r} "
+            f"message={results[1][1].message!r}"
+        )
+        # And at least one insert was committed (i.e. the fallback
+        # actually fired).
+        assert results[1][1].inserts_applied >= 1, (
+            f"Issue #3274: per-segment retry should have committed >=1 insert, "
+            f"got inserts_applied={results[1][1].inserts_applied}"
+        )
+
+    def _straight_route(
+        self,
+        net_id: int,
+        name: str,
+        length_mm: float,
+        y: float = 0.0,
+        layer: Layer = Layer.F_CU,
+    ) -> Route:
+        return _straight_route(net_id, name, length_mm, y=y, layer=layer)
+
+    def test_all_candidates_fail_still_rolls_back(self):
+        """When every candidate fails DRC, the member is rolled back.
+
+        Preserves the legacy contract: if NO candidate passes, the
+        member's cascade rolls back byte-for-byte and reports
+        ``post_insertion_drc_violation``.
+        """
+        # Single straight segment route -- only one candidate available.
+        # Hostile geometry on both sides of net 1 means the single
+        # candidate's only bulge direction collides.  Equivalent to
+        # the existing ``test_intra_group_rollback`` but explicit
+        # about the new contract.
+        group = _ddr_group(net_ids=[1, 2, 3], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 10.0, y=2.0),
+            3: _straight_route(3, "D2", 15.0, y=-0.3),
+        }
+        original_net1 = routes[1]
+        original_net1_segments = routes[1].segments
+
+        cfg = SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0)
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.4,
+            config=cfg,
+            max_inserts_per_member=1,
+        )
+
+        assert results[1][1].reason == "post_insertion_drc_violation"
+        # Drift-prevention: byte-for-byte rollback to original.
+        assert results[1][0] is original_net1
+        assert results[1][0].segments is original_net1_segments
+        assert results[1][1].inserts_applied == 0
 
 
 # =============================================================================

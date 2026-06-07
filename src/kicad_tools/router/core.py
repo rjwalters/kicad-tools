@@ -10243,6 +10243,42 @@ class Autorouter:
             num_copper_layers=num_layers,
         )
 
+        # Issue #3317 follow-up (judge change-request on PR #3317):
+        # Build the diff-pair partners map (net_id -> partner_net_id) so
+        # the single-ended tuner can apply the per-class
+        # ``intra_pair_clearance`` floor during its post-insertion DRC
+        # self-check, rather than only the broader
+        # ``intra_group_clearance_mm``.  Without this map the
+        # ``_post_insertion_clearance_ok_group`` helper falls back to its
+        # legacy two-pass check, which was insufficient on board 07's
+        # TMDS_D0 pair (see PR #3317 judge comment).
+        diff_pair_partners_by_id: dict[int, int] = {}
+        try:
+            name_to_id = {n: i for i, n in self.net_names.items()}
+            partner_by_name = self.get_diff_pair_map()
+            for p_name, n_name in partner_by_name.items():
+                p_id = name_to_id.get(p_name)
+                n_id = name_to_id.get(n_name)
+                if p_id is not None and n_id is not None:
+                    diff_pair_partners_by_id[p_id] = n_id
+        except Exception:
+            # Defensive: a partner-map build failure must not break
+            # tuning.  Fall back to no diff-pair tightening.
+            diff_pair_partners_by_id = {}
+
+        # Manufacturer's via-clearance floor for the new segment-vs-via
+        # pass (Issue #3317 follow-up).  Defaults to 0.2 mm for JLCPCB.
+        via_clearance_mm = self.rules.via_clearance
+
+        # Group pads by net id for the segment-vs-pad clearance pass
+        # (Issue #3317 follow-up).  ``self.pads`` is ``{(ref, pin): Pad}``;
+        # the tuner needs ``{net_id: [Pad, ...]}`` so it can build the
+        # foreign-pad set for each candidate net cheaply.
+        pads_by_net: dict[int, list[Any]] = {}
+        for pad in self.pads.values():
+            pads_by_net.setdefault(pad.net, []).append(pad)
+        pad_clearance_mm = self.rules.trace_clearance
+
         for group in detected_groups:
             # Default per-class info.  When a net class is not configured
             # for this group's reference net (the common synthetic-test
@@ -10272,6 +10308,10 @@ class Autorouter:
                     intra_group_clearance_mm=intra_group_clearance_mm,
                     intra_pair_clearance_mm=intra_pair_clearance_mm,
                     length_critical=length_critical,
+                    via_clearance_mm=via_clearance_mm,
+                    diff_pair_partners=diff_pair_partners_by_id,
+                    pads_by_net=pads_by_net,
+                    pad_clearance_mm=pad_clearance_mm,
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar
