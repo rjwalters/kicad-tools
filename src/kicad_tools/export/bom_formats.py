@@ -50,10 +50,26 @@ class BOMFormatter(ABC):
         pass
 
     def filter_items(self, items: list[BOMItem]) -> list[BOMItem]:
-        """Filter items based on config."""
+        """Filter items based on config.
+
+        Always drops virtual items -- power symbols (``power:GND``,
+        ``kicad_tools_pwr:VIN`` synthesized rails, and any ``#PWR``
+        reference) and explicit "exclude from BOM" symbols (``in_bom=
+        False``). These are schematic-only labels that don't represent
+        a placed footprint, so they must not appear in the BOM CSV or
+        the JLCPCB pre-flight will (correctly) flag a BOM/PCB mismatch.
+        Issue #3291 surfaced this when the voltage-divider's synthesized
+        ``VIN`` power symbol leaked into ``bom_jlcpcb.csv`` after the
+        schematic was rewritten to use ``VIN`` instead of stock ``+5V``.
+        """
+        filtered = [
+            item
+            for item in items
+            if not getattr(item, "is_virtual", False)
+        ]
         if self.config.include_dnp:
-            return items
-        return [item for item in items if not getattr(item, "dnp", False)]
+            return filtered
+        return [item for item in filtered if not getattr(item, "dnp", False)]
 
 
 class JLCPCBBOMFormatter(BOMFormatter):

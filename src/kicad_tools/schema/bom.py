@@ -35,8 +35,20 @@ class BOMItem:
 
     @property
     def is_power_symbol(self) -> bool:
-        """Check if this is a power symbol (not a real component)."""
-        return self.lib_id.startswith("power:")
+        """Check if this is a power symbol (not a real component).
+
+        Covers KiCad's stock ``power:`` library and kicad-tools'
+        synthesized ``kicad_tools_pwr:`` library (used by
+        ``Schematic.add_pwr_symbol`` for non-stock rails like ``VIN``,
+        ``VMOTOR``, etc. — see #3291). Also recognizes the legacy
+        ``#PWR`` reference prefix as a fallback when a power symbol is
+        loaded from a file whose ``lib_id`` was stripped or rewritten.
+        """
+        if self.lib_id.startswith("power:") or self.lib_id.startswith(
+            "kicad_tools_pwr:"
+        ):
+            return True
+        return bool(self.reference) and self.reference.startswith("#PWR")
 
     @property
     def is_virtual(self) -> bool:
