@@ -380,13 +380,20 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       fields (``intra_pair_clearance``, ``coupled_continuity_threshold``,
       etc.) do not project through the subprocess boundary.
 
-      To stay under the DRC tolerance (HARD LIMIT: do not widen
-      ``.github/routed-drc-tolerance.yml``), this recipe omits
-      ``--differential-pairs``.  Net yield is ~25/31 (status-quo parity
-      with the prior in-process baseline) and DRC stays under 60
-      errors (under the 70 allowlist).  When the upstream
-      diff-pair-overlap router bug is fixed (follow-up issue), this
-      recipe can re-add ``--differential-pairs`` for the 29/31 yield.
+      Update (refresh tracker #3295, 2026-06-07): with #3012 closed
+      (PR #3022 added the ``min_spacing_cells`` floor in
+      ``CoupledPathfinder``), the *DRC* blocker against
+      ``--differential-pairs`` is fixed.  However, an empirical re-enable
+      test on the same date showed the ``CoupledPathfinder`` pre-pass
+      hangs CPU-bound for >40 minutes on this board (well past the
+      ``--timeout 600`` budget, which the pre-pass does not honour).
+      This recipe therefore continues to omit ``--differential-pairs``.
+      Net yield is 28/31 (matching the PR #3276 baseline: DQ3,
+      MIPI_CLK_N, MIPI_DAT0_N remain stranded per #3275) and routed-DRC
+      stays under the per-board allowlist (currently 25; measured 23
+      under jlcpcb-tier1 / 17 under jlcpcb).  See
+      the inline comment block adjacent to the ``cmd`` list for the
+      full empirical record.
 
     What each flag does:
 
@@ -457,40 +464,55 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # (overlapping sibling traces, ~20K ``diffpair_clearance_intra``
     # violations -- the bug this issue documents).
     #
-    # Issue #3003 (this PR): hardens the
-    # ``DiffPairRouter.route_differential_pair_coupled`` inline serpentine
-    # shim so it (a) gates ``match_pair_lengths(add_serpentines=True)``
-    # on ``length_critical=True`` (length-critical pairs are routed by
-    # the audited Phase 3I tuner instead of this shim), and (b) when it
-    # does run, threads ``intra_pair_clearance_mm`` + the partner route
-    # through ``create_serpentine`` so the bulge biases away from the
-    # partner and is DRC-rejected if it would violate intra-pair
-    # clearance.
+    # Issue #3003: hardens the ``DiffPairRouter.route_differential_pair_coupled``
+    # inline serpentine shim so it (a) gates
+    # ``match_pair_lengths(add_serpentines=True)`` on ``length_critical=True``
+    # (length-critical pairs are routed by the audited Phase 3I tuner
+    # instead of this shim), and (b) when it does run, threads
+    # ``intra_pair_clearance_mm`` + the partner route through
+    # ``create_serpentine`` so the bulge biases away from the partner and
+    # is DRC-rejected if it would violate intra-pair clearance.
     #
-    # Judge follow-up: the shim hardening is correct defense-in-depth
-    # but the empirical "0 diffpair_clearance_intra with
-    # ``--differential-pairs``" claim does NOT reproduce.  Re-routing
-    # board 07 with ``--differential-pairs`` and the d25f9782 HEAD
-    # still produces ~459 ``diffpair_clearance_intra`` violations
-    # because the dominant source is upstream of the shim --
-    # ``CoupledPathfinder`` lays both centerlines at
-    # ``pair.rules.spacing`` (typ. 0.15-0.2 mm) without consulting
-    # ``net_class.effective_intra_pair_clearance()``, so on tight
-    # boards (HDMI: 0.15 mm spacing + 0.15 mm trace_width gives 0 mm
-    # edge-to-edge instead of the required 0.1 mm).
+    # Issue #3012 (CLOSED via PR #3022, 2026-05-18): added the
+    # ``min_spacing_cells`` floor in ``CoupledPathfinder`` so coupled
+    # routing now consults
+    # ``net_class.effective_intra_pair_clearance()`` (see
+    # ``src/kicad_tools/router/diffpair_routing.py:700-704, :769-774,
+    # :828-830``).  Prior to PR #3022, ``--differential-pairs`` on
+    # board 07 produced ~459 ``diffpair_clearance_intra`` violations
+    # because both centerlines were laid at ``pair.rules.spacing``
+    # without consulting the per-pair intra-clearance override.
     #
-    # To stay under the 70-error allowlist while the coupled-pathfinder
-    # bug is being designed/fixed in a separate PR, this recipe keeps
-    # ``--differential-pairs`` OFF.  The sidecar is still passed via
-    # ``--net-class-map`` so the diff-pair pre-pass remains exercisable
-    # by other test paths and the shim hardening from this PR is still
-    # protected by its unit-test regression suite
-    # (``tests/test_diffpair_serpentine_clearance.py``).
+    # Re-enable attempt (refresh tracker #3295, 2026-06-07):
+    # The #3275 curator hypothesis was that with #3012 closed, the
+    # easy win on board 07 would be to re-append ``--differential-pairs``
+    # so MIPI_CLK_N / MIPI_DAT0_N route through ``CoupledPathfinder``
+    # instead of failing on corridor contention in the single-ended
+    # negotiated loop.  Empirical test on this worktree (2026-06-07,
+    # main @ 956f9487, C++ backend v1.0.0):
     #
-    # Follow-up tracker for the coupled-pathfinder root cause:
-    # Issue #3012 (router: CoupledPathfinder ignores
-    # intra_pair_clearance).  Re-enable ``--differential-pairs``
-    # here once that issue is closed.
+    #   - With ``--differential-pairs`` added to the command line,
+    #     the ``route_all_with_diffpairs`` pre-pass
+    #     (route_cmd.py:7253-7295) enters the ``CoupledPathfinder``
+    #     loop and pegs CPU at 99.7% for >40 minutes without emitting
+    #     any per-pair progress (no "Routing pair ..." lines, no
+    #     "coupled pathfinder" diagnostics).  The ``--timeout 600``
+    #     argument is forwarded only to the negotiated phase
+    #     (``_phase2_strategy`` closure), NOT to the diff-pair pre-pass,
+    #     so the run never self-aborts and never reaches the
+    #     single-ended negotiator that produces the 28/31 baseline.
+    #   - This is a wall-clock regression of >4x the recipe's stated
+    #     ``--timeout 600`` budget (and would blow past the GitHub
+    #     Actions 10-min job ceiling on CI).
+    #
+    # Conclusion: ``--differential-pairs`` cannot be re-enabled here
+    # until the CoupledPathfinder is either (a) made interruptible
+    # against a wall-clock budget or (b) profiled and made fast enough
+    # to complete in under the recipe budget.  Filing this empirical
+    # observation as part of the refresh; #3275 retains its open
+    # follow-up status (the curator's diagnosis named the right
+    # mechanism, but the proposed easy-win does NOT empirically land).
+    #
     # Issue #3098 (M-G milestone): add ``--length-match-groups`` so the
     # ``apply_match_group_tuning`` orchestrator hook is engaged on the
     # routed PCB.  Before this PR the recipe omitted the flag (it was
