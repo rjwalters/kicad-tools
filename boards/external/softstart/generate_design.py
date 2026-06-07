@@ -1088,9 +1088,35 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     C7_POS = (BOARD_ORIGIN_X + 92, BOARD_ORIGIN_Y + 82)
     C8_POS = (BOARD_ORIGIN_X + 98, BOARD_ORIGIN_Y + 82)
 
-    # Status LED
-    D2_POS = (BOARD_ORIGIN_X + 130, BOARD_ORIGIN_Y + 70)
-    R12_POS = (BOARD_ORIGIN_X + 130, BOARD_ORIGIN_Y + 76)
+    # Status LED.
+    #
+    # Issue #3257: D2 / R12 nudged east 7 mm (130 -> 137 mm) so STATUS_LED's
+    # routing leg between R12 and D2 stays clear of SWDIO's main east-bound
+    # B.Cu trace at y~173.3 mm.  The pre-#3257 placement at x=130 mm placed
+    # R12 (+76 mm) / D2 (+70 mm) directly above and below U1's east-column
+    # escape (pin 15 / pin 17 at y +/- 0.325 / -0.975 mm relative to U1's
+    # 175 mm center), forcing STATUS_LED's R12->D2 vertical leg to take a
+    # diagonal B.Cu path through the same y-band where SWDIO's main route
+    # lays its horizontal B.Cu trace -- four deterministic
+    # ``clearance_segment_segment`` violations on B.Cu pinned by
+    # ``tests/router/test_softstart_manufacturable_baseline.py``.
+    #
+    # The 7 mm east nudge moves R12 / D2 clear of the U1-east escape cluster
+    # AND clear of SWDIO's main east-bound corridor (U1 east edge x=117.85,
+    # J5 west edge x=141, so the cluster is comfortably mid-corridor at
+    # x=137).  STATUS_LED now routes from U1.15 east on F.Cu, drops down to
+    # R12 at (137, 176), then back up to D2 at (137, 170) -- all OUTSIDE
+    # the SWDIO B.Cu y-band.
+    #
+    # This is the issue body's "Direction C: push U1 layout" intervention,
+    # localised to the LED + resistor only (instead of moving U1 itself,
+    # which would cascade through every U1-connected net's placement
+    # dependencies).  Routing reach stays at 10/10 (verified post-nudge);
+    # the 4 SWDIO/STATUS_LED clearance violations drop to 0 across
+    # PYTHONHASHSEED=42 with the deterministic ``kct route --backend cpp``
+    # path documented in the issue body.
+    D2_POS = (BOARD_ORIGIN_X + 137, BOARD_ORIGIN_Y + 70)
+    R12_POS = (BOARD_ORIGIN_X + 137, BOARD_ORIGIN_Y + 76)
 
     # Debug header (right edge)
     J5_POS = (BOARD_ORIGIN_X + 142, BOARD_ORIGIN_Y + 75)
