@@ -2,11 +2,36 @@
 """
 Demonstrate autorouting on the USB joystick PCB.
 
-This script:
-1. Loads the generated USB joystick PCB
-2. Configures net classes for USB, analog, and digital signals
-3. Routes all nets with priority ordering
-4. Saves the routed result
+Issue #3308 (June 7 2026): this script previously carried its OWN
+recipe -- 0.1mm grid, 0.2mm clearance, ``USB_CC1`` / ``USB_CC2``
+skipped, ``route_all_with_diffpairs(enabled=True)`` -- which had
+drifted from the canonical recipe in ``generate_design.py:route_pcb()``
+that produced the committed routed PCB.  The drift caused
+``kct build --step route`` (which invokes ``route_demo.py``, see
+``src/kicad_tools/cli/build_cmd.py:1189``) to produce strictly worse
+output than the committed artifact even when nothing in the router
+itself had regressed.
+
+Fix (Option 1a from the issue):
+``route_demo.py`` now DELEGATES to ``generate_design.py:route_pcb()``
+so the demo and the end-to-end build recipe are guaranteed to be the
+same code path.  The two cannot drift again because there is now only
+one copy of the recipe.
+
+The canonical recipe (see ``generate_design.py:route_pcb()``) uses:
+
+  * 0.05mm routing grid (needed for J1 USB-C off-grid pad escape; #3095)
+  * 0.15mm trace width / 0.15mm trace clearance
+  * ``manufacturer="jlcpcb-tier1"`` declared on ``DesignRules`` so the
+    EscapeRouter can resolve ``via_in_pad_supported`` (#3183)
+  * fine-pitch clearance 0.08mm at 0.8mm threshold (#3095)
+  * Only VCC / GND / VBUS skipped -- USB_CC1 / USB_CC2 are now routable
+    on the finer grid (#3095)
+  * ``intra_pair_clearance=0.15mm`` on USB_D+/USB_D- (#3095)
+  * ``random.seed(42)`` for determinism
+  * ``KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK=1`` env (#3183)
+  * ``route_all`` with in-pad escape rescues on U1 pins 12-15, 26-27
+    (#3183)
 
 Usage:
     python route_demo.py [input_pcb] [output_pcb]
@@ -16,7 +41,6 @@ Example:
 """
 
 import contextlib
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,14 +49,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from kicad_tools.dev import warn_if_stale
-from kicad_tools.router import (
-    DesignRules,
-    DifferentialPairConfig,
-    create_net_class_map,
-    load_pcb_for_routing,
-    show_routing_summary,
-)
-from kicad_tools.router.optimizer import GridCollisionChecker, OptimizationConfig, TraceOptimizer
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -41,15 +57,25 @@ warn_if_stale()
 def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
     """Run DRC on the PCB using kct check for consistent results.
 
-    Uses kct check as a subprocess to ensure the same DRC rules
-    are applied as when running kct check manually.
+    Issue #3150 / #3308: align the local DRC summary with the
+    jlcpcb-tier1 profile this board ships and is gated against (see
+    ``.github/routed-drc-tolerance.yml`` and
+    ``generate_design.py:run_drc()``).
 
     Returns:
         Tuple of (success, error_count, warning_count)
     """
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--mfr",
+                "jlcpcb-tier1",
+            ],
             capture_output=True,
             text=True,
         )
@@ -72,27 +98,20 @@ def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
         return False, -1, -1
 
 
-def _get_routing_params() -> dict[str, float]:
-    """Get routing parameters from environment variables (set by kct build) or defaults.
-
-    When run via 'kct build', routing parameters from project.kct are passed as
-    environment variables. This allows custom route scripts to use project settings
-    while still supporting standalone execution with defaults.
-
-    Returns:
-        Dict with grid_resolution, trace_width, trace_clearance, via_drill, via_diameter
-    """
-    return {
-        "grid_resolution": float(os.environ.get("KCT_ROUTE_GRID", "0.1")),
-        "trace_width": float(os.environ.get("KCT_ROUTE_TRACE_WIDTH", "0.2")),
-        "trace_clearance": float(os.environ.get("KCT_ROUTE_CLEARANCE", "0.2")),
-        "via_drill": float(os.environ.get("KCT_ROUTE_VIA_DRILL", "0.3")),
-        "via_diameter": float(os.environ.get("KCT_ROUTE_VIA_DIAMETER", "0.6")),
-    }
-
-
 def main():
-    """Run the routing demo."""
+    """Run the routing demo via the canonical generate_design.py recipe.
+
+    Issue #3308: delegate to ``generate_design.py:route_pcb()`` so the
+    demo cannot drift from the end-to-end recipe.  ``kct build --step
+    route`` runs this script (per ``src/kicad_tools/cli/build_cmd.py:1189``);
+    using the same code path that produced the committed routed PCB
+    guarantees a fresh ``kct build`` reproduces the shipped artifact.
+    """
+    # Import here (rather than at module scope) so the import path is
+    # set up before ``generate_design`` pulls in its router deps.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from generate_design import route_pcb  # noqa: E402
+
     # Parse arguments
     demo_dir = Path(__file__).parent
     input_pcb = sys.argv[1] if len(sys.argv) > 1 else "output/usb_joystick.kicad_pcb"
@@ -107,163 +126,23 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("USB Joystick Autorouting Demo")
+    print("USB Joystick Autorouting Demo (delegates to generate_design.py)")
     print("=" * 60)
     print(f"\nInput:  {input_path}")
     print(f"Output: {output_path}")
-
-    # Configure design rules
-    # NOTE: TQFP-32 has 0.8mm pin pitch, so we need a fine grid (0.1mm)
-    # to route between pins. A coarser grid (0.25mm) won't have enough
-    # resolution to find paths through the dense QFP pinout.
-    # Parameters come from project.kct (via env vars when run by kct build)
-    # or fall back to sensible defaults for standalone execution
-    params = _get_routing_params()
-    rules = DesignRules(
-        grid_resolution=params["grid_resolution"],
-        trace_width=params["trace_width"],
-        trace_clearance=params["trace_clearance"],
-        via_drill=params["via_drill"],
-        via_diameter=params["via_diameter"],
+    print(
+        "\nIssue #3308: this demo delegates to "
+        "generate_design.py:route_pcb() so the demo and the canonical "
+        "build recipe share a single implementation."
     )
 
-    # Configure net classes for proper priority routing
-    net_class_map = create_net_class_map(
-        power_nets=["VCC", "VBUS", "GND"],
-        high_speed_nets=["USB_D+", "USB_D-"],  # USB differential pair
-        clock_nets=["XTAL1", "XTAL2"],  # Crystal oscillator
-    )
+    # Delegate to the canonical recipe.  ``route_pcb()`` prints its own
+    # progress block and returns True on full success, False on partial.
+    success = route_pcb(input_path, output_path)
 
-    # Skip power/ground planes (assume these are routed as pours)
-    # Skip USB_CC1/USB_CC2 - CC configuration channel nets between USB-C
-    # connector and MCU that cannot be autorouted on 2 layers due to
-    # USB-C connector pad density exceeding 2-layer routing capacity.
-    #
-    # Issue #2744 (re-evaluation note, May 2026): the curator asked
-    # whether USB_CC1/USB_CC2 could be un-skipped now that the router
-    # has layer-escalation logic. However, this script uses
-    # ``router.route_all_with_diffpairs()`` directly (not
-    # ``kct route --auto-layers``) so it has NO escalation path -- it
-    # can only attempt 2 layers and give up. Until/unless this script
-    # is rewritten to use the CLI route-with-escalation entrypoint, the
-    # CC1/CC2 skip is still the correct call: removing it would just
-    # turn two known-skip nets into two known-fail nets, with no
-    # behaviour benefit. The router escalation work is tracked
-    # separately (multi-layer escalation issue family).
-    skip_nets = ["VCC", "GND", "VBUS", "USB_CC1", "USB_CC2"]
-
-    print("\n--- Loading PCB ---")
-    print(f"  Grid resolution: {rules.grid_resolution}mm")
-    print(f"  Trace width: {rules.trace_width}mm")
-    print(f"  Clearance: {rules.trace_clearance}mm")
-    print(f"  Skipping nets: {skip_nets}")
-
-    # Load the PCB and create autorouter
-    router, net_map = load_pcb_for_routing(
-        str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
-    )
-
-    # Apply net class map
-    router.net_class_map.update(net_class_map)
-
-    print(f"\n  Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"  Nets loaded: {len(net_map)}")
-    print(f"  Nets to route: {len([n for n in router.nets if n > 0])}")
-
-    # Show net breakdown
-    print("\n  Net breakdown:")
-    for net_name, net_num in sorted(net_map.items(), key=lambda x: x[1]):
-        if net_name and net_name not in skip_nets:
-            pad_count = len(router.nets.get(net_num, []))
-            print(f"    {net_name}: {pad_count} pads")
-
-    # Route all nets with differential-pair-aware routing (Issue #2760).
-    #
-    # Without this, the router schedules USB_D- before USB_D+ via per-net
-    # priority ordering and lays down a via near U1.29 / J1.A6, blocking
-    # the diagonal pad-flip corridor that USB_D+ then needs.  The result
-    # was 4 diffpair_clearance_intra violations at the J1 USB-C connector.
-    #
-    # ``route_all_with_diffpairs`` runs ``CoupledPathfinder`` over USB_D+ /
-    # USB_D- first, atomically reserving both halves' geometry before any
-    # single-net A* runs.  Pairs that the CoupledPathfinder cannot handle
-    # fall through to independent per-net routing (default behaviour for
-    # the basic strategy).  See ``router/diffpair_routing.py:1751``.
-    print("\n--- Routing (diff-pair-aware mode) ---")
-    diffpair_config = DifferentialPairConfig(enabled=True)
-    router.route_all_with_diffpairs(diffpair_config=diffpair_config)
-
-    # Get statistics before optimization
-    stats_before = router.get_statistics()
-
-    print("\n--- Raw Results (before optimization) ---")
-    print(f"  Routes created: {stats_before['routes']}")
-    print(f"  Segments: {stats_before['segments']}")
-    print(f"  Vias: {stats_before['vias']}")
-    print(f"  Total length: {stats_before['total_length_mm']:.2f}mm")
-    print(f"  Nets routed: {stats_before['nets_routed']}")
-
-    # Optimize traces - merge collinear segments, eliminate zigzags, etc.
-    # Use collision checker to prevent optimizations that create DRC violations
-    print("\n--- Optimizing traces ---")
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-    )
-    collision_checker = GridCollisionChecker(router.grid)
-    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_route = optimizer.optimize_route(route)
-        optimized_routes.append(optimized_route)
-    router.routes = optimized_routes
-
-    # Get statistics after optimization
-    stats = router.get_statistics()
-
-    segments_before = stats_before["segments"]
-    segments_after = stats["segments"]
-    reduction = (1 - segments_after / segments_before) * 100 if segments_before > 0 else 0
-
-    print(f"  Segments: {segments_before} -> {segments_after} ({reduction:.1f}% reduction)")
-    print(f"  Vias: {stats_before['vias']} -> {stats['vias']}")
-
-    print("\n--- Final Results ---")
-    print(f"  Routes created: {stats['routes']}")
-    print(f"  Segments: {stats['segments']}")
-    print(f"  Vias: {stats['vias']}")
-    print(f"  Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"  Nets routed: {stats['nets_routed']}")
-
-    # Generate output PCB with routes
-    print("\n--- Saving routed PCB ---")
-
-    # Read original PCB content
-    original_content = input_path.read_text()
-
-    # Get route S-expressions
-    route_sexp = router.to_sexp()
-
-    # Insert routes before final closing parenthesis
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
-    else:
-        output_content = original_content
-        print("  Warning: No routes generated!")
-
-    output_path.write_text(output_content)
-    print(f"  Saved to: {output_path}")
-
-    # Run DRC validation
+    # Run DRC validation on the resulting routed PCB.  This is in addition
+    # to whatever the recipe does internally so the demo always surfaces
+    # a final DRC summary even when ``route_pcb()`` short-circuits.
     print("\n--- DRC Validation ---")
     drc_passed, drc_errors, drc_warnings = run_drc(output_path)
     if drc_passed:
@@ -273,44 +152,35 @@ def main():
             print(f"  Errors:   {drc_errors}")
         if drc_warnings > 0:
             print(f"  Warnings: {drc_warnings}")
-        print(f"\n  Run 'kct check {output_path}' for full details")
+        print(f"\n  Run 'kct check {output_path} --mfr jlcpcb-tier1' for full details")
 
-    # Summary
+    # Final tally that the regression test parser (#2744) keys off of.
+    # ``route_pcb`` prints its own "PARTIAL: Routed N/M signal nets"
+    # line, so we add a top-level SUCCESS / PARTIAL banner here.
     print("\n" + "=" * 60)
-    # Issue #2498: Restrict the routing-summary target population to multi-pad
-    # nets that are still routable post-skip.  ``router.nets`` reflects the
-    # state after ``load_pcb_for_routing`` rewrote skip-net pads to net=0, so
-    # this matches the convention used by ``cli/route_cmd.py`` and prevents
-    # skipped power nets (VCC/VBUS/GND/USB_CC1/USB_CC2) from being mis-reported
-    # as "No path found".
-    multi_pad_net_ids = {
-        net_id for net_id, pads in router.nets.items() if net_id > 0 and len(pads) >= 2
-    }
-    total_nets = len(multi_pad_net_ids)
-    all_nets_routed = stats["nets_routed"] == total_nets
-
-    if all_nets_routed and drc_passed:
+    if success and drc_passed:
         print("SUCCESS: All nets routed, DRC passed!")
-    elif all_nets_routed and not drc_passed:
+        exit_code = 0
+    elif success and not drc_passed:
         print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
         print("  Review DRC errors before manufacturing.")
+        exit_code = 1
     else:
-        print(f"PARTIAL: Routed {stats['nets_routed']}/{total_nets} nets")
+        # ``route_pcb`` already printed the per-net partial line; here we
+        # just consolidate.  Match ``generate_design.py``'s success rule:
+        # PARTIAL routing is acceptable so long as the routed-DRC summary
+        # is within the jlcpcb-tier1 ceiling.
+        print("PARTIAL: not all nets routed (see route_pcb output above)")
         if not drc_passed:
             print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
-        # Show comprehensive routing summary with successes, failures, and suggestions
-        show_routing_summary(
-            router,
-            net_map,
-            total_nets,
-            nets_to_route_ids=multi_pad_net_ids,
-        )
+        # Partial routing is acceptable for this board; the USB-C
+        # connector pad density exceeds what a 2-layer autorouter can
+        # fully handle.  Match the approach used by generate_design.py:
+        # success if DRC passes.
+        exit_code = 0 if drc_passed else 1
     print("=" * 60)
 
-    # Partial routing is acceptable for this board; the USB-C connector
-    # pad density exceeds what a 2-layer autorouter can fully handle.
-    # Match the approach used by generate_design.py: success if DRC passes.
-    return 0 if drc_passed else 1
+    return exit_code
 
 
 if __name__ == "__main__":

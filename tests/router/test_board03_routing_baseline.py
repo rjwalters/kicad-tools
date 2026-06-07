@@ -194,6 +194,63 @@ def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
     return int(routed), int(total)
 
 
+def _parse_per_net_status(stdout: str) -> dict[str, str]:
+    """Extract per-net routing status from ``kct route`` ROUTING PREVIEW output.
+
+    Issue #3308 AC #4: the existing baseline test only asserts on the
+    aggregate ``Nets routed: N/M`` headline.  Per-net assertions for
+    USB_D+/USB_D-/USB_CC1/USB_CC2 guard against a future regression
+    where the headline holds but the specific high-value nets quietly
+    flip from routed to unrouted.
+
+    ``kct route`` emits a per-net block under the ``ROUTING PREVIEW``
+    header of the form::
+
+        Net: USB_D+
+          Layers:   F.Cu -> B.Cu
+          Length:   12.34mm
+          Segments: 7, 1 via(s)
+          Status:   <check>  Routed
+
+    or (for unrouted nets)::
+
+        Net: USB_CC1
+          Status:   <x>  No path found
+
+    We parse the ``Net:`` lines and the corresponding ``Status:`` lines
+    into a ``{net_name: status}`` dict where status is one of
+    ``"routed"`` or ``"unrouted"``.  Nets with neither a Routed nor a
+    No-path status block are omitted (e.g. skipped power-pour nets).
+
+    The escalation mode can emit multiple ROUTING PREVIEW blocks; we
+    take the LAST occurrence of each net (the final state the router
+    landed on, matching the convention in ``_parse_routed_net_count``).
+    """
+    result: dict[str, str] = {}
+    # Iterate through ``Net: NAME`` lines and look at the next few lines
+    # for a Status: line.  Use re.finditer to get the position of each
+    # Net: header so we can scan forward a bounded distance.
+    net_header_pattern = re.compile(r"^Net:\s+(\S+)\s*$", re.MULTILINE)
+    status_routed = re.compile(r"Status:\s+\S+\s+Routed", re.MULTILINE)
+    status_unrouted = re.compile(r"Status:\s+\S+\s+No path found", re.MULTILINE)
+
+    headers = list(net_header_pattern.finditer(stdout))
+    for idx, header in enumerate(headers):
+        net_name = header.group(1)
+        # Scan from this header to the next (or end of stdout) for a
+        # Status: line.  Bound the window so we don't accidentally pull
+        # in a status line from a later net.
+        start = header.end()
+        end = headers[idx + 1].start() if idx + 1 < len(headers) else len(stdout)
+        window = stdout[start:end]
+        if status_routed.search(window):
+            result[net_name] = "routed"
+        elif status_unrouted.search(window):
+            result[net_name] = "unrouted"
+        # else: skipped or absent -- don't pollute the result dict
+    return result
+
+
 @pytest.fixture(scope="module")
 def unrouted_pcb_path() -> Path:
     """Verify the committed unrouted board 03 PCB exists.
@@ -318,6 +375,96 @@ class TestBoard03RoutingBaseline:
             "  - any change to ``_create_intra_ic_routes`` that affects "
             "diff-pair partner consolidation on the same package."
         )
+
+    def test_per_net_reach_usb_signals(self, route_stdout: str) -> None:
+        """USB_D+ / USB_D- / USB_CC1 / USB_CC2 per-net reach is pinned.
+
+        Issue #3308 AC #4: the aggregate ``Nets routed: N/M`` headline
+        masks per-net regressions on the high-value USB signals.  The
+        canonical example: the headline can stay at 11/13 even if USB_D+
+        regressed from routed to partial (since USB_CC2 could swap into
+        a fully-routed slot in compensation).
+
+        This test asserts a per-net reach baseline for the four USB-C
+        signals.  The exact pinned states reflect the June 7 2026
+        measurement after #3304 (C++ backend layer-index fix):
+
+          * USB_D+ MUST be ``routed`` -- this is the original #2760 net
+            and the most-watched diff-pair half.  A flip to ``unrouted``
+            means the J1 + U1.29 escape corridor regressed.
+          * USB_CC2 MUST be ``routed`` -- this was the headline ratchet
+            in #3304 (recovered 1/2 -> 2/2 pads via layer_to_index fix).
+            A flip to ``unrouted`` means the C++ layer-index mapping
+            regressed.
+          * USB_D- MAY be ``unrouted`` (currently is) -- this is the
+            partial state pinned by ``test_committed_pcb_drc_state``
+            and the focus of the #3308 follow-up bisect work.  We do
+            NOT hard-fail if it flips to ``routed`` (that's an
+            improvement); we only require it does not silently
+            disappear from the per-net output altogether.
+          * USB_CC1 MAY be ``unrouted`` (currently is) -- ditto.
+
+        If/when the #3308 follow-up bisect lands and recovers
+        USB_D-/USB_CC1, the SOFT requirement can ratchet to a HARD
+        requirement -- but ratchet by tightening this test, not by
+        silently relaxing it.
+        """
+        per_net = _parse_per_net_status(route_stdout)
+        assert per_net, (
+            "Could not parse any per-net status lines from kct route "
+            "stdout.  The ROUTING PREVIEW output format may have "
+            "changed -- check src/kicad_tools/cli/route_cmd.py for the "
+            "'Net: NAME' / 'Status:' emission code.\n"
+            f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+        )
+
+        # All four USB signals MUST appear in the per-net output (even
+        # as ``unrouted``).  Absence means the net topology changed or
+        # the parser is no longer keying off the right marker.
+        for net in ("USB_D+", "USB_D-", "USB_CC1", "USB_CC2"):
+            assert net in per_net, (
+                f"{net} missing from kct route per-net output.  "
+                "Either the schematic/PCB generator no longer emits "
+                "this net, or the ROUTING PREVIEW format changed.  "
+                f"Per-net states found: {sorted(per_net)}.\n"
+                f"stdout (last 4000 chars):\n{route_stdout[-4000:]}"
+            )
+
+        # HARD per-net contracts.  USB_D+ and USB_CC2 are the post-#3304
+        # ratchet floor; a flip to unrouted is a regression.
+        assert per_net["USB_D+"] == "routed", (
+            f"USB_D+ regressed to '{per_net['USB_D+']}' on kct route at "
+            "HEAD.  This was the original Issue #2760 failure mode -- "
+            "USB_D+ stranded at J1.A6/J1.B6 with U1.29 unconnected -- "
+            "and the in-pad escape rescue at U1.29 (#3183) is the "
+            "expected fix.  Bisect against escape generator changes "
+            "(per-pad escape_width #3278 / PR #3300) and the in-pad "
+            "fallback gate (KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK)."
+        )
+        assert per_net["USB_CC2"] == "routed", (
+            f"USB_CC2 regressed to '{per_net['USB_CC2']}' on kct route "
+            "at HEAD.  Issue #3304 fixed the C++ backend layer-index "
+            "mismapping that previously prevented USB_CC2 from "
+            "re-connecting on a 4L stack -- a regression here likely "
+            "means the layer_to_index lookup in ``_route_impl`` "
+            "regressed back to the modulo shortcut.  See "
+            "tests/router/test_cpp_backend_layer_mapping.py for the "
+            "invariant unit test."
+        )
+
+        # SOFT per-net contracts.  USB_D- and USB_CC1 are currently
+        # ``unrouted`` and that is the pinned state.  If they improve to
+        # ``routed`` that's progress -- we do NOT fail, but we DO note
+        # that someone should ratchet this test.
+        for net in ("USB_D-", "USB_CC1"):
+            status = per_net[net]
+            assert status in ("routed", "unrouted"), (
+                f"{net} has unexpected status '{status}'.  Expected "
+                "either 'routed' or 'unrouted'.  The ROUTING PREVIEW "
+                "format may have grown a new status."
+            )
+            # No assertion on the value itself -- partial states are
+            # acceptable here per the #3308 framing.
 
     def test_the_1_of_16_myth_stays_dead(self, route_stdout: str) -> None:
         """If routing reach ever drops to 1 or fewer, somebody broke it badly.
