@@ -5239,3 +5239,248 @@ class TestOutputResultDiagnostics:
         captured = capsys.readouterr()
         assert "Blocking obstacle breakdown" in captured.out
         assert "track: 1" in captured.out
+
+
+# ----------------------------------------------------------------------------
+# Issue #3271: pad-aware --avoid-pad-overlap regression coverage
+#
+# The standard ``calculate_via_position`` checks clearance against OTHER-net
+# copper but NOT against same-net pads.  On dense QFN / BGA footprints the
+# ``pad_radius + offset`` placement can land the via on top of a neighbouring
+# same-net pad -- geometrically clear, but rejected by manufacturers that
+# forbid via-in-pad (e.g. JLCPCB standard tier).  The
+# ``--avoid-pad-overlap`` flag added by issue #3271 post-filters such
+# placements; these tests pin the geometry, the bbox helper, and the
+# end-to-end CLI behaviour.
+# ----------------------------------------------------------------------------
+
+
+# A fine-pitch QFN-like footprint where pad 1's offset-placed via lands inside
+# pad 2 (next pad on the same row, same GND net).  Pads are 0.6mm-wide rectangles
+# centred 1.0mm apart on the +X axis -- exactly the geometry that triggers the
+# board-06 J3 ground-frame failure described in #3271.  Default placement
+# offsets the via to ``pad_radius + offset = 0.3 + 0.5 = 0.8mm`` from pad 1's
+# centre at (110.0, 110.0), landing at (110.8, 110.0) -- which is *inside*
+# pad 2's bbox at (110.7, 109.7)..(111.3, 110.3) for a 0.3mm-radius drill.
+PAD_OVERLAP_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Custom:QFN_Dense"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 110 110)
+    (property "Reference" "U1" (at 0 -2 0) (layer "F.SilkS") (uuid "ref-uuid-u1"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd rect (at 1.0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-uuid-1") (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (polygon (pts (xy 90 90) (xy 130 90) (xy 130 130) (xy 90 130)))
+  )
+)
+"""
+
+
+@pytest.fixture
+def pad_overlap_test_pcb(tmp_path: Path) -> Path:
+    """PCB where stitching pad 1 would land the via inside same-net pad 2."""
+    pcb_file = tmp_path / "pad_overlap.kicad_pcb"
+    pcb_file.write_text(PAD_OVERLAP_TEST_PCB)
+    return pcb_file
+
+
+class TestFindSmdPadBboxes:
+    """find_smd_pad_bboxes_on_nets: per-net SMD bbox collection."""
+
+    def test_returns_bbox_for_smd_pad_on_target_net(self, pad_overlap_test_pcb):
+        """SMD pads on the target net are returned with their AABB."""
+        from kicad_tools.cli.stitch_cmd import find_smd_pad_bboxes_on_nets
+
+        sexp = load_pcb(pad_overlap_test_pcb)
+        bboxes = find_smd_pad_bboxes_on_nets(sexp, {1})
+
+        # Two GND pads on U1 -- bboxes match the rectangles.
+        assert len(bboxes) == 2
+        for net_num, *_ in bboxes:
+            assert net_num == 1
+        # Pad 1 at (110, 110), 0.6 x 0.6 -> (109.7, 109.7, 110.3, 110.3)
+        # Pad 2 at (111, 110), 0.6 x 0.6 -> (110.7, 109.7, 111.3, 110.3)
+        sorted_bboxes = sorted(bboxes, key=lambda b: b[1])
+        assert math.isclose(sorted_bboxes[0][1], 109.7, abs_tol=1e-6)
+        assert math.isclose(sorted_bboxes[0][3], 110.3, abs_tol=1e-6)
+        assert math.isclose(sorted_bboxes[1][1], 110.7, abs_tol=1e-6)
+        assert math.isclose(sorted_bboxes[1][3], 111.3, abs_tol=1e-6)
+
+    def test_excludes_pads_not_on_target_nets(self, pad_overlap_test_pcb):
+        """Pads on nets outside the requested set are filtered out."""
+        from kicad_tools.cli.stitch_cmd import find_smd_pad_bboxes_on_nets
+
+        sexp = load_pcb(pad_overlap_test_pcb)
+        # No nets requested -> empty result.
+        assert find_smd_pad_bboxes_on_nets(sexp, set()) == []
+        # Unknown net -> empty result.
+        assert find_smd_pad_bboxes_on_nets(sexp, {999}) == []
+
+
+class TestViaDrillInsidePadBbox:
+    """_via_drill_inside_pad_bbox: drill-circle containment geometry."""
+
+    def test_drill_fully_inside_bbox_returns_true(self):
+        """Drill circle wholly inside the bbox -> True."""
+        from kicad_tools.cli.stitch_cmd import _via_drill_inside_pad_bbox
+
+        bbox = (110.7, 109.7, 111.3, 110.3)
+        # Centre at (111, 110) with 0.2mm drill -> drill radius 0.1mm, drill bbox
+        # (110.9, 109.9)..(111.1, 110.1), wholly inside.
+        assert _via_drill_inside_pad_bbox(111.0, 110.0, 0.2, bbox) is True
+
+    def test_drill_partially_outside_bbox_returns_false(self):
+        """Drill spills past the bbox edge -> False (not classified via-in-pad)."""
+        from kicad_tools.cli.stitch_cmd import _via_drill_inside_pad_bbox
+
+        bbox = (110.7, 109.7, 111.3, 110.3)
+        # Centre at (111.25, 110) with 0.2mm drill -> spills past the right edge.
+        assert _via_drill_inside_pad_bbox(111.25, 110.0, 0.2, bbox) is False
+
+    def test_drill_centre_outside_bbox_returns_false(self):
+        """Drill centred far from bbox -> False."""
+        from kicad_tools.cli.stitch_cmd import _via_drill_inside_pad_bbox
+
+        bbox = (110.7, 109.7, 111.3, 110.3)
+        assert _via_drill_inside_pad_bbox(120.0, 110.0, 0.2, bbox) is False
+
+
+class TestAvoidPadOverlap:
+    """run_stitch ``avoid_pad_overlap``: post-filter would-be via-in-pad placements."""
+
+    def test_naive_stitch_places_via_in_neighbour_pad(self, pad_overlap_test_pcb):
+        """Without the guard, stitching pad U1.1 lands the via inside pad U1.2.
+
+        This is the pre-emption target -- we're pinning the failure mode that
+        ``--avoid-pad-overlap`` exists to fix, so a future change that alters
+        default placement geometry will trip this test before the guard is
+        evaluated.
+        """
+        from kicad_tools.cli.stitch_cmd import (
+            _via_drill_inside_pad_bbox,
+            find_smd_pad_bboxes_on_nets,
+            run_stitch,
+        )
+
+        result = run_stitch(
+            pad_overlap_test_pcb,
+            net_names=["GND"],
+            dry_run=True,  # Don't write the PCB; we just want the placements.
+            avoid_pad_overlap=False,
+        )
+        # At least one via placement was attempted (the placer found at least
+        # one pad to stitch).
+        assert result.vias_added, "Naive stitch should produce at least one placement"
+        sexp = load_pcb(pad_overlap_test_pcb)
+        bboxes = find_smd_pad_bboxes_on_nets(sexp, {1})
+        offending = [
+            placement
+            for placement in result.vias_added
+            if any(
+                _via_drill_inside_pad_bbox(placement.via_x, placement.via_y, placement.drill, b)
+                for _net, *b in [(0, *bbox[1:]) for bbox in bboxes]
+            )
+        ]
+        assert offending, (
+            "Pre-emption target: naive stitch should place the via inside a "
+            "neighbouring same-net pad on this fixture; if this fails, default "
+            "placement geometry changed and the --avoid-pad-overlap regression "
+            "fixture needs to be updated."
+        )
+
+    def test_avoid_pad_overlap_filters_via_in_pad_placements(self, pad_overlap_test_pcb):
+        """With the guard, the via-in-pad placement is dropped from vias_added.
+
+        Verifies the post-filter is applied: the result still records the
+        attempt (via ``via_in_pad_filtered`` and ``pads_skipped``) but does
+        not commit the offending via.
+        """
+        from kicad_tools.cli.stitch_cmd import (
+            _via_drill_inside_pad_bbox,
+            find_smd_pad_bboxes_on_nets,
+            run_stitch,
+        )
+
+        result = run_stitch(
+            pad_overlap_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+            avoid_pad_overlap=True,
+        )
+        sexp = load_pcb(pad_overlap_test_pcb)
+        bboxes = find_smd_pad_bboxes_on_nets(sexp, {1})
+
+        # No kept via lands inside a same-net SMD pad.
+        for placement in result.vias_added:
+            for _net, *bbox_pts in [(0, *bbox[1:]) for bbox in bboxes]:
+                assert not _via_drill_inside_pad_bbox(
+                    placement.via_x, placement.via_y, placement.drill, bbox_pts
+                ), (
+                    f"Filter failed: kept via at ({placement.via_x}, "
+                    f"{placement.via_y}) is inside same-net pad bbox {bbox_pts}"
+                )
+
+        # At least one would-be placement was filtered.
+        assert result.via_in_pad_filtered > 0
+        # And the filtered count is reflected in pads_skipped with the
+        # ``via_in_pad`` diagnostic.
+        assert any(
+            "via_in_pad" in reason for _pad, reason in result.pads_skipped
+        ), "via_in_pad reason should appear in pads_skipped diagnostics"
+
+    def test_avoid_pad_overlap_default_off(self, pad_overlap_test_pcb):
+        """Default ``avoid_pad_overlap=False`` preserves existing behaviour.
+
+        Backward-compat guard: callers that don't pass the flag get the
+        pre-#3271 placement, so this is a non-breaking addition.
+        """
+        from kicad_tools.cli.stitch_cmd import run_stitch
+
+        result = run_stitch(
+            pad_overlap_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+        assert result.via_in_pad_filtered == 0
+
+
+class TestAvoidPadOverlapCli:
+    """CLI flag wiring: ``kct stitch --avoid-pad-overlap`` end-to-end."""
+
+    def test_cli_flag_filters_via_in_pad_placements(self, pad_overlap_test_pcb):
+        """Running ``main(['--avoid-pad-overlap', ...])`` filters via-in-pad."""
+        from kicad_tools.cli.stitch_cmd import main
+
+        # ``--dry-run`` keeps the file untouched; we only care about exit code.
+        rc = main(
+            [
+                str(pad_overlap_test_pcb),
+                "--net",
+                "GND",
+                "--avoid-pad-overlap",
+                "--dry-run",
+            ]
+        )
+        # Exit 0 even when all placements were filtered, because at least one
+        # pad was found and ``avoid_pad_overlap`` is the documented "no via
+        # produced for this pad" path.
+        assert rc == 0
