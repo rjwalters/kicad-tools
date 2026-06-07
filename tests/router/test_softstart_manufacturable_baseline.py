@@ -2,7 +2,7 @@
 
 This test pins the **measured best-available** state of the softstart
 example board against the manufacturing pipeline as of June 2026
-(post-Wave-3 router fixes: PRs #3248 / #3249 / #3250).
+(post-Wave-3 router fixes: PRs #3248 / #3249 / #3250 / #3287).
 
 Baseline measurement at HEAD (worst-of-3 across PYTHONHASHSEED=42/43/44):
 
@@ -10,9 +10,8 @@ Baseline measurement at HEAD (worst-of-3 across PYTHONHASHSEED=42/43/44):
   * Multi-pad signal nets: 10
   * **Nets connected: 10 (topologically complete)** -- all 10 signal
     nets reach end-to-end pad connectivity
-  * Residual DRC: 4 ``clearance_segment_segment`` violations on B.Cu,
-    all between SWDIO (net 17) and STATUS_LED (net 20) in the U1
-    east-side TSSOP-20 cluster around grid (227-230, 173-176) mm
+  * Residual DRC: **0** ``clearance_segment_segment`` violations
+    (was 4 pre-PR #3287; drained by the D2/R12 placement nudge)
   * 8 ``connectivity`` errors are for the **intentionally-skipped
     power nets** (filled by copper pours, not the router)
 
@@ -23,8 +22,9 @@ The acceptance criteria pinned by this test:
    foundational A* / negotiated-loop regression -- bisect against
    PRs #3248 (Euclidean via-clearance) and #3250 (sub-cell pad-margin)
    first.
-2. ``clearance_segment_segment`` violation count <= 6 (current
-   baseline is 4; the +2 head-room absorbs noise across builds).
+2. ``clearance_segment_segment`` violation count == 0 (post-#3287
+   D2/R12 placement nudge drained the 4 pre-#3287 SWDIO/STATUS_LED
+   violations to 0; verified perfectly stable across seeds 42/43/44).
 3. No NEW ``clearance_pad_segment`` violations.  Pad-segment clearance
    is the regime PR #3250 was supposed to fix; a non-zero count here
    signals that fix regressed.
@@ -49,11 +49,12 @@ History:
 
 The 10/10 reach is achieved by the **adaptive-grid auto-resolution**
 path that ``kct route`` invokes when auto-grid selects 0.127mm (memory-
-budget-capped above the 0.075mm DRC-safe target).  The 4 residual
-SWDIO/STATUS_LED clearance violations are a known follow-up:
-``fix-drc`` nudging cannot resolve them because the U1 east-side
-cluster has no slack for trace displacement without regressing
-connectivity.
+budget-capped above the 0.075mm DRC-safe target).  The 4 pre-#3287
+SWDIO/STATUS_LED clearance violations were drained to **0** by the
+D2/R12 placement nudge in PR #3287 (Issue #3257): pushing the LED
+column 7 mm east (130 -> 137 mm) takes STATUS_LED's R12->D2 vertical
+leg out of the SWDIO B.Cu corridor at y~173.3 mm.  Issue #3297
+verified the post-#3287 state is fully JLCPCB ship-ready.
 
 This test is gated behind ``KICAD_RUN_SLOW_SOFTSTART_REACH=1`` and
 slated for the slow-tests CI workflow.
@@ -91,11 +92,17 @@ REQUIRED_NETS_TOTAL = 10
 # escape-layer or per-pad budget intervention could close (see the
 # direction-1 / direction-2 negative-results notes in the issue #3235
 # spike commentary at ``router/negotiated.py:1056-1066`` and
-# ``router/two_phase.py:711-736``).  Headroom kept at +2 to absorb
-# run-to-run noise observed when the placement re-spread re-balances
-# the U1-east escape cohort across PYTHONHASHSEED variants.
-MAX_SEG_SEG_CLEARANCE_VIOLATIONS = 2  # current baseline is 0, +2 headroom
-MAX_PAD_SEG_CLEARANCE_VIOLATIONS = 1  # PR #3250 closed pad-segment regime
+# ``router/two_phase.py:711-736``).
+#
+# Issue #3297: tightened 2 -> 0 after worst-of-3-seed (42/43/44)
+# verification confirmed the post-#3287 baseline is perfectly stable
+# at 0 segment-segment clearance violations across all seeds.  The
+# previous +2 headroom is no longer needed because the placement
+# nudge produces a deterministic clear B.Cu corridor independent of
+# PYTHONHASHSEED variants.  A regression here is now a true regression,
+# not noise.
+MAX_SEG_SEG_CLEARANCE_VIOLATIONS = 0  # current baseline is 0, no headroom (honest floor)
+MAX_PAD_SEG_CLEARANCE_VIOLATIONS = 0  # PR #3250 closed pad-segment regime; 0 across all seeds
 
 # Power nets that are intentionally skipped from the autorouter and
 # filled by copper pours / hand-routed by the user (see
@@ -294,21 +301,23 @@ class TestSoftstartManufacturableBaseline:
     def test_residual_clearance_within_budget(self, route_stdout: str) -> None:
         """Residual DRC clearance violations must stay within the documented budget.
 
-        The current baseline produces 4 ``clearance_segment_segment``
+        Post-PR #3287 baseline produces **0** ``clearance_segment_segment``
         violations + 0 ``clearance_pad_segment`` violations across
-        seeds 42/43/44 (perfectly stable).  These are all between
-        SWDIO and STATUS_LED on B.Cu in the U1 east-side cluster.
+        seeds 42/43/44 (perfectly stable).  Issue #3297 verified the
+        post-#3287 D2/R12 placement nudge drains all 4 pre-#3287
+        SWDIO/STATUS_LED B.Cu violations to 0 with no
+        PYTHONHASHSEED-dependent noise.
 
-        This test gates against new clearance violations creeping in
-        from elsewhere -- the current 4 are documented; any spike
-        above the budget indicates a regression in the negotiated
-        loop's clearance handling.
+        This test gates against ANY new clearance violation creeping
+        in -- with the floor now at 0 + 0, a non-zero violation count
+        is a true regression rather than noise.  Likely bisect targets:
+        PR #3287 (D2/R12 placement, may have been reverted),
+        PR #3248 (Euclidean via-clearance kernel),
+        PR #3250 (sub-cell pad-margin closure).
 
-        ``fix-drc`` cannot resolve the residual 4 because nudging
-        breaks connectivity in the tight U1 cluster (see
-        ``kct fix-drc`` output: "rolled back due to connectivity
-        regression").  This is the documented manufacturability gap
-        flagged for a separate follow-up issue.
+        The route summary's ``Violations: N`` line includes the 8
+        intentionally-skipped power-net connectivity errors plus any
+        true clearance violations.  Budget = 8 + 0 + 0 = 8.
         """
         total_violations = _parse_violations(route_stdout)
         # "Violations: N" includes connectivity errors for skipped
