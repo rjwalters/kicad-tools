@@ -2132,6 +2132,278 @@ class TestMultiRowEscapeGeneration:
                 assert len(escape.segments) == 1
 
 
+class TestMultiRowEdgeAlignedEscape:
+    """Tests for board-edge-aligned multi-row connector escape (Issue #3310).
+
+    When a 40-pin multi-row connector (e.g., chorus J2 RPi GPIO header)
+    sits on a board edge with all routing destinations on the opposite
+    side, both rows must escape toward the populated side rather than
+    routing the far row off the board edge.
+    """
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        """Create grid + rules for a chorus-J2-like scenario."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        # Place grid origin so center is at (40, 40).  J2 will sit on
+        # the east edge with synthetic foreign pads to the west.
+        grid = RoutingGrid(800, 800, rules, origin_x=0, origin_y=0)
+        return grid, rules
+
+    def _make_j2_like_connector(
+        self,
+        grid: RoutingGrid,
+        center_x: float = 70.0,
+        center_y: float = 40.0,
+        n_foreign_west: int = 100,
+        n_foreign_east: int = 0,
+    ) -> list[Pad]:
+        """Create a 40-pin vertical 2x20 connector at (center_x, center_y)
+        with foreign pads populating one side (west by default).
+
+        Returns the connector's pads (not the foreign pads).
+        """
+        connector_pads = create_connector_pads(40)  # 2 rows x 20 col, vertical
+        # create_connector_pads returns pads at row_spacing/2 = +/- 1.27mm
+        # in X and Y from 0 to 48mm.  Translate to (center_x, center_y).
+        translated: list[Pad] = []
+        for p in connector_pads:
+            translated.append(
+                Pad(
+                    x=p.x + center_x,
+                    y=p.y + center_y,
+                    width=p.width,
+                    height=p.height,
+                    net=p.net,
+                    net_name=p.net_name,
+                    layer=p.layer,
+                    ref=p.ref,
+                    pin=p.pin,
+                    through_hole=p.through_hole,
+                    drill=p.drill,
+                )
+            )
+
+        # Inject foreign pads west and east of the connector.  The
+        # board-edge detector queries ``grid._pads`` for foreign pads.
+        west_x_start = center_x - 20.0
+        for i in range(n_foreign_west):
+            grid._pads.append(
+                Pad(
+                    x=west_x_start - i * 0.1,
+                    y=center_y + (i % 30) - 15,
+                    width=1.0,
+                    height=1.0,
+                    net=900 + i,
+                    net_name=f"FOREIGN_W_{i}",
+                    layer=Layer.F_CU,
+                    ref=f"U{i}",
+                    pin="1",
+                    through_hole=False,
+                )
+            )
+        east_x_start = center_x + 5.0
+        for i in range(n_foreign_east):
+            grid._pads.append(
+                Pad(
+                    x=east_x_start + i * 0.1,
+                    y=center_y + (i % 30) - 15,
+                    width=1.0,
+                    height=1.0,
+                    net=800 + i,
+                    net_name=f"FOREIGN_E_{i}",
+                    layer=Layer.F_CU,
+                    ref=f"V{i}",
+                    pin="1",
+                    through_hole=False,
+                )
+            )
+        # Also add the connector pads to grid._pads so the detector sees
+        # them but excludes via id() match.
+        for p in translated:
+            grid._pads.append(p)
+        return translated
+
+    def test_edge_aligned_both_rows_escape_toward_populated_side(
+        self, grid_and_rules
+    ):
+        """Issue #3310: For an edge-aligned 40-pin connector with all
+        destinations west, BOTH rows must escape WEST (not opposite
+        directions as the original symmetric strategy did)."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = self._make_j2_like_connector(grid)
+        info = router.analyze_package(pads)
+        assert info.package_type == PackageType.MULTI_ROW_CONNECTOR
+
+        escapes = router.generate_escapes(info)
+        assert len(escapes) == 40
+
+        # ALL outer-row escapes must point WEST.
+        outer = [e for e in escapes if e.via is None]
+        assert all(e.direction == EscapeDirection.WEST for e in outer), (
+            "Outer-row escapes should all go WEST when board is populated west"
+        )
+
+        # ALL inner-row escapes must also point WEST (the populated side).
+        inner = [e for e in escapes if e.via is not None]
+        assert all(e.direction == EscapeDirection.WEST for e in inner), (
+            "Inner-row escapes should also go WEST under board-edge "
+            "detection (Issue #3310)"
+        )
+
+    def test_edge_aligned_inner_endpoints_on_empty_side(
+        self, grid_and_rules
+    ):
+        """Issue #3310: The inner-row escape endpoints must sit on the
+        EMPTY side of the connector (the side opposite the populated
+        routing area).  This is the short-trace strategy: vias go
+        OPPOSITE the populated direction; their endpoints are just
+        past the via (a few hundred micrometres) on the same side.
+        The main router then reaches these endpoints by navigating
+        around the connector ends on inner layers."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = self._make_j2_like_connector(grid)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # Connector X bbox: center_x +/- 1.27 -- inner row is at the
+        # east side (x = center_x + 1.27).  All foreign pads are west
+        # (populated_dir = -1), so vias and endpoints sit EAST of the
+        # connector.
+        xs = [p.x for p in pads]
+        x_max = max(xs)
+
+        inner = [e for e in escapes if e.via is not None]
+        for e in inner:
+            ep_x, _ = e.escape_point
+            assert ep_x > x_max, (
+                f"Inner-row pad at x={e.pad.x:.2f} should have endpoint "
+                f"east of the connector's max x={x_max:.2f}, "
+                f"got ep_x={ep_x:.2f}"
+            )
+
+    def test_edge_aligned_inner_endpoints_short_trace(self, grid_and_rules):
+        """Issue #3310: The inner-row inner-layer escape segments must
+        be SHORT (a few millimetres) so they do not run along the via
+        column and intersect peer pads' vias.  An end-exit pattern
+        (routing the trace full-length to the connector end) creates
+        traces that would overlap peer vias and get dropped by the
+        apply_escape_routes foreign-via gate -- regressing from 40
+        escapes to 24."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = self._make_j2_like_connector(grid)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        inner = [e for e in escapes if e.via is not None]
+        for e in inner:
+            inner_seg = e.segments[-1]
+            length = math.hypot(
+                inner_seg.x2 - inner_seg.x1,
+                inner_seg.y2 - inner_seg.y1,
+            )
+            assert length < 2.0, (
+                f"Inner-layer escape segment for pin {e.pad.pin} is "
+                f"{length:.2f}mm long; expected < 2mm to avoid "
+                f"intersecting peer vias"
+            )
+
+    def test_edge_aligned_via_positions_perpendicular_staggered(
+        self, grid_and_rules
+    ):
+        """Issue #3310: Adjacent inner-row vias should have at least
+        two distinct perpendicular (X) positions to break up the via
+        wall that previously blocked cross-traffic."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = self._make_j2_like_connector(grid)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        inner = [e for e in escapes if e.via is not None]
+        via_xs = {round(e.via_pos[0], 2) for e in inner}
+        assert len(via_xs) >= 2, (
+            "Inner-row vias should occupy at least 2 distinct X "
+            "positions to avoid a continuous via wall (Issue #3310). "
+            f"Got via X positions: {sorted(via_xs)}"
+        )
+
+    def test_edge_aligned_does_not_clobber_via_clearance(self, grid_and_rules):
+        """Issue #3310: The perpendicular stagger must still maintain
+        via-to-via clearance (via_diameter + via_clearance) so DRC stays
+        clean."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = self._make_j2_like_connector(grid)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        inner = [e for e in escapes if e.via is not None]
+        min_dist = rules.via_diameter + rules.via_clearance
+        positions = [e.via_pos for e in inner]
+        for i, p1 in enumerate(positions):
+            for p2 in positions[i + 1 :]:
+                d = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                assert d >= min_dist - 1e-6, (
+                    f"Via centers too close: {d:.3f}mm < required "
+                    f"{min_dist:.3f}mm"
+                )
+
+    def test_symmetric_board_keeps_original_strategy(self, grid_and_rules):
+        """When the connector is centered (balanced foreign pads on both
+        sides), the detector should return 0 and the rows should escape
+        in opposite directions (original behavior)."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        # Equal foreign pads on both sides.
+        pads = self._make_j2_like_connector(
+            grid, n_foreign_west=50, n_foreign_east=50
+        )
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # Direction should split between EAST and WEST.
+        directions = {e.direction for e in escapes}
+        assert EscapeDirection.EAST in directions
+        assert EscapeDirection.WEST in directions
+
+    def test_no_foreign_pads_uses_symmetric_strategy(self, grid_and_rules):
+        """When the grid has no other components (purely synthetic test
+        scenarios), the detector should return 0 (fallback) and use the
+        original center-based outer/inner classification."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        # No foreign pads injected.
+        pads = self._make_j2_like_connector(
+            grid, n_foreign_west=0, n_foreign_east=0
+        )
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # Sanity: still produces 40 escapes.
+        assert len(escapes) == 40
+        # Both directions appear (symmetric).
+        directions = {e.direction for e in escapes}
+        assert len(directions) >= 2
+
+
 # ==============================================================================
 # Segment-to-Pad Clearance Tests (Issue #2319)
 # ==============================================================================
