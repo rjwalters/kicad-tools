@@ -1226,6 +1226,7 @@ def identify_nearest_obstacle(
     other_net_vias: list[tuple[float, float, float, int]] | None = None,
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
+    net_map: dict[int, str] | None = None,
 ) -> SkipDetail:
     """Identify the nearest obstacle preventing via placement near a pad.
 
@@ -1242,6 +1243,12 @@ def identify_nearest_obstacle(
         other_net_vias: Other-net vias
         other_net_pads: Other-net pads
         other_net_filled_polygons: Other-net filled zone polygons
+        net_map: Optional mapping of net number to net name.  When provided,
+            the obstacle reason string includes the human-readable net name
+            (e.g. ``track (net 8 'SWO')``) in addition to the net number,
+            making it easier to trace stitching failures back to specific
+            signal nets.  See issue #3267 (board 04 U2.35) for the
+            motivating case.
 
     Returns:
         SkipDetail with the type, location, and reason of the nearest obstacle
@@ -1254,6 +1261,15 @@ def identify_nearest_obstacle(
         other_net_pads = []
     if other_net_filled_polygons is None:
         other_net_filled_polygons = []
+
+    def _net_label(net_num: int) -> str:
+        """Format a net reference as ``net N`` or ``net N 'NAME'``."""
+        if net_map is None:
+            return f"net {net_num}"
+        name = net_map.get(net_num)
+        if not name:
+            return f"net {net_num}"
+        return f"net {net_num} '{name}'"
 
     via_radius = via_size / 2
     best: SkipDetail | None = None
@@ -1287,7 +1303,7 @@ def identify_nearest_obstacle(
                 obstacle_x=mid_x,
                 obstacle_y=mid_y,
                 obstacle_net=seg.net_number,
-                reason=f"track (net {seg.net_number}) on {seg.layer} "
+                reason=f"track ({_net_label(seg.net_number)}) on {seg.layer} "
                 f"gap={effective:.2f}mm need={clearance:.2f}mm",
             )
 
@@ -1302,7 +1318,7 @@ def identify_nearest_obstacle(
                 obstacle_x=ovx,
                 obstacle_y=ovy,
                 obstacle_net=onet,
-                reason=f"via (net {onet}) at ({ovx:.2f}, {ovy:.2f}) "
+                reason=f"via ({_net_label(onet)}) at ({ovx:.2f}, {ovy:.2f}) "
                 f"gap={effective:.2f}mm need={clearance:.2f}mm",
             )
 
@@ -1317,7 +1333,7 @@ def identify_nearest_obstacle(
                 obstacle_x=px,
                 obstacle_y=py,
                 obstacle_net=pnet,
-                reason=f"pad (net {pnet}) at ({px:.2f}, {py:.2f}) "
+                reason=f"pad ({_net_label(pnet)}) at ({px:.2f}, {py:.2f}) "
                 f"gap={effective:.2f}mm need={clearance:.2f}mm",
             )
 
@@ -3620,6 +3636,12 @@ def run_stitch(
     other_net_pads = find_all_pads(sexp, exclude_nets=net_numbers)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=net_numbers)
 
+    # Net-number -> net-name lookup so skip diagnostics can name the
+    # offending signal (e.g. ``net 8 'SWO'``) instead of just a number.
+    # See issue #3267 (board 04 U2.35 stitch failure traced to SWO
+    # diagonal grazing the GND pad).
+    obstacle_net_map = get_net_map(sexp)
+
     # Process each pad
     for pad in pads:
         # Check if already connected
@@ -3761,6 +3783,7 @@ def run_stitch(
                                 other_net_vias,
                                 other_net_pads,
                                 other_net_filled_polys,
+                                net_map=obstacle_net_map,
                             )
                             result.skip_details.append((pad, detail))
                             result.pads_skipped.append(
@@ -3784,6 +3807,7 @@ def run_stitch(
                             other_net_vias,
                             other_net_pads,
                             other_net_filled_polys,
+                            net_map=obstacle_net_map,
                         )
                         result.skip_details.append((pad, detail))
                         result.pads_skipped.append(
