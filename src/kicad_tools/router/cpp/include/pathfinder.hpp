@@ -18,6 +18,8 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 
 namespace router {
 
@@ -308,9 +310,94 @@ private:
     // --- Resumable A* search state (promoted from route() locals) ---
     using PQ = std::priority_queue<AStarNode, std::vector<AStarNode>, std::greater<AStarNode>>;
     PQ search_open_set_;
-    std::unordered_set<std::tuple<int, int, int>, GridPosHash> search_closed_set_;
-    std::unordered_map<std::tuple<int, int, int>, float, GridPosHash> search_g_scores_;
+    // Issue #3309: Per-net A* hot loop replaced the
+    // ``std::unordered_set<tuple<int,int,int>, GridPosHash>`` /
+    // ``std::unordered_map<tuple<int,int,int>, float, GridPosHash>`` storage
+    // with flat ``std::vector`` arrays indexed by
+    // ``layer * rows * cols + y * cols + x``.  Profiling on chorus's
+    // multi-pad nets (DAC_CLK 217s, SPI_MOSI 270s) showed ~80% of wall-clock
+    // was spent inside ``find()`` / ``count()`` on these tables:
+    //   * Per 2D neighbor expansion (up to 8 / cell): one tuple
+    //     allocation, one ``GridPosHash`` XOR-shift, one bucket walk,
+    //     one tuple equality compare for the closed-set check, then
+    //     another full lookup pair on g_score.
+    //   * Per via-target layer (3+ for 4L): the same two-lookup pair.
+    // Replacing with O(1) integer-index lookups into preallocated
+    // contiguous vectors removes the hashing, tuple alloc, and bucket
+    // walk entirely (~5-10x faster per cell visit, no per-expansion
+    // heap allocations).
+    //
+    // Avoiding the O(N) ``clear()`` between routes:
+    //   ``search_g_score_gen_`` holds a per-cell "generation stamp".
+    //   ``search_current_gen_`` is bumped on every new search; a cell's
+    //   g_score is treated as "uninserted" (== +infinity) when its gen
+    //   stamp does not match the current generation.  Same trick for
+    //   closed-set membership via ``search_closed_gen_``.  This makes
+    //   per-net reset O(1) instead of O(rows * cols * layers).
+    //
+    // Determinism note (#3309 + #3144):
+    //   We never iterated either table -- only looked up / inserted by
+    //   key -- so the A* pop order, tie-break, and path selection are
+    //   entirely a function of the priority queue and the ``operator>``
+    //   defined on ``AStarNode``, both unchanged.  The byte-identical
+    //   route invariant for boards 06/07 is preserved.
+    std::vector<float> search_g_scores_flat_;
+    std::vector<uint32_t> search_g_score_gen_;
+    std::vector<uint32_t> search_closed_gen_;
+    uint32_t search_current_gen_ = 0;
+    // Cached grid dimensions matching the flat-array sizing.  When the
+    // grid is resized between calls (rare), ``ensure_search_arrays_sized()``
+    // grows the vectors and resets the generation counters.
+    int search_flat_cols_ = 0;
+    int search_flat_rows_ = 0;
+    int search_flat_layers_ = 0;
     std::vector<AStarNode> search_closed_list_;
+
+    // Flat-array helpers (Issue #3309).
+    //
+    // ``flat_index`` returns the linear index for ``(x, y, layer)``.  The
+    // bounds invariant (``grid_.is_valid``) is checked by callers before
+    // computing the index, so the helper is a pure arithmetic operation.
+    inline size_t flat_index(int x, int y, int layer) const noexcept {
+        return static_cast<size_t>(layer) *
+                   static_cast<size_t>(search_flat_rows_) *
+                   static_cast<size_t>(search_flat_cols_) +
+               static_cast<size_t>(y) * static_cast<size_t>(search_flat_cols_) +
+               static_cast<size_t>(x);
+    }
+
+    // Resize the flat arrays if the grid dimensions have changed, then
+    // bump the generation counter so every cell's prior gen stamp is
+    // invalidated in O(1).  Wraparound at ``UINT32_MAX`` triggers a full
+    // ``std::fill`` reset (rare; ~4B searches between resets).
+    void ensure_search_arrays_sized();
+
+    // ``g_score_at`` returns the cell's current g_score or
+    // ``+infinity`` if the stamp does not match the current generation.
+    inline float g_score_at(size_t idx) const noexcept {
+        return (search_g_score_gen_[idx] == search_current_gen_)
+                   ? search_g_scores_flat_[idx]
+                   : std::numeric_limits<float>::infinity();
+    }
+
+    // ``set_g_score`` writes the new value and stamps the cell with
+    // the current generation.
+    inline void set_g_score(size_t idx, float value) noexcept {
+        search_g_scores_flat_[idx] = value;
+        search_g_score_gen_[idx] = search_current_gen_;
+    }
+
+    // ``is_closed`` returns true iff the cell has been added to the
+    // closed set in the current generation.
+    inline bool is_closed(size_t idx) const noexcept {
+        return search_closed_gen_[idx] == search_current_gen_;
+    }
+
+    // ``mark_closed`` stamps the cell as closed for the current
+    // generation.
+    inline void mark_closed(size_t idx) noexcept {
+        search_closed_gen_[idx] = search_current_gen_;
+    }
 
     // Set of rejected goal cells (skipped during goal test in resume())
     std::unordered_set<std::tuple<int, int, int>, GridPosHash> rejected_goals_;

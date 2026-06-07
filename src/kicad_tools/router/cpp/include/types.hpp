@@ -60,7 +60,19 @@ namespace router {
 // ``clearance_pad_segment`` errors on board 05 with --backend cpp.
 // Bumping the build version forces ``kct build-native`` so the fix takes
 // effect.
-constexpr int ROUTER_CPP_BUILD_VERSION = 9;
+//
+// Bump to 10 for Issue #3309 (A* flat-array g_score / closed-set storage).
+// The resumable A* hot loop replaced ``std::unordered_map<tuple<int,int,int>,
+// float>`` / ``std::unordered_set<tuple<int,int,int>>`` member tables with
+// generation-stamped flat ``std::vector<float>`` / ``std::vector<uint32_t>``
+// arrays indexed by ``layer * rows * cols + y * cols + x``.  The public
+// binding surface is unchanged; the Pathfinder ABI gained new member
+// vectors and an ``ensure_search_arrays_sized()`` helper.  Pre-#3309 .so
+// files would still link but exercise the slower hashmap path -- bumping
+// the version forces a rebuild so the post-#3309 performance fix takes
+// effect and the regression test (``tests/test_router_cpp_astar_flat_arrays_3309.py``)
+// passes its build-version guard.
+constexpr int ROUTER_CPP_BUILD_VERSION = 10;
 
 // Grid cell state
 struct GridCell {
