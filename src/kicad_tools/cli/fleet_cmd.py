@@ -45,8 +45,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
+from kicad_tools.schema.pcb import canonicalize_power_nets
 
 SCHEMA_VERSION = "1.1"
+
+# Issue #3302: tolerate at most this many added-only nets (after
+# power-rail alias normalisation) before flagging source drift.
+#
+# The kicad-tools schematic style routinely leaves short
+# component-to-component nets unlabeled (e.g. ``LED_K`` between D1.K and
+# R1, ``BOOT0`` between U2.44 and R2 on board 04). KiCad synthesises
+# a net name during PCB sync, so the PCB-net set is a strict superset
+# of the schematic-label set even when the design is in perfect sync.
+# Without tolerance, every unlabeled local net becomes a false-positive
+# drift signal.
+#
+# Bound at 2 (a conservative default chosen empirically from the
+# in-repo board set): board 04 has exactly 2 such unlabeled local
+# nets, while board 03's 3 real adds (``VBUS``, ``USB_CC1``,
+# ``USB_CC2``) -- a genuine schematic-vs-PCB mismatch -- still
+# trigger. Boards that grow more than two unlabeled local nets
+# without re-routing will still surface the drift correctly.
+_DRIFT_ADDED_ONLY_TOLERANCE = 2
 
 # Default location for the per-board DRC tolerance allowlist (mirrors
 # ``scripts/ci/check_routed_drc.py``). Boards listed here have a
@@ -636,13 +656,36 @@ def _detect_source_drift(
     board_dir: Path,
     *,
     sample_limit: int = 8,
+    added_only_tolerance: int = _DRIFT_ADDED_ONLY_TOLERANCE,
 ) -> tuple[bool, int | None, int | None, list[str], list[str]]:
-    """Detect schematic-vs-PCB net-set drift (issue #3280).
+    """Detect schematic-vs-PCB net-set drift (issues #3280, #3302).
 
     Compares the set of named labels in the source ``.kicad_sch`` to the
     set of named nets in the routed PCB. When the sets differ, the routed
     PCB is treated as **source-stale**: its ``X/Y nets`` count is no
     longer a trustworthy signal of current-design routing progress.
+
+    Two normalisation passes are applied before the symmetric difference
+    is computed (issue #3302):
+
+      1. **Power-rail alias canonicalisation.** KiCad's stock
+         ``power:+3V3`` symbol publishes ``+3V3`` while kicad-tools'
+         netlist-sync emits ``+3.3V``; both forms refer to the same
+         electrical net. :func:`canonicalize_power_nets` rewrites both
+         sides to a single canonical form (``+3.3V``) so fractional
+         rails compare equal across the schematic-vs-PCB boundary.
+         See ``src/kicad_tools/schema/pcb.py`` for the alias table.
+
+      2. **Sub-threshold added-only tolerance.** kicad-tools schematics
+         routinely leave short component-to-component nets unlabeled
+         (e.g. ``LED_K`` on board 04). The PCB synthesises a name for
+         each such net during sync, so the PCB-net set is a strict
+         superset of the schematic-label set even when the design is in
+         perfect sync. When the residual diff after canonicalisation
+         has **no removals** AND at most ``added_only_tolerance`` added
+         names, those adds are attributed to unlabeled-local-net
+         synthesis and drift is *not* reported. Genuine schematic edits
+         (adds beyond the threshold, OR any removals) still surface.
 
     The check is deliberately conservative:
       * If the schematic cannot be located or parsed, we return
@@ -657,7 +700,9 @@ def _detect_source_drift(
         ``(source_stale, schematic_net_count, pcb_net_count,
         added_in_pcb, removed_from_pcb)``. The ``added`` / ``removed``
         samples are sorted and capped at ``sample_limit`` for bounded
-        JSON output.
+        JSON output. Counts are the raw (pre-canonicalisation) set
+        sizes so the JSON ``schematic_net_count`` /
+        ``pcb_net_count`` keys keep their previous meaning.
     """
     sch_path = _find_source_schematic(board_dir)
     if sch_path is None:
@@ -669,9 +714,23 @@ def _detect_source_drift(
     if pcb_nets is None:
         return (False, len(sch_nets), None, [], [])
 
-    added = sorted(pcb_nets - sch_nets)
-    removed = sorted(sch_nets - pcb_nets)
-    source_stale = bool(added) or bool(removed)
+    # Step 1: canonicalise power-rail aliases on both sides before the
+    # set diff. Non-power names pass through unchanged.
+    sch_canon = canonicalize_power_nets(sch_nets)
+    pcb_canon = canonicalize_power_nets(pcb_nets)
+
+    added = sorted(pcb_canon - sch_canon)
+    removed = sorted(sch_canon - pcb_canon)
+
+    # Step 2: sub-threshold added-only tolerance. Only applies when
+    # there are NO removals (a removed schematic label is always a
+    # real signal) AND the residual add count is within the
+    # unlabeled-local-net headroom.
+    if not removed and 0 < len(added) <= added_only_tolerance:
+        source_stale = False
+    else:
+        source_stale = bool(added) or bool(removed)
+
     return (
         source_stale,
         len(sch_nets),

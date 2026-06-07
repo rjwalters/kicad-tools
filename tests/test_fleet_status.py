@@ -905,8 +905,10 @@ MATCHING_NETS_PCB = """(kicad_pcb
 """
 
 
-# A PCB with an EXTRA net (USB_CC1) that does not appear in THREE_NET_SCH.
-# This is the board-03 condition: routed PCB has more nets than schematic.
+# A PCB with EXTRA nets (USB_CC1, USB_CC2, VBUS) that do not appear in
+# THREE_NET_SCH. This mirrors the real board-03 condition (routed PCB has
+# more nets than schematic) and intentionally exceeds the issue #3302
+# ``_DRIFT_ADDED_ONLY_TOLERANCE`` headroom so a real drift still fires.
 EXTRA_NET_DRIFT_PCB = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -920,6 +922,8 @@ EXTRA_NET_DRIFT_PCB = """(kicad_pcb
   (net 2 "GND")
   (net 3 "SIG1")
   (net 4 "USB_CC1")
+  (net 5 "USB_CC2")
+  (net 6 "VBUS")
   (gr_rect (start 0 0) (end 30 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
   (footprint "Resistor_SMD:R_0402"
     (layer "F.Cu")
@@ -934,6 +938,13 @@ EXTRA_NET_DRIFT_PCB = """(kicad_pcb
     (property "Reference" "R2")
     (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 3 "SIG1"))
     (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 4 "USB_CC1"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 25 10)
+    (property "Reference" "R3")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 5 "USB_CC2"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 6 "VBUS"))
   )
 )
 """
@@ -1015,7 +1026,7 @@ class TestFleetStatusSourceDrift:
         routing = b["routing"]
         assert routing["source_stale"] is True
         assert routing["schematic_net_count"] == 3
-        assert routing["pcb_net_count"] == 4
+        assert routing["pcb_net_count"] == 6
         assert "USB_CC1" in routing.get("drift_added", [])
 
     def test_no_drift_preserves_routing_blocker(self, tmp_path: Path, capsys):
@@ -1094,7 +1105,7 @@ class TestFleetStatusSourceDrift:
         assert len(drift_blockers) == 1, b["blockers"]
         # Format: "routed PCB stale (schematic drift: N nets in schematic, M in PCB)"
         assert "3 nets in schematic" in drift_blockers[0]
-        assert "4 in PCB" in drift_blockers[0]
+        assert "6 in PCB" in drift_blockers[0]
 
     def test_drift_ship_ready_false(self, tmp_path: Path, capsys):
         """Drift forces ship_ready=False even when routing looks complete.
@@ -1119,3 +1130,272 @@ class TestFleetStatusSourceDrift:
         b = data["boards"][0]
         assert b["ship_ready"] is False
         assert b["routing"]["routing_complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #3302: power-rail alias + unlabeled-local-net tolerance
+# ---------------------------------------------------------------------------
+
+
+# Schematic that uses the stock ``power:+3V3`` symbol name (KiCad
+# convention) plus a labeled signal net SIG1.
+POWER_ALIAS_SCH = """(kicad_sch
+  (version 20240108)
+  (generator "test")
+  (paper "A4")
+  (label "+3V3" (at 10 10 0))
+  (label "GND" (at 10 20 0))
+  (label "SIG1" (at 10 30 0))
+)
+"""
+
+
+# PCB that uses the kicad-tools netlist-sync convention (``+3.3V``)
+# for the same rail. Functionally identical to POWER_ALIAS_SCH.
+POWER_ALIAS_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "+3.3V")
+  (net 2 "GND")
+  (net 3 "SIG1")
+  (gr_rect (start 0 0) (end 30 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "+3.3V"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "+3.3V"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 3 "SIG1"))
+  )
+)
+"""
+
+
+# PCB that adds TWO unlabeled-local synthesised nets (BOOT0, LED_K) on
+# top of the matching schematic. This mirrors the board-04 condition:
+# kicad-tools synthesises a net name during sync for short
+# component-to-component segments that the schematic leaves unlabeled.
+UNLABELED_LOCAL_NETS_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG1")
+  (net 4 "BOOT0")
+  (net 5 "LED_K")
+  (gr_rect (start 0 0) (end 30 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 3 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 4 "BOOT0"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 25 10)
+    (property "Reference" "R3")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 4 "BOOT0"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 5 "LED_K"))
+  )
+)
+"""
+
+
+class TestFleetStatusDriftFalsePositiveFixes:
+    """Issue #3302 -- false-positive drift on board 04 (and similar).
+
+    Two distinct false-positive classes are tolerated here:
+
+      1. Power-rail naming format mismatch (``+3V3`` vs ``+3.3V``):
+         normalised by the canonical-form table in
+         ``kicad_tools.schema.pcb.canonicalize_power_net``.
+
+      2. Sub-threshold added-only diff: kicad-tools schematics routinely
+         leave short component-to-component nets unlabeled, so the PCB
+         net set is a strict superset of the schematic-label set even
+         when the design is in sync. A residual added-only diff of at
+         most ``_DRIFT_ADDED_ONLY_TOLERANCE`` (default 2) is attributed
+         to unlabeled-local-net synthesis and not flagged.
+
+    The regression we MUST preserve: PR #3289's board-03 protection
+    where the PCB has more than two added nets relative to the
+    schematic -- that still triggers ``routed PCB stale``.
+    """
+
+    def test_power_rail_alias_not_flagged(self, tmp_path: Path, capsys):
+        """``+3V3`` (schematic) vs ``+3.3V`` (PCB) -> not source-stale.
+
+        This is the board-04 root cause: KiCad's stock ``power:+3V3``
+        symbol writes ``+3V3`` into the schematic-label set while the
+        kicad-tools netlist-sync convention emits ``+3.3V`` into the
+        PCB-net set. Both names refer to the same rail; the drift
+        detector must canonicalise both sides before the diff.
+        """
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "alias-board",
+            sch_text=POWER_ALIAS_SCH,
+            pcb_text=POWER_ALIAS_PCB,
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+
+        routing = b["routing"]
+        assert routing["source_stale"] is False, (
+            f"+3V3<->+3.3V should canonicalise; got {routing}"
+        )
+        # Raw counts are preserved for back-compat (issue #3302 AC).
+        assert routing["schematic_net_count"] == 3
+        assert routing["pcb_net_count"] == 3
+        # No drift blocker.
+        assert not any(
+            "routed PCB stale" in blocker for blocker in b["blockers"]
+        ), b["blockers"]
+
+    def test_two_unlabeled_local_nets_not_flagged(self, tmp_path: Path, capsys):
+        """<= 2 added unlabeled local nets in PCB -> not source-stale.
+
+        Board 04's `LED_K` / `BOOT0` condition: short component-to-
+        component segments are unlabeled in the schematic but
+        synthesised in the PCB. The PCB-net set is a strict superset
+        but the design is in sync.
+        """
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "unlabeled-board",
+            sch_text=THREE_NET_SCH,  # VCC, GND, SIG1
+            pcb_text=UNLABELED_LOCAL_NETS_PCB,  # ...+ BOOT0, LED_K
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+
+        routing = b["routing"]
+        assert routing["source_stale"] is False, (
+            f"two added local nets should be tolerated; got {routing}"
+        )
+        # Raw counts are preserved for back-compat.
+        assert routing["schematic_net_count"] == 3
+        assert routing["pcb_net_count"] == 5
+        # No drift blocker -- only routing/manufacturing gates remain.
+        assert not any(
+            "routed PCB stale" in blocker for blocker in b["blockers"]
+        ), b["blockers"]
+
+    def test_board03_style_three_adds_still_flagged(self, tmp_path: Path, capsys):
+        """Three added non-alias nets -> still flagged (board 03 case).
+
+        The regression guard for PR #3289: a real schematic drift
+        where the PCB has three or more added nets (e.g. ``VBUS``,
+        ``USB_CC1``, ``USB_CC2`` on board 03) is NOT masked by the
+        sub-threshold tolerance.
+        """
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "real-drift-board",
+            sch_text=THREE_NET_SCH,
+            pcb_text=EXTRA_NET_DRIFT_PCB,  # adds USB_CC1, USB_CC2, VBUS
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+
+        routing = b["routing"]
+        assert routing["source_stale"] is True
+        assert any(
+            "routed PCB stale" in blocker for blocker in b["blockers"]
+        ), b["blockers"]
+
+    def test_removal_always_flagged(self, tmp_path: Path, capsys):
+        """A removed schematic label is ALWAYS a real signal.
+
+        The added-only tolerance only applies when there are zero
+        removals. A net present in the schematic but missing from the
+        PCB indicates the PCB was rebuilt against a stale schematic and
+        must surface even if the count is sub-threshold.
+        """
+        # Schematic has one extra label (SIG_REMOVED) that the PCB lacks.
+        sch_with_extra = """(kicad_sch
+          (version 20240108)
+          (generator "test")
+          (paper "A4")
+          (label "VCC" (at 10 10 0))
+          (label "GND" (at 10 20 0))
+          (label "SIG1" (at 10 30 0))
+          (label "SIG_REMOVED" (at 10 40 0))
+        )
+        """
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "removed-board",
+            sch_text=sch_with_extra,
+            pcb_text=MATCHING_NETS_PCB,  # VCC, GND, SIG1 only
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+
+        routing = b["routing"]
+        assert routing["source_stale"] is True
+        assert "SIG_REMOVED" in routing.get("drift_removed", [])
+
+    def test_canonicalize_power_net_unit(self):
+        """Unit-level check on the canonicaliser used by the detector."""
+        from kicad_tools.schema.pcb import canonicalize_power_net
+
+        # Fractional rail forms canonicalise to ``+N.MV``.
+        assert canonicalize_power_net("+3V3") == "+3.3V"
+        assert canonicalize_power_net("+3.3V") == "+3.3V"
+        assert canonicalize_power_net("+1V8") == "+1.8V"
+        assert canonicalize_power_net("+1.8V") == "+1.8V"
+        assert canonicalize_power_net("+2V5") == "+2.5V"
+        assert canonicalize_power_net("-3V3") == "-3.3V"
+
+        # Whole-volt forms canonicalise to ``+NV``.
+        assert canonicalize_power_net("+5V") == "+5V"
+        assert canonicalize_power_net("+5.0V") == "+5V"
+        assert canonicalize_power_net("+12V") == "+12V"
+        assert canonicalize_power_net("+12.0V") == "+12V"
+
+        # Non-power names pass through unchanged.
+        assert canonicalize_power_net("VBUS") == "VBUS"
+        assert canonicalize_power_net("GND") == "GND"
+        assert canonicalize_power_net("BOOT0") == "BOOT0"
+        assert canonicalize_power_net("LED_K") == "LED_K"
+        assert canonicalize_power_net("USB_CC1") == "USB_CC1"
+        assert canonicalize_power_net("") == ""
