@@ -495,21 +495,42 @@ class DesignRules:
         # Apply neck-down only for fine-pitch components
         return pin_pitch < self.neck_down_threshold
 
-    def get_neck_down_width(self, distance_to_pad: float, pin_pitch: float | None = None) -> float:
+    def get_neck_down_width(
+        self,
+        distance_to_pad: float,
+        pin_pitch: float | None = None,
+        base_width: float | None = None,
+    ) -> float:
         """Calculate trace width based on distance to pad center.
 
-        Creates a smooth linear interpolation from trace_width to min_trace_width
-        as the trace approaches a fine-pitch pad.
+        Creates a smooth linear interpolation from ``base_width`` (or
+        ``trace_width`` when not supplied) down to ``min_trace_width`` as
+        the trace approaches a fine-pitch pad.
 
         Args:
             distance_to_pad: Distance from segment point to pad center (mm)
             pin_pitch: Optional pin pitch in mm (for determining if neck-down applies)
+            base_width: Optional starting (corridor) width to taper from
+                (mm).  When ``None`` falls back to ``self.trace_width``.
+                Issue #3313 wires this for impedance-driven sizing so the
+                taper interpolates from the per-net-class
+                impedance-derived width (e.g. 0.387 mm for a 50 Ω
+                single-ended target on the JLCPCB tier-1 4-layer stackup)
+                down to ``min_trace_width`` (e.g. 0.10 mm manufacturer
+                minimum) instead of the global ``rules.trace_width``.
+                Without this knob, an impedance-resolved class with a
+                wide width would force the pathfinder to ``min()`` the
+                resolved width with the (narrower) corridor default and
+                negate the impedance solver's contribution.
 
         Returns:
-            Trace width in mm. Returns trace_width if:
+            Trace width in mm. Returns ``base_width`` (or ``trace_width``)
+            unchanged if:
             - Neck-down is disabled (min_trace_width is None)
             - Distance is beyond neck_down_distance
             - Pin pitch is above neck_down_threshold
+            - The resolved ``base_width`` is already at or below
+              ``min_trace_width`` (no further taper is possible)
 
         Example:
             >>> rules = DesignRules(
@@ -523,24 +544,41 @@ class DesignRules:
             0.15
             >>> rules.get_neck_down_width(0.0)  # At pad
             0.1
+            >>> # Impedance-driven base width (Issue #3313):
+            >>> rules.get_neck_down_width(0.0, pin_pitch=0.5, base_width=0.387)
+            0.1
+            >>> rules.get_neck_down_width(0.5, pin_pitch=0.5, base_width=0.387)
+            0.2435
         """
+        # Resolve the corridor width to taper from.  When the caller does
+        # not supply an explicit base width, fall back to the global
+        # rules.trace_width for pre-#3313 callers.
+        corridor_width = base_width if base_width is not None else self.trace_width
+
         # Feature disabled
         if self.min_trace_width is None:
-            return self.trace_width
+            return corridor_width
 
         # Check if this is a fine-pitch situation
         if pin_pitch is not None and pin_pitch >= self.neck_down_threshold:
-            return self.trace_width
+            return corridor_width
 
         # Beyond taper zone - use normal width
         if distance_to_pad >= self.neck_down_distance:
-            return self.trace_width
+            return corridor_width
 
-        # Linear interpolation from trace_width to min_trace_width
+        # Degenerate case: the corridor width is already at or below the
+        # manufacturer minimum.  Taper has no work to do; just return the
+        # corridor width unchanged so the caller does not accidentally
+        # widen a trace that was deliberately narrow.
+        if corridor_width <= self.min_trace_width:
+            return corridor_width
+
+        # Linear interpolation from corridor_width to min_trace_width
         # At distance=0: min_trace_width
-        # At distance=neck_down_distance: trace_width
+        # At distance=neck_down_distance: corridor_width
         t = distance_to_pad / self.neck_down_distance
-        return self.min_trace_width + t * (self.trace_width - self.min_trace_width)
+        return self.min_trace_width + t * (corridor_width - self.min_trace_width)
 
 
 @dataclass

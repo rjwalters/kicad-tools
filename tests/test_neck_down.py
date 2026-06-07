@@ -187,6 +187,110 @@ class TestNeckDownEdgeCases:
         assert isinstance(width, float)
 
 
+class TestNeckDownBaseWidthOverride:
+    """Tests for the ``base_width`` parameter on
+    :meth:`DesignRules.get_neck_down_width` (Issue #3313).
+
+    The original (pre-#3313) signature interpolated between
+    ``rules.trace_width`` and ``rules.min_trace_width``.  Issue #3313
+    added an optional ``base_width`` parameter so the impedance-driven
+    sizing pipeline can taper from the per-net-class
+    impedance-resolved width (e.g. 0.387 mm for a 50 Ω SE target on
+    the JLCPCB tier-1 4-layer stackup) down to the manufacturer
+    minimum, instead of being silently clamped back to the (narrower)
+    global ``rules.trace_width`` default.
+
+    Without this parameter the pathfinder's
+    ``_calculate_segment_width`` would take ``min(net_class.trace_width,
+    rules.get_neck_down_width(...))`` and lose the impedance benefit on
+    every segment outside the taper zone (i.e. the entire corridor
+    away from fine-pitch pads), reintroducing the PR #3273 / #3315
+    impedance-sidecar trap.
+    """
+
+    def test_base_width_used_outside_taper_zone(self):
+        """``base_width`` overrides ``trace_width`` outside the taper zone."""
+        rules = DesignRules(
+            trace_width=0.2,
+            min_trace_width=0.1,
+            neck_down_distance=1.0,
+            neck_down_threshold=0.8,
+        )
+        # Beyond taper zone -> returns the base width (corridor width),
+        # not the rules.trace_width.
+        width = rules.get_neck_down_width(2.0, pin_pitch=0.5, base_width=0.387)
+        assert width == pytest.approx(0.387, abs=0.001)
+
+    def test_base_width_interpolation_at_zero_distance(self):
+        """At pad center, taper terminates at ``min_trace_width``."""
+        rules = DesignRules(
+            trace_width=0.2,
+            min_trace_width=0.1,
+            neck_down_distance=1.0,
+            neck_down_threshold=0.8,
+        )
+        # At pad center, regardless of base_width, returns min.
+        width = rules.get_neck_down_width(0.0, pin_pitch=0.5, base_width=0.387)
+        assert width == pytest.approx(0.1, abs=0.001)
+
+    def test_base_width_interpolation_at_midpoint(self):
+        """Linear interpolation from ``base_width`` to ``min_trace_width``."""
+        rules = DesignRules(
+            trace_width=0.2,
+            min_trace_width=0.1,
+            neck_down_distance=1.0,
+            neck_down_threshold=0.8,
+        )
+        # At midpoint of taper zone, t=0.5 -> 0.1 + 0.5 * (0.387 - 0.1)
+        width = rules.get_neck_down_width(0.5, pin_pitch=0.5, base_width=0.387)
+        assert width == pytest.approx(0.1 + 0.5 * (0.387 - 0.1), abs=0.001)
+
+    def test_base_width_none_falls_back_to_trace_width(self):
+        """When ``base_width`` is None, behavior matches pre-#3313."""
+        rules = DesignRules(
+            trace_width=0.2,
+            min_trace_width=0.1,
+            neck_down_distance=1.0,
+            neck_down_threshold=0.8,
+        )
+        # base_width=None should behave identically to omitting the kwarg
+        for d in (0.0, 0.5, 1.0, 2.0):
+            assert rules.get_neck_down_width(d, pin_pitch=0.5) == \
+                rules.get_neck_down_width(d, pin_pitch=0.5, base_width=None)
+
+    def test_base_width_below_min_returns_corridor(self):
+        """Degenerate ``base_width`` < ``min_trace_width`` is left alone."""
+        rules = DesignRules(
+            trace_width=0.2,
+            min_trace_width=0.15,
+            neck_down_distance=1.0,
+            neck_down_threshold=0.8,
+        )
+        # base_width 0.10 < min_trace_width 0.15 -- should NOT widen
+        # the trace at the pad.  The taper has no work to do.
+        width = rules.get_neck_down_width(0.0, pin_pitch=0.5, base_width=0.10)
+        assert width == pytest.approx(0.10, abs=0.001)
+
+    def test_base_width_ignored_when_feature_disabled(self):
+        """``base_width`` is honored even when neck-down is disabled."""
+        rules = DesignRules(trace_width=0.2)  # min_trace_width=None
+        # Feature disabled -> returns corridor width unchanged.
+        width = rules.get_neck_down_width(0.0, pin_pitch=0.5, base_width=0.387)
+        assert width == pytest.approx(0.387, abs=0.001)
+
+    def test_base_width_ignored_for_standard_pitch(self):
+        """Standard-pitch components return the corridor width."""
+        rules = DesignRules(
+            trace_width=0.2,
+            min_trace_width=0.1,
+            neck_down_distance=1.0,
+            neck_down_threshold=0.8,
+        )
+        # Standard-pitch (1.27 mm) -> returns corridor width as-is.
+        width = rules.get_neck_down_width(0.0, pin_pitch=1.27, base_width=0.387)
+        assert width == pytest.approx(0.387, abs=0.001)
+
+
 class TestNeckDownRouting:
     """Integration tests for neck-down during actual routing."""
 

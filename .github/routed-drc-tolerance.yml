@@ -753,7 +753,18 @@ tolerances:
   # residual are the tightening targets; the diff-pair length/
   # continuity counts tighten as the board's coupled routing
   # improves.  After #3144 the post-tightening floor is 32.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 39
+  #
+  # Issue #3313 (impedance-driven sizing enabled): the refreshed
+  # routed PCB carries impedance-resolved widths (0.375 / 0.475 mm)
+  # and clears all 30 ``impedance`` violations the pre-#3313 PCB
+  # carried.  The new sidecar measurement composition is:
+  #   8 diffpair_length_skew + 8 diffpair_routing_continuity
+  #   + 1 diffpair_clearance_intra
+  #   = 17 blocking.  (Plus 4 advisory ``connectivity`` excluded
+  #   from the gate.)  Floor tightened from 39 to 21 to lock in
+  #   the impedance compliance lift while leaving 4-error headroom
+  #   for seed-dependent variance in the negotiated rip-up cohort.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 21
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure

@@ -3338,12 +3338,22 @@ class Router:
             min_width = base_trace_width
 
             # Check start pad influence
+            # Issue #3313: pass base_trace_width as the corridor width so
+            # the taper interpolates from the (possibly impedance-driven)
+            # per-net-class width down to ``rules.min_trace_width``
+            # instead of the global ``rules.trace_width``.  Without this
+            # the ``min()`` step below would collapse a 0.387 mm
+            # impedance-resolved width back down to the 0.20 mm global
+            # default whenever the segment was far from any fine-pitch
+            # pad, defeating the impedance solver's contribution.
             if start_needs_neckdown:
                 dist_to_start_1 = _distance(x1, y1, start_pad.x, start_pad.y)
                 dist_to_start_2 = _distance(x2, y2, start_pad.x, start_pad.y)
                 # Use minimum distance from either endpoint
                 min_dist_start = min(dist_to_start_1, dist_to_start_2)
-                width_from_start = self.rules.get_neck_down_width(min_dist_start, start_pitch)
+                width_from_start = self.rules.get_neck_down_width(
+                    min_dist_start, start_pitch, base_width=base_trace_width
+                )
                 min_width = min(min_width, width_from_start)
 
             # Check end pad influence
@@ -3352,7 +3362,9 @@ class Router:
                 dist_to_end_2 = _distance(x2, y2, end_pad.x, end_pad.y)
                 # Use minimum distance from either endpoint
                 min_dist_end = min(dist_to_end_1, dist_to_end_2)
-                width_from_end = self.rules.get_neck_down_width(min_dist_end, end_pitch)
+                width_from_end = self.rules.get_neck_down_width(
+                    min_dist_end, end_pitch, base_width=base_trace_width
+                )
                 min_width = min(min_width, width_from_end)
 
             return min_width
