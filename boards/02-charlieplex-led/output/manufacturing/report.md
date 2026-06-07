@@ -2,7 +2,7 @@
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-05-24 | jlcpcb"
+date: "Rev 1 | 2026-06-07 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 14 (0 SMD, 0 THT, 14 other) |
 | Nets | 10 |
-| Traces | 232 segments |
+| Traces | 155 segments |
 | Vias | 24 |
 | Board Size | 50.0 x 55.0 mm |
 
@@ -87,6 +87,10 @@ Charlieplex LED Grid
 ### Action Items
 
 - **[OPTIONAL]** Verify zone fill in KiCad for 1 zone-connected nets
+- **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
+- **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
+- **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets
+- **[OPTIONAL]** Analog net: LINE_D — audio signal; keep short, away from digital/switching nets
 
 
 \newpage
