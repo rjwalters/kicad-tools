@@ -11,10 +11,73 @@ This module provides:
 - Obstacle: Area to avoid during routing
 """
 
+import random
 import uuid
 from dataclasses import dataclass, field
 
 from .layers import Layer
+
+# Issue #3272: Deterministic UUID mode.  When :func:`enable_deterministic_uuids`
+# is called the per-element UUID emitted by :meth:`Segment.to_sexp` and
+# :meth:`Via.to_sexp` is derived from the seeded global ``random`` module
+# instead of ``os.urandom`` (which ``uuid.uuid4`` consults).  This makes the
+# routed ``.kicad_pcb`` byte-identical across runs that share a routing seed
+# -- the smoke harness at ``scripts/ci/board06_determinism_smoke.sh`` and the
+# regression test at ``tests/router/test_board06_determinism.py`` rely on
+# this property.  ``route_all_negotiated`` and ``route_all_with_diffpairs``
+# turn this on whenever ``seed is not None``; callers that need
+# stochastic UUIDs (e.g. unit tests asserting uniqueness across calls)
+# can leave the toggle off (the default).
+_DETERMINISTIC_UUIDS: bool = False
+
+
+def enable_deterministic_uuids(enabled: bool = True) -> None:
+    """Toggle deterministic UUID emission for :class:`Segment` and :class:`Via`.
+
+    Issue #3272.  When ``enabled`` is True, ``to_sexp()`` derives each
+    UUID from ``random.getrandbits(128)`` (seeded by the caller via
+    ``random.seed(seed)``) instead of ``uuid.uuid4()`` (which reads
+    ``os.urandom`` and is therefore non-deterministic).  The resulting
+    UUID still has the canonical xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    shape so KiCad and downstream tools see the same format.
+
+    This is a module-level toggle rather than a per-instance argument
+    because the emit sites live deep in router internals and threading
+    a flag through every call site would touch every place that
+    instantiates a Segment/Via.  The toggle is meant to be flipped on at
+    the top of a deterministic route session and flipped off again at
+    the end.  See :func:`reset_deterministic_uuids`.
+    """
+    global _DETERMINISTIC_UUIDS
+    _DETERMINISTIC_UUIDS = bool(enabled)
+
+
+def reset_deterministic_uuids() -> None:
+    """Restore default (non-deterministic) UUID emission.  Issue #3272."""
+    global _DETERMINISTIC_UUIDS
+    _DETERMINISTIC_UUIDS = False
+
+
+def is_deterministic_uuids_enabled() -> bool:
+    """Return the current :func:`enable_deterministic_uuids` state.
+
+    Exposed for tests and diagnostics that need to assert / branch on
+    the deterministic-UUID mode without reaching into module privates.
+    """
+    return _DETERMINISTIC_UUIDS
+
+
+def _make_uuid() -> str:
+    """Generate a UUID string honoring the :func:`enable_deterministic_uuids` toggle.
+
+    When deterministic mode is active the UUID is derived from
+    ``random.getrandbits(128)`` so it tracks the seeded global RNG.
+    Otherwise we fall through to ``uuid.uuid4()`` which is what the
+    pre-#3272 code emitted.
+    """
+    if _DETERMINISTIC_UUIDS:
+        return str(uuid.UUID(int=random.getrandbits(128), version=4))
+    return str(uuid.uuid4())
 
 
 def _fmt(val: float) -> int | float:
@@ -135,7 +198,7 @@ class Via:
 \t\t(drill {_fmt(self.drill)})
 \t\t(layers "{layer_start}" "{layer_end}")
 \t\t(net {self.net})
-\t\t(uuid "{uuid.uuid4()}")
+\t\t(uuid "{_make_uuid()}")
 \t)"""
 
 
@@ -170,7 +233,7 @@ class Segment:
 \t\t(width {_fmt(self.width)})
 \t\t(layer "{self.layer.kicad_name}")
 \t\t(net {self.net})
-\t\t(uuid "{uuid.uuid4()}")
+\t\t(uuid "{_make_uuid()}")
 \t)"""
 
 
