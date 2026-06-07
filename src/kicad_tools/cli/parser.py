@@ -685,7 +685,10 @@ def _add_sch_parser(subparsers) -> None:
         "--auto",
         action="store_true",
         default=True,
-        help=("Assign only unambiguous candidates (default; only mode currently supported)."),
+        help=(
+            "Assign only unambiguous candidates (default; only mode currently "
+            "supported)."
+        ),
     )
     sch_assign_fp.add_argument(
         "--dry-run",

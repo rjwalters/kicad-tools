@@ -3087,7 +3087,8 @@ def route_with_layer_escalation(
             # pre-regression best per the #2396 selector.
             if not quiet:
                 flush_print(
-                    f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)"
+                    f"\n  Routed: {nets_routed}/{nets_to_route} nets "
+                    f"({completion * 100:.0f}%)"
                 )
                 flush_print("  Status: INSUFFICIENT - early stop (regression)")
                 # Issue #3241 (Option D): emit failure-cause histogram so
