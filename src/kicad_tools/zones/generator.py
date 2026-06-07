@@ -65,6 +65,32 @@ if TYPE_CHECKING:
     from kicad_tools.router.net_class import NetClass
 
 
+def _zone_uuid_factory() -> str:
+    """Generate a zone UUID, honoring the router primitives toggle.
+
+    Issue #3272.  Delegated to the router primitives module so that
+    ``enable_deterministic_uuids(True)`` (set inside
+    :func:`Autorouter.route_all_negotiated` whenever ``seed`` is
+    supplied) makes ZONE UUIDs deterministic too -- not just segment /
+    via UUIDs.  Without this, board 06's smoke harness still observed
+    file-level diffs on the trailing zone block even when all routed
+    segments matched.  The import is deferred to call time so module
+    load order between :mod:`kicad_tools.zones.generator` and
+    :mod:`kicad_tools.router.primitives` is irrelevant.
+    """
+    try:
+        from kicad_tools.router.primitives import (
+            is_deterministic_uuids_enabled,
+        )
+    except Exception:  # pragma: no cover - defensive
+        return str(uuid_module.uuid4())
+    if is_deterministic_uuids_enabled():
+        import random as _random
+
+        return str(uuid_module.UUID(int=_random.getrandbits(128), version=4))
+    return str(uuid_module.uuid4())
+
+
 @dataclass
 class ZoneOverlapWarning:
     """Warning about overlapping zones on the same layer.
@@ -164,7 +190,16 @@ class GeneratedZone:
     config: ZoneConfig
     net_number: int
     boundary: list[tuple[float, float]]
-    uuid: str = field(default_factory=lambda: str(uuid_module.uuid4()))
+    # Issue #3272: defer to the router primitives' deterministic-UUID
+    # toggle so zones written by ``auto_create_zones_for_pour_nets``
+    # share the same byte-identical-across-runs property as routed
+    # segments / vias when the upstream caller has activated the
+    # toggle via :func:`route_all_negotiated` (with ``seed=...``).
+    # When the toggle is off this falls through to ``uuid.uuid4()``
+    # exactly as before.
+    uuid: str = field(
+        default_factory=lambda: _zone_uuid_factory()
+    )
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression node for this zone."""

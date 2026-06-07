@@ -479,3 +479,224 @@ class TestCppPathfinderBuildVersionBumped:
             "Bump both constants together when changing the C++ binding "
             "surface (added/removed/renamed symbols, struct fields)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #3272: deterministic-UUID toggle for Segment / Via / Zone S-exprs
+# ---------------------------------------------------------------------------
+#
+# Before #3272 the routed PCB was geometry-deterministic under ``seed=N``
+# (the routing decisions were reproducible) BUT the file-level MD5 still
+# drifted run-to-run because :meth:`Segment.to_sexp`, :meth:`Via.to_sexp`
+# and the zone generator's UUID factory all emitted ``uuid.uuid4()`` --
+# which reads ``os.urandom`` independently of the seeded global RNG.  As
+# a result the board-06 determinism smoke harness produced
+# false-positive failures (MD5 mismatch on byte-different but
+# semantically-identical files) and the regression test at
+# ``tests/router/test_board06_determinism.py`` could not assert the
+# stronger "identical PCB content" invariant.
+#
+# These tests pin the toggle behaviour at the unit-test level so a
+# future refactor that re-introduces unseeded ``uuid.uuid4()`` calls in
+# the router primitives or zone generator fails fast.
+
+
+class TestDeterministicUuidToggle:
+    """Issue #3272: ``enable_deterministic_uuids`` makes Segment/Via UUIDs reproducible."""
+
+    def test_segment_uuid_deterministic_under_seeded_rng(self) -> None:
+        """Two ``Segment.to_sexp`` calls with the same seeded RNG produce identical UUIDs.
+
+        Without #3272 the per-segment UUID came from ``uuid.uuid4()``
+        (i.e. ``os.urandom``) and was independent of the seeded global
+        RNG, so the routed PCB MD5 drifted even when routing was
+        otherwise reproducible.
+        """
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import (
+            Segment,
+            enable_deterministic_uuids,
+            reset_deterministic_uuids,
+        )
+
+        try:
+            enable_deterministic_uuids(True)
+
+            random.seed(42)
+            sexp_a = Segment(0, 0, 1, 0, 0.2, Layer.F_CU, net=1).to_sexp()
+
+            random.seed(42)
+            sexp_b = Segment(0, 0, 1, 0, 0.2, Layer.F_CU, net=1).to_sexp()
+        finally:
+            reset_deterministic_uuids()
+
+        assert sexp_a == sexp_b, (
+            "Segment.to_sexp must emit identical UUIDs when the global "
+            "RNG is re-seeded and the deterministic-UUID toggle is on. "
+            "If this fails, primitives._make_uuid is no longer reading "
+            "from random.getrandbits -- Issue #3272 has regressed."
+        )
+
+    def test_via_uuid_deterministic_under_seeded_rng(self) -> None:
+        """Two ``Via.to_sexp`` calls with the same seeded RNG produce identical UUIDs."""
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import (
+            Via,
+            enable_deterministic_uuids,
+            reset_deterministic_uuids,
+        )
+
+        try:
+            enable_deterministic_uuids(True)
+
+            random.seed(42)
+            sexp_a = Via(
+                x=1.0, y=2.0, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=1,
+            ).to_sexp()
+
+            random.seed(42)
+            sexp_b = Via(
+                x=1.0, y=2.0, drill=0.3, diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU), net=1,
+            ).to_sexp()
+        finally:
+            reset_deterministic_uuids()
+
+        assert sexp_a == sexp_b, (
+            "Via.to_sexp must emit identical UUIDs when the global RNG "
+            "is re-seeded and the deterministic-UUID toggle is on. "
+            "Issue #3272 regression."
+        )
+
+    def test_toggle_off_yields_distinct_uuids(self) -> None:
+        """When the toggle is off, ``Segment.to_sexp`` calls emit different UUIDs.
+
+        Preserves the historical ``uuid.uuid4()`` semantics for callers
+        that haven't opted into deterministic routing (i.e. routes
+        created without ``seed=...``).
+        """
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.primitives import (
+            Segment,
+            reset_deterministic_uuids,
+        )
+
+        # Make sure we're starting from a known state -- another test
+        # in the session may have left the toggle on.
+        reset_deterministic_uuids()
+
+        sexp_a = Segment(0, 0, 1, 0, 0.2, Layer.F_CU, net=1).to_sexp()
+        sexp_b = Segment(0, 0, 1, 0, 0.2, Layer.F_CU, net=1).to_sexp()
+
+        # Pull the UUIDs out for a clearer diagnostic when this fails.
+        import re
+
+        uuid_a = re.search(r'uuid "([^"]+)"', sexp_a).group(1)
+        uuid_b = re.search(r'uuid "([^"]+)"', sexp_b).group(1)
+        assert uuid_a != uuid_b, (
+            f"Default Segment.to_sexp must emit a fresh UUID per call "
+            f"(toggle off).  Got identical UUIDs: {uuid_a}.  If you "
+            f"flipped the default to deterministic, downstream callers "
+            f"that rely on uniqueness (e.g. KiCad's element ID resolver) "
+            f"may silently collide."
+        )
+
+    def test_zone_uuid_factory_deterministic_under_seeded_rng(self) -> None:
+        """Zone UUIDs track the deterministic-UUID toggle like Segment / Via.
+
+        Without this, ``auto_create_zones_for_pour_nets`` would still
+        introduce file-level non-determinism in board-06's output even
+        with a seeded router, because zones come from
+        :mod:`kicad_tools.zones.generator` which has its own UUID
+        factory.
+        """
+        from kicad_tools.router.primitives import (
+            enable_deterministic_uuids,
+            reset_deterministic_uuids,
+        )
+        from kicad_tools.zones.generator import _zone_uuid_factory
+
+        try:
+            enable_deterministic_uuids(True)
+
+            random.seed(42)
+            u1 = _zone_uuid_factory()
+            u2 = _zone_uuid_factory()
+
+            random.seed(42)
+            u1_replay = _zone_uuid_factory()
+            u2_replay = _zone_uuid_factory()
+        finally:
+            reset_deterministic_uuids()
+
+        assert u1 == u1_replay and u2 == u2_replay, (
+            "Zone UUID factory must honour the router primitives "
+            "deterministic-UUID toggle so board-06's auto-pour zones "
+            "produce a byte-identical .kicad_pcb across runs.  Issue "
+            "#3272 regression."
+        )
+        assert u1 != u2, (
+            "Successive calls within a single seeded run must still "
+            "produce distinct UUIDs (different positions in the RNG "
+            "stream) -- otherwise every zone would collide on the "
+            "same UUID and KiCad would treat them as the same element."
+        )
+
+    def test_route_all_negotiated_enables_uuid_toggle_under_seed(self) -> None:
+        """Passing ``seed=...`` to ``route_all_negotiated`` activates the toggle.
+
+        End-to-end wiring check: the user-visible API for opting into
+        determinism is ``router.route_all_negotiated(seed=N)``.  That
+        call MUST flip the module-level toggle on as a side effect, so
+        any downstream ``to_sexp()`` emission produces a deterministic
+        UUID.  This is the integration site #3272 cares about.
+        """
+        from kicad_tools.router.primitives import (
+            is_deterministic_uuids_enabled,
+            reset_deterministic_uuids,
+        )
+
+        # Ensure we don't pre-bias the assertion below.
+        reset_deterministic_uuids()
+        assert not is_deterministic_uuids_enabled(), (
+            "test pre-condition: toggle should be off at start"
+        )
+
+        router = _make_seed_test_router()
+        router.route_all_negotiated(max_iterations=1, seed=42)
+
+        assert is_deterministic_uuids_enabled(), (
+            "route_all_negotiated(seed=...) must activate the "
+            "deterministic-UUID toggle (Issue #3272).  Without this "
+            "the routed PCB's segment / via UUIDs continue to drift "
+            "across runs even when routing decisions are reproducible."
+        )
+
+        # Clean up so we don't bleed state into other tests in the
+        # session.
+        reset_deterministic_uuids()
+
+    def test_route_all_negotiated_leaves_toggle_off_without_seed(self) -> None:
+        """Default behaviour (no seed) does NOT flip the toggle on.
+
+        Guards against an accidental refactor that flips the toggle
+        unconditionally.  Users who didn't opt into determinism
+        should still see fresh ``uuid.uuid4()``-derived UUIDs.
+        """
+        from kicad_tools.router.primitives import (
+            is_deterministic_uuids_enabled,
+            reset_deterministic_uuids,
+        )
+
+        reset_deterministic_uuids()
+        router = _make_seed_test_router()
+        router.route_all_negotiated(max_iterations=1)
+
+        assert not is_deterministic_uuids_enabled(), (
+            "route_all_negotiated() WITHOUT seed must NOT activate "
+            "the deterministic-UUID toggle.  If this fails, the "
+            "default code path silently makes every routed PCB "
+            "reproducible -- masking future regressions in the "
+            "unseeded route path."
+        )

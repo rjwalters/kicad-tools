@@ -6238,6 +6238,23 @@ class Autorouter:
             self._perturbation_seed = seed
             self._perturbation_rng = random.Random(seed)
             random.seed(seed)
+            # Issue #3272: Activate the deterministic-UUID toggle so
+            # the per-segment / per-via UUIDs emitted by
+            # :meth:`Segment.to_sexp` / :meth:`Via.to_sexp` track the
+            # seeded global RNG instead of ``os.urandom``.  Without
+            # this the routed PCB is functionally identical across
+            # runs (same routes, same vias, same widths) but the file
+            # MD5 still differs -- which both invalidates the
+            # determinism smoke harness at
+            # ``scripts/ci/board06_determinism_smoke.sh`` and makes
+            # post-mortem diff analysis impossibly noisy.  The toggle
+            # is module-level and intentionally persists once
+            # activated; tests or callers that require stochastic
+            # UUIDs after a seeded routing call can invoke
+            # ``primitives.reset_deterministic_uuids()`` to restore
+            # the default ``uuid.uuid4()`` behaviour.
+            from .primitives import enable_deterministic_uuids
+            enable_deterministic_uuids(True)
 
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         # Issue #1295: Filter out pour nets before negotiated routing
