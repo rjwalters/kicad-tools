@@ -83,7 +83,18 @@ UNROUTED_PCB = BOARD_DIR / "output" / "softstart.kicad_pcb"
 # Acceptance criteria for the post-Wave-3 baseline (Issue #3235).
 REQUIRED_NETS_CONNECTED = 10  # all signal nets must be topologically complete
 REQUIRED_NETS_TOTAL = 10
-MAX_SEG_SEG_CLEARANCE_VIOLATIONS = 6  # current baseline is 4, +2 headroom
+# Issue #3257: tightened 6 -> 2 after the D2/R12 placement nudge (D2 east
+# from x=130 to x=137 mm) drained all four pre-#3257 SWDIO/STATUS_LED
+# B.Cu violations on the U1 east-side cluster.  The placement nudge moves
+# the STATUS_LED resistor + LED column clear of SWDIO's main east-bound
+# B.Cu trace at y~173.3 mm, breaking the geometric overlap that no
+# escape-layer or per-pad budget intervention could close (see the
+# direction-1 / direction-2 negative-results notes in the issue #3235
+# spike commentary at ``router/negotiated.py:1056-1066`` and
+# ``router/two_phase.py:711-736``).  Headroom kept at +2 to absorb
+# run-to-run noise observed when the placement re-spread re-balances
+# the U1-east escape cohort across PYTHONHASHSEED variants.
+MAX_SEG_SEG_CLEARANCE_VIOLATIONS = 2  # current baseline is 0, +2 headroom
 MAX_PAD_SEG_CLEARANCE_VIOLATIONS = 1  # PR #3250 closed pad-segment regime
 
 # Power nets that are intentionally skipped from the autorouter and

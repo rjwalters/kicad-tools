@@ -995,6 +995,74 @@ class EscapeRouter:
         # for the named-constraint diagnostic line.
         self.missed_via_in_pad_components: set[str] = set()
 
+        # Issue #3257: per-pad escape-layer overrides for SSOP/TSSOP
+        # fine-pitch dual-row dispatcher.  Maps ``(ref, pin)`` to the
+        # forced escape layer (``Layer.F_CU`` -> stay on surface,
+        # ``Layer.B_CU`` / inner-signal -> via to inner).  Consulted by
+        # ``_create_fine_pitch_row_escapes`` BEFORE the default
+        # alternating-parity ``needs_via`` calculation, allowing surgical
+        # per-pin overrides on packages where the alternation pattern
+        # would otherwise place adjacent foreign-net traces on the same
+        # post-escape layer (e.g. softstart U1 east column where pin 17
+        # SWDIO odd-via to B.Cu and pin 15 STATUS_LED odd-via to B.Cu
+        # produce overlapping B.Cu routes near the U1 east-side cluster
+        # -- the documented 4-violation residual the
+        # ``test_softstart_manufacturable_baseline`` test pinned).
+        #
+        # Env-var encoding (preferred for both CLI and Python callers):
+        #
+        #     export KICAD_TOOLS_ESCAPE_PAD_LAYER_OVERRIDES='{"U1.15":"F.Cu"}'
+        #
+        # The JSON dict keys are ``"REF.PIN"`` strings (str-cast pin id);
+        # values are KiCad layer names ("F.Cu", "B.Cu", "In1.Cu", ...).
+        # Invalid JSON or unknown layer names are logged and treated as
+        # an empty override map so the routing call never crashes on a
+        # malformed env var.
+        #
+        # Direct dict constructor argument is the simpler integration
+        # point for Python callers (e.g. board-specific ``route_pcb``
+        # functions); the env-var path exists for the CLI ``kct route``
+        # subprocess flow.  Both feed the same backing dict.  This
+        # mirrors the existing pattern used by
+        # ``strict_in_pad_clearance`` / ``micro_via_in_pad_fallback`` /
+        # ``extended_pitch_in_pad_fallback`` (env-var-driven opt-in
+        # flags) for stylistic consistency.
+        self.escape_pad_layer_overrides: dict[tuple[str, str], "Layer"] = {}
+        _override_json = _os.environ.get("KICAD_TOOLS_ESCAPE_PAD_LAYER_OVERRIDES")
+        if _override_json:
+            try:
+                import json as _json
+
+                _raw = _json.loads(_override_json)
+                if isinstance(_raw, dict):
+                    for key, value in _raw.items():
+                        if not isinstance(key, str) or "." not in key:
+                            logger.warning(
+                                "Skipping malformed escape_pad_layer_overrides "
+                                "key %r (expected 'REF.PIN').",
+                                key,
+                            )
+                            continue
+                        ref, pin = key.split(".", 1)
+                        try:
+                            layer = Layer.from_kicad_name(value)
+                        except (ValueError, KeyError):
+                            logger.warning(
+                                "Skipping escape_pad_layer_overrides[%s] -- "
+                                "unknown layer %r (expected 'F.Cu', 'B.Cu', "
+                                "'In1.Cu', ...).",
+                                key,
+                                value,
+                            )
+                            continue
+                        self.escape_pad_layer_overrides[(ref, pin)] = layer
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "Failed to parse KICAD_TOOLS_ESCAPE_PAD_LAYER_OVERRIDES "
+                    "as JSON (%s); treating as empty.",
+                    exc,
+                )
+
     def _get_trace_width_for_net(self, net_name: str) -> float:
         """Get the trace width for a net based on its net class.
 
@@ -3244,6 +3312,31 @@ class EscapeRouter:
             # assignment.  Default is 0 (historical strict-by-position
             # alternation).
             needs_via = (i + phase_offset) % 2 == 1
+
+            # Issue #3257: per-pad escape-layer override.  When the caller
+            # has supplied an override for this ``(ref, pin)`` tuple, we
+            # force the layer assignment to match.  Mapping to ``F.Cu``
+            # (the pad's own surface layer on the standard front-side
+            # SSOP/TSSOP placement) clears ``needs_via``; mapping to any
+            # non-surface layer (B.Cu, In1.Cu, ...) sets it.  This is the
+            # surgical lever softstart uses to break the SWDIO/STATUS_LED
+            # B.Cu overlap in U1's east column without flipping the
+            # alternation globally (which regressed routing reach 8/10 ->
+            # 7/10 per #3235's negative-results note).
+            override_layer = self.escape_pad_layer_overrides.get(
+                (pad.ref, str(pad.pin))
+            )
+            if override_layer is not None:
+                needs_via = override_layer != pad.layer
+                logger.info(
+                    "Escape pad layer override (#3257): %s pin %s "
+                    "needs_via=%s (override=%s, pad.layer=%s)",
+                    pad.ref,
+                    pad.pin,
+                    needs_via,
+                    override_layer.value,
+                    pad.layer.value,
+                )
 
             if needs_via:
                 # Odd pin: Via to inner layer
