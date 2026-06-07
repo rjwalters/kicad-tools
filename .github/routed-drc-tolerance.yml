@@ -1012,7 +1012,24 @@ tolerances:
   # / allocator-state residual #3146 did not fully eliminate)
   # and is tracked separately.  The 28 floor reflects the CI
   # observed count -- the binding gate.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 28
+  #
+  # Tightened 28 -> 25 by Issue #3263 (M-G manufacturable
+  # campaign).  PRs #3197/#3198/#3202/#3203 (per-pad channel
+  # budget infrastructure + ADC restoration + analog-ground
+  # bridge audit) lifted board 07's net-yield from 25/31 -> 28/31
+  # (DQ3, MIPI_CLK_N, MIPI_DAT0_N still unrouted; previously
+  # also DQS_N, MIPI_CLK_P, MIPI_DAT1_P, TMDS_D1_P, A1).  The
+  # extra successfully-routed nets surface +1 diffpair_length_skew
+  # and +1 diffpair_routing_continuity each, but the gross error
+  # count drops 33 raw -> 23 raw (macOS local) because the
+  # previously stranded nets contributed clearance violations as
+  # they struggled to escape.  Floor 25 = observed 23 + 2-error
+  # slack (matching the post-#3146 convention for board 07).  The
+  # match-group rule continues to fire (ADDR_BUS skew 15.4 mm vs
+  # 0.5 mm tolerance, unchanged -- this is upstream of
+  # apply_match_group_tuning's reach and is tracked as a
+  # follow-up under the M-G campaign).
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 25
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
