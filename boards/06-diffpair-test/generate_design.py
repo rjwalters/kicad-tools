@@ -303,12 +303,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # the 1.0mm-pitch BGA pads without blocking adjacent pad access.
     # This is the same tier the Phase 3K impedance formulas were calibrated
     # against, so the router consumes the same stackup the DRC will check.
+    #
+    # Issue #3313 -- impedance-driven sizing + neck-down taper:
+    #   * ``manufacturer="jlcpcb"`` activates the validator's JLCPCB
+    #     impedance regex defaults (synthesised onto net classes that
+    #     do not declare an explicit ``target_*_impedance``).
+    #   * ``min_trace_width=0.10`` (4 mil JLCPCB 4-layer 1oz minimum)
+    #     enables the existing neck-down taper mechanic so the escape
+    #     router can fit narrow traces through fine-pitch BGA-49 / QFN /
+    #     FFC corridors while the corridor-region trace widens back to
+    #     the impedance-resolved width (~0.39 mm for 50 Ω SE / ~0.20 mm
+    #     for 100 Ω diff, etc.).  Without this, enabling the impedance
+    #     resolver would brick the BGA escapes (the 0.39 mm wide trace
+    #     does not fit through the 0.5 mm pad-pitch escape channel).
     rules = DesignRules(
         grid_resolution=0.05,
         trace_width=0.15,
         trace_clearance=0.15,
         via_drill=0.25,
         via_diameter=0.45,
+        manufacturer="jlcpcb",
+        min_trace_width=0.10,
+        neck_down_distance=1.0,
+        neck_down_threshold=0.8,
     )
 
     # Power and ground nets are handled via copper pours on the inner planes
@@ -346,23 +363,44 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # / ``intra_pair_clearance`` reflect the impedance solver's output for
     # the configured stackup.
     #
-    # NOTE for the scaffold: the impedance solver produces wide traces
-    # (~0.39mm for 50 Ohm single-ended on F.Cu with JLCPCB tier-1 stackup)
-    # which do not fit through the dense pad-pitch corridors at the BGA,
-    # QFN, and FFC connectors.  Routing succeeds only on 3/21 nets when
-    # the resolved widths are applied.  Trade-off: with the resolved
-    # widths most nets fail to route; without them the impedance DRC rule
-    # fires on 25 routed traces.  The scaffold ships with the impedance
-    # call WIRED but bypassed (declared via the net-class attribute) so:
-    #   (a) ``build_net_class_map`` still emits the target_diff_impedance /
-    #       target_single_impedance values for AC#6 assertions
-    #   (b) ``kct check --mfr jlcpcb`` reports impedance mismatches that
-    #       Phase 4N's CI gate will track as the routed-DRC tolerance
-    #       baseline
-    #   (c) once Phase 3I serpentine + the impedance-aware pathfinder
-    #       widening lands, this flag can be flipped to True and the
-    #       routed PCB regenerated for a tighter DRC bound
-    APPLY_IMPEDANCE_DRIVEN_SIZING = False
+    # Issue #3313 -- impedance sizing ENABLED (was disabled prior to PR
+    # closing #3313):
+    #
+    # The pre-fix scaffold disabled the resolver because the impedance
+    # solver produces wide traces (~0.39 mm for 50 Ω single-ended on F.Cu
+    # with the JLCPCB tier-1 stackup) which do not fit through the dense
+    # pad-pitch corridors at the BGA-49, QFN, and FFC connectors.
+    # Routing succeeded only on 3/21 nets when the resolved widths were
+    # applied uniformly.  The PR #3273 / #3315 trap then bit the next
+    # author: ``kct check`` WITHOUT ``--net-class-map`` made the dormant
+    # path look fine (3 errors) while a sidecar check revealed ~600
+    # impedance violations.
+    #
+    # The fix that lets this be ``True``:
+    #
+    #   1. ``DesignRules`` now declares ``min_trace_width=0.10`` and the
+    #      escape router already uses that width for fine-pitch BGA-49 /
+    #      QFN escape segments (escape.py:3303-3304, Issue #1778), so the
+    #      escape geometry succeeds even when the corridor trace is
+    #      ~0.39 mm wide.
+    #
+    #   2. ``DesignRules.get_neck_down_width`` (rules.py:498) now accepts
+    #      a ``base_width`` parameter, and the pathfinder passes the
+    #      per-net-class ``trace_width`` (the impedance-resolved width)
+    #      as the corridor base.  Segments taper from the impedance
+    #      width down to ``min_trace_width`` (0.10 mm) within
+    #      ``neck_down_distance`` of fine-pitch pads (#3313).
+    #
+    #   3. ``manufacturer="jlcpcb"`` is set so the resolver's clamp path
+    #      and validator regex defaults reference the same fab tier the
+    #      stackup ``Stackup.jlcpcb_4layer()`` represents.
+    #
+    # Heed PR #3273 -- the strict CI gate at
+    # ``scripts/ci/check_routed_drc.py`` runs WITH the net-class sidecar
+    # (Issue #3151), so the impedance count IS the gate.  This recipe
+    # must keep ``APPLY_IMPEDANCE_DRIVEN_SIZING = True`` and the
+    # impedance-resolved widths must land on the F.Cu signal nets.
+    APPLY_IMPEDANCE_DRIVEN_SIZING = True
     if APPLY_IMPEDANCE_DRIVEN_SIZING:
         try:
             from kicad_tools.manufacturers import get_profile
@@ -381,8 +419,40 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                 design_rules=mfr_rules,
                 layer="F.Cu",
             )
+
+            # Issue #3313 -- preserve recipe-author's tight ``intra_pair_clearance``.
+            #
+            # The resolver computes a (trace_width, intra_pair_clearance)
+            # pair from the coupled-lines model that maintains the target
+            # differential impedance.  On the JLCPCB tier-1 4-layer
+            # stackup the bisection picks a "loosely coupled" geometry
+            # (~8 mm gap with ~0.475 mm widths for 90/100 Ω diff).  That
+            # gap is correct physics, but it disables Phase 2E coupled
+            # routing on board 06 (the gap exceeds the available diff-
+            # pair fabric width and the gap-coupled routing collapses to
+            # independent per-net routing).
+            #
+            # The recipe deliberately declares ``intra_pair_clearance``
+            # = 0.075-0.10 mm on USB/USB3/PCIe/MIPI for tightly-coupled
+            # diff-pair routing -- an explicit author choice that takes
+            # precedence over the solver's "loosely coupled" branch.
+            # Re-apply the recipe's per-class ``intra_pair_clearance``
+            # (and ``clearance``) on each resolved class, keeping the
+            # resolver's impedance-driven ``trace_width`` override.
+            import dataclasses as _dc
+            for _name, _resolved_nc in list(resolved_map.items()):
+                _original_nc = net_class_map.get(_name)
+                if _original_nc is None:
+                    continue
+                resolved_map[_name] = _dc.replace(
+                    _resolved_nc,
+                    intra_pair_clearance=_original_nc.intra_pair_clearance,
+                    clearance=_original_nc.clearance,
+                )
+
             net_class_map = resolved_map
             print("   Impedance sizing applied (stackup: jlcpcb_4layer)")
+            print("   Recipe intra_pair_clearance preserved (resolver-computed gap discarded)")
             if mismatch_warnings:
                 print(f"   Stackup mismatch warnings: {len(mismatch_warnings)}")
             if clamp_errors:
