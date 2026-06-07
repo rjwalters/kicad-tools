@@ -1210,11 +1210,40 @@ class CppPathfinder:
         start_layer = self._grid.num_layers // 2  # Default to middle
         end_layer = self._grid.num_layers // 2
 
-        # Try to get actual layer from pad
+        # Try to get actual layer from pad.
+        #
+        # Issue #3304: Use the grid's ``layer_to_index`` mapping rather than
+        # ``layer.value % num_layers``.  The modulo trick happens to give
+        # the correct index for ``F.Cu`` (value=0) and for B.Cu only on
+        # 6-layer stacks (5 % 6 == 5).  For ALL other layer counts it
+        # produces the WRONG index for ``B.Cu`` (value=5):
+        #
+        #   - 2-layer: 5 % 2 = 1 ✓ (also happens to be correct)
+        #   - 4-layer: 5 % 4 = 1 ✗ (should be 3; In1.Cu picked instead)
+        #   - 6-layer: 5 % 6 = 5 ✓
+        #
+        # On 4-layer boards this caused the C++ A* to terminate on
+        # ``In1.Cu`` (the wrongly-mapped goal layer) whenever the
+        # destination virtual_pad was on ``B.Cu`` (the inner escape layer
+        # the 4L SIG-GND-PWR-SIG stack falls back to when no inner SIGNAL
+        # layers are present in ``_select_inner_escape_layer``).  The
+        # escape route lays its inner stub on B.Cu but the main router
+        # ends on In1.Cu -- they share an XY but no via bridges the layer
+        # gap, so the union-find connectivity check counts the pad as
+        # disconnected.  This was the root cause of the board 03
+        # USB_CC2 regression after #3278 narrowed the escape stub: the
+        # narrower stub stops blocking the main router's path so the
+        # A* now finds the wrong-layer goal cell instead of failing
+        # and falling back to a path that ends correctly.
+        #
+        # The ``layer_to_index`` lookup is what
+        # :meth:`Router.route` in ``pathfinder.py`` already uses
+        # (line 2348), so this brings the C++ backend into parity with
+        # the Python reference path.
         if hasattr(start.layer, "value"):
-            start_layer = start.layer.value % self._grid.num_layers
+            start_layer = self._grid.layer_to_index(start.layer.value)
         if hasattr(end.layer, "value"):
-            end_layer = end.layer.value % self._grid.num_layers
+            end_layer = self._grid.layer_to_index(end.layer.value)
 
         # Compute start/end layers for through-hole pads if not provided
         # Through-hole pads can be accessed on any routable layer
@@ -1943,7 +1972,11 @@ class CppPathfinder:
         end_gx, end_gy = self._grid._impl.world_to_grid(end.x, end.y)
 
         if layer is None:
-            layer = start.layer.value % self._grid.num_layers
+            # Issue #3304: use ``layer_to_index`` not ``layer.value %
+            # num_layers``.  See the comment in ``_route_impl`` for the
+            # full explanation of why the modulo trick mismaps B.Cu to
+            # an inner layer on 4-layer stacks.
+            layer = self._grid.layer_to_index(start.layer.value)
 
         # Trace a direct line from start to end using Bresenham's algorithm
         gx1, gy1 = start_gx, start_gy

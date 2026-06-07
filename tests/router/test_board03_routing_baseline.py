@@ -7,13 +7,14 @@ June 2026.
 Baseline measurement at HEAD (with ``kct route --backend cpp --seed 42
 --auto-fix --auto-fix-passes 2 --manufacturer jlcpcb-tier1``):
 
-- **Routed: 10/13 nets (77%)** post-#3278 escape contract correction
-  (PR #3300).  USB_D+, USB_D-, and USB_CC2 are partial.
-- **Layer count: 2** (the 2-layer attempt produces the best result)
+- **Routed: 11/13 nets (85%)** post-#3278 (PR #3300) and post-#3304
+  (this ratchet).  USB_D+ and USB_D- remain partial.
+- **Layer count: 4** (the 4-layer attempt produces the best result)
 - USB_D+ / USB_D- partial due to escape-geometry interactions with J1's
-  USB-C connector pad layout.  USB_CC2 regressed from 2/2 -> 1/2 pads
-  after the per-pad escape width fix shifted the main-router channel
-  topology — downstream gap tracked in #3304.
+  USB-C connector pad layout.  USB_CC2 recovered from 1/2 -> 2/2 pads
+  via the #3304 C++ backend layer-index fix (B.Cu was being mismapped
+  to In1.Cu on 4L stacks because of a ``layer.value % num_layers``
+  shortcut in ``_route_impl``).
 - The committed unrouted PCB has 16 nets total: 13 are routed, 3 are
   power/pour nets (VCC, VBUS, GND) that are skipped by the router and
   served by auto-pour zones instead.
@@ -28,46 +29,47 @@ Context (the "1/16" myth):
 June 7 2026 re-measurement (issue #3293):
     Re-measured after #3278 landed via PR #3300.  The fix was the
     primary blocker we expected to recover the 11/13 (or better)
-    floor, but it actually produced 10/13: the structural
+    floor, but it initially produced 10/13: the structural
     per-pad escape width fix corrected USB_D+/D- escape geometry,
-    but the new A* channel topology around J1 caused USB_CC2 to
-    regress from 2/2 -> 1/2 pads (now tracked under #3304).  Net
-    delta on board 03: 11/13 -> 10/13.  The committed routed PCB
+    but a long-latent C++ backend layer-index mismapping caused
+    USB_CC2 to regress from 2/2 -> 1/2 pads.  Issue #3304
+    diagnosed the mismapping (B.Cu mapped to In1.Cu on 4L stacks
+    via ``layer.value % num_layers``) and the fix recovered the
+    11/13 floor.  The committed routed PCB
     (``output/usb_joystick_routed.kicad_pcb``, last updated by PR
     #3195 on June 4) is still STRICTLY BETTER at 12/13 with 4 DRC
-    errors on jlcpcb-tier1.  We do NOT regenerate the committed PCB
-    on the June 7 refresh because doing so would overwrite the
-    better-quality 12/13 state with the current 10/13 floor.  The
-    route_demo.py vs ``kct route`` reach divergence is tracked in
-    issue #3308.
+    errors on jlcpcb-tier1.  The route_demo.py vs ``kct route``
+    reach divergence is tracked in issue #3308.
 
-Manufacturability verdict (June 7 2026):
-    Board 03 is NOT JLCPCB-tier1 ship-ready.  Even with #3278
-    landed (via PR #3300), a fresh route at HEAD produces only
-    10/13 nets (USB_D+, USB_D-, USB_CC2 partial).  The committed
-    routed PCB (the strictly better artifact we ship today) carries
+Manufacturability verdict (June 7 2026, post-#3304):
+    Board 03 is NOT JLCPCB-tier1 ship-ready.  After #3304's
+    C++ backend layer-index fix, a fresh route at HEAD produces
+    11/13 nets (USB_D+, USB_D- partial).  The committed routed
+    PCB (the strictly better artifact we ship today) carries
     4 DRC errors on jlcpcb-tier1:
       - 1 USB_D+ stranded pad
       - 1 diffpair_clearance_intra (USB_D+/USB_D-)
       - 1 clearance_segment_via
       - 1 clearance_pad_via
-    Recovering ship-ready will require fixing the USB_CC2
-    main-router regression (#3304) AND closing out the remaining
-    USB_D+/USB_D- partial routes (#3308 for the route_demo
-    divergence in the meantime).
+    Recovering ship-ready will require closing out the remaining
+    USB_D+/USB_D- partial routes (escape-geometry interactions
+    with J1's USB-C row -- separate work; #3308 for the
+    route_demo divergence in the meantime).
 
 Known follow-on issues that prevent a higher baseline:
     - **#3278** (closed by PR #3300): Escape generator used
       ``pads[0].net_name``'s net-class trace width for the whole
       row, pulling Power-class 0.5mm width into USB_D+/USB_D-
       HighSpeed escapes.  Fixed by per-pad ``escape_width``.
-      Landing it produced 10/13 (NOT the hoped-for 13/13) because
-      the corrected escapes shifted the main-router A* channel
-      topology and USB_CC2 regressed.
-    - **#3304**: Post-#3278 main-router gap — corrected escape
-      geometry shifts the A* channel topology near J1 and USB_CC2
-      regressed from 2/2 -> 1/2 pads.  Will ratchet the floor back
-      to 11 (or 12+) once USB_CC2 is recovered.
+    - **#3304** (THIS RATCHET): The C++ backend's ``_route_impl``
+      computed search-time goal layer as
+      ``end.layer.value % num_layers``.  For ``B.Cu`` (value=5)
+      on a 4L stack (num_layers=4), this gave index 1 (In1.Cu)
+      instead of 3 (B.Cu).  The narrower post-#3278 escape stub
+      stopped blocking the main router's path so the A* found
+      the wrong-layer goal cell.  Replaced with the canonical
+      ``self._grid.layer_to_index`` lookup that
+      ``Router.route`` in ``pathfinder.py`` already used.
     - **#3279**: 2-layer boards with GND pour on B.Cu have no
       pipeline step to stitch F.Cu SMD GND pads to the pour, so
       ``kct check`` reports ``Net 'GND' is partially routed: 26 of 29
@@ -82,10 +84,12 @@ Known follow-on issues that prevent a higher baseline:
 
 Acceptance criteria pinned by this test:
 
-1. **Reach floor**: ``kct route`` produces >= 10 routed signal nets
-   (out of 13).  Drops to 9 or fewer indicate a routing-quality
+1. **Reach floor**: ``kct route`` produces >= 11 routed signal nets
+   (out of 13).  Drops to 10 or fewer indicate a routing-quality
    regression on USB-C-class pad-density boards.  The floor was
-   temporarily relaxed from 11 to 10 by PR #3300 pending #3304.
+   temporarily relaxed from 11 to 10 by PR #3300 then ratcheted
+   back to 11 by the PR that closes #3304 (C++ backend layer-
+   index mismapping fix).
 2. **Deterministic across seeds**: seeds 1 / 42 / 99 all produce the
    same routed-net count, so a single-seed run is a reliable
    indicator of overall quality.
@@ -133,12 +137,24 @@ COMMITTED_ROUTED_PCB = BOARD_DIR / "output" / "usb_joystick_routed.kicad_pcb"
 # Post-#3278 escape contract correction (landed via PR #3300): the
 # per-pad ``escape_width`` fix corrected fine-pitch HighSpeed escapes
 # (USB_D+ improved 1/3 -> 2/3 pads), but the main router's A* path-finder
-# now sees a different B.Cu channel topology around J1 and regressed
-# USB_CC2 from 2/2 -> 1/2 pads.  Net delta on board 03: 11/13 -> 10/13.
-# The structural escape fix is correct and stays; the downstream
-# main-router gap is tracked in #3304 and will ratchet this floor back
-# to 11 (or 12+) once USB_CC2 is recovered.
-REQUIRED_NETS_ROUTED = 10
+# initially saw a different B.Cu channel topology around J1 and regressed
+# USB_CC2 from 2/2 -> 1/2 pads (10/13 fresh-route reach).
+#
+# Issue #3304 (THIS RATCHET): the regression was traced to a layer-
+# index mismapping in the C++ backend's ``_route_impl`` -- when a
+# destination virtual-pad sat on ``B.Cu`` (the inner-escape-layer
+# fallback the 4L SIG-GND-PWR-SIG stack picks when no inner SIGNAL
+# layer exists), the C++ A* used ``layer.value % num_layers`` to
+# compute the goal layer.  For B.Cu (enum value=5) on a 4L stack
+# (num_layers=4), the modulo gave index 1 (In1.Cu) instead of the
+# correct index 3 (B.Cu).  The A* then terminated on In1.Cu, the
+# escape stub laid down on B.Cu, and the union-find connectivity
+# check saw the pad as disconnected.  Replacing the modulo with
+# the canonical ``self._grid.layer_to_index`` lookup restores
+# USB_CC2 to 2/2 pads and lifts board 03 to 11/13.  USB_D+ /
+# USB_D- still defer to the main router due to escape-geometry
+# interactions with J1's USB-C row (separate work).
+REQUIRED_NETS_ROUTED = 11
 EXPECTED_TOTAL_NETS = 13
 
 # Committed-PCB ceiling pinned by the June 7 2026 measurement.  The
@@ -263,16 +279,16 @@ class TestBoard03RoutingBaseline:
     """
 
     def test_reach_meets_floor(self, route_stdout: str) -> None:
-        """``kct route --backend cpp`` produces at least 10/13 nets routed.
+        """``kct route --backend cpp`` produces at least 11/13 nets routed.
 
-        This is the post-#3278 baseline (PR #3300 corrected the per-pad
-        escape width).  USB_D+/USB_D- still defer to the main router due
-        to escape geometry on J1, and USB_CC2 regressed from 2/2 -> 1/2
-        pads after the corrected escapes shifted the channel topology.
-        Floor temporarily relaxed 11 -> 10 pending #3304.  A regression
-        below 10 means the router lost further ground on a USB-C-class
-        board — bisect against escape / diff-pair / negotiated-loop
-        changes.
+        This is the post-#3278 / post-#3304 baseline (PR #3300 corrected
+        the per-pad escape width; #3304 fixed the C++ backend layer-
+        index mismapping that prevented USB_CC2 from re-connecting).
+        USB_D+/USB_D- still defer to the main router due to escape
+        geometry on J1.  A regression below 11 means the router lost
+        ground on a USB-C-class board -- bisect against escape /
+        diff-pair / negotiated-loop changes and the layer_to_index
+        invariant in ``tests/router/test_cpp_backend_layer_mapping.py``.
         """
         parsed = _parse_routed_net_count(route_stdout)
         assert parsed is not None, (
@@ -291,11 +307,12 @@ class TestBoard03RoutingBaseline:
         assert routed >= REQUIRED_NETS_ROUTED, (
             f"Board 03 routing reach regressed: routed {routed}/{total}, "
             f"expected >= {REQUIRED_NETS_ROUTED}/{EXPECTED_TOTAL_NETS} "
-            "(post-#3278 baseline; floor relaxed pending #3304).  Common "
-            "regression sources to bisect:\n"
+            "(post-#3278 / post-#3304 baseline).  Common regression "
+            "sources to bisect:\n"
             "  - escape clearance / lateral_offset changes for USB-C "
-            "(escape contract is post-#3278; see #3304 for the "
-            "main-router downstream gap)\n"
+            "(escape contract is post-#3278)\n"
+            "  - C++ backend layer-index mapping in ``_route_impl`` "
+            "(post-#3304; should use ``layer_to_index`` not modulo)\n"
             "  - negotiated-loop rip-up policy on BLOCKED_BY_COMPONENT\n"
             "  - per-pad channel budget for J1's 12 SMT signal pads\n"
             "  - any change to ``_create_intra_ic_routes`` that affects "
@@ -329,7 +346,7 @@ class TestBoard03RoutingBaseline:
 
 @pytest.mark.slow
 def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path) -> None:
-    """The same reach (10/13) is produced for seeds 1, 42, and 99.
+    """The same reach (11/13) is produced for seeds 1, 42, and 99.
 
     The negotiated A* router uses the global seed for tie-breaks during
     A* and for the rip-up selection in BLOCKED_BY_COMPONENT.  For a
