@@ -1,0 +1,371 @@
+"""Board 02 (charlieplex-led) manufacturability baseline regression guard.
+
+This test pins the **measured manufacturable** state of the
+boards/02-charlieplex-led example board against the routing + DRC
+pipeline as of June 2026 (post-Wave-3 router fixes: PRs #3247 / #3248
+/ #3250 / and the #3214 route_demo subprocess port from #3207).
+
+Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
+``kct route --backend cpp``):
+
+- **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
+- **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
+- **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
+- **Deterministic output**: 22 routes / 155 segments / 24 vias /
+  324.66mm total length identical across seeds 42/43/44 -- this small
+  2-layer board has fully converged.
+
+Board 02 is the smallest non-trivial routing target in the repo
+(~37mm x ~22mm, 10 nets, 34 pads).  The 4 NODE_x charlieplex matrix
+nets connect to 4-6 LEDs each in an interleaved pattern -- per
+Issue #2432 this is uniquely hostile to the python backend (which
+gets 6/8 = 75%), but the cpp backend's negotiated congestion router
+handles it cleanly.
+
+The acceptance criteria pinned by this test:
+
+1. CPP routing achieves >= 8/8 signal nets routed (100% reach).
+   Regression to 7 or below indicates a foundational A* / negotiated-
+   loop regression on small dense topologies -- bisect against
+   PRs #3248 (Euclidean via-clearance), #3250 (sub-cell pad-margin),
+   and #3247 (auto-fix budget) first.
+2. DRC reports 0 errors at jlcpcb-tier1 profile (the consumer
+   manufacturer target).  Any non-zero clearance violation count here
+   signals a regression in the negotiated loop's clearance handling
+   OR a regression in the post-route auto-fix sweep.
+3. Output determinism: routes/segments/vias counts stable across
+   seeds 42/43/44 (the convergence claim).  This is the bit-perfect
+   property recorded above; a non-trivial drift indicates a
+   determinism regression (seed plumbing, hash-set iteration order,
+   etc.).
+
+History:
+
+- **PR #3036**: closed the original NODE_x routing gap by aligning
+  U1 pads to the 0.1mm router grid (Issue #2917 / #2933).
+- **PR #3102 + PR #3121**: same-net via-in-pad nudge sweep
+  (Issue #3112) -- moves escape vias off LED pads so the jlcpcb
+  ``via_in_pad`` rule passes.
+- **PR #3163** (Issue #3147): auto-export mfg bundle from the
+  ``generate_design.py`` recipes so fleet status reads ``ship_ready``.
+- **PR #3214** (Issue #3207): replace bare ``router.route_all()`` in
+  ``route_demo.py`` with subprocess ``kct route`` matching the
+  ``generate_design.py:route_pcb()`` recipe; established the 8/8 floor
+  for the demo path.
+- **PR #3247** (Issue #3238): reserve auto-fix budget + structured
+  skip signal.
+- **PR #3248** (Issue #3232 sibling): Euclidean via-clearance kernel.
+- **PR #3250** (Issue #3233): ``_add_pad_unsafe`` sub-cell pad-metal
+  margin closure.
+
+Related ongoing work:
+
+- Issue #2432: charlieplex NODE_x nets stall on python backend.  This
+  test pins cpp-backend reach only; python backend regression is
+  tracked separately.
+
+Runs unconditionally (no slow gate) -- board 02 routing completes in
+~6 s wall-clock, which is well within ``pnpm check:ci`` budget.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BOARD_DIR = REPO_ROOT / "boards" / "02-charlieplex-led"
+UNROUTED_PCB = BOARD_DIR / "output" / "charlieplex_3x3.kicad_pcb"
+
+# Acceptance criteria for the post-Wave-3 baseline.
+REQUIRED_SIGNAL_NETS_ROUTED = 8  # all 4 LINE_x + 4 NODE_x signal nets
+REQUIRED_SIGNAL_NETS_TOTAL = 8
+MAX_DRC_ERRORS = 0  # jlcpcb-tier1 must be perfectly clean
+
+
+def _parse_routed_signal_nets(stdout: str) -> tuple[int, int] | None:
+    """Extract the canonical ``Nets routed: N/M`` line from kct route output.
+
+    Board 02 has 10 named nets (LINE_A-D + NODE_A-D + GND + VCC), but
+    GND is in the skip list (auto-poured into a zone) and VCC is a
+    single-pad net handled implicitly, so the router-summary ``Nets
+    routed: N/M`` line shows 8/8 for the signal-net topology when fully
+    routed.
+
+    Returns ``(routed, total)`` or ``None`` if no match found.
+    """
+    # The canonical line emitted by the layer-escalation summary is the
+    # final one and the most reliable.
+    pattern = re.compile(r"Nets routed:\s+(\d+)/(\d+)")
+    matches = pattern.findall(stdout)
+    if matches:
+        # Take the last occurrence (final summary, after any iteration logs).
+        last = matches[-1]
+        return int(last[0]), int(last[1])
+    return None
+
+
+def _parse_drc_status(stdout: str) -> bool | None:
+    """Return True if the kct route output reports ``DRC PASSED``.
+
+    Returns False on explicit ``DRC FAILED``, None if neither is found.
+    """
+    if "DRC PASSED" in stdout:
+        return True
+    if "DRC FAILED" in stdout:
+        return False
+    return None
+
+
+@pytest.fixture(scope="module")
+def unrouted_pcb_path() -> Path:
+    """Verify the committed unrouted board 02 PCB exists for the route run."""
+    if not UNROUTED_PCB.exists():
+        pytest.skip(
+            f"Board 02 unrouted PCB not found at {UNROUTED_PCB!s}; "
+            "regenerate via `uv run python boards/02-charlieplex-led/generate_pcb.py`."
+        )
+    return UNROUTED_PCB
+
+
+@pytest.fixture(scope="module")
+def route_stdout(unrouted_pcb_path: Path) -> str:
+    """Run the canonical ``kct route`` invocation for board 02 once per module.
+
+    Mirrors the recipe in ``boards/02-charlieplex-led/generate_design.py``
+    (``route_pcb()`` at line ~528) and ``route_demo.py`` (subprocess
+    invocation post-PR #3214) but routes to a tmpdir so it never
+    overwrites the committed artifact.
+
+    Uses ``--backend cpp`` (the production default) with seed 42 for
+    deterministic reproduction.  The bit-perfect-across-seeds property
+    is checked separately by ``test_routing_output_deterministic``.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        pcb_copy = Path(td) / "charlieplex_3x3.kicad_pcb"
+        shutil.copy2(unrouted_pcb_path, pcb_copy)
+        output_path = Path(td) / "charlieplex_3x3_routed.kicad_pcb"
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "route",
+            str(pcb_copy),
+            "--output",
+            str(output_path),
+            "--seed",
+            "42",
+            "--manufacturer",
+            "jlcpcb-tier1",
+            "--backend",
+            "cpp",
+            "--timeout",
+            "300",
+            "--auto-fix",
+            "--auto-fix-passes",
+            "2",
+        ]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=480,
+            check=False,
+        )
+        # Exit codes from cli/route_cmd.py:
+        #   0 = full route + DRC clean
+        #   2 = partial routing below --min-completion
+        #   3 = >= min-completion but DRC violations remain
+        # The current baseline reaches 0; any other code is a regression.
+        # Codes 1 and 5 are fatal (crash / unhandled exception).
+        if proc.returncode in (1, 5):
+            pytest.fail(
+                f"kct route returned fatal exit code {proc.returncode}\n"
+                f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
+                f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+            )
+        return proc.stdout
+
+
+class TestBoard02ManufacturableBaseline:
+    """Pin the post-Wave-3 manufacturable baseline for board 02.
+
+    Runs ``kct route --backend cpp`` as a subprocess (the production
+    invocation path) and asserts the measured reach + DRC profile
+    match the documented baseline.
+    """
+
+    def test_all_signal_nets_routed(self, route_stdout: str) -> None:
+        """All 8 multi-pad signal nets must reach 100% connectivity.
+
+        The cpp backend's negotiated congestion router achieves 8/8
+        on this board's interleaved charlieplex topology.  A
+        regression below 8 would indicate one of:
+        - A regression in the negotiated rip-up loop in
+          ``router/core.py`` (the iteration-1-best-restoration path
+          in particular -- board 02 hits the
+          ``best-metric early-stop`` branch after 3 iterations).
+        - A regression in PR #3248's Euclidean via-clearance kernel
+          (more lateral via-escape conflicts on a dense board).
+        - A regression in PR #3250's ``_add_pad_unsafe`` sub-cell
+          pad-metal margin fix (the U1 DIP-8 cluster is the tightest
+          on this board).
+        - A regression in PR #3247's auto-fix budget reservation
+          (this board exercises auto-fix on the dense NODE_x
+          interleaving).
+
+        The python backend currently reaches only 6/8 on this board
+        (Issue #2432); this test pins the cpp path only.
+        """
+        parsed = _parse_routed_signal_nets(route_stdout)
+        assert parsed is not None, (
+            "Could not find 'Nets routed: N/M' line in kct route output. "
+            "Last 2000 chars:\n"
+            f"{route_stdout[-2000:]}"
+        )
+        routed, total = parsed
+        assert total == REQUIRED_SIGNAL_NETS_TOTAL, (
+            f"Board 02 signal-net total changed from "
+            f"{REQUIRED_SIGNAL_NETS_TOTAL} to {total}.  If this is "
+            "intentional (e.g. a new signal net added to the design), "
+            "update REQUIRED_SIGNAL_NETS_TOTAL in this test and the "
+            "baseline-measurement notes in the module docstring."
+        )
+        assert routed >= REQUIRED_SIGNAL_NETS_ROUTED, (
+            f"Board 02 cpp routing regressed to {routed}/"
+            f"{REQUIRED_SIGNAL_NETS_TOTAL} (expected >= "
+            f"{REQUIRED_SIGNAL_NETS_ROUTED}/{REQUIRED_SIGNAL_NETS_TOTAL}). "
+            "See the docstring history for bisect targets."
+        )
+
+    def test_drc_clean_at_jlcpcb_tier1(self, route_stdout: str) -> None:
+        """The post-route DRC sweep must pass at jlcpcb-tier1.
+
+        ``kct route`` runs ``drc_verify_and_nudge`` after routing
+        (see ``router/drc_nudge.py:1513``) and reports the final
+        status as either ``DRC PASSED`` or ``DRC FAILED``.
+
+        For board 02 the post-Wave-3 baseline produces 0 errors at
+        jlcpcb-tier1 across all 3 seeds tested (42/43/44) -- the
+        small board is fully converged.  Any DRC failure here
+        signals a regression in either:
+        - The negotiated loop's clearance handling.
+        - The post-route auto-fix / nudge sweep (PR #3247).
+        - The board's geometry (e.g. pad placement drift).
+        """
+        status = _parse_drc_status(route_stdout)
+        assert status is not None, (
+            "Could not find 'DRC PASSED' or 'DRC FAILED' line in kct "
+            "route output -- DRC step may have crashed before emitting "
+            "a status.  Last 2000 chars:\n"
+            f"{route_stdout[-2000:]}"
+        )
+        assert status is True, (
+            "Board 02 post-route DRC failed at jlcpcb-tier1.  The "
+            "post-Wave-3 baseline expects DRC PASSED.  Inspect the "
+            "kct route output for the failing rule type and (a) check "
+            "whether the negotiated loop's clearance handling regressed "
+            "or (b) whether the auto-fix sweep budget was exhausted "
+            "(Issue #3238 / PR #3247)."
+        )
+
+
+def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> None:
+    """The cpp-backend routing output is bit-perfect across seeds 42/43/44.
+
+    This pins the convergence claim made in the module docstring:
+    board 02 is small and the negotiated congestion router converges
+    fully, so different seeds produce identical route geometries
+    (same segment count, same via count, same total length).
+
+    A failure here means one of:
+    - Determinism regressed (e.g. a non-deterministic data structure
+      iteration order introduced by a future PR).
+    - The convergence assumption is no longer valid (e.g. router logic
+      now picks different but equally-good solutions per seed).
+
+    The latter is not necessarily a bug, but the test will catch it
+    so we can decide intentionally whether to relax the assertion.
+    """
+    seeds = [42, 43, 44]
+    results: dict[int, tuple[int, int, int, float]] = {}
+
+    for seed in seeds:
+        with tempfile.TemporaryDirectory() as td:
+            pcb_copy = Path(td) / "charlieplex_3x3.kicad_pcb"
+            shutil.copy2(unrouted_pcb_path, pcb_copy)
+            output_path = Path(td) / "charlieplex_3x3_routed.kicad_pcb"
+            cmd = [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "route",
+                str(pcb_copy),
+                "--output",
+                str(output_path),
+                "--seed",
+                str(seed),
+                "--manufacturer",
+                "jlcpcb-tier1",
+                "--backend",
+                "cpp",
+                "--timeout",
+                "300",
+                "--auto-fix",
+                "--auto-fix-passes",
+                "2",
+            ]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=480,
+                check=False,
+            )
+            if proc.returncode in (1, 5):
+                pytest.fail(
+                    f"kct route returned fatal exit code "
+                    f"{proc.returncode} on seed {seed}\n"
+                    f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
+                    f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+                )
+            stdout = proc.stdout
+
+            routes_m = re.search(r"Routes created:\s+(\d+)", stdout)
+            segments_m = re.search(r"Segments:\s+(\d+)", stdout)
+            vias_m = re.search(r"Vias:\s+(\d+)", stdout)
+            length_m = re.search(r"Total length:\s+([\d.]+)mm", stdout)
+            assert all([routes_m, segments_m, vias_m, length_m]), (
+                f"Could not parse route summary metrics for seed {seed}. "
+                f"Last 2000 chars:\n{stdout[-2000:]}"
+            )
+            assert routes_m is not None
+            assert segments_m is not None
+            assert vias_m is not None
+            assert length_m is not None
+            results[seed] = (
+                int(routes_m.group(1)),
+                int(segments_m.group(1)),
+                int(vias_m.group(1)),
+                float(length_m.group(1)),
+            )
+
+    # Reference values from the documented baseline (seed 42).
+    ref = results[seeds[0]]
+    for seed in seeds[1:]:
+        assert results[seed] == ref, (
+            f"Board 02 routing output diverged across seeds: "
+            f"seed {seeds[0]}={ref} vs seed {seed}={results[seed]}.  "
+            "This means either (a) determinism regressed (a future PR "
+            "introduced a non-deterministic data-structure iteration "
+            "order) or (b) the convergence assumption is no longer "
+            "valid (the router now picks different but equally-good "
+            "solutions per seed).  Inspect recent router changes "
+            "before relaxing the assertion."
+        )
