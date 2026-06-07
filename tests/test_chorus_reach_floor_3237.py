@@ -17,6 +17,27 @@ fixes are present) on 2026-06-06 evening:
     C++      | 5/48 (10%)| 3/48 (6%) | 4/48 (8%) | 5/48 | SKIPPED
 
 Both backends still produce dramatically less reach than May 10's 62%.
+
+Post-Wave-3 re-measurement (Issue #3252, 2026-06-06 night, HEAD fb400383):
+After PR #3247 landed (auto-fix budget reservation, the load-bearing fix
+per #3238's analysis), one cpp/seed 42 attempt was measured with timeout=480
+under contended CPU.  Result was WORSE, not better:
+
+    Backend  | Attempt 1 | Attempt 2 | Attempt 3 | Best  | AUTOFIX_SKIPPED
+    ---------+-----------+-----------+-----------+-------+----------------
+    C++      | 2/48 (4%) | 0/48 (0%) | (cut)     | 2/48  | NOT present
+
+The AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token from #3247 does NOT appear in
+stderr -- the auto-fix budget reservation is working correctly.  Yet reach
+DROPPED from 5/48 (post-Wave-1) to 2/48 (post-Wave-3).  This implies one
+of the Wave-2/3 PRs (most plausibly #3232 Euclidean trace kernel, #3248
+Euclidean via kernel, or #3250 sub-cell pad-metal margin) made the
+geometry tighter on chorus's dense dual-row J2 + SSOP packages.  The
+floor was NOT lowered to 2 because doing so would weaken the regression
+test; instead the post-Wave-3 measurement is recorded here as a known-bad
+baseline and follow-up has been filed (see #3252 close-out comment) to
+attribute the regression to a specific PR via git-bisect on the 1500s
+recipe.
 The mechanism is unchanged from the issue body: each attempt detail-routes
 27-30 nets but only 5-7 of those tally as "fully connected" in the final
 result.  The 20-25 "partial-route" nets per attempt never get cleaned
@@ -80,6 +101,13 @@ CHORUS_NETS_TOTAL = 48  # v19 stripped fixture; +2 vs v18 used in the
 # backends on 2026-06-06 evening.  CI must assert reach >= this so that
 # future PRs cannot silently degrade further while #3238 is in flight.
 # (Python = 6/48, C++ = 5/48 -> floor = 5.)
+#
+# Intentionally NOT lowered to 2 after the post-Wave-3 re-measurement
+# (#3252) discovered cpp/seed 42 dropped to 2/48 on HEAD fb400383.  The
+# point of this constant is to *catch* further regressions; lowering it
+# would weaken that guarantee.  Instead the slow integration test below
+# is left expecting >= 5 so it fails on post-Wave-3 HEAD, surfacing the
+# regression to anyone who opts in (KCT_RUN_CHORUS_REACH_FLOOR=1).
 CHORUS_POST_WAVE1_FLOOR = 5
 
 # Backend-specific best-result floors.  Useful when the integration
@@ -87,6 +115,16 @@ CHORUS_POST_WAVE1_FLOOR = 5
 # C++ stays within the issue body's AC #2 tolerance (C++ >= 80% of Python).
 CHORUS_POST_WAVE1_FLOOR_PYTHON = 6
 CHORUS_POST_WAVE1_FLOOR_CPP = 5
+
+# Post-Wave-3 re-measurement (Issue #3252, 2026-06-06 night, HEAD fb400383).
+# Single attempt with --backend cpp --seed 42 --timeout 480 (reduced from
+# 1500 due to system contention -- multiple loom workers running).  Best
+# result across the layer-escalation ladder was 4L 2/48 (4%); attempt 2
+# (4L ALL-SIG) routed 24 nets in detail-routing but 0 fully-connected.
+# AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token from #3247 was NOT present, so
+# the auto-fix budget reservation is engaging correctly; the bottleneck
+# is per-attempt detail-routing geometry, not auto-fix budget.
+CHORUS_POST_WAVE3_OBSERVED_CPP_SEED42 = 2  # Below the floor -> known bad
 
 # May-10 reach target (issue body AC #1).  Once #3238 lands and reach
 # recovers, the integration test below should be flipped from "assert
@@ -140,6 +178,33 @@ def test_post_wave1_measurement_documented() -> None:
         "Global floor must equal the smaller of the per-backend floors; "
         "drift here means the constants were updated inconsistently."
     )
+
+
+def test_post_wave3_remeasurement_documented() -> None:
+    """The post-Wave-3 re-measurement (Issue #3252) is recorded honestly.
+
+    Per the #3252 close-out, reach DROPPED from 5/48 (post-Wave-1) to
+    2/48 (post-Wave-3 cpp seed 42) -- i.e., one of the Wave-2/3 PRs
+    silently regressed chorus.  We intentionally do NOT lower the floor
+    constant; instead the post-Wave-3 measurement is captured here as a
+    distinct constant so a future Builder doing git-bisect to attribute
+    the regression has a precise pre-fix baseline to compare against.
+
+    Failure of this test means the post-Wave-3 measurement was edited
+    without updating the docstring header -- bump both together.
+    """
+    # The post-Wave-3 measurement was strictly below the post-Wave-1 floor
+    # (this is the regression #3252 documented).  If a later PR raises it
+    # back to >= floor on cpp/seed 42, retire this constant and update the
+    # slow integration test.
+    assert CHORUS_POST_WAVE3_OBSERVED_CPP_SEED42 < CHORUS_POST_WAVE1_FLOOR, (
+        "Post-Wave-3 cpp/seed42 measurement should still be below the "
+        "post-Wave-1 floor.  If reach has recovered, that's good news -- "
+        "retire CHORUS_POST_WAVE3_OBSERVED_CPP_SEED42 and update the "
+        "docstring header."
+    )
+    # Sanity: it's a non-negative net count.
+    assert 0 <= CHORUS_POST_WAVE3_OBSERVED_CPP_SEED42 <= CHORUS_NETS_TOTAL
 
 
 def test_post_wave1_floor_matches_nets_total() -> None:
