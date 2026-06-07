@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +82,20 @@ class RoutingStatus:
     blocking_incomplete_nets: int = 0
     unrouted_nets: int = 0
     error: str | None = None
+    # Issue #3280: when True, the routed PCB's net set disagrees with the
+    # source schematic's named-label set, so any ``X/Y nets`` count derived
+    # from the PCB is misleading as a current-routing signal. Filled in by
+    # ``_survey_board`` via ``_detect_source_drift``.
+    source_stale: bool = False
+    # Distinct counts that produced the drift verdict above. ``None`` means
+    # we could not extract them (no schematic alongside the PCB, parse
+    # failure, etc.) -- treated as "not source-stale".
+    schematic_net_count: int | None = None
+    pcb_net_count: int | None = None
+    # Sample of drifted nets (added/removed in PCB vs schematic), capped to
+    # keep JSON output bounded. Empty when ``source_stale`` is False.
+    drift_added: list[str] = field(default_factory=list)
+    drift_removed: list[str] = field(default_factory=list)
 
     @property
     def completion_pct(self) -> float:
@@ -92,15 +107,17 @@ class RoutingStatus:
     def routing_complete(self) -> bool:
         if self.error is not None:
             return False
+        # If the routed PCB is stale relative to its source schematic, its
+        # routed-net count is not a trustworthy signal for "is the current
+        # design routed?" -- treat as not complete (issue #3280).
+        if self.source_stale:
+            return False
         # A board is routing-complete iff every multi-pad net is fully
         # connected -- with one exception: plane/pour stitching residuals
         # (advisory connectivity per ``ADVISORY_RULE_IDS``) are excluded
         # because the CI gate at ``check_routed_drc`` already ignores
         # them. Single-pad nets are not counted by NetStatusAnalyzer.
-        return (
-            (self.blocking_incomplete_nets + self.unrouted_nets) == 0
-            and self.total_nets > 0
-        )
+        return (self.blocking_incomplete_nets + self.unrouted_nets) == 0 and self.total_nets > 0
 
     def to_dict(self) -> dict:
         data: dict = {
@@ -113,7 +130,14 @@ class RoutingStatus:
             "blocking_incomplete_nets": self.blocking_incomplete_nets,
             "unrouted_nets": self.unrouted_nets,
             "routing_complete": self.routing_complete,
+            "source_stale": self.source_stale,
+            "schematic_net_count": self.schematic_net_count,
+            "pcb_net_count": self.pcb_net_count,
         }
+        if self.drift_added:
+            data["drift_added"] = list(self.drift_added)
+        if self.drift_removed:
+            data["drift_removed"] = list(self.drift_removed)
         if self.error is not None:
             data["error"] = self.error
         return data
@@ -541,6 +565,122 @@ def _detect_erc(board_dir: Path) -> ERCStatus:
     return erc
 
 
+_SCH_LABEL_RE = re.compile(r'\(\s*(?:label|global_label|hierarchical_label)\s+"([^"]+)"')
+_PCB_NET_RE = re.compile(r'\(net\s+\d+\s+"([^"]+)"\)')
+
+
+def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
+    """Return the set of named labels declared in a KiCad schematic.
+
+    The detection is intentionally lightweight: we only collect text from
+    ``label`` / ``global_label`` / ``hierarchical_label`` s-expression
+    leaves. Auto-generated ``Net-(...)`` placeholders (KiCad's default
+    unconnected names) are skipped because they cannot be reliably
+    mapped to a PCB net name without a full netlister pass.
+
+    Returns ``None`` if the file cannot be read so callers can treat
+    that as "unknown source state" and skip drift gating.
+    """
+    try:
+        text = sch_path.read_text()
+    except OSError:
+        return None
+    labels: set[str] = set()
+    for m in _SCH_LABEL_RE.finditer(text):
+        name = m.group(1)
+        if not name:
+            continue
+        if name.startswith("Net-("):
+            continue
+        labels.add(name)
+    return labels
+
+
+def _extract_pcb_named_nets(pcb_path: Path) -> set[str] | None:
+    """Return the set of non-empty named nets declared in a KiCad PCB.
+
+    Only top-level ``(net N "name")`` declarations are matched; the
+    empty net 0 is dropped. Returns ``None`` on read failure.
+    """
+    try:
+        text = pcb_path.read_text()
+    except OSError:
+        return None
+    nets: set[str] = set()
+    for m in _PCB_NET_RE.finditer(text):
+        name = m.group(1)
+        if name:
+            nets.add(name)
+    return nets
+
+
+def _find_source_schematic(board_dir: Path) -> Path | None:
+    """Locate the source ``.kicad_sch`` for a board.
+
+    Looks in ``board_dir/output/`` first (where generators emit) and
+    falls back to ``board_dir/`` (legacy layout). Returns the first
+    matching schematic by sort order, or ``None`` if none exists.
+    """
+    for candidate_dir in (board_dir / "output", board_dir):
+        try:
+            matches = sorted(candidate_dir.glob("*.kicad_sch"))
+        except OSError:
+            continue
+        if matches:
+            return matches[0]
+    return None
+
+
+def _detect_source_drift(
+    routed_pcb: Path,
+    board_dir: Path,
+    *,
+    sample_limit: int = 8,
+) -> tuple[bool, int | None, int | None, list[str], list[str]]:
+    """Detect schematic-vs-PCB net-set drift (issue #3280).
+
+    Compares the set of named labels in the source ``.kicad_sch`` to the
+    set of named nets in the routed PCB. When the sets differ, the routed
+    PCB is treated as **source-stale**: its ``X/Y nets`` count is no
+    longer a trustworthy signal of current-design routing progress.
+
+    The check is deliberately conservative:
+      * If the schematic cannot be located or parsed, we return
+        ``(False, None, None, [], [])`` -- "unknown source state, do not
+        gate". This preserves the pre-fix behavior for boards where
+        drift detection cannot run.
+      * If the PCB nets cannot be parsed (extremely unlikely since
+        NetStatusAnalyzer already loaded the same file), we likewise
+        return "no drift".
+
+    Returns:
+        ``(source_stale, schematic_net_count, pcb_net_count,
+        added_in_pcb, removed_from_pcb)``. The ``added`` / ``removed``
+        samples are sorted and capped at ``sample_limit`` for bounded
+        JSON output.
+    """
+    sch_path = _find_source_schematic(board_dir)
+    if sch_path is None:
+        return (False, None, None, [], [])
+    sch_nets = _extract_schematic_nets(sch_path)
+    if sch_nets is None:
+        return (False, None, None, [], [])
+    pcb_nets = _extract_pcb_named_nets(routed_pcb)
+    if pcb_nets is None:
+        return (False, len(sch_nets), None, [], [])
+
+    added = sorted(pcb_nets - sch_nets)
+    removed = sorted(sch_nets - pcb_nets)
+    source_stale = bool(added) or bool(removed)
+    return (
+        source_stale,
+        len(sch_nets),
+        len(pcb_nets),
+        added[:sample_limit],
+        removed[:sample_limit],
+    )
+
+
 def _compute_routing(routed_pcb: Path) -> RoutingStatus:
     """Run NetStatusAnalyzer on a routed PCB and tally pads/nets."""
     status = RoutingStatus()
@@ -585,7 +725,21 @@ def _compute_blockers(
     if routing.error is not None:
         blockers.append(f"routing analysis failed: {routing.error}")
         return blockers
-    if not routing.routing_complete:
+    if routing.source_stale:
+        # Issue #3280: the routed PCB's net set disagrees with the source
+        # schematic, so the ``X/Y nets`` figure derived from the PCB is
+        # not a trustworthy current-routing signal. Emit a clearer blocker
+        # and suppress the misleading count. The schematic net count is
+        # surfaced when available so triage can see the actual target.
+        if routing.schematic_net_count is not None:
+            blockers.append(
+                "routed PCB stale (schematic drift: "
+                f"{routing.schematic_net_count} nets in schematic, "
+                f"{routing.pcb_net_count} in PCB)"
+            )
+        else:
+            blockers.append("routed PCB stale (schematic drift)")
+    elif not routing.routing_complete:
         # Use the advisory-filtered count so the blocker message agrees
         # with the verdict (plane/pour stitching residuals do not show
         # up here even though `incomplete_nets` may be non-zero).
@@ -630,6 +784,21 @@ def _survey_board(
         except OSError:
             routed_mtime = None
         routing = _compute_routing(routed_pcb)
+        # Issue #3280: detect schematic-vs-PCB net-set drift so the
+        # ``X/Y nets`` blocker does not lie when the routed PCB no longer
+        # reflects the current schematic.
+        (
+            source_stale,
+            sch_count,
+            pcb_count,
+            added,
+            removed,
+        ) = _detect_source_drift(routed_pcb, board_dir)
+        routing.source_stale = source_stale
+        routing.schematic_net_count = sch_count
+        routing.pcb_net_count = pcb_count
+        routing.drift_added = added
+        routing.drift_removed = removed
         mfg = _detect_manufacturing(board_dir)
         if (
             routed_mtime is not None
