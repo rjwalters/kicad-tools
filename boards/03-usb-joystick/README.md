@@ -77,7 +77,8 @@ This design demonstrates routing of different signal classes:
 |------|-------------|
 | `generate_pcb.py` | Script to generate the unrouted PCB file |
 | `generate_schematic.py` | Script to generate the schematic file |
-| `route_demo.py` | Script to run the autorouter |
+| `route_demo.py` | Thin wrapper that delegates to `generate_design.py:route_pcb()` (Issue #3308) |
+| `generate_design.py` | End-to-end design flow (schematic + PCB + route + export); owns the canonical routing recipe |
 | `output/usb_joystick.kicad_sch` | Generated schematic |
 | `output/usb_joystick.kicad_pcb` | Generated unrouted PCB |
 | `output/usb_joystick_routed.kicad_pcb` | Routed PCB output |
@@ -116,6 +117,15 @@ Creates `output/usb_joystick.kicad_pcb` with all components placed and nets defi
 # From repository root
 uv run python boards/03-usb-joystick/route_demo.py
 ```
+
+Issue #3308 (June 2026): `route_demo.py` is a thin wrapper that
+delegates to `generate_design.py:route_pcb()`.  This guarantees the
+demo recipe and the end-to-end build recipe share a single
+implementation -- they cannot drift again.  `kct build --step route`
+also invokes `route_demo.py` (see
+`src/kicad_tools/cli/build_cmd.py:1189`), so all three entry points
+(``route_demo.py``, ``kct build --step route``, ``generate_design.py``)
+now produce the same routed output.
 
 This:
 1. Loads the unrouted PCB
