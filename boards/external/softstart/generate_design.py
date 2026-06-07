@@ -36,6 +36,37 @@ Audit-repair notes (2026-05-18, issue #3050):
     routing with the C++ backend and longer timeouts will close most of
     these but cannot finish a perfect route on the TSSOP-20 cluster.
 
+Manufacturability baseline (2026-06-06, post-Wave-3 router fixes):
+
+- ``python generate_design.py`` (this script, default path): 8/10 signal
+  nets fully routed, 32 DRC errors (23 real clearance + 9 expected
+  power-net connectivity).
+- ``kct route --backend cpp --layers 2 --skip-nets <power>`` (preferred
+  manufacturing path): **10/10 signal nets topologically connected**, 4
+  residual ``clearance_segment_segment`` violations on B.Cu between
+  SWDIO and STATUS_LED in the U1 east-side cluster.  ``kct fix-drc``
+  cannot resolve those 4 because nudges break connectivity in the tight
+  U1 cluster.
+
+The 10/10 reach is pinned by
+``tests/router/test_softstart_manufacturable_baseline.py`` (gated on
+``KICAD_RUN_SLOW_SOFTSTART_REACH=1``).
+
+Preferred manufacturing recipe (after running this script)::
+
+    SKIP="AC_LINE,AC_NEUTRAL,FUSED_LINE,GND,+3.3V,VRECT,SCAP_POS+,SCAP_POS_GND,SCAP_NEG+,SCAP_NEG_GND,ISENSE_POS"
+    kct route boards/external/softstart/output/softstart.kicad_pcb \\
+        --output boards/external/softstart/output/softstart_routed.kicad_pcb \\
+        --backend cpp --layers 2 --no-auto-layers \\
+        --manufacturer jlcpcb-tier1 \\
+        --skip-nets "$SKIP" \\
+        --seed 42 --timeout 300
+    kct check  boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb-tier1
+    kct export boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb-tier1
+
+The board is manufacturable modulo the 4 SWDIO/STATUS_LED residual
+clearance violations (filed as a follow-up issue per #3235).
+
 Usage:
     python generate_design.py [output_dir]
 """
