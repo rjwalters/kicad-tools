@@ -380,9 +380,7 @@ class TestFleetStatusBasics:
             artifacts_older_than_routed=True,
         )
 
-        result = main(
-            ["status", "--boards-dir", str(boards), "--format", "json"]
-        )
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
         assert result == 2
 
         captured = capsys.readouterr()
@@ -504,9 +502,7 @@ class TestFleetStatusBasics:
 
         # Plain ASCII only (no Unicode glyphs, no checkmarks/x-marks).
         forbidden_chars = "✓✗✅❌─━│"
-        assert not any(c in out for c in forbidden_chars), (
-            "Unicode glyphs leaked into table output"
-        )
+        assert not any(c in out for c in forbidden_chars), "Unicode glyphs leaked into table output"
 
         # YES / NO ship status appears.
         assert "YES" in out
@@ -743,9 +739,7 @@ class TestFleetStatusAdvisoryFilter:
             has_manifest=True,
         )
 
-        result = main(
-            ["status", "--boards-dir", str(boards), "--format", "json"]
-        )
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
         # All boards ship-ready -> exit 0.
         assert result == 0
 
@@ -760,9 +754,7 @@ class TestFleetStatusAdvisoryFilter:
         assert b["ship_ready"] is True
         assert b["blockers"] == []
 
-    def test_fleet_status_blocking_signal_does_not_ship(
-        self, tmp_path: Path, capsys
-    ):
+    def test_fleet_status_blocking_signal_does_not_ship(self, tmp_path: Path, capsys):
         """Board with a genuine signal-net gap must still fail ship-ready."""
         boards = tmp_path / "boards"
         make_fake_board(
@@ -775,9 +767,7 @@ class TestFleetStatusAdvisoryFilter:
             has_manifest=True,
         )
 
-        result = main(
-            ["status", "--boards-dir", str(boards), "--format", "json"]
-        )
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
         # Not ship-ready -> exit 2.
         assert result == 2
 
@@ -789,13 +779,9 @@ class TestFleetStatusAdvisoryFilter:
         assert b["routing"]["routing_complete"] is False
         # Blocker message should use the filtered count -- one blocking
         # signal-net gap, not "0 nets" or the raw count.
-        assert any(
-            "incomplete routing (1/" in blocker for blocker in b["blockers"]
-        ), b["blockers"]
+        assert any("incomplete routing (1/" in blocker for blocker in b["blockers"]), b["blockers"]
 
-    def test_fleet_status_advisory_table_shows_yes(
-        self, tmp_path: Path, capsys
-    ):
+    def test_fleet_status_advisory_table_shows_yes(self, tmp_path: Path, capsys):
         """The Ship? column reads YES even when the raw incomplete>0."""
         boards = tmp_path / "boards"
         make_fake_board(
@@ -866,3 +852,270 @@ class TestFleetStatusAdvisoryFilter:
         assert "blocking_incomplete_nets" in data["boards"][0]["routing"]
         # Raw field preserved.
         assert "incomplete_nets" in data["boards"][0]["routing"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #3280: schematic-vs-PCB drift detection
+# ---------------------------------------------------------------------------
+
+
+# A minimal schematic with three named labels (matches the EXTRA_NET_PCB
+# below for the no-drift case and EXTRA_NET_DRIFT_PCB for the drift case).
+THREE_NET_SCH = """(kicad_sch
+  (version 20240108)
+  (generator "test")
+  (paper "A4")
+  (label "VCC" (at 10 10 0))
+  (label "GND" (at 10 20 0))
+  (label "SIG1" (at 10 30 0))
+)
+"""
+
+
+# A PCB whose named-net set matches THREE_NET_SCH exactly (VCC, GND, SIG1).
+# No drift -> blocker text is the normal "incomplete routing" form.
+MATCHING_NETS_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG1")
+  (gr_rect (start 0 0) (end 30 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 3 "SIG1"))
+  )
+)
+"""
+
+
+# A PCB with an EXTRA net (USB_CC1) that does not appear in THREE_NET_SCH.
+# This is the board-03 condition: routed PCB has more nets than schematic.
+EXTRA_NET_DRIFT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG1")
+  (net 4 "USB_CC1")
+  (gr_rect (start 0 0) (end 30 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 2 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 3 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 4 "USB_CC1"))
+  )
+)
+"""
+
+
+def _make_board_with_schematic(
+    boards_dir: Path,
+    name: str,
+    *,
+    sch_text: str,
+    pcb_text: str,
+    has_gerbers: bool = True,
+    has_bom: bool = True,
+    has_cpl: bool = True,
+    has_manifest: bool = True,
+) -> tuple[Path, Path]:
+    """Build a board fixture that includes a ``.kicad_sch`` alongside the
+    routed PCB so source-drift detection (issue #3280) has something to
+    compare against.
+
+    Returns ``(routed_pcb_path, schematic_path)``.
+    """
+    routed_pcb = make_fake_board(
+        boards_dir,
+        name,
+        pcb_text=pcb_text,
+        has_gerbers=has_gerbers,
+        has_bom=has_bom,
+        has_cpl=has_cpl,
+        has_manifest=has_manifest,
+    )
+    # Schematic lives alongside the routed PCB under output/ to match the
+    # real-board layout used by all in-repo boards (see boards/0*-*/output).
+    sch_path = routed_pcb.parent / f"{name.replace('-', '_')}.kicad_sch"
+    sch_path.write_text(sch_text)
+    return routed_pcb, sch_path
+
+
+class TestFleetStatusSourceDrift:
+    """Issue #3280 -- routed PCB stale relative to source schematic.
+
+    When a board's committed ``_routed.kicad_pcb`` carries a different
+    set of named nets than its ``.kicad_sch`` (because the schematic was
+    regenerated but the PCB was not re-routed), the ``X/Y nets`` figure
+    derived from the PCB is meaningless as a current-routing signal. The
+    fleet-status command must suppress the misleading
+    ``incomplete routing (X/Y nets)`` blocker and surface a clearer
+    ``routed PCB stale (schematic drift)`` blocker instead.
+
+    Real-world trigger: board 03 (`03-usb-joystick`) reported
+    ``1/16 nets`` from a stale PCB while ``kct route`` against the
+    current schematic produces 11/13.
+    """
+
+    def test_drift_suppresses_incomplete_routing_blocker(self, tmp_path: Path, capsys):
+        """Drift detected -> no ``incomplete routing`` blocker."""
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "drift-board",
+            sch_text=THREE_NET_SCH,
+            pcb_text=EXTRA_NET_DRIFT_PCB,
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+
+        # The misleading "incomplete routing (X/Y nets)" blocker must
+        # NOT fire -- this is the core regression guard.
+        assert not any("incomplete routing" in blocker for blocker in b["blockers"]), b["blockers"]
+        # A drift-specific blocker fires instead, and surfaces the
+        # schematic net count (3) so triage can see the actual target.
+        assert any(
+            "routed PCB stale" in blocker and "schematic drift" in blocker
+            for blocker in b["blockers"]
+        ), b["blockers"]
+        # JSON exposes the structured drift signal.
+        routing = b["routing"]
+        assert routing["source_stale"] is True
+        assert routing["schematic_net_count"] == 3
+        assert routing["pcb_net_count"] == 4
+        assert "USB_CC1" in routing.get("drift_added", [])
+
+    def test_no_drift_preserves_routing_blocker(self, tmp_path: Path, capsys):
+        """No drift -> existing ``incomplete routing`` / ship behavior wins.
+
+        Guards that boards with a fresh schematic-matching routed PCB
+        still report routing status via the original code path.
+        """
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "matched-board",
+            sch_text=THREE_NET_SCH,
+            pcb_text=MATCHING_NETS_PCB,
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+
+        routing = b["routing"]
+        assert routing["source_stale"] is False
+        assert routing["schematic_net_count"] == 3
+        assert routing["pcb_net_count"] == 3
+        # No drift blocker.
+        assert not any("routed PCB stale" in blocker for blocker in b["blockers"]), b["blockers"]
+
+    def test_missing_schematic_does_not_gate(self, tmp_path: Path, capsys):
+        """No ``.kicad_sch`` -> drift detection is a no-op (back-compat).
+
+        Boards without a schematic alongside the routed PCB cannot be
+        evaluated for drift; the surveyor must NOT synthesize a false
+        ``routed PCB stale`` blocker in that case. This preserves the
+        pre-fix behavior for legacy/fixture boards.
+        """
+        boards = tmp_path / "boards"
+        # make_fake_board creates ONLY a routed PCB -- no schematic.
+        make_fake_board(
+            boards,
+            "no-sch-board",
+            pcb_text=MATCHING_NETS_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+        routing = b["routing"]
+
+        assert routing["source_stale"] is False
+        assert routing["schematic_net_count"] is None
+        assert not any("routed PCB stale" in blocker for blocker in b["blockers"])
+
+    def test_drift_blocker_message_format(self, tmp_path: Path, capsys):
+        """Blocker text surfaces both the schematic and PCB net counts.
+
+        Curators reading the blocker should know exactly how far apart
+        the two sides have drifted without parsing JSON.
+        """
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "drift-board",
+            sch_text=THREE_NET_SCH,
+            pcb_text=EXTRA_NET_DRIFT_PCB,
+        )
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+
+        drift_blockers = [blocker for blocker in b["blockers"] if "routed PCB stale" in blocker]
+        assert len(drift_blockers) == 1, b["blockers"]
+        # Format: "routed PCB stale (schematic drift: N nets in schematic, M in PCB)"
+        assert "3 nets in schematic" in drift_blockers[0]
+        assert "4 in PCB" in drift_blockers[0]
+
+    def test_drift_ship_ready_false(self, tmp_path: Path, capsys):
+        """Drift forces ship_ready=False even when routing looks complete.
+
+        The dangerous false-negative this guards: a stale PCB whose
+        nets happen to be all 100% connected would otherwise read as
+        ship-ready, hiding the schematic drift entirely. The drift
+        blocker MUST gate ship-readiness.
+        """
+        boards = tmp_path / "boards"
+        _make_board_with_schematic(
+            boards,
+            "drift-board",
+            sch_text=THREE_NET_SCH,
+            pcb_text=EXTRA_NET_DRIFT_PCB,
+        )
+
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
+        # Not ship-ready -> exit 2.
+        assert result == 2
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+        assert b["ship_ready"] is False
+        assert b["routing"]["routing_complete"] is False
