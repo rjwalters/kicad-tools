@@ -100,6 +100,32 @@ Pathfinder::Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_rou
         }
     }
 
+    // Issue #3234: Pre-compute the circular (Euclidean) kernel offsets at
+    // ``via_half_cells_``.  Sibling to ``circular_kernel_offsets_`` --
+    // ``is_via_blocked_diag`` had the same Chebyshev/Euclidean mismatch as
+    // the trace kernel that PR #3232 closed.  Cells in the diagonal corners
+    // of the legacy ``[-r, r]`` square have Euclidean distance ``r * sqrt(2)``,
+    // so the square kernel admitted candidate via centers whose true
+    // Euclidean clearance fell up to ``r * (1 - 1/sqrt(2)) ~= 0.293 * r``
+    // cells short of the rule.  This matches the trace-side mechanism and
+    // contributes to ``clearance_segment_via`` / ``clearance_pad_via``
+    // violations on dense layouts.
+    {
+        const int r = via_half_cells_;
+        const int r_sq = r * r;
+        via_kernel_offsets_.clear();
+        via_kernel_offsets_.reserve(
+            static_cast<size_t>(3.15f * r_sq + 1));
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx * dx + dy * dy <= r_sq) {
+                    via_kernel_offsets_.emplace_back(
+                        static_cast<int8_t>(dx), static_cast<int8_t>(dy));
+                }
+            }
+        }
+    }
+
     // Default: all layers are routable
     for (int i = 0; i < grid.layers(); ++i) {
         routable_layers_.push_back(i);
@@ -350,35 +376,83 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
     out_world_y = 0.0f;
 
     int radius = (radius_override > 0) ? radius_override : via_half_cells_;
-    for (int layer = 0; layer < grid_.layers(); ++layer) {
-        for (int dy = -radius; dy <= radius; ++dy) {
-            for (int dx = -radius; dx <= radius; ++dx) {
-                int cx = x + dx, cy = y + dy;
+
+    // Issue #3234: Switch the via-clearance kernel from Chebyshev (square)
+    // to Euclidean (circular disc).  Sibling to PR #3232 (Issue #3229)
+    // which closed the same gap on the trace side.  The DRC measures
+    // Euclidean clearance; the legacy square kernel passed candidates at
+    // the diagonal corners whose true Euclidean clearance fell as short
+    // as ``radius * (1 - 1/sqrt(2)) ~= 0.293 * radius`` cells.
+    //
+    // Fast path: when ``radius_override`` is zero, use the cached
+    // ``via_kernel_offsets_`` populated in the constructor.  Slow path
+    // (per-net via radius override): iterate the bounding square and
+    // apply an inline Euclidean filter -- no temporary vector allocation
+    // (mirrors PR #3232's canonical approach for ``is_trace_blocked``).
+    const bool use_cached = (radius_override <= 0);
+    const int radius_sq = radius * radius;
+
+    if (use_cached) {
+        for (int layer = 0; layer < grid_.layers(); ++layer) {
+            for (const auto& [dx_off, dy_off] : via_kernel_offsets_) {
+                const int cx = x + static_cast<int>(dx_off);
+                const int cy = y + static_cast<int>(dy_off);
                 if (!grid_.is_valid(cx, cy, layer)) {
                     // Grid-cell rejection: no specific blocking net.
                     return true;
                 }
 
                 const auto& cell = grid_.at(cx, cy, layer);
-                if (cell.blocked) {
+                if (!cell.blocked) {
+                    continue;
+                }
+
+                if (allow_sharing) {
+                    // Negotiated mode: mirror Python
+                    // pathfinder.py::_is_via_blocked SoA branch.
+                    // Issue #2989: own-net ``is_obstacle`` cells must
+                    // remain passable so the routing net's own via can
+                    // land inside its destination pad's footprint.
+                    if (cell.is_obstacle && cell.net != net) {
+                        return true;  // Foreign-net obstacle blocks
+                    }
+                    if (cell.net == 0 && cell.usage_count == 0) {
+                        return true;
+                    }
+                    if (cell.net != net && cell.usage_count == 0) {
+                        return true;
+                    }
+                    // Allow with cost for routed cells / own-net obstacle.
+                } else {
+                    if (cell.is_obstacle || cell.net != net) {
+                        return true;
+                    }
+                }
+            }
+        }
+    } else {
+        // Slow path: per-net radius override.  Iterate the square and
+        // filter to the Euclidean disc inline.
+        for (int layer = 0; layer < grid_.layers(); ++layer) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int dist_sq = dx * dx + dy * dy;
+                    if (dist_sq > radius_sq) {
+                        continue;  // Outside the disc.
+                    }
+                    const int cx = x + dx, cy = y + dy;
+                    if (!grid_.is_valid(cx, cy, layer)) {
+                        return true;
+                    }
+
+                    const auto& cell = grid_.at(cx, cy, layer);
+                    if (!cell.blocked) {
+                        continue;
+                    }
+
                     if (allow_sharing) {
-                        // Negotiated mode: mirror Python
-                        // pathfinder.py::_is_via_blocked SoA branch
-                        // (lines 1428-1453).  Issue #2989: own-net
-                        // ``is_obstacle`` cells (destination /
-                        // diff-pair-partner pad metal painted by
-                        // PR #2928 first-touch + PR #2942 rect-aware
-                        // halo) MUST remain passable so the routing
-                        // net's own via can land inside its
-                        // destination pad's footprint.  Without this
-                        // gate, partner B's pad rejects every via
-                        // candidate -> A* cannot reach partner ->
-                        // diff-pair lands 1-of-2 endpoints.  Matches
-                        // USB3/PCIE/MIPI failure on board 06 and
-                        // USB_D-/USB_CC2/JOY_Y on board 03.
-                        // Foreign-net obstacles still hard-reject.
                         if (cell.is_obstacle && cell.net != net) {
-                            return true;  // Foreign-net obstacle blocks
+                            return true;
                         }
                         if (cell.net == 0 && cell.usage_count == 0) {
                             return true;
@@ -386,8 +460,6 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                         if (cell.net != net && cell.usage_count == 0) {
                             return true;
                         }
-                        // Allow with cost for routed cells / own-net
-                        // obstacle.
                     } else {
                         if (cell.is_obstacle || cell.net != net) {
                             return true;

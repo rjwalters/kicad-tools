@@ -242,10 +242,24 @@ class Router:
         )
 
         # Pre-compute via checking offsets for vectorized blocking check (Issue #966)
-        # Store all (dx, dy) pairs within via radius for batch cell lookup
+        # Issue #3234: Filter to the Euclidean disc (``dx*dx + dy*dy <= r*r``)
+        # rather than the full Chebyshev square.  Sibling to PR #3232 (#3229)
+        # which switched the trace kernel from Chebyshev to Euclidean.  The
+        # DRC measures Euclidean clearance, and the legacy square kernel
+        # admitted via centers at the diagonal corners whose true Euclidean
+        # clearance fell up to ``via_half_cells * (1 - 1/sqrt(2)) ~= 0.293 *
+        # via_half_cells`` cells short of the rule -- the via-side mirror of
+        # the trace-side diagonal corner gap.  At ``via_half_cells = 2`` the
+        # disc has 13 cells vs 25 for the square (-48%); at ``via_half_cells
+        # = 3`` it has 29 vs 49 (-41%) -- so the disc kernel is a small
+        # speedup at the via-check hot path, not a slowdown.
         via_r = self._via_half_cells
+        via_r_sq = via_r * via_r
         via_offsets = [
-            (dx, dy) for dy in range(-via_r, via_r + 1) for dx in range(-via_r, via_r + 1)
+            (dx, dy)
+            for dy in range(-via_r, via_r + 1)
+            for dx in range(-via_r, via_r + 1)
+            if dx * dx + dy * dy <= via_r_sq
         ]
         self._via_offset_dx = np.array([dx for dx, _ in via_offsets], dtype=np.int32)
         self._via_offset_dy = np.array([dy for _, dy in via_offsets], dtype=np.int32)
@@ -1618,16 +1632,25 @@ class Router:
         # When a custom radius is provided, compute offsets on the fly
         # rather than using the pre-computed arrays (which use the global
         # via diameter).
+        #
+        # Issue #3234: Filter the per-net override offsets to the
+        # Euclidean disc (``dx*dx + dy*dy <= radius*radius``) -- mirrors
+        # the constructor-time filter applied to ``_via_offset_dx`` /
+        # ``_via_offset_dy`` and the C++ ``via_kernel_offsets_``.  Without
+        # this filter the override path would silently revert to the
+        # legacy Chebyshev kernel, reintroducing the diagonal-corner gap
+        # for nets with custom via diameters.
         if radius is not None and radius != self._via_half_cells:
             via_r = radius
-            via_offset_dx = np.array(
-                [dx for dy in range(-via_r, via_r + 1) for dx in range(-via_r, via_r + 1)],
-                dtype=np.int32,
-            )
-            via_offset_dy = np.array(
-                [dy for dy in range(-via_r, via_r + 1) for dx in range(-via_r, via_r + 1)],
-                dtype=np.int32,
-            )
+            via_r_sq = via_r * via_r
+            via_offsets = [
+                (dx, dy)
+                for dy in range(-via_r, via_r + 1)
+                for dx in range(-via_r, via_r + 1)
+                if dx * dx + dy * dy <= via_r_sq
+            ]
+            via_offset_dx = np.array([dx for dx, _ in via_offsets], dtype=np.int32)
+            via_offset_dy = np.array([dy for _, dy in via_offsets], dtype=np.int32)
         else:
             via_offset_dx = self._via_offset_dx
             via_offset_dy = self._via_offset_dy

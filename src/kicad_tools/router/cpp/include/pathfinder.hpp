@@ -283,6 +283,21 @@ private:
     // on the fly -- those branches are not perf-critical.
     std::vector<std::pair<int8_t, int8_t>> circular_kernel_offsets_;
 
+    // Issue #3234: Pre-computed circular (Euclidean) kernel offsets for
+    // ``via_half_cells_``.  Sibling to ``circular_kernel_offsets_``;
+    // closes the Chebyshev->Euclidean gap on the via-clearance side
+    // (``is_via_blocked_diag``).  Each pair ``(dx, dy)`` satisfies
+    // ``dx*dx + dy*dy <= via_half_cells_ * via_half_cells_``.  Replaces
+    // the square Chebyshev scan that produced diagonal-corner
+    // ``clearance_segment_via`` / ``clearance_pad_via`` violations whose
+    // true Euclidean clearance fell up to
+    // ``via_half_cells_ * (1 - 1/sqrt(2))`` cells short of the rule.
+    //
+    // ``radius_override > 0`` paths use an inline Euclidean filter over
+    // the bounding square rather than a temporary vector allocation
+    // (mirrors PR #3232's canonical pattern for ``is_trace_blocked``).
+    std::vector<std::pair<int8_t, int8_t>> via_kernel_offsets_;
+
     // Routable layer indices
     std::vector<int> routable_layers_;
 
