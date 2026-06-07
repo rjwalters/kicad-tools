@@ -27,14 +27,15 @@ The fleet-status fingerprint (54/55 pads ~ 98% manufacturer-readiness)
 is the higher-level invariant this pin is protecting.  Today board 04
 ships at:
 
-  * 9/9 signal nets routed (committed PCB; the fresh router can drop NRST
-    on some seeds -- see follow-on issue filed under #3261 for the
-    intermittent NRST regression).
-  * 1 blocking error (SWDIO/BOOT0 clearance at B.Cu (143.8, 119.7), the
-    historically-unstable cluster tracked under #2834).
-  * 1 advisory connectivity finding (U2.8 LQFP-48 corner GND pad the
-    stitcher could not reach even with --micro-via).
-  * CI gate: PASS (1 <= floor of 1; advisory excluded per ``DRCChecker``).
+  * 8/9 signal nets routed (committed PCB; NRST stranded as advisory
+    connectivity, documented as correct router behaviour per #3286 --
+    the U2.7/U2.8 channel is below the 0.127 mm jlcpcb-tier1 clearance
+    floor that the post-#3128 clearance cluster correctly enforces).
+  * 0 blocking errors (the SWDIO/BOOT0 ``clearance_segment_via`` that
+    drove the prior 1-error floor is gone in the post-#3286 routed PCB).
+  * 2 advisory connectivity findings: NRST (J1.5 -> U2.7 stranded per
+    #3286) plus the U2.8/U2.35 LQFP-48 corner GND stitch gap (#3267).
+  * CI gate: PASS (0 <= floor of 0; advisory excluded per ``DRCChecker``).
 
 This test is a stateless source pin -- it does NOT re-route the board.
 It checks the committed routed PCB against the gate that ships with the
@@ -47,7 +48,12 @@ References:
   ``manufacturers:`` override block.
 - PR #3218 -- ``--mfr jlcpcb-tier1`` in the recipe (closes #3208).
 - PR #3128 -- micro-via in-pad rescue (#3118), tightened floor 4 -> 1.
-- Issue #2834 -- the manufacturing-ready cluster the residual rides with.
+- PR #3286 -- documented NRST clearance regression, refreshed routed PCB,
+  tightened floor 1 -> 0 (closes #3266).
+- PR #3288 -- narrowed NC-pin plane-net classifier so stripped 2L recipe
+  also reaches 8/9 (closes #3281, #3268).
+- Issue #2834 -- the manufacturing-ready cluster the residuals ride with.
+- Issue #3298 -- post-#3286 refresh verification against current main.
 """
 
 from __future__ import annotations
@@ -180,13 +186,21 @@ def test_board_04_advisory_connectivity_does_not_balloon(
 ) -> None:
     """Advisory connectivity findings must stay within the documented bound.
 
-    The committed PCB carries ONE advisory connectivity finding (U2.8 GND
-    stitch gap, documented in ``.github/routed-drc-tolerance.yml`` lines
-    1140-1151).  If a future router change strands additional pads, the
-    fleet-status manufacturer-readiness percentage drops -- catching this
-    at PR time avoids silently regressing the board's functional
-    completeness even though the CI gate (which filters advisories)
-    still passes.
+    The post-#3286 committed PCB carries TWO advisory connectivity
+    findings:
+
+      1. NRST is stranded at J1.5 because the U2.7 NRST -> U2.8 GND
+         channel is below the 0.127 mm jlcpcb-tier1 clearance floor;
+         this is correct router behaviour per #3286.
+      2. The U2.8/U2.35 LQFP-48 corner GND stitch gap (#3267) -- the
+         standard 0.6 mm and 0.3 mm micro-vias both collide with
+         neighbouring escape traces.
+
+    Both are documented in ``.github/routed-drc-tolerance.yml``. If a
+    future router change strands additional pads, the fleet-status
+    manufacturer-readiness percentage drops -- catching this at PR time
+    avoids silently regressing the board's functional completeness even
+    though the CI gate (which filters advisories) still passes.
 
     The threshold is intentionally lenient (<= 3 connectivity findings)
     to avoid flapping on small router state changes; this catches
@@ -197,8 +211,9 @@ def test_board_04_advisory_connectivity_does_not_balloon(
     connectivity = [v for v in violations if v.get("rule_id") == "connectivity"]
     connectivity_count = len(connectivity)
 
-    # Soft cap: 3 advisory findings.  Today's count is 1.  A jump to 4+
-    # signals a multi-net stranding event worth investigating.
+    # Soft cap: 3 advisory findings.  Post-#3286 count is 2 (NRST
+    # strand + U2.8/U2.35 GND stitch gap).  A jump to 4+ signals a
+    # multi-net stranding event worth investigating.
     SOFT_CAP = 3
     assert connectivity_count <= SOFT_CAP, (
         f"Board 04 has {connectivity_count} advisory connectivity findings; "
