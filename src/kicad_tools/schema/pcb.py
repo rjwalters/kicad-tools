@@ -49,6 +49,89 @@ def _is_power_net(name: str, pattern: re.Pattern[str] | None = None) -> bool:
     return pat.search(name) is not None
 
 
+# ---------------------------------------------------------------------------
+# Power-rail name canonicalisation (issue #3302)
+# ---------------------------------------------------------------------------
+#
+# KiCad's stock ``power:`` library uses ``V`` as a decimal separator for
+# sub-volt fractional rails (``+3V3``, ``+1V8``, ``+2V5``) while the
+# kicad-tools netlist-sync convention emits the same rails with a decimal
+# point (``+3.3V``, ``+1.8V``, ``+2.5V``). The two forms refer to the
+# same electrical net but the strings differ, so a naive set-difference
+# between schematic-label names and PCB-net names sees a spurious add
+# and a spurious remove for every fractional rail.
+#
+# ``_POWER_RAIL_ALIAS_RE`` recognises the canonical-form pair and
+# ``canonicalize_power_net`` rewrites both forms to a single canonical
+# string (``+N.MV``, no decimal-point removal) so the two sides of a
+# drift comparison agree without affecting non-power names. Whole-volt
+# rails (``+5V`` / ``+5.0V``) are also normalised; this keeps the table
+# closed and avoids drift surprises on boards that emit ``+5.0V``.
+#
+# The table is deliberately limited to the ``+N`` and ``+N.M`` rails
+# called out in the schema convention documentation
+# (``src/kicad_tools/schematic/models/elements_mixin.py:394-397``). It
+# is *not* a general fuzzy net matcher; non-matching names are returned
+# unchanged.
+
+# ``+3V3`` / ``+3.3V`` / ``+3.0V`` (whole volt with explicit fraction)
+_POWER_RAIL_V_DECIMAL_RE = re.compile(r"^([+\-])(\d+)V(\d+)$")
+_POWER_RAIL_DOT_DECIMAL_RE = re.compile(r"^([+\-])(\d+)\.(\d+)V$")
+_POWER_RAIL_WHOLE_RE = re.compile(r"^([+\-])(\d+)V$")
+
+
+def canonicalize_power_net(name: str) -> str:
+    """Return the canonical form of a power-rail net name.
+
+    The canonical form is ``+N.MV`` for fractional rails (``+3V3`` ->
+    ``+3.3V``) and ``+NV`` for whole-volt rails (``+5.0V`` -> ``+5V``).
+    Names that don't match the power-rail-alias grammar are returned
+    unchanged, so the function is a pure no-op for signal names like
+    ``BOOT0``, ``LED_K`` or ``USB_CC1``.
+
+    Examples:
+        ``+3V3``    -> ``+3.3V``
+        ``+3.3V``   -> ``+3.3V``
+        ``+1V8``    -> ``+1.8V``
+        ``+5V``     -> ``+5V``
+        ``+5.0V``   -> ``+5V``
+        ``-3V3``    -> ``-3.3V``
+        ``VBUS``    -> ``VBUS`` (no change)
+        ``BOOT0``   -> ``BOOT0`` (no change)
+    """
+    if not name:
+        return name
+    m = _POWER_RAIL_V_DECIMAL_RE.match(name)
+    if m:
+        sign, whole, frac = m.group(1), m.group(2), m.group(3)
+        # Strip a trailing zero fraction (``+3V0`` -> ``+3V`` canonical).
+        if frac == "0":
+            return f"{sign}{whole}V"
+        return f"{sign}{whole}.{frac}V"
+    m = _POWER_RAIL_DOT_DECIMAL_RE.match(name)
+    if m:
+        sign, whole, frac = m.group(1), m.group(2), m.group(3)
+        # Whole-volt rail expressed with explicit ``.0`` fraction.
+        if frac == "0":
+            return f"{sign}{whole}V"
+        return f"{sign}{whole}.{frac}V"
+    m = _POWER_RAIL_WHOLE_RE.match(name)
+    if m:
+        sign, whole = m.group(1), m.group(2)
+        return f"{sign}{whole}V"
+    return name
+
+
+def canonicalize_power_nets(names: set[str]) -> set[str]:
+    """Apply :func:`canonicalize_power_net` to every name in a set.
+
+    Returns a new set; the input is not mutated. Non-power-rail names
+    pass through unchanged so the caller can treat the result as a
+    drop-in replacement for the original set.
+    """
+    return {canonicalize_power_net(n) for n in names}
+
+
 @dataclass
 class Layer:
     """PCB layer definition."""
