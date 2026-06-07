@@ -15,6 +15,13 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
   324.66mm total length identical across seeds 42/43/44 -- this small
   2-layer board has fully converged.
 
+**Re-verified 2026-06-07** on current main (issue #3292):
+- Includes Wave 6/7 PRs #3286 (board-04 NRST refresh), #3288 (plane-net
+  classifier narrowing), #3290 (2L stitch when GND pour is cross-layer).
+- All 3 cpp seeds (42/43/44) still produce bit-perfect
+  22/155/24/324.66mm output, 8/8 nets, DRC PASS at jlcpcb-tier1.
+- ``kct fleet status`` reports ``ship_ready=YES`` for board 02.
+
 Board 02 is the smallest non-trivial routing target in the repo
 (~37mm x ~22mm, 10 nets, 34 pads).  The 4 NODE_x charlieplex matrix
 nets connect to 4-6 LEDs each in an interleaved pattern -- per
@@ -369,3 +376,18 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
             "solutions per seed).  Inspect recent router changes "
             "before relaxing the assertion."
         )
+
+    # Exact baseline numbers (re-verified 2026-06-07 on current main).
+    # Pinning these catches "all-seeds drift identically" regressions
+    # that the cross-seed equality check above would silently allow
+    # (e.g. a router cost-function tweak that improves all seeds in
+    # lockstep -- still a measurable regression vs the PR #3265 baseline).
+    EXPECTED = (22, 155, 24, 324.66)
+    assert ref == EXPECTED, (
+        f"Board 02 routing baseline drifted: got {ref}, expected "
+        f"{EXPECTED}. This is consistent across seeds (so no determinism "
+        "regression), but a real router-output change.  Investigate the "
+        "router PRs landed since 2026-06-07 (see PR #3265 baseline log) "
+        "and decide whether the change is desired -- if yes, update "
+        "EXPECTED here AND the docstring baseline."
+    )
