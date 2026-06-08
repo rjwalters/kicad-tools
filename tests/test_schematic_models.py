@@ -2256,6 +2256,187 @@ class TestSchematicValidationAdvanced:
         unconnected = [i for i in issues if "unconnected" in i["type"]]
         assert len(unconnected) == 0
 
+    def _build_lm393_symdef(self):
+        """Build a SymbolDef mimicking a 3-unit LM393 comparator.
+
+        Mirrors how the SExp library parser tags pins with their wrapping
+        unit number (``LM393_<unit>_<style>`` symbols):
+
+        - Unit 1 pins (channel A inputs and output): IN+ (pin 3), IN-
+          (pin 2), OUT (pin 1).
+        - Unit 2 pins (channel B inputs and output): IN+ (pin 5), IN-
+          (pin 6), OUT (pin 7).
+        - Unit 3 pins (package power): V+ (pin 8), V- (pin 4).
+
+        All pins are positioned at the symbol origin to simplify wire
+        attachment.  The validator only cares about per-instance pin
+        positions, not the relative geometry between units, so colocated
+        pins are sufficient for this test.
+        """
+        return SymbolDef(
+            lib_id="Comparator:LM393",
+            name="LM393",
+            raw_sexp="",
+            pins=[
+                # Unit 1 (channel A)
+                Pin(name="-", number="2", x=0, y=0, angle=0, length=0,
+                    pin_type="input", unit=1),
+                Pin(name="+", number="3", x=0, y=0, angle=0, length=0,
+                    pin_type="input", unit=1),
+                Pin(name="OUT_A", number="1", x=0, y=0, angle=0, length=0,
+                    pin_type="open_collector", unit=1),
+                # Unit 2 (channel B)
+                Pin(name="-", number="6", x=0, y=0, angle=0, length=0,
+                    pin_type="input", unit=2),
+                Pin(name="+", number="5", x=0, y=0, angle=0, length=0,
+                    pin_type="input", unit=2),
+                Pin(name="OUT_B", number="7", x=0, y=0, angle=0, length=0,
+                    pin_type="open_collector", unit=2),
+                # Unit 3 (package power)
+                Pin(name="V+", number="8", x=0, y=0, angle=0, length=0,
+                    pin_type="power_in", unit=3),
+                Pin(name="V-", number="4", x=0, y=0, angle=0, length=0,
+                    pin_type="power_in", unit=3),
+            ],
+        )
+
+    def test_check_unconnected_pins_multi_unit_only_placed_unit(self):
+        """Multi-unit symbol: validator only flags pins on placed units (#3349).
+
+        Place only unit 1 of a 3-unit LM393.  The other units' pins
+        (which include the V+/V- power pins in unit 3) belong to a
+        different ``SymbolInstance`` that hasn't been added, so they
+        must NOT be flagged as unconnected on the placed instance.
+        Otherwise builders that wire each unit at its own location see
+        spurious "Pin V- (power_in) on U7 ... not connected" errors
+        like the ones reported in issue #3349 on softstart rev B.
+        """
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sym_def = self._build_lm393_symdef()
+
+        # Place ONLY unit 1 (channel A) at the origin.  Add wires for
+        # this unit's three pins so they're connected.
+        inst1 = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0,
+            reference="U7", value="LM393", unit=1,
+        )
+        sch.symbols.append(inst1)
+        # All unit-1 pins are colocated at (100, 100) per the test
+        # symbol; one wire there connects them.
+        sch.add_wire((100, 100), (100, 50), snap=False)
+
+        issues = sch._check_unconnected_pins()
+        # The validator must not report unit-2 or unit-3 pins (V+, V-,
+        # channel B inputs/outputs) on this instance — those belong to
+        # placements that haven't been added yet.
+        u7_unconnected = [
+            i for i in issues
+            if "unconnected" in i["type"] and "U7" in i["message"]
+        ]
+        assert u7_unconnected == [], (
+            "Validator flagged pins from non-placed units of multi-unit "
+            f"symbol U7: {[i['message'] for i in u7_unconnected]}"
+        )
+
+    def test_check_unconnected_pins_multi_unit_all_placed_connected(self):
+        """Multi-unit symbol: all units placed and connected → 0 errors.
+
+        Mirrors the acceptance criterion from issue #3349: an LM393
+        with all 3 units placed and every pin wired should produce
+        zero ``unconnected_pin`` issues for that reference.
+        """
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sym_def = self._build_lm393_symdef()
+
+        for unit in (1, 2, 3):
+            sch.symbols.append(
+                SymbolInstance(
+                    symbol_def=sym_def,
+                    x=100.0 + unit * 10,
+                    y=100.0,
+                    rotation=0,
+                    reference="U7",
+                    value="LM393",
+                    unit=unit,
+                )
+            )
+            # Wire at the placement point to connect that unit's pins.
+            sch.add_wire((100.0 + unit * 10, 100), (100.0 + unit * 10, 50),
+                         snap=False)
+
+        issues = sch._check_unconnected_pins()
+        u7_unconnected = [
+            i for i in issues
+            if "unconnected" in i["type"] and "U7" in i["message"]
+        ]
+        assert u7_unconnected == [], (
+            "All units of multi-unit symbol U7 are connected; expected 0 "
+            f"unconnected pin issues, got: {[i['message'] for i in u7_unconnected]}"
+        )
+
+    def test_validate_multi_unit_no_duplicate_reference(self):
+        """Multi-unit instances sharing a reference are not duplicates (#3349).
+
+        The validator's duplicate-reference check used to flag every
+        second-and-later ``SymbolInstance`` regardless of unit, which
+        produced false positives for normal multi-unit placements
+        (KiCad ERC accepts them).  Distinct ``unit`` numbers under the
+        same ``lib_id`` must not be reported as duplicates.
+        """
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sym_def = self._build_lm393_symdef()
+
+        for unit in (1, 2, 3):
+            sch.symbols.append(
+                SymbolInstance(
+                    symbol_def=sym_def,
+                    x=100.0 + unit * 10,
+                    y=100.0,
+                    rotation=0,
+                    reference="U7",
+                    value="LM393",
+                    unit=unit,
+                )
+            )
+
+        issues = sch.validate()
+        dup = [i for i in issues if i["type"] == "duplicate_reference"]
+        assert dup == [], (
+            "Multi-unit placements with distinct unit numbers must not be "
+            f"flagged as duplicate references; got: {[i['message'] for i in dup]}"
+        )
+
+    def test_validate_same_unit_twice_still_flagged(self):
+        """Genuine duplicates (same ref + same unit) must still error.
+
+        Defends against over-correction: if two ``SymbolInstance`` rows
+        claim to be the same unit of the same lib_id, that's a real
+        configuration bug and the validator should still flag it.
+        """
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sym_def = self._build_lm393_symdef()
+
+        # Two copies of unit 1 — both claim to be channel A of U7.
+        for x_offset in (10, 20):
+            sch.symbols.append(
+                SymbolInstance(
+                    symbol_def=sym_def,
+                    x=100.0 + x_offset,
+                    y=100.0,
+                    rotation=0,
+                    reference="U7",
+                    value="LM393",
+                    unit=1,
+                )
+            )
+
+        issues = sch.validate()
+        dup = [i for i in issues if i["type"] == "duplicate_reference"]
+        assert len(dup) == 1, (
+            "Expected exactly one duplicate_reference error for two "
+            f"copies of U7 unit 1, got: {[i['message'] for i in dup]}"
+        )
+
     def test_check_disconnected_labels_connected(self):
         """Labels at wire endpoints don't generate errors."""
         from kicad_tools.schematic.models.elements import Label

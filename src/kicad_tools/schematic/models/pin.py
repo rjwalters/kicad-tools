@@ -31,7 +31,14 @@ class Pin:
     angle: float  # Direction pin extends INTO symbol (0=right, 90=up, 180=left, 270=down)
     length: float
     pin_type: str = "passive"
-    unit: int = 1  # Unit number for multi-unit symbols (1-indexed; default 1)
+    # Unit number this pin belongs to. KiCad multi-unit symbols use child symbols
+    # named ``Name_<unit>_<style>`` (e.g. ``LM393_2_1``) — each unit owns the pins
+    # declared inside its child symbol. Unit ``0`` is a special "common" unit
+    # whose pins are shared by every unit (e.g. shared package power pins). The
+    # default of ``0`` keeps single-unit symbols and legacy parsers unaffected:
+    # they look like "one common unit", so they continue to match SymbolInstance
+    # placements regardless of the instance's ``unit`` field.
+    unit: int = 0
 
     def connection_point(self) -> tuple[float, float]:
         """Get the wire connection point in symbol-local (library Y-up) coords.
