@@ -56,6 +56,45 @@ Manufacturability verdict (June 7 2026, post-#3304):
     with J1's USB-C row -- separate work; #3308 for the
     route_demo divergence in the meantime).
 
+June 8 2026 refresh attempt (issue #3335):
+    Attempted to refresh the committed artifacts using the canonical
+    ``generate_design.py:route_pcb()`` recipe (per PR #3327's
+    consolidation).  The fresh route landed at 11/13 with 3 DRC
+    errors (USB_CC1 + USB_D- partial; USB_D+ now routes fully).
+    This is a DIFFERENT failure mode from the committed PCB --
+    the committed PCB has USB_D+ partial (DRC=4); the fresh PCB
+    has USB_CC1 and USB_D- partial (DRC=3).
+
+    Per-net comparison:
+      | Net      | Committed (12/13)     | Fresh (11/13)        |
+      | -------- | --------------------- | -------------------- |
+      | USB_D+   | partial (2/3 pads)    | COMPLETE             |
+      | USB_D-   | COMPLETE              | partial (2/3 pads)   |
+      | USB_CC1  | COMPLETE              | partial (1/2 pads)   |
+      | USB_CC2  | COMPLETE              | COMPLETE             |
+      | VBUS     | COMPLETE              | COMPLETE             |
+
+    The fresh route trades USB_D+ partial (committed) for USB_CC1 +
+    USB_D- partial (refresh).  Net count regresses 12 -> 11, so the
+    committed PCB remains strictly better in routing reach.  The
+    refresh was NOT shipped (per PR #3273 lesson: do not ship
+    artifacts that regress committed reach).
+
+    Schematic drift is structural and unaffected by refresh:
+    the schematic represents the USB connector with a simplified
+    4-pin USB_PIN_MAP (VCC/USB_D-/USB_D+/GND) while the PCB
+    places a full 16-pin USB Type-C connector with VBUS/USB_CC1/
+    USB_CC2 net assignments.  ``kct fleet status`` reports the
+    drift as "13 nets in schematic, 16 in PCB" (3 added: VBUS,
+    USB_CC1, USB_CC2).  Clearing the drift requires either:
+      (a) adding VBUS/USB_CC1/USB_CC2 global_label calls to the
+          schematic generator in ``create_usb_joystick_schematic``
+          (out of scope for the refresh-only ticket; tracked
+          separately under "schematic gap" follow-ups), or
+      (b) the unlabeled-local-net headroom being raised from 2
+          to >= 3 in ``_DRIFT_ADDED_ONLY_TOLERANCE`` (a fleet-side
+          fix; would mask drift more broadly).
+
 Known follow-on issues that prevent a higher baseline:
     - **#3278** (closed by PR #3300): Escape generator used
       ``pads[0].net_name``'s net-class trace width for the whole
@@ -103,11 +142,12 @@ Acceptance criteria pinned by this test:
 References:
     - Parent tracking issue: #3259
     - June 7 refresh tracking issue: #3293
+    - June 8 refresh attempt tracking issue: #3335
     - Stale fleet-status reporting: #3280
     - Escape clearance bug (fixed): #3278 (PR #3300)
     - Main-router USB_CC2 regression follow-up: #3304
     - 2-layer pour stitching gap: #3279 (PR #3290 partial fix)
-    - route_demo regression: #3308
+    - route_demo regression: #3308 (closed by PR #3327 recipe consolidation)
     - Existing board-03 demo-path test: tests/test_board_03_regression.py
 """
 
@@ -160,11 +200,14 @@ EXPECTED_TOTAL_NETS = 13
 # Committed-PCB ceiling pinned by the June 7 2026 measurement.  The
 # committed ``usb_joystick_routed.kicad_pcb`` (last updated by PR
 # #3195 on June 4) is strictly better than a fresh route at HEAD
-# (12/13 with 4 DRC errors vs the current 10/13 fresh route — see
-# #3304 for USB_CC2 main-router regression and #3308 for the
-# route_demo divergence).  We assert that the committed file cannot
-# silently degrade past this ceiling without somebody re-running the
-# recipe AND updating these numbers in the same commit.
+# (12/13 with 4 DRC errors vs a fresh canonical-recipe route of
+# 11/13 with 3 DRC errors — see #3304 for USB_CC2 main-router
+# regression and #3308 for the now-resolved route_demo divergence).
+# Re-confirmed June 8 2026 (#3335 refresh attempt): the fresh route
+# routes USB_D+ but strands USB_CC1 and USB_D-, a different failure
+# mode but same net-count regression.  We assert that the committed
+# file cannot silently degrade past this ceiling without somebody
+# re-running the recipe AND updating these numbers in the same commit.
 MAX_COMMITTED_DRC_ERRORS = 4
 EXPECTED_COMMITTED_DRC_RULES = {
     "clearance_segment_via",
