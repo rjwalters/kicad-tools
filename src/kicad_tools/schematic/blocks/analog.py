@@ -574,3 +574,234 @@ def create_hall_sensor_input(
         filter_cap=filter_cap,
         ref_start=ref_start,
     )
+
+
+class OvercurrentComparator(CircuitBlock):
+    """Open-collector comparator + threshold divider + pull-up for hardware OC trip.
+
+    Used in motor / load-switch protection circuits where the firmware
+    monitoring loop is too slow to respond to a fault: a fast analog
+    comparator (LM393, open-collector output) watches a current-sense
+    voltage and trips an IRQ line the moment the sense voltage crosses
+    a programmed threshold.  Because the LM393 output is open-collector
+    it can also be DIO-OR'd with other failsafe lines without needing
+    extra logic.
+
+    Topology:
+
+                              VCC (+3.3V)
+                               │
+                              [R_PULLUP]
+                               │
+        SHUNT_VOLTAGE ───[+]   │
+                       (LM393)─┴─── IRQ_OC (open-collector output)
+        V_THRESHOLD ────[-]
+            ▲
+            │
+            ├──[R_TH_HI]── VCC
+            │
+            └──[R_TH_LO]── GND
+
+    The threshold divider sets the trip point: when SHUNT_VOLTAGE
+    rises above V_THRESHOLD, the comparator output is released (high-
+    Z, pulled high by R_PULLUP) → IRQ_OC asserts.
+
+    Ports:
+        - SHUNT_VOLTAGE: Positive comparator input — wire to the
+          current-sense amplifier output (e.g., INA180A3 OUT pin).
+        - V_THRESHOLD: Negative input — labelled, but already wired
+          to the internal divider; exposed for inspection / probing.
+        - IRQ_OUTPUT: Open-collector comparator output (pulled up
+          to VCC via R_PULLUP).
+        - VCC: Comparator supply rail.
+        - GND: Comparator ground / divider return.
+
+    Example:
+        from kicad_tools.schematic.blocks import OvercurrentComparator
+
+        oc = OvercurrentComparator(
+            sch, x=200, y=80,
+            ref="U6",
+            shunt_voltage_node=ina180_out_pos,
+            threshold_value_v=2.0,
+            irq_output_pin="OC_TRIP",
+        )
+        sch.add_wire(oc.port("VCC"), (oc.port("VCC")[0], RAIL_3V3))
+        sch.add_wire(oc.port("GND"), (oc.port("GND")[0], RAIL_GND))
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        ref: str = "U6",
+        shunt_voltage_node: tuple[float, float] | None = None,
+        threshold_value_v: float = 2.0,
+        irq_output_pin: str | None = None,
+        vcc_voltage: float = 3.3,
+        comparator_symbol: str = "Comparator:LM393",
+        comparator_footprint: str = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+        resistor_symbol: str = "Device:R",
+        pullup_value: str = "10k",
+        ref_r_start: int = 1,
+        r_ref_prefix: str = "R",
+    ):
+        """Create an overcurrent comparator block.
+
+        Args:
+            sch: Schematic to add to.
+            x: X coordinate of the comparator center.
+            y: Y coordinate of the comparator center.
+            ref: Reference designator for the comparator IC.
+            shunt_voltage_node: Optional position tuple of the upstream
+                sense amplifier's output pin.  Informational only —
+                the caller is responsible for wiring SHUNT_VOLTAGE to
+                this node.
+            threshold_value_v: Trip threshold in volts at the comparator
+                input.  The block computes R_TH_HI / R_TH_LO values to
+                achieve this threshold given ``vcc_voltage`` and the
+                10 kΩ baseline lower resistor.
+            irq_output_pin: Optional net name for the open-collector
+                output (e.g., ``"OC_TRIP"``).  When provided a label
+                is emitted at the comparator OUT pin.
+            vcc_voltage: VCC rail voltage used to size the threshold
+                divider.  Default 3.3 V.
+            comparator_symbol: KiCad symbol for the comparator
+                (default ``Comparator:LM393``).
+            comparator_footprint: Footprint for the IC.
+            resistor_symbol: KiCad symbol for resistors.
+            pullup_value: Open-collector output pull-up resistor.
+            ref_r_start: Starting reference number for resistors.
+            r_ref_prefix: Reference prefix for resistors.
+        """
+        super().__init__(sch, x, y)
+
+        # Place the comparator IC
+        self.comparator = sch.add_symbol(
+            comparator_symbol,
+            x,
+            y,
+            ref,
+            "LM393",
+            footprint=comparator_footprint,
+        )
+        self.components = {"U_CMP": self.comparator}
+
+        # Threshold divider: R_TH_HI from VCC, R_TH_LO to GND, junction = V_THRESHOLD.
+        # ratio = vcc/threshold = (R_TH_HI + R_TH_LO) / R_TH_LO
+        # Pick R_TH_LO = 10k, then R_TH_HI = R_TH_LO * (ratio - 1).
+        r_lo_ohms = 10000.0
+        ratio = vcc_voltage / max(threshold_value_v, 1e-6)
+        r_hi_ohms = r_lo_ohms * (ratio - 1.0)
+
+        # Place R_TH_HI (top of divider) and R_TH_LO (bottom of divider)
+        r_th_hi_ref = f"{r_ref_prefix}{ref_r_start}"
+        r_th_lo_ref = f"{r_ref_prefix}{ref_r_start + 1}"
+        r_pullup_ref = f"{r_ref_prefix}{ref_r_start + 2}"
+
+        div_x = x - 25
+        self.r_th_hi = sch.add_symbol(
+            resistor_symbol,
+            div_x,
+            y - 15,
+            r_th_hi_ref,
+            self._format_resistance(r_hi_ohms),
+            rotation=90,
+        )
+        self.r_th_lo = sch.add_symbol(
+            resistor_symbol,
+            div_x,
+            y + 15,
+            r_th_lo_ref,
+            self._format_resistance(r_lo_ohms),
+            rotation=90,
+        )
+        self.r_pullup = sch.add_symbol(
+            resistor_symbol,
+            x + 25,
+            y - 15,
+            r_pullup_ref,
+            pullup_value,
+            rotation=90,
+        )
+        self.components["R_TH_HI"] = self.r_th_hi
+        self.components["R_TH_LO"] = self.r_th_lo
+        self.components["R_PULLUP"] = self.r_pullup
+
+        # Threshold divider junction
+        r_th_hi_out = self.r_th_hi.pin_position("2")
+        r_th_lo_in = self.r_th_lo.pin_position("1")
+        sch.add_wire(r_th_hi_out, r_th_lo_in)
+        threshold_node = (r_th_hi_out[0], (r_th_hi_out[1] + r_th_lo_in[1]) / 2)
+        sch.add_junction(threshold_node[0], threshold_node[1])
+
+        # Pull-up junction at top of R_PULLUP (this is the comparator output
+        # node pulled toward VCC)
+        r_pullup_top = self.r_pullup.pin_position("1")
+        r_pullup_bot = self.r_pullup.pin_position("2")
+
+        # Comparator pin layout (LM393 single-pole, generic positions —
+        # actual pin numbers come from the symbol).  We use port-style
+        # access (named pins) where possible; the symbol numbering for
+        # LM393 dual is: 1=OUT1, 2=IN1-, 3=IN1+, 4=VEE/GND, 5=IN2+,
+        # 6=IN2-, 7=OUT2, 8=VCC.  We use channel 1.
+        try:
+            cmp_out = self.comparator.pin_position("1")
+            cmp_in_neg = self.comparator.pin_position("2")
+            cmp_in_pos = self.comparator.pin_position("3")
+            cmp_gnd = self.comparator.pin_position("4")
+            cmp_vcc = self.comparator.pin_position("8")
+        except Exception:
+            # Fall back to symbol-relative positions if the symbol layout
+            # differs (e.g. unit-A subsymbol convention).
+            cmp_out = (x + 10, y - 5)
+            cmp_in_neg = (x - 10, y - 5)
+            cmp_in_pos = (x - 10, y + 5)
+            cmp_gnd = (x, y + 15)
+            cmp_vcc = (x, y - 15)
+
+        # Wire threshold node → comparator IN- (negative input)
+        sch.add_wire(threshold_node, (cmp_in_neg[0], threshold_node[1]))
+        sch.add_wire((cmp_in_neg[0], threshold_node[1]), cmp_in_neg)
+
+        # Wire comparator OUT → R_PULLUP bottom (the pull-up's GND-side
+        # pin actually ties to OUT for open-collector; the top of
+        # R_PULLUP ties to VCC).
+        sch.add_wire(cmp_out, (r_pullup_bot[0], cmp_out[1]))
+        sch.add_wire((r_pullup_bot[0], cmp_out[1]), r_pullup_bot)
+
+        # Optional IRQ label at the open-collector output node
+        if irq_output_pin is not None:
+            STUB = 2.54
+            stub_end = (cmp_out[0] + STUB, cmp_out[1])
+            sch.add_wire(cmp_out, stub_end)
+            sch.add_label(irq_output_pin, stub_end[0], stub_end[1])
+
+        self.ports = {
+            "SHUNT_VOLTAGE": cmp_in_pos,
+            "V_THRESHOLD": threshold_node,
+            "IRQ_OUTPUT": cmp_out,
+            "VCC": cmp_vcc,
+            "GND": cmp_gnd,
+            # Convenience aliases for caller's rail tie-up
+            "DIV_VCC": self.r_th_hi.pin_position("1"),
+            "DIV_GND": self.r_th_lo.pin_position("2"),
+            "PULLUP_VCC": r_pullup_top,
+        }
+
+        # Metadata
+        self.threshold_value_v = threshold_value_v
+        self.vcc_voltage = vcc_voltage
+        self.shunt_voltage_node = shunt_voltage_node
+        self.irq_output_pin = irq_output_pin
+
+    @staticmethod
+    def _format_resistance(r_ohms: float) -> str:
+        """Format resistance value as string (R/k/M conventions)."""
+        if r_ohms >= 1e6:
+            return f"{r_ohms / 1e6:.1f}M"
+        if r_ohms >= 1e3:
+            return f"{r_ohms / 1e3:.1f}k"
+        return f"{r_ohms:.0f}R"
+

@@ -32,6 +32,9 @@ from .passives import (
     create_mcu_decoupling_array,
     create_voltage_divider,
 )
+
+# Precharge / inrush limiter
+from .precharge import PrechargeSubsystem
 from .regulators import (
     BuckConverter,
     DualSupplyCascade,
@@ -65,4 +68,6 @@ __all__ = [
     "VoltageDivider",
     "create_mcu_decoupling_array",
     "create_voltage_divider",
+    # Precharge
+    "PrechargeSubsystem",
 ]
