@@ -22,6 +22,24 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
   22/155/24/324.66mm output, 8/8 nets, DRC PASS at jlcpcb-tier1.
 - ``kct fleet status`` reports ``ship_ready=YES`` for board 02.
 
+**Re-verified 2026-06-08** on current main (issue #3334) at HEAD 21076e6c:
+- Covers all Wave 9 router PRs landed since the #3292 re-verification:
+  #3300 (escape width), #3322 (power-rail alias + per-segment retry),
+  #3323 (A* flat arrays), #3324 (layer_to_index goal layer fix),
+  #3326 (trace-width-by-impedance), #3328 (board-edge-aware multi-row
+  escape), #3329 (deterministic Segment/Via/Zone UUIDs under seed=N),
+  #3330 (diff-pair centerline overlap rejection), #3332 (BGA-49 /
+  budget-exit diff-pair priority).
+- Board 02 has no impedance net classes (the #3326 trace-width-by-
+  impedance path does not engage), no diff pairs (#3330/#3332 inactive),
+  no multi-row connectors (#3328 inactive), and no escape-width-affected
+  topology -- so most Wave 9 changes are no-ops on this board.
+- All 3 cpp seeds (42/43/44) still produce bit-perfect
+  22/155/24/324.66mm output, 8/8 nets, DRC PASS at jlcpcb-tier1.
+- ``kct fleet status`` reports ``ship_ready=YES`` for board 02, manifest
+  ``fresh`` (no artifact refresh needed -- the routed PCB and manifest
+  from the #3292 verification round remain byte-identical).
+
 Board 02 is the smallest non-trivial routing target in the repo
 (~37mm x ~22mm, 10 nets, 34 pads).  The 4 NODE_x charlieplex matrix
 nets connect to 4-6 LEDs each in an interleaved pattern -- per
