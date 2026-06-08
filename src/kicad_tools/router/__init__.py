@@ -107,9 +107,13 @@ from .fine_pitch import (
     analyze_fine_pitch_components,
 )
 from .fine_pitch_escape import (
+    DEFAULT_ESCAPE_REGION_RADIUS_MM,
     ESCAPE_CLEARANCE_SAFETY_MARGIN_MM,
+    FinePitchRegion,
+    detect_fine_pitch_regions,
     geometry_needs_fine_pitch_escape,
     get_default_escape_clearance,
+    resolve_clearance_with_escape_region,
 )
 from .grid import RoutingGrid
 from .adaptive_grid import (
@@ -541,6 +545,11 @@ __all__ = [
     "ESCAPE_CLEARANCE_SAFETY_MARGIN_MM",
     "geometry_needs_fine_pitch_escape",
     "get_default_escape_clearance",
+    # Fine-Pitch Escape Region Detector (Issue #3371 P_FP2)
+    "DEFAULT_ESCAPE_REGION_RADIUS_MM",
+    "FinePitchRegion",
+    "detect_fine_pitch_regions",
+    "resolve_clearance_with_escape_region",
     # Sub-Grid Routing for Fine-Pitch Components (Issue #1109)
     "SubGridRouter",
     "SubGridAnalysis",
