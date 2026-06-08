@@ -2712,6 +2712,24 @@ def _add_route_parser(subparsers) -> None:
             "via-in-pad for fine-pitch QFP escape."
         ),
     )
+    # Issue #3352 (P_AS5): Auto-pcb-size escalation -- opt-in (default off).
+    # The outer parser registers and forwards the flag; the inner route_cmd
+    # parser (route_cmd.py) is the canonical owner of the help text and
+    # behaviour.  Per Q5 the flag IMPLIES --auto-layers in the inner parser.
+    route_parser.add_argument(
+        "--auto-pcb-size",
+        action="store_true",
+        default=False,
+        help=(
+            "Automatically escalate PCB envelope to the next manufacturer "
+            "size tier when routing reach + DRC density indicate the envelope "
+            "is the bottleneck (default: disabled).  Per Issue #3352 Q5, "
+            "--auto-pcb-size implies --auto-layers; pass --no-auto-layers to "
+            "opt out of the layers axis.  Honours the project.kct "
+            "MechanicalRequirements.envelope_hard + "
+            "ManufacturingRequirements.escalation policy when present."
+        ),
+    )
     route_parser.add_argument(
         "--mfr-tier-ladder",
         type=str,

@@ -248,6 +248,11 @@ def run_route_command(args) -> int:
         sub_argv.append("--auto-mfr-tier")
     if getattr(args, "mfr_tier_ladder", None):
         sub_argv.extend(["--mfr-tier-ladder", args.mfr_tier_ladder])
+    # Issue #3352 (P_AS5): forward --auto-pcb-size to the inner parser.
+    # Opt-in (default off); when set the inner dispatcher implies
+    # --auto-layers per Q5 of the architect proposal.
+    if getattr(args, "auto_pcb_size", False):
+        sub_argv.append("--auto-pcb-size")
     if getattr(args, "min_trace", None) is not None:
         sub_argv.extend(["--min-trace", str(args.min_trace)])
     if getattr(args, "min_clearance_floor", None) is not None:

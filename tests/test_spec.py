@@ -722,7 +722,16 @@ class TestBackCompatExistingBoards:
     """Smoke test: existing project.kct files parse cleanly without the new fields."""
 
     def test_softstart_loads(self):
-        """boards/external/softstart/project.kct loads without error."""
+        """boards/external/softstart/project.kct loads with the P_AS5 declarations.
+
+        P_AS5 (Issue #3352) opted the softstart recipe into the
+        auto-pcb-size escalation feature.  The in-tree spec now declares
+        ``envelope_hard=true`` (rev B chassis fit is fixed) and the
+        ``layers-only`` escalation policy.  This test verifies those
+        declarations parse cleanly through the schema -- it is the
+        canonical real-recipe regression guard for the P_AS1 schema
+        additions consumed end-to-end.
+        """
         from pathlib import Path
 
         from kicad_tools.spec.parser import load_spec
@@ -737,10 +746,12 @@ class TestBackCompatExistingBoards:
         if not path.exists():
             pytest.skip(f"softstart project.kct not found at {path}")
         spec = load_spec(path)
-        # New fields should not break old recipes
-        assert spec.requirements.mechanical.envelope_hard is False
+        # P_AS5 declarations: envelope_hard + layers-only escalation
+        assert spec.requirements.mechanical.envelope_hard is True
         assert spec.requirements.mechanical.mounting_hole_group is None
-        assert spec.requirements.manufacturing.escalation is None
+        assert spec.requirements.manufacturing.escalation is not None
+        assert spec.requirements.manufacturing.escalation.ladder == "layers-only"
+        assert spec.requirements.manufacturing.escalation.max_layers == 4
 
     @pytest.mark.parametrize(
         "board_dir",
