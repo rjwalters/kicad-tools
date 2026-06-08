@@ -873,6 +873,21 @@ class Autorouter:
         # preserves the original (non-deterministic-trigger-timing) behaviour.
         self._perturbation_seed: int | None = None
 
+        # Issue #3270: Net IDs whose coupled-pathfinder pre-pass exhausted
+        # the per-pair budget and deferred to the main strategy.  These
+        # nets carry heavy escape-geometry constraints (typically inner-ring
+        # BGA-49 USB3 pairs whose paired escape segments + corridor
+        # reservation still require dense F.Cu/inner-layer routing to
+        # reach the partner package).  When non-empty, ``_get_net_priority``
+        # promotes them to complexity_tier 0 (route ahead of other nets in
+        # the same priority class) so they get first pick of grid resources
+        # before the negotiated congestion main strategy fills the inner-
+        # layer corridor with single-ended traffic.
+        # Populated by ``route_all_with_diffpairs`` after budget-exit
+        # detection (see ``diffpair_routing.py`` ``budget_exit_diff_nets``)
+        # and cleared at the end of the main strategy.
+        self._budget_exit_diff_nets: set[int] = set()
+
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
 
@@ -4147,6 +4162,22 @@ class Autorouter:
         complexity_tier = 0 if (pad_count == 2 and distance < SIMPLE_NET_THRESHOLD_MM) else 1
         if complexity_tier == 1 and self._net_has_off_grid_pads(net_id):
             complexity_tier = 0
+
+        # Issue #3270: Promote diff-pair nets whose coupled pre-pass
+        # exhausted the per-pair budget to complexity_tier -1 so they
+        # route ahead of every other net in the same priority class.
+        # Rationale: on board 06's BGA-49 USB3 escapes the inner-ring
+        # pair (B2/B3 USB3_TX1) must traverse a corridor that gets
+        # colonised by single-ended USB3 traffic (B5/B6 USB3_RX1,
+        # F2/F3 USB3_TX2, F5/F6 USB3_RX2) when those route first.
+        # Routing the budget-exit pair FIRST inside the main strategy
+        # gives it first pick of the inner-layer corridor reserved by
+        # ``_reserve_pair_continuation_corridor`` (Issue #2677) before
+        # any siblings can fill it.  Without this nudge the budget-exit
+        # pair lands last and either bursts the per-net-timeout (60s
+        # observed on board 06 seed=42) or times out the run.
+        if net_id in self._budget_exit_diff_nets:
+            complexity_tier = -1
 
         # Issue #2278: Pre-route RUDY congestion score (negated so higher = route first)
         estimator = self._ensure_congestion_estimator()
