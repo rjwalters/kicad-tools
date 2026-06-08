@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-07T15:47:57.012281+00:00",
+  "generated_at": "2026-06-08T17:36:58.535152+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,94 +13,28 @@
       "size": 372
     },
     "gerbers.zip": {
-      "sha256": "7d40220cd7b93e22de7819203d88db0f8b5bd7f1e217be333a8dbdf6d916e025",
-      "size": 10821
+      "sha256": "dea4c79f6ef04960f3c2af71e6bf41e70b2d6454feea781ad06a307dd60de301",
+      "size": 10829
     },
     "report.pdf": {
-      "sha256": "9dd690dc7d549c024439d0d7db2970f5720a842dec679e5a2e2786d284e9f12c",
-      "size": 29434
+      "sha256": "9e3dcd6d3e289534ff707bc5e3ff86ee1a55e69d8b74e135693aeb9af9d9978c",
+      "size": 29495
     },
     "report.md": {
-      "sha256": "25c8a51c0778288bc95a62ee56374f11b5fe0c01a46d549338e022e86f681730",
+      "sha256": "acd89693540f5b1b50ef4037a92c4de7ace21227a32f2b83aa54c22d989d58a6",
       "size": 1940
     },
     "kicad_project.zip": {
-      "sha256": "a0f5d3da605dc856d9fc3f761ed8c0a56bc301ce9c20320b44a4d9ee27869ccb",
-      "size": 10693
+      "sha256": "231c8a7197b21fd7a04d14d2b69f2e0140a0ed75de72e7103abfb22c03df6f06",
+      "size": 10674
     },
     "README.txt": {
-      "sha256": "5cf2ae252cd547ff89724792a07294fa2684d4b7350bc275ea8f39a44affb0b7",
+      "sha256": "a65e83dc7ba9a5a8f128e5733e1373514f3d34c514345e5b2cd78d1db32f9196",
       "size": 764
     }
   },
   "board": {
     "name": "voltage_divider_routed",
     "pcb_file": "voltage_divider_routed.kicad_pcb"
-  },
-  "preflight": [
-    {
-      "name": "pcb_file",
-      "status": "OK",
-      "message": "PCB file parsed successfully",
-      "details": "Footprints: 4"
-    },
-    {
-      "name": "schematic_file",
-      "status": "OK",
-      "message": "Schematic auto-detected: voltage_divider.kicad_sch"
-    },
-    {
-      "name": "board_outline",
-      "status": "OK",
-      "message": "Board outline is closed (5 points)"
-    },
-    {
-      "name": "footprints",
-      "status": "OK",
-      "message": "All 4 footprints have library footprint names"
-    },
-    {
-      "name": "board_dimensions",
-      "status": "OK",
-      "message": "Board dimensions within limits (30.00 x 25.00 mm)"
-    },
-    {
-      "name": "drill_holes",
-      "status": "OK",
-      "message": "Drill holes present (0 vias, 4 TH pads)"
-    },
-    {
-      "name": "tht_in_cpl",
-      "status": "OK",
-      "message": "No through-hole components in CPL-eligible footprints"
-    },
-    {
-      "name": "bom_fields",
-      "status": "WARN",
-      "message": "BOM field issues: 1 problem(s)",
-      "details": "4/4 active item(s) missing LCSC part number"
-    },
-    {
-      "name": "bom_pcb_match",
-      "status": "OK",
-      "message": "BOM and PCB references match (4 components)"
-    },
-    {
-      "name": "bom_cpl_match",
-      "status": "OK",
-      "message": "BOM and CPL references match (4 components)"
-    },
-    {
-      "name": "drc",
-      "status": "WARN",
-      "message": "No DRC report found; run kicad-cli or kct check first",
-      "details": "Use --drc-report to specify a report file, or --skip-drc to skip"
-    },
-    {
-      "name": "erc",
-      "status": "WARN",
-      "message": "No ERC report found; run kicad-cli first",
-      "details": "Use --erc-report to specify a report file, or --skip-erc to skip"
-    }
-  ]
+  }
 }
