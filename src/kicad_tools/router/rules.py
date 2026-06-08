@@ -103,7 +103,20 @@ class DesignRules:
     # When set, components with pin pitch below fine_pitch_threshold automatically
     # use this clearance instead of trace_clearance
     fine_pitch_clearance: float | None = None
-    fine_pitch_threshold: float = 0.8  # mm - components with pitch < this use fine_pitch_clearance
+    # mm -- components with pitch < this use fine_pitch_clearance
+    #
+    # Issue #3371 (P_FP1): Raised from 0.8mm -> 1.5mm so 1.27mm-pitch SOIC
+    # packages (UCC27211, LM393, MCP6001-SOIC, and the rest of the SOIC-8
+    # family) qualify for fine-pitch handling.  Industry-standard SOIC was
+    # silently falling through to the default clearance path because of the
+    # old 0.8mm cap; raising the threshold lets the existing per-component
+    # clearance shrink machinery (Issue #1016) cover the SOIC-8 escape
+    # corridor without recipe-side opt-ins.  The 1.5mm value is large enough
+    # to cover 1.27mm SOIC plus tighter pitches (SOP, SSOP, TSSOP) in a
+    # single threshold.  Tightening below 1.27mm is unsafe (it re-excludes
+    # SOIC); going much above 1.5mm starts to capture 1.778mm (70 mil) and
+    # coarser pitches that are not corridor-constrained.
+    fine_pitch_threshold: float = 1.5
 
     # Trace neck-down configuration (Issue #1018)
     # When routing to fine-pitch pads, traces can be narrowed near the pad to fit
@@ -367,12 +380,18 @@ class DesignRules:
         standard_envelope = self.trace_clearance + self.trace_width / 2.0
         return max(via_halo, standard_envelope)
 
-    def get_clearance_for_component(self, ref: str, pin_pitch: float | None = None) -> float:
+    def get_clearance_for_component(
+        self,
+        ref: str,
+        pin_pitch: float | None = None,
+        net_class: "NetClassRouting | None" = None,
+    ) -> float:
         """Get the clearance to use for a specific component.
 
-        Checks for per-component clearance overrides, then for automatic
-        fine-pitch clearance based on pin pitch, then falls back to the
-        default trace_clearance.
+        Checks for per-component clearance overrides, then for an explicit
+        net-class escape-clearance override (Issue #3371 / P_FP1), then for
+        automatic fine-pitch clearance based on pin pitch, then falls back
+        to the default trace_clearance.
 
         Issue #2867 -- narrow-channel guard (C++ validator path): this
         method is the C++ pad-vs-segment validator's clearance source
@@ -407,6 +426,14 @@ class DesignRules:
         Args:
             ref: Component reference (e.g., "U1")
             pin_pitch: Optional pin pitch in mm (for automatic fine-pitch detection)
+            net_class: Optional :class:`NetClassRouting` for the net being routed
+                through this component.  When supplied and the class has an
+                explicit ``escape_clearance`` override set (Issue #3371 / P_FP1),
+                the override wins over the global ``fine_pitch_clearance`` for
+                this component.  Used by the fine-pitch escape pipeline so the
+                escape-region clearance is per-net-class rather than global.
+                Backward-compat: ``None`` (the default) preserves the pre-#3371
+                behaviour.
 
         Returns:
             Clearance in mm to use for this component.
@@ -430,6 +457,17 @@ class DesignRules:
         # geometry is feasible for this specific component.
         if ref in self.component_clearances:
             return self.component_clearances[ref]
+
+        # Issue #3371 (P_FP1): per-net-class escape clearance override.
+        # When the calling pathfinder threaded a :class:`NetClassRouting`
+        # whose ``escape_clearance`` is set, prefer that explicit value
+        # over the global ``fine_pitch_clearance``.  The caller is
+        # asserting (and is responsible for verifying) that the geometry
+        # is feasible -- the per-class override is analogous to the
+        # explicit per-component override above and bypasses the
+        # narrow-channel guard for the same reason.
+        if net_class is not None and net_class.escape_clearance is not None:
+            return net_class.escape_clearance
 
         # Check for automatic fine-pitch clearance
         if (
@@ -707,6 +745,37 @@ class NetClassRouting:
 
     # Length constraint parameters (Issue #630)
     length_constraint: LengthConstraint | None = None  # Length constraint for this net class
+
+    # Fine-pitch escape clearance override (Issue #3371 / P_FP1)
+    escape_clearance: float | None = None
+    """Per-net-class clearance applied within fine-pitch escape regions.
+
+    Issue #3371 / P_FP1 -- when set, this value overrides the global
+    :attr:`DesignRules.trace_clearance` (and the per-component
+    :attr:`DesignRules.fine_pitch_clearance`) for traces escaping a
+    fine-pitch package (typically a 1.27mm-pitch SOIC like the UCC27211
+    or a tighter SSOP/TSSOP/QFN).  The override is *only* applied within
+    a detector-defined escape region near the fine-pitch package; outside
+    the region the per-class :attr:`clearance` (or its absence) controls.
+
+    The geometry trigger and region detection live in
+    :mod:`kicad_tools.router.fine_pitch_escape` (P_FP2); the per-class
+    field declared here is the *data carrier* that downstream consumers
+    (validator, grid halo, C++ pad-segment check) read through
+    :meth:`DesignRules.get_clearance_for_component` once that method is
+    threaded with the ``net_class`` argument (also P_FP1).
+
+    Default is ``None`` for backward compatibility -- existing net
+    classes ignore the field and behave exactly as before.  Phase P_FP1
+    scope is the data + predicate plumbing; P_FP2 wires the trigger and
+    P_FP3 applies the override at the pathfinder boundary.
+
+    Manufacturer-floor guard (Issue #2867 lineage): callers must ensure
+    ``escape_clearance >= mfr_limits.min_clearance``.  The
+    :func:`kicad_tools.router.fine_pitch_escape.get_default_escape_clearance`
+    helper returns the safe default per Q_FP2
+    (``mfr.min_clearance + 0.013`` mm safety margin).
+    """
 
     # Differential pair within-pair clearance (Issue #2557, Epic #2556 Phase 1A)
     intra_pair_clearance: float | None = None
@@ -1040,6 +1109,7 @@ class NetClassRouting:
         - ``target_diff_impedance`` (Phase 3K / #2650)
         - ``target_single_impedance`` (Phase 3K / #2650)
         - ``intra_pair_clearance`` (Phase 1A / #2557)
+        - ``escape_clearance`` (Issue #3371 / P_FP1)
         - ``length_match_group`` / ``length_match_reference`` /
           ``length_match_tolerance_mm`` (Phase 1A / #2687, Epic #2661)
 
@@ -1078,6 +1148,7 @@ class NetClassRouting:
             "length_constraint": (
                 self.length_constraint.to_dict() if self.length_constraint is not None else None
             ),
+            "escape_clearance": self.escape_clearance,
             "intra_pair_clearance": self.intra_pair_clearance,
             "diffpair_partner": self.diffpair_partner,
             "coupled_routing": self.coupled_routing,
@@ -1129,6 +1200,7 @@ class NetClassRouting:
             avoid_layers=data.get("avoid_layers"),
             layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
             length_constraint=length_constraint,
+            escape_clearance=data.get("escape_clearance"),
             intra_pair_clearance=data.get("intra_pair_clearance"),
             diffpair_partner=data.get("diffpair_partner"),
             coupled_routing=data.get("coupled_routing", False),

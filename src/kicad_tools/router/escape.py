@@ -47,6 +47,27 @@ from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 logger = logging.getLogger(__name__)
 
 
+# Issue #3371 (P_FP1): default cap for "fine-pitch" classification.
+#
+# Raised from the historical 0.75mm to 1.5mm so 1.27mm-pitch SOIC packages
+# (UCC27211 SOIC-8, LM393, MCP6001-SOIC, and every other SOIC-8 family
+# part) qualify for the fine-pitch escape path.  The previous 0.75mm value
+# capped detection at SSOP/TSSOP and silently excluded SOIC, which left
+# the router falling through to the generic SOP path for 1.27mm pitches
+# even when the recipe-relative corridor math (``2 * (trace_width +
+# clearance) > pin_pitch - pad_size``) said the corridor was infeasible.
+#
+# The 1.5mm value is intentionally generous: it covers 1.27mm SOIC plus
+# every tighter standard pitch (SOP/SSOP/TSSOP/QFN at 0.65mm or 0.5mm)
+# under one threshold so callers do not have to enumerate pitches.  This
+# constant is the SAME value as :attr:`DesignRules.fine_pitch_threshold`
+# default and the two are intentionally kept in sync -- when one
+# changes, the other should be revisited.  Centralising it here gives
+# the escape-router-side code a single reference rather than re-quoting
+# the literal.
+FINE_PITCH_THRESHOLD_MM: float = 1.5
+
+
 @dataclass(frozen=True)
 class _SegmentAdapter:
     """Adapter that exposes a :class:`Segment` with the ``start_x/start_y/end_x/end_y``
@@ -280,20 +301,39 @@ def _looks_like_quad_layout(pads: list[Pad]) -> bool:
     return _is_quad_arrangement(pads, center_x, center_y, width, height)
 
 
-def is_fine_pitch_ssop(pads: list[Pad], pitch_threshold: float = 0.75) -> bool:
-    """Check if pads represent a fine-pitch SSOP/TSSOP package.
+def is_fine_pitch_ssop(
+    pads: list[Pad], pitch_threshold: float = FINE_PITCH_THRESHOLD_MM
+) -> bool:
+    """Check if pads represent a fine-pitch dual-row package.
 
-    Fine-pitch SSOP/TSSOP packages (0.65mm pitch) have adjacent pins too close
-    together for standard routing between them. They require special escape
-    routing with alternating layer assignments.
+    Fine-pitch dual-row packages (SOIC-8 at 1.27mm; SSOP at 0.65mm; TSSOP
+    at 0.5mm) have adjacent pins close enough together that escaping
+    inboard pins between two outboard pins is corridor-constrained at
+    JLCPCB tier-1 clearance (0.20mm + 0.30mm trace).  They benefit from
+    the alternating-layer escape path (``_escape_fine_pitch_dual_row``)
+    that this predicate gates.
 
     Args:
         pads: List of pads from a single component
         pitch_threshold: Maximum pitch to be considered fine-pitch (mm).
-            Default 0.75mm catches both SSOP (0.65mm) and TSSOP (0.5mm).
+            Default :data:`FINE_PITCH_THRESHOLD_MM` (1.5mm) catches
+            1.27mm-pitch SOIC (UCC27211, LM393, MCP6001-SOIC, etc.)
+            *and* every tighter standard pitch (SSOP at 0.65mm, TSSOP at
+            0.5mm).  Issue #3371 (P_FP1): the historical default was
+            0.75mm, which silently excluded SOIC and forced 1.27mm-pitch
+            traffic through the generic SOP path that does not know
+            about corridor infeasibility under tight clearance.
 
     Returns:
-        True if the package is a fine-pitch SSOP/TSSOP needing special routing
+        True if the package is a fine-pitch dual-row package needing
+        special routing.
+
+    Note:
+        Callers that want the *old* pre-#3371 SSOP/TSSOP-only behavior
+        (where SOIC-8 falls through to the generic SOP path) can pass
+        ``pitch_threshold=0.75`` explicitly.  This is the right
+        behaviour for callers that pair this predicate with a SOP-
+        specific path; the default broadens the dual-row class.
     """
     if len(pads) < 4:  # Need at least 4 pads for SSOP
         return False
