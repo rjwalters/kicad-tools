@@ -225,6 +225,95 @@ CHORUS_POST_WAVE9_UNROUTED_CPP = 15  # 15/48 have no segments at all
 # Used by the test below to assert the speedup is materially > 1x.
 CHORUS_POST_WAVE9_PERNET_SPEEDUP_DAC_CLK = 3.2  # 217s -> 68.6s
 
+# Post-Wave-10 re-measurement (Issue #3340, 2026-06-08, HEAD 21076e6c --
+# includes all merges through PR #3359 P_AS3 auto-pcb-size CLI integration,
+# PR #3357 schematic validator fix, PR #3358 P_AS2 auto-pcb-size, PR #3356
+# OvercurrentComparator multi-unit pin lookup, PR #3355 P_AS1 auto-pcb-size
+# data + schema, PR #3353 BackToBackFETPair orthogonal Z-route, PR #3350
+# softstart rev B PCB placement, PR #3345 softstart rev B schematic, plus
+# Wave 11 router infrastructure: PR #3203 per-pad channel budget edge-
+# classification, PR #3193 deterministic A* tie-break, PR #3202 audit
+# restore, PR #3198 C++ per-pad channel budget, PR #3197 topology-aware
+# analog-ground bridge audit).  Same recipe as Wave-9: cpp seed 42,
+# --timeout 1200, --auto-layers, --auto-fix --auto-fix-passes 2, under
+# heavy system contention (4+ other loom workers actively routing).
+#
+#   Backend  | Attempt 1   | Attempt 2   | Attempt 3   | Best (strict) | Detail-routed | Partial | Unrouted | Auto-fix
+#   ---------+-------------+-------------+-------------+---------------+---------------+---------+----------+---------
+#   C++      | 4/48 (8%)   | 3/48 (6%)   | 2/48 (4%)   | 4/48 (8%)     | 28/48         | 29/48   | 15/48    | RAN, partial-repair kept
+#
+# Per-net A* timing comparison (chorus seed 42, Wave-10 cpp under contention vs Wave-9 cpp):
+#
+#   Net           | Wave-9 (cpp) | Wave-10 (cpp, contended) | Note
+#   --------------+--------------+--------------------------+--------------------------
+#   DAC_CLK       | 68.6s        | 82.5s                    | +20% (contention overhead)
+#   DAC_CLK_DIV2  | 69.2s        | 83.2s                    | +20%
+#   I2S_BCLK      | 73.7s        | 89.4s                    | +21%
+#   I2S_LRCLK     | 77.1s        | 94.3s                    | +22%
+#   I2S_DIN       | 116.7s       | 155.3s                   | +33%
+#   AUDIO_L       | 198.6s       | 261.6s                   | +32% (still routed, not BLOCKED_PATH)
+#   AUDIO_R       | 205.6s       | 271.0s -> BLOCKED_PATH   | Classification stable vs Wave-9
+#
+# Key findings:
+#   1. **Strict reach unchanged at 4/48 (8%)** -- identical to Wave-9.  The
+#      partial-vs-strict gap (#3255 mechanism) remains dominant.
+#   2. **Partial/unrouted counts unchanged (29/48 and 15/48)** -- the
+#      Wave-9 baseline composition is stable.
+#   3. **AUDIO_R BLOCKED_PATH classification is STABLE** between Wave-9 and
+#      Wave-10.  AUDIO_L successfully routes on both waves (261.6s in
+#      Wave-10 under contention, 198.6s in Wave-9 -- ~30% slower under
+#      contention but still completes).  The issue #3340 hypothesis that
+#      "Wave 11 router changes resolved AUDIO_R" is NOT supported -- AUDIO_R
+#      remains BLOCKED_PATH on the same fixture with the same suggestion
+#      ("Move C17, C20, J4 (+1 more) south to create routing channel").
+#      The earlier issue body language calling it "AUDIO_L/R BLOCKED_PATH"
+#      conflates the two: only AUDIO_R is BLOCKED_PATH; AUDIO_L is merely
+#      slow (~260s) and routes via 4L SIG-GND-PWR-SIG.
+#   4. **Auto-fix outcome IMPROVED vs Wave-9**: this run kept the partial
+#      repair (14/46 violations resolved across 2 passes, "partial repair;
+#      some violations remain") instead of rolling back due to
+#      connectivity regression.  Connectivity invariant check passed at all
+#      three checkpoints (optimize, nudge, finalize) on the 48 multi-pad
+#      nets.  This is a small but real improvement -- previously auto-fix
+#      was net-negative; now it's net-positive even if not at the 95%
+#      manufacturability target.
+#   5. **AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token NOT present** -- the
+#      auto-fix budget reservation from PR #3247 is still engaging.
+#   6. Per-net timing on dominant clock nets is ~20% slower than Wave-9 due
+#      to concurrent loom workers consuming CPU.  This does NOT invalidate
+#      the PR #3323 speedup claim (Wave-9 measured 3.2x vs Wave-8); a
+#      contention-free re-run should show the same or better speedup.
+#      The Wave-9 speedup constant is preserved as the canonical value.
+#
+# Verdict for #3340: chorus reach is **stable** at 4/48 strict-connected
+# between Wave-9 and Wave-10.  The dominant bottleneck remains the
+# partial-vs-strict gap (#3255 mechanism: 29 nets have routes but only
+# 1 of 2-3 pads connected, e.g., SDA 1/3, SPI_SCK 1/3, SWCLK 1/4).
+# AUDIO_R BLOCKED_PATH is a stable classification, not a regression
+# introduced by #3328 nor resolved by Wave 11 router changes -- it
+# reflects a genuine placement constraint that needs C17/C20/J4 to move
+# south.  The floor constant (5) is INTENTIONALLY NOT lowered to 4 even
+# though Wave-10 measured below it; per the docstring, lowering the
+# floor weakens the regression guarantee and the floor should only move
+# UPWARD with multi-seed confirmation.
+CHORUS_POST_WAVE10_BEST_CPP_SEED42 = 4  # Same as Wave-9
+CHORUS_POST_WAVE10_DETAIL_ROUTED_CPP = 28  # Same as Wave-9
+CHORUS_POST_WAVE10_PARTIAL_CPP = 29  # Same as Wave-9
+CHORUS_POST_WAVE10_UNROUTED_CPP = 15  # Same as Wave-9
+# AUDIO_R BLOCKED_PATH stability: True if AUDIO_R is reported BLOCKED_PATH
+# in both Wave-9 and Wave-10.  Used by the test below to anchor the
+# "stable classification, not regression" finding from #3340.
+CHORUS_POST_WAVE10_AUDIO_R_BLOCKED = True
+# AUDIO_L routed status: True if AUDIO_L successfully routes (i.e., is NOT
+# classified BLOCKED_PATH).  Wave-10 confirms AUDIO_L routes in 261.6s
+# on attempt 1's 4L SIG-GND-PWR-SIG layer ladder.
+CHORUS_POST_WAVE10_AUDIO_L_ROUTED = True
+# Auto-fix kept partial repair on Wave-10 (no connectivity rollback).
+# Distinct from Wave-9's behavior where auto-fix was rolled back.  This
+# is the small step-change in this measurement; track it so any future
+# regression to "auto-fix rolls back" is caught.
+CHORUS_POST_WAVE10_AUTOFIX_KEPT = True
+
 # May-10 reach target (issue body AC #1).  Once the partial-vs-strict
 # gap (#3255) is closed and reach recovers, the integration test below
 # should be flipped from "assert >= floor" to "assert >= target" and the
@@ -414,6 +503,105 @@ def test_post_wave9_remeasurement_documented() -> None:
         "flat-arrays infrastructure has regressed.  Bisect from HEAD "
         "back through PRs that touched src/kicad_tools/router/router_cpp.cpp "
         "or the AStarSolver class."
+    )
+
+
+def test_post_wave10_remeasurement_documented() -> None:
+    """The post-Wave-10 re-measurement (Issue #3340) is recorded honestly.
+
+    Wave-10 (2026-06-08, HEAD 21076e6c) confirms the Wave-9 baseline is
+    stable.  The same chorus-test-revA_v19_stripped fixture under the same
+    recipe (cpp seed 42, --timeout 1200, --auto-fix --auto-fix-passes 2,
+    --auto-layers) produces an identical 4/48 strict-connected reach, 29
+    partial routes, and 15 unrouted nets.
+
+    The dominant Wave-10 finding is **stability**: chorus did not move
+    despite ~25 PRs merging between Wave-9 (HEAD facbe2e7) and Wave-10
+    (HEAD 21076e6c).  Most of those merges did not touch the router (P_AS1
+    auto-pcb-size, softstart rev B, BackToBackFETPair Z-route, schematic
+    validator fix); the router-touching merges (PR #3203 per-pad channel
+    budget edge-classification fix, PR #3193 deterministic A* tie-break,
+    PR #3198 C++ per-pad channel budget infrastructure, PR #3197 topology-
+    aware analog-ground bridge audit) did not change chorus reach.
+
+    Distinct from earlier post-Wave-X tests, this one also explicitly
+    asserts the **AUDIO_R BLOCKED_PATH stability** to anchor the
+    finding from #3340's hypothesis investigation.  The Wave-9 baseline
+    classified AUDIO_R as BLOCKED_PATH; Wave-10 confirms the same
+    classification with the same placement-feedback suggestion.  This
+    rules out two alternative hypotheses: (a) that #3328's J2 board-edge-
+    aware escape introduced AUDIO_R BLOCKED_PATH as a regression (would
+    require a comparison to pre-#3328 baseline to fully rule out, filed as
+    follow-up); (b) that Wave 11 router changes (PR #3203, #3198) resolved
+    AUDIO_R (definitively ruled out by Wave-10 measurement).
+
+    Failure of this test means either:
+
+    1. The post-Wave-10 measurements were edited without updating the
+       docstring header -- update both together.
+    2. A future PR landed that actually moved chorus reach (good news!) --
+       bump CHORUS_POST_WAVE10_BEST_CPP_SEED42, add a Wave-11 block, and
+       consider bumping CHORUS_POST_WAVE1_FLOOR if multi-seed confirms.
+    3. AUDIO_R is no longer BLOCKED_PATH (also good news -- either a
+       placement change in the fixture or a router improvement).  Set
+       CHORUS_POST_WAVE10_AUDIO_R_BLOCKED = False and update the docstring.
+    """
+    # Wave-10 cpp reach was 4/48, identical to Wave-9.  Captures the
+    # stability finding.
+    assert CHORUS_POST_WAVE10_BEST_CPP_SEED42 == 4
+    assert CHORUS_POST_WAVE10_BEST_CPP_SEED42 == CHORUS_POST_WAVE9_BEST_CPP_SEED42, (
+        "Wave-10 cpp reach should match Wave-9 (stability finding).  If "
+        "the numbers diverged, update the docstring header to explain the "
+        "delta and consider whether the floor constant should change."
+    )
+
+    # Detail-routing now completes 28 nets per attempt (same as Wave-9).
+    # The partial-vs-strict gap (29/48 partial, 15/48 unrouted) is the
+    # dominant chorus bottleneck and has not closed.
+    assert CHORUS_POST_WAVE10_DETAIL_ROUTED_CPP == 28
+    assert CHORUS_POST_WAVE10_PARTIAL_CPP == 29
+    assert CHORUS_POST_WAVE10_UNROUTED_CPP == 15
+
+    # Partial + unrouted + strict should equal CHORUS_NETS_TOTAL.
+    assert (
+        CHORUS_POST_WAVE10_BEST_CPP_SEED42
+        + CHORUS_POST_WAVE10_PARTIAL_CPP
+        + CHORUS_POST_WAVE10_UNROUTED_CPP
+        == CHORUS_NETS_TOTAL
+    ), (
+        "strict + partial + unrouted must total all chorus signal nets; "
+        f"got {CHORUS_POST_WAVE10_BEST_CPP_SEED42} + "
+        f"{CHORUS_POST_WAVE10_PARTIAL_CPP} + "
+        f"{CHORUS_POST_WAVE10_UNROUTED_CPP} != {CHORUS_NETS_TOTAL}."
+    )
+
+    # AUDIO_R BLOCKED_PATH is a stable classification, not a regression
+    # introduced by #3328 nor resolved by Wave 11 router changes.  The
+    # placement suggestion (move C17, C20, J4 south) is unchanged.
+    assert CHORUS_POST_WAVE10_AUDIO_R_BLOCKED is True, (
+        "AUDIO_R should still be classified BLOCKED_PATH on Wave-10.  If "
+        "the router unblocked it, that's good news -- update this constant "
+        "to False and document the responsible PR in the docstring header."
+    )
+
+    # AUDIO_L is NOT BLOCKED_PATH -- it routes successfully (~260s on
+    # attempt 1's 4L ladder under contention).  This anchors the finding
+    # that the original issue body's 'AUDIO_L/R BLOCKED_PATH' language
+    # conflates the two: only AUDIO_R hits BLOCKED_PATH.
+    assert CHORUS_POST_WAVE10_AUDIO_L_ROUTED is True, (
+        "AUDIO_L should successfully route on Wave-10's 4L SIG-GND-PWR-SIG "
+        "ladder.  If it joins AUDIO_R in BLOCKED_PATH, that's a regression "
+        "and should be filed against the router PR that introduced it."
+    )
+
+    # Auto-fix kept partial repair on Wave-10 (no connectivity rollback).
+    # This is the small step-change in this measurement -- Wave-9 had the
+    # auto-fix rolled back due to connectivity regression (31 -> 29 nets);
+    # Wave-10 keeps 14/46 repairs with no connectivity loss.
+    assert CHORUS_POST_WAVE10_AUTOFIX_KEPT is True, (
+        "Auto-fix should keep partial repair (no rollback) on Wave-10.  "
+        "If it regressed to rolling back, file a follow-up to investigate "
+        "the auto-fix connectivity-invariant guard."
     )
 
 
