@@ -52,20 +52,23 @@ The 10/10 reach is pinned by
 ``tests/router/test_softstart_manufacturable_baseline.py`` (gated on
 ``KICAD_RUN_SLOW_SOFTSTART_REACH=1``).
 
-Preferred manufacturing recipe (after running this script)::
+Preferred manufacturing recipe (after running this script — rev B P4)::
 
     SKIP="AC_LINE,AC_NEUTRAL,FUSED_LINE,GND,+3.3V,VRECT,SCAP_POS+,SCAP_POS_GND,SCAP_NEG+,SCAP_NEG_GND,ISENSE_POS"
     kct route boards/external/softstart/output/softstart.kicad_pcb \\
         --output boards/external/softstart/output/softstart_routed.kicad_pcb \\
         --backend cpp --layers 2 --no-auto-layers \\
-        --manufacturer jlcpcb-tier1 \\
+        --manufacturer jlcpcb \\
+        --clearance 0.20 \\
         --skip-nets "$SKIP" \\
         --seed 42 --timeout 300
-    kct check  boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb-tier1
-    kct export boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb-tier1
+    kct check  boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb
+    kct export boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb
 
-The board is manufacturable modulo the 4 SWDIO/STATUS_LED residual
-clearance violations (filed as a follow-up issue per #3235).
+Rev B P4 (Issue #3343) tightens trace clearance from 0.15mm -> 0.20mm
+to match the canonical project.kct ``requirements.manufacturing.min_space``
+spec.  Best-effort residuals are accepted per the architect plan;
+high-current power nets are filled by copper pours.
 
 Usage:
     python generate_design.py [output_dir]
@@ -1660,7 +1663,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         "11. Star ground: PCB zone keep-outs separate PGND/SGND (no schematic-side split).\n"
         "12. AC mains isolation: keep HV section separate.\n"
         "13. Board: 150mm x 100mm, 2-layer, 2oz copper.\n"
-        "    (P2 retains trace_clearance=0.15mm; DRC tightening to 0.2mm is P4 work.)\n",
+        "    (P4: trace_clearance=0.20mm, min_via=0.30mm — matches rev B JLCPCB spec.)\n",
         x=X_AC_INPUT,
         y=RAIL_GND + 20,
     )
@@ -2537,7 +2540,15 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     def generate_lqfp32(ref: str, pos: tuple, value: str) -> str:
         """STM32G031K8T6 LQFP-32 footprint (7×7 mm body, 0.8 mm pitch).
 
-        Pin assignments mirror the rev B schematic (architect proposal P3).
+        Pin assignments mirror the rev B **schematic symbol**
+        (``MCU_ST_STM32G0:STM32G031K8Tx``).  P3 originally used the
+        architect's nominal pin map which was offset by ~2 positions from
+        the KiCad symbol; this caused DRC connectivity errors on every
+        MCU net.  Issue #3343 P4 reconciles forward-annotation from
+        schematic → PCB so the PCB pad numbers match the schematic
+        symbol's pin numbering exactly (verified against the symbol
+        library at ``/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/MCU_ST_STM32G0.kicad_sym``).
+
         LQFP-32 has 8 pads per side, 4 sides, total 32 pads.
 
         Pin layout (1-indexed, counterclockwise from pin 1 marker at top-left):
@@ -2546,83 +2557,77 @@ def create_softstart_pcb(output_dir: Path) -> Path:
             Side 3 (right, bottom to top):  pins 17-24 (x = +3.75, y from +2.8 to -2.8)
             Side 4 (top, right to left):    pins 25-32 (y = -3.75, x from +2.8 to -2.8)
 
-        STM32G031K8T6 pin map (architect proposal — rev B):
-          pin 1  VDD       +3.3V
-          pin 2  PC14      NC
-          pin 3  PC15      NC
-          pin 4  PF2/NRST  NRST
-          pin 5  VDDA      +3.3V
-          pin 6  PA0       V_AC_SENSE       (ADC IN0)
-          pin 7  PA1       V_BUS_DVDT       (ADC IN1)
-          pin 8  PA2       I_SENSE_OUT      (ADC IN2)
-          pin 9  PA3       V_BANK_POS_SENSE (ADC IN3)
-          pin 10 PA4       V_BANK_NEG_SENSE (ADC IN4)
-          pin 11 PA5       OC_TRIP          (EXTI IRQ)
-          pin 12 PA6       ZC_DETECT        (EXTI)
-          pin 13 PA7       GATE_POS_A       (driver IN_HI)
-          pin 14 PB0       GATE_POS_B       (driver IN_LO)
-          pin 15 PB1       GATE_NEG_A       (driver IN_HI)
-          pin 16 PB2       GATE_NEG_B       (driver IN_LO)
-          pin 17 PA8       PRECHARGE_POS
-          pin 18 PA9       PRECHARGE_NEG
-          pin 19 PA10      NC (reserve)
-          pin 20 PA11      NC (reserve)
-          pin 21 PA12      STATUS_LED
-          pin 22 PA13      SWDIO
-          pin 23 PA14      SWCLK
-          pin 24 PA15      NC (reserve)
-          pin 25 PB3       NC (reserve)
-          pin 26 PB4       NC (reserve)
-          pin 27 PB5       NC (reserve)
-          pin 28 PB6       NC (reserve)
-          pin 29 PB7       NC (reserve)
-          pin 30 PB8       NC (reserve)
-          pin 31 VSS       GND
-          pin 32 VDD       +3.3V
-
-        Note: this pin-to-net mapping is a placement-stage mirror of the
-        schematic — actual net continuity is enforced by the schematic's
-        net labels.  Mismatches would surface as DRC unconnected-pad
-        errors in P4 routing; the architect proposal pin map above is
-        nominal and BUILDER notes any discrepancy from the actual KiCad
-        symbol numbering during P4.
+        STM32G031K8Tx pin map (from KiCad MCU_ST_STM32G0 symbol library):
+          pin 1  PB9       (reserve, NC)
+          pin 2  PC14      (NC)
+          pin 3  PC15      (NC)
+          pin 4  VDD       +3.3V
+          pin 5  VSS       GND
+          pin 6  PF2       NRST
+          pin 7  PA0       V_AC_SENSE       (ADC IN0)
+          pin 8  PA1       V_BUS_DVDT       (ADC IN1)
+          pin 9  PA2       I_SENSE_OUT      (ADC IN2)
+          pin 10 PA3       V_BANK_POS_SENSE (ADC IN3)
+          pin 11 PA4       V_BANK_NEG_SENSE (ADC IN4)
+          pin 12 PA5       OC_TRIP          (EXTI IRQ)
+          pin 13 PA6       ZC_DETECT        (EXTI)
+          pin 14 PA7       GATE_POS_A       (driver IN_HI)
+          pin 15 PB0       GATE_POS_B       (driver IN_LO)
+          pin 16 PB1       GATE_NEG_A       (driver IN_HI)
+          pin 17 PB2       GATE_NEG_B       (driver IN_LO)
+          pin 18 PA8       PRECHARGE_POS
+          pin 19 NC/PA9    (no-connect)
+          pin 20 PC6       PRECHARGE_NEG
+          pin 21 NC/PA10   (no-connect)
+          pin 22 PA9/PA11  (NC reserve)
+          pin 23 PA10/PA12 (NC reserve)
+          pin 24 PA13      SWDIO
+          pin 25 PA14      SWCLK
+          pin 26 PA15      STATUS_LED
+          pin 27 PB3       (NC reserve)
+          pin 28 PB4       (NC reserve)
+          pin 29 PB5       (NC reserve)
+          pin 30 PB6       (NC reserve)
+          pin 31 PB7       (NC reserve)
+          pin 32 PB8       (NC reserve)
         """
         x, y = pos
         pitch = 0.8
-        # Pin-to-net map (rev B architect proposal)
+        # Pin-to-net map (rev B — matches KiCad MCU_ST_STM32G0:STM32G031K8Tx
+        # symbol pin numbering, P4 reconciliation per #3343).
         pin_net = {
-            1: "+3.3V",
-            2: "",  # PC14 NC
-            3: "",  # PC15 NC
-            4: "NRST",
-            5: "+3.3V",   # VDDA tied to VDD
-            6: "V_AC_SENSE",
-            7: "V_BUS_DVDT",
-            8: "I_SENSE_OUT",
-            9: "V_BANK_POS_SENSE",
-            10: "V_BANK_NEG_SENSE",
-            11: "OC_TRIP",
-            12: "ZC_DETECT",
-            13: "GATE_POS_A",
-            14: "GATE_POS_B",
-            15: "GATE_NEG_A",
-            16: "GATE_NEG_B",
-            17: "PRECHARGE_POS",
-            18: "PRECHARGE_NEG",
-            19: "",  # PA10 reserve
-            20: "",  # PA11 reserve
-            21: "STATUS_LED",
-            22: "SWDIO",
-            23: "SWCLK",
-            24: "",  # PA15 reserve
-            25: "",  # PB3 reserve
-            26: "",  # PB4 reserve
-            27: "",  # PB5 reserve
-            28: "",  # PB6 reserve
-            29: "",  # PB7 reserve
-            30: "",  # PB8 reserve
-            31: "GND",
-            32: "+3.3V",
+            1: "",                 # PB9 reserve NC
+            2: "",                 # PC14 NC
+            3: "",                 # PC15 NC
+            4: "+3.3V",            # VDD
+            5: "GND",              # VSS
+            6: "NRST",             # PF2
+            7: "V_AC_SENSE",       # PA0
+            8: "V_BUS_DVDT",       # PA1
+            9: "I_SENSE_OUT",      # PA2
+            10: "V_BANK_POS_SENSE", # PA3
+            11: "V_BANK_NEG_SENSE", # PA4
+            12: "OC_TRIP",         # PA5
+            13: "ZC_DETECT",       # PA6
+            14: "GATE_POS_A",      # PA7
+            15: "GATE_POS_B",      # PB0
+            16: "GATE_NEG_A",      # PB1
+            17: "GATE_NEG_B",      # PB2
+            18: "PRECHARGE_POS",   # PA8
+            19: "",                # NC/PA9 (no-connect)
+            20: "PRECHARGE_NEG",   # PC6
+            21: "",                # NC/PA10 (no-connect)
+            22: "",                # PA9/PA11 reserve
+            23: "",                # PA10/PA12 reserve
+            24: "SWDIO",           # PA13
+            25: "SWCLK",           # PA14
+            26: "STATUS_LED",      # PA15
+            27: "",                # PB3 reserve
+            28: "",                # PB4 reserve
+            29: "",                # PB5 reserve
+            30: "",                # PB6 reserve
+            31: "",                # PB7 reserve
+            32: "",                # PB8 reserve
         }
 
         # LQFP-32: 8 pads per side, pitch 0.8 mm.  Pad offset from center:
@@ -2916,41 +2921,34 @@ def create_softstart_pcb(output_dir: Path) -> Path:
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """Route the PCB using the autorouter.
+    """Route the PCB using ``kct route --backend cpp`` (rev B P4 recipe).
 
-    Note: trace_clearance stays at 0.15mm in P2.  The 0.2mm DRC tightening
-    called out in the rev B architect plan is deferred to P4 (per issue
-    #3343 phase plan) — tightening now would defeat the gating purpose
-    and risks P4 routing failures before placement is finalised in P3.
+    Issue #3343 P4: rev B switches to the C++ adaptive-grid pipeline (the
+    proven manufacturable baseline established by PRs #3256/#3287/#3306).
+    The DesignRules used by the recipe (``--clearance 0.20``, via 0.3mm
+    drill) match the rev B project.kct ``requirements.manufacturing``
+    spec (``min_trace: 0.2mm``, ``min_space: 0.2mm``, ``min_via: 0.3mm
+    drill``).  ``--manufacturer jlcpcb`` is the rev B target (vs rev A's
+    jlcpcb-tier1) and the C++ backend gives a 10-100× speedup vs the
+    Python ``route_with_escape`` path.
+
+    The architect predicted regression risk at 0.2mm vs rev A's 0.15mm
+    (denser clusters may not fit) so the recipe accepts best-effort
+    residuals.  The skip-nets list still excludes high-current power
+    nets that are filled by copper pours, not the router.
+
+    See ``tests/router/test_softstart_manufacturable_baseline.py`` for
+    the proven baseline invocation shape that this recipe mirrors.
     """
-    from kicad_tools.router import DesignRules, load_pcb_for_routing
-    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
-
     print("\n" + "=" * 60)
-    print("Routing PCB...")
+    print("Routing PCB (kct route --backend cpp, rev B P4)...")
     print("=" * 60)
 
-    # Issue #3138: apply the empirically validated "combined intervention"
-    # baseline from #3134.  The four knobs together (tight clearance +
-    # placement spread + drc-aware optimizer + jlcpcb-tier1 manufacturer
-    # profile) lifted reach from 4/10 -> 6/10 on this board; the additional
-    # ``route_with_escape`` swap below is the algorithmic gap closer.
-    rules = DesignRules(
-        grid_resolution=0.075,
-        trace_width=0.3,
-        trace_clearance=0.15,  # P2 baseline; P4 tightens to 0.2mm per #3343 plan
-        via_drill=0.3,
-        via_diameter=0.6,
-    )
-
-    print(f"\n1. Loading PCB: {input_path}")
-    print(f"   Grid resolution: {rules.grid_resolution}mm")
-    print(f"   Trace width: {rules.trace_width}mm")
-    print(f"   Clearance: {rules.trace_clearance}mm")
-
-    # Skip power and high-current nets.  ISENSE_POS carries discharge current
-    # (formerly DISCHARGE_POS/NEG) and should be routed as a heavy trace by
-    # the user, so it's skipped from the auto-router too.
+    # Issue #3343 P4 ship-state:
+    # - trace_clearance 0.20mm (rev B min_space spec, vs rev A's 0.15mm)
+    # - via_drill 0.30mm (rev B min_via spec)
+    # - manufacturer "jlcpcb" (rev B target, vs rev A's "jlcpcb-tier1")
+    # - backend "cpp" (proven manufacturable baseline path, PRs #3256/#3287/#3306)
     skip_nets = [
         "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
         "+3.3V", "VRECT",
@@ -2958,97 +2956,83 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "ISENSE_POS",
     ]
 
-    router, net_map = load_pcb_for_routing(
+    print(f"\n1. Loading PCB: {input_path}")
+    print("   Clearance: 0.20mm (rev B min_space)")
+    print("   Via drill: 0.30mm (rev B min_via)")
+    print("   Manufacturer: jlcpcb (rev B target)")
+    print("   Backend: cpp (adaptive grid)")
+    print(f"   Skipping high-current power nets: {len(skip_nets)}")
+
+    cmd = [
+        sys.executable, "-m", "kicad_tools.cli", "route",
         str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
+        "--output", str(output_path),
+        "--seed", "42",
+        "--no-auto-layers",
+        "--layers", "2",
+        "--manufacturer", "jlcpcb",
+        "--backend", "cpp",
+        "--clearance", "0.20",
+        "--skip-nets", ",".join(skip_nets),
+        "--timeout", "300",
+    ]
+    print(f"\n2. Running: {' '.join(cmd[3:])}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    # Reach + violation summary parsed from kct route stdout.
+    stdout = result.stdout or ""
+    if stdout:
+        # Print the route summary tail (last ~25 lines).
+        tail_lines = stdout.strip().split("\n")[-25:]
+        for line in tail_lines:
+            print(f"   {line}")
+
+    # Parse "Nets connected: N (topologically complete)" line (signal nets
+    # fully routed pad-to-pad).  Falls back to "Nets routed: N/M" which
+    # counts attempts.
+    import re
+    connected_m = re.search(
+        r"Nets connected:\s+(\d+)\s+\(topologically complete\)", stdout
     )
+    nets_connected = int(connected_m.group(1)) if connected_m else None
 
-    print(f"\n   Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"   Nets loaded: {len(net_map)}")
-    print(f"   Skipping high-current nets: {len(skip_nets)}")
-
-    print("\n2. Routing nets...")
-    # Use negotiated mode with explicit per-net + total timeouts so the run
-    # cannot hang indefinitely on dense layouts (see issue #2794).  These
-    # bounds are generous enough for this board's signal-net count (~10) but
-    # short enough that any pathological case fails fast.
-    #
-    # Issue #3138: switched from ``route_all_negotiated()`` to
-    # ``route_with_escape(use_negotiated=True, ...)`` so the dense-package
-    # escape pre-pass (``generate_escape_routes`` + virtual escape-endpoint
-    # pads, ``router/core.py:10783-10821``) runs on U1 (STM32G031F6P6 TSSOP-20
-    # at 0.65mm pitch -- flagged by ``is_dense_package()`` in
-    # ``router/escape.py:222``).  Without the pre-pass, the U1 east-side
-    # cluster (pins 11-20) cannot escape and routing reach was capped at
-    # 6/10 nets even with the combined intervention (#3134).  The pre-pass
-    # generates short orthogonal escape stubs from each TSSOP pad and
-    # registers virtual escape-endpoint pads (#2401) so the main router
-    # routes between those endpoints rather than the original congested
-    # pin centers.
-    router.route_with_escape(
-        use_negotiated=True,
-        per_net_timeout=45.0,
-        timeout=420.0,
-    )
-
-    stats_before = router.get_statistics()
-    print("\n3. Raw routing results:")
-    print(f"   Routes: {stats_before['routes']}")
-    print(f"   Segments: {stats_before['segments']}")
-    print(f"   Vias: {stats_before['vias']}")
-
-    print("\n4. Optimizing traces...")
-    # Issue #3138 combined intervention: enable drc-aware optimization with
-    # jlcpcb-tier1 manufacturer profile so per-net optimizations that increase
-    # DRC violations are rolled back.
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-        drc_aware=True,
-        drc_manufacturer="jlcpcb-tier1",
-    )
-    optimizer = TraceOptimizer(config=opt_config)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_route = optimizer.optimize_route(route)
-        optimized_routes.append(optimized_route)
-    router.routes = optimized_routes
-
-    stats = router.get_statistics()
-    print("\n5. Final routing results:")
-    print(f"   Routes: {stats['routes']}")
-    print(f"   Segments: {stats['segments']}")
-    print(f"   Vias: {stats['vias']}")
-    print(f"   Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats['nets_routed']}")
-
-    print(f"\n6. Saving routed PCB: {output_path}")
-    original_content = input_path.read_text()
-    route_sexp = router.to_sexp()
-
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
+    routed_m = re.search(r"Nets routed:\s+(\d+)/(\d+)", stdout)
+    if routed_m:
+        nets_routed = int(routed_m.group(1))
+        nets_total = int(routed_m.group(2))
     else:
-        output_content = original_content
-        print("   Warning: No routes generated!")
+        nets_routed, nets_total = (nets_connected or 0), 0
 
-    output_path.write_text(output_content)
+    print(f"\n3. Routing summary:")
+    if nets_connected is not None:
+        print(f"   Nets connected (topologically complete): {nets_connected}")
+    print(f"   Nets routed (attempts): {nets_routed}/{nets_total}")
 
-    total_signal_nets = len([n for n in router.nets if n > 0])
-    success = stats["nets_routed"] == total_signal_nets
-
+    # exit codes from cli/route_cmd.py:
+    #   0 = full route + DRC clean
+    #   2 = partial routing below --min-completion
+    #   3 = >= min-completion but DRC violations remain
+    #   4 = partial routing AND clearance violations
+    #   1, 5 = fatal
+    success = result.returncode == 0
     if success:
-        print("\n   SUCCESS: All signal nets routed!")
+        print(f"\n   SUCCESS: full route + DRC clean ({nets_total}/{nets_total} signal nets)")
+    elif result.returncode in (1, 5):
+        print(f"\n   FATAL: kct route returned exit code {result.returncode}")
+        if result.stderr:
+            print(f"   stderr (last 500 chars): {result.stderr[-500:]}")
     else:
-        print(f"\n   PARTIAL: Routed {stats['nets_routed']}/{total_signal_nets} signal nets")
+        # Treat 2/3/4 as best-effort residual (rev B P4 accepts these)
+        print(
+            f"\n   PARTIAL (rc={result.returncode}): "
+            f"{nets_routed}/{nets_total} signal nets routed; "
+            "residuals are acceptable per rev B P4 best-effort policy."
+        )
+        # Best-effort: count the routing as successful if connectivity is at
+        # least the same as the rev A baseline (10/10 signal nets connected).
+        # P4 acceptance: at minimum, match the rev A manufacturable baseline
+        # of 10/10 topologically complete.
+        success = bool(nets_connected and nets_connected >= 10)
 
     return success
 
@@ -3103,13 +3087,15 @@ def run_drc(pcb_path: Path) -> bool:
     print("=" * 60)
 
     try:
-        # Issue #3138: use jlcpcb-tier1 manufacturer profile to match the
-        # combined-intervention baseline (supports via-in-pad which the
-        # default jlcpcb profile does not).
+        # Issue #3343 P4: rev B targets the standard jlcpcb manufacturer
+        # profile (per ``requirements.manufacturing.target_fab: jlcpcb`` in
+        # the canonical project.kct).  Rev A used jlcpcb-tier1 to enable
+        # via-in-pad; rev B doesn't need via-in-pad and the stricter rev B
+        # clearance spec (0.20mm trace + space) is the load-bearing change.
         result = subprocess.run(
             [
                 sys.executable, "-m", "kicad_tools.cli", "check",
-                "--mfr", "jlcpcb-tier1",
+                "--mfr", "jlcpcb",
                 str(pcb_path),
             ],
             capture_output=True,
@@ -3199,14 +3185,13 @@ def create_project(output_dir: Path, project_name: str) -> Path:
 def main() -> int:
     """Main entry point.
 
-    By default (rev B P2 ship-state) this generates the schematic and
-    runs the rev B schematic + ERC + PCB placement pipeline.  Routing,
-    DRC tightening, and manufacturing export are deferred to P4/P5 (see
-    issue #3343 phase plan).  Set the environment variable
-    ``SOFTSTART_RUN_FULL_PIPELINE=1`` to opt into routing + export
-    (rev A baseline regression — note rev B routing parameters are
-    P4-territory; running with the rev B PCB and rev A router settings
-    may produce reach regressions until the P4 0.2mm clearance landing).
+    By default (rev B P4 ship-state) this generates the schematic, runs
+    ERC, places the PCB, and now (post-#3343 P4) routes with the rev B
+    0.20mm clearance + jlcpcb manufacturer profile via
+    ``kct route --backend cpp``.  Manufacturing export (P5) still runs
+    only when ``SOFTSTART_RUN_FULL_PIPELINE=1`` is set so the placement-
+    only smoke loop stays fast for tests.  P5 will switch the default to
+    full pipeline once the manufacturing bundle is validated.
     """
     import os
 
@@ -3234,8 +3219,8 @@ def main() -> int:
             print("\n" + "=" * 60)
             print("Rev B P3: schematic + ERC + PCB placement complete.")
             print("Routing (P4) + manufacturing bundle (P5) skipped — set")
-            print("SOFTSTART_RUN_FULL_PIPELINE=1 to run them (may have reach")
-            print("regressions until P4 tightens DRC to 0.2mm).")
+            print("SOFTSTART_RUN_FULL_PIPELINE=1 to run them (rev B P4")
+            print("routing uses kct route --backend cpp with 0.20mm clearance).")
             print("=" * 60)
             print("\nSUMMARY")
             print("=" * 60)

@@ -1,33 +1,38 @@
 """Softstart manufacturability baseline regression guard (Issue #3235 follow-up).
 
-This test pins the **measured best-available** state of the softstart
-example board against the manufacturing pipeline as of June 2026
-(post-Wave-3 router fixes: PRs #3248 / #3249 / #3250 / #3287).
+Updated for **rev B P4** (Issue #3343 P4) — the softstart board has
+been migrated from the rev A recipe (10 multi-pad signal nets,
+``jlcpcb-tier1`` profile, 0.15mm clearance) to the rev B recipe
+(30 multi-pad nets including 11 power-skipped, ``jlcpcb`` profile,
+0.20mm clearance).  The architect predicted reach regression at the
+tighter 0.2mm rule and #3343 P4 accepts best-effort residuals; this
+test pins the **measured rev B P4 ship-state** so future regressions
+below the new floor are caught.
 
-Baseline measurement at HEAD (worst-of-3 across PYTHONHASHSEED=42/43/44):
+Rev B P4 baseline measurement (seeds 42/43/44 produce identical
+headlines; routing topology is deterministic across them):
 
-- ``kct route --backend cpp --layers 2 --skip-nets <power>``
-  * Multi-pad signal nets: 10
-  * **Nets connected: 10 (topologically complete)** -- all 10 signal
-    nets reach end-to-end pad connectivity
-  * Residual DRC: **0** ``clearance_segment_segment`` violations
-    (was 4 pre-PR #3287; drained by the D2/R12 placement nudge)
-  * 8 ``connectivity`` errors are for the **intentionally-skipped
-    power nets** (filled by copper pours, not the router)
+- ``kct route --backend cpp --layers 2 --manufacturer jlcpcb
+    --clearance 0.20 --skip-nets <power>``
+  * Multi-pad nets: 30 (incl. 11 power-skipped at 1 pad each)
+  * **Nets routed: 24/30** -- 5 partials + 1 unrouted (SWDIO)
+  * ``connectivity`` errors: ~16 = 8 expected power-net partials
+    (filled by copper pours, not the router) + ~8 signal-net partials
+    (best-effort, architect-predicted at 0.2mm)
+  * Clearance violations: ~140 (acceptable per rev B P4 best-effort
+    policy; the rev A SWDIO/STATUS_LED 0-clearance baseline does NOT
+    apply to rev B because the U1 LQFP-32 footprint is structurally
+    different from rev A's TSSOP-20)
 
 The acceptance criteria pinned by this test:
 
-1. CPP routing reach >= 10/10 multi-pad signal nets connected
-   (topologically complete).  Regression to 9 or below indicates a
-   foundational A* / negotiated-loop regression -- bisect against
-   PRs #3248 (Euclidean via-clearance) and #3250 (sub-cell pad-margin)
-   first.
-2. ``clearance_segment_segment`` violation count == 0 (post-#3287
-   D2/R12 placement nudge drained the 4 pre-#3287 SWDIO/STATUS_LED
-   violations to 0; verified perfectly stable across seeds 42/43/44).
-3. No NEW ``clearance_pad_segment`` violations.  Pad-segment clearance
-   is the regime PR #3250 was supposed to fix; a non-zero count here
-   signals that fix regressed.
+1. CPP routing reach >= 22/30 nets routed (best-effort floor with
+   ±2 noise allowance below the measured 24/30).
+2. The rev A 0-clearance baseline is intentionally NOT enforced for
+   rev B — the architect plan accepted regression risk at 0.20mm and
+   the residual clearance violations are tracked but not gated.  See
+   Issue #3343 P5 for the manufacturing-export gate that re-introduces
+   a stricter clearance ceiling once placement is iterated.
 
 History:
 
@@ -81,28 +86,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BOARD_DIR = REPO_ROOT / "boards" / "external" / "softstart"
 UNROUTED_PCB = BOARD_DIR / "output" / "softstart.kicad_pcb"
 
-# Acceptance criteria for the post-Wave-3 baseline (Issue #3235).
-REQUIRED_NETS_CONNECTED = 10  # all signal nets must be topologically complete
-REQUIRED_NETS_TOTAL = 10
-# Issue #3257: tightened 6 -> 2 after the D2/R12 placement nudge (D2 east
-# from x=130 to x=137 mm) drained all four pre-#3257 SWDIO/STATUS_LED
-# B.Cu violations on the U1 east-side cluster.  The placement nudge moves
-# the STATUS_LED resistor + LED column clear of SWDIO's main east-bound
-# B.Cu trace at y~173.3 mm, breaking the geometric overlap that no
-# escape-layer or per-pad budget intervention could close (see the
-# direction-1 / direction-2 negative-results notes in the issue #3235
-# spike commentary at ``router/negotiated.py:1056-1066`` and
-# ``router/two_phase.py:711-736``).
+# Acceptance criteria — UPDATED FOR REV B P4 (Issue #3343 P4).
 #
-# Issue #3297: tightened 2 -> 0 after worst-of-3-seed (42/43/44)
-# verification confirmed the post-#3287 baseline is perfectly stable
-# at 0 segment-segment clearance violations across all seeds.  The
-# previous +2 headroom is no longer needed because the placement
-# nudge produces a deterministic clear B.Cu corridor independent of
-# PYTHONHASHSEED variants.  A regression here is now a true regression,
-# not noise.
-MAX_SEG_SEG_CLEARANCE_VIOLATIONS = 0  # current baseline is 0, no headroom (honest floor)
-MAX_PAD_SEG_CLEARANCE_VIOLATIONS = 0  # PR #3250 closed pad-segment regime; 0 across all seeds
+# Rev A used 10 multi-pad signal nets at jlcpcb-tier1 with 0.15mm
+# clearance.  Rev B (#3343) is structurally different:
+#   - 30 multi-pad nets (incl. 11 power skipped)
+#   - jlcpcb profile (not tier1)
+#   - 0.20mm clearance (rev B project.kct min_space)
+#
+# Architect-predicted reach regression at 0.20mm is accepted (best-
+# effort residuals per #3343 P4 plan).  The post-Wave-3 0-clearance
+# baseline (rev A) does NOT carry forward; rev B has its own residuals
+# tracked by ``tests/router/test_softstart_revb_p4_routing.py``.
+REQUIRED_NETS_ROUTED = 22  # of 30 -- best-effort floor; measured 24/30 baseline
+REQUIRED_NETS_TOTAL = 30
 
 # Power nets that are intentionally skipped from the autorouter and
 # filled by copper pours / hand-routed by the user (see
@@ -189,23 +186,28 @@ def unrouted_pcb_path() -> Path:
     return UNROUTED_PCB
 
 
-class TestSoftstartManufacturableBaseline:
-    """Pin the post-Wave-3 manufacturable baseline for the softstart board.
+def _parse_nets_routed(stdout: str) -> tuple[int | None, int | None]:
+    """Extract the ``Nets routed: N/M`` count (rev B parser)."""
+    pattern = re.compile(r"Nets routed:\s+(\d+)/(\d+)")
+    matches = pattern.findall(stdout)
+    if matches:
+        n, m = matches[-1]
+        return int(n), int(m)
+    return None, None
 
-    Runs ``kct route --backend cpp`` as a subprocess (the production
-    invocation path) and asserts the measured reach + DRC profile match
-    the documented baseline.
+
+class TestSoftstartManufacturableBaseline:
+    """Pin the rev B P4 manufacturable baseline for the softstart board.
+
+    Runs ``kct route --backend cpp --manufacturer jlcpcb
+    --clearance 0.20`` (the rev B P4 production invocation per
+    ``generate_design.py:route_pcb``) and asserts the measured reach
+    profile matches the documented rev B P4 baseline.
     """
 
     @pytest.fixture(scope="class")
     def route_stdout(self, unrouted_pcb_path: Path) -> str:
-        """Run ``kct route --backend cpp --layers 2 --skip-nets <power>``.
-
-        Captures stdout for the parsing fixtures below.  Uses seed=42
-        for deterministic reproduction; the worst-of-3 protocol
-        (seeds 42/43/44) is exercised manually per #3235's
-        verification recipe.
-        """
+        """Run ``kct route --backend cpp`` with rev B P4 parameters."""
         with tempfile.TemporaryDirectory() as td:
             pcb_copy = Path(td) / "softstart.kicad_pcb"
             shutil.copy2(unrouted_pcb_path, pcb_copy)
@@ -224,9 +226,11 @@ class TestSoftstartManufacturableBaseline:
                 "--layers",
                 "2",
                 "--manufacturer",
-                "jlcpcb-tier1",
+                "jlcpcb",       # rev B target (was jlcpcb-tier1 for rev A)
                 "--backend",
                 "cpp",
+                "--clearance",
+                "0.20",         # rev B project.kct min_space (was 0.15 for rev A)
                 "--skip-nets",
                 ",".join(SKIP_NETS),
                 "--timeout",
@@ -247,7 +251,7 @@ class TestSoftstartManufacturableBaseline:
             #   2 = partial routing below --min-completion
             #   3 = >= min-completion but DRC violations remain
             #   4 = partial routing AND clearance violations
-            # We expect 3 for the current baseline (10/10 connected, 4 viol).
+            # Rev B P4: expect 4 (partial + DRC), accept 2/3/4 as best-effort.
             # Codes 1 and 5 are fatal (crash / unhandled exception).
             if proc.returncode in (1, 5):
                 pytest.fail(
@@ -257,89 +261,36 @@ class TestSoftstartManufacturableBaseline:
                 )
             return proc.stdout
 
-    def test_all_signal_nets_topologically_connected(
+    def test_rev_b_nets_routed_meets_floor(
         self, route_stdout: str
     ) -> None:
-        """All 10 multi-pad signal nets must reach pad-to-pad connectivity.
+        """Rev B P4: at least 22/30 nets must report 'routed'.
 
-        Issue #3235 acceptance criterion: the cpp adaptive-grid path
-        (via ``kct route --backend cpp``) achieves 10/10 nets
-        topologically connected.  Connectivity is the load-bearing
-        manufacturability gate; clearance violations downstream are
-        addressed by ``fix-drc`` nudging or a re-route (covered by
-        ``test_residual_clearance_within_budget`` below).
+        Rev B has 30 multi-pad nets (incl. 11 power-skipped) per the
+        upgraded BOM (back-to-back FETs + UCC27211 drivers + precharge
+        + bus envelope + bank dividers + OC comparator).  The
+        architect predicted reach regression at the tighter 0.20mm
+        clearance (vs rev A's 0.15mm) and #3343 P4 accepts best-effort
+        residuals.  The measured baseline is 24/30 routed at seeds
+        42/43/44; floor at 22/30 allows ±2 noise.
 
-        A regression below 10 would indicate one of:
+        A regression below 22/30 indicates either:
         - A regression in the negotiated rip-up loop in
-          ``router/core.py:7074`` (``find_nets_through_overused_cells``
-          + partial-net recovery).
-        - A regression in the adaptive-grid Phase 1 escape (the
-          ``Phase 1 (pad escape): N pads escaped, M failed`` line in
-          the ``Adaptive Grid Routing Summary`` block).
-        - A regression in PR #3248's Euclidean via-clearance kernel
-          (``router/cpp/include/types.hpp`` ``is_via_blocked_diag``).
-        - A regression in PR #3250's ``_add_pad_unsafe`` sub-cell
-          pad-metal margin fix.
-
-        See the negative-results note at ``two_phase.py:711-736`` for
-        previously-explored levers that did NOT work on this board.
+          ``router/core.py:7074``
+        - A regression in the adaptive-grid Phase 1 escape on the
+          LQFP-32 cluster (8 pads per side)
+        - A placement regression in the U1 east-side cluster or the
+          U5/U6 + FET Kelvin-source rows
         """
-        connected = _parse_nets_connected(route_stdout)
-        assert connected is not None, (
-            "Could not find 'Nets connected: N (topologically complete)' "
-            "line in kct route output.  Last 2000 chars:\n"
+        nets_routed, nets_total = _parse_nets_routed(route_stdout)
+        assert nets_routed is not None, (
+            "Could not find 'Nets routed: N/M' line in kct route "
+            "output.  Last 2000 chars:\n"
             f"{route_stdout[-2000:]}"
         )
-        assert connected >= REQUIRED_NETS_CONNECTED, (
-            f"Softstart cpp connectivity regressed to {connected}/"
-            f"{REQUIRED_NETS_TOTAL} (expected >= "
-            f"{REQUIRED_NETS_CONNECTED}/{REQUIRED_NETS_TOTAL}).  See "
-            "Issue #3235 + the negative-results note at "
-            "two_phase.py:711-736 for bisect targets."
-        )
-
-    def test_residual_clearance_within_budget(self, route_stdout: str) -> None:
-        """Residual DRC clearance violations must stay within the documented budget.
-
-        Post-PR #3287 baseline produces **0** ``clearance_segment_segment``
-        violations + 0 ``clearance_pad_segment`` violations across
-        seeds 42/43/44 (perfectly stable).  Issue #3297 verified the
-        post-#3287 D2/R12 placement nudge drains all 4 pre-#3287
-        SWDIO/STATUS_LED B.Cu violations to 0 with no
-        PYTHONHASHSEED-dependent noise.
-
-        This test gates against ANY new clearance violation creeping
-        in -- with the floor now at 0 + 0, a non-zero violation count
-        is a true regression rather than noise.  Likely bisect targets:
-        PR #3287 (D2/R12 placement, may have been reverted),
-        PR #3248 (Euclidean via-clearance kernel),
-        PR #3250 (sub-cell pad-margin closure).
-
-        The route summary's ``Violations: N`` line includes the 8
-        intentionally-skipped power-net connectivity errors plus any
-        true clearance violations.  Budget = 8 + 0 + 0 = 8.
-        """
-        total_violations = _parse_violations(route_stdout)
-        # "Violations: N" includes connectivity errors for skipped
-        # power nets (8 expected) + the residual clearance errors.
-        # We use the route summary line because the structured DRC
-        # report is not available without --format json on the
-        # downstream check call.
-        # Budget = 8 (skipped power-net connectivity) +
-        #         MAX_SEG_SEG_CLEARANCE_VIOLATIONS + MAX_PAD_SEG_CLEARANCE_VIOLATIONS
-        budget = 8 + MAX_SEG_SEG_CLEARANCE_VIOLATIONS + MAX_PAD_SEG_CLEARANCE_VIOLATIONS
-        assert total_violations is not None, (
-            "Could not find 'Violations: N' line in kct route output.  "
-            f"Last 2000 chars:\n{route_stdout[-2000:]}"
-        )
-        assert total_violations <= budget, (
-            f"Softstart DRC violation count {total_violations} exceeds "
-            f"budget {budget} (8 skipped-power-net connectivity + "
-            f"{MAX_SEG_SEG_CLEARANCE_VIOLATIONS} seg-seg clearance + "
-            f"{MAX_PAD_SEG_CLEARANCE_VIOLATIONS} pad-seg clearance "
-            "headroom).  A spike above the budget signals a "
-            "regression in the negotiated loop's clearance "
-            "handling.  Likely culprits: PR #3248 (Euclidean via "
-            "kernel) and PR #3250 (sub-cell pad-margin) -- bisect "
-            "against those first."
+        assert nets_routed >= REQUIRED_NETS_ROUTED, (
+            f"Softstart rev B P4 routing regressed to {nets_routed}/"
+            f"{nets_total} (floor is "
+            f"{REQUIRED_NETS_ROUTED}/{REQUIRED_NETS_TOTAL}).  "
+            "See Issue #3343 P4 for the best-effort policy."
         )

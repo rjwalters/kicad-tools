@@ -435,8 +435,23 @@ class TestSoftstartCallSite:
     the end-to-end softstart routing would silently regress to 6/10.
     """
 
-    def test_softstart_generator_calls_route_with_escape(self):
-        """generate_design.py must invoke route_with_escape, not route_all_negotiated."""
+    def test_softstart_generator_routes_via_cpp_backend(self):
+        """generate_design.py must invoke kct route --backend cpp.
+
+        Updated for Issue #3343 P4 (rev B): rev A used the Python
+        ``router.route_with_escape(...)`` path to access the TSSOP-20
+        dense-package escape pre-pass (#3138).  Rev B switched to the
+        LQFP-32 footprint (less dense, 0.8mm pitch vs 0.65mm) and
+        routes via ``kct route --backend cpp``, which uses the C++
+        adaptive-grid pipeline (with Phase 1 pad escape built in) for
+        a 10-100× speedup.
+
+        This test was originally Issue #3138's guard against reverting
+        to ``router.route_all_negotiated()`` (which bypassed the
+        escape pre-pass).  Under rev B P4, the equivalent guard is
+        that ``route_pcb`` must invoke ``--backend cpp`` (so the C++
+        adaptive-grid path runs).
+        """
         from pathlib import Path
 
         gen_path = (
@@ -453,19 +468,10 @@ class TestSoftstartCallSite:
             )
 
         text = gen_path.read_text()
-        assert "router.route_with_escape(" in text, (
-            "Issue #3138: softstart generate_design.py must call "
-            "router.route_with_escape(...) so the dense-package escape "
-            "pre-pass runs on the U1 TSSOP-20.  Reverting to "
-            "router.route_all_negotiated(...) bypasses the pre-pass "
-            "and caps reach at 6/10 nets."
+        # Rev B P4: kct route --backend cpp is the production path.
+        assert '"--backend", "cpp"' in text or "--backend cpp" in text, (
+            "Issue #3343 P4: softstart generate_design.py must invoke "
+            "kct route --backend cpp.  Rev A's "
+            "router.route_with_escape(...) path was retired in favour "
+            "of the C++ adaptive-grid pipeline."
         )
-        # Strict: the bare route_all_negotiated() call must not be the
-        # ONLY routing entry -- if it appears in the script, the
-        # route_with_escape call must also appear.  (We allow both
-        # because some future variant may call route_all_negotiated for
-        # a non-dense board, but the dense softstart path must go
-        # through route_with_escape.)
-        if "router.route_all_negotiated(" in text:
-            # ok as long as the route_with_escape call is also present
-            assert "router.route_with_escape(" in text
