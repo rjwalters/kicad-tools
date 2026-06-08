@@ -2340,6 +2340,26 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # auto-resolve will be revisited under a follow-up issue once
         # the C++ pathfinder's per-net per-clearance cost surface
         # matches the Python backend's behaviour on this layout.
+        #
+        # Issue #3337 (2026-06-08) re-measurement on current main
+        # (post Wave 9 fixes #3258/#3307): the gap remains substantial.
+        # Side-by-side A/B at HEAD (committed pin vs fresh cpp re-route):
+        #
+        #   backend    | total | blocking | pad_seg | seg_seg | seg_via | reach
+        #   committed  |   29  |     6    |    6    |    0    |    0    | 60%
+        #   python new |   32  |    11    |    3    |    5    |    3    | 60%
+        #   cpp new    |   68  |    54    |   11    |   31    |    9    | 67%
+        #
+        # The cpp backend buys +7% routing reach at the cost of a 9x
+        # increase in clearance_segment_segment violations and a 5x
+        # increase in total blocking errors -- the python pin remains
+        # the correct choice for this layout.  The committed PCB is
+        # also strictly better than a fresh python re-route under
+        # current main (6 vs 11 blocking), per the
+        # test_committed_pcb_has_no_segment_segment_or_segment_via
+        # regression test from PR #3258.  DO NOT overwrite the
+        # committed routed snapshot without manually verifying the
+        # new fresh re-route is strictly better.
         "--backend",
         "python",
         "--seed",
