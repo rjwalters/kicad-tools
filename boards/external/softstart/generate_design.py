@@ -1649,7 +1649,8 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         "10. High-current traces: 2mm+ for BUS_LINE, SCAP_*+, GND (handled by user pour).\n"
         "11. Star ground: PCB zone keep-outs separate PGND/SGND (no schematic-side split).\n"
         "12. AC mains isolation: keep HV section separate.\n"
-        "13. Board: 150mm x 100mm, 2-layer, 2oz copper. DRC tightened to 0.2mm (Q5).\n",
+        "13. Board: 150mm x 100mm, 2-layer, 2oz copper.\n"
+        "    (P2 retains trace_clearance=0.15mm; DRC tightening to 0.2mm is P4 work.)\n",
         x=X_AC_INPUT,
         y=RAIL_GND + 20,
     )
@@ -2380,7 +2381,13 @@ def create_softstart_pcb(output_dir: Path) -> Path:
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """Route the PCB using the autorouter."""
+    """Route the PCB using the autorouter.
+
+    Note: trace_clearance stays at 0.15mm in P2.  The 0.2mm DRC tightening
+    called out in the rev B architect plan is deferred to P4 (per issue
+    #3343 phase plan) — tightening now would defeat the gating purpose
+    and risks P4 routing failures before placement is finalised in P3.
+    """
     from kicad_tools.router import DesignRules, load_pcb_for_routing
     from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
@@ -2396,7 +2403,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     rules = DesignRules(
         grid_resolution=0.075,
         trace_width=0.3,
-        trace_clearance=0.15,
+        trace_clearance=0.15,  # P2 baseline; P4 tightens to 0.2mm per #3343 plan
         via_drill=0.3,
         via_diameter=0.6,
     )
