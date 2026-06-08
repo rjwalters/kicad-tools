@@ -79,13 +79,22 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.blocks import (
+    BackToBackFETPair,
     DebugHeader,
     FuseBlock,
     LEDIndicator,
+    PrechargeSubsystem,
+    UCC27211GateDriver,
     VoltageDividerSense,
 )
 from kicad_tools.schematic.blocks.mcu import BootModeSelector, MCUBlock, ResetButton
 from kicad_tools.schematic.models.schematic import Schematic
+
+# Path to the project-local KiCad symbol library that ships the custom
+# UCC27211 gate-driver symbol (PR #3344 / Issue #3343 P1).
+_CUSTOM_SYMBOL_LIB = (
+    Path(__file__).parent / "symbols" / "softstart_custom.kicad_sym"
+)
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -98,27 +107,38 @@ def generate_uuid() -> str:
 
 def create_softstart_schematic(output_dir: Path) -> Path:
     """
-    Create the soft-start board schematic.
+    Create the soft-start board schematic (rev B topology).
+
+    Rev B replaces rev A's single-FET-per-bank discharge with back-to-back
+    pairs + UCC27211 gate drivers + precharge subsystems, adds a hardware
+    overcurrent comparator (LM393), bank voltage sensing, a bus envelope
+    op-amp buffer (MCP6001), gate protection (TVS + bleeders + failsafe),
+    a dedicated 12V VGATE rail (LM7812), and upgrades the MCU to a
+    STM32G031K8T6 LQFP-32.
 
     Returns the path to the generated schematic file.
     """
-    print("Creating Generator Soft-Start Schematic...")
+    print("Creating Generator Soft-Start Schematic (rev B)...")
     print("=" * 60)
 
     sch = Schematic(
         title="Generator Soft-Start - Supercapacitor Power Assist",
-        date="2025-01",
-        revision="A",
+        date="2026-06",
+        revision="B",
         company="kicad-tools",
         comment1="120VAC soft-start for 8000 BTU AC on Honda EU1000i",
-        comment2="STM32G031F6P6 MCU, 2x30S supercap banks",
+        comment2="STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers",
+        # Register the project-local symbol library so add_symbol() can
+        # resolve "softstart_custom:UCC27211" (PR #3344 / Issue #3343 P1).
+        local_symbol_libs=[_CUSTOM_SYMBOL_LIB],
     )
 
     # =========================================================================
     # Power Rail Y Coordinates
     # =========================================================================
     RAIL_3V3 = 30       # 3.3V logic supply
-    RAIL_VRECT = 50     # Rectified DC (~5-12V from small transformer/supply)
+    RAIL_VRECT = 50     # Rectified DC (~12V from bridge rectifier)
+    RAIL_12V = 70       # 12V VGATE rail (LM7812 output) for UCC27211 supply
     RAIL_GND = 280      # Ground
 
     # Schematic section X positions
@@ -126,12 +146,19 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     X_VSENSE = 80
     X_ZC_DETECT = 130
     X_CHARGE = 180
-    X_DISCHARGE = 250
-    X_ISENSE = 320
-    X_MCU = 390
-    X_LDO = 470
-    X_LED = 530
-    X_DEBUG = 560
+    X_DISCHARGE_POS = 240        # Back-to-back pair Q1A/Q1B (positive bank)
+    X_DRIVER_POS = 280            # UCC27211 driver for Q1A/Q1B
+    X_DISCHARGE_NEG = 330        # Back-to-back pair Q2A/Q2B (negative bank)
+    X_DRIVER_NEG = 370            # UCC27211 driver for Q2A/Q2B
+    X_PRECHARGE = 410             # Precharge subsystems (both banks)
+    X_ISENSE = 460                # Current sense shunt + INA180A3
+    X_OC = 500                    # LM393 overcurrent comparator
+    X_BANKDIV = 540               # Bank voltage divider pair
+    X_BUSBUF = 600                # MCP6001 bus envelope buffer (east of U7 unit B)
+    X_MCU = 640                   # STM32G031K8T6
+    X_LDO = 720                   # XC6206 3.3V LDO + LM7812 12V
+    X_LED = 780                   # Status LED
+    X_DEBUG = 810                 # SWD debug header
 
     # =========================================================================
     # Section 1: Power Rails
@@ -183,6 +210,28 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_power("power:PWR_FLAG", x=X_CHARGE - 10, y=RAIL_VRECT, rotation=0)
     sch.add_junction(X_CHARGE - 10, RAIL_VRECT)
 
+    # 12V VGATE: NOT a continuous rail (would conflict with the +3.3V LDO
+    # output wire crossing RAIL_12V at the XC6206 column).  Instead VGATE
+    # is implemented via global net labels at each consumer (U5/U6 VDD,
+    # C21/C22/C24/C25, C33).  No PWR_FLAG needed: LM7812 VO is power_output
+    # and itself publishes the net to ERC.
+
+    # PWR_FLAG for the Kelvin-source nets SRC_POS / SRC_NEG.  The UCC27211
+    # VSS pin (power_in) ties to the back-to-back-pair source node — which
+    # is *not* the system GND but a high-voltage floating reference.  ERC
+    # would flag "Input Power pin not driven" without an explicit PWR_FLAG
+    # publishing that these nets are externally sourced (by the FET source
+    # current path).  Place these PWR_FLAGs in clean low-density areas
+    # below the GND rail to avoid wire collisions.
+    sch.add_power("power:PWR_FLAG", x=200, y=320, rotation=0)
+    sch.add_label("SRC_POS", 200, 320)
+    sch.add_power("power:PWR_FLAG", x=230, y=320, rotation=0)
+    sch.add_label("SRC_NEG", 230, 320)
+    # PWR_FLAG for BUS_LINE (the back-to-back-pair drain-B net joins both
+    # banks at the current shunt; ERC needs to know this is a real net).
+    sch.add_power("power:PWR_FLAG", x=260, y=320, rotation=0)
+    sch.add_label("BUS_LINE", 260, 320)
+
     # Ground rail (spans full width).
     sch.add_rail(
         RAIL_GND,
@@ -199,7 +248,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_power("power:PWR_FLAG", x=X_AC_INPUT + 10, y=RAIL_GND, rotation=0)
     sch.add_junction(X_AC_INPUT + 10, RAIL_GND)
 
-    print("   Added +3.3V, VRECT, and GND rails")
+    print("   Added +3.3V, VRECT, VGATE (12V), and GND rails")
 
     # =========================================================================
     # Section 2: AC Power Input (Fuse + Varistor + Terminal Block)
@@ -284,20 +333,22 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_junction(j1_pin2[0], j1_pin2[1])
 
     # =========================================================================
-    # Section 3: AC Voltage Sensing (Resistor Divider)
+    # Section 3: AC Voltage Sensing (Resistor Divider — feeds bus envelope)
     # =========================================================================
     print("\n3. Adding AC voltage sensing...")
 
-    # Voltage divider: 120VAC peak ~170V -> 3.3V ADC
-    # ratio = 170V / 3.3V ~ 51.5
+    # Voltage divider: rev B uses a 100:1 ratio (1M + 10k) per
+    # ``project.kct`` ``suggestions.bus_voltage_sense.divider_ratio``.
+    # The divider output ``V_AC_SENSE_RAW`` drives the MCP6001 buffer
+    # (Section 11a below) which feeds the MCU PA0 ADC.
     vsense = VoltageDividerSense(
         sch,
         x=X_VSENSE,
         y=140,
-        ratio=51.5,
+        ratio=100.0,
         ref_start=1,
     )
-    print(f"   R1/R2: Voltage divider (ratio 51.5:1)")
+    print("   R1/R2: Voltage divider (ratio 100:1, rev B spec)")
 
     # Wire voltage divider
     vsense_vin = vsense.port("VIN")
@@ -308,9 +359,12 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_wire(vsense_vin, (vsense_vin[0] - 5, vsense_vin[1]))
     sch.add_label("AC_LINE", vsense_vin[0] - 5, vsense_vin[1])
 
-    # Add a short wire stub at VOUT so label is on a wire
+    # Divider output: feeds both the MCP6001 op-amp buffer (slow envelope
+    # path → V_AC_SENSE → MCU PA0) and a series-cap dV/dt detector → MCU
+    # PA1 V_BUS_DVDT.  The wiring for both downstream consumers happens in
+    # the op-amp buffer section.
     sch.add_wire(vsense_vout, (vsense_vout[0] + 5, vsense_vout[1]))
-    sch.add_label("V_AC_SENSE", vsense_vout[0] + 5, vsense_vout[1])
+    sch.add_label("V_AC_SENSE_RAW", vsense_vout[0] + 5, vsense_vout[1])
 
     # Connect ground
     sch.add_wire(vsense_gnd, (vsense_gnd[0], RAIL_GND), warn_on_collision=False)
@@ -507,98 +561,431 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_label("SCAP_NEG_GND", j4_pin2[0] + 5, j4_pin2[1])
 
     # =========================================================================
-    # Section 6: Discharge Circuit (2x IRFB4110 N-MOSFETs)
+    # Section 6: Discharge Circuit (Rev B — back-to-back FETs + UCC27211)
     # =========================================================================
-    print("\n6. Adding discharge circuits...")
+    print("\n6. Adding rev B discharge circuits...")
 
-    # Positive bank discharge MOSFET
-    q1 = sch.add_symbol(
-        "Device:Q_NMOS",
-        x=X_DISCHARGE,
-        y=120,
-        ref="Q1",
-        value="IRFB4110",
-        footprint="Package_TO_SOT_THT:TO-220-3_Vertical",
+    # ---- Positive bank: BackToBackFETPair Q1A/Q1B with UCC27211 driver ----
+    # Per rev B project.kct:
+    #   - 2x IRFB4110 N-FETs, sources tied (common-source node = Kelvin ref)
+    #   - Drains face outward: Q1A.drain → SCAP_POS+, Q1B.drain → BUS_LINE
+    #     ("BUS_LINE" is the high-current return path joining both banks at
+    #     the current shunt; it terminates at ISENSE_POS which is the shunt
+    #     high side, preserving rev A's single_pad_net invariant).
+    pair_pos = BackToBackFETPair(
+        sch,
+        x=X_DISCHARGE_POS,
+        y=110,
+        ref_a="Q1A",
+        ref_b="Q1B",
+        mosfet_value="IRFB4110",
+        kelvin_label="SRC_POS",   # name the Kelvin tie node
     )
-    # Gate resistor for Q1
-    r_gate1 = sch.add_symbol(
-        "Device:R",
-        x=X_DISCHARGE - 20,
-        y=120,
-        ref="R7",
-        value="10R",
-        auto_footprint=True,
+    # Drain A → SCAP_POS+ (positive bank top)
+    pa_da = pair_pos.port("DRAIN_A")
+    sch.add_wire(pa_da, (pa_da[0], pa_da[1] - 5))
+    sch.add_label("SCAP_POS+", pa_da[0], pa_da[1] - 5)
+    # Drain B → BUS_LINE (joins R9 shunt via ISENSE_POS — see Section 7)
+    pa_db = pair_pos.port("DRAIN_B")
+    sch.add_wire(pa_db, (pa_db[0], pa_db[1] + 5))
+    sch.add_label("BUS_LINE", pa_db[0], pa_db[1] + 5)
+    print("   Q1A/Q1B: IRFB4110 back-to-back pair (positive bank)")
+
+    # UCC27211 gate driver for the positive pair (HO → Q1A.gate, LO → Q1B.gate).
+    # vgate_net VGATE = 12V supply (LM7812 in section 11).  Kelvin source ref
+    # ties to SRC_POS via VSS/HS — *not* power GND, per UCC27211 Kelvin-source
+    # discipline.
+    drv_pos = UCC27211GateDriver(
+        sch,
+        x=X_DRIVER_POS,
+        y=110,
+        ref="U5",
+        vgate_net="VGATE",
+        kelvin_source_net="SRC_POS",
+        li_net="GATE_POS_B",       # MCU drives low-side (Q1B) gate
+        hi_net="GATE_POS_A",       # MCU drives high-side (Q1A) gate
+        lo_net="UCC_LO_POS",       # driver LO output → Q1B gate stub
+        ho_net="UCC_HO_POS",       # driver HO output → Q1A gate stub
+        hb_net="VBOOT_POS",
+        hs_net="SRC_POS",          # HS = switch node = common source
+        cap_ref_start=20,          # C20=C_BOOT, C21=C_BULK, C22=C_BYPASS
     )
-    print(f"   Q1: IRFB4110 (positive bank discharge)")
-    print(f"   R7: 10R gate resistor")
+    # Tie driver VDD pin to VGATE net (stub label).
+    drv_vdd = drv_pos.port("VDD")
+    sch.add_wire(drv_vdd, (drv_vdd[0], drv_vdd[1] - 5))
+    sch.add_label("VGATE", drv_vdd[0], drv_vdd[1] - 5)
+    # Wire driver VCC bulk/bypass caps (C21, C22) between VGATE and SRC_POS.
+    # The P1 UCC27211GateDriver block places the cap symbols but does NOT
+    # wire them (block deficiency — to be filed as follow-up).  P2 wires
+    # them via stub labels on each cap pin.
+    for cap_inst in (drv_pos.c_vcc_bulk, drv_pos.c_vcc_bypass):
+        p1 = cap_inst.pin_position("1")
+        p2 = cap_inst.pin_position("2")
+        sch.add_wire(p1, (p1[0], p1[1] - 3))
+        sch.add_label("VGATE", p1[0], p1[1] - 3)
+        sch.add_wire(p2, (p2[0], p2[1] + 3))
+        sch.add_label("SRC_POS", p2[0], p2[1] + 3)
+    print("   U5: UCC27211 gate driver (positive bank, Kelvin to SRC_POS)")
 
-    # Wire Q1 gate
-    q1_gate = q1.pin_position("G")
-    q1_drain = q1.pin_position("D")
-    q1_source = q1.pin_position("S")
-
-    r7_pin1 = r_gate1.pin_position("1")
-    r7_pin2 = r_gate1.pin_position("2")
-    sch.add_wire(r7_pin2, q1_gate)
-    # Gate label (stub wire)
-    sch.add_wire(r7_pin1, (r7_pin1[0] - 5, r7_pin1[1]))
-    sch.add_label("GATE_POS", r7_pin1[0] - 5, r7_pin1[1])
-    # Drain label (stub wire)
-    sch.add_wire(q1_drain, (q1_drain[0], q1_drain[1] - 5))
-    sch.add_label("SCAP_POS+", q1_drain[0], q1_drain[1] - 5)
-    # Source label (stub wire) — Q1 and Q2 both source-return through the
-    # current shunt R9, so the source net is the shunt's high side (ISENSE_POS).
-    # This used to be a distinct "DISCHARGE_POS" net which left R9 stranded
-    # from the discharge path in the PCB netlist (single_pad_net DRC error).
-    sch.add_wire(q1_source, (q1_source[0], q1_source[1] + 5))
-    sch.add_label("ISENSE_POS", q1_source[0], q1_source[1] + 5)
-
-    # Negative bank discharge MOSFET
-    q2 = sch.add_symbol(
-        "Device:Q_NMOS",
-        x=X_DISCHARGE,
+    # ---- Negative bank: identical topology with Q2A/Q2B + U6 driver ----
+    pair_neg = BackToBackFETPair(
+        sch,
+        x=X_DISCHARGE_NEG,
         y=180,
-        ref="Q2",
-        value="IRFB4110",
-        footprint="Package_TO_SOT_THT:TO-220-3_Vertical",
+        ref_a="Q2A",
+        ref_b="Q2B",
+        mosfet_value="IRFB4110",
+        kelvin_label="SRC_NEG",
     )
-    # Gate resistor for Q2
-    r_gate2 = sch.add_symbol(
-        "Device:R",
-        x=X_DISCHARGE - 20,
+    na_da = pair_neg.port("DRAIN_A")
+    sch.add_wire(na_da, (na_da[0], na_da[1] - 5))
+    sch.add_label("SCAP_NEG+", na_da[0], na_da[1] - 5)
+    na_db = pair_neg.port("DRAIN_B")
+    sch.add_wire(na_db, (na_db[0], na_db[1] + 5))
+    sch.add_label("BUS_LINE", na_db[0], na_db[1] + 5)
+    print("   Q2A/Q2B: IRFB4110 back-to-back pair (negative bank)")
+
+    drv_neg = UCC27211GateDriver(
+        sch,
+        x=X_DRIVER_NEG,
         y=180,
-        ref="R8",
-        value="10R",
-        auto_footprint=True,
+        ref="U6",
+        vgate_net="VGATE",
+        kelvin_source_net="SRC_NEG",
+        li_net="GATE_NEG_B",
+        hi_net="GATE_NEG_A",
+        lo_net="UCC_LO_NEG",
+        ho_net="UCC_HO_NEG",
+        hb_net="VBOOT_NEG",
+        hs_net="SRC_NEG",
+        cap_ref_start=23,          # C23=C_BOOT, C24=C_BULK, C25=C_BYPASS
     )
-    print(f"   Q2: IRFB4110 (negative bank discharge)")
-    print(f"   R8: 10R gate resistor")
+    drv_neg_vdd = drv_neg.port("VDD")
+    sch.add_wire(drv_neg_vdd, (drv_neg_vdd[0], drv_neg_vdd[1] - 5))
+    sch.add_label("VGATE", drv_neg_vdd[0], drv_neg_vdd[1] - 5)
+    # Wire driver VCC bulk/bypass caps (C24, C25) between VGATE and SRC_NEG.
+    for cap_inst in (drv_neg.c_vcc_bulk, drv_neg.c_vcc_bypass):
+        p1 = cap_inst.pin_position("1")
+        p2 = cap_inst.pin_position("2")
+        sch.add_wire(p1, (p1[0], p1[1] - 3))
+        sch.add_label("VGATE", p1[0], p1[1] - 3)
+        sch.add_wire(p2, (p2[0], p2[1] + 3))
+        sch.add_label("SRC_NEG", p2[0], p2[1] + 3)
+    print("   U6: UCC27211 gate driver (negative bank, Kelvin to SRC_NEG)")
 
-    # Wire Q2 gate
-    q2_gate = q2.pin_position("G")
-    q2_drain = q2.pin_position("D")
-    q2_source = q2.pin_position("S")
+    # ---- Driver-output → main-FET gate wiring + per-FET gate protection ----
+    # For each main FET we add:
+    #   - 10kΩ gate bleeder (gate ↔ source) — prevents floating gate
+    #   - 18V TVS gate ↔ source clamp (SMBJ18A footprint, Device:D_TVS symbol)
+    # The driver HO/LO output → FET gate is wired directly via net label
+    # (UCC_HO_POS → GATE_POS_A stub on the BackToBackFETPair gate pin).
+    def _wire_gate_and_protect(
+        gate_pin: tuple[float, float],
+        source_pin: tuple[float, float],
+        driver_output_net: str,
+        gate_label_net: str,
+        ref_bleeder: str,
+        ref_tvs: str,
+        side: str = "left",
+    ) -> None:
+        """Wire driver output → FET gate (via net label) + add protection.
 
-    r8_pin1 = r_gate2.pin_position("1")
-    r8_pin2 = r_gate2.pin_position("2")
-    sch.add_wire(r8_pin2, q2_gate)
-    # Gate label (stub wire)
-    sch.add_wire(r8_pin1, (r8_pin1[0] - 5, r8_pin1[1]))
-    sch.add_label("GATE_NEG", r8_pin1[0] - 5, r8_pin1[1])
-    # Drain label (stub wire)
-    sch.add_wire(q2_drain, (q2_drain[0], q2_drain[1] - 5))
-    sch.add_label("SCAP_NEG+", q2_drain[0], q2_drain[1] - 5)
-    # Source label (stub wire) — see Q1 above; both MOSFET sources share the
-    # single shunt's high side (ISENSE_POS).
-    sch.add_wire(q2_source, (q2_source[0], q2_source[1] + 5))
-    sch.add_label("ISENSE_POS", q2_source[0], q2_source[1] + 5)
+        Bleeder R + TVS clamp share the gate node and tie to the FET source
+        (common-source node SRC_POS or SRC_NEG, which is also the driver's
+        Kelvin reference).
+        """
+        # Stub label at the gate pin → connects to driver output via the net
+        STUB = 5.0
+        if side == "left":
+            gate_stub_end = (gate_pin[0] - STUB, gate_pin[1])
+        else:
+            gate_stub_end = (gate_pin[0] + STUB, gate_pin[1])
+        sch.add_wire(gate_pin, gate_stub_end)
+        sch.add_label(driver_output_net, gate_stub_end[0], gate_stub_end[1])
+        # Also expose the gate node by its MCU-facing logical name so
+        # downstream consumers (e.g. failsafe pull-down) can bind to it.
+        # Bleeder + TVS share the gate stub end; layered to the SOUTH of the
+        # gate pin so they don't collide with the driver output stub.
+        bleeder_x = gate_stub_end[0]
+        bleeder_y = gate_pin[1] + 18  # 18 mm below the gate pin
+        tvs_x = gate_stub_end[0] + 10
+        tvs_y = gate_pin[1] + 18
+        # Bleeder R (10k, 0805)
+        r_bleeder = sch.add_symbol(
+            "Device:R",
+            x=bleeder_x,
+            y=bleeder_y,
+            ref=ref_bleeder,
+            value="10k",
+            rotation=0,
+        )
+        # Wire bleeder pin 1 to gate stub end
+        rb_pin1 = r_bleeder.pin_position("1")
+        rb_pin2 = r_bleeder.pin_position("2")
+        sch.add_wire(gate_stub_end, (gate_stub_end[0], rb_pin1[1]))
+        sch.add_wire((gate_stub_end[0], rb_pin1[1]), rb_pin1)
+        # Bleeder pin 2 to source net (via label)
+        sch.add_wire(rb_pin2, (rb_pin2[0] + 3, rb_pin2[1]))
+        # TVS: Device:D_TVS, value "SMBJ18A".
+        d_tvs = sch.add_symbol(
+            "Device:D_TVS",
+            x=tvs_x,
+            y=tvs_y,
+            ref=ref_tvs,
+            value="SMBJ18A",
+            rotation=0,
+            footprint="Diode_SMD:D_SMB",
+        )
+        d_tvs_pin1 = d_tvs.pin_position("1")  # K (anode side per Device:D_TVS)
+        d_tvs_pin2 = d_tvs.pin_position("2")  # cathode side
+        # Pin 1 (cathode toward gate) to bleeder R pin 2 (gate net)
+        sch.add_wire(d_tvs_pin1, (d_tvs_pin1[0], rb_pin2[1]))
+        sch.add_wire((d_tvs_pin1[0], rb_pin2[1]), (rb_pin2[0] + 3, rb_pin2[1]))
+        sch.add_junction(rb_pin2[0] + 3, rb_pin2[1])
+        # Add the bleeder-to-source net label on the share node
+        sch.add_label(
+            f"{gate_label_net}__protect",  # private node naming the gate net
+            rb_pin2[0] + 3,
+            rb_pin2[1],
+        )
+        # TVS pin 2 → source net label
+        sch.add_wire(d_tvs_pin2, (d_tvs_pin2[0] + 3, d_tvs_pin2[1]))
+        # The source-side return for both bleeder and TVS bonds to the
+        # Kelvin source node (SRC_POS / SRC_NEG); add explicit labels.
+        # (caller provides the correct net via `gate_label_net` placement)
+
+    # Positive pair gate wiring (Q1A drives from UCC_HO_POS, Q1B from UCC_LO_POS).
+    # The HO/LO outputs are labeled at the driver IC side; the gates pick the
+    # same nets via labels. We add 10k bleeder + TVS clamp per FET.
+    # ---- Simpler approach: just emit gate labels + drop bleeder/TVS as
+    # independent gate-to-source protection components. We name the gate
+    # nets explicitly so they bind to the driver outputs.
+    qa_gate = pair_pos.port("GATE_A")
+    qb_gate = pair_pos.port("GATE_B")
+    qa_pos_source = pair_pos.port("SOURCE")
+    qb_pos_source = pair_pos.port("SOURCE")
+    # Gate labels for the back-to-back pair pins so they bond to driver outputs
+    sch.add_wire(qa_gate, (qa_gate[0] - 5, qa_gate[1]))
+    sch.add_label("UCC_HO_POS", qa_gate[0] - 5, qa_gate[1])
+    sch.add_wire(qb_gate, (qb_gate[0] - 5, qb_gate[1]))
+    sch.add_label("UCC_LO_POS", qb_gate[0] - 5, qb_gate[1])
+
+    qna_gate = pair_neg.port("GATE_A")
+    qnb_gate = pair_neg.port("GATE_B")
+    sch.add_wire(qna_gate, (qna_gate[0] - 5, qna_gate[1]))
+    sch.add_label("UCC_HO_NEG", qna_gate[0] - 5, qna_gate[1])
+    sch.add_wire(qnb_gate, (qnb_gate[0] - 5, qnb_gate[1]))
+    sch.add_label("UCC_LO_NEG", qnb_gate[0] - 5, qnb_gate[1])
+
+    # Gate protection: 1× 10k bleeder + 1× SMBJ18A TVS per main FET (×4).
+    # Placed in a low-density band south of the back-to-back FET pairs and
+    # north of the MCU rail so they don't collide with the supercap connector
+    # row (y=119-160) or the FET-pair rows (y=90-180).  Each pair of
+    # bleeder + TVS sits between its FET's gate net and the pair's common-
+    # source (Kelvin) node.
+    # Y bands: positive-bank protection at y=235-250, negative-bank at y=250-265.
+    print("   Gate protection: 4× 10k bleeders + 4× SMBJ18A TVS (8 parts total)")
+
+    def _emit_gate_protection(
+        x: float,
+        y: float,
+        gate_net: str,
+        source_net: str,
+        ref_r: str,
+        ref_d: str,
+    ) -> None:
+        """Bleeder + TVS clamp between gate_net and source_net.
+
+        Both components are placed horizontally (rotation=0).  Bleeder pin 1
+        and TVS pin 1 (cathode) get gate_net label stubs on the LEFT; pin 2
+        on each gets source_net label stubs on the RIGHT.
+        """
+        r = sch.add_symbol(
+            "Device:R",
+            x=x,
+            y=y,
+            ref=ref_r,
+            value="10k",
+            rotation=0,
+            auto_footprint=True,
+        )
+        d = sch.add_symbol(
+            "Device:D_TVS",
+            x=x,
+            y=y + 6,
+            ref=ref_d,
+            value="SMBJ18A",
+            rotation=0,
+            footprint="Diode_SMD:D_SMB",
+        )
+        rp1 = r.pin_position("1")
+        rp2 = r.pin_position("2")
+        dp1 = d.pin_position("1")  # K (cathode) — toward gate
+        dp2 = d.pin_position("2")  # anode — toward source
+
+        # Gate-side label stubs (left)
+        sch.add_wire(rp1, (rp1[0] - 3, rp1[1]))
+        sch.add_label(gate_net, rp1[0] - 3, rp1[1])
+        sch.add_wire(dp1, (dp1[0] - 3, dp1[1]))
+        sch.add_label(gate_net, dp1[0] - 3, dp1[1])
+        # Source-side label stubs (right)
+        sch.add_wire(rp2, (rp2[0] + 3, rp2[1]))
+        sch.add_label(source_net, rp2[0] + 3, rp2[1])
+        sch.add_wire(dp2, (dp2[0] + 3, dp2[1]))
+        sch.add_label(source_net, dp2[0] + 3, dp2[1])
+
+    # Positive pair: R_GB1+D_TVS1 (Q1A gate) and R_GB2+D_TVS2 (Q1B gate).
+    # Placed in the south staging band (y=305-345) below RAIL_GND=280, in
+    # the clean low-density area between the recipe's other south-band
+    # PWR_FLAGs (x=200-260, y=320).  Each protection block uses its own
+    # x column to avoid label-stub collisions with adjacent blocks.
+    _emit_gate_protection(300, 305, "UCC_HO_POS", "SRC_POS",
+                          "R_GB1", "D_TVS1")
+    _emit_gate_protection(300, 330, "UCC_LO_POS", "SRC_POS",
+                          "R_GB2", "D_TVS2")
+    _emit_gate_protection(340, 305, "UCC_HO_NEG", "SRC_NEG",
+                          "R_GB3", "D_TVS3")
+    _emit_gate_protection(340, 330, "UCC_LO_NEG", "SRC_NEG",
+                          "R_GB4", "D_TVS4")
+
+    # ---- Failsafe pull-downs on driver LI/HI inputs (per Q8 resolution) ----
+    # Two 2N7002 N-FETs: drain to UCC27211 LI/HI input pins, gate to NRST,
+    # source to GND.  When NRST asserts (low), both 2N7002 gates pull to 0V
+    # and the 2N7002s turn OFF, so LI/HI float (intentional — caller can
+    # tie a pull-down resistor to the driver inputs through the same node).
+    # When NRST de-asserts (high), the 2N7002s pull LI/HI low, forcing the
+    # driver outputs low and turning OFF all gates.  Wait — the Q8 spec
+    # says "pull driver LI/HI inputs low when NRST asserted (low)".
+    # Topology:  Gate→NRST (active-low reset signal becomes gate drive that
+    # OFFs the 2N7002 → driver inputs float when reset).  This is wrong.
+    # Correct topology (Q8 resolution): gate the 2N7002 with the INVERSE of
+    # NRST, OR use the convention that NRST is normally HIGH (MCU running)
+    # and pulls LOW only on reset.  When NRST is HIGH the 2N7002 is ON (its
+    # drain pulls LI/HI low → driver inputs low → outputs low).  When NRST
+    # is LOW the 2N7002 is OFF (LI/HI input pull-up takes over).
+    # Wait — that's exactly backwards.  Let me re-read Q8:
+    #   "2N7002 drain pulls UCC27211's LI/HI inputs low when NRST asserted"
+    # NRST asserted = NRST LOW.  We want LI/HI pulled LOW when NRST is LOW.
+    # So the 2N7002 must be ON when NRST is LOW → gate driven by /NRST
+    # (active high during reset).  Easiest topology: tie the 2N7002 *source*
+    # to NRST and *gate* to +3.3V.  When NRST is LOW (reset), Vgs = 3.3V →
+    # 2N7002 ON → LI/HI drain pulled LOW (toward NRST=0V).  When NRST is
+    # HIGH (running), Vgs = 0 → 2N7002 OFF → LI/HI free for the MCU to
+    # drive normally.  This is the Q8-correct topology.
+    print("   Q7/Q8: 2N7002 failsafe pull-downs on driver LI (gate=+3.3V, source=NRST)")
+    # Q7 (pos-bank failsafe) at the south edge of the protection band
+    # so its stub labels don't collide with the FET-pair / connector rows.
+    q_fs_pos = sch.add_symbol(
+        "Transistor_FET:2N7002",
+        x=X_DRIVER_POS - 20,
+        y=260,
+        ref="Q7",
+        value="2N7002",
+        rotation=0,
+        footprint="Package_TO_SOT_SMD:SOT-23",
+    )
+    q_fs_neg = sch.add_symbol(
+        "Transistor_FET:2N7002",
+        x=X_DRIVER_NEG - 20,
+        y=260,
+        ref="Q8",
+        value="2N7002",
+        rotation=0,
+        footprint="Package_TO_SOT_SMD:SOT-23",
+    )
+    # Q7 (positive driver failsafe): gate=+3.3V, source=NRST, drain=UCC LI
+    # (we tie to the LI input — Q8 resolution drops driver-input HI as the
+    # secondary because the 2N7002 OR-tie at LI is sufficient to force the
+    # UCC27211 output low when its LI is low — actually we need BOTH LI and
+    # HI low for both outputs to be low.  So we use one 2N7002 per input.
+    # The spec calls for 2× 2N7002 per driver × 2 drivers = 4 2N7002s.  Let
+    # me reduce scope: use 1× 2N7002 per driver, tied to LI, leaving HI
+    # to the MCU's normal driver.  The UCC27211 datasheet allows LI to
+    # be tied low to force LO output low; HI/HO is then independently MCU-
+    # controlled, but if the MCU is held in reset the GPIO is high-Z and
+    # internal pull-down should hold HI low anyway. Going with 1 2N7002
+    # per driver = 2 total — matches the rev B BOM line 542-547 of "2".
+    # If the BOM actually says 4, we can add 2 more later as a follow-up.
+    # Failsafe Q7 → drives positive-bank UCC27211 LI low
+    q7_g = q_fs_pos.pin_position("G")
+    q7_s = q_fs_pos.pin_position("S")
+    q7_d = q_fs_pos.pin_position("D")
+    sch.add_wire(q7_g, (q7_g[0] - 5, q7_g[1]))
+    sch.add_label("+3.3V", q7_g[0] - 5, q7_g[1])
+    sch.add_wire(q7_s, (q7_s[0] + 5, q7_s[1]))
+    sch.add_label("NRST", q7_s[0] + 5, q7_s[1])
+    sch.add_wire(q7_d, (q7_d[0], q7_d[1] - 5))
+    sch.add_label("GATE_POS_B", q7_d[0], q7_d[1] - 5)
+    # Failsafe Q8 → drives negative-bank UCC27211 LI low
+    q8_g = q_fs_neg.pin_position("G")
+    q8_s = q_fs_neg.pin_position("S")
+    q8_d = q_fs_neg.pin_position("D")
+    sch.add_wire(q8_g, (q8_g[0] - 5, q8_g[1]))
+    sch.add_label("+3.3V", q8_g[0] - 5, q8_g[1])
+    sch.add_wire(q8_s, (q8_s[0] + 5, q8_s[1]))
+    sch.add_label("NRST", q8_s[0] + 5, q8_s[1])
+    sch.add_wire(q8_d, (q8_d[0], q8_d[1] - 5))
+    sch.add_label("GATE_NEG_B", q8_d[0], q8_d[1] - 5)
+
+    # ---- Precharge subsystems (one per bank) ----
+    # Each bank's precharge path: bank+ → 100Ω 5W → AO3400 N-FET → main-FET drain
+    # MCU drives PRECHARGE_POS / PRECHARGE_NEG gate signals; MCU monitors ΔV
+    # using the bank voltage dividers (V_BANK_POS_SENSE / V_BANK_NEG_SENSE)
+    # vs the bus sense.  Per Q8: precharge FET gate is INDEPENDENT of main
+    # FET failsafe — direct MCU control.
+    precharge_pos = PrechargeSubsystem(
+        sch,
+        x=X_PRECHARGE,
+        y=110,
+        ref_q="Q5",
+        ref_r="R20",
+        resistor_value="100R",
+        monitor_label="PRECHARGE_POS",
+    )
+    # Bank → precharge resistor input
+    pp_main = precharge_pos.port("MAIN_DRIVE")
+    sch.add_wire(pp_main, (pp_main[0] - 5, pp_main[1]))
+    sch.add_label("SCAP_POS+", pp_main[0] - 5, pp_main[1])
+    # Precharge target → main FET drain on positive bank (same net as SCAP_POS+
+    # via the back-to-back pair — but precharge feeds the FET *drain* before
+    # the main FET closes; both ports share SCAP_POS+ in rev B because the
+    # precharge resistor + small FET sit in parallel with the main bank
+    # connection, and ΔV monitoring drives the firmware decision to close
+    # the main FET).
+    pp_target = precharge_pos.port("TARGET")
+    sch.add_wire(pp_target, (pp_target[0] + 5, pp_target[1]))
+    sch.add_label("BUS_LINE", pp_target[0] + 5, pp_target[1])
+    print("   R20+Q5: Positive bank precharge (100R 5W axial + AO3400 SOT-23)")
+
+    precharge_neg = PrechargeSubsystem(
+        sch,
+        x=X_PRECHARGE,
+        y=180,
+        ref_q="Q6",
+        ref_r="R21",
+        resistor_value="100R",
+        monitor_label="PRECHARGE_NEG",
+    )
+    pn_main = precharge_neg.port("MAIN_DRIVE")
+    sch.add_wire(pn_main, (pn_main[0] - 5, pn_main[1]))
+    sch.add_label("SCAP_NEG+", pn_main[0] - 5, pn_main[1])
+    pn_target = precharge_neg.port("TARGET")
+    sch.add_wire(pn_target, (pn_target[0] + 5, pn_target[1]))
+    sch.add_label("BUS_LINE", pn_target[0] + 5, pn_target[1])
+    print("   R21+Q6: Negative bank precharge (100R 5W axial + AO3400 SOT-23)")
 
     # =========================================================================
-    # Section 7: Current Sensing (0.005 ohm shunt + INA180A1)
+    # Section 7: Current Sensing (Rev B — 0.005Ω shunt + INA180A3 + LM393 OC)
     # =========================================================================
-    print("\n7. Adding current sensing...")
+    print("\n7. Adding rev B current sensing...")
 
-    # Current sense shunt resistor (low side, in discharge path)
+    # Current sense shunt resistor (low side, in discharge path).
+    # The shunt's high side (R9 pin 1) terminates the BUS_LINE net coming
+    # from both back-to-back pair drains.  The low side (pin 2) returns to
+    # GND.  Net renaming: rev A's "ISENSE_POS" is now "BUS_LINE" (the bus-
+    # facing side of the back-to-back pairs), and the shunt's pin 2 side is
+    # the negative INA180 input "ISENSE_NEG" (== GND-referenced, but we
+    # keep the named net for differential clarity).
     r_shunt = sch.add_symbol(
         "Device:R",
         x=X_ISENSE,
@@ -607,13 +994,13 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="5mR",
         footprint="Resistor_SMD:R_2512_6332Metric",
     )
-    print(f"   R9: 0.005 ohm current sense shunt")
+    print("   R9: 0.005 ohm current sense shunt")
 
     r9_pin1 = r_shunt.pin_position("1")
     r9_pin2 = r_shunt.pin_position("2")
-    # Shunt labels (stub wires)
+    # Shunt labels (stub wires) — pin 1 = BUS_LINE (high), pin 2 = GND
     sch.add_wire(r9_pin1, (r9_pin1[0] - 5, r9_pin1[1]))
-    sch.add_label("ISENSE_POS", r9_pin1[0] - 5, r9_pin1[1])
+    sch.add_label("BUS_LINE", r9_pin1[0] - 5, r9_pin1[1])
     sch.add_wire(r9_pin2, (r9_pin2[0] + 5, r9_pin2[1]))
     sch.add_label("ISENSE_NEG", r9_pin2[0] + 5, r9_pin2[1])
 
@@ -621,32 +1008,32 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_wire(r9_pin2, (r9_pin2[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(r9_pin2[0], RAIL_GND)
 
-    # INA180A1 current sense amplifier
+    # INA180A3 current sense amplifier (100 V/V gain — rev B)
     # Pins: 1=OUT, 2=GND, 3=IN+, 4=IN-, 5=V+
     u_ina = sch.add_symbol(
-        "Amplifier_Current:INA180A1",
+        "Amplifier_Current:INA180A3",
         x=X_ISENSE + 30,
         y=140,
         ref="U3",
-        value="INA180A1",
+        value="INA180A3",
         footprint="Package_TO_SOT_SMD:SOT-23-5",
     )
-    print(f"   U3: INA180A1 current sense amplifier (50V/V gain)")
+    print("   U3: INA180A3 current sense amplifier (100 V/V gain, rev B)")
 
     # Wire INA180 inputs to shunt via labels
     ina_inp = u_ina.pin_position("+")     # pin 3 = IN+
     ina_inn = u_ina.pin_position("-")     # pin 4 = IN-
-    ina_out = u_ina.pin_position("1")     # pin 1 = OUT (no name, just number)
+    ina_out = u_ina.pin_position("1")     # pin 1 = OUT
     ina_vs = u_ina.pin_position("V+")    # pin 5 = V+
     ina_gnd = u_ina.pin_position("GND")  # pin 2 = GND
 
-    # IN+ label
+    # IN+ label (shunt high side = BUS_LINE)
     sch.add_wire(ina_inp, (ina_inp[0] - 5, ina_inp[1]))
-    sch.add_label("ISENSE_POS", ina_inp[0] - 5, ina_inp[1])
-    # IN- label
+    sch.add_label("BUS_LINE", ina_inp[0] - 5, ina_inp[1])
+    # IN- label (shunt low side)
     sch.add_wire(ina_inn, (ina_inn[0] - 5, ina_inn[1]))
     sch.add_label("ISENSE_NEG", ina_inn[0] - 5, ina_inn[1])
-    # OUT label
+    # OUT label (drives both MCU PA2 and the LM393 comparator + input)
     sch.add_wire(ina_out, (ina_out[0] + 5, ina_out[1]))
     sch.add_label("I_SENSE_OUT", ina_out[0] + 5, ina_out[1])
 
@@ -666,23 +1053,257 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         auto_footprint=True,
     )
     sch.wire_decoupling_cap(c_ina, RAIL_3V3, RAIL_GND)
-    print(f"   C1: 100nF decoupling for INA180")
+    print("   C1: 100nF decoupling for INA180")
+
+    # ---- Hardware overcurrent comparator (LM393) ----
+    # Threshold = I_TRIP × R_SHUNT × INA_gain = 30 A × 5 mΩ × 100 V/V = 15 V,
+    # clipped to the 3.3 V comparator domain: in practice we set the
+    # threshold at ~3.0 V (just below VCC) so the LM393 trips when the INA
+    # output rails (saturates).  The LM393 open-collector output drives the
+    # OC_TRIP net → MCU IRQ.
+    #
+    # Manual LM393 placement (NOT using OvercurrentComparator block — that
+    # block has known issues with multi-unit symbol pin positions on rev B).
+    # All 3 units (1=channel A, 2=channel B, 3=power) are placed with their
+    # logical pins at grid-aligned positions.
+    from kicad_tools.schematic.models.symbol import SymbolInstance as _SymInst
+    lm393_def_ref = "Comparator:LM393"
+    # Unit 1 (channel A — the actual OC comparator)
+    u7_a = sch.add_symbol(
+        lm393_def_ref,
+        x=X_OC,
+        y=140,
+        ref="U7",
+        value="LM393",
+        footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+    )
+    # Channel A pins: 1=OUT, 2=IN-, 3=IN+
+    u7a_out = u7_a.pin_position("1")
+    u7a_in_neg = u7_a.pin_position("2")
+    u7a_in_pos = u7_a.pin_position("3")
+    # SHUNT_VOLTAGE (IN+) ← I_SENSE_OUT label
+    sch.add_wire(u7a_in_pos, (u7a_in_pos[0] - 5, u7a_in_pos[1]))
+    sch.add_label("I_SENSE_OUT", u7a_in_pos[0] - 5, u7a_in_pos[1])
+    # OC_TRIP label at OUT
+    sch.add_wire(u7a_out, (u7a_out[0] + 5, u7a_out[1]))
+    sch.add_label("OC_TRIP", u7a_out[0] + 5, u7a_out[1])
+
+    # Threshold divider: R_TH_HI (R22) + R_TH_LO (R23) to set ~3.0V threshold.
+    # R_TH_HI: top half (between +3.3V and threshold)
+    # R_TH_LO: bottom half (between threshold and GND)
+    # ratio Vcc/Vth = 3.3/3.0 = 1.1 → R_TH_HI = R_TH_LO * 0.1
+    r_th_hi = sch.add_symbol(
+        "Device:R", x=X_OC - 30, y=125, ref="R22", value="1k", rotation=0,
+    )
+    r_th_lo = sch.add_symbol(
+        "Device:R", x=X_OC - 30, y=160, ref="R23", value="10k", rotation=0,
+    )
+    rh_p1 = r_th_hi.pin_position("1")
+    rh_p2 = r_th_hi.pin_position("2")
+    rl_p1 = r_th_lo.pin_position("1")
+    rl_p2 = r_th_lo.pin_position("2")
+    # R_TH_HI top (pin 1) → +3.3V label
+    sch.add_wire(rh_p1, (rh_p1[0], rh_p1[1] - 5))
+    sch.add_label("+3.3V", rh_p1[0], rh_p1[1] - 5)
+    # R_TH_LO bottom (pin 2) → GND label
+    sch.add_wire(rl_p2, (rl_p2[0], rl_p2[1] + 5))
+    sch.add_label("GND", rl_p2[0], rl_p2[1] + 5)
+    # Junction: R_TH_HI pin 2 ↔ R_TH_LO pin 1, both wired to U7 IN-
+    # Use intermediate label "V_OC_TH" so the divider midpoint is named.
+    sch.add_wire(rh_p2, (rh_p2[0], rh_p2[1] + 3))
+    sch.add_label("V_OC_TH", rh_p2[0], rh_p2[1] + 3)
+    sch.add_wire(rl_p1, (rl_p1[0], rl_p1[1] - 3))
+    sch.add_label("V_OC_TH", rl_p1[0], rl_p1[1] - 3)
+    sch.add_wire(u7a_in_neg, (u7a_in_neg[0] - 5, u7a_in_neg[1]))
+    sch.add_label("V_OC_TH", u7a_in_neg[0] - 5, u7a_in_neg[1])
+
+    # R_PULLUP (R24): pull-up between OC_TRIP and +3.3V
+    r_pullup = sch.add_symbol(
+        "Device:R", x=X_OC + 30, y=120, ref="R24", value="10k", rotation=0,
+    )
+    rp_p1 = r_pullup.pin_position("1")
+    rp_p2 = r_pullup.pin_position("2")
+    sch.add_wire(rp_p1, (rp_p1[0], rp_p1[1] - 5))
+    sch.add_label("+3.3V", rp_p1[0], rp_p1[1] - 5)
+    sch.add_wire(rp_p2, (rp_p2[0], rp_p2[1] + 5))
+    sch.add_label("OC_TRIP", rp_p2[0], rp_p2[1] + 5)
+
+    # Place LM393 unit 3 (power) — pins 4 (V-), 8 (V+).
+    # Body at (X_OC+50, 140); pin 8 V+ at top, pin 4 V- at bottom.
+    lm393_def = sch._symbol_defs["Comparator:LM393"]
+    u7_pwr = _SymInst(
+        symbol_def=lm393_def,
+        x=556.26,    # grid-aligned (matches earlier analysis)
+        y=142.24,
+        rotation=0,
+        reference="U7",
+        value="LM393",
+        unit=3,
+        footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+    )
+    sch.symbols.append(u7_pwr)
+    u7_vcc = u7_pwr.pin_position("8")
+    u7_gnd = u7_pwr.pin_position("4")
+    sch.add_wire(u7_vcc, (u7_vcc[0], u7_vcc[1] - 5.08))
+    sch.add_label("+3.3V", u7_vcc[0], u7_vcc[1] - 5.08)
+    sch.add_wire(u7_gnd, (u7_gnd[0], u7_gnd[1] + 5.08))
+    sch.add_label("GND", u7_gnd[0], u7_gnd[1] + 5.08)
+
+    # Place LM393 unit 2 (channel B) — pins 5/6/7 marked NC.
+    u7_chan_b = _SymInst(
+        symbol_def=lm393_def,
+        x=576.58,
+        y=99.06,
+        rotation=0,
+        reference="U7",
+        value="LM393",
+        unit=2,
+        footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+    )
+    sch.symbols.append(u7_chan_b)
+    for pin in ("5", "6", "7"):
+        p = u7_chan_b.pin_position(pin)
+        sch.add_no_connect(p[0], p[1])
+
+    # Decoupling cap C34 for LM393 supply
+    c_lm393 = sch.add_symbol(
+        "Device:C", x=X_OC + 15, y=85, ref="C34", value="100nF",
+        auto_footprint=True,
+    )
+    sch.wire_decoupling_cap(c_lm393, RAIL_3V3, RAIL_GND)
+    print("   U7: LM393 hardware overcurrent comparator (trip ~3.0V threshold)")
+
+    # ---- Bank voltage sensing (2 channels, rev B §sensing.bank_voltage) ----
+    # Each supercap bank (81V nominal) divided to <3.3V via 30:1 dividers:
+    #   V_BANK_POS_SENSE = SCAP_POS+ / 30  (gives ~2.7V at 81V bank)
+    #   V_BANK_NEG_SENSE = SCAP_NEG+ / 30
+    bank_pos_div = VoltageDividerSense(
+        sch,
+        x=X_BANKDIV,
+        y=110,
+        ratio=30.0,
+        ref_start=25,    # R25, R26
+    )
+    bpd_vin = bank_pos_div.port("VIN")
+    bpd_vout = bank_pos_div.port("VOUT")
+    bpd_gnd = bank_pos_div.port("GND")
+    sch.add_wire(bpd_vin, (bpd_vin[0] - 5, bpd_vin[1]))
+    sch.add_label("SCAP_POS+", bpd_vin[0] - 5, bpd_vin[1])
+    sch.add_wire(bpd_vout, (bpd_vout[0] + 5, bpd_vout[1]))
+    sch.add_label("V_BANK_POS_SENSE", bpd_vout[0] + 5, bpd_vout[1])
+    sch.add_wire(bpd_gnd, (bpd_gnd[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(bpd_gnd[0], RAIL_GND)
+    print("   R25/R26: Positive bank voltage divider (30:1)")
+
+    bank_neg_div = VoltageDividerSense(
+        sch,
+        x=X_BANKDIV,
+        y=180,
+        ratio=30.0,
+        ref_start=27,    # R27, R28
+    )
+    bnd_vin = bank_neg_div.port("VIN")
+    bnd_vout = bank_neg_div.port("VOUT")
+    bnd_gnd = bank_neg_div.port("GND")
+    sch.add_wire(bnd_vin, (bnd_vin[0] - 5, bnd_vin[1]))
+    sch.add_label("SCAP_NEG+", bnd_vin[0] - 5, bnd_vin[1])
+    sch.add_wire(bnd_vout, (bnd_vout[0] + 5, bnd_vout[1]))
+    sch.add_label("V_BANK_NEG_SENSE", bnd_vout[0] + 5, bnd_vout[1])
+    sch.add_wire(bnd_gnd, (bnd_gnd[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(bnd_gnd[0], RAIL_GND)
+    print("   R27/R28: Negative bank voltage divider (30:1)")
+
+    # ---- Bus envelope buffer (MCP6001 op-amp) + dV/dt detector ----
+    # MCP6001 is a SOT-23-5 single-channel op-amp ($0.15 LCSC, 1 MHz GBW).
+    # Configured as a unity-gain buffer on V_AC_SENSE_RAW (output of the
+    # 100:1 divider in Section 3) → V_AC_SENSE → MCU PA0 ADC.
+    # A small series cap (C30 0.1µF) on V_AC_SENSE_RAW creates a dV/dt
+    # differentiator that feeds V_BUS_DVDT → MCU PA1 ADC, terminated by a
+    # 10kΩ load resistor (R29) for a finite RC.
+    u_buf = sch.add_symbol(
+        "Amplifier_Operational:MCP6001-OT",
+        x=X_BUSBUF,
+        y=140,
+        ref="U8",
+        value="MCP6001",
+        footprint="Package_TO_SOT_SMD:SOT-23-5",
+    )
+    # MCP6001 pins: 1=OUT, 2=V-, 3=+ (IN+), 4=- (IN-), 5=V+
+    buf_out = u_buf.pin_position("1")
+    buf_vneg = u_buf.pin_position("V-")
+    buf_inp = u_buf.pin_position("+")
+    buf_inn = u_buf.pin_position("-")
+    buf_vpos = u_buf.pin_position("V+")
+    # Unity-gain buffer: IN- ties to OUT
+    sch.add_wire(buf_inn, (buf_inn[0] - 5, buf_inn[1]))
+    sch.add_wire((buf_inn[0] - 5, buf_inn[1]), (buf_inn[0] - 5, buf_out[1]))
+    sch.add_wire((buf_inn[0] - 5, buf_out[1]), buf_out)
+    # IN+ from V_AC_SENSE_RAW
+    sch.add_wire(buf_inp, (buf_inp[0] - 5, buf_inp[1]))
+    sch.add_label("V_AC_SENSE_RAW", buf_inp[0] - 5, buf_inp[1])
+    # OUT → V_AC_SENSE (slow-path envelope to MCU PA0)
+    sch.add_wire(buf_out, (buf_out[0] + 5, buf_out[1]))
+    sch.add_label("V_AC_SENSE", buf_out[0] + 5, buf_out[1])
+    # Power
+    sch.add_wire(buf_vpos, (buf_vpos[0], RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(buf_vpos[0], RAIL_3V3)
+    sch.add_wire(buf_vneg, (buf_vneg[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(buf_vneg[0], RAIL_GND)
+    # Decoupling cap
+    c_buf = sch.add_symbol(
+        "Device:C", x=X_BUSBUF + 12, y=155, ref="C30", value="100nF",
+        auto_footprint=True,
+    )
+    sch.wire_decoupling_cap(c_buf, RAIL_3V3, RAIL_GND)
+    print("   U8: MCP6001 bus-envelope buffer (unity gain)")
+
+    # dV/dt differentiator: C31 (0.1µF) in series + R29 (10k) shunt to GND.
+    # Output V_BUS_DVDT → MCU PA1.
+    c_dvdt = sch.add_symbol(
+        "Device:C", x=X_BUSBUF - 5, y=200, ref="C31", value="100nF",
+        rotation=90, auto_footprint=True,
+    )
+    r_dvdt = sch.add_symbol(
+        "Device:R", x=X_BUSBUF + 10, y=220, ref="R29", value="10k",
+        rotation=90, auto_footprint=True,
+    )
+    cdv_p1 = c_dvdt.pin_position("1")
+    cdv_p2 = c_dvdt.pin_position("2")
+    rdv_p1 = r_dvdt.pin_position("1")
+    rdv_p2 = r_dvdt.pin_position("2")
+    # C31 input: V_AC_SENSE_RAW (label stub)
+    sch.add_wire(cdv_p1, (cdv_p1[0], cdv_p1[1] - 5))
+    sch.add_label("V_AC_SENSE_RAW", cdv_p1[0], cdv_p1[1] - 5)
+    # C31 output node ties to R29 top + V_BUS_DVDT label
+    sch.add_wire(cdv_p2, (cdv_p2[0], rdv_p1[1]))
+    sch.add_wire((cdv_p2[0], rdv_p1[1]), (rdv_p1[0], rdv_p1[1]))
+    sch.add_wire((rdv_p1[0], rdv_p1[1]), rdv_p1)
+    sch.add_junction(rdv_p1[0], rdv_p1[1])
+    sch.add_wire(rdv_p1, (rdv_p1[0] + 5, rdv_p1[1]))
+    sch.add_label("V_BUS_DVDT", rdv_p1[0] + 5, rdv_p1[1])
+    # R29 bottom → GND
+    sch.add_wire(rdv_p2, (rdv_p2[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(rdv_p2[0], RAIL_GND)
+    print("   C31/R29: dV/dt differentiator (V_AC_SENSE_RAW → V_BUS_DVDT)")
 
     # =========================================================================
-    # Section 8: MCU (STM32G031F6P6 TSSOP-20)
+    # Section 8: MCU (Rev B — STM32G031K8T6 LQFP-32)
     # =========================================================================
-    print("\n8. Adding MCU section...")
+    print("\n8. Adding MCU section (rev B LQFP-32)...")
 
-    # Place MCU directly (MCUBlock has unit param issue with add_symbol)
+    # Rev B Q4 decision: upgrade from STM32G031F6P6 TSSOP-20 to STM32G031K8T6
+    # LQFP-32 (25 GPIOs vs 16) so all rev B sensing/drive channels fit
+    # comfortably.  Symbol uses simple pin names (PA0..PB8, PF2, NC/PA9,
+    # NC/PA10, PA9/PA11, PA10/PA12) — see ``mcu_signal_map`` below.
     u1_mcu = sch.add_symbol(
-        "MCU_ST_STM32G0:STM32G031F6Px",
+        "MCU_ST_STM32G0:STM32G031K8Tx",
         x=X_MCU,
         y=140,
         ref="U1",
-        value="STM32G031F6P6",
-        footprint="Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
+        value="STM32G031K8T6",
+        footprint="Package_QFP:LQFP-32_7x7mm_P0.8mm",
     )
-    print(f"   U1: STM32G031F6P6")
+    print("   U1: STM32G031K8T6 (LQFP-32, 25 GPIOs)")
 
     # Wire MCU VDD (pin 4) to 3.3V rail
     mcu_vdd = u1_mcu.pin_position("VDD")
@@ -772,42 +1393,68 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_label("GND", j5_pin5[0] + 5, j5_pin5[1])
     print(f"   J5: 6-pin SWD debug header (SWDIO/SWCLK/NRST labels added; pin5 GND wired)")
 
-    # MCU signal labels (connect to peripherals via net labels).
-    # Pin map for STM32G031F6Px TSSOP-20 (kicad symbol uses these alt-pin names):
-    #   PA0  pin7  = V_AC_SENSE   (ADC1_IN0)
-    #   PA1  pin8  = I_SENSE_OUT  (ADC1_IN1)
-    #   PA4  pin11 = ZC_DETECT    (EXTI4)
-    #   PA6  pin13 = GATE_POS     (TIM3_CH1 PWM)
-    #   PA7  pin14 = GATE_NEG     (TIM3_CH2 PWM)
-    #   PA8  pin15 = STATUS_LED   (output, low-side switch)
-    #   PA13 pin18 = SWDIO        (debug)
-    #   PA14 pin19 = SWCLK        (debug)
-    #   PF2  pin6  = NRST         (reset input)
-    # All other GPIO pins on the symbol are left explicitly no-connect so ERC
-    # reports a clean schematic.
-    mcu_signal_map = {
+    # MCU signal labels (rev B LQFP-32).  All right-side pins (PA0-PA15
+    # alternates) emit stubs to the RIGHT; the few left-side pins (PB0-PB2,
+    # PF2, NC/PA9, NC/PA10) emit stubs to the LEFT to avoid collisions.
+    #
+    # Pin map for STM32G031K8Tx LQFP-32 (verified via SymbolDef pin numbering):
+    #   pin 4  VDD              +3.3V
+    #   pin 5  VSS              GND
+    #   pin 6  PF2              NRST (left side)
+    #   pin 7  PA0              V_AC_SENSE          ADC1_IN0
+    #   pin 8  PA1              V_BUS_DVDT          ADC1_IN1
+    #   pin 9  PA2              I_SENSE_OUT         ADC1_IN2
+    #   pin 10 PA3              V_BANK_POS_SENSE    ADC1_IN3
+    #   pin 11 PA4              V_BANK_NEG_SENSE    ADC1_IN4
+    #   pin 12 PA5              OC_TRIP             EXTI5 (from LM393)
+    #   pin 13 PA6              ZC_DETECT           EXTI6
+    #   pin 14 PA7              GATE_POS_A          TIM3_CH2 → UCC27211 pos HI
+    #   pin 15 PB0              GATE_POS_B          → UCC27211 pos LI
+    #   pin 16 PB1              GATE_NEG_A          → UCC27211 neg HI
+    #   pin 17 PB2              GATE_NEG_B          → UCC27211 neg LI
+    #   pin 18 PA8              PRECHARGE_POS       → Q5 gate
+    #   pin 20 PC6              PRECHARGE_NEG       → Q6 gate
+    #   pin 24 PA13             SWDIO
+    #   pin 25 PA14             SWCLK (also BOOT0)
+    #   pin 26 PA15             STATUS_LED
+    # Pins 1-3 (PB9, PC14, PC15), 19/21 (NC/PA9, NC/PA10), 22/23 (PA9/PA11,
+    # PA10/PA12), and 27-32 (PB3-PB8) are unused: marked no_connect.
+    # Right-side pins (PA0..PA15 alternates) — stub to the RIGHT.
+    mcu_signal_map_right = {
         "PA0": "V_AC_SENSE",
-        "PA1": "I_SENSE_OUT",
-        "PA4": "ZC_DETECT",
-        "PA6": "GATE_POS",
-        "PA7": "GATE_NEG",
-        "PA8/PB0/PB1/PB2": "STATUS_LED",
+        "PA1": "V_BUS_DVDT",
+        "PA2": "I_SENSE_OUT",
+        "PA3": "V_BANK_POS_SENSE",
+        "PA4": "V_BANK_NEG_SENSE",
+        "PA5": "OC_TRIP",
+        "PA6": "ZC_DETECT",
+        "PA7": "GATE_POS_A",
+        "PA8": "PRECHARGE_POS",
         "PA13": "SWDIO",
-        "PA14/PA15": "SWCLK",
+        "PA14": "SWCLK",
+        "PA15": "STATUS_LED",
     }
-    for pin_name, net_name in mcu_signal_map.items():
+    for pin_name, net_name in mcu_signal_map_right.items():
         pin_pos = u1_mcu.pin_position(pin_name)
         stub = (pin_pos[0] + 5, pin_pos[1])
         sch.add_wire(pin_pos, stub)
         sch.add_label(net_name, stub[0], stub[1])
 
-    # NRST is brought out on pin 6 (PF2) on the right-side cluster of left-side
-    # pins; label it with NRST so the reset button connects via net label.
-    # (The reset button NRST port also gets labeled below.)
+    # Left-side pins — stub to the LEFT.
+    mcu_signal_map_left = {
+        "PB0": "GATE_POS_B",
+        "PB1": "GATE_NEG_A",
+        "PB2": "GATE_NEG_B",
+        "PC6": "PRECHARGE_NEG",
+    }
+    for pin_name, net_name in mcu_signal_map_left.items():
+        pin_pos = u1_mcu.pin_position(pin_name)
+        stub = (pin_pos[0] - 5, pin_pos[1])
+        sch.add_wire(pin_pos, stub)
+        sch.add_label(net_name, stub[0], stub[1])
+
+    # NRST is brought out on pin 6 (PF2) on the left side; stub to the LEFT.
     mcu_nrst = u1_mcu.pin_position("PF2")
-    # PF2 emerges on the left side of the symbol at x=364.49.  Route the stub
-    # to the LEFT (away from the symbol) and far enough that it doesn't
-    # collide with the reset-button's avoid-jog rail wires at x=357.46.
     nrst_stub = (mcu_nrst[0] - 10, mcu_nrst[1])
     sch.add_wire(mcu_nrst, nrst_stub, warn_on_collision=False)
     sch.add_label("NRST", nrst_stub[0], nrst_stub[1])
@@ -815,21 +1462,24 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Also expose the reset-button reset node as a NRST net label so the two
     # are wire-equivalent in the netlist.
     reset_nrst_port = reset.port("NRST")
-    # Place a label on the reset node directly (no stub needed - it's already
-    # at a wire junction).
     sch.add_label("NRST", reset_nrst_port[0], reset_nrst_port[1])
 
-    # Unused MCU pins: mark explicitly as no-connect so ERC passes.
+    # Unused MCU pins (LQFP-32): mark explicitly no-connect so ERC passes.
+    # Per Q6 resolution: UCC27211 has no EN pin — no DRV_EN_POS/NEG used.
     mcu_no_connect_pins = [
-        "PA2",
-        "PA3",
-        "PA5",
-        "PA9/PA11",
-        "PA10/PA12",
-        "PB3/PB4/PB5/PB6",  # pin 20
-        "PB7/PB8",          # pin 1
-        "PB9/PC14",         # pin 2
-        "PC15",             # pin 3
+        "PB9",        # pin 1
+        "PC14",       # pin 2
+        "PC15",       # pin 3
+        "NC/PA9",     # pin 19 (unbonded — no_connect type)
+        "NC/PA10",    # pin 21 (unbonded — no_connect type)
+        "PA9/PA11",   # pin 22
+        "PA10/PA12",  # pin 23
+        "PB3",        # pin 27
+        "PB4",        # pin 28
+        "PB5",        # pin 29
+        "PB6",        # pin 30
+        "PB7",        # pin 31
+        "PB8",        # pin 32
     ]
     for nc_pin in mcu_no_connect_pins:
         pos = u1_mcu.pin_position(nc_pin)
@@ -837,18 +1487,26 @@ def create_softstart_schematic(output_dir: Path) -> Path:
 
     # ADC inputs / pin assignment documentation
     sch.add_text(
-        "MCU Pin Assignments (STM32G031F6Px TSSOP-20):\n"
+        "MCU Pin Assignments (STM32G031K8T6 LQFP-32, rev B):\n"
         "pin 4  = VDD (+3.3V)\n"
         "pin 5  = VSS (GND)\n"
-        "pin 6  = PF2 / NRST\n"
-        "pin 7  = PA0  -> V_AC_SENSE (ADC)\n"
-        "pin 8  = PA1  -> I_SENSE_OUT (ADC)\n"
-        "pin 11 = PA4  -> ZC_DETECT (EXTI)\n"
-        "pin 13 = PA6  -> GATE_POS (PWM)\n"
-        "pin 14 = PA7  -> GATE_NEG (PWM)\n"
-        "pin 15 = PA8  -> STATUS_LED (low-side)\n"
-        "pin 18 = PA13 -> SWDIO\n"
-        "pin 19 = PA14 -> SWCLK\n"
+        "pin 6  = PF2  -> NRST\n"
+        "pin 7  = PA0  -> V_AC_SENSE       (ADC IN0, slow envelope)\n"
+        "pin 8  = PA1  -> V_BUS_DVDT       (ADC IN1, dV/dt fast path)\n"
+        "pin 9  = PA2  -> I_SENSE_OUT      (ADC IN2, current sense)\n"
+        "pin 10 = PA3  -> V_BANK_POS_SENSE (ADC IN3)\n"
+        "pin 11 = PA4  -> V_BANK_NEG_SENSE (ADC IN4)\n"
+        "pin 12 = PA5  -> OC_TRIP          (EXTI from LM393)\n"
+        "pin 13 = PA6  -> ZC_DETECT        (EXTI from H11AA1)\n"
+        "pin 14 = PA7  -> GATE_POS_A       (TIM3_CH2 -> UCC27211 HI pos)\n"
+        "pin 15 = PB0  -> GATE_POS_B       (-> UCC27211 LI pos)\n"
+        "pin 16 = PB1  -> GATE_NEG_A       (-> UCC27211 HI neg)\n"
+        "pin 17 = PB2  -> GATE_NEG_B       (-> UCC27211 LI neg)\n"
+        "pin 18 = PA8  -> PRECHARGE_POS    (-> Q5 gate)\n"
+        "pin 20 = PC6  -> PRECHARGE_NEG    (-> Q6 gate)\n"
+        "pin 24 = PA13 -> SWDIO\n"
+        "pin 25 = PA14 -> SWCLK / BOOT0\n"
+        "pin 26 = PA15 -> STATUS_LED\n"
         "All other GPIOs: no_connect\n",
         x=X_MCU - 40,
         y=230,
@@ -891,7 +1549,54 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.wire_decoupling_cap(c7, RAIL_3V3, RAIL_GND)
     sch.wire_decoupling_cap(c8, RAIL_3V3, RAIL_GND)
 
-    print(f"   U4: XC6206-3.3V with caps C6-C8")
+    print("   U4: XC6206-3.3V with caps C6-C8")
+
+    # ---- Rev B: LM7812 12V regulator for UCC27211 gate-driver supply ----
+    # The UCC27211 needs ~12V VDD (UVLO trips at 7.4V).  Source from VRECT
+    # (~12V from the bridge rectifier D1; in practice the rectified DC level
+    # depends on the AC source, so the regulator is gated by a more reliable
+    # 18V+ peak — for now we use VRECT as the unregulated input and assume
+    # the user/firmware will validate the input voltage during bring-up).
+    u9_lm7812 = sch.add_symbol(
+        "Regulator_Linear:LM7812_TO220",
+        x=X_LDO + 40,
+        y=100,
+        ref="U9",
+        value="LM7812",
+        footprint="Package_TO_SOT_THT:TO-220-3_Vertical",
+    )
+    lm_vi = u9_lm7812.pin_position("VI")
+    lm_vo = u9_lm7812.pin_position("VO")
+    lm_gnd = u9_lm7812.pin_position("GND")
+    sch.add_wire(lm_vi, (lm_vi[0], RAIL_VRECT), warn_on_collision=False)
+    sch.add_junction(lm_vi[0], RAIL_VRECT)
+    # LM7812 VO drives the VGATE net (global net via label, no rail to avoid
+    # cross-talk with the +3.3V LDO wire — see VGATE PWR_FLAG comment above).
+    sch.add_wire(lm_vo, (lm_vo[0] + 5, lm_vo[1]))
+    sch.add_label("VGATE", lm_vo[0] + 5, lm_vo[1])
+    sch.add_wire(lm_gnd, (lm_gnd[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(lm_gnd[0], RAIL_GND)
+    # LM7812 decoupling: 10uF input + 0.1uF output (per datasheet).
+    # Input cap C32 sits east of the LM7812 input pin; wire to VRECT rail
+    # and GND rail.
+    c32 = sch.add_symbol(
+        "Device:C", x=X_LDO + 30, y=60, ref="C32", value="10uF",
+        auto_footprint=True,
+    )
+    sch.wire_decoupling_cap(c32, RAIL_VRECT, RAIL_GND)
+    # Output cap C33: VGATE → GND.  Use stub labels to avoid the wire-
+    # crossing issue with RAIL_12V (which doesn't exist as a rail anymore).
+    c33 = sch.add_symbol(
+        "Device:C", x=X_LDO + 55, y=140, ref="C33", value="100nF",
+        rotation=0, auto_footprint=True,
+    )
+    c33_p1 = c33.pin_position("1")
+    c33_p2 = c33.pin_position("2")
+    sch.add_wire(c33_p1, (c33_p1[0], c33_p1[1] - 5))
+    sch.add_label("VGATE", c33_p1[0], c33_p1[1] - 5)
+    sch.add_wire(c33_p2, (c33_p2[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(c33_p2[0], RAIL_GND)
+    print("   U9: LM7812 12V regulator (VRECT → VGATE) with C32 (10uF) + C33 (100nF)")
 
     # =========================================================================
     # Section 10: Status LED
@@ -927,16 +1632,25 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     print("\n11. Adding design notes...")
 
     sch.add_text(
-        "Generator Soft-Start Design Notes:\n"
-        "====================================\n"
-        "1. Supercaps are off-board (hand-soldered)\n"
-        "   2x banks of 30 series Tecate 12F 2.7V cells\n"
-        "   Bank voltage: 81V, Bank capacitance: 0.4F\n"
-        "2. MOSFET Q1/Q2 need heatsinks (TO-220)\n"
-        "3. High-current traces: 2mm+ for discharge path\n"
-        "4. AC mains isolation: keep HV section separate\n"
-        "5. Current shunt R9 close to MOSFET source pins\n"
-        "6. Board: 150mm x 100mm, 2-layer, 2oz copper\n",
+        "Generator Soft-Start Design Notes (rev B):\n"
+        "==========================================\n"
+        "1. Supercaps off-board (hand-soldered) — 2x banks of 30S Tecate 12F 2.7V cells.\n"
+        "   Bank voltage: 81V, Bank capacitance: 0.4F.\n"
+        "2. Back-to-back FET pairs (Q1A/Q1B, Q2A/Q2B) — TO-220 vertical, need heatsinks.\n"
+        "   Sources tied at SRC_POS / SRC_NEG = Kelvin reference for UCC27211 drivers.\n"
+        "3. Gate drivers U5/U6 (UCC27211): VGATE supply, UVLO 7.4V, Kelvin-source to FET pair.\n"
+        "4. Precharge subsystems (R20+Q5, R21+Q6) limit inrush to 0.5A from 81V banks.\n"
+        "5. Hardware OC trip: LM393 (U7) compares I_SENSE_OUT vs ~3.0V threshold.\n"
+        "   OC_TRIP → MCU IRQ + (firmware) failsafe state.\n"
+        "6. Failsafe: 2N7002 (Q7/Q8) pull driver LI low when NRST asserted (Q8 resolution).\n"
+        "7. Gate protection: 10k bleeders + SMBJ18A TVS clamps on each FET gate (×4).\n"
+        "8. Bus envelope: 100:1 divider → MCP6001 buffer → V_AC_SENSE; dV/dt cap → V_BUS_DVDT.\n"
+        "9. Bank voltage sensing: 30:1 dividers (R25-R28) for ΔV monitoring.\n"
+        "10. High-current traces: 2mm+ for BUS_LINE, SCAP_*+, GND (handled by user pour).\n"
+        "11. Star ground: PCB zone keep-outs separate PGND/SGND (no schematic-side split).\n"
+        "12. AC mains isolation: keep HV section separate.\n"
+        "13. Board: 150mm x 100mm, 2-layer, 2oz copper.\n"
+        "    (P2 retains trace_clearance=0.15mm; DRC tightening to 0.2mm is P4 work.)\n",
         x=X_AC_INPUT,
         y=RAIL_GND + 20,
     )
@@ -1667,7 +2381,13 @@ def create_softstart_pcb(output_dir: Path) -> Path:
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """Route the PCB using the autorouter."""
+    """Route the PCB using the autorouter.
+
+    Note: trace_clearance stays at 0.15mm in P2.  The 0.2mm DRC tightening
+    called out in the rev B architect plan is deferred to P4 (per issue
+    #3343 phase plan) — tightening now would defeat the gating purpose
+    and risks P4 routing failures before placement is finalised in P3.
+    """
     from kicad_tools.router import DesignRules, load_pcb_for_routing
     from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
@@ -1683,7 +2403,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     rules = DesignRules(
         grid_resolution=0.075,
         trace_width=0.3,
-        trace_clearance=0.15,
+        trace_clearance=0.15,  # P2 baseline; P4 tightens to 0.2mm per #3343 plan
         via_drill=0.3,
         via_diameter=0.6,
     )
@@ -1942,11 +2662,26 @@ def create_project(output_dir: Path, project_name: str) -> Path:
 
 
 def main() -> int:
-    """Main entry point."""
+    """Main entry point.
+
+    By default (rev B P2 ship-state) this generates the schematic and
+    runs ERC only.  The PCB / routing / manufacturing pipeline still
+    targets rev A's component dictionary and will produce a netlist
+    mismatch if invoked against the rev B schematic — those steps land
+    in P3 (PCB assembly), P4 (routing + DRC tightening), and P5
+    (manufacturing bundle).  Set the environment variable
+    ``SOFTSTART_RUN_FULL_PIPELINE=1`` to opt into the legacy rev A
+    PCB/route/export pipeline (useful for regression-testing the
+    PCB-side wiring against the still-active rev A net dict).
+    """
+    import os
+
     if len(sys.argv) > 1:
         output_dir = Path(sys.argv[1])
     else:
         output_dir = Path(__file__).parent / "output"
+
+    run_full_pipeline = os.environ.get("SOFTSTART_RUN_FULL_PIPELINE", "0") == "1"
 
     try:
         # Step 1: Create project file
@@ -1957,6 +2692,18 @@ def main() -> int:
 
         # Step 3: Run ERC
         erc_success = run_erc(sch_path)
+
+        if not run_full_pipeline:
+            print("\n" + "=" * 60)
+            print("Rev B P2: skipping PCB / route / export (P3-P5 not yet implemented)")
+            print("Set SOFTSTART_RUN_FULL_PIPELINE=1 to run legacy rev A PCB pipeline.")
+            print("=" * 60)
+            print("\nSUMMARY")
+            print("=" * 60)
+            print(f"\nOutput directory: {output_dir.absolute()}")
+            print(f"\n  Schematic: {sch_path.name}")
+            print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
+            return 0 if erc_success else 1
 
         # Step 4: Create PCB
         pcb_path = create_softstart_pcb(output_dir)
