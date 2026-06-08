@@ -168,17 +168,36 @@ class TestIsFinePitchSsop:
         pads = make_ssop_pads(pin_count=20, pitch=0.5)
         assert is_fine_pitch_ssop(pads)
 
-    def test_soic_1p27mm_not_fine_pitch(self):
-        """1.27mm pitch SOIC should NOT be fine pitch."""
-        pads = make_ssop_pads(pin_count=16, pitch=1.27)
-        assert not is_fine_pitch_ssop(pads)
+    def test_soic_1p27mm_is_fine_pitch_default(self):
+        """1.27mm pitch SOIC is now detected as fine-pitch by default.
 
-    def test_threshold_boundary(self):
-        """Test boundary at 0.75mm threshold."""
-        pads_fine = make_ssop_pads(pin_count=16, pitch=0.74)
-        pads_not_fine = make_ssop_pads(pin_count=16, pitch=0.76)
+        Issue #3371 (P_FP1): the default threshold was raised to 1.5mm so
+        SOIC-8 / SOIC-16 packages qualify for the fine-pitch escape path.
+        The historical pre-#3371 cap (0.75mm) silently excluded SOIC and
+        forced 1.27mm pitches through the generic SOP path that does not
+        know about corridor infeasibility under tight clearance.
+        """
+        pads = make_ssop_pads(pin_count=16, pitch=1.27)
+        assert is_fine_pitch_ssop(pads)
+
+    def test_soic_1p27mm_excluded_when_threshold_overridden(self):
+        """Explicit ``pitch_threshold=0.75`` restores pre-#3371 SSOP/TSSOP-only behaviour."""
+        pads = make_ssop_pads(pin_count=16, pitch=1.27)
+        assert not is_fine_pitch_ssop(pads, pitch_threshold=0.75)
+
+    def test_threshold_boundary_default(self):
+        """Test boundary at the new 1.5mm default threshold (Issue #3371)."""
+        pads_fine = make_ssop_pads(pin_count=16, pitch=1.49)
+        pads_not_fine = make_ssop_pads(pin_count=16, pitch=1.51)
         assert is_fine_pitch_ssop(pads_fine)
         assert not is_fine_pitch_ssop(pads_not_fine)
+
+    def test_threshold_boundary_explicit(self):
+        """Test boundary when caller passes an explicit pre-#3371 threshold."""
+        pads_fine = make_ssop_pads(pin_count=16, pitch=0.74)
+        pads_not_fine = make_ssop_pads(pin_count=16, pitch=0.76)
+        assert is_fine_pitch_ssop(pads_fine, pitch_threshold=0.75)
+        assert not is_fine_pitch_ssop(pads_not_fine, pitch_threshold=0.75)
 
 
 class TestPackageInfo:

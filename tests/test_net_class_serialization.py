@@ -280,6 +280,7 @@ class TestDriftPrevention:
                 match_group="drift_test",
                 match_tolerance=0.25,
             ),
+            "escape_clearance": 0.14,
             "intra_pair_clearance": 0.0625,
             "diffpair_partner": "DRIFT_N",
             "coupled_routing": True,

@@ -106,6 +106,11 @@ from .fine_pitch import (
     OffGridPad,
     analyze_fine_pitch_components,
 )
+from .fine_pitch_escape import (
+    ESCAPE_CLEARANCE_SAFETY_MARGIN_MM,
+    geometry_needs_fine_pitch_escape,
+    get_default_escape_clearance,
+)
 from .grid import RoutingGrid
 from .adaptive_grid import (
     AdaptiveGridResult,
@@ -532,6 +537,10 @@ __all__ = [
     "ComponentGridAnalysis",
     "OffGridPad",
     "analyze_fine_pitch_components",
+    # Fine-Pitch Escape Predicates (Issue #3371 P_FP1)
+    "ESCAPE_CLEARANCE_SAFETY_MARGIN_MM",
+    "geometry_needs_fine_pitch_escape",
+    "get_default_escape_clearance",
     # Sub-Grid Routing for Fine-Pitch Components (Issue #1109)
     "SubGridRouter",
     "SubGridAnalysis",
