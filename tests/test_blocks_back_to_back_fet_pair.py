@@ -135,3 +135,85 @@ class TestBackToBackFETPair:
         )
         assert pair.mosfet_value == "IRFB4110"
         assert hasattr(pair, "kelvin_node")
+
+    def test_all_emitted_wires_are_orthogonal(self):
+        """Every wire segment must be horizontal or vertical (issue #3347).
+
+        Diagonal wires are accepted by KiCad's schematic parser but cause
+        unintended crossings, defeat the validator's orthogonal-only
+        connectivity heuristics, and render as visually confusing slopes
+        in the editor.  The block must therefore route the source tie
+        (and any Kelvin hint stub) as Manhattan segments only.
+
+        This test uses an asymmetric mock pin layout where the source
+        sits offset in X from the symbol origin — mirroring the real
+        ``Device:Q_NMOS`` geometry that produced the original diagonal
+        bug.  Without the Z-route fix, ``a_source -> b_source`` would
+        span both axes simultaneously.
+        """
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.reference = ref
+            rotation = kwargs.get("rotation", 0)
+            # Emulate Device:Q_NMOS: source pin is offset +2.54 from the
+            # symbol origin in library X.  With rotation=180 that flips
+            # to -2.54 in schematic space — the same +/-5.08 mm separation
+            # between the two source pins that produced the original
+            # diagonal in softstart rev B.
+            if rotation == 180:
+                pins = {
+                    "D": (x - 2.54, y + 5.08),
+                    "G": (x + 5.08, y),
+                    "S": (x - 2.54, y - 5.08),
+                }
+            else:
+                pins = {
+                    "D": (x + 2.54, y - 5.08),
+                    "G": (x - 5.08, y),
+                    "S": (x + 2.54, y + 5.08),
+                }
+            comp.pin_position.side_effect = lambda name, _p=pins: _p.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.add_label = Mock()
+
+        BackToBackFETPair(sch, x=100, y=80, ref_a="Q1A", ref_b="Q1B")
+
+        assert sch.add_wire.call_count >= 1, "Block must emit at least one wire"
+        for call in sch.add_wire.call_args_list:
+            (p1, p2), _kwargs = call.args, call.kwargs
+            x1, y1 = p1
+            x2, y2 = p2
+            is_horizontal = y1 == y2
+            is_vertical = x1 == x2
+            assert is_horizontal or is_vertical, (
+                f"Non-orthogonal wire segment emitted: ({x1}, {y1}) -> "
+                f"({x2}, {y2}).  Wires must be horizontal (same y) or "
+                f"vertical (same x); diagonals cause unintended crossings "
+                f"and defeat validator heuristics (issue #3347)."
+            )
+
+    def test_source_tie_passes_through_kelvin_node(self, mock_schematic):
+        """The Z-route's bend (Kelvin junction) sits at A-source X / mid Y.
+
+        Locks the geometry guarantee callers rely on: the ``SOURCE`` port
+        and any Kelvin hint stub extend from the same A-side bend that
+        the previous diagonal implementation used, so this fix does not
+        move the public port position.
+        """
+        pair = BackToBackFETPair(mock_schematic, x=100, y=80)
+
+        # In the default mock, both sources share x=100 (symmetric pins),
+        # so kelvin_node X equals a_source.x by construction.  Y is the
+        # midpoint between a_source.y (90) and b_source.y (130).
+        assert pair.kelvin_node[1] == pytest.approx(110.0)
+        # Junction is added exactly at the Kelvin node.
+        junction_calls = mock_schematic.add_junction.call_args_list
+        assert any(
+            call.args[:2] == pair.kelvin_node for call in junction_calls
+        ), "Kelvin junction must sit at kelvin_node coordinates"
