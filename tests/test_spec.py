@@ -533,3 +533,242 @@ class TestCopperWeight:
         mfg = ManufacturingRequirements(layers={"count": 2})
         assert mfg.layers == {"count": 2}
         assert mfg.copper_weight is None
+
+
+class TestMountingHoleGroupSpec:
+    """Tests for the MountingHoleGroupSpec schema (Issue #3352, P_AS1)."""
+
+    def test_basic_construction(self):
+        """MountingHoleGroupSpec accepts holes + anchor."""
+        from kicad_tools.spec.schema import MountingHoleGroupSpec
+
+        spec = MountingHoleGroupSpec(
+            holes=[(0.0, 0.0), (10.0, 0.0)],
+            anchor=(5.0, 5.0),
+        )
+        assert spec.holes == [(0.0, 0.0), (10.0, 0.0)]
+        assert spec.anchor == (5.0, 5.0)
+        assert spec.hole_diameter_mm == 3.2  # default
+        assert spec.keepout_radius_mm == 5.0  # default
+
+    def test_empty_holes_rejected(self):
+        """An empty holes list raises ValidationError."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleGroupSpec
+
+        with pytest.raises(ValidationError, match="at least one hole"):
+            MountingHoleGroupSpec(holes=[], anchor=(0.0, 0.0))
+
+    def test_negative_dimensions_rejected(self):
+        """Zero or negative hole_diameter/keepout raises ValidationError."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import MountingHoleGroupSpec
+
+        with pytest.raises(ValidationError, match="must be positive"):
+            MountingHoleGroupSpec(
+                holes=[(0.0, 0.0)],
+                anchor=(0.0, 0.0),
+                hole_diameter_mm=0.0,
+            )
+        with pytest.raises(ValidationError, match="must be positive"):
+            MountingHoleGroupSpec(
+                holes=[(0.0, 0.0)],
+                anchor=(0.0, 0.0),
+                keepout_radius_mm=-1.0,
+            )
+
+    def test_overrides_accepted(self):
+        """Construction with explicit hole_diameter / keepout_radius works."""
+        from kicad_tools.spec.schema import MountingHoleGroupSpec
+
+        spec = MountingHoleGroupSpec(
+            holes=[(0.0, 0.0)],
+            anchor=(0.0, 0.0),
+            hole_diameter_mm=2.5,
+            keepout_radius_mm=3.0,
+        )
+        assert spec.hole_diameter_mm == 2.5
+        assert spec.keepout_radius_mm == 3.0
+
+
+class TestMechanicalRequirementsEnvelopeHard:
+    """Tests for the envelope_hard field on MechanicalRequirements (Issue #3352)."""
+
+    def test_envelope_hard_defaults_false(self):
+        """envelope_hard defaults to False (back-compat with existing recipes)."""
+        from kicad_tools.spec.schema import MechanicalRequirements
+
+        mech = MechanicalRequirements()
+        assert mech.envelope_hard is False
+
+    def test_envelope_hard_true_when_set(self):
+        """envelope_hard accepts True."""
+        from kicad_tools.spec.schema import MechanicalRequirements
+
+        mech = MechanicalRequirements(envelope_hard=True)
+        assert mech.envelope_hard is True
+
+    def test_mounting_hole_group_defaults_none(self):
+        """mounting_hole_group defaults to None (back-compat)."""
+        from kicad_tools.spec.schema import MechanicalRequirements
+
+        mech = MechanicalRequirements()
+        assert mech.mounting_hole_group is None
+
+    def test_mounting_hole_group_attached(self):
+        """mounting_hole_group field accepts a MountingHoleGroupSpec."""
+        from kicad_tools.spec.schema import (
+            MechanicalRequirements,
+            MountingHoleGroupSpec,
+        )
+
+        group = MountingHoleGroupSpec(
+            holes=[(0.0, 0.0), (140.0, 0.0), (0.0, 90.0), (140.0, 90.0)],
+            anchor=(5.0, 5.0),
+        )
+        mech = MechanicalRequirements(mounting_hole_group=group)
+        assert mech.mounting_hole_group is group
+
+
+class TestEscalationPolicy:
+    """Tests for the EscalationPolicy schema (Issue #3352, P_AS1)."""
+
+    def test_defaults(self):
+        """All EscalationPolicy fields have sensible defaults."""
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        policy = EscalationPolicy()
+        assert policy.ladder == "layers-first"
+        assert policy.max_layers == 4
+        assert policy.max_size_tier is None
+        assert policy.density_threshold_viols_per_cm2 == 0.5
+
+    def test_all_ladder_values_accepted(self):
+        """The five documented ladder values all parse."""
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        for value in [
+            "layers-first",
+            "size-first",
+            "layers-only",
+            "size-only",
+            "none",
+        ]:
+            policy = EscalationPolicy(ladder=value)
+            assert policy.ladder == value
+
+    def test_invalid_ladder_rejected(self):
+        """An unknown ladder value raises ValidationError."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        with pytest.raises(ValidationError):
+            EscalationPolicy(ladder="bogus")
+
+    def test_max_layers_must_be_positive(self):
+        """max_layers < 1 raises ValidationError."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        with pytest.raises(ValidationError, match="max_layers must be >= 1"):
+            EscalationPolicy(max_layers=0)
+
+    def test_max_size_tier_negative_rejected(self):
+        """A negative max_size_tier raises ValidationError."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        with pytest.raises(ValidationError, match="max_size_tier must be >= 0"):
+            EscalationPolicy(max_size_tier=-1)
+
+    def test_density_threshold_negative_rejected(self):
+        """A non-positive density threshold raises ValidationError."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        with pytest.raises(
+            ValidationError, match="density_threshold_viols_per_cm2 must be positive"
+        ):
+            EscalationPolicy(density_threshold_viols_per_cm2=0.0)
+
+    def test_attached_to_manufacturing_requirements(self):
+        """escalation field on ManufacturingRequirements accepts an EscalationPolicy."""
+        from kicad_tools.spec.schema import (
+            EscalationPolicy,
+            ManufacturingRequirements,
+        )
+
+        policy = EscalationPolicy(ladder="size-first", max_layers=6)
+        mfg = ManufacturingRequirements(escalation=policy)
+        assert mfg.escalation is policy
+        assert mfg.escalation.ladder == "size-first"
+        assert mfg.escalation.max_layers == 6
+
+    def test_escalation_defaults_none(self):
+        """escalation defaults to None on ManufacturingRequirements (back-compat)."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements()
+        assert mfg.escalation is None
+
+
+class TestBackCompatExistingBoards:
+    """Smoke test: existing project.kct files parse cleanly without the new fields."""
+
+    def test_softstart_loads(self):
+        """boards/external/softstart/project.kct loads without error."""
+        from pathlib import Path
+
+        from kicad_tools.spec.parser import load_spec
+
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "boards"
+            / "external"
+            / "softstart"
+            / "project.kct"
+        )
+        if not path.exists():
+            pytest.skip(f"softstart project.kct not found at {path}")
+        spec = load_spec(path)
+        # New fields should not break old recipes
+        assert spec.requirements.mechanical.envelope_hard is False
+        assert spec.requirements.mechanical.mounting_hole_group is None
+        assert spec.requirements.manufacturing.escalation is None
+
+    @pytest.mark.parametrize(
+        "board_dir",
+        [
+            "00-simple-led",
+            "01-voltage-divider",
+            "02-charlieplex-led",
+            "03-usb-joystick",
+            "04-stm32-devboard",
+            "05-bldc-motor-controller",
+            "06-diffpair-test",
+            "07-matchgroup-test",
+        ],
+    )
+    def test_board_loads(self, board_dir: str):
+        """boards/<dir>/project.kct loads without error (back-compat smoke)."""
+        from pathlib import Path
+
+        from kicad_tools.spec.parser import load_spec
+
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "boards"
+            / board_dir
+            / "project.kct"
+        )
+        if not path.exists():
+            pytest.skip(f"project.kct not found at {path}")
+        spec = load_spec(path)
+        # Spec object is well-formed
+        assert spec.project is not None
