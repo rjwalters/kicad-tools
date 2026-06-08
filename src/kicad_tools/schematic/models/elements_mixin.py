@@ -223,6 +223,40 @@ class SchematicElementsMixin:
             self._snap_coord(point[1], f"{context} y"),
         )
 
+    def _load_symbol_def(self, lib_id: str) -> SymbolDef:
+        """Load a symbol definition, honoring ``local_symbol_libs``.
+
+        Resolution order:
+
+        1. If the lib_id's library prefix matches a local lib registered
+           on ``self.local_symbol_libs``, parse from that file directly.
+        2. Otherwise, fall through to ``SymbolDef.from_library()`` which
+           uses the global ``KICAD_SYMBOL_PATHS`` search.
+
+        Args:
+            lib_id: Library:Symbol format id (e.g., ``"softstart_custom:UCC27211"``).
+
+        Returns:
+            SymbolDef parsed from the matching library file.
+        """
+        # Check for a local-lib match first
+        if ":" in lib_id:
+            lib_name = lib_id.split(":", 1)[0]
+            local_libs = getattr(self, "local_symbol_libs", None)
+            if local_libs:
+                # Build a list of parent directories so the existing
+                # SymbolDef parser (which appends "<lib_name>.kicad_sym"
+                # to each search path) finds our local file naturally.
+                local_dirs = []
+                for lp in local_libs:
+                    if lp.name == f"{lib_name}.kicad_sym" and lp.exists():
+                        local_dirs.append(lp.parent)
+                if local_dirs:
+                    return SymbolDef.from_library(lib_id, lib_paths=local_dirs)
+
+        # Fall through to global library search
+        return SymbolDef.from_library(lib_id)
+
     def add_symbol(
         self,
         lib_id: str,
@@ -291,9 +325,14 @@ class SchematicElementsMixin:
                 rotation=rotation,
             )
 
-        # Load symbol definition if not cached
+        # Load symbol definition if not cached.  When the schematic has
+        # local symbol libs (set via ``Schematic(local_symbol_libs=...)``),
+        # consult those first by passing an extended ``lib_paths`` list
+        # to ``SymbolDef.from_library``.  This lets project-local
+        # ``.kicad_sym`` files resolve their custom lib_ids without
+        # requiring the user to globally install them.
         if lib_id not in self._symbol_defs:
-            self._symbol_defs[lib_id] = SymbolDef.from_library(lib_id)
+            self._symbol_defs[lib_id] = self._load_symbol_def(lib_id)
 
         sym_def = self._symbol_defs[lib_id]
 

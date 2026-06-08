@@ -107,6 +107,7 @@ class Schematic(
         page: str = "1",
         grid: float = DEFAULT_GRID,
         snap_mode: SnapMode = SnapMode.AUTO,
+        local_symbol_libs: list[Path] | None = None,
     ):
         """Initialize a new schematic.
 
@@ -124,6 +125,14 @@ class Schematic(
             page: Page number string
             grid: Grid spacing in mm (default: 2.54)
             snap_mode: Grid snapping behavior (default: SnapMode.AUTO)
+            local_symbol_libs: Optional list of project-local ``.kicad_sym``
+                files to consult during symbol lookup *in addition to* the
+                stock KiCad symbol library paths.  Each entry must be a
+                path to a ``.kicad_sym`` file (NOT a directory).  When
+                provided, ``add_symbol()`` can resolve ``LIBNAME:SYMNAME``
+                ids whose ``LIBNAME`` matches the file stem of any entry.
+                Default ``None`` preserves prior behavior (stock libs only).
+                See :meth:`resolve_lib_path` for the search semantics.
         """
         self.title = title
         self.date = date
@@ -174,6 +183,35 @@ class Schematic(
 
         # Track the saved path for operations like run_erc()
         self._saved_path: Path | None = None
+
+        # Project-local symbol libraries.  Each entry is a path to a
+        # ``.kicad_sym`` file; symbol lookups consult these *before*
+        # falling through to the stock KiCad library paths (matching
+        # KiCad's own project-local library precedence).
+        self.local_symbol_libs: list[Path] = list(local_symbol_libs or [])
+
+    def resolve_lib_path(self, lib_name: str) -> Path | None:
+        """Resolve a library name to a ``.kicad_sym`` file path.
+
+        Searches ``self.local_symbol_libs`` first (project-local libs win
+        over stock libs, matching KiCad's project-table precedence).
+        Returns ``None`` if no match is found in the local libs — callers
+        should fall through to the global ``KICAD_SYMBOL_PATHS`` search
+        in that case.
+
+        Args:
+            lib_name: The library name portion of a lib_id (e.g.,
+                ``"softstart_custom"`` from ``"softstart_custom:UCC27211"``).
+
+        Returns:
+            Path to the matching ``.kicad_sym`` file, or ``None`` if no
+            local lib matches.
+        """
+        target = f"{lib_name}.kicad_sym"
+        for lib_path in self.local_symbol_libs:
+            if lib_path.name == target and lib_path.exists():
+                return lib_path
+        return None
 
     @property
     def sheet_path(self) -> str:

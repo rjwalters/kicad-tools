@@ -1551,3 +1551,434 @@ def create_gate_drive_resistor_array(
         input_nets=input_nets,
         output_nets=output_nets,
     )
+
+
+class BackToBackFETPair(CircuitBlock):
+    """Two N-channel MOSFETs in source-tied (common-source) back-to-back configuration.
+
+    This is the canonical bidirectional-blocking switch topology: two
+    N-FETs sit with their sources tied together (the *Kelvin* / common-
+    source node) and their drains face outward.  Because each FET's
+    body diode is oriented towards its own drain, the pair blocks
+    current in *both* directions when both gates are off (a single FET
+    would conduct via its body diode when the drain-source voltage
+    reverses).
+
+    This is intentionally **NOT** a ``HalfBridge``.  In a half-bridge,
+    the high-side source ties to the low-side drain (the *phase* node),
+    and the body-diode orientation creates a freewheeling path for
+    motor inductance.  The semantics, port set, and downstream usage
+    differ — please don't reach for ``HalfBridge`` here.
+
+    Schematic:
+
+        DRAIN_A ──┐
+                 [QA]      ← gate GATE_A
+        SOURCE   ─┤
+                  │ (sources tied — common-source / Kelvin reference)
+        SOURCE   ─┤
+                 [QB]      ← gate GATE_B
+        DRAIN_B ──┘
+
+    Typical use:
+    -   Bidirectional supercap-bank discharge switch (softstart rev B):
+        DRAIN_A → bank+, DRAIN_B → bus return, GATE_A == GATE_B driven
+        by a single gate-driver HO output, SOURCE is the Kelvin point
+        for current-sense return AND the driver's COM/HS reference.
+    -   Battery-protection back-to-back FET (charge/discharge blocking).
+    -   Any "true off" load switch where leakage through a body diode
+        is unacceptable.
+
+    Ports:
+        - DRAIN_A: First FET drain (e.g., wired to bank+)
+        - DRAIN_B: Second FET drain (e.g., wired to bus return)
+        - GATE_A: First FET gate (typically driven from gate driver HO)
+        - GATE_B: Second FET gate (often tied to GATE_A in driver
+          topologies that drive both FETs from a single output)
+        - SOURCE: Common-source / Kelvin reference node (the driver's
+          COM/HS pin should tie here via a dedicated short trace —
+          this is *the* layout-critical net in this topology)
+
+    Thermal metadata:
+        Each FET is tagged with ``Thermal_Rth_JC=0.5`` and
+        ``Power_Dissipation=5W`` so ThermalAnalyzer integration
+        treats it like the existing ``HalfBridge`` FETs.
+
+    Example:
+        from kicad_tools.schematic.blocks import BackToBackFETPair
+
+        pair = BackToBackFETPair(
+            sch, x=150, y=80,
+            ref_a="Q1A", ref_b="Q1B",
+            mosfet_value="IRFB4110",
+        )
+        sch.add_wire(pair.port("DRAIN_A"), bank_pos_pos)
+        sch.add_wire(pair.port("DRAIN_B"), bus_pos)
+        sch.add_label("SRC_POS", *pair.port("SOURCE"))
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        ref_a: str = "Q1A",
+        ref_b: str = "Q1B",
+        mosfet_value: str = "IRFB4110",
+        mosfet_symbol: str = "Device:Q_NMOS",
+        mosfet_footprint: str = "Package_TO_SOT_THT:TO-220-3_Vertical",
+        fet_spacing: float = 40.0,
+        kelvin_label: str | None = None,
+        kelvin_trace_hint: bool = True,
+    ):
+        """Create a back-to-back N-FET pair with common-source / Kelvin tie.
+
+        Args:
+            sch: Schematic to add to.
+            x: X coordinate of the FET pair center.
+            y: Y coordinate of the *first* (upper) FET center; the
+                second FET sits ``fet_spacing`` mm below.
+            ref_a: Reference designator for FET A (the upper one).
+            ref_b: Reference designator for FET B (the lower one).
+            mosfet_value: MOSFET part number / value (default IRFB4110
+                — TI 100V N-FET used in softstart rev B).
+            mosfet_symbol: KiCad symbol for N-channel MOSFET.
+            mosfet_footprint: Footprint for both FETs.
+            fet_spacing: Vertical spacing between the two FET centers
+                (mm).  Defaults to 40 to leave room for a labeled
+                Kelvin tie wire and a junction marker.
+            kelvin_label: Optional net name to label at the common-
+                source / Kelvin tie node.  When provided, a label is
+                placed on the source-tie wire so ERC sees the named
+                net.
+            kelvin_trace_hint: When True (default), draws a horizontal
+                stub from the Kelvin node outward to provide a hand-
+                off point for the gate driver's COM/HS Kelvin trace.
+                Set False if the recipe will draw its own Kelvin
+                routing.
+        """
+        super().__init__(sch, x, y)
+
+        # Place FET A (upper)
+        self.fet_a = sch.add_symbol(
+            mosfet_symbol,
+            x,
+            y,
+            ref_a,
+            mosfet_value,
+            footprint=mosfet_footprint,
+            properties={"Thermal_Rth_JC": "0.5", "Power_Dissipation": "5W"},
+        )
+
+        # Place FET B (lower), oriented to flip the source upward so
+        # both sources meet at the common-source node.  ``Device:Q_NMOS``
+        # with rotation=180 puts the source on top and the drain on the
+        # bottom — this is the back-to-back orientation we want.
+        b_y = y + fet_spacing
+        self.fet_b = sch.add_symbol(
+            mosfet_symbol,
+            x,
+            b_y,
+            ref_b,
+            mosfet_value,
+            rotation=180,
+            footprint=mosfet_footprint,
+            properties={"Thermal_Rth_JC": "0.5", "Power_Dissipation": "5W"},
+        )
+
+        self.components = {
+            "Q_A": self.fet_a,
+            "Q_B": self.fet_b,
+        }
+
+        # Pin positions.  With FET A unrotated and FET B at rotation=180,
+        # FET A's source faces down toward FET B's source — exactly the
+        # back-to-back topology we need.
+        a_drain = self.fet_a.pin_position("D")
+        a_source = self.fet_a.pin_position("S")
+        a_gate = self.fet_a.pin_position("G")
+        b_drain = self.fet_b.pin_position("D")
+        b_source = self.fet_b.pin_position("S")
+        b_gate = self.fet_b.pin_position("G")
+
+        # Tie the two sources together with a vertical wire.  The Kelvin
+        # node sits at the midpoint between the two source pins.
+        sch.add_wire(a_source, b_source)
+        kelvin_node = (a_source[0], (a_source[1] + b_source[1]) / 2)
+        sch.add_junction(kelvin_node[0], kelvin_node[1])
+
+        # Optional Kelvin trace hint — a short stub to the right of the
+        # tie node, terminating in a junction.  This gives the recipe a
+        # hand-off point to route the dedicated Kelvin trace to the
+        # gate driver's COM/HS pin.
+        if kelvin_trace_hint:
+            hint_end = (kelvin_node[0] + 5.0, kelvin_node[1])
+            sch.add_wire(kelvin_node, hint_end)
+            kelvin_port = hint_end
+        else:
+            kelvin_port = kelvin_node
+
+        # Optional Kelvin label
+        if kelvin_label is not None:
+            sch.add_label(kelvin_label, kelvin_port[0], kelvin_port[1])
+
+        self.ports = {
+            "DRAIN_A": a_drain,
+            "DRAIN_B": b_drain,
+            "GATE_A": a_gate,
+            "GATE_B": b_gate,
+            "SOURCE": kelvin_port,
+        }
+
+        # Metadata for downstream tools
+        self.kelvin_node = kelvin_node
+        self.mosfet_value = mosfet_value
+
+
+class UCC27211GateDriver(CircuitBlock):
+    """TI UCC27211 half-bridge gate driver with UVLO, Miller-immunity, Kelvin-source ref.
+
+    The UCC27211 is a SOIC-8 half-bridge driver with separate LI/HI
+    logic inputs and LO/HO gate outputs, 4A peak drive, integrated
+    bootstrap diode + bootstrap node (HB), and a 7.4 V UVLO (under-
+    voltage lockout) trip on VDD.  UVLO + ~50 V/ns dV/dt Miller
+    immunity are *intrinsic IC properties* — they don't need any
+    external parts beyond the standard supply bypass + bootstrap.
+
+    This block places the IC + supply decoupling (bulk + bypass) +
+    bootstrap capacitor + bootstrap-to-HS connection.  It exposes the
+    Kelvin source reference (the driver's VSS / HS pin pair) as an
+    explicit ``KELVIN_SOURCE`` port so the recipe can wire it
+    *directly* to the back-to-back FET pair's ``SOURCE`` port — making
+    the Kelvin tie an explicit net rather than relying on power-GND
+    pour to carry it.
+
+    Failsafe note (softstart rev B):
+        The UCC27211 has no dedicated EN pin (per TI datasheet);
+        failsafe shutdown is achieved by pulling LI/HI inputs low.
+        The block exposes ``failsafe_pulldown_node`` as a reference
+        for callers (P2) to wire 2N7002 drains to.  See the orchestrator
+        Q8 resolution in issue #3343.
+
+    Ports:
+        - VDD: Driver supply input (typically 12 V VGATE rail)
+        - VSS: Driver ground reference (NOTE: ties to Kelvin source,
+          NOT power GND; see KELVIN_SOURCE below)
+        - LI: Low-side input (from MCU)
+        - HI: High-side input (from MCU)
+        - LO: Low-side gate output
+        - HO: High-side gate output
+        - HB: Bootstrap capacitor node (top plate of C_BOOT)
+        - HS: High-side return / switch node (bottom plate of C_BOOT,
+          and tied to the back-to-back pair's common source)
+        - KELVIN_SOURCE: Convenience alias for VSS (the explicit
+          Kelvin tie point — wire this to the FET pair's SOURCE port)
+        - failsafe_pulldown_node: Tuple of (LI_pos, HI_pos) intended
+          for failsafe pull-down attachment.  Not a Port; access via
+          ``self.failsafe_pulldown_node``.
+
+    Metadata (for downstream tools):
+        - ``self.uvlo_trip_v = 7.4``: UVLO trip voltage (datasheet).
+        - ``self.peak_drive_a = 4.0``: Peak gate drive current.
+        - ``self.dvdt_immunity_v_per_ns = 50``: Miller immunity rating.
+
+    Example:
+        from kicad_tools.schematic.blocks import (
+            BackToBackFETPair, UCC27211GateDriver,
+        )
+
+        # The custom UCC27211 symbol must be registered with the schematic.
+        from pathlib import Path
+        sch = Schematic(
+            "softstart",
+            local_symbol_libs=[Path("symbols/softstart_custom.kicad_sym")],
+        )
+
+        pair = BackToBackFETPair(sch, x=150, y=80, ref_a="Q1A", ref_b="Q1B")
+        drv = UCC27211GateDriver(
+            sch, x=110, y=110, ref="U5",
+            vgate_net="VGATE",
+            li_net="GATE_POS_B", hi_net="GATE_POS_A",
+        )
+        # Tie driver Kelvin reference to pair common-source
+        sch.add_wire(drv.port("KELVIN_SOURCE"), pair.port("SOURCE"))
+    """
+
+    UVLO_TRIP_V = 7.4
+    PEAK_DRIVE_A = 4.0
+    DVDT_IMMUNITY_V_PER_NS = 50
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        ref: str = "U5",
+        vgate_net: str = "VGATE",
+        kelvin_source_net: str | None = None,
+        li_net: str | None = None,
+        hi_net: str | None = None,
+        lo_net: str | None = None,
+        ho_net: str | None = None,
+        hb_net: str | None = None,
+        hs_net: str | None = None,
+        bootstrap_cap_value: str = "100nF",
+        vcc_bulk_cap_value: str = "10uF",
+        vcc_bypass_cap_value: str = "100nF",
+        driver_symbol: str = "softstart_custom:UCC27211",
+        driver_footprint: str = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+        cap_ref_prefix: str = "C",
+        cap_ref_start: int = 1,
+    ):
+        """Place a UCC27211 with bootstrap + supply decoupling.
+
+        Args:
+            sch: Schematic to add to (must have the UCC27211 symbol
+                registered via ``local_symbol_libs`` — see class
+                docstring).
+            x: X coordinate of the driver IC center.
+            y: Y coordinate of the driver IC center.
+            ref: Reference designator for the IC.
+            vgate_net: Net name for the 12 V driver supply rail.
+            kelvin_source_net: Optional net name to label at the
+                KELVIN_SOURCE port (also tied to the IC's VSS pin).
+                Use the same net name as the back-to-back pair's
+                common-source net so the recipe's intent (Kelvin tie)
+                is preserved in the netlist.
+            li_net, hi_net: Optional net names for the LI/HI input
+                pins; when provided, stub-labels are emitted so
+                callers (notably the failsafe pull-down circuit) can
+                bind to these nets by name.
+            lo_net, ho_net: Optional net names for the LO/HO output
+                pins.
+            hb_net, hs_net: Optional net names for the HB/HS bootstrap
+                nodes.
+            bootstrap_cap_value: Bootstrap capacitor value (HB ↔ HS).
+            vcc_bulk_cap_value: VDD bulk decoupling capacitor.
+            vcc_bypass_cap_value: VDD high-frequency bypass capacitor.
+            driver_symbol: KiCad lib_id for the UCC27211 symbol.  The
+                default ``softstart_custom:UCC27211`` requires the
+                schematic to have its ``local_symbol_libs`` pointed at
+                ``boards/external/softstart/symbols/softstart_custom.kicad_sym``.
+            driver_footprint: SOIC-8 footprint for the IC.
+            cap_ref_prefix: Reference prefix for the three caps.
+            cap_ref_start: Starting cap reference number.
+        """
+        super().__init__(sch, x, y)
+
+        # Place the driver IC
+        self.driver = sch.add_symbol(
+            driver_symbol,
+            x,
+            y,
+            ref,
+            "UCC27211",
+            footprint=driver_footprint,
+        )
+        self.components = {"U_DRV": self.driver}
+
+        # Get IC pin positions
+        vdd = self.driver.pin_position("4")  # VDD
+        vss = self.driver.pin_position("7")  # VSS (Kelvin ref)
+        li = self.driver.pin_position("6")
+        hi = self.driver.pin_position("5")
+        lo = self.driver.pin_position("8")
+        ho = self.driver.pin_position("2")
+        hb = self.driver.pin_position("1")
+        hs = self.driver.pin_position("3")
+
+        # Bootstrap capacitor between HB and HS (right side of IC)
+        c_boot_ref = f"{cap_ref_prefix}{cap_ref_start}"
+        c_boot_x = x + 20
+        c_boot_y = (hb[1] + hs[1]) / 2
+        self.c_boot = sch.add_symbol(
+            "Device:C",
+            c_boot_x,
+            c_boot_y,
+            c_boot_ref,
+            bootstrap_cap_value,
+            rotation=90,
+        )
+        self.components["C_BOOT"] = self.c_boot
+
+        # Wire HB → C_BOOT top, HS → C_BOOT bottom
+        boot_top = self.c_boot.pin_position("1")
+        boot_bot = self.c_boot.pin_position("2")
+        sch.add_wire(hb, (boot_top[0], hb[1]))
+        sch.add_wire((boot_top[0], hb[1]), boot_top)
+        sch.add_wire(hs, (boot_bot[0], hs[1]))
+        sch.add_wire((boot_bot[0], hs[1]), boot_bot)
+
+        # VDD bulk + bypass caps (left side of IC, sharing a return rail)
+        c_bulk_ref = f"{cap_ref_prefix}{cap_ref_start + 1}"
+        c_bypass_ref = f"{cap_ref_prefix}{cap_ref_start + 2}"
+        c_bulk_x = x - 20
+        c_bypass_x = x - 10
+        c_y = y - 15
+        self.c_vcc_bulk = sch.add_symbol(
+            "Device:C", c_bulk_x, c_y, c_bulk_ref, vcc_bulk_cap_value, rotation=0
+        )
+        self.c_vcc_bypass = sch.add_symbol(
+            "Device:C", c_bypass_x, c_y, c_bypass_ref, vcc_bypass_cap_value, rotation=0
+        )
+        self.components["C_VCC_BULK"] = self.c_vcc_bulk
+        self.components["C_VCC_BYPASS"] = self.c_vcc_bypass
+
+        # Optional net labels at IC pins (short stubs to land labels on wires)
+        STUB = 2.54
+
+        def _stub_label(pin_pos: tuple[float, float], net: str, direction: str = "left"):
+            """Emit a short stub + label so ERC sees a named net at the pin."""
+            if direction == "left":
+                end = (pin_pos[0] - STUB, pin_pos[1])
+            elif direction == "right":
+                end = (pin_pos[0] + STUB, pin_pos[1])
+            elif direction == "up":
+                end = (pin_pos[0], pin_pos[1] - STUB)
+            else:  # down
+                end = (pin_pos[0], pin_pos[1] + STUB)
+            sch.add_wire(pin_pos, end)
+            sch.add_label(net, end[0], end[1])
+
+        if li_net is not None:
+            _stub_label(li, li_net, "left")
+        if hi_net is not None:
+            _stub_label(hi, hi_net, "left")
+        if lo_net is not None:
+            _stub_label(lo, lo_net, "right")
+        if ho_net is not None:
+            _stub_label(ho, ho_net, "right")
+        if hb_net is not None:
+            _stub_label(hb, hb_net, "right")
+        if hs_net is not None:
+            _stub_label(hs, hs_net, "right")
+        if kelvin_source_net is not None:
+            _stub_label(vss, kelvin_source_net, "down")
+
+        # Ports
+        self.ports = {
+            "VDD": vdd,
+            "VSS": vss,
+            "LI": li,
+            "HI": hi,
+            "LO": lo,
+            "HO": ho,
+            "HB": hb,
+            "HS": hs,
+            "KELVIN_SOURCE": vss,  # alias — VSS *is* the Kelvin ref pin
+        }
+
+        # Failsafe attachment metadata: (LI position, HI position).
+        # Per Q8 resolution in issue #3343, the failsafe topology is
+        # (a) pull LI/HI low via 2N7002s gated on NRST.  P2 wires
+        # 2N7002 drains to these positions.
+        self.failsafe_pulldown_node = {
+            "LI": li,
+            "HI": hi,
+        }
+
+        # Metadata for downstream tools
+        self.uvlo_trip_v = self.UVLO_TRIP_V
+        self.peak_drive_a = self.PEAK_DRIVE_A
+        self.dvdt_immunity_v_per_ns = self.DVDT_IMMUNITY_V_PER_NS
+
