@@ -333,3 +333,74 @@ class TestSchemaIntegration:
         assert group.keepout_radius_mm == 5.0
         # And the round-tripped group should fit the softstart envelope
         assert group.fits_in_envelope(150, 100)
+
+
+# ---------------------------------------------------------------------------
+# Envelope-origin normalization (Issue #3352, P_AS4)
+# ---------------------------------------------------------------------------
+
+
+class TestFromSpecEnvelopeOrigin:
+    """from_spec() envelope_origin parameter normalises board-coordinate anchors."""
+
+    class FakeSpec:
+        def __init__(self, anchor=(105.0, 105.0)):
+            self.holes = [(0.0, 0.0), (90.0, 0.0), (0.0, 90.0), (90.0, 90.0)]
+            self.anchor = anchor
+            self.hole_diameter_mm = 3.2
+            self.keepout_radius_mm = 5.0
+
+    def test_none_envelope_origin_no_normalization(self):
+        """Default behaviour (envelope_origin=None) preserves the spec anchor verbatim."""
+        spec = self.FakeSpec(anchor=(105.0, 105.0))
+        group = MountingHoleGroup.from_spec(spec)
+        assert group.anchor == (105.0, 105.0)
+
+    def test_envelope_origin_zero_no_change(self):
+        """envelope_origin=(0, 0) is the identity transform."""
+        spec = self.FakeSpec(anchor=(5.0, 5.0))
+        group = MountingHoleGroup.from_spec(spec, envelope_origin=(0.0, 0.0))
+        assert group.anchor == (5.0, 5.0)
+
+    def test_envelope_origin_subtracts_offset(self):
+        """KiCad default origin (100, 100): spec anchor in board coords is
+        normalised to envelope-local frame."""
+        spec = self.FakeSpec(anchor=(105.0, 105.0))
+        # The board outline starts at (100, 100); the hole group's anchor
+        # in board coords is (105, 105) -- i.e. 5 mm inset from the
+        # envelope's bottom-left.  After normalization, the anchor should
+        # be (5, 5) in the envelope-local frame.
+        group = MountingHoleGroup.from_spec(spec, envelope_origin=(100.0, 100.0))
+        assert group.anchor == (5.0, 5.0)
+
+    def test_envelope_origin_fits_check_consistent(self):
+        """A normalised group passes fits_in_envelope against the size-tier dims."""
+        # 100x100 envelope at origin (100, 100) -- corner holes at 5 mm inset.
+        spec = self.FakeSpec(anchor=(105.0, 105.0))
+        # holes: (0,0)...(90,90) local; board coords with anchor (5, 5)
+        # local = corners between (5, 5) and (95, 95)
+        # With keepout=5, the bbox extends to [-2.5 .. 100], which crosses
+        # the (0, 100) envelope boundary on the left (the (-2.5) would
+        # only happen if anchor were (2.5, 2.5)).  Use a clean 5+0 to 5+90
+        # = [5..95] +- keepout 5 = [0..100], which exactly fits 100x100.
+        group = MountingHoleGroup.from_spec(spec, envelope_origin=(100.0, 100.0))
+        # Group bbox is (0, 0) to (100, 100) including keepout.
+        assert group.fits_in_envelope(100.0, 100.0)
+
+    def test_envelope_origin_non_zero_doesnt_fit_without_normalization(self):
+        """Without normalization the same group would erroneously appear to fit."""
+        spec = self.FakeSpec(anchor=(105.0, 105.0))
+        # Without normalization: anchor (105, 105), holes 0..90 local.
+        # Bbox in board coords: [105-5 .. 105+90+5] = [100 .. 200].
+        # Against a 100x100 envelope: max_x=200 > 100 -> does NOT fit.
+        group_raw = MountingHoleGroup.from_spec(spec)
+        assert not group_raw.fits_in_envelope(100.0, 100.0)
+        # With normalization: anchor (5, 5), bbox [0..100] -- fits.
+        group_norm = MountingHoleGroup.from_spec(spec, envelope_origin=(100.0, 100.0))
+        assert group_norm.fits_in_envelope(100.0, 100.0)
+
+    def test_envelope_origin_accepts_int(self):
+        """envelope_origin accepts integer coordinates."""
+        spec = self.FakeSpec(anchor=(105.0, 110.0))
+        group = MountingHoleGroup.from_spec(spec, envelope_origin=(100, 100))
+        assert group.anchor == (5.0, 10.0)

@@ -620,3 +620,223 @@ class TestDeterminism:
         assert (w1, h1) == pytest.approx((w2, h2))
         assert w2 == pytest.approx(150.0)
         assert h2 == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# Ladder strategies: size-first / interleaved [size, layers] (P_AS4)
+# ---------------------------------------------------------------------------
+
+
+class TestSizeFirstStrategy:
+    """Tests for the ``size-first`` ladder strategy in route_with_size_escalation."""
+
+    def _args(self, pcb_path: Path, ladder: str = "size-first") -> SimpleNamespace:
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        return SimpleNamespace(
+            pcb=str(pcb_path),
+            output=None,
+            manufacturer="jlcpcb",
+            auto_layers=True,
+            auto_pcb_size=True,
+            max_layers=4,
+            min_completion=0.95,
+            quiet=False,
+            strategy="negotiated",
+            _escalation_policy=EscalationPolicy(ladder=ladder),
+        )
+
+    def test_size_first_pins_layers_during_size_walk(self, tmp_path):
+        """In size-first mode, the inner layer count is pinned to 2 while
+        walking the size ladder."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_100x100)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path, ladder="size-first")
+
+        observed_max_layers: list[int] = []
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            observed_max_layers.append(args.max_layers)
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=100,
+                nets_to_route=100,
+                overflow=0,
+                completion=1.0,
+                success=True,
+                router=None,
+            )
+            return 0
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            rc = route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=True,
+            )
+
+        assert rc == 0
+        # In size-first mode the first inner call sees max_layers=2.
+        assert observed_max_layers[0] == 2
+
+    def test_size_first_falls_back_to_layers_after_size_exhausts(self, tmp_path):
+        """After the size ladder exhausts in size-first mode, a final pass
+        with full layer escalation runs at the top tier."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_100x100)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path, ladder="size-first")
+
+        attempts = []
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            attempts.append(
+                {
+                    "max_layers": args.max_layers,
+                    "attempt_num": len(attempts) + 1,
+                }
+            )
+            # Scale violations with board area so the density trigger keeps
+            # firing as the ladder walks up.  A constant 70/100 reach
+            # + density 0.8 viols/cm^2 forces ESCALATE every iteration.
+            from kicad_tools.router.io import extract_board_dimensions
+
+            dims = extract_board_dimensions(pcb_path)
+            board_area_cm2 = (dims[0] * dims[1]) / 100.0 if dims else 100.0
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=70,
+                nets_to_route=100,
+                overflow=int(0.8 * board_area_cm2),
+                completion=0.7,
+                success=False,
+                router=None,
+            )
+            return 2
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=True,
+            )
+
+        assert len(attempts) >= 2, f"Expected at least 2 attempts; got: {attempts}"
+        # All but the final attempt should have max_layers=2 (size-first pin).
+        assert attempts[0]["max_layers"] == 2, (
+            f"size-first mode should pin max_layers=2 during size walk, got {attempts}"
+        )
+        # The final attempt (fallback after max_tier refusal) should have
+        # max_layers restored to the original (4).
+        assert attempts[-1]["max_layers"] == 4, (
+            f"size-first should restore max_layers after size ladder exhaustion; "
+            f"attempts: {attempts}"
+        )
+
+    def test_layers_first_doesnt_pin_layers(self, tmp_path):
+        """Layers-first (default) does NOT pin max_layers -- the inner call
+        sees the full layer ladder."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_100x100)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path, ladder="layers-first")
+
+        observed_max_layers: list[int] = []
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            observed_max_layers.append(args.max_layers)
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=100,
+                nets_to_route=100,
+                overflow=0,
+                completion=1.0,
+                success=True,
+                router=None,
+            )
+            return 0
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=True,
+            )
+
+        # layers-first preserves the original max_layers (4).
+        assert observed_max_layers[0] == 4
+
+
+class TestMultiAttemptRegression:
+    """Test that the size-escalation loop refuses when the ladder is regressing."""
+
+    def _args(self, pcb_path: Path) -> SimpleNamespace:
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        return SimpleNamespace(
+            pcb=str(pcb_path),
+            output=None,
+            manufacturer="jlcpcb",
+            auto_layers=True,
+            auto_pcb_size=True,
+            max_layers=4,
+            min_completion=0.95,
+            quiet=False,
+            strategy="negotiated",
+            _escalation_policy=EscalationPolicy(ladder="layers-first"),
+        )
+
+    def test_hard_regression_triggers_refusal(self, tmp_path):
+        """When the second size attempt routes 10 fewer nets than the first,
+        the regression detector should fire and refuse."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_100x100)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path)
+
+        attempts = {"count": 0}
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                # First attempt: trigger escalation
+                args._last_layer_result = SimpleNamespace(
+                    nets_routed=80,
+                    nets_to_route=100,
+                    overflow=88,
+                    completion=0.8,
+                    success=False,
+                    router=None,
+                )
+                return 2
+            # Second attempt (after grow): routes 10 fewer nets -> hard regression
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=70,
+                nets_to_route=100,
+                overflow=150,
+                completion=0.7,
+                success=False,
+                router=None,
+            )
+            return 2
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            rc = route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=True,
+            )
+
+        # Should refuse after the regression is detected -- 2 attempts only.
+        assert attempts["count"] == 2
+        assert rc == 2

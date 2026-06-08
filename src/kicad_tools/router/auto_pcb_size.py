@@ -49,13 +49,19 @@ from kicad_tools.spec.schema import EscalationPolicy
 
 __all__ = [
     "DEFAULT_REACH_THRESHOLD",
+    "SIZE_CONSECUTIVE_REGRESSIONS",
+    "SIZE_HARD_DROP_NETS",
+    "SIZE_REGRESSION_TOLERANCE",
     "EscalationContext",
     "EscalationDecision",
+    "RegressionVerdict",
     "RoutingResultMetrics",
     "can_escalate_with_holes",
     "decide_escalation",
+    "detect_regression_history",
     "select_next_tier",
     "should_escalate",
+    "should_escalate_with_history",
 ]
 
 
@@ -70,6 +76,33 @@ __all__ = [
 # by-recipe tuning becomes necessary -- the constant is intentionally
 # named here so the future field has an obvious source.
 DEFAULT_REACH_THRESHOLD: float = 0.95
+
+
+# Multi-attempt regression-detection constants (Issue #3352, P_AS4).
+#
+# Mirror the auto-layers ladder constants from PR #3244 (described in
+# ``route_with_layer_escalation`` -- ``REGRESSION_TOLERANCE`` etc.) but
+# applied across *size-tier* attempts rather than layer-stack attempts.
+# Same semantics, distinct prefix so the two ladders' constants don't
+# collide when both ladders are walked simultaneously by P_AS4's
+# ``[size, layers]`` composite strategy.
+#
+# Rationale (per architect proposal Q2 in the issue):
+#   - SIZE_REGRESSION_TOLERANCE = 2: small jitter (1-2 fewer nets routed
+#     on a strictly larger envelope) is noise from routing-order changes
+#     and does NOT count as a regression.  Matches the auto-layers
+#     tolerance.
+#   - SIZE_HARD_DROP_NETS = 5: a single attempt with >= 5 fewer nets
+#     routed than the previous attempt is severe enough to exit the
+#     ladder immediately (signal that the larger envelope is making
+#     routing strictly worse -- a placement / BOM hot-spot, not an
+#     envelope problem).
+#   - SIZE_CONSECUTIVE_REGRESSIONS = 2: otherwise, require two
+#     consecutive regressions (each exceeding SIZE_REGRESSION_TOLERANCE)
+#     before exiting.  Single-attempt blips are tolerated.
+SIZE_REGRESSION_TOLERANCE: int = 2
+SIZE_HARD_DROP_NETS: int = 5
+SIZE_CONSECUTIVE_REGRESSIONS: int = 2
 
 
 @dataclass(frozen=True)
@@ -145,6 +178,10 @@ class EscalationDecision(Enum):
         REFUSE_MAX_TIER: Trigger fired but the current tier index is
             already at the policy's max (or the manufacturer's max),
             so there's no further size escalation to attempt.
+        REFUSE_REGRESSION: Trigger fired but the routing history shows
+            that escalating the envelope produces strictly worse
+            results.  The bottleneck is not the envelope -- typically
+            placement or BOM density.  (Issue #3352, P_AS4.)
         NO_ESCALATION_NEEDED: Trigger did not fire.  The current attempt
             is good enough (reach >= threshold AND DRC density <= threshold).
     """
@@ -153,7 +190,32 @@ class EscalationDecision(Enum):
     REFUSE_HARD_ENVELOPE = "refuse_hard_envelope"
     REFUSE_HOLES_DONT_FIT = "refuse_holes_dont_fit"
     REFUSE_MAX_TIER = "refuse_max_tier"
+    REFUSE_REGRESSION = "refuse_regression"
     NO_ESCALATION_NEEDED = "no_escalation_needed"
+
+
+@dataclass(frozen=True)
+class RegressionVerdict:
+    """Result of :func:`detect_regression_history` over an attempt sequence.
+
+    Returned by the multi-attempt regression detector consumed by
+    :func:`should_escalate_with_history` and (via the optional ``history``
+    argument) :func:`decide_escalation`.
+
+    Attributes:
+        is_regressing: True iff the history indicates a structural
+            regression (hard drop or N consecutive small regressions).
+            When True, escalation should refuse rather than ESCALATE.
+        reason: Human-readable explanation suitable for the
+            ``_print_size_escalation_refusal`` UX.
+        streak: Current consecutive-regression streak length (mostly for
+            debugging / logging).  Zero when the latest attempt did not
+            regress.
+    """
+
+    is_regressing: bool
+    reason: str
+    streak: int
 
 
 @dataclass(frozen=True)
@@ -247,6 +309,150 @@ def should_escalate(
     if metrics.drc_density <= policy.density_threshold_viols_per_cm2:
         return False
     return True
+
+
+def detect_regression_history(
+    history: list[RoutingResultMetrics],
+    *,
+    regression_tolerance: int = SIZE_REGRESSION_TOLERANCE,
+    hard_drop_nets: int = SIZE_HARD_DROP_NETS,
+    consecutive_regressions: int = SIZE_CONSECUTIVE_REGRESSIONS,
+) -> RegressionVerdict:
+    """Detect cross-attempt regression across a size-escalation history.
+
+    Inspects the attempt sequence (most-recent last) and reports whether
+    the size ladder is making routing strictly worse.  Mirrors the
+    auto-layers ladder's ``REGRESSION_TOLERANCE`` / ``HARD_DROP_NETS`` /
+    ``CONSECUTIVE_REGRESSIONS`` pattern (see PR #3244 commit for the
+    layer-side analogue in ``route_with_layer_escalation``).
+
+    The detector is intentionally simple: it compares each attempt's
+    ``signal_nets_routed`` to the previous attempt's value and counts
+    drops.  A hard drop on a single attempt (>= ``hard_drop_nets``) is
+    an immediate verdict; otherwise we require
+    ``consecutive_regressions`` back-to-back drops each exceeding
+    ``regression_tolerance``.
+
+    For the auto-pcb-size ladder, a regression means "a strictly larger
+    envelope routed strictly worse" -- which is structurally backwards.
+    Growing further cannot cure it, so refusal is the correct response.
+
+    Args:
+        history: Ordered list of per-attempt metrics (oldest first,
+            most-recent last).  Empty or single-element histories
+            never report a regression (nothing to compare against).
+        regression_tolerance: Drops <= this count are ignored as
+            noise.  Default :data:`SIZE_REGRESSION_TOLERANCE`.
+        hard_drop_nets: A single-attempt drop >= this count triggers
+            immediate refusal.  Default :data:`SIZE_HARD_DROP_NETS`.
+        consecutive_regressions: Number of back-to-back drops
+            exceeding ``regression_tolerance`` required for refusal.
+            Default :data:`SIZE_CONSECUTIVE_REGRESSIONS`.
+
+    Returns:
+        :class:`RegressionVerdict` describing whether the history
+        regresses and why.
+
+    Example:
+        >>> # No regression: monotonic improvement
+        >>> h = [
+        ...     RoutingResultMetrics(signal_nets_routed=70, signal_nets_total=100,
+        ...                          drc_violations=10, board_area_cm2=100.0),
+        ...     RoutingResultMetrics(signal_nets_routed=85, signal_nets_total=100,
+        ...                          drc_violations=5, board_area_cm2=150.0),
+        ... ]
+        >>> v = detect_regression_history(h)
+        >>> v.is_regressing
+        False
+        >>> # Hard drop: 80 -> 70 = 10 nets
+        >>> h = [
+        ...     RoutingResultMetrics(signal_nets_routed=80, signal_nets_total=100,
+        ...                          drc_violations=10, board_area_cm2=100.0),
+        ...     RoutingResultMetrics(signal_nets_routed=70, signal_nets_total=100,
+        ...                          drc_violations=15, board_area_cm2=150.0),
+        ... ]
+        >>> v = detect_regression_history(h)
+        >>> v.is_regressing
+        True
+    """
+    if len(history) < 2:
+        return RegressionVerdict(is_regressing=False, reason="", streak=0)
+
+    streak = 0
+    last_drop = 0
+    for prev, cur in zip(history, history[1:], strict=False):
+        drop = prev.signal_nets_routed - cur.signal_nets_routed
+        last_drop = drop
+        if drop >= hard_drop_nets:
+            return RegressionVerdict(
+                is_regressing=True,
+                reason=(
+                    f"hard drop of {drop} nets (>= {hard_drop_nets} threshold) "
+                    f"when growing the envelope -- larger board routed "
+                    f"strictly worse, suggesting BOM/placement bottleneck "
+                    f"rather than envelope over-constraint"
+                ),
+                streak=streak + 1,
+            )
+        if drop > regression_tolerance:
+            streak += 1
+            if streak >= consecutive_regressions:
+                return RegressionVerdict(
+                    is_regressing=True,
+                    reason=(
+                        f"{streak} consecutive size-tier escalations regressed "
+                        f"(each by > {regression_tolerance} nets) -- growing "
+                        f"the envelope is no longer helping; the bottleneck "
+                        f"is upstream of envelope (placement/BOM)"
+                    ),
+                    streak=streak,
+                )
+        else:
+            # Improvement or jitter within tolerance resets the streak.
+            streak = 0
+
+    return RegressionVerdict(
+        is_regressing=False,
+        reason="",
+        streak=streak if last_drop > regression_tolerance else 0,
+    )
+
+
+def should_escalate_with_history(
+    history: list[RoutingResultMetrics],
+    policy: EscalationPolicy,
+    reach_threshold: float = DEFAULT_REACH_THRESHOLD,
+) -> bool:
+    """Multi-attempt-aware variant of :func:`should_escalate`.
+
+    Returns ``True`` iff the most-recent attempt's metrics fire the
+    single-shot trigger AND the history does NOT exhibit a structural
+    regression (see :func:`detect_regression_history`).
+
+    This is the canonical way to consult both single-shot signals and
+    cross-attempt history when deciding whether to walk the size ladder
+    further.  Use :func:`detect_regression_history` directly when you
+    need the structured verdict (e.g. to emit a refusal message).
+
+    Args:
+        history: Ordered list of per-attempt metrics (oldest first).
+            Must be non-empty -- the last element is the current
+            attempt's metrics.
+        policy: The recipe's escalation policy.
+        reach_threshold: See :func:`should_escalate`.
+
+    Returns:
+        ``True`` if the current attempt warrants escalation AND the
+        history does not regress.  ``False`` otherwise.
+
+    Raises:
+        ValueError: If ``history`` is empty.
+    """
+    if not history:
+        raise ValueError("should_escalate_with_history requires a non-empty history")
+    if not should_escalate(history[-1], policy, reach_threshold):
+        return False
+    return not detect_regression_history(history).is_regressing
 
 
 def select_next_tier(
@@ -388,6 +594,7 @@ def decide_escalation(
     metrics: RoutingResultMetrics,
     context: EscalationContext,
     reach_threshold: float = DEFAULT_REACH_THRESHOLD,
+    history: list[RoutingResultMetrics] | None = None,
 ) -> EscalationDecision:
     """Compose trigger detection, ladder logic, and hole-fit check.
 
@@ -400,24 +607,34 @@ def decide_escalation(
       1. ``NO_ESCALATION_NEEDED`` when the trigger does not fire (reach
          is already at or above threshold, or density is at or below
          threshold).
-      2. ``REFUSE_MAX_TIER`` when the trigger fires but the ladder is
+      2. ``REFUSE_REGRESSION`` when the trigger fires but ``history`` is
+         supplied and shows that the size ladder has been regressing
+         (see :func:`detect_regression_history`).  Larger envelopes
+         routing strictly worse implies the bottleneck is not the
+         envelope; refusal is the correct response (P_AS4).
+      3. ``REFUSE_MAX_TIER`` when the trigger fires but the ladder is
          exhausted (already at policy / manufacturer maximum).
-      3. ``REFUSE_HARD_ENVELOPE`` when the trigger fires, the ladder has
+      4. ``REFUSE_HARD_ENVELOPE`` when the trigger fires, the ladder has
          room, but ``envelope_hard=True`` blocks the grow.
-      4. ``REFUSE_HOLES_DONT_FIT`` when the trigger fires, the envelope is
+      5. ``REFUSE_HOLES_DONT_FIT`` when the trigger fires, the envelope is
          soft, the ladder has room, but the mounting-hole group falls
          outside the next-tier envelope.
-      5. ``ESCALATE`` otherwise -- the grow is permitted.
+      6. ``ESCALATE`` otherwise -- the grow is permitted.
 
     This ordering ensures the caller gets the most actionable refusal
-    reason possible: "you can't escalate because you're already at the
-    max tier" is more useful than "you can't escalate because your
-    envelope is declared hard" when both happen to be true.
+    reason possible: "you can't escalate because growing makes things
+    worse" is more useful than "you can't escalate because the recipe
+    says envelope_hard" when both happen to be true.
 
     Args:
         metrics: Per-attempt routing metrics.
         context: Slow-changing escalation state.
         reach_threshold: See :func:`should_escalate`.
+        history: Optional ordered list of per-attempt metrics (oldest
+            first; the *current* attempt's ``metrics`` need not be
+            included -- ``decide_escalation`` appends it internally
+            for the regression check).  When supplied, enables the
+            ``REFUSE_REGRESSION`` outcome.
 
     Returns:
         The escalation decision.
@@ -444,7 +661,22 @@ def decide_escalation(
     if not should_escalate(metrics, context.policy, reach_threshold):
         return EscalationDecision.NO_ESCALATION_NEEDED
 
-    # Step 2: is there a next tier to escalate to?  This check comes
+    # Step 2 (P_AS4): if multi-attempt history is supplied, check whether
+    # the size ladder has been regressing.  If yes, refuse early -- the
+    # envelope is not the bottleneck and further escalation can't help.
+    # Build the full sequence by appending the current attempt's metrics
+    # to the caller's history (callers may pass the prior-attempts list
+    # without the current one already appended).
+    if history is not None and len(history) >= 1:
+        full_history = list(history)
+        if not full_history or full_history[-1] is not metrics:
+            full_history.append(metrics)
+        if len(full_history) >= 2:
+            verdict = detect_regression_history(full_history)
+            if verdict.is_regressing:
+                return EscalationDecision.REFUSE_REGRESSION
+
+    # Step 3: is there a next tier to escalate to?  This check comes
     # before the envelope-hard check because "max tier" is the more
     # specific failure mode (no further escalation is possible *at all*
     # vs. "the recipe forbids growing"); the caller's error message can
