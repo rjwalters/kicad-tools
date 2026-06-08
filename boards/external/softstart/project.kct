@@ -119,6 +119,14 @@ requirements:
       height: "100mm"
     mounting: "M3 standoffs, 4 corners"
     connector_access: "AC terminals on one edge"
+    # Issue #3352 P_AS5: the 150x100mm envelope is set by the rev B
+    # chassis fit (see ``softstart`` repo project.kct rev B for the
+    # canonical mechanical declaration).  Declaring envelope_hard=true
+    # opts out of the auto-pcb-size *size* axis; the recipe still walks
+    # the auto-layers axis when escalation is engaged.  Refusal at this
+    # axis is the documented expected outcome -- the user gets a clear
+    # message naming the BOM / layers / clearance levers.
+    envelope_hard: true
 
   manufacturing:
     target_fab: jlcpcb
@@ -129,6 +137,16 @@ requirements:
     min_space: "0.2mm"
     min_via: "0.3mm drill"
     assembly: "none"  # Hand-solder supercaps
+    # Issue #3352 P_AS5: opt the recipe into the auto-pcb-size +
+    # auto-layers escalation ladder.  Per Q5 of the architect
+    # proposal, --auto-pcb-size implies --auto-layers; this ladder
+    # selector pins the policy to *layers-only* because the recipe
+    # also declares envelope_hard=true above.  The wrapper therefore
+    # walks 2L -> 4L (capped at max_layers=4) before refusing.
+    escalation:
+      ladder: layers-only
+      max_layers: 4
+      density_threshold_viols_per_cm2: 0.5
 
   compliance:
     safety_notes:
