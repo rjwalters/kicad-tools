@@ -3594,6 +3594,17 @@ class DiffPairRouter:
                 )
                 diff_net_ids = diff_net_ids - budget_exit_diff_nets
 
+        # Issue #3270: Surface budget-exit diff-pair nets to the
+        # Autorouter so ``_get_net_priority`` can promote them to the
+        # head of the non-diff main strategy's net order.  Without this
+        # the budget-exit pair lands last and routes against a heavily
+        # colonised grid; on board 06 seed=42 USB3_TX1+/U2.B2 then
+        # bursts the per-net timeout (60s observed vs 30s budget) and
+        # exhausts the strategy wall-clock before reaching MIPI_RST.
+        # The set is cleared after the strategy returns to keep the
+        # promotion local to this invocation.
+        self.autorouter._budget_exit_diff_nets = set(budget_exit_diff_nets)
+
         non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
         if non_diff_nets:
             print(f"\n--- Routing {len(non_diff_nets)} non-differential nets ---")
@@ -3603,7 +3614,14 @@ class DiffPairRouter:
                 # responsible for routing every net in self.autorouter.nets;
                 # diff-pair nets are filtered by the caller's net selection
                 # since their pads are already marked as routed on the grid.
-                strategy_routes = non_diffpair_strategy()
+                try:
+                    strategy_routes = non_diffpair_strategy()
+                finally:
+                    # Issue #3270: Clear the budget-exit promotion set so
+                    # subsequent ``route_all`` / ``route_all_negotiated``
+                    # invocations on the same autorouter inherit the
+                    # default priority ordering (no leak across calls).
+                    self.autorouter._budget_exit_diff_nets = set()
                 # Filter out any routes for diff-pair nets that the strategy
                 # may have re-routed (shouldn't happen if grid marking is
                 # correct, but defend against it).
@@ -3618,14 +3636,20 @@ class DiffPairRouter:
                         non_diff_nets, key=lambda n: self.autorouter._get_net_priority(n)
                     )
 
-                for net in non_diff_order:
-                    routes = self.autorouter.route_net(net)
-                    all_routes.extend(routes)
-                    if routes:
-                        print(
-                            f"  Net {net}: {len(routes)} routes, "
-                            f"{sum(len(r.segments) for r in routes)} segments"
-                        )
+                try:
+                    for net in non_diff_order:
+                        routes = self.autorouter.route_net(net)
+                        all_routes.extend(routes)
+                        if routes:
+                            print(
+                                f"  Net {net}: {len(routes)} routes, "
+                                f"{sum(len(r.segments) for r in routes)} segments"
+                            )
+                finally:
+                    # Issue #3270: clear the promotion set on the
+                    # legacy per-net path too -- the priority lift
+                    # is meaningful only for this strategy invocation.
+                    self.autorouter._budget_exit_diff_nets = set()
 
         print("\n=== Differential Pair Routing Complete ===")
         print(f"  Total routes: {len(all_routes)}")

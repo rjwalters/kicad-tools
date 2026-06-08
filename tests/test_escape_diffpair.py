@@ -1254,3 +1254,211 @@ class TestCorridorAttractor:
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
         )
         return er, info
+
+
+# =============================================================================
+# Issue #3270: BGA-49 inner-ring single-pad drift-prevention fixture
+# =============================================================================
+# Codifies the "B2/B3 inner-ring USB3 pair on a 7x7 BGA-49" geometry from
+# board 06 so future budget/heuristic changes that regress the corridor
+# reservation behaviour for inner-ring paired pads land a test failure
+# instead of a silent reach regression on the integration board.
+#
+# Mirrors curator AC #6 from Issue #3270: "Drift-prevention regression:
+# synthetic BGA-49 fixture (the one from #2677 AC, plus one isolating
+# just the U2.B2-class inner-ring single-pad case) holds in the test
+# suite so future budget/heuristic changes cannot regress."
+
+
+def make_bga49_with_inner_ring_pair(
+    p_net: str = "USB3_TX1+",
+    n_net: str = "USB3_TX1-",
+) -> list[Pad]:
+    """Build a 7x7 BGA-49 with the diff pair at B2/B3 (inner-ring).
+
+    Mirrors ``boards/06-diffpair-test/generate_pcb.py:generate_bga49_usb3_sink``
+    exactly so the synthetic fixture exercises the same launch direction
+    (SOUTH from B-row, see ``_get_quadrant_direction``) and same lateral
+    geometry the integration board hits.
+
+    Layout (1.27 mm pitch, 0.45 mm pads, F.Cu only):
+
+    * Row A and G + col 1 and 7: perimeter ring, all GND (net 5)
+    * Inner power: C2/C6/E2/E6 = +3V3 (net 4); rest of inner 3x5 = +1V2
+      (net 6)
+    * **B2 = p_net, B3 = n_net** (the inner-ring USB3 pair under test)
+    * B5, B6, F2, F3, F5, F6: other USB3 lanes (unique nets)
+
+    Total: 49 pads with 8 unique signal nets (USB3 lanes), GND, +3V3,
+    +1V2.
+    """
+    pitch = 1.27
+    pad_size = 0.45
+    pads: list[Pad] = []
+
+    pin_nets: dict[str, tuple[str, int]] = {}
+    for row_letter in "ABCDEFG":
+        for col in range(1, 8):
+            pin_nets[f"{row_letter}{col}"] = ("GND", 5)
+    for row in "CDE":
+        for col in range(2, 7):
+            pin_nets[f"{row}{col}"] = ("+1V2", 6)
+    pin_nets["C2"] = ("+3V3", 4)
+    pin_nets["C6"] = ("+3V3", 4)
+    pin_nets["E2"] = ("+3V3", 4)
+    pin_nets["E6"] = ("+3V3", 4)
+
+    # The pair under test: B2 / B3 (inner-ring, second row from outer
+    # perimeter, second / third column from the west edge).  Net IDs 1
+    # and 2 match the existing TestCorridorReservation convention so the
+    # owner-set assertion (`{1, 2}` for the paired pair) carries over.
+    pin_nets["B2"] = (p_net, 1)
+    pin_nets["B3"] = (n_net, 2)
+    # Other USB3 lanes (unique nets so the diff-pair pre-pass does NOT
+    # pair them and only B2/B3 enters the corridor reservation path).
+    pin_nets["B5"] = ("USB3_RX1+", 10)
+    pin_nets["B6"] = ("USB3_RX1-", 11)
+    pin_nets["F2"] = ("USB3_TX2+", 12)
+    pin_nets["F3"] = ("USB3_TX2-", 13)
+    pin_nets["F5"] = ("USB3_RX2+", 14)
+    pin_nets["F6"] = ("USB3_RX2-", 15)
+
+    for row_idx, row_letter in enumerate("ABCDEFG"):
+        for col in range(1, 8):
+            px = (col - 4) * pitch
+            py = (row_idx - 3) * pitch
+            net_name, net_id = pin_nets[f"{row_letter}{col}"]
+            pads.append(
+                Pad(
+                    x=px, y=py,
+                    width=pad_size, height=pad_size,
+                    net=net_id, net_name=net_name,
+                    layer=Layer.F_CU, ref="U2",
+                    through_hole=False,
+                    pin=f"{row_letter}{col}",
+                )
+            )
+    return pads
+
+
+class TestBGA49InnerRingCorridorDriftPrevention:
+    """Drift-prevention: B2/B3 inner-ring pair gets a corridor reservation.
+
+    Curator AC #6 from Issue #3270.  Synthetic BGA-49 fixture replicates
+    board 06's USB3_TX1+/- launch geometry exactly so any future
+    refactor that breaks inner-ring corridor reservation (e.g. a
+    well-intentioned ring-aware short-circuit that skips inner pads)
+    will fail this gate instead of stranding U2.B2 on the integration
+    board.
+    """
+
+    def test_inner_ring_pair_reserves_corridor(self, grid_4layer, rules):
+        """The B2/B3 inner-ring pair MUST produce a corridor reservation.
+
+        Counterpart to ``TestCorridorReservation.test_gate_a`` but on the
+        exact 7x7 BGA-49 footprint board 06 uses, with the diff pair on
+        the **inner** ring (B-row) -- not the original 4x4 fixture's
+        B-row pair which is functionally on the outer of two rings.
+        """
+        pads = make_bga49_with_inner_ring_pair()
+        info = make_package_info(pads, PackageType.BGA, "U2")
+        diff_pair_map = {"USB3_TX1+": "USB3_TX1-", "USB3_TX1-": "USB3_TX1+"}
+        ncm = {n: NET_CLASS_HIGH_SPEED for n in diff_pair_map}
+
+        er = EscapeRouter(
+            grid_4layer, rules,
+            net_class_map=ncm, diff_pair_map=diff_pair_map,
+        )
+
+        assert er.pair_corridor_reservations == 0
+        er.generate_escapes(info)
+
+        assert er.diff_pair_segment_calls == 1, (
+            "Inner-ring paired escape must run exactly once for the "
+            "single B2/B3 USB3 pair"
+        )
+        assert er.pair_corridor_reservations == 1, (
+            "Inner-ring B2/B3 pair must reserve exactly one corridor; "
+            "future refactors that limit corridor reservation to "
+            "outer-ring pairs will fail this gate"
+        )
+        assert er.pair_corridor_reserved_cells >= 1
+        assert grid_4layer.reserved_cell_count() == er.pair_corridor_reserved_cells
+
+    def test_inner_ring_pair_launches_south(self, grid_4layer, rules):
+        """B2/B3 pair launch direction must be SOUTH (outward from BGA).
+
+        The pair sits 1 pitch south of BGA center (row B = row 1, center
+        is row D = row 3).  ``_get_quadrant_direction`` returns SOUTH
+        when ``|dy| > |dx|`` and ``dy < 0``: B2/B3 mid_y = -2.54 < 0,
+        mid_x = -1.905 -> |dy| > |dx| -> SOUTH.
+
+        Locking in the launch direction prevents a refactor that
+        accidentally classifies the inner-ring pair as 'inward' or
+        'diagonal' (which would defeat the corridor reservation, since
+        the corridor extrudes along the launch direction).
+        """
+        from kicad_tools.router.escape import EscapeDirection
+
+        pads = make_bga49_with_inner_ring_pair()
+        info = make_package_info(pads, PackageType.BGA, "U2")
+        diff_pair_map = {"USB3_TX1+": "USB3_TX1-", "USB3_TX1-": "USB3_TX1+"}
+        ncm = {n: NET_CLASS_HIGH_SPEED for n in diff_pair_map}
+
+        er = EscapeRouter(
+            grid_4layer, rules,
+            net_class_map=ncm, diff_pair_map=diff_pair_map,
+        )
+        escapes = er.generate_escapes(info)
+
+        pair_escapes = [
+            e for e in escapes
+            if e.pad.net_name in ("USB3_TX1+", "USB3_TX1-")
+        ]
+        assert len(pair_escapes) == 2, (
+            "Expected exactly 2 paired escapes for B2/B3 inner-ring pair"
+        )
+        for e in pair_escapes:
+            assert e.direction == EscapeDirection.SOUTH, (
+                f"Inner-ring B-row pair must launch SOUTH (outward), "
+                f"got {e.direction.name} for {e.pad.pin}"
+            )
+            # And the F.Cu paired escape carries no via-drop (the pair
+            # is committed to surface routing until the main pathfinder
+            # decides where to drop).  The corridor reservation is the
+            # mechanism that protects the inner-layer continuation.
+            assert e.via is None
+            assert e.escape_layer == Layer.F_CU
+
+    def test_inner_ring_pair_corridor_owner_set_is_pair_only(
+        self, grid_4layer, rules,
+    ):
+        """The B2/B3 corridor is owned by the B2/B3 pair, not other USB3 lanes.
+
+        Other lanes (USB3_RX1, USB3_TX2, USB3_RX2) on the same BGA share
+        the package but their nets are NOT paired in the diff_pair_map
+        passed to this test, so they MUST NOT appear in the B2/B3
+        corridor's owner set.  This is the regression guard against a
+        future change that accidentally bundles all USB3 lanes into a
+        single shared owner set (which would let RX1's traces colonise
+        the TX1 corridor).
+        """
+        pads = make_bga49_with_inner_ring_pair()
+        info = make_package_info(pads, PackageType.BGA, "U2")
+        diff_pair_map = {"USB3_TX1+": "USB3_TX1-", "USB3_TX1-": "USB3_TX1+"}
+        ncm = {n: NET_CLASS_HIGH_SPEED for n in diff_pair_map}
+
+        er = EscapeRouter(
+            grid_4layer, rules,
+            net_class_map=ncm, diff_pair_map=diff_pair_map,
+        )
+        er.generate_escapes(info)
+
+        # All reservations should be owned by exactly the pair {1, 2}.
+        reserved_items = list(grid_4layer._reserved_for_nets.items())
+        assert reserved_items, "Expected non-empty reservation map"
+        unique_owner_sets = {frozenset(o) for _, o in reserved_items}
+        assert unique_owner_sets == {frozenset({1, 2})}, (
+            f"All B2/B3 corridor cells must be owned by the pair {{1, 2}}; "
+            f"found unexpected owner sets {unique_owner_sets - {{frozenset({{1, 2}})}}}"
+        )
