@@ -60,20 +60,44 @@ class SchematicValidationMixin:
         """
         issues = []
 
-        # Check for duplicate references
-        refs = {}
+        # Check for duplicate references.
+        #
+        # Multi-unit symbols (LM393, MCP6001 dual op-amp, hex inverters, …)
+        # are placed as multiple ``SymbolInstance`` rows that share the same
+        # reference designator on purpose — KiCad's own ERC treats them as
+        # one logical part.  A genuine duplicate is therefore a pair where
+        # either:
+        #   * the lib_ids differ (two different parts numbered the same), or
+        #   * the unit numbers collide (two copies of the same unit, e.g.
+        #     two ``unit=1`` symbols claiming to be channel A of the dual
+        #     comparator).
+        # The previous implementation flagged every second-or-later
+        # ``SymbolInstance`` regardless of unit, generating false positives
+        # like the 13 errors on softstart rev B reported in #3349.
+        refs: dict[str, list] = {}
         for sym in self.symbols:
-            if sym.reference in refs:
-                issues.append(
-                    {
-                        "severity": "error",
-                        "type": "duplicate_reference",
-                        "message": f"Duplicate reference '{sym.reference}' at ({sym.x}, {sym.y})",
-                        "location": (sym.x, sym.y),
-                        "fix_applied": False,
-                    }
-                )
-            refs[sym.reference] = sym
+            refs.setdefault(sym.reference, []).append(sym)
+
+        for ref, instances in refs.items():
+            if len(instances) < 2:
+                continue
+            seen_units: dict[tuple[str, int], object] = {}
+            for sym in instances:
+                key = (sym.symbol_def.lib_id, getattr(sym, "unit", 1))
+                if key in seen_units:
+                    issues.append(
+                        {
+                            "severity": "error",
+                            "type": "duplicate_reference",
+                            "message": (
+                                f"Duplicate reference '{ref}' at ({sym.x}, {sym.y})"
+                            ),
+                            "location": (sym.x, sym.y),
+                            "fix_applied": False,
+                        }
+                    )
+                else:
+                    seen_units[key] = sym
 
         # Check for off-grid symbols
         for sym in self.symbols:
@@ -275,6 +299,23 @@ class SchematicValidationMixin:
             p2 = (round(wire.x2, 2), round(wire.y2, 2))
             wire_segments.append((p1, p2))
 
+        # Multi-unit symbols (e.g. LM393 dual comparator) share a
+        # ``reference`` across multiple :class:`SymbolInstance` rows.
+        # ``symbol_def.pins`` always lists *every* pin from *every* unit,
+        # so without filtering each placed instance would re-check the
+        # entire pin list — producing duplicate "pin not connected"
+        # errors for pins that belong to a different unit (issue #3349).
+        # Pins carry the unit number they were declared under
+        # (``pin.unit``); ``0`` means "common to all units" (typically
+        # shared package power pins).  Each instance only owns the pins
+        # whose unit matches its own ``unit`` field, plus any unit-0
+        # commons — but the common pins should be reported only by the
+        # *first* placed instance of that reference so we do not flag
+        # the same physical pin twice.
+        first_instance_for_ref: dict[str, object] = {}
+        for sym in self.symbols:
+            first_instance_for_ref.setdefault(sym.reference, sym)
+
         for sym in self.symbols:
             # Skip simple 2-pin passive components (resistors, capacitors, etc.)
             # These often have one pin floating during design
@@ -282,7 +323,22 @@ class SchematicValidationMixin:
                 p.pin_type == "passive" for p in sym.symbol_def.pins
             )
 
+            sym_unit = getattr(sym, "unit", 1)
+            owns_common_pins = first_instance_for_ref.get(sym.reference) is sym
+
             for pin in sym.symbol_def.pins:
+                pin_unit = getattr(pin, "unit", 0)
+
+                # Skip pins that belong to a different unit than the one
+                # currently placed.  Unit 0 = "common to all units" and is
+                # reported only by the first placed instance for this ref
+                # so the same physical pin is not double-counted.
+                if pin_unit == 0:
+                    if not owns_common_pins:
+                        continue
+                elif pin_unit != sym_unit:
+                    continue
+
                 # Skip passive pins on simple 2-pin devices
                 if is_simple_passive and pin.pin_type == "passive":
                     continue

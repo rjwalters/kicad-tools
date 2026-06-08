@@ -80,7 +80,7 @@ class SymbolDef:
                         angle=p.angle,
                         length=p.length,
                         pin_type=p.pin_type,
-                        unit=getattr(p, "unit", 1),
+                        unit=getattr(p, "unit", 0),
                     )
                     for p in cached.pins
                 ],
@@ -181,8 +181,14 @@ class SymbolDef:
         highest unit number observed across the parsed pins.  Used by the
         block library (and any caller that needs to place every unit) to
         size loops correctly without re-parsing the underlying library.
+
+        Note: ``Pin.unit`` uses ``0`` as a "common to all units" sentinel
+        (e.g. shared package power pins), so the unit count is the
+        maximum of the non-zero unit numbers — with a floor of 1 so
+        single-unit symbols (whose pins are all tagged ``unit=0``) still
+        report a meaningful count.
         """
-        return max((p.unit for p in self.pins), default=1)
+        return max((p.unit for p in self.pins if p.unit > 0), default=1)
 
     def get_pin_unit(self, pin_number: str) -> int:
         """Return the unit number that owns ``pin_number`` (default 1).
@@ -193,34 +199,35 @@ class SymbolDef:
         use this to route ``pin_position(pin_number)`` to the correct
         instance.  Unknown pin numbers fall back to ``1`` so callers do
         not need defensive existence checks.
+
+        Note: pins tagged with the ``0`` "common to all units" sentinel
+        (shared package power pins) report as unit ``1`` here because
+        callers using this helper want a concrete unit to place against;
+        common pins can be reached through any unit instance.
         """
         for p in self.pins:
             if p.number == pin_number:
-                return p.unit
+                return p.unit if p.unit > 0 else 1
         return 1
 
     @classmethod
     def _parse_pins_sexp(cls, sym_node: SExp) -> list[Pin]:
         """Parse pin definitions from symbol SExp node.
 
-        KiCad multi-unit symbols nest their pins inside ``(symbol "Name_N_1" ...)``
-        sub-blocks where ``N`` is the 1-indexed unit number (``_0_1`` is the
-        graphical body, no pins).  We carry the unit number from the enclosing
-        sub-symbol down to each :class:`Pin` so that callers (and the block
-        library) can locate the correct ``SymbolInstance`` for each pin number.
-        Pins outside any unit sub-symbol default to ``unit=1``.
+        Multi-unit KiCad symbols nest their pins inside child symbol nodes
+        named ``<Name>_<unit>_<style>`` (e.g. ``LM393_2_1``).  Each pin is
+        tagged with the unit number extracted from that wrapper name so
+        downstream validation can filter by which units are actually
+        placed.  Pins declared at the top level (or inside a unit-0
+        wrapper like ``LM393_0_1``) keep ``unit=0`` to indicate they are
+        common to every unit instance (shared package power pins, etc.).
         """
         pins = []
 
-        def _extract_unit(unit_name: str) -> int | None:
-            """Return the unit number for a sub-symbol like ``Name_3_1``."""
-            m = re.match(r".+_(\d+)_\d+$", unit_name)
-            if not m:
-                return None
-            return int(m.group(1))
+        unit_pattern = re.compile(r".+_(\d+)_\d+$")
 
-        def find_pins(node: SExp, current_unit: int = 1):
-            """Recursively find all pin nodes, tagging with enclosing unit."""
+        def find_pins(node: SExp, current_unit: int):
+            """Recursively find all pin nodes, tracking the wrapping unit."""
             for child in node.children:
                 if child.name == "pin":
                     pin = Pin.from_sexp(child)
@@ -228,21 +235,21 @@ class SymbolDef:
                         pin.unit = current_unit
                         pins.append(pin)
                 elif child.is_list:
-                    # If this child is a unit sub-symbol, propagate its number
-                    # down to nested pin nodes.  The graphical body sub-symbol
-                    # (``Name_0_1``) has no pins; treat it as ``unit=1`` for
-                    # safety -- single-unit symbols typically pack everything
-                    # in ``Name_1_1`` anyway.
-                    child_unit = current_unit
+                    # If this is a unit wrapper (Name_<unit>_<style>), update
+                    # the unit context for its descendants.  The graphical
+                    # body sub-symbol (``Name_0_1``) carries no pins; its
+                    # ``unit=0`` tag also doubles as the "common to all
+                    # units" sentinel for shared package pins.
+                    next_unit = current_unit
                     if child.name == "symbol" and child.children:
                         first = child.children[0]
                         if first.is_atom:
-                            extracted = _extract_unit(str(first.value))
-                            if extracted is not None and extracted > 0:
-                                child_unit = extracted
-                    find_pins(child, child_unit)
+                            m = unit_pattern.match(str(first.value))
+                            if m:
+                                next_unit = int(m.group(1))
+                    find_pins(child, next_unit)
 
-        find_pins(sym_node)
+        find_pins(sym_node, 0)
         return pins
 
     def _add_prefix_to_node(self, node: SExp, lib_name: str, skip_extends: bool = False) -> SExp:
@@ -599,11 +606,21 @@ class SymbolInstance:
         # position, but asking unit 1 for pin "4" (V-, on unit 3) would
         # silently return a phantom position derived from unit 1's
         # outline (issue #3346).
+        #
+        # ``Pin.unit`` uses ``0`` as the "common to all units" sentinel
+        # (shared package power pins, single-unit symbols whose pins are
+        # all tagged ``unit=0``).  Treat those as matching any instance
+        # unit so callers asking unit 2 for a shared GND pin still get
+        # the right position.
+        def _pin_matches_unit(pin: Pin) -> bool:
+            pin_unit = getattr(pin, "unit", 0)
+            return pin_unit == 0 or pin_unit == self.unit
+
         pin = None
         for p in self.symbol_def.pins:
-            if (p.name == pin_name_or_number or p.number == pin_name_or_number) and (
-                getattr(p, "unit", 1) == self.unit
-            ):
+            if (
+                p.name == pin_name_or_number or p.number == pin_name_or_number
+            ) and _pin_matches_unit(p):
                 pin = p
                 break
 
@@ -622,7 +639,7 @@ class SymbolInstance:
             for p in self.symbol_def.pins:
                 if (
                     p.name.lower() == target_lower or p.number.lower() == target_lower
-                ) and getattr(p, "unit", 1) == self.unit:
+                ) and _pin_matches_unit(p):
                     pin = p
                     break
         if pin is None:
