@@ -3395,6 +3395,11 @@ def route_with_layer_escalation(
     # next manufacturer tier.  Harmless when no outer wrapper exists.
     with contextlib.suppress(AttributeError, TypeError):
         args._last_router = final_result.router
+        # Issue #3352 (P_AS3): Stash the full LayerEscalationResult so an
+        # outer ``route_with_size_escalation`` wrapper can inspect
+        # ``nets_routed`` / ``nets_to_route`` / ``overflow`` to construct
+        # ``RoutingResultMetrics`` and call ``decide_escalation``.
+        args._last_layer_result = final_result
 
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline so the
@@ -4464,6 +4469,509 @@ def route_with_mfr_tier_escalation(
         flush_print("  4. Add layers via --auto-layers --max-layers 6 (if not already on).")
 
     return final_exit_code
+
+
+def route_with_size_escalation(
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    quiet: bool = False,
+) -> int:
+    """Route a PCB with auto-pcb-size escalation (Issue #3352, P_AS3).
+
+    Wraps :func:`route_with_layer_escalation` (or the single-layer path when
+    ``--no-auto-layers`` is set).  After each inner routing attempt, builds
+    a :class:`RoutingResultMetrics` from the stashed
+    ``args._last_layer_result`` and calls
+    :func:`kicad_tools.router.auto_pcb_size.decide_escalation` to determine
+    the next step.
+
+    Decision handling:
+
+      * :attr:`EscalationDecision.NO_ESCALATION_NEEDED` -- inner routing met
+        the reach + DRC density thresholds; return the inner exit code.
+      * :attr:`EscalationDecision.ESCALATE` -- grow the PCB outline via
+        :func:`kicad_tools.pcb.outline.grow_board_outline_corner_anchored`
+        (corner-anchored per Q2), advance the tier index, re-route.
+      * :attr:`EscalationDecision.REFUSE_HARD_ENVELOPE` -- emit the
+        actionable error from the architect proposal (BOM / layers /
+        clearance / envelope-relax levers) and return the inner exit code.
+      * :attr:`EscalationDecision.REFUSE_HOLES_DONT_FIT` -- emit an error
+        naming the hole-group anchor and the new envelope; return inner
+        exit code.
+      * :attr:`EscalationDecision.REFUSE_MAX_TIER` -- ladder exhausted;
+        emit error noting the topmost tier reached.
+
+    Per Q5: ``--auto-pcb-size`` IMPLIES ``--auto-layers`` unless
+    ``--no-auto-layers`` was explicit.  This wrapper does NOT enforce
+    that policy itself -- it dispatches to the layer-escalation path when
+    ``args.auto_layers`` is truthy and to the single-attempt path
+    otherwise.  Setting ``args.auto_layers = True`` at the CLI dispatch
+    site is the canonical way to honour the Q5 implication.
+
+    The escalation policy comes from ``args._escalation_policy`` when the
+    CLI dispatch site has loaded one from ``project.kct``; otherwise a
+    default :class:`EscalationPolicy` is constructed (which defaults to
+    ``layers-first`` ladder and 0.5 viols/cm^2 density trigger).
+
+    Args:
+        pcb_path: Path to input PCB file.
+        output_path: Path for output routed PCB file.
+        args: Parsed command-line arguments.  Honours
+            ``args.auto_layers``, ``args.manufacturer``,
+            ``args._escalation_policy`` (optional), ``args._envelope_hard``
+            (optional), ``args._hole_group`` (optional).
+        quiet: Suppress output.
+
+    Returns:
+        Exit code (0 = success, 1 = failure, 2 = partial,
+        3 = DRC violations).  Mirrors the inner function's contract.
+    """
+    from kicad_tools.cli.progress import flush_print
+    from kicad_tools.pcb.outline import (
+        OutlineGrowError,
+        grow_board_outline_corner_anchored,
+    )
+    from kicad_tools.router.auto_pcb_size import (
+        EscalationContext,
+        EscalationDecision,
+        RoutingResultMetrics,
+        decide_escalation,
+    )
+    from kicad_tools.router.io import extract_board_dimensions
+    from kicad_tools.router.mfr_limits import (
+        find_smallest_admitting_tier,
+        get_mfr_size_tier_ladder,
+    )
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.spec.schema import EscalationPolicy
+
+    # Resolve the escalation policy.  CLI dispatch site may have loaded
+    # one from project.kct; otherwise use the default policy (layers-first
+    # ladder, 0.5 viols/cm^2 density trigger, max_layers=4).
+    policy: EscalationPolicy = getattr(args, "_escalation_policy", None) or EscalationPolicy()
+    envelope_hard: bool = bool(getattr(args, "_envelope_hard", False))
+    hole_group = getattr(args, "_hole_group", None)
+
+    # Manufacturer for the size ladder.  Mirrors the layer-escalation
+    # path's reliance on args.manufacturer.
+    manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+
+    # Discover the starting tier index from the current board dimensions.
+    dims = extract_board_dimensions(pcb_path)
+    if dims is None:
+        if not quiet:
+            flush_print(
+                "Error: --auto-pcb-size requires a board outline on Edge.Cuts; "
+                "no outline detected.  Run `kct pcb edit-outline --set-outline rect "
+                "--origin X Y --size W H` to add one before re-running.",
+                file=sys.stderr,
+            )
+        return 1
+
+    cur_w, cur_h = dims
+    try:
+        ladder = get_mfr_size_tier_ladder(manufacturer)
+    except ValueError as exc:
+        if not quiet:
+            flush_print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    starting_tier = find_smallest_admitting_tier(cur_w, cur_h, manufacturer)
+    if starting_tier is None:
+        # Board already exceeds the largest tier; can't escalate further.
+        if not quiet:
+            flush_print(
+                f"Error: --auto-pcb-size: current board ({cur_w:g}x{cur_h:g} mm) "
+                f"already exceeds the largest registered tier for {manufacturer} "
+                f"({ladder[-1].max_width_mm:g}x{ladder[-1].max_height_mm:g} mm).",
+                file=sys.stderr,
+            )
+        return 1
+
+    # Find the index of the starting tier in the ladder.  The smallest-
+    # admitting tier is unique by construction in the architect proposal's
+    # ladder (ascending area), so this is deterministic.
+    current_tier_index = 0
+    for i, t in enumerate(ladder):
+        if (
+            abs(t.max_width_mm - starting_tier.max_width_mm) < 1e-6
+            and abs(t.max_height_mm - starting_tier.max_height_mm) < 1e-6
+        ):
+            current_tier_index = i
+            break
+
+    if not quiet:
+        flush_print("=" * 60)
+        flush_print("KiCad PCB Autorouter - Size Escalation Mode")
+        flush_print("=" * 60)
+        flush_print(f"Input:              {pcb_path}")
+        flush_print(f"Output:             {output_path}")
+        flush_print(f"Starting envelope:  {cur_w:g}x{cur_h:g} mm")
+        flush_print(
+            f"Starting tier:      [{current_tier_index}] "
+            f"{starting_tier.max_width_mm:g}x{starting_tier.max_height_mm:g} mm "
+            f"({starting_tier.note or 'no note'})"
+        )
+        flush_print(f"Policy ladder:      {policy.ladder}")
+        flush_print(f"Envelope hard:      {envelope_hard}")
+        flush_print()
+
+    # Track the last exit code to return when no escalation is needed
+    # or refusal is encountered after a successful-ish inner attempt.
+    last_exit_code: int = 1
+
+    # Outer size-escalation loop.  Each iteration:
+    #   1. Run the inner layer-escalation path (or single-attempt path).
+    #   2. Read the stashed metrics from args._last_layer_result.
+    #   3. Call decide_escalation; act on the result.
+    #
+    # The loop bounds itself by REFUSE_MAX_TIER -- ladder exhaustion is
+    # the terminal failure mode.  Without that bound the loop could run
+    # forever if the trigger never settles; the manufacturer's ladder is
+    # finite by construction (typically 4-6 rungs), so this is safe.
+    MAX_SIZE_ATTEMPTS = len(ladder) + 1  # defensive cap
+    attempt_num = 0
+    while attempt_num < MAX_SIZE_ATTEMPTS:
+        attempt_num += 1
+
+        if not quiet and attempt_num > 1:
+            flush_print("=" * 60)
+            cur_tier = ladder[current_tier_index]
+            flush_print(
+                f"Size attempt {attempt_num}: tier [{current_tier_index}] "
+                f"{cur_tier.max_width_mm:g}x{cur_tier.max_height_mm:g} mm "
+                f"({cur_tier.note or 'no note'})"
+            )
+            flush_print("=" * 60)
+
+        # Dispatch to the inner routing path.
+        if getattr(args, "auto_layers", True):
+            inner_rc = route_with_layer_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=quiet,
+            )
+        else:
+            # When --no-auto-layers is explicit, run a single-attempt
+            # routing pass (the layer-escalation function honours
+            # --no-auto-layers internally via the args.max_layers /
+            # layer_configs filter, but for clarity we still dispatch
+            # there -- this matches the route_with_mfr_tier_escalation
+            # behaviour for symmetric debugging).
+            inner_rc = route_with_layer_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=quiet,
+            )
+
+        last_exit_code = inner_rc
+
+        # Read the inner attempt's metrics from the stash.  When the
+        # stash is absent (e.g. inner routing crashed before reaching
+        # the stash site), conservatively report 0 nets routed and exit.
+        last_result = getattr(args, "_last_layer_result", None)
+        if last_result is None:
+            if not quiet:
+                flush_print(
+                    "  Size escalation: inner routing did not stash a result; "
+                    "exiting escalation loop (returning inner exit code)."
+                )
+            return inner_rc
+
+        # Compute board area from the current outline.  After the first
+        # attempt, the outline reflects the just-attempted (grown) size;
+        # for subsequent attempts the metrics' area must match the size
+        # actually attempted so density is computed against the right
+        # denominator.
+        post_dims = extract_board_dimensions(pcb_path)
+        if post_dims is None:
+            # Defensive: outline was destroyed somehow; can't escalate
+            # without an outline to grow.
+            if not quiet:
+                flush_print(
+                    "  Size escalation: lost board outline after routing; exiting escalation loop."
+                )
+            return inner_rc
+        board_w, board_h = post_dims
+        board_area_cm2 = (board_w * board_h) / 100.0
+
+        # DRC-violation proxy: the router's grid overflow counter.  A
+        # principled implementation would invoke a full DRC pass here
+        # (see ``run_drc`` in kicad_tools.drc.checker), but P_AS3 uses
+        # the cheaper proxy because the routing attempt already
+        # populated it.  Overflow on the grid represents track-track
+        # congestion, which is the dominant failure mode the
+        # auto-pcb-size trigger is designed to detect.  Promote to a
+        # real DRC count in a follow-up (P_AS4 candidate).
+        nets_routed = int(getattr(last_result, "nets_routed", 0) or 0)
+        nets_total = int(getattr(last_result, "nets_to_route", 0) or 0)
+        overflow = int(getattr(last_result, "overflow", 0) or 0)
+
+        metrics = RoutingResultMetrics(
+            signal_nets_routed=nets_routed,
+            signal_nets_total=nets_total,
+            drc_violations=overflow,
+            board_area_cm2=board_area_cm2,
+        )
+
+        context = EscalationContext(
+            current_tier_index=current_tier_index,
+            policy=policy,
+            manufacturer=manufacturer,
+            hole_group=hole_group,
+            envelope_hard=envelope_hard,
+        )
+
+        decision = decide_escalation(metrics, context)
+
+        if not quiet:
+            flush_print(
+                f"  Size-escalation decision: {decision.value} "
+                f"(reach={metrics.completion:.0%}, "
+                f"drc_density={metrics.drc_density:.2f}/cm^2 over "
+                f"{board_area_cm2:.1f} cm^2)"
+            )
+
+        if decision == EscalationDecision.NO_ESCALATION_NEEDED:
+            # Inner routing was good enough -- return the inner exit code.
+            return inner_rc
+
+        if decision == EscalationDecision.REFUSE_MAX_TIER:
+            if not quiet:
+                _print_size_escalation_refusal(
+                    reason="max_tier",
+                    current_tier_index=current_tier_index,
+                    ladder=ladder,
+                    cur_dims=(board_w, board_h),
+                )
+            return inner_rc
+
+        if decision == EscalationDecision.REFUSE_HARD_ENVELOPE:
+            if not quiet:
+                _print_size_escalation_refusal(
+                    reason="envelope_hard",
+                    current_tier_index=current_tier_index,
+                    ladder=ladder,
+                    cur_dims=(board_w, board_h),
+                )
+            return inner_rc
+
+        if decision == EscalationDecision.REFUSE_HOLES_DONT_FIT:
+            if not quiet:
+                _print_size_escalation_refusal(
+                    reason="holes_dont_fit",
+                    current_tier_index=current_tier_index,
+                    ladder=ladder,
+                    cur_dims=(board_w, board_h),
+                    hole_group=hole_group,
+                )
+            return inner_rc
+
+        # decision == ESCALATE -- grow the board to the next tier.
+        next_index = current_tier_index + 1
+        if next_index >= len(ladder):
+            # Defensive: decide_escalation said ESCALATE but the ladder
+            # has no room.  Treat as max-tier refusal.
+            if not quiet:
+                _print_size_escalation_refusal(
+                    reason="max_tier",
+                    current_tier_index=current_tier_index,
+                    ladder=ladder,
+                    cur_dims=(board_w, board_h),
+                )
+            return inner_rc
+
+        next_tier = ladder[next_index]
+        if not quiet:
+            flush_print(
+                f"  Growing board: tier [{next_index}] "
+                f"{next_tier.max_width_mm:g}x{next_tier.max_height_mm:g} mm "
+                f"({next_tier.note or 'no note'})"
+            )
+
+        # Grow the outline corner-anchored (Q2).  Load the PCB, mutate,
+        # save back.  The routing pipeline expects pcb_path to be the
+        # canonical input each iteration; the staged output_path may
+        # have been consumed earlier in the loop, so we mutate pcb_path
+        # in place here -- callers wanting an untouched input should
+        # have set --output to a distinct path (the layer-escalation
+        # path already requires this; we mirror it).
+        try:
+            pcb_obj = PCB.load(pcb_path)
+            grow_board_outline_corner_anchored(
+                pcb_obj,
+                new_width_mm=next_tier.max_width_mm,
+                new_height_mm=next_tier.max_height_mm,
+            )
+            pcb_obj.save(pcb_path)
+        except OutlineGrowError as exc:
+            if not quiet:
+                flush_print(
+                    f"Error: --auto-pcb-size: outline grow failed: {exc}",
+                    file=sys.stderr,
+                )
+            return inner_rc
+
+        current_tier_index = next_index
+
+    # Loop exhausted without convergence -- conservative fallback.
+    return last_exit_code
+
+
+def _load_project_kct_for_escalation(pcb_path: Path, args) -> None:
+    """Load EscalationPolicy / envelope_hard / mounting hole group from project.kct.
+
+    Issue #3352 (P_AS3): when ``--auto-pcb-size`` is engaged, best-effort
+    discover a ``project.kct`` file next to the PCB (in the PCB's directory
+    or any parent up to the cwd) and forward its
+    :attr:`ManufacturingRequirements.escalation` policy,
+    :attr:`MechanicalRequirements.envelope_hard` flag, and
+    :attr:`MechanicalRequirements.mounting_hole_group` to
+    :func:`route_with_size_escalation`.
+
+    The helper is silent on missing fields -- absent
+    ``ManufacturingRequirements.escalation`` means "use the default
+    EscalationPolicy"; absent ``MechanicalRequirements`` means "envelope is
+    soft, no mounting hole group".
+
+    Args:
+        pcb_path: Path to the input PCB file (the discovery anchor).
+        args: Parsed CLI args; will be mutated with
+            ``_escalation_policy``, ``_envelope_hard``, ``_hole_group``.
+    """
+    from kicad_tools.pcb.mounting_holes import MountingHoleGroup
+
+    # Search upward from the PCB's directory for a project.kct file.
+    pcb_dir = pcb_path.parent if pcb_path.parent != Path("") else Path.cwd()
+    candidate_paths: list[Path] = []
+    cur = pcb_dir.resolve()
+    for _ in range(6):  # bounded ancestor walk
+        candidate_paths.append(cur / "project.kct")
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    spec_path: Path | None = None
+    for p in candidate_paths:
+        if p.is_file():
+            spec_path = p
+            break
+
+    if spec_path is None:
+        return  # No project.kct discovered; size escalation uses defaults.
+
+    try:
+        from kicad_tools.spec.parser import load_spec
+
+        spec = load_spec(spec_path)
+    except Exception:
+        # Be permissive: a malformed or partially-valid spec must not
+        # block routing.  Leave args._escalation_policy unset so the
+        # default EscalationPolicy is used.
+        return
+
+    requirements = getattr(spec, "requirements", None)
+    if requirements is None:
+        return
+
+    # ManufacturingRequirements.escalation -> args._escalation_policy
+    manufacturing = getattr(requirements, "manufacturing", None)
+    if manufacturing is not None:
+        escalation = getattr(manufacturing, "escalation", None)
+        if escalation is not None:
+            args._escalation_policy = escalation
+
+    # MechanicalRequirements.envelope_hard -> args._envelope_hard
+    # MechanicalRequirements.mounting_hole_group -> args._hole_group
+    mechanical = getattr(requirements, "mechanical", None)
+    if mechanical is not None:
+        args._envelope_hard = bool(getattr(mechanical, "envelope_hard", False))
+        hole_spec = getattr(mechanical, "mounting_hole_group", None)
+        if hole_spec is not None:
+            try:
+                args._hole_group = MountingHoleGroup.from_spec(hole_spec)
+            except (ValueError, TypeError):
+                # Defensive: invalid spec content; treat as no hole group.
+                args._hole_group = None
+
+
+def _print_size_escalation_refusal(
+    reason: str,
+    current_tier_index: int,
+    ladder: list,
+    cur_dims: tuple[float, float],
+    hole_group=None,
+) -> None:
+    """Print the actionable refusal message for auto-pcb-size escalation.
+
+    Mirrors the architect proposal's §4 refusal UX: enumerate concrete
+    alternative levers (BOM / layers / envelope / clearance / spec
+    amendment) so the user has a clear path forward rather than just a
+    "refused" sentinel.
+    """
+    from kicad_tools.cli.progress import flush_print
+
+    cur_tier = ladder[current_tier_index]
+    cur_w, cur_h = cur_dims
+
+    flush_print()
+    flush_print("=" * 60)
+    flush_print("AUTO-PCB-SIZE ESCALATION REFUSED")
+    flush_print("=" * 60)
+
+    if reason == "envelope_hard":
+        flush_print(
+            f"Reason: recipe declares envelope_hard=true (current envelope "
+            f"{cur_w:g}x{cur_h:g} mm is a non-negotiable mechanical "
+            f"constraint).  Auto-pcb-size cannot grow the board."
+        )
+    elif reason == "max_tier":
+        flush_print(
+            f"Reason: ladder exhausted at tier [{current_tier_index}] "
+            f"({cur_tier.max_width_mm:g}x{cur_tier.max_height_mm:g} mm) -- "
+            f"no further size escalation is registered for this manufacturer."
+        )
+    elif reason == "holes_dont_fit":
+        if hole_group is not None:
+            anchor = getattr(hole_group, "anchor", (0.0, 0.0))
+            flush_print(
+                f"Reason: mounting hole group at anchor ({anchor[0]:g}, "
+                f"{anchor[1]:g}) would fall outside the next-tier envelope "
+                f"at its declared position.  Auto-pcb-size cannot grow the "
+                f"board without violating the mounting-hole constraint."
+            )
+        else:
+            flush_print("Reason: mounting hole group doesn't fit in next tier.")
+
+    flush_print()
+    flush_print("This board's BOM density x clearance x envelope is over-constrained.")
+    flush_print("Consider these alternative levers (not all are mutually exclusive):")
+    flush_print()
+    flush_print(
+        "  1. Reduce BOM density -- remove non-essential components or "
+        "consolidate functionally-similar parts."
+    )
+    flush_print(
+        "  2. Enable more layers -- pass --auto-layers --max-layers 6 "
+        "(layers-first is cheapest at prototype quantities)."
+    )
+    flush_print(
+        "  3. Enlarge mechanical envelope manually -- update the project "
+        "spec dimensions and re-run.  If envelope_hard=true, change that "
+        "declaration to false to allow size escalation."
+    )
+    flush_print(
+        "  4. Loosen clearance via spec amendment -- lower --clearance or "
+        "raise --fine-pitch-clearance (within manufacturer limits)."
+    )
+    flush_print(
+        "  5. Upgrade manufacturer tier -- pass --auto-mfr-tier (e.g. "
+        "jlcpcb -> jlcpcb-tier1 for via-in-pad capability)."
+    )
+    flush_print()
 
 
 def _name_dominant_unfixable_constraint(
@@ -5953,6 +6461,33 @@ def main(argv: list[str] | None = None) -> int:
             "Maximum layer count for auto-escalation (default: 6). Only used with --auto-layers."
         ),
     )
+    # Issue #3352 (P_AS3): --auto-pcb-size escalation.  Walks the
+    # manufacturer's size-tier ladder when routing reach + DRC density
+    # indicate the envelope (not layers or clearance) is the bottleneck.
+    # Default off; opt-in because growing the board adds material cost.
+    # Q5 decision: --auto-pcb-size IMPLIES --auto-layers (layers-first is
+    # the default ladder and skipping layer escalation forfeits the
+    # cheapest rung).  Use --no-auto-layers to opt out of the layers axis.
+    parser.add_argument(
+        "--auto-pcb-size",
+        action="store_true",
+        default=False,
+        help=(
+            "Automatically escalate PCB envelope to the next manufacturer "
+            "size tier when routing reach + DRC density indicate the "
+            "envelope is the bottleneck (default: disabled). Walks the "
+            "registered cost-tier ladder for the current --mfr (e.g. "
+            "JLCPCB 100x100 -> 100x150 -> 150x150 -> ...). Per Issue #3352 "
+            "Q5, --auto-pcb-size implies --auto-layers because the "
+            "layers-first default ladder skips the cheapest rung otherwise; "
+            "pass --no-auto-layers to opt out of the layers axis. "
+            "When the recipe declares envelope_hard=true OR a mounting hole "
+            "group is pinned, the wrapper falls back to layers-only "
+            "escalation with an actionable refusal message enumerating "
+            "alternative recipe levers (BOM reduction, more layers, larger "
+            "envelope manually, looser clearance via spec amendment)."
+        ),
+    )
     # Issue #2881: --auto-mfr-tier / --mfr-tier-ladder.  Opt-in escalation
     # along a registered ladder of manufacturer tiers (e.g.
     # ``jlcpcb`` -> ``jlcpcb-tier1``).  Default off because tighter tiers
@@ -6640,6 +7175,38 @@ def main(argv: list[str] | None = None) -> int:
                     )
         except ValueError:
             pass  # Unknown manufacturer -- edge_clearance stays None
+
+    # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
+    # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
+    # IMPLIES --auto-layers unless --no-auto-layers was explicit (the
+    # layers-first ladder is meaningless when layers can't escalate).
+    # Per Q4: auto-load project.kct EscalationPolicy + envelope_hard +
+    # mounting_hole_group when a project.kct sits next to the PCB.
+    if getattr(args, "auto_pcb_size", False):
+        # Q5 enforcement: --auto-pcb-size implies --auto-layers unless
+        # the user explicitly passed --no-auto-layers.
+        _argv_for_q5 = argv if argv is not None else sys.argv
+        _explicit_no_auto_layers = "--no-auto-layers" in _argv_for_q5
+        if not _explicit_no_auto_layers and not args.auto_layers:
+            args.auto_layers = True
+            if not args.quiet:
+                print(
+                    "  (Q5: --auto-pcb-size implies --auto-layers; "
+                    "pass --no-auto-layers to opt out.)"
+                )
+
+        # Best-effort project.kct discovery.  When present, load the
+        # MechanicalRequirements.envelope_hard + mounting_hole_group + the
+        # ManufacturingRequirements.escalation policy and stash them on
+        # args so route_with_size_escalation can consume them.
+        _load_project_kct_for_escalation(pcb_path, args)
+
+        return route_with_size_escalation(
+            pcb_path=pcb_path,
+            output_path=output_path,
+            args=args,
+            quiet=args.quiet,
+        )
 
     # Issue #2881: --auto-mfr-tier wraps --auto-layers / --adaptive-rules,
     # iterating over registered manufacturer tiers from cheapest -> tightest.
