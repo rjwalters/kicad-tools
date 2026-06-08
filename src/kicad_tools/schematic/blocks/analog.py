@@ -1,11 +1,12 @@
 """Analog circuit blocks: op-amps, ADC input filters, sensor interfaces."""
 
+import contextlib
 from typing import TYPE_CHECKING, Literal
 
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
-    from kicad_sch_helper import Schematic
+    from kicad_sch_helper import Schematic, SymbolInstance  # noqa: F401
 
 
 class ADCInputFilterBlock(CircuitBlock):
@@ -677,7 +678,28 @@ class OvercurrentComparator(CircuitBlock):
         """
         super().__init__(sch, x, y)
 
-        # Place the comparator IC
+        # Place the comparator IC.  LM393 is a multi-unit symbol:
+        #   * unit 1 = comparator channel A (pins 1=OUT, 2=IN-, 3=IN+)
+        #   * unit 2 = comparator channel B (pins 5=IN+, 6=IN-, 7=OUT)
+        #   * unit 3 = power pins (4=V-, 8=V+)
+        # If we only placed unit 1 then ``pin_position("4")`` and
+        # ``pin_position("8")`` would silently return phantom positions
+        # derived from the unit-1 outline (the LM393 library file stores
+        # pin 4 at (-2.54, -7.62) inside its ``_3_1`` sub-symbol -- that
+        # offset is meaningless when applied to a unit-1 placement and
+        # leads to wires terminating in empty space (issue #3346).
+        #
+        # Place all three units; each ``SymbolInstance`` resolves
+        # ``pin_position`` against its own unit's outline.  We then build
+        # an internal pin-number -> instance map so the rest of this
+        # block (and downstream callers) can keep calling
+        # ``pin_position("4")`` and get the correct unit-3 coordinates.
+        # ``SymbolInstance`` is only imported under ``TYPE_CHECKING`` so the
+        # annotation must remain a string at runtime.  ``ruff`` flags this
+        # as ``UP037`` but the suggested fix breaks Python <3.10 evaluation.
+        self._unit_instances: "dict[int, SymbolInstance]" = {}  # noqa: UP037
+
+        primary_unit = 1
         self.comparator = sch.add_symbol(
             comparator_symbol,
             x,
@@ -685,8 +707,55 @@ class OvercurrentComparator(CircuitBlock):
             ref,
             "LM393",
             footprint=comparator_footprint,
+            unit=primary_unit,
         )
+        self._unit_instances[primary_unit] = self.comparator
         self.components = {"U_CMP": self.comparator}
+
+        # Discover the symbol's other units (if any) and place them.
+        # We read this from the parsed ``SymbolDef``; falling back
+        # gracefully when the schematic mock used in unit tests does not
+        # expose a real ``SymbolDef`` (a bare ``Mock().symbol_def`` is
+        # itself a Mock object and ``unit_count()`` returns a Mock too,
+        # so we explicitly type-check the result before iterating).
+        sym_def = getattr(self.comparator, "symbol_def", None)
+        raw_unit_count = sym_def.unit_count() if sym_def is not None else 1
+        unit_count = raw_unit_count if isinstance(raw_unit_count, int) else 1
+
+        # Offsets for power and channel-B placements.  These match the
+        # hand-tuned coordinates that PR #3345 used for softstart rev B
+        # (which is now the canonical placement for an LM393 block):
+        # power above the divider, channel B further right with all
+        # three pins marked NC.
+        unit_offsets = {
+            2: (x + 50, y - 40),  # channel B (NC pins)
+            3: (x + 25, y),       # power (V+, V-)
+        }
+        for u in range(2, unit_count + 1):
+            if u not in unit_offsets:
+                continue
+            ux, uy = unit_offsets[u]
+            inst = sch.add_symbol(
+                comparator_symbol,
+                ux,
+                uy,
+                ref,
+                "LM393",
+                footprint=comparator_footprint,
+                unit=u,
+            )
+            self._unit_instances[u] = inst
+            self.components[f"U_CMP_U{u}"] = inst
+
+        # Channel B (unit 2) pins are unused on this block; mark them as
+        # no-connect to keep ERC quiet.  Only attempt this for instances
+        # that expose ``pin_position`` (real ``SymbolInstance``); mocked
+        # schematics may not implement ``add_no_connect``.
+        if 2 in self._unit_instances and hasattr(sch, "add_no_connect"):
+            for pin_num in ("5", "6", "7"):
+                with contextlib.suppress(Exception):
+                    pos = self._unit_pin_position(pin_num)
+                    sch.add_no_connect(pos[0], pos[1])
 
         # Threshold divider: R_TH_HI from VCC, R_TH_LO to GND, junction = V_THRESHOLD.
         # ratio = vcc/threshold = (R_TH_HI + R_TH_LO) / R_TH_LO
@@ -741,20 +810,23 @@ class OvercurrentComparator(CircuitBlock):
         r_pullup_top = self.r_pullup.pin_position("1")
         r_pullup_bot = self.r_pullup.pin_position("2")
 
-        # Comparator pin layout (LM393 single-pole, generic positions —
-        # actual pin numbers come from the symbol).  We use port-style
-        # access (named pins) where possible; the symbol numbering for
-        # LM393 dual is: 1=OUT1, 2=IN1-, 3=IN1+, 4=VEE/GND, 5=IN2+,
-        # 6=IN2-, 7=OUT2, 8=VCC.  We use channel 1.
+        # Comparator pin layout (LM393 multi-unit): pins 1=OUT_A, 2=IN-_A,
+        # 3=IN+_A live on unit 1; pins 4=V-, 8=V+ live on unit 3; pins
+        # 5-7 live on unit 2 (channel B, unused here).  ``_unit_pin_position``
+        # routes each lookup to the correct ``SymbolInstance`` so that
+        # pin 4 / pin 8 resolve against the unit-3 outline -- the unit-1
+        # fallback positions used by the previous implementation produced
+        # phantom coordinates that landed in empty space (issue #3346).
         try:
-            cmp_out = self.comparator.pin_position("1")
-            cmp_in_neg = self.comparator.pin_position("2")
-            cmp_in_pos = self.comparator.pin_position("3")
-            cmp_gnd = self.comparator.pin_position("4")
-            cmp_vcc = self.comparator.pin_position("8")
+            cmp_out = self._unit_pin_position("1")
+            cmp_in_neg = self._unit_pin_position("2")
+            cmp_in_pos = self._unit_pin_position("3")
+            cmp_gnd = self._unit_pin_position("4")
+            cmp_vcc = self._unit_pin_position("8")
         except Exception:
             # Fall back to symbol-relative positions if the symbol layout
-            # differs (e.g. unit-A subsymbol convention).
+            # differs (e.g. mocked schematic in unit tests that doesn't
+            # mirror the LM393 unit topology).
             cmp_out = (x + 10, y - 5)
             cmp_in_neg = (x - 10, y - 5)
             cmp_in_pos = (x - 10, y + 5)
@@ -795,6 +867,43 @@ class OvercurrentComparator(CircuitBlock):
         self.vcc_voltage = vcc_voltage
         self.shunt_voltage_node = shunt_voltage_node
         self.irq_output_pin = irq_output_pin
+
+    def _unit_pin_position(self, pin_number: str) -> tuple[float, float]:
+        """Return the absolute position of an LM393 pin, picking the right unit.
+
+        Walks the comparator's parsed :class:`SymbolDef` to discover
+        which unit owns ``pin_number``, then delegates to the matching
+        ``SymbolInstance`` placed in :class:`__init__`.  Falls back to
+        the primary (unit 1) instance if the symbol definition is not
+        introspectable (unit-test mock) or the unit was never placed.
+
+        This is what fixes the multi-unit phantom-position bug
+        (issue #3346): asking the primary unit-1 instance for pin 4
+        used to return a position derived from unit 1's outline plus
+        unit 3's library pin offset -- two unrelated coordinate
+        systems -- which landed in empty space.  Now pin 4 is looked
+        up on the unit-3 instance and the returned point sits on a
+        wire-able grid node.
+        """
+        primary = self._unit_instances.get(1) or self.comparator
+        sym_def = getattr(primary, "symbol_def", None)
+        if sym_def is not None and hasattr(sym_def, "get_pin_unit"):
+            unit = sym_def.get_pin_unit(pin_number)
+            inst = self._unit_instances.get(unit, primary)
+        else:
+            inst = primary
+        return inst.pin_position(pin_number)
+
+    def pin_position(self, pin_number: str) -> tuple[float, float]:
+        """Public helper mirroring :meth:`SymbolInstance.pin_position`.
+
+        Exposes the multi-unit-aware lookup so callers that previously
+        held a reference to ``block.comparator`` and called
+        ``comparator.pin_position(num)`` can switch to
+        ``block.pin_position(num)`` and get correct results for pins on
+        any unit (issue #3346).
+        """
+        return self._unit_pin_position(pin_number)
 
     @staticmethod
     def _format_resistance(r_ohms: float) -> str:

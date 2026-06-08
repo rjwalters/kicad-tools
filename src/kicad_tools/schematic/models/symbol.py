@@ -80,6 +80,7 @@ class SymbolDef:
                         angle=p.angle,
                         length=p.length,
                         pin_type=p.pin_type,
+                        unit=getattr(p, "unit", 1),
                     )
                     for p in cached.pins
                 ],
@@ -172,20 +173,74 @@ class SymbolDef:
             _parent_node=parent_node,
         )
 
+    def unit_count(self) -> int:
+        """Return the number of distinct units this symbol contains.
+
+        Single-unit symbols return 1.  Multi-unit symbols (e.g. LM393's
+        three units: comparator A, comparator B, power) return the
+        highest unit number observed across the parsed pins.  Used by the
+        block library (and any caller that needs to place every unit) to
+        size loops correctly without re-parsing the underlying library.
+        """
+        return max((p.unit for p in self.pins), default=1)
+
+    def get_pin_unit(self, pin_number: str) -> int:
+        """Return the unit number that owns ``pin_number`` (default 1).
+
+        For multi-unit symbols, the pin number is unique across the whole
+        symbol but its position lives on whichever sub-unit declares it.
+        Blocks that place several ``SymbolInstance``s for a single device
+        use this to route ``pin_position(pin_number)`` to the correct
+        instance.  Unknown pin numbers fall back to ``1`` so callers do
+        not need defensive existence checks.
+        """
+        for p in self.pins:
+            if p.number == pin_number:
+                return p.unit
+        return 1
+
     @classmethod
     def _parse_pins_sexp(cls, sym_node: SExp) -> list[Pin]:
-        """Parse pin definitions from symbol SExp node."""
+        """Parse pin definitions from symbol SExp node.
+
+        KiCad multi-unit symbols nest their pins inside ``(symbol "Name_N_1" ...)``
+        sub-blocks where ``N`` is the 1-indexed unit number (``_0_1`` is the
+        graphical body, no pins).  We carry the unit number from the enclosing
+        sub-symbol down to each :class:`Pin` so that callers (and the block
+        library) can locate the correct ``SymbolInstance`` for each pin number.
+        Pins outside any unit sub-symbol default to ``unit=1``.
+        """
         pins = []
 
-        def find_pins(node: SExp):
-            """Recursively find all pin nodes."""
+        def _extract_unit(unit_name: str) -> int | None:
+            """Return the unit number for a sub-symbol like ``Name_3_1``."""
+            m = re.match(r".+_(\d+)_\d+$", unit_name)
+            if not m:
+                return None
+            return int(m.group(1))
+
+        def find_pins(node: SExp, current_unit: int = 1):
+            """Recursively find all pin nodes, tagging with enclosing unit."""
             for child in node.children:
                 if child.name == "pin":
                     pin = Pin.from_sexp(child)
                     if pin.number:  # Must have a pin number
+                        pin.unit = current_unit
                         pins.append(pin)
                 elif child.is_list:
-                    find_pins(child)
+                    # If this child is a unit sub-symbol, propagate its number
+                    # down to nested pin nodes.  The graphical body sub-symbol
+                    # (``Name_0_1``) has no pins; treat it as ``unit=1`` for
+                    # safety -- single-unit symbols typically pack everything
+                    # in ``Name_1_1`` anyway.
+                    child_unit = current_unit
+                    if child.name == "symbol" and child.children:
+                        first = child.children[0]
+                        if first.is_atom:
+                            extracted = _extract_unit(str(first.value))
+                            if extracted is not None and extracted > 0:
+                                child_unit = extracted
+                    find_pins(child, child_unit)
 
         find_pins(sym_node)
         return pins
@@ -535,14 +590,41 @@ class SymbolInstance:
             PinNotFoundError: If no pin matches the given name/number, with
                 suggestions for similar pin names
         """
-        # Find the pin by exact match on name or number
+        # Find the pin by exact match on name or number.  For multi-unit
+        # symbols (e.g. LM393), the same pin name may appear on multiple
+        # units (pin 3 = "+" on unit 1, pin 5 = "+" on unit 2).  Prefer
+        # pins that belong to *this* instance's unit before falling back
+        # to any matching pin -- otherwise asking unit 3 for pin 8 (V+,
+        # the only pin numbered "8") would still return the correct
+        # position, but asking unit 1 for pin "4" (V-, on unit 3) would
+        # silently return a phantom position derived from unit 1's
+        # outline (issue #3346).
         pin = None
         for p in self.symbol_def.pins:
-            if p.name == pin_name_or_number or p.number == pin_name_or_number:
+            if (p.name == pin_name_or_number or p.number == pin_name_or_number) and (
+                getattr(p, "unit", 1) == self.unit
+            ):
                 pin = p
                 break
 
-        # If not found, try case-insensitive match
+        # If no in-unit match, fall back to any exact match (this is
+        # what preserves single-unit symbol behaviour for callers who
+        # don't pass a unit number to ``add_symbol``).
+        if pin is None:
+            for p in self.symbol_def.pins:
+                if p.name == pin_name_or_number or p.number == pin_name_or_number:
+                    pin = p
+                    break
+
+        # If not found, try case-insensitive match (in-unit preferred)
+        if pin is None:
+            target_lower = pin_name_or_number.lower()
+            for p in self.symbol_def.pins:
+                if (
+                    p.name.lower() == target_lower or p.number.lower() == target_lower
+                ) and getattr(p, "unit", 1) == self.unit:
+                    pin = p
+                    break
         if pin is None:
             target_lower = pin_name_or_number.lower()
             for p in self.symbol_def.pins:
