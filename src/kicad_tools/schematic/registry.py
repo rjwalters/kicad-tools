@@ -67,6 +67,7 @@ class Pin:
     length: float
     pin_type: str = "passive"
     electrical_type: str = ""
+    unit: int = 1  # Unit number for multi-unit symbols (1-indexed; default 1)
 
     def connection_point(self) -> tuple[float, float]:
         """Get the wire connection point (end of pin)."""
@@ -356,7 +357,19 @@ class SymbolRegistry:
         )
 
     def _parse_pins(self, sexp: str) -> list[Pin]:
-        """Parse pin definitions from symbol S-expression."""
+        """Parse pin definitions from symbol S-expression.
+
+        Builds a ``pin_number → unit`` map by first scanning for unit
+        sub-symbol declarations (``(symbol "Name_N_1" ...``) and the pin
+        numbers that appear inside each.  Pins whose number cannot be
+        attributed to a specific unit default to ``unit=1``.  This is
+        what lets multi-unit symbols (e.g. LM393's pins 4 & 8 living on
+        unit 3) round-trip through :class:`SymbolInstance.pin_position`
+        without returning a phantom unit-1 position for an off-unit pin
+        (issue #3346).
+        """
+        pin_unit_map = self._build_pin_unit_map(sexp)
+
         pins = []
 
         # Split on "(pin " to get individual pin sections
@@ -397,10 +410,55 @@ class SymbolRegistry:
                         angle=float(at_match.group(3)),
                         length=length,
                         pin_type=pin_type,
+                        unit=pin_unit_map.get(number, 1),
                     )
                 )
 
         return pins
+
+    @staticmethod
+    def _build_pin_unit_map(sexp: str) -> dict[str, int]:
+        """Map each pin number to its enclosing unit's number.
+
+        Scans the raw S-expression text for ``(symbol "<NAME>_<UNIT>_<VARIANT>"
+        ...)`` blocks.  Inside each block, every ``(number "<N>" ...)`` is
+        attributed to that unit.  Uses parenthesis depth counting to avoid
+        consuming nested blocks past the unit boundary.
+        """
+        result: dict[str, int] = {}
+        # Find every unit sub-symbol header: `(symbol "NAME_N_V"`
+        for unit_match in re.finditer(r'\(symbol\s+"([^"]+_(\d+)_\d+)"', sexp):
+            unit_num = int(unit_match.group(2))
+            if unit_num <= 0:
+                # ``_0_1`` is the graphical body sub-symbol -- ignore
+                continue
+            # Find the slice of text covered by this unit sub-symbol.
+            start = unit_match.end()
+            depth = 1
+            i = start
+            in_string = False
+            escape = False
+            while i < len(sexp):
+                ch = sexp[i]
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"' and not escape:
+                    in_string = not in_string
+                elif not in_string:
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                i += 1
+            unit_slice = sexp[start:i]
+            # Attribute every pin number inside the slice to this unit.
+            for num_match in re.finditer(r'\(number\s+"([^"]+)"', unit_slice):
+                result.setdefault(num_match.group(1), unit_num)
+        return result
 
     def get(self, lib_id: str) -> SymbolDef:
         """

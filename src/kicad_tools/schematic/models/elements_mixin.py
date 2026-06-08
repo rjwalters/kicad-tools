@@ -270,6 +270,7 @@ class SchematicElementsMixin:
         auto_layout: bool = False,
         auto_footprint: bool = False,
         properties: dict[str, str] = None,
+        unit: int = 1,
     ) -> SymbolInstance:
         """Add a symbol to the schematic.
 
@@ -287,6 +288,14 @@ class SchematicElementsMixin:
             properties: Optional dict of custom symbol properties (e.g.,
                 {"Thermal_Rth_JC": "0.5", "Power_Dissipation": "5W"}).
                 These are stored as hidden KiCad symbol properties.
+            unit: Symbol unit number for multi-unit symbols (1-indexed,
+                default 1).  KiCad symbols like LM393 contain several
+                logical units in a single library entry; each unit's
+                pins live in a different sub-symbol block.  Passing the
+                correct unit here makes :meth:`SymbolInstance.pin_position`
+                resolve to the unit-local coordinates so that pin 4
+                (LM393 V-, on unit 3) returns the unit-3 position
+                instead of a phantom unit-1 fallback (issue #3346).
 
         Returns:
             SymbolInstance with pin_position() method
@@ -357,6 +366,7 @@ class SchematicElementsMixin:
             value=value or sym_def.name,
             footprint=effective_footprint,
             properties=properties or {},
+            unit=unit,
         )
 
         self.symbols.append(instance)

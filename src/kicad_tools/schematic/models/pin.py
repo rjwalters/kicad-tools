@@ -31,6 +31,7 @@ class Pin:
     angle: float  # Direction pin extends INTO symbol (0=right, 90=up, 180=left, 270=down)
     length: float
     pin_type: str = "passive"
+    unit: int = 1  # Unit number for multi-unit symbols (1-indexed; default 1)
 
     def connection_point(self) -> tuple[float, float]:
         """Get the wire connection point in symbol-local (library Y-up) coords.

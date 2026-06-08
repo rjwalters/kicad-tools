@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 
 from kicad_tools.schematic.blocks import OvercurrentComparator
+from kicad_tools.schematic.models.schematic import Schematic
 
 
 @pytest.fixture
@@ -57,7 +58,14 @@ def mock_schematic():
 
 class TestOvercurrentComparator:
     def test_places_comparator_and_three_resistors(self, mock_schematic):
-        """Comparator IC + R_TH_HI + R_TH_LO + R_PULLUP = 4 symbols."""
+        """Comparator IC (1 unit in the mock) + R_TH_HI + R_TH_LO + R_PULLUP.
+
+        The mock schematic returns a bare ``Mock`` from ``add_symbol`` so the
+        block treats the LM393 as single-unit and does not place units 2/3.
+        Real LM393 placement against a live ``Schematic`` produces three
+        unit instances; that's covered by ``TestLM393MultiUnitPlacement``
+        below.
+        """
         OvercurrentComparator(mock_schematic, x=200, y=80, ref="U6")
         assert mock_schematic.add_symbol.call_count == 4
 
@@ -124,3 +132,123 @@ class TestOvercurrentComparator:
         """A junction marker is placed at the threshold-divider tap."""
         OvercurrentComparator(mock_schematic, x=200, y=80)
         assert mock_schematic.add_junction.call_count >= 1
+
+
+class TestLM393MultiUnitPlacement:
+    """Regression tests for the multi-unit LM393 pin-position bug (issue #3346).
+
+    LM393 packs three logical units in one library entry:
+      * unit 1 -- comparator channel A (pins 1=OUT, 2=IN-, 3=IN+)
+      * unit 2 -- comparator channel B (pins 5=IN+, 6=IN-, 7=OUT)
+      * unit 3 -- power               (pins 4=V-, 8=V+)
+
+    The previous ``OvercurrentComparator`` placed only unit 1, then
+    asked the unit-1 ``SymbolInstance`` for pin 4 / pin 8.  Because
+    ``pin_position`` walked every pin in the parsed ``SymbolDef``
+    regardless of unit, it returned a position derived by applying the
+    unit-3 library offset to the unit-1 placement origin -- a phantom
+    point that landed in empty space and broke ERC + caller wires.
+
+    These tests exercise the real ``Schematic`` / KiCad-library code
+    path (no mocks) so they catch any regression of the unit dispatch.
+    """
+
+    def test_pin_unit_metadata_is_propagated_through_symbol_def(self):
+        """Every LM393 pin is tagged with the unit number that owns it."""
+        sch = Schematic(title="test")
+        u = sch.add_symbol("Comparator:LM393", 100, 100, "U1", "LM393")
+        unit_by_pin = {p.number: p.unit for p in u.symbol_def.pins}
+        # Channel A
+        assert unit_by_pin["1"] == 1
+        assert unit_by_pin["2"] == 1
+        assert unit_by_pin["3"] == 1
+        # Channel B
+        assert unit_by_pin["5"] == 2
+        assert unit_by_pin["6"] == 2
+        assert unit_by_pin["7"] == 2
+        # Power
+        assert unit_by_pin["4"] == 3
+        assert unit_by_pin["8"] == 3
+
+    def test_unit_count_reports_three_for_lm393(self):
+        """``SymbolDef.unit_count`` reports the highest unit observed."""
+        sch = Schematic(title="test")
+        u = sch.add_symbol("Comparator:LM393", 100, 100, "U1", "LM393")
+        assert u.symbol_def.unit_count() == 3
+
+    def test_block_places_three_unit_instances_for_lm393(self):
+        """The block emits one ``SymbolInstance`` per LM393 unit."""
+        sch = Schematic(title="test")
+        block = OvercurrentComparator(sch, x=200, y=100, ref="U7")
+        lm_units = sorted(
+            inst.unit
+            for inst in sch.symbols
+            if inst.symbol_def.lib_id == "Comparator:LM393"
+            and inst.reference == "U7"
+        )
+        assert lm_units == [1, 2, 3], (
+            f"Expected channel A + channel B + power units; got {lm_units}"
+        )
+        # The block's _unit_instances map matches.
+        assert set(block._unit_instances.keys()) == {1, 2, 3}
+
+    def test_power_pin_position_is_resolved_against_unit_3(self):
+        """Pin 4 (V-) and pin 8 (V+) resolve via the unit-3 instance.
+
+        Without the fix this used to return ``unit_1.x + unit_3_offset``,
+        a non-grid phantom point.  After the fix it returns the unit-3
+        instance's own placement plus the (-2.54, +/-7.62) library
+        offset -- a real schematic pin on the unit-3 outline.
+        """
+        sch = Schematic(title="test")
+        block = OvercurrentComparator(sch, x=200, y=100, ref="U7")
+        unit3 = block._unit_instances[3]
+        # Pin 8 (V+) is at library offset (-2.54, +7.62) on unit 3.
+        # Library Y is up, schematic Y is down, so the rendered offset
+        # is (-2.54, -7.62) relative to the unit-3 placement origin.
+        expected_vcc = (unit3.x - 2.54, unit3.y - 7.62)
+        expected_gnd = (unit3.x - 2.54, unit3.y + 7.62)
+        assert block.pin_position("8") == expected_vcc
+        assert block.pin_position("4") == expected_gnd
+        # And ports surface the same coordinates.
+        assert block.ports["VCC"] == expected_vcc
+        assert block.ports["GND"] == expected_gnd
+
+    def test_channel_a_pins_resolve_against_unit_1(self):
+        """Pins 1/2/3 still resolve against the unit-1 placement origin."""
+        sch = Schematic(title="test")
+        block = OvercurrentComparator(sch, x=200, y=100, ref="U7")
+        unit1 = block._unit_instances[1]
+        # Library offset for pin 1 (OUT) is (+7.62, 0) on unit 1.
+        expected_out = (unit1.x + 7.62, unit1.y - 0.0)
+        assert block.pin_position("1") == expected_out
+
+    def test_channel_b_pins_marked_no_connect(self):
+        """Unit 2 pins (5/6/7) are auto-tagged ``no_connect`` to satisfy ERC."""
+        sch = Schematic(title="test")
+        OvercurrentComparator(sch, x=200, y=100, ref="U7")
+        # ``Schematic`` stores no-connects in ``self.no_connects``.
+        nc_count = len(getattr(sch, "no_connects", []))
+        # 3 NCs from channel B, plus any others the block may add.
+        assert nc_count >= 3
+
+    def test_pin_position_no_longer_returns_phantom_unit1_for_pin_4(self):
+        """Direct evidence the bug is gone.
+
+        Before the fix: ``unit1_instance.pin_position("4")`` returned a
+        position computed from the unit-1 placement origin plus unit
+        3's library offset -- mathematically valid coordinates, but
+        nowhere near where pin 4 is actually drawn.  We confirm the
+        block-level dispatch returns the unit-3 coordinate instead.
+        """
+        sch = Schematic(title="test")
+        block = OvercurrentComparator(sch, x=200, y=100, ref="U7")
+        unit1 = block._unit_instances[1]
+        unit3 = block._unit_instances[3]
+        # The unit-1 instance and unit-3 instance are placed at
+        # different coordinates by the block, so applying the same
+        # library offset to each gives distinguishable results.
+        assert unit1.x != unit3.x or unit1.y != unit3.y
+        pin4_via_block = block.pin_position("4")
+        pin4_via_unit3 = unit3.pin_position("4")
+        assert pin4_via_block == pin4_via_unit3
