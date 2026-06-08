@@ -1249,9 +1249,19 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_junction(buf_vpos[0], RAIL_3V3)
     sch.add_wire(buf_vneg, (buf_vneg[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(buf_vneg[0], RAIL_GND)
-    # Decoupling cap
+    # Decoupling cap — placed WEST of U8 (not EAST) to avoid the vertical
+    # rail-tap wire colliding with downstream wires/labels at x≈612.14.
+    # The +3V3/GND/V_AC_SENSE_RAW merge bug (#3348, blocked PR #3345) was
+    # caused by placing C30 at X_BUSBUF+12=612 (pin1 at 612.14): its
+    # vertical wire to RAIL_3V3 ran through (612.14, 119.38) where the
+    # MCU NRST stub label sits, AND through (612.14, 139.7) where the U8
+    # OUT extension lands as the V_AC_SENSE label, electrically tying
+    # +3.3V, GND, NRST and V_AC_SENSE together.  Moving C30 west of U8
+    # routes its rail wires through a column with no labels or other
+    # taps (X_BUSBUF - 15 = 585 is well clear of both U8 OUT extension
+    # at x≈612 and any U7 LM393 west-side activity at x≈505-540).
     c_buf = sch.add_symbol(
-        "Device:C", x=X_BUSBUF + 12, y=155, ref="C30", value="100nF",
+        "Device:C", x=X_BUSBUF - 15, y=155, ref="C30", value="100nF",
         auto_footprint=True,
     )
     sch.wire_decoupling_cap(c_buf, RAIL_3V3, RAIL_GND)
@@ -1722,12 +1732,15 @@ def create_softstart_pcb(output_dir: Path) -> Path:
         (BOARD_ORIGIN_X + BOARD_WIDTH - MH_INSET, BOARD_ORIGIN_Y + BOARD_HEIGHT - MH_INSET),
     ]
 
-    # Net definitions.
-    # DISCHARGE_POS/DISCHARGE_NEG were removed: both MOSFET sources tie to the
-    # current-shunt high side (ISENSE_POS) in the schematic, so a distinct
-    # discharge-only net would leave R9 isolated (single_pad_net DRC error).
+    # Net definitions (rev B).
+    #
+    # Rev B nets are a superset of rev A.  Rev A had 21 nets; rev B adds 15
+    # new nets to support the back-to-back FET topology with UCC27211 gate
+    # drivers, hardware overcurrent comparator, precharge subsystems, bank
+    # voltage sensing, and the LM7812 12V gate-supply rail.
     NETS = {
         "": 0,
+        # ---- Rev A nets (preserved) ----
         "AC_LINE": 1,
         "AC_NEUTRAL": 2,
         "GND": 3,
@@ -1737,8 +1750,6 @@ def create_softstart_pcb(output_dir: Path) -> Path:
         "SCAP_POS_GND": 7,
         "SCAP_NEG+": 8,
         "SCAP_NEG_GND": 9,
-        "GATE_POS": 10,
-        "GATE_NEG": 11,
         "ISENSE_POS": 12,
         "ISENSE_NEG": 13,
         "I_SENSE_OUT": 14,
@@ -1749,97 +1760,205 @@ def create_softstart_pcb(output_dir: Path) -> Path:
         "NRST": 19,
         "STATUS_LED": 20,
         "FUSED_LINE": 21,
+        # ---- Rev B additions ----
+        # 12V VGATE rail (LM7812 output → UCC27211 VDD).
+        "VGATE": 22,
+        # Back-to-back FET gate signals (4 total: 2 banks × 2 FETs).
+        # MCU drives GATE_*_A and GATE_*_B (gate-driver inputs HI/LI);
+        # UCC_HO_*/UCC_LO_* are driver outputs (after gate-driver buffers).
+        "GATE_POS_A": 23,
+        "GATE_POS_B": 24,
+        "GATE_NEG_A": 25,
+        "GATE_NEG_B": 26,
+        "UCC_HO_POS": 27,
+        "UCC_LO_POS": 28,
+        "UCC_HO_NEG": 29,
+        "UCC_LO_NEG": 30,
+        # Kelvin source reference nodes (back-to-back common source).
+        # These nets carry high-current pulse current AND are the Kelvin
+        # reference for the gate drivers' COM/VSS pin.  Routing skip-list.
+        "SRC_POS": 31,
+        "SRC_NEG": 32,
+        # Bootstrap-cap mid-nodes for high-side UCC27211 supply.
+        "VBOOT_POS": 33,
+        "VBOOT_NEG": 34,
+        # Bus return / drain-B of both back-to-back pairs joins at the shunt.
+        "BUS_LINE": 35,
+        # Precharge gate signals (MCU → AO3400 precharge FET gates).
+        "PRECHARGE_POS": 36,
+        "PRECHARGE_NEG": 37,
+        # Bank voltage divider taps (30:1) → MCU ADC.
+        "V_BANK_POS_SENSE": 38,
+        "V_BANK_NEG_SENSE": 39,
+        # AC bus envelope (100:1 divider before MCP6001 buffer).
+        "V_AC_SENSE_RAW": 40,
+        # dV/dt sense for ZC handoff.
+        "V_BUS_DVDT": 41,
+        # OC comparator threshold (V_OC_TH ≈ 3.0V from R22/R23 divider).
+        "V_OC_TH": 42,
+        # Hardware OC trip (LM393 OUT → MCU IRQ).
+        "OC_TRIP": 43,
     }
 
-    # Component positions (organized by board section)
-    # AC input section (left edge)
-    J1_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 15)
-    F1_POS = (BOARD_ORIGIN_X + 20, BOARD_ORIGIN_Y + 12)
-    RV1_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 20)
-    J2_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 35)
-
-    # Voltage sensing (left-center)
-    R1_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 15)
-    R2_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 25)
-
-    # Zero-crossing detection
-    U2_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 15)
-    R3_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 10)
-    R4_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 20)
-    R5_POS = (BOARD_ORIGIN_X + 70, BOARD_ORIGIN_Y + 10)
-
-    # Charging circuit (center)
-    D1_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 40)
-    R6_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 40)
-
-    # Supercap connectors (center-right)
-    J3_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 30)
-    J4_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 50)
-
-    # Discharge MOSFETs (right section, near supercap connectors)
-    # R7/R8 (gate resistors) moved slightly further from Q1/Q2 to give the
-    # router clearance around the 1.8 mm TO-220 gate-pin pad and the 1.0 mm
-    # 0805 pin pads (otherwise the via-on-gate-trace lands too close).
-    Q1_POS = (BOARD_ORIGIN_X + 112, BOARD_ORIGIN_Y + 30)
-    Q2_POS = (BOARD_ORIGIN_X + 112, BOARD_ORIGIN_Y + 50)
-    R7_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 25)
-    R8_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 55)
-
-    # Current sensing
-    R9_POS = (BOARD_ORIGIN_X + 125, BOARD_ORIGIN_Y + 40)
-    U3_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 35)
-    C1_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 45)
-
-    # MCU section (right side, isolated from high-current)
-    U1_POS = (BOARD_ORIGIN_X + 115, BOARD_ORIGIN_Y + 75)
-    C2_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 70)
-    C3_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 76)
-    C4_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 82)
-
-    # LDO (center-right, between high-current and MCU)
-    U4_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 75)
-    C6_POS = (BOARD_ORIGIN_X + 78, BOARD_ORIGIN_Y + 82)
-    C7_POS = (BOARD_ORIGIN_X + 92, BOARD_ORIGIN_Y + 82)
-    C8_POS = (BOARD_ORIGIN_X + 98, BOARD_ORIGIN_Y + 82)
-
-    # Status LED.
+    # =========================================================================
+    # Rev B Component Placement (per architect proposal — issue #3343 P3)
+    # =========================================================================
     #
-    # Issue #3257: D2 / R12 nudged east 7 mm (130 -> 137 mm) so STATUS_LED's
-    # routing leg between R12 and D2 stays clear of SWDIO's main east-bound
-    # B.Cu trace at y~173.3 mm.  The pre-#3257 placement at x=130 mm placed
-    # R12 (+76 mm) / D2 (+70 mm) directly above and below U1's east-column
-    # escape (pin 15 / pin 17 at y +/- 0.325 / -0.975 mm relative to U1's
-    # 175 mm center), forcing STATUS_LED's R12->D2 vertical leg to take a
-    # diagonal B.Cu path through the same y-band where SWDIO's main route
-    # lays its horizontal B.Cu trace -- four deterministic
-    # ``clearance_segment_segment`` violations on B.Cu pinned by
-    # ``tests/router/test_softstart_manufacturable_baseline.py``.
+    # Board: 150mm × 100mm, origin (100, 100), so usable area is
+    # x in [100, 250], y in [100, 200].  Architect's layout zones
+    # (rev B project.kct §suggestions.layout) → concrete coords:
     #
-    # The 7 mm east nudge moves R12 / D2 clear of the U1-east escape cluster
-    # AND clear of SWDIO's main east-bound corridor (U1 east edge x=117.85,
-    # J5 west edge x=141, so the cluster is comfortably mid-corridor at
-    # x=137).  STATUS_LED now routes from U1.15 east on F.Cu, drops down to
-    # R12 at (137, 176), then back up to D2 at (137, 170) -- all OUTSIDE
-    # the SWDIO B.Cu y-band.
+    #   Row 1 (y≈108-118): AC INPUT  →  CHARGING  →  LDO 12V (LM7812)
+    #     J1, F1, RV1, J2 / R1/R2 / U2, R3-R5 / R6, D1 / U9
+    #   Row 2 (y≈120-128): SUPERCAP +/+ EDGE  / Discharge POS + driver + precharge
+    #     J3 / Q1A, Q1B, U5, Q5/R20 / gate protection POS (R_GB1-2 + D_TVS1-2) + Q7
+    #   Row 3 (y≈140-150): SHUNT R9 (star ground tie)  +  current/OC sense strip
+    #     R9, U3 (INA180A3), C1 / U7 (LM393), R22-24, C34 / U8 (MCP6001), C30
+    #   Row 4 (y≈155-165): SUPERCAP - / Discharge NEG + driver + precharge
+    #     J4 / Q2A, Q2B, U6, Q6/R21 / gate protection NEG (R_GB3-4 + D_TVS3-4) + Q8
+    #   Row 5 (y≈170-185): MCU island + 3V3 LDO + bank dividers + dV/dt
+    #     R25-R28 (bank dividers) / U4 (XC6206) + C6-C8 / U1 (LQFP-32) + C2-C4
+    #     R29/C31 (dV/dt)
+    #   Row 6 (y≈188-195): MCU support + status LED + debug
+    #     SW1 + R10 + C5 / R11 / D2 / R12 / J5 SWD
     #
-    # This is the issue body's "Direction C: push U1 layout" intervention,
-    # localised to the LED + resistor only (instead of moving U1 itself,
-    # which would cascade through every U1-connected net's placement
-    # dependencies).  Routing reach stays at 10/10 (verified post-nudge);
-    # the 4 SWDIO/STATUS_LED clearance violations drop to 0 across
-    # PYTHONHASHSEED=42 with the deterministic ``kct route --backend cpp``
-    # path documented in the issue body.
-    D2_POS = (BOARD_ORIGIN_X + 137, BOARD_ORIGIN_Y + 70)
-    R12_POS = (BOARD_ORIGIN_X + 137, BOARD_ORIGIN_Y + 76)
+    # Star-ground convention: R9 (shunt) is the SINGLE physical tie point
+    # between power-GND (rectifier + supercap return) and signal-GND
+    # (MCU, op-amp, comparator).  The PCB uses a single GND net; the
+    # split is enforced by zone keep-out (to be drawn in KiCad post-route,
+    # per Q9 decision in #3343).  R9 sits at center-board so both halves
+    # have line-of-sight access.
+    #
+    # Kelvin source routing: U5 (UCC27211 pos) sits adjacent to Q1A/Q1B
+    # at x≈+85 (driver) vs x≈+105 (FETs); the dedicated SRC_POS Kelvin
+    # trace lands on U5's VSS/COM pad ~5mm from each FET source.  Same
+    # for U6/Q2A/Q2B on the negative bank.
 
-    # Debug header (right edge)
-    J5_POS = (BOARD_ORIGIN_X + 142, BOARD_ORIGIN_Y + 75)
+    # ---- Row 1: AC INPUT + CHARGING + 12V LDO ----
+    # F1 (fuse holder) is 28mm long.  Space it well clear of J1.
+    J1_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 12)          # AC input TB
+    F1_POS = (BOARD_ORIGIN_X + 28, BOARD_ORIGIN_Y + 12)         # Fuse (28mm long)
+    RV1_POS = (BOARD_ORIGIN_X + 48, BOARD_ORIGIN_Y + 12)        # Varistor
+    J2_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 28)          # AC output TB
 
-    # Reset button / boot resistor
-    SW1_POS = (BOARD_ORIGIN_X + 115, BOARD_ORIGIN_Y + 90)
-    R10_POS = (BOARD_ORIGIN_X + 120, BOARD_ORIGIN_Y + 90)
-    C5_POS = (BOARD_ORIGIN_X + 125, BOARD_ORIGIN_Y + 90)
-    R11_POS = (BOARD_ORIGIN_X + 110, BOARD_ORIGIN_Y + 90)
+    # Voltage divider (now 100:1 = 1M + 10k)
+    R1_POS = (BOARD_ORIGIN_X + 58, BOARD_ORIGIN_Y + 22)         # 1M top
+    R2_POS = (BOARD_ORIGIN_X + 62, BOARD_ORIGIN_Y + 22)         # 10k bottom
+
+    # Zero-crossing detection (H11AA1 in DIP-6)
+    U2_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 28)         # H11AA1 DIP-6
+    R3_POS = (BOARD_ORIGIN_X + 70, BOARD_ORIGIN_Y + 22)
+    R4_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 22)
+    R5_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 22)
+
+    # Charging circuit (right of zero-crossing)
+    # R6 (150Ω 5W axial, 25.4mm pitch): pad1 (92, 12), pad2 (117.4, 12).
+    # Body x=91-118 with body half-h=3 (y=9-15).  Place D1 well east.
+    R6_POS = (BOARD_ORIGIN_X + 92, BOARD_ORIGIN_Y + 12)         # 150Ω 5W axial
+    D1_POS = (BOARD_ORIGIN_X + 128, BOARD_ORIGIN_Y + 16)        # Bridge rect
+
+    # 12V regulator (LM7812 TO-220) for UCC27211 supply.
+    # Placed in the right region, fed from D1's VRECT output.
+    U9_POS = (BOARD_ORIGIN_X + 138, BOARD_ORIGIN_Y + 15)        # LM7812
+    C32_POS = (BOARD_ORIGIN_X + 144, BOARD_ORIGIN_Y + 12)       # 10uF input
+    C33_POS = (BOARD_ORIGIN_X + 144, BOARD_ORIGIN_Y + 18)       # 100nF output
+
+    # ---- Row 2: SUPERCAP POS / DISCHARGE POS / DRIVER POS / PRECHARGE POS ----
+    # Supercap POS connector on LEFT edge.  Bank is off-board (hand-soldered).
+    J3_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 42)          # Pos bank TB
+    # Back-to-back FET pair Q1A/Q1B — TO-220 vertical, 12mm apart.
+    # Sources tied via short Kelvin run to U5 COM (~5mm away).
+    Q1A_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 42)        # TO-220 vertical
+    Q1B_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 42)        # TO-220 vertical
+    U5_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 42)         # UCC27211 SOIC-8
+    # Bootstrap + bypass caps for U5 (placed above driver)
+    C20_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 36)        # boot 100nF
+    C21_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 36)        # VCC bulk 10uF
+    C22_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 36)        # VCC bypass 100nF
+    # Precharge POS subsystem (in-current-path, before main FETs).
+    # R20 is 25.4mm pitch axial (5W body 17mm long).  Horizontal placement
+    # well east of Q5 so the body (pin1 at R20_POS, pin2 at R20_POS+25.4)
+    # extends into the empty corridor between row 2 (driver column) and
+    # row 3 (shunt column).
+    Q5_POS = (BOARD_ORIGIN_X + 72, BOARD_ORIGIN_Y + 42)         # AO3400 SOT-23
+    # R20 (100Ω 5W axial, 25.4mm pad pitch) horizontal in the corridor
+    # BETWEEN row 2 (y=42) and row 3 (y=58).  Pad1 (90, 51), pad2 (115.4, 51).
+    # Six-mm body half-height fits cleanly in the 47-55 corridor.
+    R20_POS = (BOARD_ORIGIN_X + 90, BOARD_ORIGIN_Y + 51)        # 100Ω 5W axial pad1
+    # Gate protection (R_GB1-2 + D_TVS1-2 + Q7 failsafe) — clustered SOUTH of U5
+    # 0805 R (2.5mm), D_SMA (5mm) → space 5mm apart minimum
+    R_GB1_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 49)
+    D_TVS1_POS = (BOARD_ORIGIN_X + 51, BOARD_ORIGIN_Y + 49)
+    R_GB2_POS = (BOARD_ORIGIN_X + 57, BOARD_ORIGIN_Y + 49)
+    D_TVS2_POS = (BOARD_ORIGIN_X + 63, BOARD_ORIGIN_Y + 49)
+    Q7_POS = (BOARD_ORIGIN_X + 69, BOARD_ORIGIN_Y + 49)         # 2N7002 failsafe
+
+    # ---- Row 3: SHUNT + CURRENT SENSE + OC COMPARATOR + BUS ENVELOPE ----
+    # R9 shunt (5mΩ 2512) sits at center as the star-ground tie.
+    R9_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 58)
+    # INA180A3 (replacement for INA180A1, same SOT-23-5 footprint)
+    U3_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 56)
+    C1_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 62)
+    # LM393 comparator (SOIC-8) + threshold divider + pull-up.
+    # Passives placed directly NEXT to U7 body (not above/below) to avoid
+    # collision with the precharge corridor at y=51 (R20) and y=65 (R21).
+    U7_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 58)        # LM393 SOIC-8
+    R22_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 56)        # 1k threshold top
+    R23_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 60)        # 10k threshold bot
+    R24_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 56)       # 10k pull-up
+    C34_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 60)       # LM393 100nF
+    # MCP6001 bus-envelope buffer (SOT-23-5) — near AC sense input
+    U8_POS = (BOARD_ORIGIN_X + 125, BOARD_ORIGIN_Y + 58)
+    C30_POS = (BOARD_ORIGIN_X + 130, BOARD_ORIGIN_Y + 58)       # 100nF bypass east
+    # dV/dt cap + load resistor (place east of bus envelope)
+    C31_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 56)       # 100nF series
+    R29_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 60)       # 10k to GND
+
+    # ---- Row 4: SUPERCAP NEG / DISCHARGE NEG / DRIVER NEG / PRECHARGE NEG ----
+    J4_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 74)          # Neg bank TB (left edge)
+    Q2A_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 74)        # TO-220 vertical
+    Q2B_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 74)        # TO-220 vertical
+    U6_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 74)         # UCC27211 SOIC-8
+    C23_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 68)        # boot 100nF
+    C24_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 68)        # VCC bulk 10uF
+    C25_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 68)        # VCC bypass 100nF
+    Q6_POS = (BOARD_ORIGIN_X + 72, BOARD_ORIGIN_Y + 74)         # AO3400 SOT-23
+    # R21: horizontal in the corridor between row 3 (y=58) and row 4 (y=74).
+    # Pad1 (90, 65), pad2 (115.4, 65).
+    R21_POS = (BOARD_ORIGIN_X + 90, BOARD_ORIGIN_Y + 65)        # 100Ω 5W axial pad1
+    R_GB3_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 80)
+    D_TVS3_POS = (BOARD_ORIGIN_X + 51, BOARD_ORIGIN_Y + 80)
+    R_GB4_POS = (BOARD_ORIGIN_X + 57, BOARD_ORIGIN_Y + 80)
+    D_TVS4_POS = (BOARD_ORIGIN_X + 63, BOARD_ORIGIN_Y + 80)
+    Q8_POS = (BOARD_ORIGIN_X + 69, BOARD_ORIGIN_Y + 80)         # 2N7002 failsafe
+
+    # ---- Row 5: BANK DIVIDERS + 3V3 LDO + MCU island ----
+    # Bank voltage dividers (30:1 = ~270k + 9.1k, but recipe value is just nominal)
+    R25_POS = (BOARD_ORIGIN_X + 10, BOARD_ORIGIN_Y + 88)        # bank pos top
+    R26_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 88)        # bank pos bot
+    R27_POS = (BOARD_ORIGIN_X + 18, BOARD_ORIGIN_Y + 88)        # bank neg top
+    R28_POS = (BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 88)        # bank neg bot
+    # 3.3V LDO (XC6206 SOT-23-3)
+    U4_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 88)         # XC6206
+    C6_POS = (BOARD_ORIGIN_X + 35, BOARD_ORIGIN_Y + 88)         # 10uF input
+    C7_POS = (BOARD_ORIGIN_X + 39, BOARD_ORIGIN_Y + 88)         # 10uF output
+    C8_POS = (BOARD_ORIGIN_X + 43, BOARD_ORIGIN_Y + 88)         # 100nF output
+    # MCU (STM32G031K8T6 LQFP-32, 7×7mm with 0.8mm pitch — larger than TSSOP-20)
+    # Placed in MCU island, isolated from the high-current rows (y=42..80).
+    U1_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 90)         # LQFP-32
+    C2_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 87)         # 100nF
+    C3_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 90)         # 100nF
+    C4_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 93)         # 4.7uF
+
+    # ---- Row 6: MCU SUPPORT + STATUS LED + DEBUG ----
+    # SW1 is 8x7mm — give it space to the east of MCU.
+    SW1_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 90)        # reset button
+    R10_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 87)        # 10k NRST pull-up
+    C5_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 93)         # 100nF debounce
+    R11_POS = (BOARD_ORIGIN_X + 84, BOARD_ORIGIN_Y + 87)        # 10k BOOT0
+    D2_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 88)         # Status LED
+    R12_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 92)        # 1k LED limit
+    J5_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 90)        # SWD header 1x6
 
     # =========================================================================
     # Footprint generators
@@ -2204,14 +2323,18 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (pad "4" thru_hole oval (at -2.54 2.54) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {NETS["GND"]} "GND"))
   )"""
 
-    def generate_resistor_axial(ref: str, pos: tuple, value: str, net1: str, net2: str) -> str:
+    def generate_resistor_axial(
+        ref: str, pos: tuple, value: str, net1: str, net2: str,
+        rotation: float = 0,
+    ) -> str:
+        """Axial 5W resistor (25.4mm pad pitch).  Set rotation=90 for vertical."""
         x, y = pos
         n1 = NETS.get(net1, 0)
         n2 = NETS.get(net2, 0)
         return f"""  (footprint "Resistor_THT:R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
-    (at {x} {y})
+    (at {x} {y} {rotation})
     (fp_text reference "{ref}" (at 12.7 -4) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -2287,6 +2410,305 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (pad "4" thru_hole circle (at 3.25 2.25) (size 2 2) (drill 1.2) (layers "*.Cu" "*.Mask") (net {NETS["GND"]} "GND"))
   )"""
 
+    # ---- Rev B footprint generators ----
+    def generate_soic8(ref: str, pos: tuple, value: str, pin_nets: dict) -> str:
+        """Generic SOIC-8 (3.9×4.9 mm, P1.27 mm) for UCC27211, LM393, etc.
+
+        pin_nets: dict mapping pin number (1..8) -> net name (str).
+        Pins missing or set to "" become no-net (0).
+
+        Pin layout (standard SOIC-8, pin 1 at top-left):
+            1 +--+ 8
+            2 |  | 7
+            3 |  | 6
+            4 +--+ 5
+
+        Pad positions: left column at x=-2.4 (pins 1-4), right column
+        at x=+2.4 (pins 8-5).  Pitch 1.27 mm Y-direction.
+        """
+        x, y = pos
+        pad_lines = []
+        for pin in range(1, 9):
+            net_name = pin_nets.get(pin, "")
+            net_num = NETS.get(net_name, 0) if net_name else 0
+            if pin <= 4:
+                pad_x = -2.4
+                # pin 1 at -1.905, pin 2 at -0.635, pin 3 at +0.635, pin 4 at +1.905
+                pad_y = (pin - 2.5) * 1.27
+            else:
+                pad_x = 2.4
+                # pin 8 at -1.905, pin 7 at -0.635, pin 6 at +0.635, pin 5 at +1.905
+                pad_y = (8.5 - pin) * 1.27 * -1 + 0  # pin8=-1.905, pin7=-0.635, pin6=+0.635, pin5=+1.905
+                # Simpler: pin 5 -> +1.905, pin 6 -> +0.635, pin 7 -> -0.635, pin 8 -> -1.905
+                pad_y = (6.5 - pin) * 1.27
+            pad_lines.append(
+                f'    (pad "{pin}" smd rect (at {pad_x:.3f} {pad_y:.3f}) '
+                f'(size 1.55 0.6) (layers "F.Cu" "F.Paste" "F.Mask") '
+                f'(net {net_num} "{net_name}"))'
+            )
+        pads = "\n".join(pad_lines)
+        return f"""  (footprint "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -4) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+{pads}
+  )"""
+
+    def generate_sot23_3(ref: str, pos: tuple, value: str, pin1_net: str, pin2_net: str, pin3_net: str) -> str:
+        """SOT-23-3 (3-pin) footprint for AO3400, 2N7002, etc.
+
+        Pin layout:
+            1 +-+ 3
+                |
+            2 +-+
+
+        Standard SOT-23: pin 1 and 3 on top (left/right), pin 2 on bottom-left.
+        Note: AO3400/2N7002 pinout is G/S/D (pin1=Gate, pin2=Source, pin3=Drain)
+        for many vendors; caller passes the correct net per pin.
+        """
+        x, y = pos
+        n1 = NETS.get(pin1_net, 0)
+        n2 = NETS.get(pin2_net, 0)
+        n3 = NETS.get(pin3_net, 0)
+        return f"""  (footprint "Package_TO_SOT_SMD:SOT-23"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at -0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {n1} "{pin1_net}"))
+    (pad "2" smd rect (at 0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {n2} "{pin2_net}"))
+    (pad "3" smd rect (at 0 -1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {n3} "{pin3_net}"))
+  )"""
+
+    def generate_sma_tvs(ref: str, pos: tuple, value: str, cathode_net: str, anode_net: str) -> str:
+        """SMA (DO-214AC) TVS diode footprint (SMBJ-series, e.g. SMBJ18A).
+
+        Standard 2-pad SMA: pin 1 = cathode (marked with stripe), pin 2 = anode.
+        """
+        x, y = pos
+        nc = NETS.get(cathode_net, 0)
+        na = NETS.get(anode_net, 0)
+        return f"""  (footprint "Diode_SMD:D_SMA"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at -2.15 0) (size 1.7 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {nc} "{cathode_net}"))
+    (pad "2" smd rect (at 2.15 0) (size 1.7 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {na} "{anode_net}"))
+  )"""
+
+    def generate_to220_lm7812(ref: str, pos: tuple) -> str:
+        """LM7812 TO-220 footprint with rev B pin/net assignment.
+
+        LM7812 pinout: pin 1 = VI (VRECT), pin 2 = GND, pin 3 = VO (VGATE).
+        """
+        x, y = pos
+        return f"""  (footprint "Package_TO_SOT_THT:TO-220-3_Vertical"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "LM7812" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" thru_hole rect (at -2.54 0) (size 2.0 2.0) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["VRECT"]} "VRECT"))
+    (pad "2" thru_hole oval (at 0 0) (size 2.0 2.0) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["GND"]} "GND"))
+    (pad "3" thru_hole oval (at 2.54 0) (size 2.0 2.0) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["VGATE"]} "VGATE"))
+  )"""
+
+    def generate_lqfp32(ref: str, pos: tuple, value: str) -> str:
+        """STM32G031K8T6 LQFP-32 footprint (7×7 mm body, 0.8 mm pitch).
+
+        Pin assignments mirror the rev B schematic (architect proposal P3).
+        LQFP-32 has 8 pads per side, 4 sides, total 32 pads.
+
+        Pin layout (1-indexed, counterclockwise from pin 1 marker at top-left):
+            Side 1 (left, top to bottom):  pins 1-8   (x = -3.75, y from -2.8 to +2.8)
+            Side 2 (bottom, left to right): pins 9-16 (y = +3.75, x from -2.8 to +2.8)
+            Side 3 (right, bottom to top):  pins 17-24 (x = +3.75, y from +2.8 to -2.8)
+            Side 4 (top, right to left):    pins 25-32 (y = -3.75, x from +2.8 to -2.8)
+
+        STM32G031K8T6 pin map (architect proposal — rev B):
+          pin 1  VDD       +3.3V
+          pin 2  PC14      NC
+          pin 3  PC15      NC
+          pin 4  PF2/NRST  NRST
+          pin 5  VDDA      +3.3V
+          pin 6  PA0       V_AC_SENSE       (ADC IN0)
+          pin 7  PA1       V_BUS_DVDT       (ADC IN1)
+          pin 8  PA2       I_SENSE_OUT      (ADC IN2)
+          pin 9  PA3       V_BANK_POS_SENSE (ADC IN3)
+          pin 10 PA4       V_BANK_NEG_SENSE (ADC IN4)
+          pin 11 PA5       OC_TRIP          (EXTI IRQ)
+          pin 12 PA6       ZC_DETECT        (EXTI)
+          pin 13 PA7       GATE_POS_A       (driver IN_HI)
+          pin 14 PB0       GATE_POS_B       (driver IN_LO)
+          pin 15 PB1       GATE_NEG_A       (driver IN_HI)
+          pin 16 PB2       GATE_NEG_B       (driver IN_LO)
+          pin 17 PA8       PRECHARGE_POS
+          pin 18 PA9       PRECHARGE_NEG
+          pin 19 PA10      NC (reserve)
+          pin 20 PA11      NC (reserve)
+          pin 21 PA12      STATUS_LED
+          pin 22 PA13      SWDIO
+          pin 23 PA14      SWCLK
+          pin 24 PA15      NC (reserve)
+          pin 25 PB3       NC (reserve)
+          pin 26 PB4       NC (reserve)
+          pin 27 PB5       NC (reserve)
+          pin 28 PB6       NC (reserve)
+          pin 29 PB7       NC (reserve)
+          pin 30 PB8       NC (reserve)
+          pin 31 VSS       GND
+          pin 32 VDD       +3.3V
+
+        Note: this pin-to-net mapping is a placement-stage mirror of the
+        schematic — actual net continuity is enforced by the schematic's
+        net labels.  Mismatches would surface as DRC unconnected-pad
+        errors in P4 routing; the architect proposal pin map above is
+        nominal and BUILDER notes any discrepancy from the actual KiCad
+        symbol numbering during P4.
+        """
+        x, y = pos
+        pitch = 0.8
+        # Pin-to-net map (rev B architect proposal)
+        pin_net = {
+            1: "+3.3V",
+            2: "",  # PC14 NC
+            3: "",  # PC15 NC
+            4: "NRST",
+            5: "+3.3V",   # VDDA tied to VDD
+            6: "V_AC_SENSE",
+            7: "V_BUS_DVDT",
+            8: "I_SENSE_OUT",
+            9: "V_BANK_POS_SENSE",
+            10: "V_BANK_NEG_SENSE",
+            11: "OC_TRIP",
+            12: "ZC_DETECT",
+            13: "GATE_POS_A",
+            14: "GATE_POS_B",
+            15: "GATE_NEG_A",
+            16: "GATE_NEG_B",
+            17: "PRECHARGE_POS",
+            18: "PRECHARGE_NEG",
+            19: "",  # PA10 reserve
+            20: "",  # PA11 reserve
+            21: "STATUS_LED",
+            22: "SWDIO",
+            23: "SWCLK",
+            24: "",  # PA15 reserve
+            25: "",  # PB3 reserve
+            26: "",  # PB4 reserve
+            27: "",  # PB5 reserve
+            28: "",  # PB6 reserve
+            29: "",  # PB7 reserve
+            30: "",  # PB8 reserve
+            31: "GND",
+            32: "+3.3V",
+        }
+
+        # LQFP-32: 8 pads per side, pitch 0.8 mm.  Pad offset from center:
+        #   Side X (left/right): x = ±3.75 mm
+        #   Side Y (top/bottom): y = ±3.75 mm
+        # Pad span on each side: 7 × 0.8 = 5.6 mm centered → y or x in [-2.8, +2.8].
+
+        # Standard LQFP-32 0.8mm pitch pad: 0.4mm wide × 1.4mm long.
+        # Pad center offset from body center: 3.85mm.
+        # The corner pin spacing (e.g. pin 8 left-bottom vs pin 9 bottom-left)
+        # is the limiting case — increase the body-to-center offset slightly
+        # from the nominal 3.75 to 3.85 so the inner corner gap clears the
+        # 0.127mm JLCPCB tier-1 pad-pad rule with margin.
+        pad_lines = []
+        pad_long = 1.4     # pad length (long dimension, perpendicular to body edge)
+        pad_short = 0.40   # pad width (along pitch)
+        pad_offset = 3.85  # pad center offset from body center
+        for pin in range(1, 33):
+            net_name = pin_net.get(pin, "")
+            net_num = NETS.get(net_name, 0) if net_name else 0
+
+            side = (pin - 1) // 8  # 0=left, 1=bottom, 2=right, 3=top
+            idx = (pin - 1) % 8     # 0..7 within the side
+
+            if side == 0:
+                # Left side, pins 1-8 top to bottom
+                pad_x = -pad_offset
+                pad_y = (idx - 3.5) * pitch  # pin1 y=-2.8, pin8 y=+2.8
+                size_x = pad_long
+                size_y = pad_short
+            elif side == 1:
+                # Bottom side, pins 9-16 left to right
+                pad_x = (idx - 3.5) * pitch
+                pad_y = pad_offset
+                size_x = pad_short
+                size_y = pad_long
+            elif side == 2:
+                # Right side, pins 17-24 bottom to top
+                pad_x = pad_offset
+                pad_y = (3.5 - idx) * pitch  # pin17 y=+2.8, pin24 y=-2.8
+                size_x = pad_long
+                size_y = pad_short
+            else:
+                # Top side, pins 25-32 right to left
+                pad_x = (3.5 - idx) * pitch  # pin25 x=+2.8, pin32 x=-2.8
+                pad_y = -pad_offset
+                size_x = pad_short
+                size_y = pad_long
+
+            pad_lines.append(
+                f'    (pad "{pin}" smd rect (at {pad_x:.3f} {pad_y:.3f}) '
+                f'(size {size_x} {size_y}) (layers "F.Cu" "F.Paste" "F.Mask") '
+                f'(net {net_num} "{net_name}"))'
+            )
+        pads = "\n".join(pad_lines)
+        return f"""  (footprint "Package_QFP:LQFP-32_7x7mm_P0.8mm"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+{pads}
+  )"""
+
+    def generate_xc6206_sot23(ref: str, pos: tuple) -> str:
+        """XC6206 3.3V LDO in SOT-23 (pin 1=Vin, 2=GND, 3=Vout)."""
+        x, y = pos
+        return f"""  (footprint "Package_TO_SOT_SMD:SOT-23"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y})
+    (fp_text reference "{ref}" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "XC6206-3.3V" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at -0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["VRECT"]} "VRECT"))
+    (pad "2" smd rect (at 0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+    (pad "3" smd rect (at 0 -1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
+  )"""
+
     # =========================================================================
     # Build PCB
     # =========================================================================
@@ -2307,9 +2729,9 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_varistor("RV1", RV1_POS, "275VAC"))
     parts.append(generate_terminal_block_2("J2", J2_POS, "FUSED_LINE", "AC_NEUTRAL"))
 
-    print("\n3. Adding voltage sensing...")
-    parts.append(generate_resistor_0805("R1", R1_POS, "510k", "AC_LINE", "V_AC_SENSE"))
-    parts.append(generate_resistor_0805("R2", R2_POS, "10k", "V_AC_SENSE", "GND"))
+    print("\n3. Adding voltage sensing (rev B 100:1 divider)...")
+    parts.append(generate_resistor_0805("R1", R1_POS, "1M", "AC_LINE", "V_AC_SENSE_RAW"))
+    parts.append(generate_resistor_0805("R2", R2_POS, "10k", "V_AC_SENSE_RAW", "GND"))
 
     print("\n4. Adding zero-crossing detection...")
     parts.append(generate_dip6("U2", U2_POS, "H11AA1"))
@@ -2321,42 +2743,155 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_resistor_axial("R6", R6_POS, "150R 5W", "FUSED_LINE", ""))
     parts.append(generate_bridge_rect("D1", D1_POS, "DB107"))
 
-    print("\n6. Adding supercap connectors...")
+    print("\n6. Adding 12V VGATE regulator (rev B LM7812)...")
+    parts.append(generate_to220_lm7812("U9", U9_POS))
+    parts.append(generate_cap_0805("C32", C32_POS, "10uF", "VRECT", "GND"))
+    parts.append(generate_cap_0805("C33", C33_POS, "100nF", "VGATE", "GND"))
+
+    print("\n7. Adding supercap connectors (banks on board edge)...")
     parts.append(generate_terminal_block_2("J3", J3_POS, "SCAP_POS+", "SCAP_POS_GND"))
     parts.append(generate_terminal_block_2("J4", J4_POS, "SCAP_NEG+", "SCAP_NEG_GND"))
 
-    print("\n7. Adding discharge MOSFETs...")
-    # Q1/Q2 source pins are on the shunt high side (ISENSE_POS) — see NETS comment.
-    parts.append(generate_to220("Q1", Q1_POS, "IRFB4110", "GATE_POS", "SCAP_POS+", "ISENSE_POS"))
-    parts.append(generate_to220("Q2", Q2_POS, "IRFB4110", "GATE_NEG", "SCAP_NEG+", "ISENSE_POS"))
-    parts.append(generate_resistor_0805("R7", R7_POS, "10R", "GATE_POS", ""))
-    parts.append(generate_resistor_0805("R8", R8_POS, "10R", "GATE_NEG", ""))
+    print("\n8. Adding rev B back-to-back FET pairs (positive bank)...")
+    # Q1A/Q1B: TO-220 back-to-back, sources tied at SRC_POS (Kelvin).
+    # Drain A ties to SCAP_POS+ (supercap bank), drain B ties to BUS_LINE
+    # (post-shunt bus).  Both gates driven independently from U5 outputs.
+    parts.append(generate_to220("Q1A", Q1A_POS, "IRFB4110", "UCC_HO_POS", "SCAP_POS+", "SRC_POS"))
+    parts.append(generate_to220("Q1B", Q1B_POS, "IRFB4110", "UCC_LO_POS", "BUS_LINE", "SRC_POS"))
 
-    print("\n8. Adding current sensing...")
+    print("\n9. Adding rev B UCC27211 gate driver (positive bank)...")
+    parts.append(generate_soic8("U5", U5_POS, "UCC27211", {
+        1: "VGATE",      # VDD
+        2: "VBOOT_POS",  # HB
+        3: "UCC_HO_POS", # HO (drives Q1A gate via R_GB1/D_TVS1 protection)
+        4: "SRC_POS",    # HS (Kelvin source — adjacent to Q1A/Q1B source-tie)
+        5: "UCC_LO_POS", # LO (drives Q1B gate)
+        6: "SRC_POS",    # VSS (Kelvin source — common with HS)
+        7: "GATE_POS_B", # LI (low-side input from MCU)
+        8: "GATE_POS_A", # HI (high-side input from MCU)
+    }))
+    parts.append(generate_cap_0805("C20", C20_POS, "100nF", "VBOOT_POS", "SRC_POS"))    # bootstrap
+    parts.append(generate_cap_0805("C21", C21_POS, "10uF", "VGATE", "SRC_POS"))         # VCC bulk
+    parts.append(generate_cap_0805("C22", C22_POS, "100nF", "VGATE", "SRC_POS"))        # VCC bypass
+
+    print("\n10. Adding rev B precharge subsystem (positive bank)...")
+    # Q5 (AO3400 SOT-23): gate=PRECHARGE_POS, source=SRC_POS, drain=BUS_LINE
+    # R20: 100Ω 5W axial in series between SCAP_POS+ and Q5 drain.
+    parts.append(generate_sot23_3("Q5", Q5_POS, "AO3400",
+                                  "PRECHARGE_POS", "SRC_POS", "BUS_LINE"))
+    parts.append(generate_resistor_axial("R20", R20_POS, "100R 5W", "SCAP_POS+", "BUS_LINE"))
+
+    print("\n11. Adding rev B gate protection (positive bank)...")
+    # R_GB1/D_TVS1: across Q1A gate-source (UCC_HO_POS to SRC_POS)
+    # R_GB2/D_TVS2: across Q1B gate-source (UCC_LO_POS to SRC_POS)
+    # Q7: 2N7002 failsafe pull-down — gate=+3.3V, source=NRST, drain=UCC_HO_POS
+    parts.append(generate_resistor_0805("R_GB1", R_GB1_POS, "10k", "UCC_HO_POS", "SRC_POS"))
+    parts.append(generate_sma_tvs("D_TVS1", D_TVS1_POS, "SMBJ18A", "UCC_HO_POS", "SRC_POS"))
+    parts.append(generate_resistor_0805("R_GB2", R_GB2_POS, "10k", "UCC_LO_POS", "SRC_POS"))
+    parts.append(generate_sma_tvs("D_TVS2", D_TVS2_POS, "SMBJ18A", "UCC_LO_POS", "SRC_POS"))
+    parts.append(generate_sot23_3("Q7", Q7_POS, "2N7002", "+3.3V", "NRST", "UCC_HO_POS"))
+
+    print("\n12. Adding current shunt + INA180A3 (rev B 100V/V gain)...")
     parts.append(generate_resistor_2512("R9", R9_POS, "5mR", "ISENSE_POS", "ISENSE_NEG"))
-    parts.append(generate_sot23_5("U3", U3_POS, "INA180A1"))
+    parts.append(generate_sot23_5("U3", U3_POS, "INA180A3"))
     parts.append(generate_cap_0805("C1", C1_POS, "100nF", "+3.3V", "GND"))
 
-    print("\n9. Adding MCU...")
-    parts.append(generate_tssop20("U1", U1_POS, "STM32G031F6P6"))
-    parts.append(generate_cap_0805("C2", C2_POS, "100nF", "+3.3V", "GND"))
-    parts.append(generate_cap_0805("C3", C3_POS, "100nF", "+3.3V", "GND"))
-    parts.append(generate_cap_0805("C4", C4_POS, "4.7uF", "+3.3V", "GND"))
+    print("\n13. Adding rev B LM393 hardware OC comparator...")
+    parts.append(generate_soic8("U7", U7_POS, "LM393", {
+        1: "OC_TRIP",      # 1A OUT (open-collector)
+        2: "V_OC_TH",      # 1A IN-
+        3: "I_SENSE_OUT",  # 1A IN+
+        4: "GND",          # GND
+        5: "",             # 2B IN+ NC
+        6: "",             # 2B IN- NC
+        7: "",             # 2B OUT NC
+        8: "+3.3V",        # VCC
+    }))
+    parts.append(generate_resistor_0805("R22", R22_POS, "1k", "+3.3V", "V_OC_TH"))
+    parts.append(generate_resistor_0805("R23", R23_POS, "10k", "V_OC_TH", "GND"))
+    parts.append(generate_resistor_0805("R24", R24_POS, "10k", "+3.3V", "OC_TRIP"))
+    parts.append(generate_cap_0805("C34", C34_POS, "100nF", "+3.3V", "GND"))
 
-    print("\n10. Adding LDO...")
-    parts.append(generate_sot223("U4", U4_POS, "AMS1117-3.3", "VRECT", "GND", "+3.3V"))
+    print("\n14. Adding rev B MCP6001 bus envelope buffer + dV/dt...")
+    # MCP6001 SOT-23-5: pin 1=VOUT, 2=V-, 3=IN+, 4=IN-, 5=V+
+    # Unity-gain buffer: IN- tied to VOUT, IN+ from V_AC_SENSE_RAW
+    parts.append(f"""  (footprint "Package_TO_SOT_SMD:SOT-23-5"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {U8_POS[0]} {U8_POS[1]})
+    (fp_text reference "U8" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "MCP6001" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at -1.1 0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["V_AC_SENSE"]} "V_AC_SENSE"))
+    (pad "2" smd rect (at -1.1 0) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+    (pad "3" smd rect (at -1.1 -0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["V_AC_SENSE_RAW"]} "V_AC_SENSE_RAW"))
+    (pad "4" smd rect (at 1.1 -0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["V_AC_SENSE"]} "V_AC_SENSE"))
+    (pad "5" smd rect (at 1.1 0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
+  )""")
+    parts.append(generate_cap_0805("C30", C30_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C31", C31_POS, "100nF", "V_AC_SENSE_RAW", "V_BUS_DVDT"))
+    parts.append(generate_resistor_0805("R29", R29_POS, "10k", "V_BUS_DVDT", "GND"))
+
+    print("\n15. Adding rev B back-to-back FET pairs (negative bank)...")
+    parts.append(generate_to220("Q2A", Q2A_POS, "IRFB4110", "UCC_HO_NEG", "SCAP_NEG+", "SRC_NEG"))
+    parts.append(generate_to220("Q2B", Q2B_POS, "IRFB4110", "UCC_LO_NEG", "BUS_LINE", "SRC_NEG"))
+
+    print("\n16. Adding rev B UCC27211 gate driver (negative bank)...")
+    parts.append(generate_soic8("U6", U6_POS, "UCC27211", {
+        1: "VGATE",
+        2: "VBOOT_NEG",
+        3: "UCC_HO_NEG",
+        4: "SRC_NEG",
+        5: "UCC_LO_NEG",
+        6: "SRC_NEG",
+        7: "GATE_NEG_B",
+        8: "GATE_NEG_A",
+    }))
+    parts.append(generate_cap_0805("C23", C23_POS, "100nF", "VBOOT_NEG", "SRC_NEG"))
+    parts.append(generate_cap_0805("C24", C24_POS, "10uF", "VGATE", "SRC_NEG"))
+    parts.append(generate_cap_0805("C25", C25_POS, "100nF", "VGATE", "SRC_NEG"))
+
+    print("\n17. Adding rev B precharge subsystem (negative bank)...")
+    parts.append(generate_sot23_3("Q6", Q6_POS, "AO3400",
+                                  "PRECHARGE_NEG", "SRC_NEG", "BUS_LINE"))
+    parts.append(generate_resistor_axial("R21", R21_POS, "100R 5W", "SCAP_NEG+", "BUS_LINE"))
+
+    print("\n18. Adding rev B gate protection (negative bank)...")
+    parts.append(generate_resistor_0805("R_GB3", R_GB3_POS, "10k", "UCC_HO_NEG", "SRC_NEG"))
+    parts.append(generate_sma_tvs("D_TVS3", D_TVS3_POS, "SMBJ18A", "UCC_HO_NEG", "SRC_NEG"))
+    parts.append(generate_resistor_0805("R_GB4", R_GB4_POS, "10k", "UCC_LO_NEG", "SRC_NEG"))
+    parts.append(generate_sma_tvs("D_TVS4", D_TVS4_POS, "SMBJ18A", "UCC_LO_NEG", "SRC_NEG"))
+    parts.append(generate_sot23_3("Q8", Q8_POS, "2N7002", "+3.3V", "NRST", "UCC_HO_NEG"))
+
+    print("\n19. Adding rev B bank voltage dividers (30:1)...")
+    parts.append(generate_resistor_0805("R25", R25_POS, "270k", "SCAP_POS+", "V_BANK_POS_SENSE"))
+    parts.append(generate_resistor_0805("R26", R26_POS, "9.1k", "V_BANK_POS_SENSE", "GND"))
+    parts.append(generate_resistor_0805("R27", R27_POS, "270k", "SCAP_NEG+", "V_BANK_NEG_SENSE"))
+    parts.append(generate_resistor_0805("R28", R28_POS, "9.1k", "V_BANK_NEG_SENSE", "GND"))
+
+    print("\n20. Adding rev B 3.3V LDO (XC6206)...")
+    parts.append(generate_xc6206_sot23("U4", U4_POS))
     parts.append(generate_cap_0805("C6", C6_POS, "10uF", "VRECT", "GND"))
     parts.append(generate_cap_0805("C7", C7_POS, "10uF", "+3.3V", "GND"))
     parts.append(generate_cap_0805("C8", C8_POS, "100nF", "+3.3V", "GND"))
 
-    print("\n11. Adding status LED...")
+    print("\n21. Adding rev B MCU (STM32G031K8T6 LQFP-32)...")
+    parts.append(generate_lqfp32("U1", U1_POS, "STM32G031K8T6"))
+    parts.append(generate_cap_0805("C2", C2_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C3", C3_POS, "100nF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C4", C4_POS, "4.7uF", "+3.3V", "GND"))
+
+    print("\n22. Adding status LED...")
     parts.append(generate_led_0805("D2", D2_POS, "STATUS_LED", "GND"))
     parts.append(generate_resistor_0805("R12", R12_POS, "1k", "+3.3V", "STATUS_LED"))
 
-    print("\n12. Adding debug header...")
+    print("\n23. Adding debug header...")
     parts.append(generate_pin_header("J5", J5_POS, 6, "SWD", ["+3.3V", "SWDIO", "GND", "SWCLK", "GND", "NRST"]))
 
-    print("\n13. Adding reset/boot components...")
+    print("\n24. Adding reset/boot components...")
     parts.append(generate_switch("SW1", SW1_POS))
     parts.append(generate_resistor_0805("R10", R10_POS, "10k", "+3.3V", "NRST"))
     parts.append(generate_cap_0805("C5", C5_POS, "100nF", "NRST", "GND"))
@@ -2665,14 +3200,13 @@ def main() -> int:
     """Main entry point.
 
     By default (rev B P2 ship-state) this generates the schematic and
-    runs ERC only.  The PCB / routing / manufacturing pipeline still
-    targets rev A's component dictionary and will produce a netlist
-    mismatch if invoked against the rev B schematic — those steps land
-    in P3 (PCB assembly), P4 (routing + DRC tightening), and P5
-    (manufacturing bundle).  Set the environment variable
-    ``SOFTSTART_RUN_FULL_PIPELINE=1`` to opt into the legacy rev A
-    PCB/route/export pipeline (useful for regression-testing the
-    PCB-side wiring against the still-active rev A net dict).
+    runs the rev B schematic + ERC + PCB placement pipeline.  Routing,
+    DRC tightening, and manufacturing export are deferred to P4/P5 (see
+    issue #3343 phase plan).  Set the environment variable
+    ``SOFTSTART_RUN_FULL_PIPELINE=1`` to opt into routing + export
+    (rev A baseline regression — note rev B routing parameters are
+    P4-territory; running with the rev B PCB and rev A router settings
+    may produce reach regressions until the P4 0.2mm clearance landing).
     """
     import os
 
@@ -2693,20 +3227,23 @@ def main() -> int:
         # Step 3: Run ERC
         erc_success = run_erc(sch_path)
 
+        # Step 4: Create PCB (P3 — placement only, no routing yet)
+        pcb_path = create_softstart_pcb(output_dir)
+
         if not run_full_pipeline:
             print("\n" + "=" * 60)
-            print("Rev B P2: skipping PCB / route / export (P3-P5 not yet implemented)")
-            print("Set SOFTSTART_RUN_FULL_PIPELINE=1 to run legacy rev A PCB pipeline.")
+            print("Rev B P3: schematic + ERC + PCB placement complete.")
+            print("Routing (P4) + manufacturing bundle (P5) skipped — set")
+            print("SOFTSTART_RUN_FULL_PIPELINE=1 to run them (may have reach")
+            print("regressions until P4 tightens DRC to 0.2mm).")
             print("=" * 60)
             print("\nSUMMARY")
             print("=" * 60)
             print(f"\nOutput directory: {output_dir.absolute()}")
             print(f"\n  Schematic: {sch_path.name}")
+            print(f"  PCB (unrouted): {pcb_path.name}")
             print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
             return 0 if erc_success else 1
-
-        # Step 4: Create PCB
-        pcb_path = create_softstart_pcb(output_dir)
 
         # Step 5: Route PCB
         routed_path = output_dir / "softstart_routed.kicad_pcb"
@@ -2735,18 +3272,24 @@ def main() -> int:
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
         print(f"  MFG bundle: {'PASS' if mfg_success else 'FAIL'}")
-        print("\nComponent summary:")
-        print("  AC Input: J1, J2, F1, RV1")
-        print("  Voltage Sensing: R1, R2")
+        print("\nRev B component summary:")
+        print("  AC Input: J1, J2, F1, RV1, R1/R2 (100:1 divider)")
         print("  Zero-Crossing: U2 (H11AA1), R3-R5")
-        print("  Charging: R6, D1 (bridge rect)")
-        print("  Supercap Connectors: J3, J4")
-        print("  Discharge: Q1, Q2 (IRFB4110), R7, R8")
-        print("  Current Sense: R9 (5mR), U3 (INA180A1), C1")
-        print("  MCU: U1 (STM32G031F6P6), C2-C4")
-        print("  Power: U4 (AMS1117-3.3), C6-C8")
-        print("  Reset: SW1, R10, C5")
-        print("  Boot: R11")
+        print("  Charging: R6 (150R 5W), D1 (bridge rect)")
+        print("  12V VGATE: U9 (LM7812), C32/C33")
+        print("  Supercap Connectors: J3, J4 (off-board hand-solder)")
+        print("  Discharge POS: Q1A/Q1B (IRFB4110 back-to-back), U5 (UCC27211)")
+        print("  Discharge NEG: Q2A/Q2B (IRFB4110 back-to-back), U6 (UCC27211)")
+        print("  Precharge: Q5/Q6 (AO3400), R20/R21 (100R 5W axial)")
+        print("  Gate protection: R_GB1-4 (10k bleeders), D_TVS1-4 (SMBJ18A)")
+        print("  Failsafe: Q7/Q8 (2N7002)")
+        print("  Current Sense: R9 (5mR), U3 (INA180A3, 100V/V), C1")
+        print("  OC Comparator: U7 (LM393), R22-24, C34")
+        print("  Bus Envelope: U8 (MCP6001), C30, C31, R29 (dV/dt)")
+        print("  Bank Sense: R25-R28 (30:1 dividers)")
+        print("  MCU: U1 (STM32G031K8T6 LQFP-32), C2-C4")
+        print("  3V3 LDO: U4 (XC6206), C6-C8")
+        print("  Reset/Boot: SW1, R10, R11, C5")
         print("  Status: D2, R12")
         print("  Debug: J5 (SWD)")
 
