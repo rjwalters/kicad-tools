@@ -679,3 +679,234 @@ class TestManufacturabilityFloor:
             f"the impedance pipeline is wired all the way through to the "
             f"emitted geometry.  Width distribution: {dict(width_counts)}"
         )
+
+
+# =============================================================================
+# Issue #3338: strict-gate guard for the committed routed PCB
+# =============================================================================
+
+
+class TestBoard06StrictGateGuard:
+    """Issue #3338 -- pin the strict CI gate's blocking-error count on the
+    committed routed PCB so a future artifact refresh that drifts on the
+    impedance sidecar (the PR #3273 trap) trips this fast unit test before
+    the CI ``routed-pcb-drc-check`` job catches it.
+
+    The strict gate (``scripts/ci/check_routed_drc.py``) runs ``kct check``
+    with ``--net-class-map`` auto-resolved by
+    ``scripts/ci/net_class_map_resolver.py`` (in-process derivation for
+    board 06 because no committed ``net_class_map.json`` sidecar lives
+    next to the routed PCB).  Without the sidecar the impedance /
+    diff-pair-skew / diff-pair-continuity / match-group-skew rule families
+    short-circuit to a no-op (see #3151), so a naive ``kct check`` would
+    report a count that hides ~hundreds of impedance violations whenever
+    the trace widths drift off the 50 / 90 / 100 Ω impedance-resolved
+    targets.  PR #3273 fell into this trap; PR #3315 codified the
+    impedance modal-width tripwire (see ``test_impedance_sidecar_trap_lifted``
+    above) and this test pins the strict-gate count itself so a refresh
+    PR is caught by an exact-count assertion rather than only the modal-
+    width invariant.
+
+    Mirrors ``tests/test_board_05_drc_allowlist.py`` in shape (per-board
+    strict-gate guard) but routes through the sidecar resolver so the
+    impedance / diff-pair rule families are actually counted.
+
+    The expected count is sourced from the live measurement on the
+    committed PCB at the time this test was written (Issue #3338,
+    HEAD = 21076e6c):
+
+    *   strict gate WITH sidecar = ``17`` blocking errors
+    *   advisory ``connectivity`` = ``4`` (3 unrouted blocking nets
+        ``USB3_TX1+``, ``USB3_TX1-``, ``MIPI_RST`` plus partial GND plane)
+
+    Both counts are excluded-from-gate per the audit pipeline's classifier;
+    only the 17 blocking value gates CI.  The allowlist at
+    ``.github/routed-drc-tolerance.yml:767`` is currently ``21`` (post-#3326
+    tightening), leaving 4-error headroom for seed-dependent variance in
+    the negotiated rip-up cohort -- this test pins the *current* floor
+    (17) so a regression is caught even within the 21 headroom.
+    """
+
+    EXPECTED_STRICT_GATE_ERRORS = 17
+    EXPECTED_ADVISORY_CONNECTIVITY = 4
+
+    @pytest.fixture(scope="class")
+    def routed_pcb(self) -> Path:
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        if not routed.exists():
+            pytest.skip(
+                f"Routed PCB artifact missing: {routed}.  Re-run "
+                "`python boards/06-diffpair-test/generate_design.py --step route "
+                "--seed 42` to regenerate."
+            )
+        return routed
+
+    @pytest.fixture(scope="class")
+    def strict_gate_result(self, routed_pcb: Path) -> dict:
+        """Invoke ``kct check`` with the auto-resolved impedance sidecar.
+
+        Mirrors the exact invocation used by
+        ``scripts/ci/check_routed_drc.py`` so this fast unit test produces
+        the same number CI gates on.
+        """
+        import json
+        import subprocess
+
+        # Import the resolver the same way the strict gate script does.
+        ci_dir = REPO_ROOT / "scripts" / "ci"
+        sys.path.insert(0, str(ci_dir))
+        try:
+            from net_class_map_resolver import resolve_net_class_map_sidecar  # type: ignore
+        finally:
+            sys.path.pop(0)
+
+        with resolve_net_class_map_sidecar(routed_pcb) as sidecar:
+            assert sidecar is not None, (
+                "Board 06 net-class-map sidecar resolution returned None; the "
+                "in-process derivation from "
+                "``boards/06-diffpair-test/generate_design.py::build_net_class_map`` "
+                "failed.  Without the sidecar the impedance / diff-pair / "
+                "match-group rule families short-circuit to a no-op and the "
+                "PR #3273 trap re-opens."
+            )
+
+            cmd = [
+                "uv",
+                "run",
+                "kct",
+                "check",
+                str(routed_pcb),
+                "--mfr",
+                "jlcpcb",
+                "--errors-only",
+                "--format",
+                "json",
+                "--net-class-map",
+                str(sidecar),
+            ]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=REPO_ROOT,
+                timeout=180,
+            )
+            assert proc.returncode in (0, 2), (
+                f"kct check exited {proc.returncode} on {routed_pcb}.\n"
+                f"stderr:\n{proc.stderr}"
+            )
+            return json.loads(proc.stdout)
+
+    def test_strict_gate_blocking_count_pinned(self, strict_gate_result: dict) -> None:
+        """Blocking-error count under the impedance sidecar matches the floor.
+
+        The CI gate's ``_count_blocking_errors`` filters advisory rules
+        (``connectivity``) out of the count it compares against the
+        allowlist.  We apply the same filter here so the pinned value
+        matches what the CI gate sees.
+
+        A FAILURE here means one of:
+
+        * A real routing regression that introduced new DRC violations
+          (e.g., a refresh PR drifted on impedance widths and triggered
+          ~hundreds of impedance violations -- the PR #3273 trap).
+        * A router improvement that DROPPED the count below 17 -- in that
+          case tighten ``EXPECTED_STRICT_GATE_ERRORS`` in the SAME PR
+          and tighten the allowlist in ``.github/routed-drc-tolerance.yml``
+          (currently 21; the strict gate's drift warning will be your
+          guide).  This is the OUT-OF-SCOPE follow-up from issue #3338.
+        """
+        from kicad_tools.validate.checker import DRCChecker
+
+        violations = strict_gate_result.get("violations", [])
+        blocking = 0
+        for v in violations:
+            if not isinstance(v, dict):
+                continue
+            if v.get("severity", "error") != "error":
+                continue
+            rule_id = v.get("rule_id", "")
+            if not isinstance(rule_id, str):
+                continue
+            if DRCChecker.is_advisory_rule(rule_id):
+                continue
+            blocking += 1
+
+        assert blocking == self.EXPECTED_STRICT_GATE_ERRORS, (
+            f"Strict-gate blocking-error count on the committed routed PCB "
+            f"is {blocking}; expected {self.EXPECTED_STRICT_GATE_ERRORS} "
+            f"(pinned by Issue #3338).  If a refresh PR INCREASED this, "
+            f"the impedance sidecar likely drifted -- re-run "
+            f"``scripts/ci/check_routed_drc.py "
+            f"boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb`` "
+            f"to confirm and either revert the refresh or accept the new "
+            f"floor.  If a router improvement DECREASED this, tighten "
+            f"``EXPECTED_STRICT_GATE_ERRORS`` AND "
+            f"``.github/routed-drc-tolerance.yml:767`` in the same PR."
+        )
+
+    def test_strict_gate_within_allowlist(self, strict_gate_result: dict) -> None:
+        """Belt-and-braces: also verify the blocking count is within the
+        committed allowlist (the CI gate's actual comparison)."""
+        import yaml
+
+        from kicad_tools.validate.checker import DRCChecker
+
+        allowlist_path = REPO_ROOT / ".github" / "routed-drc-tolerance.yml"
+        if not allowlist_path.exists():
+            pytest.skip(f"Allowlist file not found at {allowlist_path}")
+
+        data = yaml.safe_load(allowlist_path.read_text())
+        tolerances = data.get("tolerances", {})
+        key = "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb"
+        assert key in tolerances, (
+            f"Board 06 entry {key!r} missing from allowlist {allowlist_path}.  "
+            f"Issue #3326 tightened the floor from 39 to 21; if board 06 "
+            f"now reaches 0 the entry should be removed entirely (per the "
+            f"file's policy header) and this test updated."
+        )
+        allowed = tolerances[key]
+
+        violations = strict_gate_result.get("violations", [])
+        blocking = sum(
+            1
+            for v in violations
+            if isinstance(v, dict)
+            and v.get("severity", "error") == "error"
+            and isinstance(v.get("rule_id", ""), str)
+            and not DRCChecker.is_advisory_rule(v.get("rule_id", ""))
+        )
+        assert blocking <= allowed, (
+            f"Board 06 routed PCB strict-gate blocking-error count "
+            f"({blocking}) exceeds allowlist value ({allowed}) from "
+            f"{allowlist_path.relative_to(REPO_ROOT)}.  This is a routing "
+            f"regression -- revert the offending change or raise the "
+            f"allowlist with reviewer sign-off and a tracking-issue link."
+        )
+
+    def test_advisory_connectivity_pinned(self, strict_gate_result: dict) -> None:
+        """Advisory ``connectivity`` count pinned at 4 (3 blocking-incomplete
+        signal nets + 1 partial GND plane).
+
+        The 3 blocking incompletes are ``USB3_TX1+`` / ``USB3_TX1-`` (the
+        BGA-49 inner-ring residual tracked under closed #3270) and
+        ``MIPI_RST`` (FFC connector single-ended trace).  A drift in this
+        count usually signals the router has either gained OR lost a net
+        in the residual cohort -- both deserve scrutiny because the
+        cohort is the "Wave 9 unfinished business" set.
+        """
+        violations = strict_gate_result.get("violations", [])
+        connectivity = sum(
+            1
+            for v in violations
+            if isinstance(v, dict) and v.get("rule_id") == "connectivity"
+        )
+        assert connectivity == self.EXPECTED_ADVISORY_CONNECTIVITY, (
+            f"Advisory connectivity count on the committed routed PCB is "
+            f"{connectivity}; expected {self.EXPECTED_ADVISORY_CONNECTIVITY} "
+            f"(3 blocking-incomplete signal nets USB3_TX1+/USB3_TX1-/MIPI_RST "
+            f"+ 1 partial GND plane).  A change here indicates the router "
+            f"gained or lost a net in the residual cohort -- investigate "
+            f"before updating the pin."
+        )
