@@ -1124,10 +1124,7 @@ def _finalize_routes(
             f"  Partial routes:  {partial_count}/{nets_to_route} "
             f"-- have segments, not all pads connected"
         )
-        flush_print(
-            f"  Unrouted:        {unrouted_count}/{nets_to_route} "
-            f"-- no segments at all"
-        )
+        flush_print(f"  Unrouted:        {unrouted_count}/{nets_to_route} -- no segments at all")
 
     return route_sexp, stats, cleanup_stats
 
@@ -3087,8 +3084,7 @@ def route_with_layer_escalation(
             # pre-regression best per the #2396 selector.
             if not quiet:
                 flush_print(
-                    f"\n  Routed: {nets_routed}/{nets_to_route} nets "
-                    f"({completion * 100:.0f}%)"
+                    f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)"
                 )
                 flush_print("  Status: INSUFFICIENT - early stop (regression)")
                 # Issue #3241 (Option D): emit failure-cause histogram so
@@ -4621,6 +4617,39 @@ def route_with_size_escalation(
     # or refusal is encountered after a successful-ish inner attempt.
     last_exit_code: int = 1
 
+    # P_AS4: Multi-attempt regression detection.  Mirrors the pattern in
+    # ``route_with_layer_escalation`` (PR #3244 -- REGRESSION_TOLERANCE,
+    # HARD_DROP_NETS, CONSECUTIVE_REGRESSIONS) but accumulates across
+    # *size* attempts rather than *layer* attempts.  ``decide_escalation``
+    # consumes the list via its ``history`` parameter and may return
+    # ``REFUSE_REGRESSION`` when growing the envelope produces strictly
+    # worse routing.
+    history: list[RoutingResultMetrics] = []
+
+    # P_AS4: Resolve the ladder strategy.  ``layers-first`` walks the
+    # inner layer-escalation loop fully at each size tier; ``size-first``
+    # walks size tiers first with layer-escalation pinned at the recipe's
+    # starting layer count, then walks layers as a final fallback at the
+    # largest tier.  Both modes share the size-grow + decision-tree
+    # plumbing below; the inner dispatch picks which call path runs.
+    ladder_policy = policy.ladder
+    size_first_mode = ladder_policy in ("size-first", "size-only")
+
+    # When in size-first mode, save the original max_layers so we can
+    # honour it as a final fallback after the size ladder exhausts.  The
+    # inner routing call is pinned to the smallest allowed layer count
+    # while the outer loop walks size tiers.
+    _original_max_layers = int(getattr(args, "max_layers", 4) or 4)
+    if size_first_mode:
+        # Pin inner layer count to the smallest layer config that admits
+        # this PCB; for most recipes that's 2.  The layer-escalation
+        # filter inside route_with_layer_escalation will collapse the
+        # ladder to a single rung at that count.
+        # NB: this mutates args but we restore it before the layers-as-
+        # fallback final attempt; it's the same pattern the
+        # auto-mfr-tier escalation uses to swap manufacturer per attempt.
+        args.max_layers = 2
+
     # Outer size-escalation loop.  Each iteration:
     #   1. Run the inner layer-escalation path (or single-attempt path).
     #   2. Read the stashed metrics from args._last_layer_result.
@@ -4645,27 +4674,16 @@ def route_with_size_escalation(
             )
             flush_print("=" * 60)
 
-        # Dispatch to the inner routing path.
-        if getattr(args, "auto_layers", True):
-            inner_rc = route_with_layer_escalation(
-                pcb_path=pcb_path,
-                output_path=output_path,
-                args=args,
-                quiet=quiet,
-            )
-        else:
-            # When --no-auto-layers is explicit, run a single-attempt
-            # routing pass (the layer-escalation function honours
-            # --no-auto-layers internally via the args.max_layers /
-            # layer_configs filter, but for clarity we still dispatch
-            # there -- this matches the route_with_mfr_tier_escalation
-            # behaviour for symmetric debugging).
-            inner_rc = route_with_layer_escalation(
-                pcb_path=pcb_path,
-                output_path=output_path,
-                args=args,
-                quiet=quiet,
-            )
+        # Dispatch to the inner routing path.  Both branches call into
+        # route_with_layer_escalation -- the difference is whether layers
+        # are pinned (size-first) or allowed to escalate (layers-first /
+        # default).  args.max_layers is mutated above for size-first.
+        inner_rc = route_with_layer_escalation(
+            pcb_path=pcb_path,
+            output_path=output_path,
+            args=args,
+            quiet=quiet,
+        )
 
         last_exit_code = inner_rc
 
@@ -4717,6 +4735,11 @@ def route_with_size_escalation(
             board_area_cm2=board_area_cm2,
         )
 
+        # P_AS4: accumulate the cross-attempt history so the regression
+        # detector can fire on the second (and later) attempts when the
+        # ladder is making things worse.
+        history.append(metrics)
+
         context = EscalationContext(
             current_tier_index=current_tier_index,
             policy=policy,
@@ -4725,7 +4748,7 @@ def route_with_size_escalation(
             envelope_hard=envelope_hard,
         )
 
-        decision = decide_escalation(metrics, context)
+        decision = decide_escalation(metrics, context, history=history)
 
         if not quiet:
             flush_print(
@@ -4739,7 +4762,54 @@ def route_with_size_escalation(
             # Inner routing was good enough -- return the inner exit code.
             return inner_rc
 
+        if decision == EscalationDecision.REFUSE_REGRESSION:
+            if not quiet:
+                _print_size_escalation_refusal(
+                    reason="regression",
+                    current_tier_index=current_tier_index,
+                    ladder=ladder,
+                    cur_dims=(board_w, board_h),
+                )
+            return inner_rc
+
         if decision == EscalationDecision.REFUSE_MAX_TIER:
+            # In size-first mode, exhaust the size ladder, then try a
+            # final pass with full layer escalation at the largest tier.
+            # If that already happened (max_layers restored), refuse cleanly.
+            if size_first_mode and args.max_layers != _original_max_layers:
+                if not quiet:
+                    flush_print(
+                        "  Size ladder exhausted; falling back to layer "
+                        f"escalation at tier [{current_tier_index}] (size-first policy)."
+                    )
+                args.max_layers = _original_max_layers
+                size_first_mode = False  # don't loop here again
+                # Re-dispatch to the layer-escalation path immediately.
+                inner_rc = route_with_layer_escalation(
+                    pcb_path=pcb_path,
+                    output_path=output_path,
+                    args=args,
+                    quiet=quiet,
+                )
+                last_exit_code = inner_rc
+                # Read the final attempt's metrics and decide once more.
+                last_result_final = getattr(args, "_last_layer_result", None)
+                if last_result_final is not None:
+                    final_nets_routed = int(getattr(last_result_final, "nets_routed", 0) or 0)
+                    final_nets_total = int(getattr(last_result_final, "nets_to_route", 0) or 0)
+                    final_overflow = int(getattr(last_result_final, "overflow", 0) or 0)
+                    final_metrics = RoutingResultMetrics(
+                        signal_nets_routed=final_nets_routed,
+                        signal_nets_total=final_nets_total,
+                        drc_violations=final_overflow,
+                        board_area_cm2=board_area_cm2,
+                    )
+                    if not quiet:
+                        flush_print(
+                            f"  Size-first fallback result: reach={final_metrics.completion:.0%}, "
+                            f"drc_density={final_metrics.drc_density:.2f}/cm^2"
+                        )
+                return inner_rc
             if not quiet:
                 _print_size_escalation_refusal(
                     reason="max_tier",
@@ -4891,8 +4961,29 @@ def _load_project_kct_for_escalation(pcb_path: Path, args) -> None:
         args._envelope_hard = bool(getattr(mechanical, "envelope_hard", False))
         hole_spec = getattr(mechanical, "mounting_hole_group", None)
         if hole_spec is not None:
+            # P_AS4: normalise the spec's anchor against the PCB outline's
+            # origin so the fits_in_envelope check (which assumes a
+            # 0-relative envelope) is consistent regardless of where the
+            # board outline lives in absolute coordinates.  KiCad's default
+            # outline origin is (100, 100); without normalisation a hole
+            # group declared at (5, 5) board-coords would fail the fit
+            # check against a 100x100 envelope (because 5+keepout > 100
+            # is false but 5+keepout < 100 is false too -- the math is
+            # just inconsistent).
+            envelope_origin: tuple[float, float] | None = None
             try:
-                args._hole_group = MountingHoleGroup.from_spec(hole_spec)
+                from kicad_tools.router.io import extract_board_origin
+
+                envelope_origin = extract_board_origin(pcb_path)
+            except Exception:
+                # Best-effort: if origin can't be discovered, fall back to
+                # the 0-relative interpretation (spec.anchor is already
+                # envelope-local).
+                envelope_origin = None
+            try:
+                args._hole_group = MountingHoleGroup.from_spec(
+                    hole_spec, envelope_origin=envelope_origin
+                )
             except (ValueError, TypeError):
                 # Defensive: invalid spec content; treat as no hole group.
                 args._hole_group = None
@@ -4945,6 +5036,16 @@ def _print_size_escalation_refusal(
             )
         else:
             flush_print("Reason: mounting hole group doesn't fit in next tier.")
+    elif reason == "regression":
+        flush_print(
+            f"Reason: size-tier escalation regressed -- growing the envelope "
+            f"from a smaller tier to {cur_tier.max_width_mm:g}x"
+            f"{cur_tier.max_height_mm:g} mm produced strictly worse routing "
+            f"(see :func:`detect_regression_history` in auto_pcb_size).  "
+            f"This indicates the bottleneck is not the envelope -- typically "
+            f"placement quality or BOM density.  Further envelope growth "
+            f"cannot help."
+        )
 
     flush_print()
     flush_print("This board's BOM density x clearance x envelope is over-constrained.")

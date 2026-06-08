@@ -1583,6 +1583,43 @@ def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float
     return None
 
 
+def extract_board_origin(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
+    """Extract board outline origin (bottom-left corner) from a KiCad PCB file.
+
+    Issue #3352 (P_AS4): companion to :func:`extract_board_dimensions`.
+    Used by the auto-pcb-size escalation loop to normalise a recipe's
+    mounting-hole-group anchor against the board outline origin -- KiCad's
+    default origin is ``(100, 100)``, but a hole group declared at
+    ``anchor=(5, 5)`` in the spec typically means "5 mm in from the
+    envelope's bottom-left corner", not "absolute board coord (5, 5)".
+
+    Parses the Edge.Cuts gr_rect to find the start coordinate, then
+    returns ``(min_x, min_y)`` -- the bottom-left corner of the outline.
+
+    Args:
+        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents.
+
+    Returns:
+        ``(origin_x, origin_y)`` in mm, or ``None`` if no board outline
+        gr_rect is detected.
+    """
+    if isinstance(pcb_path_or_text, Path):
+        pcb_text = pcb_path_or_text.read_text()
+    elif not pcb_path_or_text.startswith("("):
+        pcb_text = Path(pcb_path_or_text).read_text()
+    else:
+        pcb_text = pcb_path_or_text
+
+    edge_match = re.search(
+        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
+        pcb_text,
+    )
+    if edge_match:
+        x1, y1, x2, y2 = map(float, edge_match.groups())
+        return (min(x1, x2), min(y1, y2))
+    return None
+
+
 def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     """Extract pad positions from a KiCad PCB file for grid analysis.
 

@@ -80,20 +80,19 @@ class MountingHoleGroup:
         """Validate the group on construction."""
         if not self.holes:
             raise ValueError(
-                "MountingHoleGroup.holes must be non-empty; "
-                "groups with zero holes are meaningless"
+                "MountingHoleGroup.holes must be non-empty; groups with zero holes are meaningless"
             )
         if self.hole_diameter_mm <= 0:
-            raise ValueError(
-                f"hole_diameter_mm must be positive, got {self.hole_diameter_mm}"
-            )
+            raise ValueError(f"hole_diameter_mm must be positive, got {self.hole_diameter_mm}")
         if self.keepout_radius_mm <= 0:
-            raise ValueError(
-                f"keepout_radius_mm must be positive, got {self.keepout_radius_mm}"
-            )
+            raise ValueError(f"keepout_radius_mm must be positive, got {self.keepout_radius_mm}")
 
     @classmethod
-    def from_spec(cls, spec: Any) -> MountingHoleGroup:
+    def from_spec(
+        cls,
+        spec: Any,
+        envelope_origin: tuple[float, float] | None = None,
+    ) -> MountingHoleGroup:
         """Construct from a :class:`MountingHoleGroupSpec` (pydantic model).
 
         Convenience constructor for the spec-loading path.  ``spec`` is duck-
@@ -101,17 +100,47 @@ class MountingHoleGroup:
         it here would create a circular import), so we only require the
         attributes documented on ``MountingHoleGroupSpec``.
 
+        Issue #3352 P_AS4 -- envelope origin normalization:
+
+        Recipes typically declare the mounting-hole group anchor in the
+        envelope's *local* frame (0-relative): "5 mm in from the
+        bottom-left corner" is ``anchor=(5, 5)``.  The auto-pcb-size
+        envelope-fit check (:meth:`fits_in_envelope`) likewise assumes a
+        0-relative frame -- it tests against ``[0, W] x [0, H]``.  Most
+        KiCad recipes, however, place the board outline at a non-zero
+        origin (the KiCad default is ``(100, 100)`` -- see ``boards/01``
+        through ``boards/07``).  The hole group's anchor in board
+        coordinates is therefore ``envelope_origin + spec.anchor``, and
+        the fit check must be done in the 0-relative frame to be
+        consistent with the size-tier envelope dimensions.
+
+        Passing ``envelope_origin`` causes ``from_spec`` to interpret
+        ``spec.anchor`` as a board-coordinate position and subtract the
+        envelope origin so the returned group's ``anchor`` is relative
+        to the envelope's bottom-left.  When ``envelope_origin`` is
+        ``None`` (the default), no normalization is applied -- the spec
+        anchor is taken at face value.
+
         Args:
             spec: A :class:`MountingHoleGroupSpec` instance (or any object
                 exposing ``holes``, ``anchor``, ``hole_diameter_mm``, and
                 ``keepout_radius_mm`` attributes).
+            envelope_origin: Optional ``(x, y)`` board-coordinate
+                position of the envelope's bottom-left corner.  When
+                supplied, the spec's anchor is normalised to the
+                envelope-local frame (``spec.anchor - envelope_origin``).
 
         Returns:
-            A new ``MountingHoleGroup`` with values copied from the spec.
+            A new ``MountingHoleGroup`` with values copied from the spec,
+            normalised against ``envelope_origin`` when supplied.
         """
+        anchor_x, anchor_y = float(spec.anchor[0]), float(spec.anchor[1])
+        if envelope_origin is not None:
+            anchor_x -= float(envelope_origin[0])
+            anchor_y -= float(envelope_origin[1])
         return cls(
             holes=list(spec.holes),
-            anchor=tuple(spec.anchor),  # type: ignore[arg-type]
+            anchor=(anchor_x, anchor_y),
             hole_diameter_mm=float(spec.hole_diameter_mm),
             keepout_radius_mm=float(spec.keepout_radius_mm),
         )
@@ -186,10 +215,7 @@ class MountingHoleGroup:
         """
         min_x, min_y, max_x, max_y = self.bbox_board()
         return (
-            min_x >= 0.0
-            and min_y >= 0.0
-            and max_x <= envelope_width
-            and max_y <= envelope_height
+            min_x >= 0.0 and min_y >= 0.0 and max_x <= envelope_width and max_y <= envelope_height
         )
 
     def intersects(self, other: MountingHoleGroup) -> bool:
@@ -210,10 +236,7 @@ class MountingHoleGroup:
         b_min_x, b_min_y, b_max_x, b_max_y = other.bbox_board()
         # Standard AABB overlap test
         return not (
-            a_max_x < b_min_x
-            or b_max_x < a_min_x
-            or a_max_y < b_min_y
-            or b_max_y < a_min_y
+            a_max_x < b_min_x or b_max_x < a_min_x or a_max_y < b_min_y or b_max_y < a_min_y
         )
 
     def to_footprint_dict(self) -> dict[str, Any]:

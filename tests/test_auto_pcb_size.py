@@ -610,3 +610,218 @@ class TestEscalationContext:
         )
         with pytest.raises((AttributeError, TypeError)):
             ctx.current_tier_index = 1  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Multi-attempt regression detection (P_AS4)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRegressionHistory:
+    """Tests for :func:`detect_regression_history` (P_AS4 multi-attempt detector)."""
+
+    def _m(self, nets_routed: int, board_area_cm2: float = 100.0) -> RoutingResultMetrics:
+        return RoutingResultMetrics(
+            signal_nets_routed=nets_routed,
+            signal_nets_total=100,
+            drc_violations=10,
+            board_area_cm2=board_area_cm2,
+        )
+
+    def test_empty_history_no_regression(self):
+        from kicad_tools.router.auto_pcb_size import detect_regression_history
+
+        v = detect_regression_history([])
+        assert v.is_regressing is False
+        assert v.streak == 0
+
+    def test_single_attempt_no_regression(self):
+        from kicad_tools.router.auto_pcb_size import detect_regression_history
+
+        v = detect_regression_history([self._m(80)])
+        assert v.is_regressing is False
+
+    def test_monotonic_improvement_no_regression(self):
+        from kicad_tools.router.auto_pcb_size import detect_regression_history
+
+        history = [self._m(70), self._m(85, 150.0), self._m(95, 225.0)]
+        v = detect_regression_history(history)
+        assert v.is_regressing is False
+        assert v.streak == 0
+
+    def test_hard_drop_triggers_immediate(self):
+        """A single attempt with >= SIZE_HARD_DROP_NETS drop -> immediate exit."""
+        from kicad_tools.router.auto_pcb_size import (
+            SIZE_HARD_DROP_NETS,
+            detect_regression_history,
+        )
+
+        # 80 -> 70 (drop = 10 nets, >= 5 threshold)
+        history = [self._m(80), self._m(70, 150.0)]
+        v = detect_regression_history(history)
+        assert v.is_regressing is True
+        assert str(SIZE_HARD_DROP_NETS) in v.reason or "hard drop" in v.reason.lower()
+
+    def test_jitter_within_tolerance_ignored(self):
+        """Drops <= SIZE_REGRESSION_TOLERANCE are tolerated as noise."""
+        from kicad_tools.router.auto_pcb_size import detect_regression_history
+
+        # 80 -> 79 -> 78 (each drop = 1 net, <= 2 tolerance)
+        history = [self._m(80), self._m(79, 150.0), self._m(78, 225.0)]
+        v = detect_regression_history(history)
+        assert v.is_regressing is False
+
+    def test_consecutive_small_regressions(self):
+        """SIZE_CONSECUTIVE_REGRESSIONS small drops in a row -> exit."""
+        from kicad_tools.router.auto_pcb_size import detect_regression_history
+
+        # 80 -> 76 (drop=4) -> 72 (drop=4) -- each > 2 tolerance but < 5
+        history = [self._m(80), self._m(76, 150.0), self._m(72, 225.0)]
+        v = detect_regression_history(history)
+        assert v.is_regressing is True
+        assert "consecutive" in v.reason.lower()
+
+    def test_streak_resets_on_improvement(self):
+        """A single regression followed by improvement should NOT exit."""
+        from kicad_tools.router.auto_pcb_size import detect_regression_history
+
+        # 80 -> 76 (drop=4) -> 85 (gain=9)
+        history = [self._m(80), self._m(76, 150.0), self._m(85, 225.0)]
+        v = detect_regression_history(history)
+        assert v.is_regressing is False
+
+    def test_tunable_thresholds(self):
+        """Pass-through of threshold kwargs is honoured."""
+        from kicad_tools.router.auto_pcb_size import detect_regression_history
+
+        history = [self._m(80), self._m(70, 150.0)]
+        # Default: drop=10 hits HARD_DROP_NETS=5; bumping the threshold
+        # to 20 should make this no longer a hard drop.
+        v = detect_regression_history(history, hard_drop_nets=20)
+        # The drop=10 > regression_tolerance=2 -> streak=1, not enough
+        # to fail the default consecutive_regressions=2.
+        assert v.is_regressing is False
+
+
+class TestShouldEscalateWithHistory:
+    """Tests for the history-aware single-shot wrapper."""
+
+    def _bad_metrics(self) -> RoutingResultMetrics:
+        return RoutingResultMetrics(
+            signal_nets_routed=80,
+            signal_nets_total=100,
+            drc_violations=132,
+            board_area_cm2=150.0,
+        )
+
+    def test_empty_history_raises(self):
+        from kicad_tools.router.auto_pcb_size import should_escalate_with_history
+
+        with pytest.raises(ValueError):
+            should_escalate_with_history([], EscalationPolicy())
+
+    def test_no_trigger_false(self):
+        """If the single-shot trigger doesn't fire, return False regardless of history."""
+        from kicad_tools.router.auto_pcb_size import should_escalate_with_history
+
+        good = RoutingResultMetrics(
+            signal_nets_routed=98,
+            signal_nets_total=100,
+            drc_violations=5,
+            board_area_cm2=100.0,
+        )
+        # History with regressing drop pattern -- shouldn't matter
+        assert should_escalate_with_history([good], EscalationPolicy()) is False
+
+    def test_trigger_no_regression_true(self):
+        """Trigger fires + no regression -> True."""
+        from kicad_tools.router.auto_pcb_size import should_escalate_with_history
+
+        assert should_escalate_with_history([self._bad_metrics()], EscalationPolicy()) is True
+
+    def test_trigger_with_regression_false(self):
+        """Trigger fires + regression -> False (refuse escalation)."""
+        from kicad_tools.router.auto_pcb_size import should_escalate_with_history
+
+        m1 = RoutingResultMetrics(
+            signal_nets_routed=80, signal_nets_total=100, drc_violations=132, board_area_cm2=100.0
+        )
+        m2 = RoutingResultMetrics(
+            signal_nets_routed=70, signal_nets_total=100, drc_violations=132, board_area_cm2=150.0
+        )
+        # drop of 10 nets >= HARD_DROP_NETS=5 -> regressing
+        assert should_escalate_with_history([m1, m2], EscalationPolicy()) is False
+
+
+class TestDecideEscalationWithHistory:
+    """:func:`decide_escalation` consumes the history parameter (P_AS4)."""
+
+    def _bad(self, nets: int, area: float = 150.0) -> RoutingResultMetrics:
+        return RoutingResultMetrics(
+            signal_nets_routed=nets,
+            signal_nets_total=100,
+            drc_violations=132,
+            board_area_cm2=area,
+        )
+
+    def test_no_history_unchanged_behaviour(self):
+        """history=None keeps the P_AS3 behaviour intact."""
+        from kicad_tools.router.auto_pcb_size import decide_escalation
+
+        ctx = EscalationContext(
+            current_tier_index=0,
+            policy=EscalationPolicy(),
+            manufacturer="jlcpcb",
+            envelope_hard=False,
+        )
+        d = decide_escalation(self._bad(80), ctx)
+        assert d == EscalationDecision.ESCALATE
+
+    def test_history_with_regression_returns_refuse(self):
+        """When the size ladder is regressing, return REFUSE_REGRESSION."""
+        from kicad_tools.router.auto_pcb_size import decide_escalation
+
+        ctx = EscalationContext(
+            current_tier_index=1,
+            policy=EscalationPolicy(),
+            manufacturer="jlcpcb",
+            envelope_hard=False,
+        )
+        prior = self._bad(80, area=100.0)
+        current = self._bad(70, area=150.0)  # drop of 10 -- hard regress
+        d = decide_escalation(current, ctx, history=[prior, current])
+        assert d == EscalationDecision.REFUSE_REGRESSION
+
+    def test_history_no_regression_still_escalates(self):
+        """Monotonic improvement + trigger -> still escalates."""
+        from kicad_tools.router.auto_pcb_size import decide_escalation
+
+        ctx = EscalationContext(
+            current_tier_index=1,
+            policy=EscalationPolicy(),
+            manufacturer="jlcpcb",
+            envelope_hard=False,
+        )
+        prior = self._bad(70, area=100.0)
+        current = self._bad(85, area=150.0)  # gain
+        d = decide_escalation(current, ctx, history=[prior, current])
+        # 85% reach is still below 95% threshold + density 132/150=0.88 > 0.5
+        assert d == EscalationDecision.ESCALATE
+
+    def test_history_regression_takes_precedence_over_envelope_hard(self):
+        """REFUSE_REGRESSION precedes REFUSE_HARD_ENVELOPE in decision order."""
+        from kicad_tools.router.auto_pcb_size import decide_escalation
+
+        ctx = EscalationContext(
+            current_tier_index=1,
+            policy=EscalationPolicy(),
+            manufacturer="jlcpcb",
+            envelope_hard=True,
+        )
+        prior = self._bad(80, area=100.0)
+        current = self._bad(70, area=150.0)  # hard regression
+        d = decide_escalation(current, ctx, history=[prior, current])
+        # The regression is the more actionable signal; envelope_hard is
+        # secondary because the user needs to know that growing wouldn't
+        # have helped anyway.
+        assert d == EscalationDecision.REFUSE_REGRESSION
