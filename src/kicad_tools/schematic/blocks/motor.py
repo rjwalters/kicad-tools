@@ -1701,10 +1701,36 @@ class BackToBackFETPair(CircuitBlock):
         b_source = self.fet_b.pin_position("S")
         b_gate = self.fet_b.pin_position("G")
 
-        # Tie the two sources together with a vertical wire.  The Kelvin
-        # node sits at the midpoint between the two source pins.
-        sch.add_wire(a_source, b_source)
+        # Tie the two sources together with an orthogonal Z-route (issue
+        # #3347).  ``Device:Q_NMOS`` places the source pin offset +2.54 mm
+        # from the symbol origin in library X; with FET B rotated 180°
+        # that offset flips to -2.54 mm.  The two source pins therefore
+        # sit at *different* X coordinates (typically 5.08 mm apart) — a
+        # single ``add_wire(a_source, b_source)`` produced a diagonal
+        # segment that KiCad rendered as a ~10° slope and crossed
+        # neighbouring rails.
+        #
+        # Route as three orthogonal segments instead:
+        #   1. a_source -> (a_source.x, mid_y)   (vertical down)
+        #   2. (a_source.x, mid_y) -> (b_source.x, mid_y)  (horizontal)
+        #   3. (b_source.x, mid_y) -> b_source   (vertical to B)
+        #
+        # The Kelvin junction node sits at the A-side of the horizontal
+        # bend so the existing rightward hint stub (and label, if any)
+        # remain in their previous positions — preserving the block's
+        # public ``SOURCE`` port geometry.
         kelvin_node = (a_source[0], (a_source[1] + b_source[1]) / 2)
+        bend_b = (b_source[0], kelvin_node[1])
+        sch.add_wire(a_source, kelvin_node)
+        if b_source[0] != a_source[0]:
+            sch.add_wire(kelvin_node, bend_b)
+            sch.add_wire(bend_b, b_source)
+        else:
+            # Degenerate case: sources happen to share X (e.g. a custom
+            # symbol with symmetric source/drain placement).  Skip the
+            # zero-length horizontal hop and keep the route a clean
+            # single vertical.
+            sch.add_wire(kelvin_node, b_source)
         sch.add_junction(kelvin_node[0], kelvin_node[1])
 
         # Optional Kelvin trace hint — a short stub to the right of the
