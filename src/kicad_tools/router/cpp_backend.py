@@ -601,9 +601,31 @@ class CppGrid:
         # Issue #2908: Pre-compute plane-net classification on Python side
         # (C++ has no net-name string table) so the C++ validator can use
         # the same carve-out as the Python ``_is_plane_net_pad`` helper.
+        from .fine_pitch_escape import resolve_clearance_with_escape_region
         from .grid import _is_plane_net_pad
 
         component_pitches = grid.compute_component_pitches()
+
+        # Issue #3371 / P_FP2: Fine-pitch escape regions installed on the
+        # grid (empty list when the detector has not run, which is the
+        # default until P_FP3 wires the autorouter to populate them).
+        # Threaded into ``resolve_clearance_with_escape_region`` for every
+        # pad's clearance lookup so the per-net-class escape clearance can
+        # land at the C++ pad-segment validator's clearance source.
+        #
+        # Important: this bulk-copy runs at grid construction time, BEFORE
+        # any specific net is being routed.  We therefore cannot pass a
+        # per-net :class:`NetClassRouting` here -- the bulk clearance is a
+        # *board-wide default*.  ``net_class=None`` in the call below
+        # means "use the region's escape_clearance default at detection
+        # time" (which already encodes the manufacturer floor + safety
+        # margin via :func:`get_default_escape_clearance`).  P_FP3 will
+        # add the per-net override path via either (a) a separate set of
+        # add_pad calls per net during the A* boundary, or (b) a tighter
+        # ``clearance_override`` carrier on the C++ Pad struct that the
+        # search-side can interpret per net.  P_FP2 only opens the seam.
+        regions = grid.get_fine_pitch_regions()
+
         for pad in grid._pads:
             # Compute layer index (-1 for through-hole pads = all layers)
             if pad.through_hole:
@@ -615,8 +637,18 @@ class CppGrid:
                     layer_idx = 0
 
             # Pre-compute clearance for this pad's component (Issue #1016)
+            # threaded with the fine-pitch escape regions (Issue #3371 / P_FP2).
+            # When ``regions`` is empty (the default) this call delegates to
+            # the standard :meth:`DesignRules.get_clearance_for_component`
+            # path -- byte-for-byte identical to the pre-#3371 line.
             pin_pitch = component_pitches.get(pad.ref) if pad.ref else None
-            clearance_override = grid.rules.get_clearance_for_component(pad.ref, pin_pitch)
+            clearance_override = resolve_clearance_with_escape_region(
+                grid.rules,
+                pad,
+                net_class=None,
+                regions=regions,
+                pin_pitch=pin_pitch,
+            )
 
             # Deterministic FNV-1a hash of component reference
             ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0

@@ -165,7 +165,24 @@ def _sync_pad_to_cpp_grid(
         except (KeyError, ValueError):
             layer_idx = 0
 
-    clearance_override = py_grid.rules.get_clearance_for_component(pad.ref, pin_pitch)
+    # Issue #3371 / P_FP2: route the clearance lookup through
+    # ``resolve_clearance_with_escape_region`` so fine-pitch escape
+    # regions installed on the grid (via ``set_fine_pitch_regions``) can
+    # land at the C++ pad-segment validator's clearance source.  When the
+    # grid has no regions installed (the default) the helper delegates to
+    # the standard :meth:`DesignRules.get_clearance_for_component` -- the
+    # pre-#3371 behaviour is preserved byte-for-byte.  Imported lazily to
+    # mirror the deferred ``router_cpp`` import above and avoid module-
+    # load ordering hazards.
+    from .fine_pitch_escape import resolve_clearance_with_escape_region
+
+    clearance_override = resolve_clearance_with_escape_region(
+        py_grid.rules,
+        pad,
+        net_class=None,
+        regions=py_grid.get_fine_pitch_regions(),
+        pin_pitch=pin_pitch,
+    )
     ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
     is_plane_net = _is_plane_net_pad(pad)
 
@@ -785,6 +802,23 @@ class RoutingGrid:
         # reduced since the component footprint already guarantees physical
         # manufacturability at that pitch.
         self._component_pads: dict[str, list[Pad]] = {}
+
+        # Issue #3371 (P_FP2): Fine-pitch escape regions detected on this
+        # board.  Populated by the autorouter (or test fixture) once after
+        # all pads are added via :meth:`set_fine_pitch_regions`.  Consumed
+        # by the pad-clearance lookup at C++ grid build time
+        # (``cpp_backend.from_routing_grid``) and by the Python pathfinder
+        # halo lookup (``_clearance_for_pin_pitch``) once P_FP3 wires the
+        # consumer paths.  Empty list (the default) preserves pre-#3371
+        # behaviour: every lookup falls through to
+        # :meth:`DesignRules.get_clearance_for_component` unchanged.
+        #
+        # Type-loose ``Any`` to avoid a top-of-module import of
+        # ``fine_pitch_escape`` (which would create a circular dependency
+        # at module-load time -- ``escape.py`` already imports things from
+        # ``grid.py``).  Runtime callers cast to
+        # ``list[FinePitchRegion]`` via the resolver helper.
+        self._fine_pitch_regions: list[Any] = []
 
         # Issue #2604 follow-up: track per-pad pin_pitch so reverse lookups
         # (``find_pad_ref_at``) can mirror the reduced clearance envelope
@@ -2921,6 +2955,43 @@ class RoutingGrid:
     ) -> float:
         """Calculate minimum distance between two line segments."""
         return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
+
+    def set_fine_pitch_regions(self, regions: list[Any]) -> None:
+        """Install detected fine-pitch escape regions on this grid.
+
+        Issue #3371 / P_FP2 -- the autorouter (or test fixture) calls this
+        once after all pads have been added to the grid, passing the output
+        of :func:`kicad_tools.router.fine_pitch_escape.detect_fine_pitch_regions`.
+        The regions are stored on the grid so subsequent per-pad clearance
+        lookups (Python halo + C++ ``from_routing_grid`` bulk copy) can fold
+        the per-net-class escape clearance into the standard
+        :meth:`DesignRules.get_clearance_for_component` resolution via
+        :func:`kicad_tools.router.fine_pitch_escape.resolve_clearance_with_escape_region`.
+
+        Backward-compat: the regions list defaults to empty.  P_FP2 leaves
+        every caller in the codebase passing an empty list (i.e. no regions
+        installed) so router behaviour is byte-for-byte identical to
+        pre-#3371 until P_FP3 wires the detector into the autorouter.
+
+        Args:
+            regions: List of :class:`FinePitchRegion` objects from the
+                detector.  Loosely typed as ``list[Any]`` so this module
+                does not need to import ``fine_pitch_escape`` at top-of-
+                module (which would create a circular dependency --
+                ``escape.py`` already imports from ``grid.py`` and
+                ``fine_pitch_escape.py`` imports from ``escape.py``).
+        """
+        self._fine_pitch_regions = list(regions) if regions else []
+
+    def get_fine_pitch_regions(self) -> list[Any]:
+        """Return the installed fine-pitch escape regions.
+
+        Issue #3371 / P_FP2 -- read-side companion to
+        :meth:`set_fine_pitch_regions`.  Returns the stored list directly
+        (callers must not mutate it).  Empty list when no regions have
+        been installed yet.
+        """
+        return self._fine_pitch_regions
 
     def compute_component_pitches(self) -> dict[str, float]:
         """Compute minimum pin pitch for each component.
