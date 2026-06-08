@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime
 import re
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 try:
     from pydantic import BaseModel, Field, field_validator, model_validator
@@ -38,9 +38,11 @@ __all__ = [
     "OutputRail",
     "MechanicalRequirements",
     "MountingHole",
+    "MountingHoleGroupSpec",
     "KeepOut",
     "EnvironmentalRequirements",
     "ManufacturingRequirements",
+    "EscalationPolicy",
     "Compliance",
     "Suggestions",
     "ComponentSuggestion",
@@ -180,6 +182,86 @@ class KeepOut(BaseModel):
     layers: list[str] | None = Field(default=None, description="Affected layers")
 
 
+class MountingHoleGroupSpec(BaseModel):
+    """Placeable group of mounting holes with fixed relative geometry.
+
+    Issue #3352 (Q3 reframe): mounting holes form a rigid pattern that can be
+    *placed* as a unit when auto-pcb-size escalation grows the board.  The
+    group's anchor moves; the holes within it preserve their relative
+    positions.  This replaces the older "refuse if any mounting hole present"
+    behaviour with a richer primitive: layouts can grow as long as the hole
+    group still fits within the escalated envelope at its declared anchor.
+
+    The geometry conventions are:
+      - ``holes`` are ``(x, y)`` positions in millimetres *relative to the
+        group's local origin* (NOT board coordinates).
+      - ``anchor`` is the position in *board coordinates* where the group's
+        local origin sits.  The on-board hole position is therefore
+        ``(anchor_x + hole_x, anchor_y + hole_y)``.
+      - ``hole_diameter_mm`` applies uniformly to all holes in the group
+        (M3 = 3.2 mm clearance is the default; matches softstart rev B).
+      - ``keepout_radius_mm`` is the no-copper radius around each hole that
+        the router treats as a soft obstacle.
+
+    Consumed by the :class:`kicad_tools.pcb.mounting_holes.MountingHoleGroup`
+    primitive, which handles the geometric placement / envelope-fit check.
+
+    Attributes:
+        holes: List of ``(x, y)`` hole positions in mm, relative to anchor.
+        anchor: Default placement position ``(x, y)`` in mm, in board coords.
+        hole_diameter_mm: Clearance hole diameter in mm (default 3.2 = M3).
+        keepout_radius_mm: No-copper keepout radius in mm (default 5.0).
+    """
+
+    holes: list[tuple[float, float]] = Field(
+        ...,
+        description=(
+            "List of (x, y) hole positions in mm, relative to the group's "
+            "local origin.  Must contain at least one hole."
+        ),
+    )
+    anchor: tuple[float, float] = Field(
+        ...,
+        description=(
+            "Default placement position (x, y) in mm, in board coordinates. "
+            "The auto-pcb-size escalation loop may move this anchor when "
+            "the board envelope changes."
+        ),
+    )
+    hole_diameter_mm: float = Field(
+        default=3.2,
+        description="Clearance hole diameter in mm (default 3.2 mm = M3 clearance).",
+    )
+    keepout_radius_mm: float = Field(
+        default=5.0,
+        description=(
+            "No-copper keepout radius in mm around each hole.  Treated as a "
+            "soft obstacle by the auto-router."
+        ),
+    )
+
+    @field_validator("holes")
+    @classmethod
+    def validate_holes_nonempty(
+        cls, v: list[tuple[float, float]]
+    ) -> list[tuple[float, float]]:
+        """Reject empty hole lists -- a group with zero holes is meaningless."""
+        if not v:
+            raise ValueError(
+                "MountingHoleGroupSpec.holes must contain at least one hole; "
+                "omit the field entirely if no mounting holes are required."
+            )
+        return v
+
+    @field_validator("hole_diameter_mm", "keepout_radius_mm")
+    @classmethod
+    def validate_positive_dimensions(cls, v: float) -> float:
+        """Hole diameter and keepout radius must be positive."""
+        if v <= 0:
+            raise ValueError(f"Dimension must be positive, got {v}")
+        return v
+
+
 class MechanicalRequirements(BaseModel):
     """Mechanical requirements and form factor."""
 
@@ -189,12 +271,35 @@ class MechanicalRequirements(BaseModel):
     mounting_holes: list[MountingHole] | None = Field(
         default=None, description="Mounting hole positions"
     )
+    mounting_hole_group: MountingHoleGroupSpec | None = Field(
+        default=None,
+        description=(
+            "Issue #3352: Placeable mounting hole group with fixed relative "
+            "geometry.  Preferred over the flat ``mounting_holes`` list when "
+            "auto-pcb-size escalation is enabled; the group can be repositioned "
+            "as a unit when the board envelope grows, while preserving the hole "
+            "pattern.  When both fields are present, ``mounting_hole_group`` "
+            "takes precedence for routing/escalation; ``mounting_holes`` is "
+            "retained for backwards compatibility with non-grouped layouts."
+        ),
+    )
     keep_outs: list[KeepOut] | None = Field(default=None, description="Keep-out regions")
     edge_clearance: str | None = Field(
         default=None, description="Required clearance from board edge"
     )
     weight_max: str | None = Field(default=None, description="Maximum board weight")
     enclosure: str | None = Field(default=None, description="Target enclosure reference")
+    envelope_hard: bool = Field(
+        default=False,
+        description=(
+            "Issue #3352: When True, ``dimensions`` is a non-negotiable "
+            "enclosure constraint and auto-pcb-size escalation refuses to "
+            "grow the board, emitting an actionable error suggesting layer / "
+            "clearance / BOM levers instead.  Default False -- dimensions "
+            "are treated as initial sizing only and may be grown by "
+            "escalation when routability requires it."
+        ),
+    )
 
 
 class TemperatureRange(BaseModel):
@@ -241,6 +346,126 @@ def _parse_copper_weight_oz(value: int | float | str) -> float:
     return float(m.group(1))
 
 
+class EscalationPolicy(BaseModel):
+    """Issue #3352: Routing escalation policy for the auto-* ladder.
+
+    Declares the order in which the routing system will attempt to overcome
+    over-constrained designs.  Each rung in the ladder corresponds to a
+    different *axis* of slack (more layers, larger envelope, etc.) and the
+    routing system will only escalate along axes the recipe permits.
+
+    The ``ladder`` field selects between five composable strategies:
+
+    - ``"layers-first"`` (default): exhaust the layer escalation ladder
+      (2L -> 4L -> 6L) at the current envelope before trying size escalation.
+      Cheapest at JLCPCB prototype quantities (qty 5) where layer adds are
+      cheaper than envelope upgrades.
+    - ``"size-first"``: walk the manufacturer's size-tier ladder before
+      adding layers.  Preferred when the board's mechanical envelope is
+      genuinely negotiable and the user values 2-layer cost optimization
+      at production volume.
+    - ``"layers-only"``: layer escalation only; refuse to grow the envelope.
+      Equivalent to ``layers-first`` + ``envelope_hard=True`` but declared
+      on the manufacturing side rather than the mechanical side.
+    - ``"size-only"``: size escalation only; refuse to add layers.
+      Useful when layer count is fixed by cost or stackup constraints.
+    - ``"none"``: no escalation; refuse to escalate either axis.  The
+      routing system reports the best-attempt result and lets the recipe
+      author decide how to respond.
+
+    The policy composes with :attr:`MechanicalRequirements.envelope_hard`:
+    when the recipe declares the envelope as a hard mechanical constraint,
+    any ``ladder`` value containing ``"size"`` falls back to layer-only
+    behaviour (the size axis is implicitly disabled).
+
+    The ``max_layers`` ceiling caps the layer escalation ladder.  The
+    ``max_size_tier`` ceiling caps the size-tier escalation ladder by
+    index into the manufacturer's :data:`MFR_SIZE_TIER_LADDERS` entry.
+    A ``None`` ceiling means "use the manufacturer's maximum tier".
+
+    The ``density_threshold_viols_per_cm2`` field is the DRC density
+    trigger used by the size-escalation logic to discriminate "true
+    envelope over-constraint" from "single hot-spot we can hand-fix".
+    Hardcoded for now per Issue #3352 Q4 decision -- promote to a CLI
+    flag if empirical evidence shows recipe-by-recipe tuning is needed.
+
+    Attributes:
+        ladder: Escalation strategy selector.
+        max_layers: Layer escalation ceiling (default 4 -- covers 2L, 4L).
+        max_size_tier: Size-tier ceiling (index into MFR_SIZE_TIER_LADDERS
+            for the manufacturer; None = use manufacturer's max).
+        density_threshold_viols_per_cm2: DRC violation density that
+            triggers escalation (per Issue #3352 Q4: 0.5 viols/cm^2).
+    """
+
+    ladder: Literal[
+        "layers-first",
+        "size-first",
+        "layers-only",
+        "size-only",
+        "none",
+    ] = Field(
+        default="layers-first",
+        description=(
+            "Escalation strategy.  See class docstring for the five options "
+            "and their cost/policy implications."
+        ),
+    )
+    max_layers: int = Field(
+        default=4,
+        description=(
+            "Maximum layer count the escalation ladder may reach.  Default 4 "
+            "covers the common 2L -> 4L transition; recipes that need 6L+ "
+            "must opt in explicitly."
+        ),
+    )
+    max_size_tier: int | None = Field(
+        default=None,
+        description=(
+            "Index into the manufacturer's size-tier ladder (see "
+            ":data:`kicad_tools.router.mfr_limits.MFR_SIZE_TIER_LADDERS`) "
+            "above which size escalation refuses.  ``None`` (default) means "
+            "use the manufacturer's largest available tier."
+        ),
+    )
+    density_threshold_viols_per_cm2: float = Field(
+        default=0.5,
+        description=(
+            "DRC violation density (per cm^2 of board area) that triggers "
+            "auto-pcb-size escalation.  Per Issue #3352 Q4: hardcoded at "
+            "0.5 viols/cm^2 based on the softstart rev B 132/150 = 0.88 "
+            "case.  Tunable here for forward compatibility; promote to a "
+            "CLI flag if recipe-by-recipe tuning becomes necessary."
+        ),
+    )
+
+    @field_validator("max_layers")
+    @classmethod
+    def validate_max_layers(cls, v: int) -> int:
+        """Layer count must be a positive even number (KiCad convention)."""
+        if v < 1:
+            raise ValueError(f"max_layers must be >= 1, got {v}")
+        return v
+
+    @field_validator("max_size_tier")
+    @classmethod
+    def validate_max_size_tier(cls, v: int | None) -> int | None:
+        """Size-tier index must be non-negative when present."""
+        if v is not None and v < 0:
+            raise ValueError(f"max_size_tier must be >= 0, got {v}")
+        return v
+
+    @field_validator("density_threshold_viols_per_cm2")
+    @classmethod
+    def validate_density_threshold(cls, v: float) -> float:
+        """Density threshold must be positive (negative makes no physical sense)."""
+        if v <= 0:
+            raise ValueError(
+                f"density_threshold_viols_per_cm2 must be positive, got {v}"
+            )
+        return v
+
+
 class ManufacturingRequirements(BaseModel):
     """Manufacturing requirements and constraints."""
 
@@ -270,6 +495,16 @@ class ManufacturingRequirements(BaseModel):
     finish: str | None = Field(default=None, description="Surface finish (HASL, ENIG, etc.)")
     solder_mask: str | None = Field(default=None, description="Solder mask color")
     silkscreen: str | None = Field(default=None, description="Silkscreen color")
+    escalation: EscalationPolicy | None = Field(
+        default=None,
+        description=(
+            "Issue #3352: Auto-routing escalation policy.  When unset (the "
+            "default), no auto-escalation is performed -- the router uses "
+            "the declared layer count / envelope and reports the best "
+            "attempt.  When set, the router walks the declared ladder "
+            "before reporting refusal."
+        ),
+    )
 
     @field_validator("copper_weight", mode="before")
     @classmethod

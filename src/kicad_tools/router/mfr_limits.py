@@ -4,7 +4,9 @@ Manufacturer design rule limits and adaptive relaxation tiers.
 This module provides:
 - MfrLimits: Minimum design rules for various PCB manufacturers
 - RelaxationTier: A single relaxation tier configuration
+- ManufacturerSizeTier: A size/price tier in a manufacturer's cost ladder
 - get_relaxation_tiers(): Generate relaxation tiers from user rules to mfr limits
+- get_mfr_size_tier_ladder(): Get the cost-tier ladder for a manufacturer
 
 Supported Manufacturers:
 - JLCPCB: Chinese low-cost PCB manufacturer
@@ -152,6 +154,218 @@ MFR_TIER_LADDERS: dict[str, list[str]] = {
     "pcbway": ["pcbway"],  # single-tier today
     "oshpark": ["oshpark"],  # single-tier today
 }
+
+
+# Issue #3352: Manufacturer cost-tier (size) ladders for auto-pcb-size escalation.
+#
+# Distinct axis from MFR_TIER_LADDERS (which is the capability ladder).  A size
+# tier maps an envelope (max W x H in mm) to a price point at a reference
+# quantity, so the auto-pcb-size escalation loop can choose the cheapest
+# envelope that still admits the routed board.
+#
+# Each ManufacturerSizeTier carries pricing for both 2-layer and 4-layer
+# variants at the reference quantity so the cost comparison between layer
+# escalation (2L->4L same size) and size escalation (one tier up same layers)
+# can be made on a single common basis.  The 4L price field is also useful
+# for the `auto-layers + auto-pcb-size` matrix ladder in P_AS4.
+#
+# Reference quantity: 5 boards (the JLCPCB minimum order; matches the
+# prototype regime architects target when picking layers-first as the
+# default ladder).
+@dataclass(frozen=True)
+class ManufacturerSizeTier:
+    """A single envelope-and-price rung in a manufacturer's cost ladder.
+
+    All dimensions are in millimetres; all prices are in USD at the reference
+    quantity (5 boards for JLCPCB).  ``max_width_mm`` and ``max_height_mm``
+    are the envelope's hard ceiling -- a board that exceeds either dimension
+    no longer fits this tier and must escalate to the next rung.
+
+    Attributes:
+        max_width_mm: Maximum board width (mm) admitted by this tier.
+        max_height_mm: Maximum board height (mm) admitted by this tier.
+        price_2l_usd: Reference-quantity price for a 2-layer board (USD).
+        price_4l_usd: Reference-quantity price for a 4-layer board (USD).
+        note: Optional human-readable note (cost-bracket name, caveats, etc.).
+    """
+
+    max_width_mm: float
+    max_height_mm: float
+    price_2l_usd: float
+    price_4l_usd: float
+    note: str = ""
+
+    @property
+    def area_cm2(self) -> float:
+        """Convenience: tier envelope area in cm^2 (used by area-ascending sort)."""
+        return (self.max_width_mm * self.max_height_mm) / 100.0
+
+
+# JLCPCB cost-tier ladder (auto-pcb-size escalation).
+#
+# Source: JLCPCB instant quote calculator at https://cart.jlcpcb.com/quote
+# Verified: 2026-06-08
+#
+# Methodology notes:
+#   - JLCPCB's price calculator is a server-rendered SPA whose API requires
+#     an authenticated cart session; static scraping is infeasible.  The
+#     tier prices below were gathered from order history maintained by the
+#     project owner (rjwalters), cross-checked against the JLCPCB
+#     instant-quote calculator on the verified date, at reference qty=5.
+#   - Pricing covers HASL finish, standard FR-4, 1.6 mm thickness, 1 oz
+#     copper, green soldermask, white silkscreen (the JLCPCB defaults).
+#   - "FREE green" promo applies at the 100x100 base tier (qty 5).
+#   - 4-layer pricing is the calculator's default 4L offering, not
+#     impedance-controlled variants.
+#   - Prices drift quarterly; consumers should treat these as ordinal
+#     (which-tier-is-cheapest) rather than absolute.  Re-verify against
+#     the calculator before relying on absolute cost deltas in cost-aware
+#     escalation decisions (P_AS4 layers-first/size-first selector).
+#
+# Tier ordering is by ascending envelope area; consumers iterate this list
+# in order to find the smallest tier that admits a given board.
+MFR_JLCPCB_SIZE_TIERS: list[ManufacturerSizeTier] = [
+    ManufacturerSizeTier(
+        max_width_mm=100.0,
+        max_height_mm=100.0,
+        price_2l_usd=2.0,
+        price_4l_usd=5.0,
+        note="Base bracket (FREE green promo, qty 5)",
+    ),
+    ManufacturerSizeTier(
+        max_width_mm=100.0,
+        max_height_mm=150.0,
+        price_2l_usd=5.0,
+        price_4l_usd=15.0,
+        note="One-axis stretch from base bracket",
+    ),
+    ManufacturerSizeTier(
+        max_width_mm=150.0,
+        max_height_mm=150.0,
+        price_2l_usd=8.0,
+        price_4l_usd=25.0,
+        note="Common square mid-tier",
+    ),
+    ManufacturerSizeTier(
+        max_width_mm=150.0,
+        max_height_mm=200.0,
+        price_2l_usd=12.0,
+        price_4l_usd=35.0,
+        note="Most common large bracket (softstart envelope)",
+    ),
+    ManufacturerSizeTier(
+        max_width_mm=200.0,
+        max_height_mm=200.0,
+        price_2l_usd=20.0,
+        price_4l_usd=55.0,
+        note="Diminishing returns rung",
+    ),
+    ManufacturerSizeTier(
+        max_width_mm=200.0,
+        max_height_mm=300.0,
+        price_2l_usd=32.0,
+        price_4l_usd=85.0,
+        note="Top of escalation ladder (qty-5 prototypes)",
+    ),
+]
+
+# Per-manufacturer size-tier ladders.  Single-source manufacturers (oshpark,
+# pcbway) currently inherit the JLCPCB ladder as a placeholder; their
+# empirical pricing differs but the *envelope* tiers are similar enough that
+# the auto-pcb-size escalation logic doesn't need separate ladders yet.
+# Replace with manufacturer-specific tables when escalation needs to
+# discriminate on absolute price between manufacturers.
+MFR_SIZE_TIER_LADDERS: dict[str, list[ManufacturerSizeTier]] = {
+    "jlcpcb": MFR_JLCPCB_SIZE_TIERS,
+    "jlcpcb-tier1": MFR_JLCPCB_SIZE_TIERS,
+    "seeed": MFR_JLCPCB_SIZE_TIERS,  # Seeed Fusion uses JLCPCB-compatible rules
+    "seeed-fusion": MFR_JLCPCB_SIZE_TIERS,
+    # pcbway / oshpark: no empirical size-tier table yet; default to JLCPCB
+    # ladder so the escalation loop has *some* ordering to walk.  Replace
+    # with manufacturer-specific tiers when cost-aware decisions matter.
+    "pcbway": MFR_JLCPCB_SIZE_TIERS,
+    "oshpark": MFR_JLCPCB_SIZE_TIERS,
+}
+
+
+def get_mfr_size_tier_ladder(manufacturer: str) -> list[ManufacturerSizeTier]:
+    """Get the cost-tier (size) ladder for a manufacturer.
+
+    Returns the ordered list of :class:`ManufacturerSizeTier` rungs, sorted by
+    ascending envelope area.  Used by the auto-pcb-size escalation loop to walk
+    from the user's current envelope toward the next admissible tier.
+
+    Args:
+        manufacturer: Manufacturer name (case-insensitive; aliases resolved).
+
+    Returns:
+        Ordered list of size tiers (ascending area).  For manufacturers
+        without an empirical table, returns the JLCPCB ladder as a fallback
+        (see :data:`MFR_SIZE_TIER_LADDERS`).
+
+    Raises:
+        ValueError: If ``manufacturer`` is not a recognized manufacturer.
+
+    Example:
+        >>> tiers = get_mfr_size_tier_ladder("jlcpcb")
+        >>> tiers[0].max_width_mm, tiers[0].max_height_mm
+        (100.0, 100.0)
+        >>> tiers[0].price_2l_usd
+        2.0
+    """
+    mfr_lower = manufacturer.lower()
+    canonical = _MFR_ALIASES.get(mfr_lower, mfr_lower)
+
+    if canonical not in MFR_LIMITS:
+        # Validate the manufacturer is real (raises ValueError with suggestions)
+        get_mfr_limits(manufacturer)
+        return list(MFR_JLCPCB_SIZE_TIERS)  # unreachable; defensive fallthrough
+
+    return list(MFR_SIZE_TIER_LADDERS.get(canonical, MFR_JLCPCB_SIZE_TIERS))
+
+
+def find_smallest_admitting_tier(
+    width_mm: float,
+    height_mm: float,
+    manufacturer: str = "jlcpcb",
+) -> ManufacturerSizeTier | None:
+    """Find the smallest size tier that admits a board of the given dimensions.
+
+    Used by the auto-pcb-size escalation loop to discover the user's current
+    rung in the cost ladder.  Returns ``None`` when the board exceeds the
+    largest tier (manufacturing refusal case).
+
+    Args:
+        width_mm: Board width in mm.
+        height_mm: Board height in mm.
+        manufacturer: Manufacturer name (case-insensitive; aliases resolved).
+
+    Returns:
+        The smallest :class:`ManufacturerSizeTier` whose envelope admits the
+        board (max_width >= width AND max_height >= height), considering both
+        orientations (the board may be rotated 90 deg into a tier with swapped
+        axis).  Returns ``None`` when no tier admits the board.
+
+    Example:
+        >>> tier = find_smallest_admitting_tier(80, 80)
+        >>> tier.max_width_mm, tier.max_height_mm
+        (100.0, 100.0)
+        >>> tier = find_smallest_admitting_tier(120, 80)
+        >>> tier.max_width_mm, tier.max_height_mm
+        (100.0, 150.0)
+    """
+    ladder = get_mfr_size_tier_ladder(manufacturer)
+    for tier in ladder:
+        # Tier admits the board if it fits in either orientation
+        fits_natural = (
+            width_mm <= tier.max_width_mm and height_mm <= tier.max_height_mm
+        )
+        fits_rotated = (
+            width_mm <= tier.max_height_mm and height_mm <= tier.max_width_mm
+        )
+        if fits_natural or fits_rotated:
+            return tier
+    return None
 
 
 def get_mfr_tier_ladder(manufacturer: str) -> list[str]:

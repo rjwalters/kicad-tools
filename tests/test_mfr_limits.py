@@ -4,11 +4,16 @@ import pytest
 
 from kicad_tools.router.mfr_limits import (
     MFR_JLCPCB,
+    MFR_JLCPCB_SIZE_TIERS,
     MFR_LIMITS,
     MFR_OSHPARK,
     MFR_PCBWAY,
+    MFR_SIZE_TIER_LADDERS,
+    ManufacturerSizeTier,
     RelaxationTier,
+    find_smallest_admitting_tier,
     get_mfr_limits,
+    get_mfr_size_tier_ladder,
     get_relaxation_tiers,
 )
 
@@ -455,3 +460,156 @@ class TestIntegration:
         # Final tier should match the looked-up manufacturer's limits
         assert tiers[-1].trace_width == pytest.approx(mfr.min_trace)
         assert tiers[-1].clearance == pytest.approx(mfr.min_clearance)
+
+
+class TestManufacturerSizeTier:
+    """Tests for the ManufacturerSizeTier dataclass (Issue #3352)."""
+
+    def test_dataclass_construction(self):
+        """ManufacturerSizeTier is a dataclass with the documented fields."""
+        tier = ManufacturerSizeTier(
+            max_width_mm=100.0,
+            max_height_mm=150.0,
+            price_2l_usd=5.0,
+            price_4l_usd=15.0,
+        )
+        assert tier.max_width_mm == 100.0
+        assert tier.max_height_mm == 150.0
+        assert tier.price_2l_usd == 5.0
+        assert tier.price_4l_usd == 15.0
+        assert tier.note == ""  # default
+
+    def test_area_cm2_property(self):
+        """area_cm2 converts mm^2 envelope to cm^2 (divides by 100)."""
+        tier = ManufacturerSizeTier(
+            max_width_mm=100.0,
+            max_height_mm=100.0,
+            price_2l_usd=2.0,
+            price_4l_usd=5.0,
+        )
+        # 100mm * 100mm = 10000 mm^2 = 100 cm^2
+        assert tier.area_cm2 == pytest.approx(100.0)
+
+    def test_frozen_dataclass(self):
+        """ManufacturerSizeTier is immutable (frozen)."""
+        tier = ManufacturerSizeTier(
+            max_width_mm=100.0,
+            max_height_mm=100.0,
+            price_2l_usd=2.0,
+            price_4l_usd=5.0,
+        )
+        with pytest.raises((AttributeError, Exception)):
+            tier.max_width_mm = 200.0  # type: ignore[misc]
+
+
+class TestJlcpcbSizeTiers:
+    """Tests for the JLCPCB size-tier ladder."""
+
+    def test_ladder_nonempty(self):
+        """JLCPCB has at least the 6 documented tiers."""
+        assert len(MFR_JLCPCB_SIZE_TIERS) >= 6
+
+    def test_ladder_ascending_area(self):
+        """Tiers are ordered by ascending envelope area."""
+        areas = [t.area_cm2 for t in MFR_JLCPCB_SIZE_TIERS]
+        assert areas == sorted(areas), (
+            "MFR_JLCPCB_SIZE_TIERS must be ordered by ascending area"
+        )
+
+    def test_ladder_ascending_2l_price(self):
+        """Prices are monotonically non-decreasing along the ladder."""
+        prices_2l = [t.price_2l_usd for t in MFR_JLCPCB_SIZE_TIERS]
+        assert prices_2l == sorted(prices_2l), (
+            "JLCPCB 2L prices should be monotonically non-decreasing"
+        )
+
+    def test_base_tier_is_100x100(self):
+        """Base tier matches JLCPCB's $2 100x100 bracket."""
+        base = MFR_JLCPCB_SIZE_TIERS[0]
+        assert base.max_width_mm == 100.0
+        assert base.max_height_mm == 100.0
+
+    def test_4l_more_expensive_than_2l(self):
+        """4-layer pricing is always more expensive than 2-layer at the same tier."""
+        for tier in MFR_JLCPCB_SIZE_TIERS:
+            assert tier.price_4l_usd > tier.price_2l_usd, (
+                f"Tier {tier.max_width_mm}x{tier.max_height_mm}: "
+                f"4L (${tier.price_4l_usd}) must exceed 2L (${tier.price_2l_usd})"
+            )
+
+
+class TestGetMfrSizeTierLadder:
+    """Tests for get_mfr_size_tier_ladder()."""
+
+    def test_jlcpcb_lookup(self):
+        """JLCPCB returns the documented size tiers."""
+        ladder = get_mfr_size_tier_ladder("jlcpcb")
+        assert ladder == MFR_JLCPCB_SIZE_TIERS
+
+    def test_case_insensitive(self):
+        """Lookup is case-insensitive."""
+        assert get_mfr_size_tier_ladder("JLCPCB") == MFR_JLCPCB_SIZE_TIERS
+        assert get_mfr_size_tier_ladder("JlcPcb") == MFR_JLCPCB_SIZE_TIERS
+
+    def test_alias_resolution(self):
+        """Aliases (e.g. seeed_fusion) resolve to the canonical ladder."""
+        ladder = get_mfr_size_tier_ladder("seeed_fusion")
+        assert ladder == MFR_JLCPCB_SIZE_TIERS
+
+    def test_returns_copy(self):
+        """Returned list is a copy -- mutating it does not affect the registry."""
+        ladder = get_mfr_size_tier_ladder("jlcpcb")
+        ladder.clear()
+        # Registry should still have the original entries
+        assert len(MFR_JLCPCB_SIZE_TIERS) >= 6
+        assert len(MFR_SIZE_TIER_LADDERS["jlcpcb"]) >= 6
+
+    def test_unknown_manufacturer_raises(self):
+        """Unknown manufacturer raises ValueError with suggestions."""
+        with pytest.raises(ValueError, match="Unknown manufacturer"):
+            get_mfr_size_tier_ladder("acme-corp")
+
+
+class TestFindSmallestAdmittingTier:
+    """Tests for find_smallest_admitting_tier()."""
+
+    def test_small_board_picks_base_tier(self):
+        """An 80x80 board fits in the 100x100 base tier."""
+        tier = find_smallest_admitting_tier(80, 80)
+        assert tier is not None
+        assert tier.max_width_mm == 100.0
+        assert tier.max_height_mm == 100.0
+
+    def test_exact_tier_match(self):
+        """A 100x100 board exactly fits the 100x100 base tier."""
+        tier = find_smallest_admitting_tier(100, 100)
+        assert tier is not None
+        assert tier.max_width_mm == 100.0
+        assert tier.max_height_mm == 100.0
+
+    def test_one_axis_stretch(self):
+        """A 120x80 board fits the 100x150 tier when rotated."""
+        tier = find_smallest_admitting_tier(120, 80)
+        assert tier is not None
+        # 120x80 fits in 100x150 (after 90 deg rotation: 80x120 fits)
+        assert tier.max_width_mm == 100.0
+        assert tier.max_height_mm == 150.0
+
+    def test_softstart_envelope(self):
+        """A 150x100 board (softstart rev B) fits the 100x150 tier (rotated)."""
+        tier = find_smallest_admitting_tier(150, 100)
+        assert tier is not None
+        # 150x100 rotates to 100x150 which fits the 100x150 tier exactly
+        assert tier.max_width_mm == 100.0
+        assert tier.max_height_mm == 150.0
+
+    def test_oversize_returns_none(self):
+        """A board exceeding the largest tier returns None."""
+        tier = find_smallest_admitting_tier(500, 500)
+        assert tier is None
+
+    def test_manufacturer_argument(self):
+        """The manufacturer arg routes through the alias resolution."""
+        tier_canonical = find_smallest_admitting_tier(100, 100, "jlcpcb")
+        tier_alias = find_smallest_admitting_tier(100, 100, "JLCPCB")
+        assert tier_canonical == tier_alias
