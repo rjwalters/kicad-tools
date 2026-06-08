@@ -1200,7 +1200,11 @@ class RoutingGrid:
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         self.grid[layer_idx][gy][gx].blocked = True
 
-    def _clearance_for_pin_pitch(self, pin_pitch: float | None) -> float:
+    def _clearance_for_pin_pitch(
+        self,
+        pin_pitch: float | None,
+        pad: "Pad | None" = None,
+    ) -> float:
         """Return the grid-level clearance halo to apply around a pad.
 
         Mirrors the per-call logic in ``_add_pad_unsafe`` so callers that
@@ -1229,6 +1233,22 @@ class RoutingGrid:
         the standard envelope, which causes the pathfinder to look for
         escape routes around the package instead of through-channel.
 
+        Issue #3371 / P_FP3 -- fine-pitch escape region halo: when
+        ``pad`` is supplied AND at least one
+        :class:`FinePitchRegion` installed on this grid (via
+        :meth:`set_fine_pitch_regions`) applies to the pad (per
+        :meth:`FinePitchRegion.applies_to_pad`) AND the pad is NOT on an
+        impedance-controlled net, the halo shrinks from
+        ``trace_clearance + trace_width/2`` to
+        ``region.escape_clearance + trace_width/2``.  This lets the
+        pathfinder thread traces between the inboard pins of a
+        fine-pitch SOIC (e.g. UCC27211 at 1.27mm pitch + 0.20mm
+        clearance + 0.30mm trace, where the standard halo blocks the
+        corridor by 0.03mm).  The escape-region shrink composes with
+        the existing ``min_trace_width`` shrink: when both apply, the
+        smaller halo wins.  Callers that pass ``pad=None`` (the
+        pre-P_FP3 call shape) get byte-for-byte identical behaviour.
+
         Args:
             pin_pitch: The component pin pitch in mm, or None when not
                 available.  When below ``rules.fine_pitch_threshold``
@@ -1238,11 +1258,91 @@ class RoutingGrid:
                 *provided* the resulting channel can still satisfy full
                 clearance per the narrow-channel guard.  Full manufacturer
                 clearance is validated in post-routing DRC.
+            pad: Optional pad whose halo is being computed.  When
+                supplied and the grid has fine-pitch escape regions
+                installed, the helper consults the regions and applies
+                the per-region escape clearance for pads inside an
+                applying region.  ``None`` (the default) preserves the
+                pre-Issue #3371 behaviour: standard / shrunk halo only.
 
         Returns:
             Clearance distance in mm to pad outside the pad's metal.
         """
         standard = self.rules.trace_clearance + self.rules.trace_width / 2
+
+        # Issue #3371 / P_FP3 -- fine-pitch escape region halo.  Consult
+        # installed regions before the legacy fine-pitch shrink so the
+        # region's manufacturer-aware escape clearance wins when both
+        # gates fire.  ``set_fine_pitch_regions`` is the only way regions
+        # land on the grid; when none are installed (the default until
+        # the autorouter wires the detector) this branch is a no-op.
+        #
+        # Narrow-channel guard (Issue #2867 / PR #2866 equivalent for the
+        # region path): the region escape clearance is sound only when a
+        # trace can physically fit between adjacent pads at the
+        # *region's* escape clearance.  Geometry:
+        #
+        #     effective_channel = pin_pitch - 2 * region_clearance - trace_width
+        #     required_channel  = 2 * region_clearance + trace_width
+        #
+        # When the channel cannot fit the trace + 2 * region_clearance
+        # the shrunk halo would let A* commit to traces that DRC
+        # rejects (the same pathology PR #2866 fixed for the global
+        # ``fine_pitch_clearance`` path).  We decline the shrink and
+        # fall through to the standard halo so the pathfinder routes
+        # around the package instead of through-channel.
+        if pad is not None and self._fine_pitch_regions:
+            region_clearance = self._region_clearance_for_pad(pad)
+            if region_clearance is not None:
+                # Compute pin pitch from the region directly (the region
+                # carries the package's pitch).  This is more reliable
+                # than the call-side ``pin_pitch`` argument, which can
+                # be ``None`` for callers that did not look it up.
+                region_pin_pitch = pin_pitch
+                if region_pin_pitch is None:
+                    for region in self._fine_pitch_regions:
+                        if region.applies_to_pad(pad):
+                            region_pin_pitch = region.pin_pitch
+                            break
+
+                if region_pin_pitch is not None:
+                    effective_channel = (
+                        region_pin_pitch
+                        - 2.0 * region_clearance
+                        - self.rules.trace_width
+                    )
+                    required_channel = (
+                        2.0 * region_clearance + self.rules.trace_width
+                    )
+                    if effective_channel < required_channel:
+                        # Channel too narrow for the escape clearance --
+                        # decline the shrink so the pathfinder routes
+                        # around the package via the escape mechanism.
+                        return standard
+
+                # Halo is region clearance + trace half-width, mirroring
+                # the standard-halo formulation.
+                escape_halo = region_clearance + self.rules.trace_width / 2
+
+                # Compose with the existing fine-pitch shrink: when both
+                # apply, take the smaller (more permissive) halo so the
+                # corridor opens up for the pathfinder.  Either halo is
+                # later validated by post-route DRC against the
+                # manufacturer floor.
+                if (
+                    pin_pitch is not None
+                    and pin_pitch < self.rules.fine_pitch_threshold
+                    and self.rules.min_trace_width is not None
+                ):
+                    shrunk = self.rules.min_trace_width / 2
+                    eff_legacy = pin_pitch - 2.0 * shrunk - self.rules.trace_width
+                    req_legacy = (
+                        2.0 * self.rules.trace_clearance + self.rules.trace_width
+                    )
+                    if eff_legacy >= req_legacy:
+                        return min(escape_halo, shrunk)
+                return escape_halo
+
         if (
             pin_pitch is not None
             and pin_pitch < self.rules.fine_pitch_threshold
@@ -1274,6 +1374,37 @@ class RoutingGrid:
             # Fall through to the standard envelope so the router does
             # not try to thread between these pads.
         return standard
+
+    def _region_clearance_for_pad(self, pad: "Pad") -> float | None:
+        """Return the fine-pitch escape clearance for ``pad`` if a region applies.
+
+        Issue #3371 / P_FP3 -- helper used by
+        :meth:`_clearance_for_pin_pitch` to consult the installed
+        fine-pitch escape regions.  Returns the region's
+        ``escape_clearance`` (a plain ``float``, NOT the halo;
+        :meth:`_clearance_for_pin_pitch` adds ``trace_width/2`` to form
+        the blocking envelope) when at least one region applies to the
+        pad; ``None`` otherwise.
+
+        The first matching region wins.  In practice each pad belongs
+        to at most one fine-pitch package, so the first-match rule is
+        unambiguous.  Regions for neighbouring components that have
+        overlapping halos are not currently supported -- the first one
+        in the detector's deterministic order applies.
+
+        Args:
+            pad: Router-level pad to test.
+
+        Returns:
+            The fine-pitch escape clearance in mm when a region
+            applies, ``None`` when no region matches.
+        """
+        if not self._fine_pitch_regions:
+            return None
+        for region in self._fine_pitch_regions:
+            if region.applies_to_pad(pad):
+                return float(region.escape_clearance)
+        return None
 
     def add_pad(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Add a pad as an obstacle (except for its own net).
@@ -1342,7 +1473,10 @@ class RoutingGrid:
         # needed for grid-level blocking -- the actual manufacturer clearance is
         # validated during DRC after routing. This ensures at least 1-3 passable
         # grid cells between adjacent fine-pitch pads for A* to find paths.
-        clearance = self._clearance_for_pin_pitch(pin_pitch)
+        # Issue #3371 / P_FP3: ``pad`` is threaded so the helper can consult
+        # installed fine-pitch escape regions and shrink the halo for pads
+        # inside a detected fine-pitch package's escape region.
+        clearance = self._clearance_for_pin_pitch(pin_pitch, pad=pad)
 
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
@@ -1892,8 +2026,13 @@ class RoutingGrid:
                 else:
                     oew, oeh = other.width, other.height
                 # Use the same pin_pitch envelope; without ``_pad_pin_pitch``
-                # data we fall back to the standard envelope.
-                other_clearance = self._clearance_for_pin_pitch(self._pad_pin_pitch.get(id(other)))
+                # data we fall back to the standard envelope.  Issue #3371 /
+                # P_FP3: thread the sibling pad too so the helper consults
+                # the fine-pitch escape regions, matching the envelope
+                # actually used by ``_add_pad_unsafe`` for the sibling.
+                other_clearance = self._clearance_for_pin_pitch(
+                    self._pad_pin_pitch.get(id(other)), pad=other
+                )
                 same_component_envelopes.append(
                     (
                         other.x - oew / 2.0 - other_clearance,
@@ -3889,7 +4028,10 @@ class RoutingGrid:
             # false-positive on cells actually blocked by neighbouring
             # standard-pitch pads (relevant on chorus-test U5/U7/U9).
             pad_pitch = self._pad_pin_pitch.get(id(pad))
-            clearance = self._clearance_for_pin_pitch(pad_pitch)
+            # Issue #3371 / P_FP3: thread the pad so the helper consults
+            # the fine-pitch escape regions when installed, matching the
+            # envelope ``_add_pad_unsafe`` originally applied for this pad.
+            clearance = self._clearance_for_pin_pitch(pad_pitch, pad=pad)
 
             # Compute effective pad bounds (mirrors _add_pad_unsafe logic)
             if pad.through_hole:

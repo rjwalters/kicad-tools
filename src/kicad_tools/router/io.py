@@ -2765,6 +2765,113 @@ def _extract_edge_segments(
     return segments
 
 
+def _install_fine_pitch_regions_from_components(
+    router: Autorouter,
+    components: list[dict],
+) -> int:
+    """Install fine-pitch escape regions on ``router.grid`` from ``components``.
+
+    Issue #3371 / P_FP3 -- runs the fine-pitch escape region detector
+    against the parsed component dicts BEFORE the autorouter calls
+    ``add_component`` for each component.  This ensures the Python
+    pathfinder halo (``_clearance_for_pin_pitch``) sees the in-region
+    escape clearance when each pad's blocked envelope is computed.
+
+    The C++ validator picks up the regions lazily via
+    ``CppGrid.from_routing_grid`` (which reads
+    ``grid.get_fine_pitch_regions()`` at construction time), so no
+    additional C++ plumbing is required here.
+
+    Detection is **unconditional** when the Q_FP1 recipe-relative
+    trigger fires (a fine-pitch package's corridor is geometrically
+    infeasible at the current ``rules.trace_clearance`` +
+    ``rules.trace_width``).  When the detector finds no qualifying
+    package the helper is a strict no-op.
+
+    Manufacturer source: resolves through
+    :meth:`DesignRules.manufacturer`.  When that is unset the
+    detector still runs but the region's escape clearance defaults to
+    ``rules.trace_clearance`` (no shrink) -- the route_cmd wrapper
+    logs a warning when this fallback path engages.
+
+    Args:
+        router: Autorouter freshly constructed (no pads added yet).
+            ``router.rules`` is consulted for the recipe parameters
+            and manufacturer; ``router.grid`` is the install target.
+        components: List of parsed component dicts.  Each entry has
+            ``"ref"`` (str) and ``"pads"`` (list of pad-info dicts
+            with ``x``, ``y``, ``width``, ``height``, ``net``,
+            ``net_name``, ``through_hole``, ``drill``, ``layer``
+            keys -- the same shape :meth:`Autorouter.add_component`
+            consumes).
+
+    Returns:
+        Number of installed regions (``0`` when nothing qualifies).
+    """
+    # Defer imports to avoid module-load cycles.  ``fine_pitch_escape``
+    # transitively imports ``escape``, which imports ``grid``, which is
+    # safe but only after this module finishes its top-level imports.
+    from .fine_pitch_escape import detect_fine_pitch_regions
+    from .layers import Layer
+    from .mfr_limits import get_mfr_limits
+    from .primitives import Pad
+
+    # Build synthetic Pad objects from the components dict.  The
+    # detector only reads ``x``, ``y``, ``width``, ``height``, ``ref``,
+    # ``pin`` -- net / layer fields are immaterial here.  We construct
+    # a temporary list (not stored on the router) so the detector can
+    # run before ``add_component`` lands the real pads.
+    synth_pads: list[Pad] = []
+    for comp in components:
+        ref = comp["ref"]
+        for pad_info in comp["pads"]:
+            try:
+                synth_pads.append(
+                    Pad(
+                        x=float(pad_info["x"]),
+                        y=float(pad_info["y"]),
+                        width=float(pad_info.get("width", 0.0)),
+                        height=float(pad_info.get("height", 0.0)),
+                        net=int(pad_info.get("net", 0)),
+                        net_name=str(pad_info.get("net_name", "")),
+                        layer=pad_info.get("layer", Layer.F_CU),
+                        ref=ref,
+                        pin=str(pad_info.get("number", "")),
+                        through_hole=bool(pad_info.get("through_hole", False)),
+                        drill=float(pad_info.get("drill", 0.0)),
+                    )
+                )
+            except (TypeError, ValueError, KeyError):
+                # Detector is best-effort; bad pad data should not
+                # block routing entirely.  Skip the malformed pad.
+                continue
+
+    # Resolve manufacturer limits via ``rules.manufacturer``.  The
+    # route_cmd-side CLI ``--manufacturer`` flag is merged into the
+    # rules upstream of this entry point (it sets
+    # ``rules.manufacturer``), so reading off rules captures both the
+    # CLI and the recipe paths.
+    mfr_limits = None
+    mfr_name = getattr(router.rules, "manufacturer", None)
+    if mfr_name:
+        try:
+            mfr_limits = get_mfr_limits(mfr_name)
+        except (ValueError, KeyError):
+            mfr_limits = None
+
+    regions = detect_fine_pitch_regions(
+        synth_pads,
+        router.rules,
+        mfr_limits=mfr_limits,
+    )
+
+    if not regions:
+        return 0
+
+    router.grid.set_fine_pitch_regions(regions)
+    return len(regions)
+
+
 def load_pcb_for_routing(
     pcb_path: str,
     skip_nets: list[str] | None = None,
@@ -3129,6 +3236,19 @@ def load_pcb_for_routing(
         # iteration backstop override.
         max_search_iterations=max_search_iterations,
     )
+
+    # Issue #3371 / P_FP3 -- fine-pitch escape region detection.  Must run
+    # BEFORE pads land on the grid so the per-pad halos
+    # (``_clearance_for_pin_pitch``) reflect the in-region escape clearance
+    # at the moment each pad's blocked envelope is computed.  Running
+    # post-add-component would leave the Python-side ``pad_blocked``
+    # cells stale (set with the wider standard halo) even though the C++
+    # validator -- which reads regions live at ``from_routing_grid``
+    # construction time -- would correctly see the shrunk clearance.
+    # That asymmetry blocks the pathfinder from threading through the
+    # corridor between inboard SOIC pins, which is exactly the gap this
+    # phase closes.
+    _install_fine_pitch_regions_from_components(router, components)
 
     # Add all components
     for comp in components:
