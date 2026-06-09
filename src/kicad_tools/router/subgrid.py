@@ -1404,12 +1404,10 @@ class SubGridRouter:
             # against a neighbour pad whose edge sits one pitch away.
             pitch_estimate = max(0.4, smaller_dim + 0.4)
             via_radius = via_diameter / 2
-            inter_pad_channel = pitch_estimate - smaller_dim
-            # Available gap = channel/2 (centre to channel edge) -
-            # via_radius (via takes up half its diameter from centre)
-            # + smaller_dim/2 (the centre is offset into the pad);
-            # net: (channel + smaller_dim)/2 - via_radius =
-            # pitch_estimate/2 - via_radius.
+            # Available gap = (channel + smaller_dim) / 2 - via_radius
+            #               = pitch_estimate / 2 - via_radius
+            # (channel = pitch - smaller_dim; centre-to-channel-edge is
+            # channel / 2; via consumes via_radius from the centre).
             available_gap = pitch_estimate / 2 - via_radius
             if available_gap + 1e-6 < mfr.min_clearance:
                 # Try the micro fallback before declining.
@@ -1547,7 +1545,7 @@ class SubGridRouter:
         # numerically opposite outer layer.
         return self.grid.num_layers - 1 - surface_idx
 
-    def _layer_from_index(self, layer_idx: int) -> "Layer | None":
+    def _layer_from_index(self, layer_idx: int) -> Layer | None:
         """Map a grid layer index back to a :class:`Layer` enum value.
 
         Returns ``None`` when the index is outside the grid or no

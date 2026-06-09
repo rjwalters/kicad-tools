@@ -2649,7 +2649,7 @@ class TestInPadViaRescue:
 
         # After apply, the inner-layer cells must be unblocked and
         # claimed by the rescue pad's net.
-        for (was_blocked, _was_net), e in zip(landing_states, rescues):
+        for (was_blocked, _was_net), e in zip(landing_states, rescues, strict=True):
             gx, gy = e.grid_point
             landing_idx = grid.layer_to_index(e.via_layer.value)
             cell = grid.grid[landing_idx][gy][gx]
