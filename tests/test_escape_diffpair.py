@@ -301,10 +301,61 @@ class TestGate2EscapeRouterCtorReceivesMap:
         return ar
 
     def test_autorouter_escape_property_passes_map(self):
-        """core.py:7271 _escape property threads the map."""
+        """core.py _escape property threads the map when coupling is active.
+
+        Issue #3419: the map is now gated on ``paired_escape_coupling``
+        (flipped on by ``route_all_with_diffpairs``).  Without a coupled
+        consumer, the tightly-coupled paired escape endpoints strand the
+        plain per-net A* (board 06: 41% -> 27% reach regression).
+        """
         ar = self._build_ar_with_pair()
+        ar.paired_escape_coupling = True
         escape = ar._escape
         assert isinstance(escape, EscapeRouter)
+        assert escape.diff_pair_map == {"USB_D+": "USB_D-", "USB_D-": "USB_D+"}
+
+    def test_autorouter_escape_property_empty_map_without_coupling(self):
+        """Issue #3419: per-net routing (no coupled consumer) -> empty map.
+
+        The paired-escape pre-pass emits endpoints at the intra-pair
+        clearance; only the CoupledPathfinder can route from them.  When
+        ``paired_escape_coupling`` is False (default; plain
+        ``route_all`` / ``route_all_negotiated``), the map must NOT be
+        threaded even though pairs are detected.
+        """
+        ar = self._build_ar_with_pair()
+        assert ar.paired_escape_coupling is False
+        escape = ar._escape
+        assert escape.diff_pair_map == {}
+
+    def test_route_all_with_diffpairs_flips_coupling_flag(self):
+        """``route_all_with_diffpairs`` enables the pre-pass before routing
+        and refreshes an already-created escape router's map in place
+        (Issue #3419).
+        """
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.diffpair import DifferentialPairConfig
+
+        ar = self._build_ar_with_pair()
+        # Simulate an earlier phase having created the escape router with
+        # the gate off.
+        escape = ar._escape
+        assert escape.diff_pair_map == {}
+
+        # ``Autorouter._diffpair`` is a lazy property over
+        # ``_diffpair_router`` -- mock the underlying attribute.
+        ar._diffpair_router = MagicMock()
+        ar._diffpair_router.route_all_with_diffpairs = MagicMock(return_value=([], []))
+        ar._diffpair_router.intra_clearance_violations = MagicMock(return_value=[])
+        try:
+            ar.route_all_with_diffpairs(DifferentialPairConfig(enabled=True))
+        except Exception:
+            # The mocked inner router may not satisfy the full post-route
+            # pipeline; the flag flip happens FIRST so it is still
+            # observable either way.
+            pass
+        assert ar.paired_escape_coupling is True
         assert escape.diff_pair_map == {"USB_D+": "USB_D-", "USB_D-": "USB_D+"}
 
     def test_autorouter_escape_property_empty_map_for_no_pairs(self):
