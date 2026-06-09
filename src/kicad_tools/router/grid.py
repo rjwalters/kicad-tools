@@ -1289,59 +1289,84 @@ class RoutingGrid:
         # the shrunk halo would let A* commit to traces that DRC
         # rejects (the same pathology PR #2866 fixed for the global
         # ``fine_pitch_clearance`` path).  We decline the shrink and
-        # fall through to the standard halo so the pathfinder routes
-        # around the package instead of through-channel.
+        # fall through to the LEGACY fine-pitch shrink logic below (NOT
+        # straight to the standard halo) so pre-#3371 behaviour is
+        # preserved for boards whose recipe already used the
+        # ``min_trace_width`` shrink (Issue #3421: board 06's 0.8mm
+        # BGA/QFN pads carried a 0.05mm legacy halo pre-P_FP3; the
+        # region branch hard-returning ``standard`` inflated those
+        # halos 4.5x and regressed the board's re-route DRC 13 -> 32).
+        #
+        # Guard pitches (Issue #3421): the corridor-feasibility check
+        # must hold for BOTH
+        #   (a) the applying region's *package* pitch -- the escape
+        #       shrink exists to thread the fine-pitch package's own
+        #       corridors; when those corridors stay infeasible even at
+        #       the escape clearance, the region cannot serve its
+        #       purpose and shrinking any pad (own or foreign) only
+        #       perturbs routing; AND
+        #   (b) the call-side pad's own component pitch (when known) --
+        #       a fine-pitch pad inside a *neighbouring* package's halo
+        #       must not have its own inter-pad corridor opened by the
+        #       neighbour's region.
+        # Pre-#3421 the guard only consulted the call-side pitch, so a
+        # foreign pad (e.g. a 0.96mm-pitch passive inside a BGA's 5mm
+        # halo) picked up the escape shrink even though the BGA corridor
+        # the shrink serves was infeasible at the escape clearance.
         if pad is not None and self._fine_pitch_regions:
             region_clearance = self._region_clearance_for_pad(pad)
             if region_clearance is not None:
-                # Compute pin pitch from the region directly (the region
-                # carries the package's pitch).  This is more reliable
-                # than the call-side ``pin_pitch`` argument, which can
-                # be ``None`` for callers that did not look it up.
-                region_pin_pitch = pin_pitch
-                if region_pin_pitch is None:
-                    for region in self._fine_pitch_regions:
-                        if region.applies_to_pad(pad):
-                            region_pin_pitch = region.pin_pitch
-                            break
+                # The applying region's package pitch (the region
+                # carries the package's pitch).  This is the pitch the
+                # escape shrink is FOR; the call-side ``pin_pitch``
+                # describes the pad's own component which may differ
+                # for foreign in-halo pads.
+                region_pin_pitch: float | None = None
+                for region in self._fine_pitch_regions:
+                    if region.applies_to_pad(pad):
+                        region_pin_pitch = region.pin_pitch
+                        break
 
-                if region_pin_pitch is not None:
+                required_channel = 2.0 * region_clearance + self.rules.trace_width
+                channel_ok = True
+                for guard_pitch in (region_pin_pitch, pin_pitch):
+                    if not guard_pitch:
+                        continue
                     effective_channel = (
-                        region_pin_pitch
-                        - 2.0 * region_clearance
-                        - self.rules.trace_width
-                    )
-                    required_channel = (
-                        2.0 * region_clearance + self.rules.trace_width
+                        guard_pitch - 2.0 * region_clearance - self.rules.trace_width
                     )
                     if effective_channel < required_channel:
                         # Channel too narrow for the escape clearance --
-                        # decline the shrink so the pathfinder routes
-                        # around the package via the escape mechanism.
-                        return standard
+                        # decline the shrink.  Fall THROUGH to the legacy
+                        # min_trace_width shrink below (pre-#3371
+                        # behaviour) instead of returning the standard
+                        # halo here.
+                        channel_ok = False
+                        break
 
-                # Halo is region clearance + trace half-width, mirroring
-                # the standard-halo formulation.
-                escape_halo = region_clearance + self.rules.trace_width / 2
+                if channel_ok:
+                    # Halo is region clearance + trace half-width,
+                    # mirroring the standard-halo formulation.
+                    escape_halo = region_clearance + self.rules.trace_width / 2
 
-                # Compose with the existing fine-pitch shrink: when both
-                # apply, take the smaller (more permissive) halo so the
-                # corridor opens up for the pathfinder.  Either halo is
-                # later validated by post-route DRC against the
-                # manufacturer floor.
-                if (
-                    pin_pitch is not None
-                    and pin_pitch < self.rules.fine_pitch_threshold
-                    and self.rules.min_trace_width is not None
-                ):
-                    shrunk = self.rules.min_trace_width / 2
-                    eff_legacy = pin_pitch - 2.0 * shrunk - self.rules.trace_width
-                    req_legacy = (
-                        2.0 * self.rules.trace_clearance + self.rules.trace_width
-                    )
-                    if eff_legacy >= req_legacy:
-                        return min(escape_halo, shrunk)
-                return escape_halo
+                    # Compose with the existing fine-pitch shrink: when
+                    # both apply, take the smaller (more permissive) halo
+                    # so the corridor opens up for the pathfinder.
+                    # Either halo is later validated by post-route DRC
+                    # against the manufacturer floor.
+                    if (
+                        pin_pitch is not None
+                        and pin_pitch < self.rules.fine_pitch_threshold
+                        and self.rules.min_trace_width is not None
+                    ):
+                        shrunk = self.rules.min_trace_width / 2
+                        eff_legacy = pin_pitch - 2.0 * shrunk - self.rules.trace_width
+                        req_legacy = (
+                            2.0 * self.rules.trace_clearance + self.rules.trace_width
+                        )
+                        if eff_legacy >= req_legacy:
+                            return min(escape_halo, shrunk)
+                    return escape_halo
 
         if (
             pin_pitch is not None

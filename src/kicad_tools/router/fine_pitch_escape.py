@@ -793,14 +793,28 @@ def resolve_clearance_with_escape_region(
                 # ``get_clearance_for_component`` so the validator
                 # rejects through-channel routes the same way the grid
                 # halo does.
-                pitch_for_guard = pin_pitch
-                if pitch_for_guard is None:
-                    pitch_for_guard = region.pin_pitch
-                if pitch_for_guard is not None:
+                #
+                # Guard pitches (Issue #3421): the feasibility check must
+                # hold for BOTH the region's *package* pitch AND the
+                # call-side pad's own component pitch (when known).  The
+                # escape shrink exists to thread the fine-pitch package's
+                # own corridors; when those corridors stay infeasible
+                # even at the candidate clearance, the region cannot
+                # serve its purpose, so loosening clearance on any
+                # in-halo pad (own or foreign) is pure routing
+                # perturbation.  Pre-#3421 the guard consulted only the
+                # call-side pitch, so a foreign pad (e.g. a 0.96mm-pitch
+                # passive inside a BGA's 5mm halo) picked up the 0.14mm
+                # escape clearance even though the BGA corridor it would
+                # serve was infeasible at that clearance (board 06
+                # re-route DRC regression, 13 -> 32 errors).
+                required_channel = 2.0 * candidate + rules.trace_width
+                for pitch_for_guard in (region.pin_pitch, pin_pitch):
+                    if not pitch_for_guard:
+                        continue
                     effective_channel = (
                         pitch_for_guard - 2.0 * candidate - rules.trace_width
                     )
-                    required_channel = 2.0 * candidate + rules.trace_width
                     if effective_channel < required_channel:
                         # Channel too narrow at candidate clearance --
                         # decline the shrink for this in-region pad.
