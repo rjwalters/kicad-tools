@@ -145,6 +145,7 @@ requirements:
     # walks 2L -> 4L (capped at max_layers=4) before refusing.
     escalation:
       ladder: layers-only
+      starting_layers: 4
       max_layers: 4
       density_threshold_viols_per_cm2: 0.5
 
