@@ -11024,8 +11024,37 @@ class Autorouter:
                     self.get_diff_pair_map() if self.paired_escape_coupling else {}
                 ),
                 net_pad_positions=net_pad_positions,
+                # Issue #3428: board-wide net-id -> pad-position map so the
+                # fine-pitch QFP in-pad rescue can aim its inner stub at
+                # the net's actual routing target instead of the parity-
+                # derived along-edge direction (board 04 OSC_OUT stub
+                # blocking NRST's via slot, Issue #3411).
+                net_target_positions=self._build_net_target_positions(),
             )
         return self._escape_router
+
+    def _build_net_target_positions(self) -> dict[int, list[tuple[float, float, str]]]:
+        """Build the board-wide net-id -> [(x, y, ref), ...] pad map.
+
+        Issue #3428: consumed by ``EscapeRouter._compute_target_direction``
+        to make the in-pad rescue's inner-stub direction target-aware.
+        Plane/unassigned pads (net 0) are skipped -- they connect via
+        zone fill / stitching, never via escape stubs.  Iteration over
+        sorted ``(ref, pin)`` keys keeps the per-net position lists
+        deterministic regardless of pad-insertion order (required for
+        ``--seed`` byte-identical reproducibility).
+
+        Distinct from the str-keyed ``net_pad_positions`` map built inline
+        in ``_escape`` (Issue #3419), which feeds the diff-pair launch
+        heuristic.
+        """
+        net_target_positions: dict[int, list[tuple[float, float, str]]] = {}
+        for key in sorted(self.pads):
+            pad = self.pads[key]
+            if pad.net == 0:
+                continue
+            net_target_positions.setdefault(pad.net, []).append((pad.x, pad.y, pad.ref))
+        return net_target_positions
 
     def detect_dense_packages(self) -> list[PackageInfo]:
         """Detect dense packages that need escape routing.
