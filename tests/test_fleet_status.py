@@ -854,6 +854,314 @@ class TestFleetStatusAdvisoryFilter:
         assert "incomplete_nets" in data["boards"][0]["routing"]
 
 
+class TestFleetStatusAdvisoryDRCFilter:
+    """Issue #3363 -- extend advisory filter to clearance-refused signal nets.
+
+    PR #3215 aligned ``RoutingStatus.routing_complete`` with
+    ``DRCChecker.ADVISORY_RULE_IDS`` for plane/pour stitching residuals.
+    Issue #3363 closes the second category surfaced by PR #3286: signal
+    nets the router correctly refused at clearance (e.g. board 04's NRST
+    after the post-#3225/#3227/#3232/#3248/#3250 clearance kernel closed
+    the marginal U2.7/U2.8 corridor).
+
+    Concrete case: board 04's NRST is a signal net with both pads NOT
+    on a copper zone, so ``NetStatus.is_advisory_incomplete`` is False
+    (correctly -- it's not a plane/pour residual). But the CI strict
+    gate (``scripts/ci/check_routed_drc.py``) classifies the
+    ``connectivity`` rule violation as advisory, so the gate passes.
+    Without this fix the fleet command would still emit a misleading
+    ``incomplete routing (1/12 nets)`` blocker for boards the CI gate
+    considers ship-ready.
+
+    Implementation (Option A from the issue body): when a sidecar
+    ``drc_report.json`` exists AND classifies every error as advisory
+    ``connectivity``, the ``incomplete routing`` blocker is suppressed.
+    Without a sidecar the pre-fix behaviour persists (mirrors the
+    issue-#2932 backwards-compat rule for ``_detect_drc``).
+    """
+
+    @staticmethod
+    def _write_drc_report(
+        routed_pcb: Path,
+        *,
+        connectivity_errors: int = 0,
+        blocking_errors: int = 0,
+        include_violations: bool = True,
+    ) -> None:
+        """Drop a synthetic ``drc_report.json`` next to ``routed_pcb``.
+
+        ``connectivity_errors`` are emitted with ``rule_id="connectivity"``
+        (advisory per ``ADVISORY_RULE_IDS``). ``blocking_errors`` use
+        ``rule_id="clearance"`` so they count as non-advisory blocking
+        violations. When ``include_violations`` is False the ``violations``
+        array is omitted, forcing the fall-back to ``summary.errors``
+        (legacy report format).
+        """
+        violations: list[dict] = []
+        for i in range(connectivity_errors):
+            violations.append(
+                {
+                    "rule_id": "connectivity",
+                    "severity": "error",
+                    "message": f"Net 'X{i}' is partially routed: 1 of 2 pads stranded",
+                }
+            )
+        for i in range(blocking_errors):
+            violations.append(
+                {
+                    "rule_id": "clearance",
+                    "severity": "error",
+                    "message": f"Clearance violation #{i}",
+                }
+            )
+        report: dict = {
+            "file": str(routed_pcb),
+            "manufacturer": "jlcpcb",
+            "summary": {
+                "errors": connectivity_errors + blocking_errors,
+                "warnings": 0,
+                "infos": 0,
+                "passed": (connectivity_errors + blocking_errors) == 0,
+            },
+        }
+        if include_violations:
+            report["violations"] = violations
+        (routed_pcb.parent / "drc_report.json").write_text(json.dumps(report))
+
+    def test_advisory_only_drc_suppresses_incomplete_blocker(
+        self, tmp_path: Path, capsys
+    ):
+        """Issue #3363 acceptance: signal-net incomplete + advisory DRC -> YES.
+
+        Mirrors board 04's post-#3286 state: NRST is a signal net the
+        router refused, but the only DRC error is the advisory
+        ``connectivity`` finding. The board must ship-ready.
+        """
+        boards = tmp_path / "boards"
+        # Use BLOCKING_SIGNAL_PCB which has a signal-net (SIG1) gap that
+        # would normally drive `incomplete routing` in the fleet status.
+        routed_pcb = make_fake_board(
+            boards,
+            "nrst-style",
+            pcb_text=BLOCKING_SIGNAL_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        # The CI gate sees the same SIG1 net as an advisory connectivity
+        # finding. Drop a matching DRC report.
+        self._write_drc_report(routed_pcb, connectivity_errors=1, blocking_errors=0)
+
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
+        assert result == 0  # All ship-ready.
+
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+        # Raw view still reflects the signal-net gap for human triage.
+        assert b["routing"]["blocking_incomplete_nets"] == 1
+        # But the verdict is YES because the CI strict gate would pass.
+        assert b["ship_ready"] is True
+        assert b["blockers"] == []
+        # DRC split surfaces the advisory category to JSON consumers.
+        assert b["drc"]["blocking_errors"] == 0
+        assert b["drc"]["advisory_errors_by_rule"] == {"connectivity": 1}
+        assert b["drc"]["advisory_only"] is True
+        assert b["drc"]["over_tolerance"] is False
+
+    def test_no_drc_report_preserves_incomplete_blocker(
+        self, tmp_path: Path, capsys
+    ):
+        """Without a ``drc_report.json`` the pre-fix behaviour persists.
+
+        Mirrors the issue-#2932 backwards-compat rule for ``_detect_drc``:
+        boards that have not yet had ``kct check`` run must keep their
+        pre-fix classification. A signal-net gap without a DRC report on
+        disk continues to drive ``incomplete routing``.
+        """
+        boards = tmp_path / "boards"
+        make_fake_board(
+            boards,
+            "no-drc-report",
+            pcb_text=BLOCKING_SIGNAL_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        # NO drc_report.json written.
+
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
+        assert result == 2  # Not ship-ready.
+
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+        assert b["ship_ready"] is False
+        assert any("incomplete routing" in blocker for blocker in b["blockers"]), b[
+            "blockers"
+        ]
+        # No DRC report -> advisory_only stays False.
+        assert b["drc"]["report_exists"] is False
+        assert b["drc"]["advisory_only"] is False
+
+    def test_blocking_drc_keeps_incomplete_blocker(self, tmp_path: Path, capsys):
+        """Mixed DRC (advisory + blocking) does NOT suppress the blocker.
+
+        When the CI strict gate would itself report blocking errors
+        (e.g. board 06's ``creepage`` violations), the fleet command
+        must NOT suppress the incomplete-routing blocker -- the board
+        is not ship-ready and both reasons should remain visible.
+        """
+        boards = tmp_path / "boards"
+        routed_pcb = make_fake_board(
+            boards,
+            "mixed-drc",
+            pcb_text=BLOCKING_SIGNAL_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        # Mix: 1 advisory connectivity + 1 blocking clearance.
+        self._write_drc_report(routed_pcb, connectivity_errors=1, blocking_errors=1)
+
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
+        assert result == 2  # Not ship-ready.
+
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+        assert b["ship_ready"] is False
+        # Both the incomplete-routing AND the DRC blocker should be present.
+        assert any(
+            "incomplete routing" in blocker for blocker in b["blockers"]
+        ), b["blockers"]
+        assert any("DRC errors" in blocker for blocker in b["blockers"]), b["blockers"]
+        # advisory_only is False because there's a blocking error.
+        assert b["drc"]["advisory_only"] is False
+        assert b["drc"]["blocking_errors"] == 1
+
+    def test_legacy_summary_only_report_keeps_strict_gate(
+        self, tmp_path: Path, capsys
+    ):
+        """Older reports without a ``violations`` array stay strict.
+
+        Pre-#3363 ``drc_report.json`` files only carried ``summary.errors``.
+        Without per-rule breakdown the gate cannot distinguish blocking
+        from advisory errors, so the safer default is to treat the raw
+        count as blocking (preserves the pre-fix verdict).
+        """
+        boards = tmp_path / "boards"
+        routed_pcb = make_fake_board(
+            boards,
+            "legacy-drc",
+            pcb_text=BLOCKING_SIGNAL_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        # Legacy: summary.errors=1, no violations array.
+        self._write_drc_report(
+            routed_pcb,
+            connectivity_errors=1,
+            blocking_errors=0,
+            include_violations=False,
+        )
+
+        # Without a violations array we cannot prove all errors are
+        # advisory, so the incomplete-routing blocker stays AND the DRC
+        # blocker fires on the raw error count (strict fall-back).
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+        assert b["ship_ready"] is False
+        # Raw error count is 1, tolerance is 0 -> over_tolerance.
+        assert b["drc"]["report_exists"] is True
+        assert b["drc"]["over_tolerance"] is True
+        # advisory_only is False because the violations array is missing.
+        assert b["drc"]["advisory_only"] is False
+
+    def test_clean_drc_report_does_not_flip_incomplete_to_ship(
+        self, tmp_path: Path, capsys
+    ):
+        """A 0-error DRC report does NOT suppress incomplete-routing.
+
+        Defensive: ``advisory_only`` requires at least one advisory
+        error to fire. A clean DRC report with zero errors should NOT
+        suppress an incomplete-routing blocker -- the absence of DRC
+        errors says nothing about routing completeness on its own.
+        """
+        boards = tmp_path / "boards"
+        routed_pcb = make_fake_board(
+            boards,
+            "clean-drc-incomplete-routing",
+            pcb_text=BLOCKING_SIGNAL_PCB,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        # 0 errors total -> not advisory_only.
+        self._write_drc_report(routed_pcb, connectivity_errors=0, blocking_errors=0)
+
+        result = main(["status", "--boards-dir", str(boards), "--format", "json"])
+        # Without an advisory-rule signal the incomplete-routing blocker
+        # stays, so this is NOT ship-ready.
+        assert result == 2
+        data = json.loads(capsys.readouterr().out)
+        b = data["boards"][0]
+        assert any(
+            "incomplete routing" in blocker for blocker in b["blockers"]
+        ), b["blockers"]
+        assert b["drc"]["advisory_only"] is False
+
+    def test_drc_status_to_dict_exposes_new_fields(self, tmp_path: Path):
+        """``DRCStatus.to_dict()`` exposes the new advisory split fields."""
+        from kicad_tools.cli.fleet_cmd import DRCStatus
+
+        drc = DRCStatus(
+            report_exists=True,
+            errors=2,
+            blocking_errors=0,
+            advisory_errors_by_rule={"connectivity": 2},
+        )
+        d = drc.to_dict()
+        assert d["blocking_errors"] == 0
+        assert d["advisory_errors_by_rule"] == {"connectivity": 2}
+        assert d["advisory_only"] is True
+        # over_tolerance uses blocking_errors when present.
+        assert d["over_tolerance"] is False
+
+    def test_drc_status_over_tolerance_uses_blocking_count(self):
+        """``over_tolerance`` ignores advisory errors per CI gate semantics.
+
+        Mirrors ``scripts/ci/check_routed_drc.py``: 5 advisory connectivity
+        errors with 0 blocking errors and tolerance 0 still passes the
+        strict gate, because the gate only counts non-advisory rules.
+        """
+        from kicad_tools.cli.fleet_cmd import DRCStatus
+
+        drc = DRCStatus(
+            report_exists=True,
+            errors=5,
+            tolerance=0,
+            blocking_errors=0,
+            advisory_errors_by_rule={"connectivity": 5},
+        )
+        # Raw errors > tolerance, but blocking_errors == 0 -> not over.
+        assert drc.over_tolerance is False
+
+        # Mixed: 2 blocking + 3 advisory, tolerance 1 -> over (2 > 1).
+        drc2 = DRCStatus(
+            report_exists=True,
+            errors=5,
+            tolerance=1,
+            blocking_errors=2,
+            advisory_errors_by_rule={"connectivity": 3},
+        )
+        assert drc2.over_tolerance is True
+
+
 # ---------------------------------------------------------------------------
 # Issue #3280: schematic-vs-PCB drift detection
 # ---------------------------------------------------------------------------

@@ -203,6 +203,23 @@ class DRCStatus:
     does not exceed ``tolerance``. When ``report_exists`` is False the
     DRC step has not yet run for this board, so it must NOT block
     ship-ready (issue #2932 backwards-compat rule).
+
+    Issue #3363: ``blocking_errors`` and ``advisory_errors_by_rule``
+    split the raw ``errors`` count by ``DRCChecker.ADVISORY_RULE_IDS``
+    so the fleet command can align its routing-completion verdict with
+    the CI strict gate (``scripts/ci/check_routed_drc.py``). The CI gate
+    treats ``connectivity`` rule violations -- which include both
+    plane/pour stitching residuals AND signal nets the router refused
+    (e.g. board 04's NRST after the post-#3286 clearance kernel closed
+    the marginal U2.7/U2.8 corridor) -- as advisory. Without this split
+    the fleet command would still emit a misleading ``incomplete
+    routing (1/N nets)`` blocker for boards the CI gate considers
+    ship-ready.
+
+    When ``report_exists`` is False both new fields are 0 / empty;
+    callers MUST treat the absence of a report as "unknown" rather than
+    "advisory-only" so the pre-fix behaviour is preserved on boards
+    that have not yet had ``kct check`` run.
     """
 
     report_exists: bool = False
@@ -212,19 +229,65 @@ class DRCStatus:
     # repo-relative path used to look up the tolerance. Surfaced so
     # JSON consumers can correlate.
     tolerance_key: str | None = None
+    # Issue #3363: split of ``errors`` by ``DRCChecker.ADVISORY_RULE_IDS``.
+    # ``blocking_errors`` is what the CI strict gate compares to tolerance;
+    # ``advisory_errors_by_rule`` maps each advisory rule_id to its error
+    # count (currently only ``connectivity``). Both default to 0/empty when
+    # the violations array is missing (legacy report format) or when no
+    # report exists.
+    blocking_errors: int = 0
+    advisory_errors_by_rule: dict[str, int] = field(default_factory=dict)
 
     @property
     def over_tolerance(self) -> bool:
-        """True iff a real DRC report exists AND it exceeds tolerance."""
-        return self.report_exists and self.errors > self.tolerance
+        """True iff a real DRC report exists AND it exceeds tolerance.
+
+        Issue #3363: uses ``blocking_errors`` (advisory-filtered) instead
+        of the raw ``errors`` count so the fleet verdict matches the CI
+        gate. Reports older than the violations-array format fall back
+        to ``errors`` because ``blocking_errors == 0`` and the gate
+        cannot distinguish blocking vs advisory without the per-rule
+        breakdown (defensive: treat as blocking).
+        """
+        if not self.report_exists:
+            return False
+        # If we parsed per-rule splits, gate on the blocking subset only.
+        # Otherwise (legacy / summary-only report) fall back to the raw
+        # ``errors`` count so the gate stays strict.
+        if self.blocking_errors > 0 or self.advisory_errors_by_rule:
+            return self.blocking_errors > self.tolerance
+        return self.errors > self.tolerance
+
+    @property
+    def advisory_only(self) -> bool:
+        """True iff a real DRC report exists AND every error is advisory.
+
+        Used by :func:`_compute_blockers` (issue #3363) to suppress the
+        ``incomplete routing`` blocker when the only DRC findings are
+        advisory ``connectivity``. ``errors == 0`` (clean report) is NOT
+        treated as ``advisory_only`` because there is nothing to be
+        advisory about -- callers should keep their incomplete-routing
+        verdict from the structural net analysis in that case.
+        """
+        if not self.report_exists:
+            return False
+        # Require at least one advisory error AND zero blocking errors;
+        # the latter ensures we don't suppress a legitimate signal-net
+        # blocker when some advisory violations happen to ride along.
+        if self.blocking_errors > 0:
+            return False
+        return sum(self.advisory_errors_by_rule.values()) > 0
 
     def to_dict(self) -> dict:
         return {
             "report_exists": self.report_exists,
             "errors": self.errors,
+            "blocking_errors": self.blocking_errors,
+            "advisory_errors_by_rule": dict(self.advisory_errors_by_rule),
             "tolerance": self.tolerance,
             "tolerance_key": self.tolerance_key,
             "over_tolerance": self.over_tolerance,
+            "advisory_only": self.advisory_only,
         }
 
 
@@ -476,7 +539,20 @@ def _detect_drc(
     blocker computation must then NOT treat the board as failing DRC,
     so boards that have not yet been DRC'd retain their pre-fix
     classification.
+
+    Issue #3363: when the report includes a ``violations`` array (the
+    current ``kct check --output`` format), split the error-severity
+    count by ``DRCChecker.ADVISORY_RULE_IDS`` so the fleet command's
+    ``incomplete routing`` blocker can be suppressed for boards whose
+    only routing-incompleteness findings are advisory ``connectivity``
+    (matching ``scripts/ci/check_routed_drc.py:_count_blocking_errors``).
+    Reports lacking the array (legacy summary-only format) keep
+    ``blocking_errors == 0`` and ``advisory_errors_by_rule == {}``; the
+    ``over_tolerance`` property then falls back to the raw ``errors``
+    count so the gate stays strict on older reports.
     """
+    from kicad_tools.validate.checker import DRCChecker
+
     drc = DRCStatus()
     report_path = routed_pcb.parent / "drc_report.json"
     tolerance, matched_key = _drc_tolerance_for(routed_pcb, tolerances)
@@ -497,6 +573,29 @@ def _detect_drc(
         errors = summary.get("errors", 0)
         if isinstance(errors, int) and not isinstance(errors, bool):
             drc.errors = errors
+    # Split errors by advisory rule classification when the violations
+    # array is present (issue #3363). Mirrors
+    # ``scripts/ci/check_routed_drc.py:_count_blocking_errors`` so the
+    # fleet command's gate semantics align with the CI strict gate.
+    violations = report.get("violations") if isinstance(report, dict) else None
+    if isinstance(violations, list):
+        blocking = 0
+        advisory: dict[str, int] = {}
+        for v in violations:
+            if not isinstance(v, dict):
+                continue
+            severity = v.get("severity", "error")
+            if severity != "error":
+                continue
+            rule_id = v.get("rule_id", "")
+            if not isinstance(rule_id, str):
+                continue
+            if DRCChecker.is_advisory_rule(rule_id):
+                advisory[rule_id] = advisory.get(rule_id, 0) + 1
+            else:
+                blocking += 1
+        drc.blocking_errors = blocking
+        drc.advisory_errors_by_rule = advisory
     drc.report_exists = True
     return drc
 
@@ -776,6 +875,19 @@ def _compute_blockers(
     routing/manufacturing-artifact blockers so the first-failure reason
     in the table stays consistent with prior behavior; DRC surfaces
     when those upstream gates already pass.
+
+    Incomplete-routing handling (issue #3363, post-#3215 follow-up):
+    when a ``drc_report.json`` exists AND classifies every error as
+    advisory ``connectivity`` (per ``DRCChecker.ADVISORY_RULE_IDS``,
+    via :attr:`DRCStatus.advisory_only`), the ``incomplete routing``
+    blocker is suppressed. This aligns the fleet command's verdict
+    with ``scripts/ci/check_routed_drc.py`` for the case where the
+    router correctly refused a signal net at clearance (board 04's
+    NRST after PR #3286) -- the CI gate treats the residual as
+    advisory so the board ships, and the fleet command must agree to
+    avoid a misleading ``incomplete routing (1/12 nets)`` blocker.
+    Without a DRC report on disk the pre-fix behaviour is preserved
+    (mirrors the issue-#2932 backwards-compat rule for ``_detect_drc``).
     """
     blockers: list[str] = []
     if routed_pcb is None:
@@ -799,11 +911,23 @@ def _compute_blockers(
         else:
             blockers.append("routed PCB stale (schematic drift)")
     elif not routing.routing_complete:
-        # Use the advisory-filtered count so the blocker message agrees
-        # with the verdict (plane/pour stitching residuals do not show
-        # up here even though `incomplete_nets` may be non-zero).
-        incomplete = routing.blocking_incomplete_nets + routing.unrouted_nets
-        blockers.append(f"incomplete routing ({incomplete}/{routing.total_nets} nets)")
+        # Issue #3363: align with the CI strict gate. When a DRC report
+        # exists and shows ONLY advisory ``connectivity`` errors (zero
+        # blocking errors), the CI gate treats the board as ship-ready
+        # and the fleet command must agree. Suppress the
+        # ``incomplete routing`` blocker in that case so the verdict
+        # matches ``scripts/ci/check_routed_drc.py``.
+        if drc is not None and drc.advisory_only:
+            # Advisory-only routing residuals are not a blocker; the
+            # diagnostic count is still preserved in the routing JSON
+            # for human triage.
+            pass
+        else:
+            # Use the advisory-filtered count so the blocker message agrees
+            # with the verdict (plane/pour stitching residuals do not show
+            # up here even though `incomplete_nets` may be non-zero).
+            incomplete = routing.blocking_incomplete_nets + routing.unrouted_nets
+            blockers.append(f"incomplete routing ({incomplete}/{routing.total_nets} nets)")
     if not mfg.dir_exists:
         blockers.append("no manufacturing/ dir")
         return blockers
