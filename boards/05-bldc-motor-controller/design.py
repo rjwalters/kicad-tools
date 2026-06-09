@@ -900,11 +900,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
         gate_hs_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
         gate_ls_nets=["GATE_AL", "GATE_BL", "GATE_CL"],
     )
-    inverter.connect_to_rails(vin_rail_y=RAIL_VMOTOR, gnd_rail_y=RAIL_GND)
     print("   Three-phase inverter: Q1-Q6 (ThreePhaseInverter block)")
 
     # Add current sense shunts for each phase (R10-R12)
-    # Using CurrentSenseShunt blocks for proper current sensing
+    # Using CurrentSenseShunt blocks for proper current sensing.
+    # NOTE: Build the shunts BEFORE wiring the inverter to the rails so
+    # that ``inverter.connect_to_rails`` can be told (via ``inline_shunts``)
+    # to skip its default LS-source-to-GND wire on every phase.  Without
+    # this ordering, the half-bridge helper would emit a direct LS-source
+    # to GND wire that shorts the shunt (the LS source belongs on the
+    # shunt's IN+ side, not on GND).  See issue #3383.
     phases = ["A", "B", "C"]
     current_sensors = []
     for i, phase in enumerate(phases):
@@ -935,16 +940,14 @@ def create_bldc_controller(output_dir: Path) -> Path:
         # The shunt's IN- pin is connected to GND *physically* via the
         # LS MOSFET source / GND copper zone on the PCB; only the
         # schematic label is needed for the netlister because
-        # ``ISENSE_X-`` is consumed only by the U10 ADC pins.  The
-        # IN+ side (R10/11/12.1) remains bridged to GND through the
-        # ``HalfBridge.connect_to_rails`` LS-source-to-GND wire -- a
-        # separate structural issue (the shunt should be in-line
-        # between LS source and GND, not in parallel) that is out of
-        # scope for #3379 and tracked elsewhere.
+        # ``ISENSE_X-`` is consumed only by the U10 ADC pins.
         current_sensors.append(sense)
 
-        # Wire the inverter LS output to the current sense input
-        # Get the phase output from inverter and wire to shunt
+        # Wire the inverter LS output to the current sense input.
+        # Get the phase LS-source position and wire to shunt IN+.  This
+        # replaces the suppressed LS-source-to-GND wire from
+        # ``ThreePhaseInverter.connect_to_rails(..., inline_shunts=...)``
+        # so the LS source sits on ISENSE_X+ instead of GND.
         phase_gnd = inverter.half_bridges[i].port("GND")
         sense_in = sense.port("IN_POS")
         sense_gnd = sense.port("GND")
@@ -960,6 +963,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
         sch.add_label(f"ISENSE_{phase}-", label_x, sense_gnd[1], rotation=0)
 
         print(f"   Phase {phase}: Current sense R{10 + i} (CurrentSenseShunt block)")
+
+    # Now wire the inverter to its power rails -- but pass the per-phase
+    # in-line shunts so each half-bridge skips its default LS-source-to-
+    # GND wire (which would short the shunt; issue #3383).  VIN/VMOTOR
+    # wires + junctions are still emitted as usual.
+    inverter.connect_to_rails(
+        vin_rail_y=RAIL_VMOTOR,
+        gnd_rail_y=RAIL_GND,
+        inline_shunts=current_sensors,
+    )
 
     # =========================================================================
     # Section 8: Motor Output Connector
