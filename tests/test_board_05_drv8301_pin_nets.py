@@ -23,8 +23,8 @@ Acceptance criteria (per issue #3387):
 * AC2: every pin in the design-side mapping resolves to a real position.
 * AC3: every labelled pin has a stub wire endpoint coincident with its
   label coordinate (KiCad label-on-wire invariant; regression of #2980).
-* AC4: no GND/+3.3V bridge -- specifically, AGND (pin 28) net is "GND"
-  and PWRGD (pin 4) net is "+3.3V"; if a Builder swaps them by mistake
+* AC4: no GND/+3V3 bridge -- specifically, AGND (pin 28) net is "GND"
+  and PWRGD (pin 4) net is "+3V3"; if a Builder swaps them by mistake
   the test fails loudly.
 """
 
@@ -59,32 +59,32 @@ BOARD_05_DRV8301_PIN_NETS: dict[str, str] = {
     "1": "GND",
     "2": "GND",
     "3": "+5V",
-    "4": "+3.3V",
-    "5": "+3.3V",
-    "6": "+3.3V",
+    "4": "+3V3",
+    "5": "+3V3",
+    "6": "+3V3",
     "7": "GND",
-    "8": "+3.3V",
-    "9": "+3.3V",
-    "10": "+3.3V",
-    "11": "+3.3V",
+    "8": "+3V3",
+    "9": "+3V3",
+    "10": "+3V3",
+    "11": "+3V3",
     "12": "GND",
     "13": "+5V",
     "14": "+5V",
     "15": "+5V",
-    "16": "+3.3V",
+    "16": "+3V3",
     "17": "PWM_AH",
     "18": "PWM_AL",
     "19": "PWM_BH",
     "20": "PWM_BL",
     "21": "PWM_CH",
     "22": "PWM_CL",
-    "23": "+3.3V",
-    "24": "+3.3V",
+    "23": "+3V3",
+    "24": "+3V3",
     "25": "ISENSE_A+",
     "26": "ISENSE_B+",
     "27": "+5V",
     "28": "GND",
-    "29": "VMOTOR",
+    "29": "+24V",
     "30": "ISENSE_B+",
     "31": "ISENSE_B-",
     "32": "ISENSE_A+",
@@ -93,24 +93,24 @@ BOARD_05_DRV8301_PIN_NETS: dict[str, str] = {
     "35": "GATE_CL",
     "36": "PHASE_C",
     "37": "GATE_DRV_CH",
-    "38": "VMOTOR",
+    "38": "+24V",
     "39": "ISENSE_B-",
     "40": "GATE_BL",
     "41": "PHASE_B",
     "42": "GATE_DRV_BH",
-    "43": "VMOTOR",
+    "43": "+24V",
     "44": "ISENSE_A-",
     "45": "GATE_AL",
     "46": "PHASE_A",
     "47": "GATE_DRV_AH",
-    "48": "VMOTOR",
-    "49": "+3.3V",
+    "48": "+24V",
+    "49": "+3V3",
     "50": "SW_OUT",
     "51": "SW_OUT",
-    "52": "VMOTOR",
-    "53": "VMOTOR",
-    "54": "VMOTOR",
-    "55": "+3.3V",
+    "52": "+24V",
+    "53": "+24V",
+    "54": "+24V",
+    "55": "+3V3",
     "56": "GND",
 }
 
@@ -220,27 +220,27 @@ class TestBoard05DRV8301PinNets:
             )
 
     def test_no_gnd_3v3_bridge(self) -> None:
-        """AC4 (core anti-regression): GND and +3.3V cannot be unified.
+        """AC4 (core anti-regression): GND and +3V3 cannot be unified.
 
         Issue #3387 documents how the initial DRV8308->DRV8301 swap silently
-        bridged AGND (pin 28) onto the +3.3V net through a J3 column-wire
+        bridged AGND (pin 28) onto the +3V3 net through a J3 column-wire
         collision.  This test pins the mapping: pin 28 is GND, pin 4 is
-        +3.3V, and they are NOT the same net string.  A future refactor
+        +3V3, and they are NOT the same net string.  A future refactor
         that accidentally collapses them would fail here loudly before
         ERC catches the global ``multiple_net_names`` warning.
         """
         assert BOARD_05_DRV8301_PIN_NETS["28"] == "GND", (
             "Pin 28 (AGND) must map to the global GND net.  Swapping this "
-            "to +3.3V re-introduces the #3387 GND/+3.3V short."
+            "to +3V3 re-introduces the #3387 GND/+3V3 short."
         )
-        assert BOARD_05_DRV8301_PIN_NETS["4"] == "+3.3V", (
-            "Pin 4 (PWRGD) must map to +3.3V (open-drain pull-up).  "
+        assert BOARD_05_DRV8301_PIN_NETS["4"] == "+3V3", (
+            "Pin 4 (PWRGD) must map to +3V3 (open-drain pull-up).  "
             "Swapping to GND would tie the pull-up rail to GND."
         )
         # No pin maps to an unexpected net name.
         for pin_key, net in BOARD_05_DRV8301_PIN_NETS.items():
             assert net in {
-                "GND", "+3.3V", "+5V", "VMOTOR", "SW_OUT",
+                "GND", "+3V3", "+5V", "+24V", "SW_OUT",
                 "PWM_AH", "PWM_AL", "PWM_BH", "PWM_BL", "PWM_CH", "PWM_CL",
                 "GATE_AL", "GATE_BL", "GATE_CL",
                 "GATE_DRV_AH", "GATE_DRV_BH", "GATE_DRV_CH",

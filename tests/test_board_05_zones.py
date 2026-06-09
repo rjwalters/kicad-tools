@@ -51,14 +51,16 @@ UNROUTED_PCB = BOARD_DIR / "output" / "bldc_controller.kicad_pcb"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
 
 # Issue #2899 acceptance criterion 1: at least 4 zones in the committed
-# routed PCB.  Five nets currently get zones (VMOTOR, +5V, +3.3V, GND,
+# routed PCB.  Five nets currently get zones (+24V, +5V, +3V3, GND,
 # PWR_LED); a stricter assertion would over-fit to today's placement.
+# Note: rails renamed VMOTOR -> +24V and +3.3V -> +3V3 in PR #3393
+# (closes #3384) to match stock ``power:+24V`` / ``power:+3V3`` symbols.
 MIN_REQUIRED_ZONES = 4
 
-# Issue #2899 acceptance criterion 2 (subset): VMOTOR, +5V, +3.3V, and
+# Issue #2899 acceptance criterion 2 (subset): +24V, +5V, +3V3, and
 # GND must each have a zone.  PWR_LED is allowed to disappear (small
 # net, may not survive an all-power-board guard or a future filter).
-REQUIRED_NETS = {"VMOTOR", "+5V", "+3.3V", "GND"}
+REQUIRED_NETS = {"+24V", "+5V", "+3V3", "GND"}
 
 
 def _count_zones(pcb_path: Path) -> int:
