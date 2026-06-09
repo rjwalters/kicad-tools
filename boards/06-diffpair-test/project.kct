@@ -128,13 +128,16 @@ requirements:
     min_space: "0.15mm"
     min_via: "0.3mm"
     assembly: smt
-    # Issue #3402: this board is purpose-built for diff-pair routing on a
-    # 4-layer JLCPCB tier-1 stackup; impedance formulas (Phase 3K) assume
-    # an inner GND plane.  Probing 2L is unproductive — opt out via
-    # starting_layers=4 so the escalation ladder skips the 2L rung.
-    # Residual reach gap at 4L (41%) tracked as gh:#3413.
-    escalation:
-      starting_layers: 4
+    # Issue #3402: this board's spec describes a 4-layer JLCPCB tier-1
+    # stackup with inner GND/PWR planes, but the routing-orchestrator's
+    # auto-layer escalation (#2916) already detects this from the
+    # ``layers.preferred: 4`` hint above.  An earlier attempt to set
+    # ``escalation.starting_layers: 4`` was reverted on this board
+    # specifically: the field is NOT a no-op here — it skips the 2L
+    # probe, lands the negotiator in a different basin (4L
+    # SIG-GND-PWR-SIG), and pushed routed DRC from 21 -> 32 violations
+    # (CI failure on the Diff-Pair Routing Regression gate).  Tracked
+    # under #3413 for a real fix.
 
   compliance:
     standards:

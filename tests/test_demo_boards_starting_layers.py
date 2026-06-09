@@ -12,10 +12,17 @@ against that bar and set ``starting_layers`` per board:
   - Boards 03 and 04 also stay at the default: their 2L reach gap is
     a *placement / topology* gap, not a layer-count gap (4L doesn't
     improve completion).  Residual gaps tracked as separate issues.
-  - Boards 05, 06, 07 set ``starting_layers: 4``: 06 and 07 are
-    inherent 4-layer PCBs (inner GND / PWR planes), and 05 (DRV8301 +
+  - Boards 05 and 07 set ``starting_layers: 4``: 07 is an inherent
+    4-layer PCB (inner GND / PWR planes), and 05 (DRV8301 +
     STM32G431 + 3-phase power) shows a material reach gap at 2L vs
     4L (46% vs 60%+) — probing 2L is a waste of routing budget.
+  - Board 06 was initially in the 4L-opt-in group but reverted after
+    Judge feedback on PR #3415: the field unexpectedly altered the
+    negotiator trajectory (skipped 2L probe, started 4L
+    SIG-GND-PWR-SIG, hit stagnation+timeout, DRC 21 -> 32, CI
+    failure on the diff-pair regression gate).  Tracked under
+    #3413 — whatever closes #3413 should re-evaluate whether
+    explicit ``starting_layers`` makes sense on this board.
 
 This regression test pins the audit decisions so a future spec edit
 that silently flips a board's starting layer (e.g., dropping ``05``
@@ -49,7 +56,8 @@ AUDIT_TABLE: dict[str, int | None] = {
     "03-usb-joystick": None,
     "04-stm32-devboard": None,
     "05-bldc-motor-controller": 4,
-    "06-diffpair-test": 4,
+    # 06-diffpair-test reverted to default — see module docstring + PR #3415.
+    "06-diffpair-test": None,
     "07-matchgroup-test": 4,
 }
 
