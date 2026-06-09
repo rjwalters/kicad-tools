@@ -1707,3 +1707,160 @@ class TestFleetStatusDriftFalsePositiveFixes:
         assert canonicalize_power_net("LED_K") == "LED_K"
         assert canonicalize_power_net("USB_CC1") == "USB_CC1"
         assert canonicalize_power_net("") == ""
+
+
+# ---------------------------------------------------------------------------
+# Drift detector extraction primitives -- issue #3370
+# ---------------------------------------------------------------------------
+
+
+class TestExtractSchematicNets:
+    """Unit-level checks on :func:`_extract_schematic_nets`.
+
+    Issue #3370: the drift detector must surface implicit globals
+    published by ``power:`` symbol instances (e.g. ``+24V`` on board
+    05's input power section), but must NOT surface ``PWR_FLAG`` -- a
+    KiCad ERC convention symbol that doesn't represent its own net.
+    """
+
+    def _write_sch(self, tmp_path: Path, text: str) -> Path:
+        sch = tmp_path / "test.kicad_sch"
+        sch.write_text(text)
+        return sch
+
+    def test_label_extraction(self, tmp_path):
+        from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
+
+        sch = self._write_sch(tmp_path, """(kicad_sch
+          (label "SIG1" (at 10 10 0))
+          (label "SIG2" (at 10 20 0))
+          (global_label "GLOBAL_SIG" (at 10 30 0))
+          (hierarchical_label "HIER_SIG" (at 10 40 0))
+        )""")
+        names = _extract_schematic_nets(sch)
+        assert names == {"SIG1", "SIG2", "GLOBAL_SIG", "HIER_SIG"}
+
+    def test_power_symbol_globals(self, tmp_path):
+        """``power:+24V`` -> ``+24V`` implicit global."""
+        from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
+
+        sch = self._write_sch(tmp_path, """(kicad_sch
+          (symbol (lib_id "power:+24V") (at 10 10 0))
+          (symbol (lib_id "power:GND") (at 10 20 0))
+          (symbol (lib_id "power:+3V3") (at 10 30 0))
+          (label "SIG1" (at 10 40 0))
+        )""")
+        names = _extract_schematic_nets(sch)
+        assert names == {"+24V", "GND", "+3V3", "SIG1"}
+
+    def test_pwr_flag_excluded(self, tmp_path):
+        """``power:PWR_FLAG`` is an ERC marker, not a net publisher."""
+        from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
+
+        sch = self._write_sch(tmp_path, """(kicad_sch
+          (symbol (lib_id "power:PWR_FLAG") (at 10 10 0))
+          (symbol (lib_id "power:VCC") (at 10 20 0))
+          (label "SIG1" (at 10 30 0))
+        )""")
+        names = _extract_schematic_nets(sch)
+        assert "PWR_FLAG" not in names
+        assert names == {"VCC", "SIG1"}
+
+    def test_net_placeholder_skipped(self, tmp_path):
+        """``Net-(...)`` label placeholders are dropped."""
+        from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
+
+        sch = self._write_sch(tmp_path, """(kicad_sch
+          (label "Net-(R1-Pad2)" (at 10 10 0))
+          (label "SIG1" (at 10 20 0))
+        )""")
+        names = _extract_schematic_nets(sch)
+        assert names == {"SIG1"}
+
+    def test_unreadable_returns_none(self, tmp_path):
+        """Missing file yields ``None`` so the detector skips the gate."""
+        from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
+
+        result = _extract_schematic_nets(tmp_path / "nonexistent.kicad_sch")
+        assert result is None
+
+
+class TestExtractPcbNamedNets:
+    """Unit-level checks on :func:`_extract_pcb_named_nets`.
+
+    Issue #3370: the function must drop PCB nets that exist only in
+    routing artifacts (segments / vias / zones) with no pad
+    attachment.  Those are routing leftovers from earlier sync rounds
+    and don't represent meaningful schematic-vs-PCB drift.
+    """
+
+    def _write_pcb(self, tmp_path: Path, text: str) -> Path:
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(text)
+        return pcb
+
+    def test_pad_attached_nets_kept(self, tmp_path):
+        from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
+
+        pcb = self._write_pcb(tmp_path, """(kicad_pcb
+          (net 0 "")
+          (net 1 "VCC")
+          (net 2 "GND")
+          (footprint "R_0402"
+            (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+            (pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+          )
+        )""")
+        names = _extract_pcb_named_nets(pcb)
+        assert names == {"VCC", "GND"}
+
+    def test_pad_orphan_nets_dropped(self, tmp_path):
+        """Top-level ``(net N "X")`` with no pad reference is dropped.
+
+        Mirrors board 05's ``PWR_LED`` / ``STATUS_LED`` leftover from
+        an older sync round: the segments still reference the net but
+        no pad does.  Without this filter, those names would surface
+        as drift even though they only describe stale routing state.
+        """
+        from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
+
+        pcb = self._write_pcb(tmp_path, """(kicad_pcb
+          (net 0 "")
+          (net 1 "VCC")
+          (net 2 "GND")
+          (net 3 "STALE_SEG_NET")
+          (footprint "R_0402"
+            (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+            (pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+          )
+          (segment (start 0 0) (end 1 1) (width 0.25) (layer "F.Cu") (net 3))
+        )""")
+        names = _extract_pcb_named_nets(pcb)
+        assert "STALE_SEG_NET" not in names
+        assert names == {"VCC", "GND"}
+
+    def test_auto_generated_names_dropped(self, tmp_path):
+        """``Net-(...)`` and ``unconnected-(...)`` names are dropped."""
+        from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
+
+        pcb = self._write_pcb(tmp_path, """(kicad_pcb
+          (net 0 "")
+          (net 1 "VCC")
+          (net 2 "Net-(R1-Pad2)")
+          (net 3 "unconnected-(U1-NC-Pad5)")
+          (footprint "R_0402"
+            (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+            (pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "Net-(R1-Pad2)"))
+          )
+          (footprint "QFN-32"
+            (pad "5" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 3 "unconnected-(U1-NC-Pad5)"))
+          )
+        )""")
+        names = _extract_pcb_named_nets(pcb)
+        assert names == {"VCC"}
+
+    def test_unreadable_returns_none(self, tmp_path):
+        from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
+
+        result = _extract_pcb_named_nets(tmp_path / "nonexistent.kicad_pcb")
+        assert result is None
