@@ -859,6 +859,14 @@ class TestEarlyTermination:
         router.rules.min_drill_clearance = 0.0
         router.rules.trace_width = 0.2
         router.rules.trace_clearance = 0.15
+        # Issue #3407: router/io.py:2256 compares router._edge_clearance > 0 --
+        # so MagicMock's default sentinel must be replaced with None to avoid
+        # ``TypeError: '>' not supported between instances of 'MagicMock' and
+        # 'int'``.  Same for _edge_segments (truthiness check on the adjacent
+        # line).  Mirrors the pattern in TestStartingLayersEndToEnd (PR #3405)
+        # and TestRegressionEarlyExit.
+        router._edge_clearance = None
+        router._edge_segments = None
         return router
 
     def _make_args(self, **overrides):
