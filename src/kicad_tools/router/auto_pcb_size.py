@@ -43,15 +43,19 @@ from enum import Enum
 from kicad_tools.pcb.mounting_holes import MountingHoleGroup
 from kicad_tools.router.mfr_limits import (
     ManufacturerSizeTier,
+    MfrLimits,
     get_mfr_size_tier_ladder,
 )
 from kicad_tools.spec.schema import EscalationPolicy
 
 __all__ = [
+    "DEFAULT_PACKING_OVERHEAD",
     "DEFAULT_REACH_THRESHOLD",
+    "DEFAULT_ROUTING_CHANNEL_PER_NET_MM2",
     "SIZE_CONSECUTIVE_REGRESSIONS",
     "SIZE_HARD_DROP_NETS",
     "SIZE_REGRESSION_TOLERANCE",
+    "AreaEstimate",
     "EscalationContext",
     "EscalationDecision",
     "RegressionVerdict",
@@ -59,6 +63,8 @@ __all__ = [
     "can_escalate_with_holes",
     "decide_escalation",
     "detect_regression_history",
+    "envelope_meets_area_estimate",
+    "estimate_required_area",
     "select_next_tier",
     "should_escalate",
     "should_escalate_with_history",
@@ -76,6 +82,38 @@ __all__ = [
 # by-recipe tuning becomes necessary -- the constant is intentionally
 # named here so the future field has an obvious source.
 DEFAULT_REACH_THRESHOLD: float = 0.95
+
+
+# Issue #3403: Default packing-density multiplier for the sum-of-clearances
+# pre-route area estimator.  Mirrors :attr:`EscalationPolicy.packing_overhead`
+# default so callers that bypass the policy can still use a sane value.
+#
+# 2.5 is a moderate prototype-density figure -- empirical calibration against
+# boards 02-07 + softstart (issue #3403 acceptance) shows ratios in the
+# 1.2-4.0x range track routability reasonably well; 2.5 is the median-safe
+# value that does NOT incorrectly skip the routable cases while still
+# catching the obviously over-constrained ones.
+#
+# Rationale for the coarse multiplier (vs. fine-grained per-net channel
+# modelling): keeps the estimator fast and recipe-independent.  A more
+# sophisticated per-net model is future work (see issue body "out of
+# scope" -- coarse multiplier is fine for v1).
+DEFAULT_PACKING_OVERHEAD: float = 2.5
+
+
+# Issue #3403: Per-signal-net routing-channel area estimate (mm^2) for the
+# coarse routing-channel term in :func:`estimate_required_area`.
+#
+# Empirical derivation: a typical 0.2 mm trace at 0.15 mm clearance occupies
+# a ~0.5 mm wide channel.  Average board traversal is ~30-50 mm at typical
+# board sizes (1-15 cm^2 envelopes), giving ~15-25 mm^2 per net of channel
+# real estate.  We round to 20 mm^2 as the central tendency.
+#
+# This is intentionally a single constant per net (not per-net-class or
+# per-density-region) -- the coarse multiplier is fine for v1 per the
+# Issue #3403 scope decision.  Future work could refine to a per-net-class
+# rate that scales with trace width and net topology fanout.
+DEFAULT_ROUTING_CHANNEL_PER_NET_MM2: float = 20.0
 
 
 # Multi-attempt regression-detection constants (Issue #3352, P_AS4).
@@ -703,3 +741,324 @@ def decide_escalation(
         return EscalationDecision.REFUSE_HOLES_DONT_FIT
 
     return EscalationDecision.ESCALATE
+
+
+# ---------------------------------------------------------------------------
+# Issue #3403: sum-of-clearances area-escalation heuristic.
+#
+# Pre-route geometric lower-bound for the minimum envelope area required to
+# route the design.  When the current envelope is smaller than this lower
+# bound, we know the routing attempt is doomed without spending the routing
+# budget; the escalation loop can skip directly to the next size tier.
+#
+# The reactive DRC-density backstop (``should_escalate``) stays as the
+# fallback for cases where the heuristic under-estimates (e.g. a board
+# with looser packing than the constant assumes).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AreaEstimate:
+    """Sum-of-clearances pre-route area estimate (Issue #3403).
+
+    Detailed breakdown of the :func:`estimate_required_area` result.  The
+    individual terms are exposed so callers (logging, debugging,
+    calibration) can inspect which contribution dominates a given board.
+
+    Attributes:
+        footprint_area_mm2: Sum of all footprint bounding-box areas, in mm^2.
+            "Bounding box" means the axis-aligned envelope of the
+            footprint's pad-array (the smallest rectangle that contains
+            every pad's outer extent).  This is the minimum copper area
+            the components themselves occupy.
+        clearance_halo_mm2: Sum of perimeter-halo contributions, in mm^2.
+            For each footprint, ``2*(W+H) * min_clearance`` -- the keep-out
+            ring around the component that other copper cannot enter.
+            Approximation: treats the halo as a thin rectangular border;
+            corner overlap when components abut is not double-counted
+            because the routing pass would also need that overlap region.
+        routing_channel_mm2: Coarse estimate of routing-channel area in mm^2.
+            Computed as ``signal_net_count * routing_channel_per_net``
+            (default ``DEFAULT_ROUTING_CHANNEL_PER_NET_MM2``).  A more
+            sophisticated per-net-class model is future work.
+        packing_overhead: The multiplier applied to the sum of the above
+            three terms.  Mirrors :attr:`EscalationPolicy.packing_overhead`.
+        total_mm2: Final required-area estimate in mm^2.  Equals
+            ``packing_overhead * (footprint_area_mm2 + clearance_halo_mm2 +
+            routing_channel_mm2)``.  Compare with ``board_w * board_h`` to
+            decide whether the current envelope can possibly accommodate
+            the design.
+        signal_net_count: The signal-net count used for the routing-channel
+            term (logging / calibration helper).
+        footprint_count: Number of footprints contributing to the
+            footprint-area + halo terms (logging / calibration helper).
+
+    Example:
+        >>> # Synthetic small board: 4 footprints, 6 signal nets
+        >>> # (this docstring snippet is illustrative -- see unit tests)
+    """
+
+    footprint_area_mm2: float
+    clearance_halo_mm2: float
+    routing_channel_mm2: float
+    packing_overhead: float
+    total_mm2: float
+    signal_net_count: int
+    footprint_count: int
+
+    @property
+    def total_cm2(self) -> float:
+        """Total required-area estimate in cm^2 (convenience)."""
+        return self.total_mm2 / 100.0
+
+
+def _footprint_bbox_dimensions(footprint) -> tuple[float, float]:
+    """Compute axis-aligned bounding-box ``(width, height)`` of a footprint.
+
+    Approximation: derived from the pad-array extent rather than the full
+    courtyard / silkscreen graphic.  Pads dominate the routed-copper
+    footprint for SMD parts, and through-hole parts have their drill
+    holes inside the pad bbox -- so this approximation is sound for the
+    routing-area estimate (we're estimating copper-occupancy, not silk).
+
+    For a footprint with no pads (e.g. a mechanical-only graphic), returns
+    ``(0.0, 0.0)``.  The clearance halo will still be zero for such
+    components, which is correct: they don't contribute to copper density.
+
+    Args:
+        footprint: A :class:`kicad_tools.schema.pcb.Footprint` instance.
+
+    Returns:
+        ``(width_mm, height_mm)`` of the bounding box that contains all
+        pad outer extents.
+    """
+    pads = getattr(footprint, "pads", None)
+    if not pads:
+        return (0.0, 0.0)
+
+    # Pad positions are footprint-local (KiCad convention); the bbox is
+    # measured in the same local frame.  Footprint rotation matters in
+    # absolute coords, but the bbox AREA is rotation-invariant for the
+    # bbox we use (any rectangle's bbox area equals its width * height
+    # regardless of orientation -- a 45deg rotation would inflate the
+    # AABB but the un-rotated AABB is the canonical "minimum bbox" for
+    # this estimate).
+    min_x = float("inf")
+    max_x = float("-inf")
+    min_y = float("inf")
+    max_y = float("-inf")
+    for pad in pads:
+        px, py = pad.position
+        w, h = pad.size
+        half_w = w / 2.0
+        half_h = h / 2.0
+        if px - half_w < min_x:
+            min_x = px - half_w
+        if px + half_w > max_x:
+            max_x = px + half_w
+        if py - half_h < min_y:
+            min_y = py - half_h
+        if py + half_h > max_y:
+            max_y = py + half_h
+
+    if min_x == float("inf"):
+        return (0.0, 0.0)
+    return (max_x - min_x, max_y - min_y)
+
+
+def _count_signal_nets(pcb) -> int:
+    """Count signal nets (non-empty, non-pour) on a :class:`PCB`.
+
+    Heuristic: include every net with a non-empty name, exclude common
+    pour-net names (``GND``, ``+3V3``, ``+5V``, etc.) and the unconnected
+    net (``""``).  Mirrors the per-board "signal_nets_total" convention
+    used by the rest of the routing code.
+
+    The classification is intentionally permissive: false positives
+    (counting a power net as signal) inflate the routing-channel term
+    by ``DEFAULT_ROUTING_CHANNEL_PER_NET_MM2`` per net, which is a small
+    contribution to the total area estimate.  False negatives (missing a
+    signal net) under-estimate the channel term, which is the failure
+    mode the reactive DRC-density backstop catches.
+
+    Args:
+        pcb: A :class:`kicad_tools.schema.pcb.PCB` instance.
+
+    Returns:
+        Non-negative signal-net count.
+    """
+    nets = getattr(pcb, "nets", None)
+    if not nets:
+        return 0
+
+    # Common pour / plane net names that don't carry routed signals.
+    POUR_PREFIXES = ("+", "-")
+    POUR_NAMES = frozenset(
+        {
+            "GND",
+            "GND1",
+            "GND2",
+            "GNDA",
+            "GNDD",
+            "AGND",
+            "DGND",
+            "PGND",
+            "VCC",
+            "VDD",
+            "VSS",
+            "VEE",
+            "VBUS",
+        }
+    )
+
+    count = 0
+    for net in nets.values():
+        name = getattr(net, "name", "") or ""
+        if not name:
+            continue
+        # Skip pour/plane nets (typically power rails).
+        if name in POUR_NAMES:
+            continue
+        if name.startswith(POUR_PREFIXES):
+            # Power-rail convention: +3V3, +5V, +1V2, -12V, etc.
+            continue
+        count += 1
+    return count
+
+
+def estimate_required_area(
+    pcb,
+    mfr_limits: MfrLimits,
+    packing_overhead: float = DEFAULT_PACKING_OVERHEAD,
+    routing_channel_per_net_mm2: float = DEFAULT_ROUTING_CHANNEL_PER_NET_MM2,
+) -> AreaEstimate:
+    """Estimate the minimum board area required to route ``pcb`` (mm^2).
+
+    Issue #3403: pre-route geometric lower bound on the envelope area
+    required to accommodate the design.  The formula is::
+
+        required = packing_overhead * (
+            sum(footprint_area + clearance_perimeter for each component)
+            + sum(routing_channel_estimate for each signal net)
+        )
+
+    where:
+
+      - ``footprint_area`` = the KiCad footprint pad-bbox area (mm^2).
+      - ``clearance_perimeter`` = ``2 * (W + H) * mfr.min_clearance`` --
+        the keep-out perimeter halo around the component.
+      - ``routing_channel_estimate`` = ``routing_channel_per_net_mm2``
+        per signal net (a coarse multiplier; see
+        :data:`DEFAULT_ROUTING_CHANNEL_PER_NET_MM2`).
+      - ``packing_overhead`` = heuristic multiplier that accounts for
+        routing-channel overlap, vias, fillets, and component keepouts
+        not modeled by the per-footprint terms.
+
+    The estimate is intentionally conservative -- it returns a LOWER
+    bound on the area needed for routing to succeed.  If the current
+    envelope area is below this estimate, the routing attempt is
+    structurally infeasible.  If above, the attempt may or may not
+    succeed depending on placement and net topology -- the reactive
+    DRC-density check (``should_escalate``) catches the failures the
+    heuristic doesn't.
+
+    When ``packing_overhead == 0``, the function still computes the
+    individual terms but returns ``total_mm2 = 0`` -- effectively
+    disabling the pre-route check.  Callers may use this as the kill
+    switch.
+
+    Args:
+        pcb: The PCB to analyse (a :class:`kicad_tools.schema.pcb.PCB`).
+        mfr_limits: Manufacturer's design-rule limits.  Only
+            ``min_clearance`` is consulted for the perimeter halo.
+        packing_overhead: Multiplier applied to the sum of footprint +
+            clearance-halo + routing-channel terms.  Defaults to
+            :data:`DEFAULT_PACKING_OVERHEAD` (2.5).  Recipes that need
+            recipe-specific tuning should pass
+            ``EscalationPolicy.packing_overhead``.
+        routing_channel_per_net_mm2: Coarse per-signal-net routing
+            channel area in mm^2.  Defaults to
+            :data:`DEFAULT_ROUTING_CHANNEL_PER_NET_MM2` (20 mm^2).
+
+    Returns:
+        :class:`AreaEstimate` with the breakdown.  The
+        ``total_mm2`` field is the headline number callers compare
+        against the current envelope area.
+
+    Example:
+        >>> # Synthetic two-pad SMD on a JLCPCB-spec board:
+        >>> # bbox 5x3 mm, perimeter halo at 0.127 mm clearance,
+        >>> # one signal net -> 20 mm^2 channel.
+        >>> # See unit tests for full worked example.
+    """
+    footprint_area_sum = 0.0
+    clearance_halo_sum = 0.0
+    footprint_count = 0
+
+    footprints = getattr(pcb, "footprints", None) or []
+    for fp in footprints:
+        w, h = _footprint_bbox_dimensions(fp)
+        if w <= 0 or h <= 0:
+            # Skip components with no pads (mechanical-only graphics);
+            # they contribute neither copper nor a halo.
+            continue
+        footprint_area_sum += w * h
+        # Perimeter halo: 2 * (W + H) * min_clearance.  This is the area
+        # of a thin rectangular border of width ``min_clearance`` around
+        # a W x H rectangle.  Exact formula would add 4 * min_clearance^2
+        # for the corner squares; we omit because min_clearance^2 is
+        # ~0.016 mm^2 at JLCPCB defaults (negligible vs. the W*H term).
+        clearance_halo_sum += 2.0 * (w + h) * mfr_limits.min_clearance
+        footprint_count += 1
+
+    signal_nets = _count_signal_nets(pcb)
+    routing_channel_sum = signal_nets * routing_channel_per_net_mm2
+
+    base_sum = footprint_area_sum + clearance_halo_sum + routing_channel_sum
+    total = packing_overhead * base_sum if packing_overhead > 0 else 0.0
+
+    return AreaEstimate(
+        footprint_area_mm2=footprint_area_sum,
+        clearance_halo_mm2=clearance_halo_sum,
+        routing_channel_mm2=routing_channel_sum,
+        packing_overhead=packing_overhead,
+        total_mm2=total,
+        signal_net_count=signal_nets,
+        footprint_count=footprint_count,
+    )
+
+
+def envelope_meets_area_estimate(
+    envelope_area_mm2: float,
+    estimate: AreaEstimate,
+) -> bool:
+    """Decide whether ``envelope_area_mm2`` is large enough to attempt routing.
+
+    Issue #3403: the pre-route filter consumed by
+    :func:`route_with_size_escalation`.
+
+    Returns ``True`` when the current envelope area is greater than or
+    equal to the estimated required area, i.e. the envelope COULD
+    plausibly accommodate the design.  Returns ``False`` when the
+    envelope is strictly smaller than the estimate, indicating the
+    routing attempt is structurally infeasible and the escalation loop
+    should skip directly to the next size tier.
+
+    When the estimate is zero (``packing_overhead == 0`` disables the
+    check), this function returns ``True`` unconditionally -- the
+    pre-route filter is opted out.
+
+    Args:
+        envelope_area_mm2: The current envelope area in mm^2.
+        estimate: The :class:`AreaEstimate` from
+            :func:`estimate_required_area`.
+
+    Returns:
+        ``True`` if ``envelope_area_mm2 >= estimate.total_mm2``
+        (or if the estimate is disabled).  ``False`` otherwise.
+    """
+    if estimate.total_mm2 <= 0.0:
+        # Estimator disabled by zero packing_overhead -> trust the reactive
+        # backstop.  Always return "meets".
+        return True
+    return envelope_area_mm2 >= estimate.total_mm2

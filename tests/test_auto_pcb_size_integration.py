@@ -840,3 +840,241 @@ class TestMultiAttemptRegression:
         # Should refuse after the regression is detected -- 2 attempts only.
         assert attempts["count"] == 2
         assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #3403: sum-of-clearances pre-route area heuristic integration
+# ---------------------------------------------------------------------------
+
+
+# 50 x 50 mm board with a single 20 x 20 mm footprint -- intentionally over-
+# constrained: the bbox alone occupies 16% of the envelope, and with halo +
+# packing overhead the estimator will say the envelope is too small.
+#
+# The numbers are chosen so the estimate at default packing_overhead=2.5
+# exceeds the envelope area: 1 footprint at 20x20 + halo 2*(20+20)*0.127
+# = 400 + 10.16 = 410.16 mm^2 base, *2.5 = 1025 mm^2 required.  The
+# envelope is 50*50 = 2500 mm^2 -- so actually this small board PASSES.
+# We need a smaller envelope to force the pre-route skip.
+_PCB_30x30_BIG_PART = textwrap.dedent("""\
+    (kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (layers
+        (0 "F.Cu" signal)
+        (31 "B.Cu" signal)
+        (44 "Edge.Cuts" user)
+      )
+      (net 0 "")
+      (net 1 "SIG_A")
+      (net 2 "SIG_B")
+      (net 3 "SIG_C")
+      (net 4 "SIG_D")
+      (net 5 "SIG_E")
+      (gr_rect
+        (start 100 100)
+        (end 130 130)
+        (stroke (width 0.1) (type default))
+        (fill none)
+        (layer "Edge.Cuts")
+        (uuid "outline-1")
+      )
+      (footprint "BigPart"
+        (layer "F.Cu")
+        (uuid "fp-1")
+        (at 115 115)
+        (pad "1" smd rect (at -8 -8) (size 4 4) (layers "F.Cu"))
+        (pad "2" smd rect (at  8 -8) (size 4 4) (layers "F.Cu"))
+        (pad "3" smd rect (at -8  8) (size 4 4) (layers "F.Cu"))
+        (pad "4" smd rect (at  8  8) (size 4 4) (layers "F.Cu"))
+      )
+    )
+""")
+
+
+class TestPreRouteAreaEstimateSkip:
+    """Integration tests for the Issue #3403 pre-route area-estimate skip.
+
+    Verifies that ``route_with_size_escalation`` skips the doomed routing
+    attempt when the current envelope is smaller than the
+    sum-of-clearances estimate.
+    """
+
+    def _args(self, pcb_path: Path) -> SimpleNamespace:
+        return SimpleNamespace(
+            pcb=str(pcb_path),
+            output=None,
+            manufacturer="jlcpcb",
+            auto_layers=True,
+            auto_pcb_size=True,
+            max_layers=4,
+            min_completion=0.95,
+            quiet=False,
+            strategy="negotiated",
+            packing_overhead=None,  # use policy default
+        )
+
+    def test_pre_route_skip_avoids_inner_call(self, tmp_path):
+        """When envelope < estimate, the inner router is NOT called.
+
+        We over-estimate by passing a huge ``--packing-overhead`` so the
+        estimate exceeds even the largest tier; the wrapper should skip
+        directly without calling route_with_layer_escalation.
+        """
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_30x30_BIG_PART)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path)
+        # Force a packing overhead high enough that the estimate exceeds
+        # the largest JLCPCB tier (200x300 = 60 000 mm^2). The fixture's
+        # base sum (footprints + halo + channels) is ~510 mm^2; we need
+        # the estimate above 60 000 to force REFUSE_MAX_TIER, so
+        # packing_overhead >= 120 suffices.  Use 200 for safety.
+        args.packing_overhead = 200.0
+
+        attempts = {"inner_calls": 0}
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            attempts["inner_calls"] += 1
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=5,
+                nets_to_route=5,
+                overflow=0,
+                completion=1.0,
+                success=True,
+                router=None,
+            )
+            return 0
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            rc = route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=True,
+            )
+
+        # With huge packing overhead the estimator forces escalation at
+        # every tier; the ladder is finite (5 rungs for JLCPCB) so we
+        # should NEVER reach an inner call.
+        assert attempts["inner_calls"] == 0
+        # Exit code is 1 (refused with max_tier) when the loop exhausts.
+        assert rc == 1
+
+    def test_pre_route_check_disabled_with_zero_packing_overhead(self, tmp_path):
+        """packing_overhead=0 disables the pre-route check -- inner is called."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_30x30_BIG_PART)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path)
+        args.packing_overhead = 0.0  # kill switch
+
+        attempts = {"inner_calls": 0}
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            attempts["inner_calls"] += 1
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=5,
+                nets_to_route=5,
+                overflow=0,
+                completion=1.0,
+                success=True,
+                router=None,
+            )
+            return 0
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            rc = route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=True,
+            )
+
+        # With the kill switch active, the inner router IS called.
+        assert attempts["inner_calls"] >= 1
+        assert rc == 0
+
+    def test_pre_route_logs_estimate(self, tmp_path, capsys):
+        """The estimate is logged on each loop iteration (calibration trail)."""
+        from kicad_tools.cli import route_cmd
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_30x30_BIG_PART)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path)
+        args.packing_overhead = 2.5  # default
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=5,
+                nets_to_route=5,
+                overflow=0,
+                completion=1.0,
+                success=True,
+                router=None,
+            )
+            return 0
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=False,
+            )
+
+        captured = capsys.readouterr()
+        assert "Area estimate:" in captured.out
+        # Calibration-friendly: the breakdown is in the log line.
+        assert "footprints=" in captured.out
+        assert "halo=" in captured.out
+        assert "channels=" in captured.out
+
+    def test_pre_route_skip_then_grow_changes_envelope(self, tmp_path):
+        """After skip+grow, the next iteration sees a larger envelope."""
+        from kicad_tools.cli import route_cmd
+        from kicad_tools.router.io import extract_board_dimensions
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_PCB_30x30_BIG_PART)
+        output_path = tmp_path / "routed.kicad_pcb"
+        args = self._args(pcb_path)
+        # Pick a packing_overhead that forces escalation from 30x30 but
+        # is satisfied somewhere up the JLCPCB ladder.
+        args.packing_overhead = 10.0
+
+        # Track envelope dimensions observed at each inner call.
+        envelopes_seen: list[tuple[float, float]] = []
+
+        def fake_inner(pcb_path, output_path, args, quiet):
+            dims = extract_board_dimensions(pcb_path)
+            if dims is not None:
+                envelopes_seen.append(dims)
+            args._last_layer_result = SimpleNamespace(
+                nets_routed=5,
+                nets_to_route=5,
+                overflow=0,
+                completion=1.0,
+                success=True,
+                router=None,
+            )
+            return 0
+
+        with patch.object(route_cmd, "route_with_layer_escalation", fake_inner):
+            route_cmd.route_with_size_escalation(
+                pcb_path=pcb_path,
+                output_path=output_path,
+                args=args,
+                quiet=True,
+            )
+
+        # The final envelope must be strictly larger than the starting one.
+        final_dims = extract_board_dimensions(pcb_path)
+        assert final_dims is not None
+        final_w, final_h = final_dims
+        assert final_w > 30.0 or final_h > 30.0

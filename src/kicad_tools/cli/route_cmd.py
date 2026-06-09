@@ -4782,10 +4782,13 @@ def route_with_size_escalation(
         EscalationDecision,
         RoutingResultMetrics,
         decide_escalation,
+        envelope_meets_area_estimate,
+        estimate_required_area,
     )
     from kicad_tools.router.io import extract_board_dimensions
     from kicad_tools.router.mfr_limits import (
         find_smallest_admitting_tier,
+        get_mfr_limits,
         get_mfr_size_tier_ladder,
     )
     from kicad_tools.schema.pcb import PCB
@@ -4798,9 +4801,32 @@ def route_with_size_escalation(
     envelope_hard: bool = bool(getattr(args, "_envelope_hard", False))
     hole_group = getattr(args, "_hole_group", None)
 
+    # Issue #3403: --packing-overhead CLI flag overrides the policy default.
+    # When the user passes --packing-overhead N, replace the policy's value
+    # with a copy honouring the flag.  ``None`` means "no override" -- use
+    # the policy's value as-is.
+    cli_packing_overhead = getattr(args, "packing_overhead", None)
+    if cli_packing_overhead is not None:
+        policy = policy.model_copy(update={"packing_overhead": float(cli_packing_overhead)})
+
     # Manufacturer for the size ladder.  Mirrors the layer-escalation
     # path's reliance on args.manufacturer.
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+
+    # Issue #3403: manufacturer limits used by the pre-route area estimator.
+    # Resolved once outside the loop because the limits don't change
+    # across size-tier escalation steps (clearance is a separate axis;
+    # auto-mfr-tier handles clearance escalation independently).
+    try:
+        mfr_limits_for_estimate = get_mfr_limits(manufacturer)
+    except ValueError:
+        # Defensive: unknown manufacturer.  Fall back to a conservative
+        # clearance (0.127 mm, the JLCPCB default) so the estimator still
+        # produces a sane number.  The reactive backstop will catch
+        # mis-estimates.
+        from kicad_tools.router.mfr_limits import MFR_JLCPCB
+
+        mfr_limits_for_estimate = MFR_JLCPCB
 
     # Discover the starting tier index from the current board dimensions.
     dims = extract_board_dimensions(pcb_path)
@@ -4922,6 +4948,168 @@ def route_with_size_escalation(
                 f"({cur_tier.note or 'no note'})"
             )
             flush_print("=" * 60)
+
+        # Issue #3403: pre-route sum-of-clearances area-estimate check.
+        # Before spending a routing budget, compute the geometric lower
+        # bound on the envelope area required for the design.  When the
+        # current envelope is smaller than the estimate, the attempt is
+        # structurally infeasible -- skip directly to the next size tier.
+        #
+        # The reactive DRC-density backstop stays as the fallback for
+        # cases where the heuristic under-estimates (loose layouts, low
+        # pin-count designs).  We deliberately log the estimate even
+        # when the envelope meets it, so calibration data is captured
+        # in the route summary.
+        pre_route_skip = False
+        if policy.packing_overhead > 0:
+            try:
+                pre_pcb = PCB.load(pcb_path)
+                area_estimate = estimate_required_area(
+                    pre_pcb,
+                    mfr_limits_for_estimate,
+                    packing_overhead=policy.packing_overhead,
+                )
+                # Use the CURRENT envelope (not the stale starting envelope).
+                pre_dims = extract_board_dimensions(pcb_path)
+                if pre_dims is not None:
+                    pre_w, pre_h = pre_dims
+                    pre_envelope_mm2 = pre_w * pre_h
+                    if not quiet:
+                        flush_print(
+                            f"  Area estimate: {area_estimate.total_mm2:.0f} mm^2 "
+                            f"required "
+                            f"(footprints={area_estimate.footprint_area_mm2:.0f}, "
+                            f"halo={area_estimate.clearance_halo_mm2:.0f}, "
+                            f"channels={area_estimate.routing_channel_mm2:.0f}, "
+                            f"x{area_estimate.packing_overhead:g} packing) "
+                            f"vs envelope {pre_envelope_mm2:.0f} mm^2"
+                        )
+                    if not envelope_meets_area_estimate(pre_envelope_mm2, area_estimate):
+                        ratio = (
+                            pre_envelope_mm2 / area_estimate.total_mm2
+                            if area_estimate.total_mm2 > 0
+                            else 0.0
+                        )
+                        if not quiet:
+                            flush_print(
+                                f"  Pre-route check: envelope < estimate "
+                                f"(ratio {ratio:.2f}); skipping doomed route "
+                                f"attempt and escalating directly."
+                            )
+                        pre_route_skip = True
+            except Exception as exc:
+                # Best-effort: if the estimate fails (malformed PCB,
+                # missing data), log and fall through to the normal
+                # route attempt.  The estimator is an OPTIMISATION, not
+                # a correctness gate -- silently degrading to the
+                # reactive path is the right behaviour.
+                if not quiet:
+                    flush_print(
+                        f"  Pre-route check: area estimate failed ({exc!r}); "
+                        f"falling back to reactive escalation."
+                    )
+
+        if pre_route_skip:
+            # Skip the inner routing attempt -- jump directly to the
+            # ESCALATE branch below.  Synthesise minimal metrics so the
+            # decision tree treats this attempt as "envelope too small"
+            # (low reach, no DRC density yet -- but we set the density
+            # above threshold so should_escalate fires).
+            #
+            # Use the current envelope for the area term so density
+            # divisor is meaningful.
+            board_w, board_h = pre_dims
+            board_area_cm2 = (board_w * board_h) / 100.0
+            # Synthetic metrics: 0% reach + above-threshold density so
+            # decide_escalation returns ESCALATE (or a refusal if the
+            # ladder/hard-envelope blocks).  We pick density = 2 *
+            # threshold to be safely above the trigger floor.
+            density_floor = policy.density_threshold_viols_per_cm2
+            metrics = RoutingResultMetrics(
+                signal_nets_routed=0,
+                signal_nets_total=1,
+                drc_violations=int(2 * density_floor * board_area_cm2) + 1,
+                board_area_cm2=board_area_cm2,
+            )
+            history.append(metrics)
+
+            context = EscalationContext(
+                current_tier_index=current_tier_index,
+                policy=policy,
+                manufacturer=manufacturer,
+                hole_group=hole_group,
+                envelope_hard=envelope_hard,
+            )
+            decision = decide_escalation(metrics, context, history=history)
+
+            if decision == EscalationDecision.REFUSE_MAX_TIER:
+                if not quiet:
+                    _print_size_escalation_refusal(
+                        reason="max_tier",
+                        current_tier_index=current_tier_index,
+                        ladder=ladder,
+                        cur_dims=(board_w, board_h),
+                    )
+                return 1
+
+            if decision == EscalationDecision.REFUSE_HARD_ENVELOPE:
+                if not quiet:
+                    _print_size_escalation_refusal(
+                        reason="envelope_hard",
+                        current_tier_index=current_tier_index,
+                        ladder=ladder,
+                        cur_dims=(board_w, board_h),
+                    )
+                return 1
+
+            if decision == EscalationDecision.REFUSE_HOLES_DONT_FIT:
+                if not quiet:
+                    _print_size_escalation_refusal(
+                        reason="holes_dont_fit",
+                        current_tier_index=current_tier_index,
+                        ladder=ladder,
+                        cur_dims=(board_w, board_h),
+                        hole_group=hole_group,
+                    )
+                return 1
+
+            # Grow the board and loop.  Mirrors the post-route ESCALATE
+            # branch below; we duplicate rather than refactor to keep the
+            # pre-route path self-contained.
+            next_index = current_tier_index + 1
+            if next_index >= len(ladder):
+                if not quiet:
+                    _print_size_escalation_refusal(
+                        reason="max_tier",
+                        current_tier_index=current_tier_index,
+                        ladder=ladder,
+                        cur_dims=(board_w, board_h),
+                    )
+                return 1
+            next_tier = ladder[next_index]
+            if not quiet:
+                flush_print(
+                    f"  Growing board (pre-route skip): tier [{next_index}] "
+                    f"{next_tier.max_width_mm:g}x{next_tier.max_height_mm:g} mm "
+                    f"({next_tier.note or 'no note'})"
+                )
+            try:
+                pcb_obj = PCB.load(pcb_path)
+                grow_board_outline_corner_anchored(
+                    pcb_obj,
+                    new_width_mm=next_tier.max_width_mm,
+                    new_height_mm=next_tier.max_height_mm,
+                )
+                pcb_obj.save(pcb_path)
+            except OutlineGrowError as exc:
+                if not quiet:
+                    flush_print(
+                        f"Error: --auto-pcb-size: outline grow failed: {exc}",
+                        file=sys.stderr,
+                    )
+                return 1
+            current_tier_index = next_index
+            continue  # restart the loop at the new tier (re-estimate)
 
         # Dispatch to the inner routing path.  Both branches call into
         # route_with_layer_escalation -- the difference is whether layers
@@ -6839,6 +7027,27 @@ def main(argv: list[str] | None = None) -> int:
             "escalation with an actionable refusal message enumerating "
             "alternative recipe levers (BOM reduction, more layers, larger "
             "envelope manually, looser clearance via spec amendment)."
+        ),
+    )
+    # Issue #3403: --packing-overhead overrides EscalationPolicy.packing_overhead
+    # for the sum-of-clearances pre-route area estimator.  The estimator
+    # computes ``required = packing_overhead * (sum(footprint_area + halo)
+    # + routing_channels)`` and skips doomed routing attempts before they
+    # waste a routing budget.  ``None`` (default) means "use the policy
+    # value (default 2.5)".  ``0`` disables the pre-route check (reactive
+    # DRC-density backstop still applies).
+    parser.add_argument(
+        "--packing-overhead",
+        type=float,
+        default=None,
+        help=(
+            "Packing-density multiplier for the --auto-pcb-size pre-route "
+            "area estimator (Issue #3403).  Default uses the recipe's "
+            "EscalationPolicy.packing_overhead (default 2.5).  Bump to "
+            "3.0+ for tight layouts, down to 1.8 for loose ones.  Set to "
+            "0 to disable the pre-route check (reactive DRC-density "
+            "backstop still applies).  No effect when --auto-pcb-size "
+            "is off."
         ),
     )
     # Issue #2881: --auto-mfr-tier / --mfr-tier-ladder.  Opt-in escalation

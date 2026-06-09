@@ -2730,6 +2730,24 @@ def _add_route_parser(subparsers) -> None:
             "ManufacturingRequirements.escalation policy when present."
         ),
     )
+    # Issue #3403: --packing-overhead controls the sum-of-clearances pre-
+    # route area estimator used by --auto-pcb-size.  Default None means
+    # "use the recipe's EscalationPolicy.packing_overhead (default 2.5)".
+    # Setting to 0 disables the pre-route check; the reactive DRC-density
+    # backstop still applies.
+    route_parser.add_argument(
+        "--packing-overhead",
+        type=float,
+        default=None,
+        help=(
+            "Packing-density multiplier for the --auto-pcb-size pre-route "
+            "area estimator (Issue #3403).  Default: use the recipe's "
+            "EscalationPolicy.packing_overhead (default 2.5).  Bump to 3.0+ "
+            "for tight layouts, down to 1.8 for loose ones.  Set to 0 to "
+            "disable the pre-route check (reactive DRC-density backstop "
+            "still applies)."
+        ),
+    )
     route_parser.add_argument(
         "--mfr-tier-ladder",
         type=str,
