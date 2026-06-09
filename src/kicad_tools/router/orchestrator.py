@@ -218,6 +218,73 @@ class RoutingOrchestrator:
                 out[n] = p
         return out
 
+    def _build_net_target_positions(self) -> dict[int, list[tuple[float, float, str]]] | None:
+        """Build the board-wide net-id -> [(x, y, ref), ...] pad map.
+
+        Issue #3428: feeds the EscapeRouter's ``net_target_positions``
+        parameter so the fine-pitch QFP in-pad rescue can aim its inner
+        stub at the net's actual routing target (see
+        ``EscapeRouter._compute_target_direction``).  This mirrors the
+        ``Autorouter._build_net_target_positions`` wiring on the ``kct
+        route`` path -- the orchestrator (``kct route-auto``) is an
+        independent code path and fixing only one is a known foot-gun.
+
+        Two PCB-like shapes are supported, both defensively:
+
+        1. Autorouter-style ``self.pcb.pads`` dict keyed by
+           ``(ref, pin)`` with router ``Pad`` values.
+        2. Document-model ``self.pcb.footprints`` with relative pad
+           positions (rotated into world coordinates with the standard
+           CCW-positive convention, mirroring
+           ``kicad_tools.mcp.tools.routing._build_pads_for_net``).
+
+        Returns ``None`` when neither shape is usable (e.g. mock PCBs in
+        unit tests) so the EscapeRouter falls back to legacy
+        parity-derived stub directions.  Iteration is over sorted keys /
+        document order to keep the per-net lists deterministic.
+        """
+        result: dict[int, list[tuple[float, float, str]]] = {}
+        try:
+            pads_attr = getattr(self.pcb, "pads", None)
+            if isinstance(pads_attr, dict) and pads_attr:
+                for key in sorted(pads_attr):
+                    pad = pads_attr[key]
+                    net = getattr(pad, "net", 0)
+                    if not isinstance(net, int) or net == 0:
+                        continue
+                    result.setdefault(net, []).append(
+                        (pad.x, pad.y, getattr(pad, "ref", "") or "")
+                    )
+                return result or None
+
+            footprints = getattr(self.pcb, "footprints", None)
+            if footprints:
+                for fp in footprints:
+                    ref = getattr(fp, "reference", "") or ""
+                    if not ref or ref.startswith("#"):
+                        continue
+                    fp_x, fp_y = fp.position
+                    # KiCad rotation is CCW-positive; standard 2D
+                    # rotation matrix applies directly.
+                    rot_rad = math.radians(getattr(fp, "rotation", 0.0) or 0.0)
+                    cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+                    for pad in fp.pads:
+                        net = getattr(pad, "net_number", 0)
+                        if not isinstance(net, int) or net == 0:
+                            continue
+                        px, py = pad.position
+                        result.setdefault(net, []).append(
+                            (
+                                fp_x + px * cos_r - py * sin_r,
+                                fp_y + px * sin_r + py * cos_r,
+                                ref,
+                            )
+                        )
+                return result or None
+        except Exception:  # pragma: no cover - defensive against mock PCBs
+            return None
+        return None
+
     def route_net(
         self,
         net: str | int,
@@ -698,6 +765,12 @@ class RoutingOrchestrator:
                     # returns {} when no pairs are detected, preserving
                     # pre-#2639 single-ended behavior.
                     diff_pair_map=self._get_diff_pair_map(),
+                    # Issue #3428: net -> pad-position map for target-aware
+                    # in-pad rescue stub directions.  Same wiring as the
+                    # Autorouter (``kct route``) path -- the orchestrator
+                    # (``kct route-auto``) is an independent code path and
+                    # fixing only one is a known foot-gun in this codebase.
+                    net_target_positions=self._build_net_target_positions(),
                 )
 
         if self._escape is not None:
@@ -1347,6 +1420,9 @@ class RoutingOrchestrator:
                     # Issue #2639 / Epic #2556 Phase 2F: same threading
                     # as the escape_then_global ctor site above.
                     diff_pair_map=self._get_diff_pair_map(),
+                    # Issue #3428: same target-aware in-pad stub wiring
+                    # as the escape_then_global ctor site above.
+                    net_target_positions=self._build_net_target_positions(),
                 )
         return self._escape
 

@@ -894,6 +894,7 @@ class EscapeRouter:
         manufacturer: str | None = None,
         diff_pair_map: dict[str, str] | None = None,
         net_pad_positions: dict[str, list[tuple[float, float]]] | None = None,
+        net_target_positions: dict[int, list[tuple[float, float, str]]] | None = None,
     ):
         """Initialize the escape router.
 
@@ -932,6 +933,20 @@ class EscapeRouter:
                 the main per-net A* does not have to fight its way around
                 the package from a tight launch.  Defaults to ``None``
                 which preserves the center-outward quadrant heuristic.
+            net_target_positions: Optional board-wide net-to-pad-position map
+                (Issue #3428): ``{net_id: [(x, y, ref), ...]}`` covering
+                every pad on every net (plane nets / net 0 may be
+                omitted).  When supplied, the fine-pitch QFP in-pad
+                rescue (``_escape_qfp_alternating`` ->
+                ``_try_in_pad_escape``) points the inner-layer escape
+                stub toward the net's nearest OFF-package pad instead of
+                the parity-derived along-edge direction, so the stub no
+                longer blocks the adjacent pin's own via slot (board 04
+                LQFP-48 OSC_OUT stub vs NRST, Issue #3411).  Defaults to
+                ``None`` which preserves legacy parity-based stub
+                directions exactly.  Distinct from ``net_pad_positions``
+                (Issue #3419), which is keyed by net NAME and consumed by
+                the diff-pair launch heuristic.
         """
         self.grid = grid
         self.rules = rules
@@ -952,6 +967,14 @@ class EscapeRouter:
         # disables the heuristic (falls back to center-outward quadrant
         # direction).
         self.net_pad_positions: dict[str, list[tuple[float, float]]] = net_pad_positions or {}
+        # Issue #3428: board-wide net-id -> [(x, y, ref), ...] pad-position
+        # map used by ``_compute_target_direction`` to make the QFP in-pad
+        # rescue's inner stub target-aware.  Empty map disables the
+        # feature (every call site falls back to the legacy
+        # parity-derived direction).
+        self.net_target_positions: dict[int, list[tuple[float, float, str]]] = (
+            net_target_positions or {}
+        )
         # Instrumentation counter (Gate 3/4 of the #2587-style verification
         # chain): bumped every time ``_escape_diff_pair_segment`` is
         # invoked.  Tests assert this is non-zero on board 03 and zero
@@ -2663,13 +2686,75 @@ class EscapeRouter:
                         # that were filtered out of ``pads`` above.
                         extra_pads=self._other_footprint_pads(package, pads),
                     )
-                    if violation or pin_boxed:
+
+                    # Issue #3428 (POCKET-ESCAPE rescue): a clean surface
+                    # escape is not always a USEFUL surface escape.  On
+                    # board 04, U2.7 NRST's perpendicular WEST escape is
+                    # geometrically clean -- but its routing target
+                    # (J1.5) lies EAST across the package, and the only
+                    # west-side exit corridor is already consumed by
+                    # OSC_IN's escape via after U2.6 OSC_OUT claimed its
+                    # in-pad via.  The result is a dead-end pocket and a
+                    # stranded net no amount of rip-up can recover.
+                    #
+                    # Trigger conditions (ALL must hold; deliberately
+                    # narrow so every other board keeps byte-identical
+                    # escapes):
+                    #   1. The standard rescue triggers (violation /
+                    #      pin_boxed) did NOT fire,
+                    #   2. the net is not a pour net (plane nets connect
+                    #      via zone fill, never via escape stubs),
+                    #   3. an immediately adjacent same-package pin
+                    #      already claimed an in-pad via in this pass
+                    #      (the contested-channel signal),
+                    #   4. the net's snapped target direction points
+                    #      AWAY from the parity-derived escape direction
+                    #      (negative dot product -- the escape would
+                    #      walk away from the target into the pocket).
+                    # When they hold, rescue this pin too with an in-pad
+                    # via whose inner stub points AT the target --
+                    # under-package inner-layer space is open for SMD
+                    # packages, so ``allow_into_package=True``.
+                    pocket_target: EscapeDirection | None = None
+                    if not violation and not pin_boxed and pad.net != 0:
+                        nc = self.net_class_map.get(pad.net_name)
+                        is_pour = nc is not None and getattr(nc, "is_pour_net", False)
+                        if not is_pour:
+                            raw_target = self._compute_target_direction(
+                                pad=pad,
+                                package=package,
+                                primary_dir=primary_dir,
+                                allow_into_package=True,
+                            )
+                            if raw_target is not None:
+                                tvx, tvy = self._direction_to_vector(raw_target)
+                                dvx, dvy = self._direction_to_vector(direction)
+                                if tvx * dvx + tvy * dvy < 0 and self._neighbour_claimed_in_pad_via(
+                                    pad,
+                                    package,
+                                    escapes,
+                                ):
+                                    pocket_target = raw_target
+
+                    if violation or pin_boxed or pocket_target is not None:
                         # Issue #3033 / #3062: forward the EscapeRouter-level
                         # strict flag so the dispatcher inherits the "defer
                         # rather than commit a violating via" policy.
                         # Defaults to False on the EscapeRouter constructor,
                         # preserving legacy behaviour exactly for every
                         # existing caller.
+                        #
+                        # Issue #3428: point the rescue's inner stub at the
+                        # net's actual routing target (nearest off-package
+                        # same-net pad, snapped to a cardinal) instead of
+                        # the parity-derived along-edge direction.  On
+                        # board 04 the parity direction for U2.6 OSC_OUT
+                        # was NORTH (+y, toward U2.7 NRST); the 0.5mm
+                        # stub then blocked NRST's only escape-via slot.
+                        # Returns None (-> legacy direction) when no
+                        # net-position map was wired in, the net has no
+                        # off-package pads, or the target points into the
+                        # package body.
                         in_pad_route = self._try_in_pad_escape(
                             pad=pad,
                             direction=direction,
@@ -2677,8 +2762,30 @@ class EscapeRouter:
                             escape_width=escape_width,
                             package=package,
                             skip_on_clearance_violation=self.strict_in_pad_clearance,
+                            target_direction=(
+                                pocket_target
+                                if pocket_target is not None
+                                else self._compute_target_direction(
+                                    pad=pad,
+                                    package=package,
+                                    primary_dir=primary_dir,
+                                )
+                            ),
                         )
                         if in_pad_route is not None:
+                            if pocket_target is not None:
+                                logger.info(
+                                    "POCKET-ESCAPE in-pad rescue for %s pin %s "
+                                    "(net %s): clean surface escape pointed "
+                                    "AWAY from the net target while an "
+                                    "adjacent pin holds an in-pad via; "
+                                    "rescued with target-aware stub dir=%s "
+                                    "(Issue #3428).",
+                                    package.ref,
+                                    pad.pin,
+                                    pad.net_name,
+                                    pocket_target.name,
+                                )
                             if pin_boxed and not violation:
                                 logger.info(
                                     "In-pad rescue forced for %s pin %s "
@@ -2725,16 +2832,26 @@ class EscapeRouter:
                         # the strict-mode path was already using -- still
                         # falls back to "defer to main router" when it
                         # returns None.
-                        lateral_route = self._try_lateral_via_escape(
-                            pad=pad,
-                            direction=primary_dir,
-                            effective_clearance=effective_clearance,
-                            escape_width=escape_width,
-                            package=package,
-                        )
-                        if lateral_route is not None:
-                            escapes.append(lateral_route)
-                            continue
+                        #
+                        # Issue #3428: the lateral attempt is gated to the
+                        # LEGACY triggers (violation / pin_boxed).  When
+                        # only the pocket-escape trigger fired and the
+                        # in-pad rescue could not place a via, the pin's
+                        # surface escape is geometrically clean -- fall
+                        # through to it unchanged rather than introducing
+                        # an off-pad via that the pre-#3428 code would
+                        # never have placed.
+                        if violation or pin_boxed:
+                            lateral_route = self._try_lateral_via_escape(
+                                pad=pad,
+                                direction=primary_dir,
+                                effective_clearance=effective_clearance,
+                                escape_width=escape_width,
+                                package=package,
+                            )
+                            if lateral_route is not None:
+                                escapes.append(lateral_route)
+                                continue
 
                 # Issue #2881: Missed-rescue detection.  When the package is
                 # fine-pitch enough to need via-in-pad rescue but the
@@ -5774,6 +5891,163 @@ class EscapeRouter:
         # last-resort behavior).
         return via_x, via_y, False
 
+    def _compute_target_direction(
+        self,
+        pad: Pad,
+        package: PackageInfo,
+        primary_dir: EscapeDirection,
+        allow_into_package: bool = False,
+    ) -> EscapeDirection | None:
+        """Snap the direction toward the net's nearest off-package pad.
+
+        Issue #3428 (follow-on to #3411): the QFP-alternating dispatcher
+        chooses the in-pad rescue's inner-stub direction purely from the
+        pin's index parity in the sorted same-edge pad list.  On board 04
+        that emitted U2.6 OSC_OUT's B.Cu stub TOWARD U2.7 (NRST), whose
+        candidate escape via then failed clearance against the stub --
+        stranding NRST.  This helper consults the board-wide
+        ``net_target_positions`` map and returns the cardinal direction
+        pointing at the net's actual routing target so the stub leaves
+        the contested channel instead of blocking it.
+
+        Selection rules (all deterministic, required for the ``--seed``
+        byte-identical reproducibility AC):
+
+        1. Candidate targets are the net's pads NOT on ``package``
+           (matched by ref).  No candidates / no map entry -> ``None``
+           (caller keeps the legacy parity direction).
+        2. The nearest candidate wins; exact distance ties break by
+           ``(x, y)`` ascending.
+        3. The delta to the winner snaps to the axis with the larger
+           ``|component|``.  On an exact ``|dx| == |dy|`` tie the fixed
+           precedence ``NORTH > EAST > SOUTH > WEST`` picks between the
+           two candidate cardinals.
+        4. Into-package guard: when the snapped direction points INTO
+           the package body (negative dot product with ``primary_dir``,
+           the outward perpendicular for this edge), return ``None`` --
+           an inner stub under the package would collide with the other
+           edges' escapes.  Along-edge results (zero dot product) are
+           allowed; redirecting the stub along the edge AWAY from a
+           needy neighbour is precisely the board-04 fix.  Callers that
+           EXPLICITLY want an under-package inner stub (the
+           pocket-escape rescue, see ``_escape_qfp_alternating``) pass
+           ``allow_into_package=True`` to skip this guard -- on the
+           inner escape layer the area under an SMD package body is
+           open routing space, and a net whose target lies across the
+           package must traverse it anyway.
+
+        Args:
+            pad: The pad being rescued.
+            package: The package the pad belongs to (its ref filters
+                same-package pads out of the candidate target set).
+            primary_dir: Outward perpendicular escape direction for the
+                pad's package edge (used for the into-package guard).
+            allow_into_package: When True, skip the into-package guard
+                (step 4) and return the snapped target direction even
+                when it points across the package body.  Default False
+                preserves the conservative behaviour for the standard
+                violation-triggered rescue path.
+
+        Returns:
+            The snapped cardinal ``EscapeDirection``, or ``None`` when no
+            target information is available or the target points into
+            the package body (caller falls back to legacy behaviour).
+        """
+        positions = self.net_target_positions.get(pad.net)
+        if not positions:
+            return None
+        candidates = [(x, y) for x, y, ref in positions if ref != package.ref]
+        if not candidates:
+            return None
+
+        # Deterministic nearest-candidate selection: squared distance,
+        # then (x, y) ascending on exact ties.
+        tx, ty = min(
+            candidates,
+            key=lambda p: ((p[0] - pad.x) ** 2 + (p[1] - pad.y) ** 2, p[0], p[1]),
+        )
+        dx = tx - pad.x
+        dy = ty - pad.y
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return None
+
+        # NOTE: EscapeDirection.NORTH maps to (0, +1) in this module
+        # (see ``_direction_to_vector``), i.e. toward LARGER y in the
+        # KiCad y-down world frame.  We stay consistent with that
+        # convention here rather than the schematic-intuitive one.
+        horizontal = EscapeDirection.EAST if dx > 0 else EscapeDirection.WEST
+        vertical = EscapeDirection.NORTH if dy > 0 else EscapeDirection.SOUTH
+        if abs(dx) > abs(dy) + 1e-9:
+            target = horizontal
+        elif abs(dy) > abs(dx) + 1e-9:
+            target = vertical
+        else:
+            # Exact |dx| == |dy| tie: documented fixed precedence
+            # NORTH > EAST > SOUTH > WEST between the two candidates.
+            precedence = {
+                EscapeDirection.NORTH: 0,
+                EscapeDirection.EAST: 1,
+                EscapeDirection.SOUTH: 2,
+                EscapeDirection.WEST: 3,
+            }
+            target = min((vertical, horizontal), key=lambda d: precedence[d])
+
+        # Into-package fallback guard: reject directions whose dot
+        # product with the outward perpendicular is negative.
+        if not allow_into_package:
+            pvx, pvy = self._direction_to_vector(primary_dir)
+            tvx, tvy = self._direction_to_vector(target)
+            if pvx * tvx + pvy * tvy < 0:
+                return None
+        return target
+
+    def _neighbour_claimed_in_pad_via(
+        self,
+        pad: Pad,
+        package: PackageInfo,
+        escapes: list[EscapeRoute],
+    ) -> bool:
+        """Check whether an adjacent same-package pin claimed an in-pad via.
+
+        Issue #3428 (pocket-escape rescue trigger): when a fine-pitch
+        pin's immediate neighbour was just rescued with an in-pad via,
+        the inter-pin surface channel is contested -- the neighbour's
+        via plus its inner stub consume the clearance budget that this
+        pin's own escape via would need.  Combined with a routing target
+        on the FAR side of the package (see the caller's dot-product
+        check), the standard perpendicular surface escape leads into a
+        dead-end pocket (board 04: U2.7 NRST escaping WEST into the
+        crystal-cluster pocket while its target J1.5 lies EAST).
+
+        Adjacency is physical, not list-index based: a neighbour
+        qualifies when its pad centre lies within ``1.25 x pin_pitch``
+        (Chebyshev) of this pad.  The 1.25 factor tolerates sub-grid
+        coordinate noise while excluding next-but-one pins (2.0 x
+        pitch away).
+
+        Args:
+            pad: The pad being considered for a pocket-escape rescue.
+            package: Package context (supplies ``pin_pitch``).
+            escapes: Escape routes accumulated so far in this dispatch
+                pass (earlier-indexed pins on this and previous edges).
+
+        Returns:
+            True when at least one already-rescued in-pad via belongs to
+            an immediately adjacent pin on the same component.
+        """
+        pitch = package.pin_pitch
+        if not pitch or pitch <= 0:
+            return False
+        limit = pitch * 1.25
+        for er in escapes:
+            if er.via is None or not getattr(er.via, "in_pad", False):
+                continue
+            if er.pad is pad or er.pad.ref != pad.ref:
+                continue
+            if abs(er.pad.x - pad.x) <= limit and abs(er.pad.y - pad.y) <= limit:
+                return True
+        return False
+
     def _try_in_pad_escape(
         self,
         pad: Pad,
@@ -5782,6 +6056,7 @@ class EscapeRouter:
         escape_width: float,
         package: PackageInfo | None = None,
         skip_on_clearance_violation: bool = False,
+        target_direction: EscapeDirection | None = None,
     ) -> EscapeRoute | None:
         """Attempt an in-pad via escape for a fine-pitch SSOP/TSSOP pad.
 
@@ -5860,6 +6135,14 @@ class EscapeRouter:
                 that prefer surfacing the deferral as an explicit gap
                 over committing a DRC violation that cascades into
                 adjacent-pin routing failures.  Issue #3033 / #3062.
+            target_direction: Optional target-aware override for the
+                inner-layer stub direction (Issue #3428).  When supplied
+                (typically from ``_compute_target_direction``), the
+                inner-layer escape segment and ``escape_point`` use this
+                direction instead of ``direction``.  Via placement is
+                unaffected -- it is direction-independent.  ``None``
+                (default) preserves legacy behaviour byte-for-byte for
+                every existing call site.
 
         Returns:
             An ``EscapeRoute`` with the in-pad via and inner-layer segment,
@@ -6050,7 +6333,16 @@ class EscapeRouter:
         # Inner-layer escape point: continue inward toward the package
         # body (same direction the deferred surface escape would have
         # used) so the main router can pick up from there.
-        dx, dy = self._direction_to_vector(direction)
+        #
+        # Issue #3428: when the caller supplied a target-aware
+        # ``target_direction`` (net's actual routing target, computed by
+        # ``_compute_target_direction``), the stub vector uses it instead
+        # of the parity-derived ``direction`` so the stub does not block
+        # an adjacent fine-pitch pin's via slot.  ONLY the stub vector
+        # (and hence ``escape_point``) changes -- via placement above is
+        # direction-independent.
+        effective_direction = target_direction if target_direction is not None else direction
+        dx, dy = self._direction_to_vector(effective_direction)
         # Use a modest offset -- one via radius plus clearance plus a
         # trace width buffer is enough room for the main router to
         # connect onto the inner-layer endpoint without colliding with
@@ -6079,19 +6371,35 @@ class EscapeRouter:
             is_micro=is_micro_via_used,
         )
 
+        # Issue #3428: neck the TARGET-AWARE stub down to the manufacturer
+        # minimum trace width.  At 0.5 mm pitch the dispatcher-supplied
+        # ``escape_width`` can be the full net trace width (0.5 mm on
+        # power-derived defaults); two adjacent redirected stubs at that
+        # width touch edge-to-edge (0.000 mm clearance) no matter which
+        # directions they point.  Necking mirrors the PR #3079 lateral-
+        # stub precedent (``_try_lateral_via_escape``).  The legacy
+        # ``target_direction is None`` path keeps the dispatcher width
+        # byte-for-byte.
+        stub_width = escape_width
+        if target_direction is not None and self._mfr_limits is not None:
+            mfr_min_trace = self._mfr_limits.min_trace
+            if mfr_min_trace is not None and mfr_min_trace < stub_width:
+                stub_width = mfr_min_trace
+
         inner_seg = Segment(
             x1=via_x,
             y1=via_y,
             x2=escape_x,
             y2=escape_y,
-            width=escape_width,
+            width=stub_width,
             layer=escape_layer,
             net=pad.net,
             net_name=pad.net_name,
         )
 
         logger.info(
-            "In-pad escape generated for pad %s (%s ref=%s pin=%s): via at (%.3f, %.3f) -> %s",
+            "In-pad escape generated for pad %s (%s ref=%s pin=%s): "
+            "via at (%.3f, %.3f) -> %s, stub dir=%s%s",
             pad.net_name,
             pad.layer.kicad_name,
             pad.ref,
@@ -6099,11 +6407,13 @@ class EscapeRouter:
             via_x,
             via_y,
             escape_layer.kicad_name,
+            effective_direction.name,
+            " (target-aware, Issue #3428)" if target_direction is not None else "",
         )
 
         return EscapeRoute(
             pad=pad,
-            direction=direction,
+            direction=effective_direction,
             escape_point=(escape_x, escape_y),
             escape_layer=escape_layer,
             via_pos=(via_x, via_y),
