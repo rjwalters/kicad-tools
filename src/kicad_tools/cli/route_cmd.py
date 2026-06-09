@@ -2612,6 +2612,78 @@ def _log_fine_pitch_escape_regions(
     return len(regions)
 
 
+def _mfr_supports_via_in_pad(manufacturer: str | None) -> bool:
+    """Return True when ``manufacturer`` supports via-in-pad processing.
+
+    Issue #3371 / P_FP5 -- the auto-layers fallback composition is gated
+    on manufacturer capability so we never silently produce a routed PCB
+    with via-in-pad geometry on a tier (e.g. plain ``jlcpcb``) that does
+    not offer the process.
+
+    Args:
+        manufacturer: Manufacturer key (e.g. ``"jlcpcb-tier1"``) or
+            ``None`` when no manufacturer is configured.
+
+    Returns:
+        ``True`` when ``get_mfr_limits(manufacturer).via_in_pad_supported``
+        is True; ``False`` otherwise (including unknown manufacturer or
+        ``None`` input).
+    """
+    if not manufacturer:
+        return False
+    try:
+        from kicad_tools.router.mfr_limits import get_mfr_limits
+
+        limits = get_mfr_limits(manufacturer)
+    except (ValueError, ImportError):
+        return False
+    return bool(getattr(limits, "via_in_pad_supported", False))
+
+
+def _interleave_fine_pitch_fallback_attempts(
+    layer_configs: list,
+    enabled: bool,
+):
+    """Interleave a via-in-pad fallback retry between consecutive layer attempts.
+
+    Issue #3371 / P_FP5 -- the fine-pitch escape ladder needs a cheap rung
+    between consecutive layer-count escalations.  When the configured
+    manufacturer supports via-in-pad AND the user did not pin the flag on
+    explicitly, this helper inserts a fallback retry attempt after each
+    baseline layer attempt.  The result is a 3-tuple
+    ``(layer_count, layer_stack, via_in_pad_fallback: bool)`` per entry;
+    callers consult the third element to stamp the
+    ``KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK`` env var around the per-
+    attempt routing call.
+
+    When ``enabled=False``, the input tuples are returned with
+    ``via_in_pad_fallback=False`` appended -- preserving pre-P_FP5
+    behaviour exactly (no new attempts).  The CLI default is
+    ``enabled=True`` when ``manufacturer`` supports via-in-pad and the
+    user did not pass ``--micro-via-in-pad-fallback`` (which would imply
+    "stay on for every attempt"; treating that case as "compose" would
+    not change observable behaviour but would double the attempt count
+    needlessly).
+
+    Args:
+        layer_configs: Pre-P_FP5 list of ``(layer_count, layer_stack)``
+            tuples (the output of ``_filter_layer_configs_for_pcb``).
+        enabled: When ``True``, insert a fallback retry after each entry.
+
+    Returns:
+        A new list of ``(layer_count, layer_stack, via_in_pad_fallback)``
+        triples.  Length is ``len(layer_configs)`` when ``enabled=False``
+        and ``2 * len(layer_configs)`` otherwise.
+    """
+    if not enabled:
+        return [(lc, ls, False) for lc, ls in layer_configs]
+    interleaved: list = []
+    for lc, ls in layer_configs:
+        interleaved.append((lc, ls, False))
+        interleaved.append((lc, ls, True))
+    return interleaved
+
+
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -2727,6 +2799,34 @@ def route_with_layer_escalation(
         layer_configs, pcb_path, args.max_layers, quiet=quiet
     )
 
+    # Issue #3371 / P_FP5: compose fine-pitch escape with the auto-layers
+    # ladder.  When the user did NOT explicitly enable
+    # ``--micro-via-in-pad-fallback`` and the configured manufacturer
+    # supports via-in-pad (e.g. jlcpcb-tier1), interleave a fallback retry
+    # between consecutive layer attempts.  The ladder becomes:
+    #
+    #     L=2 baseline -> L=2 + via-in-pad fallback (if mfr allows) ->
+    #     L=4 baseline -> L=4 + via-in-pad fallback (if mfr allows) ->
+    #     L=6 baseline -> L=6 + via-in-pad fallback (if mfr allows)
+    #
+    # The fallback retry is *cheaper* than escalating layers (a single
+    # process-env-var flip), and on fine-pitch SOIC packages (e.g.
+    # softstart rev B UCC27211) it lifts pin-2 escape reach 22/30 -> 28+/30
+    # without requiring 6-layer escalation.  When the user explicitly
+    # passes ``--micro-via-in-pad-fallback`` we keep the original ladder
+    # exactly so the flag's behaviour matches its single-attempt
+    # documentation (it stays on for *every* attempt).  When the mfr
+    # tier does not support via-in-pad (e.g. tier-0 jlcpcb), the
+    # composition is a strict no-op.
+    _user_explicit_fallback = bool(getattr(args, "micro_via_in_pad_fallback", False))
+    _fp5_compose_fallback = (
+        not _user_explicit_fallback
+        and _mfr_supports_via_in_pad(getattr(args, "manufacturer", None))
+    )
+    layer_configs = _interleave_fine_pitch_fallback_attempts(
+        layer_configs, enabled=_fp5_compose_fallback
+    )
+
     if not quiet:
         flush_print("=" * 60)
         flush_print("KiCad PCB Autorouter - Layer Escalation Mode")
@@ -2791,7 +2891,26 @@ def route_with_layer_escalation(
         preserved_sexp=_preserved_sexp,
     )
 
-    for attempt_num, (layer_count, layer_stack) in enumerate(layer_configs, 1):
+    for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(
+        layer_configs, 1
+    ):
+        # Issue #3371 / P_FP5: stamp / clear the via-in-pad fallback env var
+        # *around* this attempt so the lazily-constructed EscapeRouter
+        # picks up the per-attempt opt-in.  The env var is sticky across
+        # subprocess invocations (the read site is in
+        # ``EscapeRouter.__init__``) so we always set it explicitly to
+        # match this attempt's intent -- both ON and OFF -- which also
+        # makes the test fixture happy without monkey-patching env.
+        import os as _os_fp5
+
+        if via_in_pad_fallback:
+            _os_fp5.environ["KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK"] = "1"
+        elif not _user_explicit_fallback:
+            # Only clear when the user did NOT explicitly request the
+            # fallback (which we preserve verbatim across the entire
+            # ladder per the helper's docstring).
+            _os_fp5.environ.pop("KICAD_TOOLS_MICRO_VIA_IN_PAD_FALLBACK", None)
+
         # Issue #2802: honor the total wall-clock deadline before starting
         # another layer-stack attempt.  Without this guard the loop would
         # blindly start a fresh ``route_all_negotiated`` call (each with
@@ -2826,7 +2945,13 @@ def route_with_layer_escalation(
 
         if not quiet:
             flush_print("=" * 60)
-            flush_print(f"Attempt {attempt_num}: {layer_count} layers ({layer_stack.name})")
+            # P_FP5: surface the via-in-pad fallback opt-in for this attempt
+            # so the user can see why the same layer count is being retried.
+            _fallback_suffix = " + via-in-pad fallback" if via_in_pad_fallback else ""
+            flush_print(
+                f"Attempt {attempt_num}: {layer_count} layers ({layer_stack.name})"
+                f"{_fallback_suffix}"
+            )
             flush_print("=" * 60)
 
         # Load PCB with this layer stack
@@ -3043,11 +3168,26 @@ def route_with_layer_escalation(
         # chorus-test-revA fixture, which negotiated escalates 2L -> 4L while
         # MC stopped at 2L=42%).  Skip the heuristic for those strategies.
         strategies_without_overflow_signal = {"monte-carlo", "basic", "evolutionary"}
+        # Issue #3371 / P_FP5: when the next attempt is the via-in-pad
+        # fallback retry at the *same* layer count, do not exit on
+        # zero-overflow.  Via-in-pad fallback is precisely the rescue
+        # mechanism for non-congestion (clearance) failures around
+        # fine-pitch packages -- the canonical case is UCC27211 SOIC-8
+        # pin-2 escape on softstart rev B.  Without this skip the L=2
+        # baseline -> L=2 fallback transition would be cut off when the
+        # 2L baseline finishes with 0 overflow + missing fine-pitch escapes.
+        _next_is_same_layer_fallback = (
+            attempt_num < len(layer_configs)
+            and layer_configs[attempt_num][2]  # next entry's via_in_pad_fallback
+            and layer_configs[attempt_num][0] == layer_count  # same layer count
+            and not via_in_pad_fallback
+        )
         if (
             overflow == 0
             and nets_routed < nets_to_route
             and args.strategy not in strategies_without_overflow_signal
             and not below_completion_floor
+            and not _next_is_same_layer_fallback
         ):
             if not quiet:
                 flush_print(
@@ -3077,11 +3217,26 @@ def route_with_layer_escalation(
         # Issue #2412: Early termination — stagnation detection.  If adding
         # layers did not improve nets_routed or reduce overflow, further
         # escalation is unlikely to help.
+        #
+        # Issue #3371 / P_FP5: skip when this attempt is the fallback retry
+        # at the *same* layer count as the previous attempt -- we have not
+        # added layers, we have changed the via-in-pad opt-in, so the
+        # comparison is not "adding layers did not help" but "the fallback
+        # did not improve over baseline at this layer count".  The next
+        # attempt will be at a higher layer count and the stagnation check
+        # there will use the correct baseline.
+        _this_is_same_layer_fallback = (
+            attempt_num > 1
+            and via_in_pad_fallback
+            and layer_configs[attempt_num - 2][0] == layer_count
+            and not layer_configs[attempt_num - 2][2]
+        )
         if (
             prev_nets_routed is not None
             and nets_routed <= prev_nets_routed
             and overflow >= prev_overflow
             and not below_completion_floor
+            and not _this_is_same_layer_fallback
         ):
             if not quiet:
                 flush_print("  Escalation stopped: no improvement after adding layers")
@@ -3117,8 +3272,23 @@ def route_with_layer_escalation(
         # is already tracked via the #2396 ``_is_better_result`` rule above,
         # so the loop just breaks; the caller receives the pre-regression
         # best attempt's router state.
+        #
+        # Issue #3371 / P_FP5: skip this regression check when the previous
+        # attempt was the via-in-pad-fallback retry at the *same* layer
+        # count as this attempt's baseline.  The fallback attempt may
+        # legitimately route fewer nets (the smaller via-in-pad geometry
+        # disables some surface escape paths in trade for fine-pitch
+        # rescues), but that's a within-layer-count tradeoff, not a
+        # "more layers + fewer nets" structural regression.  Without
+        # this skip the L=4-fallback -> L=6-baseline pair could trigger
+        # a false-positive exit, cutting off the rest of the ladder.
         regression_exit = False
-        if prev_nets_routed is not None:
+        _prev_was_same_layer_fallback = (
+            attempt_num > 1
+            and layer_configs[attempt_num - 2][2]  # previous via_in_pad_fallback
+            and layer_configs[attempt_num - 2][0] == layer_count  # same layer count
+        )
+        if prev_nets_routed is not None and not _prev_was_same_layer_fallback:
             drop = prev_nets_routed - nets_routed
             if drop >= HARD_DROP_NETS:
                 if not quiet:
