@@ -2440,3 +2440,243 @@ class TestRemoveOrphanNets:
 
         rc = _run_sync_netlist_command(Args(), pcb)
         assert rc == 0
+
+
+class TestNormalizeKicadCliNetNames:
+    """Tests for the ``/``-prefix normalisation of kicad-cli net names.
+
+    Issue #3370: ``kicad-cli sch export netlist`` writes hierarchical
+    local labels with a leading sheet-path slash (``/BST_A``) while
+    power-symbol globals (``+3V3``, ``GND``) come through unprefixed.
+    PCB net tables conventionally store bare names; mixing the two
+    conventions causes the ``/``-prefixed adds to land in the PCB as
+    ghost nets that get dropped by orphan cleanup, leaving the intended
+    pads on stale net values.
+    """
+
+    def _make_net(self, code: int, name: str):
+        """Construct a minimal NetlistNet with the given code and name."""
+        from kicad_tools.operations.netlist import NetlistNet
+
+        return NetlistNet(code=code, name=name, nodes=[])
+
+    def _make_netlist(self, nets):
+        """Construct a minimal Netlist with the given nets."""
+        from kicad_tools.operations.netlist import Netlist
+
+        return Netlist(
+            source_file="test.kicad_sch",
+            tool="Eeschema 10.0.1",
+            components=[],
+            nets=list(nets),
+        )
+
+    def test_single_slash_stripped(self):
+        """A single leading ``/`` is stripped from hierarchical labels."""
+        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+
+        netlist = self._make_netlist([
+            self._make_net(1, "/BST_A"),
+            self._make_net(2, "/DRV_CP1"),
+            self._make_net(3, "/SPI_MISO"),
+        ])
+        _normalize_kicad_cli_net_names(netlist)
+        names = [n.name for n in netlist.nets]
+        assert names == ["BST_A", "DRV_CP1", "SPI_MISO"]
+
+    def test_power_symbol_names_unchanged(self):
+        """Power-symbol names (``+3V3``, ``GND``, ``+5V``) are untouched."""
+        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+
+        netlist = self._make_netlist([
+            self._make_net(1, "+3V3"),
+            self._make_net(2, "GND"),
+            self._make_net(3, "+5V"),
+            self._make_net(4, "+3.3V"),
+            self._make_net(5, "-12V"),
+        ])
+        _normalize_kicad_cli_net_names(netlist)
+        names = [n.name for n in netlist.nets]
+        assert names == ["+3V3", "GND", "+5V", "+3.3V", "-12V"]
+
+    def test_bare_names_unchanged(self):
+        """Already-bare names from the Python fallback are untouched."""
+        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+
+        netlist = self._make_netlist([
+            self._make_net(1, "BST_A"),
+            self._make_net(2, "PHASE_A"),
+            self._make_net(3, "Net-(R1-Pad2)"),
+        ])
+        _normalize_kicad_cli_net_names(netlist)
+        names = [n.name for n in netlist.nets]
+        assert names == ["BST_A", "PHASE_A", "Net-(R1-Pad2)"]
+
+    def test_empty_name_unchanged(self):
+        """The empty net (code 0) has no name; normalisation is a no-op."""
+        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+
+        netlist = self._make_netlist([self._make_net(0, "")])
+        _normalize_kicad_cli_net_names(netlist)
+        assert netlist.nets[0].name == ""
+
+    def test_only_leading_slash_stripped(self):
+        """Only the first ``/`` is stripped; deeper paths keep their tail."""
+        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+
+        # Defensive: a sub-sheet hierarchical path comes through as
+        # /sheetA/SIGNAL.  We strip ONE leading slash so the surviving
+        # form (sheetA/SIGNAL) is a unique-but-bare name that will
+        # round-trip to the same canonical key on every sync invocation.
+        netlist = self._make_netlist([self._make_net(1, "/sheetA/SIGNAL")])
+        _normalize_kicad_cli_net_names(netlist)
+        assert netlist.nets[0].name == "sheetA/SIGNAL"
+
+    def test_mixed_names_partial_normalisation(self):
+        """Mixed power+hierarchical netlist: only ``/``-prefixed names change."""
+        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+
+        netlist = self._make_netlist([
+            self._make_net(1, "/BST_A"),
+            self._make_net(2, "+3V3"),
+            self._make_net(3, "/DRV_CP1"),
+            self._make_net(4, "GND"),
+            self._make_net(5, "PWM_AH"),
+        ])
+        _normalize_kicad_cli_net_names(netlist)
+        names = [n.name for n in netlist.nets]
+        assert names == ["BST_A", "+3V3", "DRV_CP1", "GND", "PWM_AH"]
+
+    def test_normalisation_is_idempotent(self):
+        """Running the normaliser twice produces the same result."""
+        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+
+        netlist = self._make_netlist([
+            self._make_net(1, "/BST_A"),
+            self._make_net(2, "+3V3"),
+        ])
+        _normalize_kicad_cli_net_names(netlist)
+        first = [n.name for n in netlist.nets]
+        _normalize_kicad_cli_net_names(netlist)
+        second = [n.name for n in netlist.nets]
+        assert first == second == ["BST_A", "+3V3"]
+
+
+# ---------------------------------------------------------------------------
+# Board 05 round-trip / drift regression (issue #3370)
+# ---------------------------------------------------------------------------
+
+_BOARD_05_DIR = Path("boards/05-bldc-motor-controller/output")
+_BOARD_05_SCH = _BOARD_05_DIR / "bldc_controller.kicad_sch"
+_BOARD_05_PCB = _BOARD_05_DIR / "bldc_controller_routed.kicad_pcb"
+
+# The 14 hierarchical-local nets that were dropped before the
+# ``/``-prefix fix.  ``+3.3V`` is intentionally excluded -- it is a
+# power-symbol alias handled by ``canonicalize_power_nets``.
+_BOARD_05_DRIFT_NETS = frozenset({
+    "BST_A", "BST_B", "BST_C",
+    "DRV_CP1", "DRV_CP2",
+    "DRV_FAULTn", "DRV_LOCKn",
+    "DRV_VCP", "DRV_VINT", "DRV_VREG", "DRV_VSW",
+    "FGFB", "FGOUT",
+    "SPI_MISO",
+})
+
+# After the fix, the PCB must carry at least this many named nets
+# (40 pre-fix + 13 recovered drift nets = 53; ``+3.3V`` already
+# present pre-fix as an alias).
+_BOARD_05_MIN_NET_COUNT = 53
+
+
+@pytest.mark.skipif(
+    not _BOARD_05_SCH.exists() or not _BOARD_05_PCB.exists(),
+    reason="Board 05 schematic/PCB artifacts not present in this checkout",
+)
+class TestBoard05SyncDriftRegression:
+    """Round-trip + invariants for board 05 schematic-PCB drift (#3370).
+
+    These tests load the on-disk board-05 artifacts (schematic +
+    committed routed PCB), apply :func:`sync_netlist` to a copy of
+    the PCB, and assert:
+
+      1. All 14 drift nets land in the synced PCB.
+      2. The synced PCB exposes >= 53 named nets (was 40 pre-fix).
+      3. No ``/``-prefixed net names appear in the synced PCB.
+      4. U3 pad assignments match the schematic's intended nets.
+    """
+
+    @pytest.fixture
+    def synced_pcb(self, tmp_path):
+        """Run sync_netlist against a copy of the board-05 PCB."""
+        import shutil
+
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        dst_pcb = tmp_path / "bldc_controller_synced.kicad_pcb"
+        shutil.copy(_BOARD_05_PCB, dst_pcb)
+
+        result = sync_netlist(
+            schematic_path=_BOARD_05_SCH,
+            pcb_path=dst_pcb,
+            dry_run=False,
+            remove_orphan_nets=True,
+        )
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        return PCB.load(dst_pcb), result
+
+    def test_drift_nets_present(self, synced_pcb):
+        """All 14 drift nets land in the synced PCB."""
+        pcb, _ = synced_pcb
+        named = {n.name for n in pcb.nets.values() if n.name}
+        missing = _BOARD_05_DRIFT_NETS - named
+        assert not missing, (
+            f"Drift nets still missing after sync: {sorted(missing)}"
+        )
+
+    def test_net_count_above_floor(self, synced_pcb):
+        """The synced PCB carries >= 53 named nets (was 40 pre-fix)."""
+        pcb, _ = synced_pcb
+        named = {n.name for n in pcb.nets.values() if n.name}
+        assert len(named) >= _BOARD_05_MIN_NET_COUNT, (
+            f"Synced PCB has only {len(named)} named nets, expected "
+            f">= {_BOARD_05_MIN_NET_COUNT}.  Drift recovery regressed."
+        )
+
+    def test_no_slash_prefixed_names(self, synced_pcb):
+        """No ``/``-prefixed net names appear in the synced PCB."""
+        pcb, _ = synced_pcb
+        named = {n.name for n in pcb.nets.values() if n.name}
+        prefixed = {n for n in named if n.startswith("/")}
+        assert not prefixed, (
+            f"Found /-prefixed net names in synced PCB: {sorted(prefixed)}"
+        )
+
+    def test_u3_drift_pads_assigned_correctly(self, synced_pcb):
+        """U3 pads land on the schematic-intended drift nets, not stale rails.
+
+        Pre-fix, U3.1 / U3.3 / U3.5 / U3.15 / U3.17 / U3.29 / U3.30
+        were stuck on ``GND`` / ``+5V`` / ``+3.3V`` / ``PWM_AH`` from
+        the original bottom-up footprint generator's DRV8301_PINS
+        table.  After the fix, sync rewrites them to the schematic's
+        BST_A / BST_B / BST_C / SPI_MISO / DRV_FAULTn / DRV_CP2 /
+        DRV_CP1 assignments.
+        """
+        pcb, _ = synced_pcb
+        u3 = pcb.get_footprint("U3")
+        assert u3 is not None, "U3 footprint not found"
+        pad_nets = {p.number: p.net_name for p in u3.pads}
+        expected = {
+            "1": "BST_A",
+            "3": "BST_B",
+            "5": "BST_C",
+            "15": "SPI_MISO",
+            "17": "DRV_FAULTn",
+            "29": "DRV_CP2",
+            "30": "DRV_CP1",
+        }
+        for pad_num, want_net in expected.items():
+            got = pad_nets.get(pad_num)
+            assert got == want_net, (
+                f"U3.{pad_num}: expected net {want_net!r}, got {got!r}"
+            )

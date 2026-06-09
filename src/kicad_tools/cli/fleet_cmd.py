@@ -586,7 +586,12 @@ def _detect_erc(board_dir: Path) -> ERCStatus:
 
 
 _SCH_LABEL_RE = re.compile(r'\(\s*(?:label|global_label|hierarchical_label)\s+"([^"]+)"')
-_PCB_NET_RE = re.compile(r'\(net\s+\d+\s+"([^"]+)"\)')
+_SCH_POWER_SYMBOL_RE = re.compile(r'\(\s*lib_id\s+"power:([^"]+)"')
+# Match ``(net NUMBER "NAME")`` -- shared between top-level
+# declarations and pad-nested references.  Pad context is
+# distinguished by the streaming parser in
+# ``_extract_pcb_pad_net_numbers``.
+_PCB_NET_NUMBERED_RE = re.compile(r'\(net\s+(\d+)\s+"([^"]+)"')
 
 
 def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
@@ -594,9 +599,19 @@ def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
 
     The detection is intentionally lightweight: we only collect text from
     ``label`` / ``global_label`` / ``hierarchical_label`` s-expression
-    leaves. Auto-generated ``Net-(...)`` placeholders (KiCad's default
-    unconnected names) are skipped because they cannot be reliably
-    mapped to a PCB net name without a full netlister pass.
+    leaves, plus implicit globals published by ``power:`` symbol
+    instances (e.g. ``power:+24V`` -> ``+24V``).  Auto-generated
+    ``Net-(...)`` placeholders (KiCad's default unconnected names) are
+    skipped because they cannot be reliably mapped to a PCB net name
+    without a full netlister pass.
+
+    Power-symbol detection (issue #3370): KiCad's ``power:`` library
+    publishes a single global label per symbol instance equal to the
+    symbol's name (the part after the ``:``).  These globals never
+    appear as ``(label "...")`` leaves in the schematic file even
+    though they are first-class nets.  Picking them up here keeps the
+    drift comparison symmetric with ``_extract_pcb_named_nets``,
+    which sees the same globals as bare ``(net N "name")`` entries.
 
     Returns ``None`` if the file cannot be read so callers can treat
     that as "unknown source state" and skip drift gating.
@@ -613,24 +628,131 @@ def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
         if name.startswith("Net-("):
             continue
         labels.add(name)
+    # Power symbols (``power:+24V``, ``power:GND``, ``power:+3V3``, ...)
+    # publish an implicit global label whose name is the part after
+    # the colon.  Include them so the drift comparison treats power
+    # rails consistently with the PCB-side ``(net N "+24V")`` entries.
+    #
+    # ``PWR_FLAG`` is a KiCad ERC convention symbol -- it marks an
+    # existing net as actively driven so the connectivity checker
+    # doesn't flag it as floating -- and does NOT publish a net of
+    # its own.  Excluding it keeps boards that use it (e.g. board 02)
+    # from showing a spurious one-net drift after this change.
+    for m in _SCH_POWER_SYMBOL_RE.finditer(text):
+        name = m.group(1)
+        if name and name != "PWR_FLAG":
+            labels.add(name)
     return labels
 
 
-def _extract_pcb_named_nets(pcb_path: Path) -> set[str] | None:
-    """Return the set of non-empty named nets declared in a KiCad PCB.
+def _extract_pcb_pad_net_numbers(pcb_text: str) -> set[int]:
+    """Return the set of net numbers actually referenced by pads.
 
-    Only top-level ``(net N "name")`` declarations are matched; the
-    empty net 0 is dropped. Returns ``None`` on read failure.
+    Pads in KiCad PCB files appear as ``(pad "NUM" TYPE SHAPE ...
+    (net N "NAME") ...)`` blocks nested inside ``(footprint ...)``.
+    Top-level ``(net N "NAME")`` declarations exist for *every* known
+    net even when no pad references the net -- routing-only artifacts
+    (segments / vias / zones left over from older sync rounds) keep
+    their declarations after their pads have been reassigned.
+
+    Returning the *number* set rather than the *name* set lets the
+    caller cross-reference with top-level declarations to determine
+    which named nets are pad-referenced and which are routing-only.
+
+    Uses a depth-tracked streaming scan rather than a single regex
+    because pad bodies can span many lines and contain nested forms.
+    """
+    pad_net_numbers: set[int] = set()
+    i = 0
+    n = len(pcb_text)
+    while True:
+        idx = pcb_text.find("(pad ", i)
+        if idx < 0:
+            idx = pcb_text.find("(pad\t", i)
+        if idx < 0:
+            idx = pcb_text.find("(pad\n", i)
+        if idx < 0:
+            break
+        # Find the end of this pad's s-expression by tracking depth.
+        depth = 0
+        j = idx
+        body_start = idx
+        body_end = idx
+        while j < n:
+            c = pcb_text[j]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    body_end = j + 1
+                    break
+            j += 1
+        if body_end <= body_start:
+            i = idx + 5
+            continue
+        body = pcb_text[body_start:body_end]
+        # Match (net N "name") inside the pad body
+        m = _PCB_NET_NUMBERED_RE.search(body)
+        if m:
+            try:
+                pad_net_numbers.add(int(m.group(1)))
+            except ValueError:
+                pass
+        i = body_end
+    return pad_net_numbers
+
+
+def _extract_pcb_named_nets(pcb_path: Path) -> set[str] | None:
+    """Return the set of non-empty PCB nets that have at least one pad.
+
+    The drift detector compares this set against the schematic's
+    label / power-symbol set.  To keep the comparison meaningful, we
+    return only nets that are actually attached to pads -- i.e. the
+    nets the synchronisation layer is responsible for.  Top-level
+    ``(net N "name")`` declarations that exist *only* because a
+    segment / via / zone still references the name (a routing-only
+    leftover from an older sync round) are dropped.
+
+    Two additional name-pattern filters keep the comparison
+    symmetric with :func:`_extract_schematic_nets` (which already
+    skips ``Net-(...)`` placeholders):
+
+      * ``Net-(REF-Pad/PinN)`` -- the netlist exporter's default name
+        for un-labeled local nets.  These appear on the PCB after
+        ``sync-netlist`` runs against a schematic whose nets carry no
+        explicit ``label`` element, so they cannot represent genuine
+        schematic-vs-PCB drift -- only sync state.
+      * ``unconnected-(REF-PinName-PadN)`` -- KiCad's marker for
+        explicitly unconnected pins.  These are not nets the schematic
+        author labeled, so they are pure sync artifacts as well.
+
+    Issue #3370: without the pad-attachment filter, board 05's stale
+    ``PWR_LED`` / ``STATUS_LED`` / ``SW_OUT`` segment leftovers from
+    an earlier sync round would surface as drift even though they
+    have no pads.
+
+    Returns ``None`` on read failure.
     """
     try:
         text = pcb_path.read_text()
     except OSError:
         return None
+    pad_net_numbers = _extract_pcb_pad_net_numbers(text)
     nets: set[str] = set()
-    for m in _PCB_NET_RE.finditer(text):
-        name = m.group(1)
-        if name:
-            nets.add(name)
+    for m in _PCB_NET_NUMBERED_RE.finditer(text):
+        try:
+            num = int(m.group(1))
+        except ValueError:
+            continue
+        if num not in pad_net_numbers:
+            continue
+        name = m.group(2)
+        if not name:
+            continue
+        if name.startswith("Net-(") or name.startswith("unconnected-("):
+            continue
+        nets.add(name)
     return nets
 
 

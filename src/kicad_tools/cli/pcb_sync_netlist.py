@@ -391,6 +391,42 @@ def _get_pad_net_snapshot(pcb) -> dict[tuple[str, str], str]:
     return snapshot
 
 
+def _normalize_kicad_cli_net_names(netlist) -> None:
+    """Strip leading ``/`` from hierarchical-label net names in-place.
+
+    The ``kicad-cli sch export netlist`` exporter prefixes hierarchical
+    local labels with the sheet path (e.g. ``/BST_A``, ``/DRV_CP1``)
+    while global power-symbol labels come through unprefixed
+    (e.g. ``+3V3``, ``GND``).  PCB net tables conventionally store bare
+    names, so adding the prefixed form creates ghost nets that get
+    dropped by orphan-net cleanup and prevents pads from being assigned
+    to the intended net.
+
+    This normalization mirrors what ``_extract_schematic_nets`` in
+    :mod:`kicad_tools.cli.fleet_cmd` does -- it consumes label-leaf
+    names that are already bare, so the drift detector and the sync
+    writer agree on the same naming convention.
+
+    Only a single leading ``/`` is stripped, and only from names that
+    do not begin with another ``/`` after the strip (defensive against
+    deeper hierarchical paths such as ``/sheetA/SIGNAL`` -- those keep
+    a leading ``/`` only if the parser was confused; we still strip
+    one and leave the rest as a sub-path token, which then becomes a
+    valid bare net name).
+
+    Power-rail aliases (``+3V3``, ``GND``, ``+5V``, ...) are left
+    unchanged because they don't carry the ``/`` prefix in the
+    exported netlist.
+
+    Args:
+        netlist: A :class:`Netlist` whose ``nets`` list will be
+            mutated in place.
+    """
+    for net in netlist.nets:
+        if net.name and net.name.startswith("/"):
+            net.name = net.name[1:]
+
+
 def _assign_nets_from_schematic(
     pcb, schematic_path: Path
 ) -> tuple[list[SyncAction], list[str]]:
@@ -419,19 +455,31 @@ def _assign_nets_from_schematic(
         errors.append(f"Failed to export netlist for net assignment: {exc}")
         return actions, errors
 
-    # Build pin-to-pad mapping when using the Python fallback path.
-    # The Python fallback produces NetNode.pin values that are schematic
-    # symbol pin numbers, which may differ from footprint pad numbers.
-    # The kicad-cli path already resolves this mapping internally, so
-    # the map is only needed for the fallback.
+    # Normalize ``/``-prefixed hierarchical net names from kicad-cli.
+    # The Python fallback already emits bare names, so this is a no-op
+    # for that path; running it unconditionally keeps the downstream
+    # invariant simple (``net.name`` is always the bare PCB-side name).
+    _normalize_kicad_cli_net_names(netlist)
+
+    # Build pin-to-pad mapping for all netlist sources.
+    #
+    # Both the Python fallback and the kicad-cli exporter emit
+    # ``NetNode.pin`` values that are *schematic* symbol pin numbers.
+    # These may differ from footprint pad numbers when a symbol uses
+    # name-based pads (BGA-style ``A1``/``B2``) or when the symbol's
+    # pin numbering follows a different package family than the
+    # footprint's pad numbering.  ``build_pin_to_pad_map`` resolves the
+    # translation by walking ``lib_symbols`` and the PCB footprint pad
+    # lists; the map is identity for the common case (pin number ==
+    # pad number) and only diverges for genuine mismatches, so building
+    # it unconditionally is safe.
     pin_to_pad_map = None
-    if netlist.tool and "Python fallback" in netlist.tool:
-        try:
-            pin_to_pad_map = build_pin_to_pad_map(schematic_path, pcb)
-        except Exception as exc:
-            errors.append(
-                f"Failed to build pin-to-pad map (proceeding without): {exc}"
-            )
+    try:
+        pin_to_pad_map = build_pin_to_pad_map(schematic_path, pcb)
+    except Exception as exc:
+        errors.append(
+            f"Failed to build pin-to-pad map (proceeding without): {exc}"
+        )
 
     # Snapshot before assignment
     before = _get_pad_net_snapshot(pcb)
