@@ -369,10 +369,13 @@ class TestGate2EscapeRouterCtorReceivesMap:
         assert escape.diff_pair_map == {}
 
     def test_orchestrator_ctor_sites_thread_map(self):
-        """Both orchestrator EscapeRouter construction sites pass the map.
+        """The orchestrator's ``_get_diff_pair_map`` resolves the map.
 
         Tested via a lightweight PCB-like shim that exposes the same
-        ``get_diff_pair_map`` hook the orchestrator looks up.
+        ``get_diff_pair_map`` hook the orchestrator looks up.  Note
+        (Issue #3432): the EscapeRouter ctor sites now gate the map on
+        ``paired_escape_coupling`` -- see
+        ``TestOrchestratorPairedEscapeGate`` for the threading tests.
         """
         from kicad_tools.router.orchestrator import RoutingOrchestrator
 
@@ -396,6 +399,107 @@ class TestGate2EscapeRouterCtorReceivesMap:
             "USB_D+": "USB_D-",
             "USB_D-": "USB_D+",
         }
+
+
+# =============================================================================
+# Issue #3432: RoutingOrchestrator paired-escape coupling gate
+# =============================================================================
+
+
+class TestOrchestratorPairedEscapeGate:
+    """RoutingOrchestrator gates diff_pair_map on ``paired_escape_coupling``.
+
+    Issue #3432 (mirrors the Autorouter gate from #3419/#3431): both
+    orchestrator EscapeRouter construction sites
+    (``_route_escape_then_global`` and the ``escape_router`` property)
+    must NOT thread the diff-pair map unless a coupled consumer exists
+    on the route-auto path.  The route-auto escape consumer is the
+    per-net GlobalRouter, which cannot route from the tightly-coupled
+    paired escape endpoints the pre-pass emits -- threading the map
+    unconditionally is the same stranding mechanism that regressed
+    board 06 from 41% to 27% reach on the Autorouter path.
+    """
+
+    PAIR_MAP = {"USB_D+": "USB_D-", "USB_D-": "USB_D+"}
+
+    def _build_orchestrator(self, grid, rules):
+        from kicad_tools.router.orchestrator import RoutingOrchestrator
+
+        pair_map = self.PAIR_MAP
+
+        class _ShimPcb:
+            """PCB-like shim with a real grid so the EscapeRouter ctor
+            sites actually construct (unlike the grid=None shim above)."""
+
+            def __init__(self):
+                self.grid = grid
+                self.net_names = {1: "USB_D+", 2: "USB_D-"}
+                self._edge_clearance = None
+                self._board_bbox = None
+
+            def get_diff_pair_map(self):
+                return dict(pair_map)
+
+        return RoutingOrchestrator(pcb=_ShimPcb(), rules=rules)
+
+    def test_orchestrator_escape_property_empty_map_without_coupling(self, grid, rules):
+        """Mirror of ``test_autorouter_escape_property_empty_map_without_coupling``.
+
+        ``paired_escape_coupling`` defaults to False (route-auto has no
+        CoupledPathfinder), so the ``escape_router`` property ctor site
+        must pass an empty map even though pairs ARE detected.
+        """
+        orch = self._build_orchestrator(grid, rules)
+        assert orch.paired_escape_coupling is False
+        # Pairs are detectable...
+        assert orch._get_diff_pair_map() == self.PAIR_MAP
+        # ...but the EscapeRouter must not receive them.
+        escape = orch.escape_router
+        assert isinstance(escape, EscapeRouter)
+        assert escape.diff_pair_map == {}
+
+    def test_orchestrator_escape_property_passes_map_with_coupling(self, grid, rules):
+        """If a coupled consumer is ever added to route-auto, flipping
+        the flag on before the escape phase threads the map (same
+        contract as ``Autorouter.paired_escape_coupling``)."""
+        orch = self._build_orchestrator(grid, rules)
+        orch.paired_escape_coupling = True
+        escape = orch.escape_router
+        assert escape.diff_pair_map == self.PAIR_MAP
+
+    def test_orchestrator_escape_then_global_site_empty_map_without_coupling(self, grid, rules):
+        """The ``_route_escape_then_global`` ctor site is gated too.
+
+        Phase 2 (GlobalRouter) is stubbed out so the test exercises only
+        the Phase 1 EscapeRouter construction.
+        """
+        from kicad_tools.router.strategies import RoutingResult, RoutingStrategy
+
+        orch = self._build_orchestrator(grid, rules)
+        assert orch.paired_escape_coupling is False
+        # Short-circuit Phase 2: the per-net global router is not under
+        # test here and needs board geometry the shim does not provide.
+        orch._route_global = lambda net, pads: RoutingResult(  # type: ignore[method-assign]
+            success=True,
+            net=net,
+            strategy_used=RoutingStrategy.GLOBAL_WITH_REPAIR,
+        )
+        pads = [
+            Pad(
+                x=1.0, y=1.0, width=0.4, height=0.4,
+                net=1, net_name="USB_D+",
+                layer=Layer.F_CU, ref="U1", through_hole=False,
+            ),
+            Pad(
+                x=5.0, y=5.0, width=0.4, height=0.4,
+                net=1, net_name="USB_D+",
+                layer=Layer.F_CU, ref="J1", through_hole=False,
+            ),
+        ]
+        result = orch._route_escape_then_global("USB_D+", pads)
+        assert result.success is True
+        assert orch._escape is not None
+        assert orch._escape.diff_pair_map == {}
 
 
 # =============================================================================
