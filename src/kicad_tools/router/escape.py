@@ -718,10 +718,50 @@ def _is_grid_pattern(pads: list[Pad], center_x: float, center_y: float) -> bool:
     if len(interior_pads) < len(pads) * 0.1:
         return False
 
-    # Count pads in each quadrant relative to center
-    quadrants = [0, 0, 0, 0]
+    # Count pads in each quadrant relative to center.
+    #
+    # Issue #3419: odd-dimension grids (7x7 BGA-49, etc.) have a full row
+    # AND a full column lying exactly ON the center axes.  The previous
+    # strict ``if/elif/else`` cascade lumped every axis pad into the last
+    # quadrant, producing a 9/9/9/22 distribution for a perfectly
+    # symmetric 7x7 grid and failing the balance check below (avg=12.25,
+    # upper bound 20.8 < 22).  Distribute axis pads fractionally across
+    # the adjacent quadrants instead:
+    #   - pad on a single axis: 0.5 to each of the two adjacent quadrants
+    #   - pad at the exact center (both axes): 0.25 to all four
+    #   - strictly in-quadrant pads: 1.0 as before
+    # Even grids have no axis pads, so their counts are unchanged
+    # (all-integer weights, identical to the pre-fix behaviour).
+    # Use a small epsilon so float jitter in pad coordinates does not
+    # spuriously classify near-axis pads as off-axis.
+    eps = 1e-6
+    quadrants = [0.0, 0.0, 0.0, 0.0]
     for p in pads:
-        if p.x > center_x and p.y > center_y:
+        on_x_axis = abs(p.y - center_y) <= eps  # lies on horizontal axis
+        on_y_axis = abs(p.x - center_x) <= eps  # lies on vertical axis
+        if on_x_axis and on_y_axis:
+            # Exact center pad: shared equally by all four quadrants.
+            for i in range(4):
+                quadrants[i] += 0.25
+        elif on_y_axis:
+            # On the vertical axis: split between the upper pair (q0/q1)
+            # or the lower pair (q2/q3) depending on the y side.
+            if p.y > center_y:
+                quadrants[0] += 0.5
+                quadrants[1] += 0.5
+            else:
+                quadrants[2] += 0.5
+                quadrants[3] += 0.5
+        elif on_x_axis:
+            # On the horizontal axis: split between the right pair
+            # (q0/q3) or the left pair (q1/q2) depending on the x side.
+            if p.x > center_x:
+                quadrants[0] += 0.5
+                quadrants[3] += 0.5
+            else:
+                quadrants[1] += 0.5
+                quadrants[2] += 0.5
+        elif p.x > center_x and p.y > center_y:
             quadrants[0] += 1
         elif p.x < center_x and p.y > center_y:
             quadrants[1] += 1
@@ -853,6 +893,7 @@ class EscapeRouter:
         board_bounds: tuple[float, float, float, float] | None = None,
         manufacturer: str | None = None,
         diff_pair_map: dict[str, str] | None = None,
+        net_pad_positions: dict[str, list[tuple[float, float]]] | None = None,
     ):
         """Initialize the escape router.
 
@@ -881,6 +922,16 @@ class EscapeRouter:
                 Pads whose partner is on a different package fall through to
                 the standard per-package escape pattern.  Defaults to ``None``
                 which preserves pre-#2639 single-ended behaviour exactly.
+            net_pad_positions: Optional board-wide map of net name to ALL pad
+                positions on that net (Issue #3419).  When provided, the
+                paired-escape pre-pass (``_escape_diff_pair_segment``) uses
+                the off-package endpoints of the pair's nets to pick a
+                launch direction TOWARD the partner connector instead of
+                blindly outward from the package center.  This keeps the
+                tightly-coupled escape endpoints facing the destination so
+                the main per-net A* does not have to fight its way around
+                the package from a tight launch.  Defaults to ``None``
+                which preserves the center-outward quadrant heuristic.
         """
         self.grid = grid
         self.rules = rules
@@ -896,6 +947,11 @@ class EscapeRouter:
         # ``_escape_diff_pair_segment`` instead of the per-package
         # dispatcher.  An empty / None map disables the feature.
         self.diff_pair_map: dict[str, str] = diff_pair_map or {}
+        # Issue #3419: board-wide net -> pad-position map for partner-
+        # connector-aware paired-escape launch direction.  Empty map
+        # disables the heuristic (falls back to center-outward quadrant
+        # direction).
+        self.net_pad_positions: dict[str, list[tuple[float, float]]] = net_pad_positions or {}
         # Instrumentation counter (Gate 3/4 of the #2587-style verification
         # chain): bumped every time ``_escape_diff_pair_segment`` is
         # invoked.  Tests assert this is non-zero on board 03 and zero
@@ -1531,6 +1587,101 @@ class EscapeRouter:
 
         return paired_escapes, paired_pad_keys
 
+    def _select_pair_launch_direction(
+        self,
+        pad_p: Pad,
+        pad_n: Pad,
+        mid_x: float,
+        mid_y: float,
+        package: PackageInfo,
+    ) -> EscapeDirection:
+        """Pick the launch direction for a paired diff-pair escape.
+
+        Issue #3419: the original heuristic launched the pair outward
+        from the package center (quadrant rule).  On board 06's BGA-49
+        that strands the tightly-coupled escape endpoints on whatever
+        side of the package the pads happen to sit -- when the partner
+        connector is elsewhere, the per-net A* has to drag the coupled
+        pair around the package perimeter from a 0.1 mm-lateral launch
+        and times out.  This helper instead aims the launch TOWARD the
+        pair's off-package endpoints (the partner connector), consulting
+        ``self.net_pad_positions`` (board-wide net -> pad positions map).
+
+        Falls back to the center-outward quadrant direction when:
+          - ``net_pad_positions`` was not provided (default behaviour),
+          - neither net has an off-package endpoint,
+          - the target direction is degenerate (zero-length vector).
+
+        Directions that would launch INTO the package interior (negative
+        dot product with the outward vector from package center to the
+        pair midpoint) are excluded so the escape never crosses the
+        package's own pad field on the surface layer.
+
+        Args:
+            pad_p: Positive-half pad
+            pad_n: Negative-half pad
+            mid_x: X of the pair midpoint
+            mid_y: Y of the pair midpoint
+            package: Package info for center and pad field
+
+        Returns:
+            Cardinal EscapeDirection for the paired launch.
+        """
+        center_x, center_y = package.center
+        fallback = self._get_quadrant_direction(mid_x, mid_y, center_x, center_y)
+        if not self.net_pad_positions:
+            return fallback
+
+        # Collect off-package endpoints for both halves of the pair.
+        # Position-keyed exclusion (not identity) because the board-wide
+        # map stores plain coordinate tuples, not Pad objects.
+        on_package = {(round(p.x, 3), round(p.y, 3)) for p in package.pads}
+        targets: list[tuple[float, float]] = []
+        for net_name in (pad_p.net_name, pad_n.net_name):
+            if not net_name:
+                continue
+            for x, y in self.net_pad_positions.get(net_name, ()):
+                if (round(x, 3), round(y, 3)) in on_package:
+                    continue
+                targets.append((x, y))
+        if not targets:
+            return fallback
+
+        tx = sum(t[0] for t in targets) / len(targets)
+        ty = sum(t[1] for t in targets) / len(targets)
+        vx = tx - mid_x
+        vy = ty - mid_y
+        norm = math.hypot(vx, vy)
+        if norm < 1e-6:
+            return fallback
+        vx /= norm
+        vy /= norm
+
+        # Outward vector (pair midpoint relative to package center):
+        # used to veto launch directions that would cross the package
+        # interior.
+        ox = mid_x - center_x
+        oy = mid_y - center_y
+
+        best_dir = fallback
+        best_score = -math.inf
+        for cand in (
+            EscapeDirection.NORTH,
+            EscapeDirection.SOUTH,
+            EscapeDirection.EAST,
+            EscapeDirection.WEST,
+        ):
+            cdx, cdy = self._direction_to_vector(cand)
+            if (cdx * ox + cdy * oy) < -1e-9:
+                # Points back through the package interior -- never
+                # launch a surface-layer pair into the pad field.
+                continue
+            score = cdx * vx + cdy * vy
+            if score > best_score:
+                best_score = score
+                best_dir = cand
+        return best_dir
+
     def _escape_diff_pair_segment(
         self,
         pad_p: Pad,
@@ -1573,9 +1724,11 @@ class EscapeRouter:
         # so both escapes leave together.
         mid_x = (pad_p.x + pad_n.x) / 2.0
         mid_y = (pad_p.y + pad_n.y) / 2.0
-        center_x, center_y = package.center
 
-        direction = self._get_quadrant_direction(mid_x, mid_y, center_x, center_y)
+        # Issue #3419: pick the launch direction toward the partner
+        # connector when board-wide net endpoints are available; fall
+        # back to the original center-outward quadrant heuristic.
+        direction = self._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, package)
         dx, dy = self._direction_to_vector(direction)
 
         # Trace widths come from per-net config.  Use the wider of the
@@ -2109,8 +2262,15 @@ class EscapeRouter:
         escapes: list[EscapeRoute] = []
         center_x, center_y = package.center
 
+        # Issue #3419: Skip pads that belong to skipped/plane nets (net=0).
+        # Plane nets (GND, VCC, etc.) are stitched via planes, not routed
+        # via escapes.  Generating escapes for them wastes the BGA perimeter
+        # channel that the signal nets need -- mirrors the equivalent filter
+        # in ``_escape_qfp_alternating`` (Issue #2513).
+        routable_pads = [p for p in package.pads if p.net != 0]
+
         # Group pads by ring (distance from center)
-        rings = self._group_pads_by_ring(package.pads, center_x, center_y)
+        rings = self._group_pads_by_ring(routable_pads, center_x, center_y)
 
         for ring_idx, ring_pads in enumerate(rings):
             # Alternate layers: even rings on F.Cu, odd on B.Cu

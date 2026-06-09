@@ -10961,6 +10961,14 @@ class Autorouter:
     def _escape(self) -> EscapeRouter:
         """Lazy-initialize escape router."""
         if self._escape_router is None:
+            # Issue #3419: board-wide net -> pad positions map so the
+            # paired-escape pre-pass can aim the launch direction toward
+            # the partner connector (off-package endpoints) instead of
+            # blindly outward from the package center.
+            net_pad_positions: dict[str, list[tuple[float, float]]] = {}
+            for pad in self.pads.values():
+                if pad.net_name:
+                    net_pad_positions.setdefault(pad.net_name, []).append((pad.x, pad.y))
             self._escape_router = EscapeRouter(
                 self.grid, self.rules, net_class_map=self.net_class_map,
                 edge_clearance=self._edge_clearance,
@@ -10972,6 +10980,7 @@ class Autorouter:
                 # ``get_diff_pair_map`` returns {} when no pairs are
                 # detected, which preserves pre-#2639 behavior bit-for-bit.
                 diff_pair_map=self.get_diff_pair_map(),
+                net_pad_positions=net_pad_positions,
             )
         return self._escape_router
 
