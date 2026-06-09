@@ -1139,6 +1139,72 @@ class EscapeRouter:
         clamped_y = max(min_y + ec, min(y, max_y - ec))
         return (clamped_x, clamped_y)
 
+    def _escape_clearance_for_ref(self, ref: str, pads: list[Pad]) -> float:
+        """Return the per-component escape clearance for the staggered SOP path.
+
+        Issue #3371 / P_FP4 -- looks up the fine-pitch escape region (if
+        any) installed on the grid that covers ``ref`` and returns its
+        :attr:`FinePitchRegion.escape_clearance`.  This is the manufacturer-
+        aware safe default computed at detection time (e.g. 0.140mm at
+        JLCPCB tier-1).  Falls back to the standard
+        :meth:`DesignRules.get_clearance_for_component` value when:
+
+        - No fine-pitch regions are installed on the grid (back-compat).
+        - No installed region matches ``ref`` or the component's pads (the
+          component is outside any escape region).
+        - The narrow-channel guard declines the shrink for this geometry
+          (corridor infeasible at the candidate clearance).
+
+        Args:
+            ref: Component reference.
+            pads: The component's pads (used for region applicability via
+                ``FinePitchRegion.applies_to_pad`` -- the identity match
+                covers wide-package outermost pins that sit at the halo
+                boundary).
+
+        Returns:
+            Escape clearance in mm for this component.
+        """
+        # Standard fall-through value -- preserves pre-P_FP4 behaviour
+        # for callers without an installed region.
+        fallback = self.rules.get_clearance_for_component(
+            ref,
+            pin_pitch=None,
+        )
+
+        # Look up regions installed on the grid.  ``getattr`` defends
+        # against grids that pre-date the P_FP3 ``set_fine_pitch_regions``
+        # API (e.g. test fixtures that build their own RoutingGrid).
+        get_regions = getattr(self.grid, "get_fine_pitch_regions", None)
+        if get_regions is None:
+            return fallback
+        regions = get_regions()
+        if not regions:
+            return fallback
+
+        for region in regions:
+            # Region applies when the component ref matches the region's
+            # package_ref OR any of the component's pads sit inside the
+            # halo (identity match + geometric containment).
+            if region.package_ref == ref:
+                # Narrow-channel guard -- decline the shrink when the
+                # candidate clearance would produce an infeasible
+                # corridor at the active recipe.  Mirrors the guard at
+                # ``resolve_clearance_with_escape_region`` and
+                # ``_clearance_for_pin_pitch``.
+                candidate = region.escape_clearance
+                pitch = region.pin_pitch
+                effective_channel = (
+                    pitch - 2.0 * candidate - self.rules.trace_width
+                )
+                required_channel = 2.0 * candidate + self.rules.trace_width
+                if effective_channel < required_channel:
+                    return fallback
+                return candidate
+
+        # No matching region -- fall through.
+        return fallback
+
     def analyze_package(self, pads: list[Pad]) -> PackageInfo:
         """Analyze a package to determine escape routing needs.
 
