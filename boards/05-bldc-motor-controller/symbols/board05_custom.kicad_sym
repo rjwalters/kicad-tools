@@ -1,0 +1,164 @@
+(kicad_symbol_lib
+	(version 20231120)
+	(generator "kicad_tools")
+	(generator_version "1.0")
+	(symbol "DRV8301"
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(duplicate_pin_numbers_are_jumpers no)
+		(property "Reference" "U"
+			(at -12.7 38.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "DRV8301"
+			(at 1.27 38.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm"
+			(at 0 -42.0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/drv8301.pdf"
+			(at 0 -44.0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Three Phase Pre-Driver, HTSSOP-56 (DCA package)"
+			(at 0 -46.0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "MFR" "Texas Instruments"
+			(at 0 -48.0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "MPN" "DRV8301"
+			(at 0 -50.0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "DRV8301 gate driver three-phase BLDC motor PMSM"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "HTSSOP*56*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "DRV8301_0_1"
+			(rectangle
+				(start -12.7 36.83)
+				(end 12.7 -36.83)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+		)
+		(symbol "DRV8301_1_1"
+			(pin passive line (at -15.24 35.56 0) (length 2.54) (name "RT_CLK" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 34.29 0) (length 2.54) (name "COMP" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 33.02 0) (length 2.54) (name "VSENSE" (effects (font (size 1.27 1.27)))) (number "3" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 31.75 0) (length 2.54) (name "PWRGD" (effects (font (size 1.27 1.27)))) (number "4" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 30.48 0) (length 2.54) (name "nOCTW" (effects (font (size 1.27 1.27)))) (number "5" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 29.21 0) (length 2.54) (name "nFAULT" (effects (font (size 1.27 1.27)))) (number "6" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 27.94 0) (length 2.54) (name "DTC" (effects (font (size 1.27 1.27)))) (number "7" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 26.67 0) (length 2.54) (name "nSCS" (effects (font (size 1.27 1.27)))) (number "8" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 25.4 0) (length 2.54) (name "SDI" (effects (font (size 1.27 1.27)))) (number "9" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 24.13 0) (length 2.54) (name "SDO" (effects (font (size 1.27 1.27)))) (number "10" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 22.86 0) (length 2.54) (name "SCLK" (effects (font (size 1.27 1.27)))) (number "11" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 21.59 0) (length 2.54) (name "DC_CAL" (effects (font (size 1.27 1.27)))) (number "12" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 20.32 0) (length 2.54) (name "GVDD" (effects (font (size 1.27 1.27)))) (number "13" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 19.05 0) (length 2.54) (name "CP1" (effects (font (size 1.27 1.27)))) (number "14" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 17.78 0) (length 2.54) (name "CP2" (effects (font (size 1.27 1.27)))) (number "15" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 16.51 0) (length 2.54) (name "EN_GATE" (effects (font (size 1.27 1.27)))) (number "16" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 15.24 0) (length 2.54) (name "INH_A" (effects (font (size 1.27 1.27)))) (number "17" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 13.97 0) (length 2.54) (name "INL_A" (effects (font (size 1.27 1.27)))) (number "18" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 12.7 0) (length 2.54) (name "INH_B" (effects (font (size 1.27 1.27)))) (number "19" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 11.43 0) (length 2.54) (name "INL_B" (effects (font (size 1.27 1.27)))) (number "20" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 10.16 0) (length 2.54) (name "INH_C" (effects (font (size 1.27 1.27)))) (number "21" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 8.89 0) (length 2.54) (name "INL_C" (effects (font (size 1.27 1.27)))) (number "22" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 7.62 0) (length 2.54) (name "DVDD" (effects (font (size 1.27 1.27)))) (number "23" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 6.35 0) (length 2.54) (name "REF" (effects (font (size 1.27 1.27)))) (number "24" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 5.08 0) (length 2.54) (name "SO1" (effects (font (size 1.27 1.27)))) (number "25" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 3.81 0) (length 2.54) (name "SO2" (effects (font (size 1.27 1.27)))) (number "26" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 2.54 0) (length 2.54) (name "AVDD" (effects (font (size 1.27 1.27)))) (number "27" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at -15.24 1.27 0) (length 2.54) (name "AGND" (effects (font (size 1.27 1.27)))) (number "28" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 35.56 180) (length 2.54) (name "PVDD1" (effects (font (size 1.27 1.27)))) (number "29" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 34.29 180) (length 2.54) (name "SP2" (effects (font (size 1.27 1.27)))) (number "30" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 33.02 180) (length 2.54) (name "SN2" (effects (font (size 1.27 1.27)))) (number "31" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 31.75 180) (length 2.54) (name "SP1" (effects (font (size 1.27 1.27)))) (number "32" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 30.48 180) (length 2.54) (name "SN1" (effects (font (size 1.27 1.27)))) (number "33" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 29.21 180) (length 2.54) (name "SL_C" (effects (font (size 1.27 1.27)))) (number "34" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 27.94 180) (length 2.54) (name "GL_C" (effects (font (size 1.27 1.27)))) (number "35" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 26.67 180) (length 2.54) (name "SH_C" (effects (font (size 1.27 1.27)))) (number "36" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 25.4 180) (length 2.54) (name "GH_C" (effects (font (size 1.27 1.27)))) (number "37" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 24.13 180) (length 2.54) (name "BST_C" (effects (font (size 1.27 1.27)))) (number "38" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 22.86 180) (length 2.54) (name "SL_B" (effects (font (size 1.27 1.27)))) (number "39" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 21.59 180) (length 2.54) (name "GL_B" (effects (font (size 1.27 1.27)))) (number "40" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 20.32 180) (length 2.54) (name "SH_B" (effects (font (size 1.27 1.27)))) (number "41" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 19.05 180) (length 2.54) (name "GH_B" (effects (font (size 1.27 1.27)))) (number "42" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 17.78 180) (length 2.54) (name "BST_B" (effects (font (size 1.27 1.27)))) (number "43" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 16.51 180) (length 2.54) (name "SL_A" (effects (font (size 1.27 1.27)))) (number "44" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 15.24 180) (length 2.54) (name "GL_A" (effects (font (size 1.27 1.27)))) (number "45" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 13.97 180) (length 2.54) (name "SH_A" (effects (font (size 1.27 1.27)))) (number "46" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 12.7 180) (length 2.54) (name "GH_A" (effects (font (size 1.27 1.27)))) (number "47" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 11.43 180) (length 2.54) (name "BST_A" (effects (font (size 1.27 1.27)))) (number "48" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 10.16 180) (length 2.54) (name "VDD_SPI" (effects (font (size 1.27 1.27)))) (number "49" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 8.89 180) (length 2.54) (name "PH1" (effects (font (size 1.27 1.27)))) (number "50" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 7.62 180) (length 2.54) (name "PH2" (effects (font (size 1.27 1.27)))) (number "51" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 6.35 180) (length 2.54) (name "BST_BK" (effects (font (size 1.27 1.27)))) (number "52" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 5.08 180) (length 2.54) (name "PVDD2_1" (effects (font (size 1.27 1.27)))) (number "53" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 3.81 180) (length 2.54) (name "PVDD2_2" (effects (font (size 1.27 1.27)))) (number "54" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 2.54 180) (length 2.54) (name "EN_BUCK" (effects (font (size 1.27 1.27)))) (number "55" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 15.24 1.27 180) (length 2.54) (name "SS_TR" (effects (font (size 1.27 1.27)))) (number "56" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 0 -39.37 90) (length 2.54) (name "PowerPAD" (effects (font (size 1.27 1.27)))) (number "57" (effects (font (size 1.27 1.27)))))
+		)
+	)
+)
