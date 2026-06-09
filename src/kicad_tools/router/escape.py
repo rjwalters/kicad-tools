@@ -4243,6 +4243,100 @@ class EscapeRouter:
 
         return escapes
 
+    def _sop_in_pad_rescue_eligible(
+        self,
+        package: PackageInfo,
+        pads: list[Pad],
+    ) -> bool:
+        """Return True when the SOP staggered path should attempt the in-pad rescue.
+
+        Issue #3381 / P_FP6 -- gate function for wiring
+        :meth:`_try_in_pad_escape` into the SOP staggered dispatcher
+        (``_create_staggered_row_escapes``).  This mirrors the QFP
+        dispatcher pattern (``_escape_qfp_alternating``) which already
+        consults the in-pad rescue when fine-pitch clearance pressure
+        cannot be resolved by the legacy escape geometry.
+
+        Four conjunctive conditions must hold for the rescue to be
+        eligible:
+
+        1. **Manufacturer capability** -- ``self.via_in_pad_supported``
+           must be True (jlcpcb-tier1, pcbway).  Tier-0 jlcpcb returns
+           False and the rescue is skipped.  Mirrors the QFP gate.
+        2. **Pitch band** -- ``package.pin_pitch <= 1.5`` mm.  This
+           covers SOIC-8 (1.27 mm pitch family) plus tighter SSOP/TSSOP
+           variants but excludes 2.54 mm-pitch SOPs that have plenty of
+           routing channel and don't need the rescue.  The 1.5 mm
+           threshold matches :data:`FINE_PITCH_THRESHOLD_MM` used by the
+           fine-pitch package classifier.
+        3. **Fine-pitch region installed** -- a
+           :class:`~kicad_tools.router.fine_pitch_escape.FinePitchRegion`
+           must match ``package.ref``.  This is the opt-in switch: only
+           packages the board author or detector flagged for fine-pitch
+           treatment participate.  Without an installed region the
+           rescue is a no-op and SOP escape geometry is bit-identical
+           to the pre-P_FP6 path.
+        4. **Geometric headroom** -- the pad long-axis dimension must
+           accommodate the manufacturer's minimum via OD (drill + 2x
+           annular ring).  UCC27211 SOIC-8 pads are 0.30 x 1.55 mm; the
+           long-axis 1.55 mm comfortably exceeds the JLCPCB tier-1
+           minimum via OD of 0.60 mm.  This guard short-circuits
+           ``_try_in_pad_escape``'s internal long-axis check so the
+           dispatcher can decide eligibility without speculatively
+           invoking the rescue helper.
+
+        Args:
+            package: Package info from ``analyze_package``.
+            pads: Row of pads under consideration; the first pad supplies
+                geometry for the long-axis headroom check (all pads in
+                an SOP row share identical width/height per the package
+                classifier).
+
+        Returns:
+            True iff all four conditions hold; False otherwise.
+        """
+        # (1) Manufacturer capability.
+        if not self.via_in_pad_supported:
+            return False
+
+        # (2) Pitch band -- gate at the FINE_PITCH_THRESHOLD_MM cap so
+        # 1.27 mm SOIC qualifies but 2.54 mm SOPs do not.  The architect
+        # proposal pinned the boundary at 1.5 mm; we re-use the existing
+        # module constant for source-of-truth alignment.  ``getattr``
+        # defends against synthetic test ``PackageInfo`` stand-ins that
+        # may not carry every attribute the real classifier produces.
+        pin_pitch = getattr(package, "pin_pitch", None)
+        if pin_pitch is None or pin_pitch > FINE_PITCH_THRESHOLD_MM:
+            return False
+
+        # (3) Fine-pitch region must match this package ref.  We re-use
+        # ``_escape_clearance_for_ref`` as the "is there a region for
+        # this ref?" probe: when a region matched AND the narrow-channel
+        # guard allowed the shrink, the per-ref clearance is strictly
+        # less than ``rules.trace_clearance``.  This is the same
+        # detection signal P_FP5 already uses one block below for the
+        # launch-step shrink, so the two gates stay in lock-step.
+        per_ref_clearance = self._escape_clearance_for_ref(package.ref, pads)
+        if per_ref_clearance >= self.rules.trace_clearance - 1e-9:
+            return False
+
+        # (4) Geometric headroom.  ``_try_in_pad_escape`` validates the
+        # long-axis dimension internally, but checking here lets the
+        # caller defer the more expensive _try_in_pad_escape invocation
+        # for pads that clearly cannot host an in-pad via on this
+        # manufacturer tier.
+        if self._mfr_limits is not None:
+            min_via_od = self._mfr_limits.min_via_diameter
+        else:
+            min_via_od = self.rules.via_diameter
+        if not pads:
+            return False
+        long_axis = max(pads[0].width, pads[0].height)
+        if long_axis < min_via_od - 1e-6:
+            return False
+
+        return True
+
     def _create_staggered_row_escapes(
         self,
         pads: list[Pad],
@@ -4288,6 +4382,42 @@ class EscapeRouter:
             # the legacy launch distance bit-for-bit.
             effective_escape_clearance = legacy_clearance
 
+        # Issue #3381 / P_FP6: in-pad rescue for the SOP staggered path.
+        # When the package + manufacturer + region + pad geometry all
+        # cooperate, attempt :meth:`_try_in_pad_escape` AS A FIRST TRY
+        # for every non-plane pad in the row; on success the in-pad
+        # route REPLACES the staggered geometry (the via is placed
+        # dead-centre on the pad and escapes vertically onto the
+        # inner / back layer, freeing the F.Cu launch corridor for
+        # the main router).  On ``None`` (geometric infeasibility,
+        # neighbour-pad clipping that even the long-axis nudge cannot
+        # resolve), fall through to the legacy staggered geometry so
+        # the pre-P_FP6 behaviour is preserved for non-rescued pads.
+        #
+        # The architect proposal (Issue #3381) mirrors the QFP
+        # dispatcher pattern at ``_escape_qfp_alternating`` ~line 2494
+        # but raises the trigger from "only when the legacy clips" to
+        # "always when eligible".  The latter is required because the
+        # SOP staggered path produces a perpendicular launch that
+        # NEVER clips a same-row neighbour (the trace runs straight
+        # away from the row, the launch X coordinate never moves
+        # laterally), so the QFP-style violation trigger would never
+        # fire on SOP geometry.  The downstream-routing congestion
+        # that the rescue addresses cannot be detected from the
+        # escape phase alone -- so the gate is geometric-feasibility-
+        # plus-region-opt-in.
+        in_pad_rescue_eligible = self._sop_in_pad_rescue_eligible(package, pads)
+        # Escape width and rescue clearance mirror the values used in
+        # ``_escape_qfp_alternating``'s in-pad invocation (the latter is
+        # the per-component clearance, not the post-via-trace clearance,
+        # because the rescue replaces the surface launch with an
+        # in-pad via and an inner-layer stub).
+        rescue_escape_width = (
+            self.rules.min_trace_width
+            if self.rules.min_trace_width is not None
+            else self._get_trace_width_for_net(pads[0].net_name if pads else "")
+        )
+
         # Calculate base escape distance and stagger offset
         base_escape_dist = effective_escape_clearance + self.rules.trace_width
         stagger_offset = self.via_spacing / 2
@@ -4300,6 +4430,43 @@ class EscapeRouter:
             # Calculate via position (perpendicular to pin row)
             via_x = pad.x + dx * escape_dist
             via_y = pad.y + dy * escape_dist
+
+            # Issue #3381 / P_FP6: try the in-pad rescue first when
+            # eligible.  Plane-net pads (net == 0) are skipped: they
+            # connect via plane stitching, not via escape, so a rescue
+            # would burn a via budget on a net that doesn't need one.
+            # This mirrors the ``_escape_qfp_alternating`` plane-net
+            # guard at line 2340.  When the rescue returns ``None``
+            # (geometric infeasibility, neighbour-pad clipping that
+            # even the long-axis nudge cannot resolve, or strict-mode
+            # deferral), the pad falls through to the legacy
+            # staggered geometry below.
+            if in_pad_rescue_eligible and pad.net != 0:
+                in_pad_route = self._try_in_pad_escape(
+                    pad=pad,
+                    direction=direction,
+                    effective_clearance=effective_escape_clearance,
+                    escape_width=rescue_escape_width,
+                    package=package,
+                    skip_on_clearance_violation=self.strict_in_pad_clearance,
+                )
+                if in_pad_route is not None:
+                    package_type_name = getattr(
+                        getattr(package, "package_type", None), "name", "SOP"
+                    )
+                    logger.info(
+                        "SOP in-pad rescue for %s pin %s (net %s): "
+                        "%s package, placed in-pad via at (%.3f, %.3f) "
+                        "(Issue #3381 / P_FP6).",
+                        package.ref,
+                        pad.pin,
+                        pad.net_name,
+                        package_type_name,
+                        in_pad_route.via_pos[0] if in_pad_route.via_pos else 0.0,
+                        in_pad_route.via_pos[1] if in_pad_route.via_pos else 0.0,
+                    )
+                    escapes.append(in_pad_route)
+                    continue
 
             # Escape point is beyond the via.  P_FP5 (#3371): the post-via
             # clearance is governed by ``rules.trace_clearance`` (the
