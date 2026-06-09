@@ -320,13 +320,23 @@ CHORUS_POST_WAVE10_AUTOFIX_KEPT = True
 # floor constant retired.
 CHORUS_MAY10_TARGET = 30  # 30/48 = 62.5%
 
-# The external chorus repo path, where the v19_stripped fixture lives.
+# The vendored chorus-test-revA fixture, surfaced via the
+# ``boards/external/chorus-test-revA`` symlink that points at the
+# canonical ``rjwalters/chorus`` repo checkout.  Resolves relative to
+# the repository root (this file is two levels under it), matching the
+# pattern in ``test_chorus_test_placement_feedback.py`` and
+# ``src/kicad_tools/benchmark/cases.py``.
+#
 # When the fixture is missing the slow integration test skips rather than
 # fails, matching the existing pattern in ``test_benchmark_chorus.py``
 # (see ``test_missing_pcb_skips_gracefully``).
-CHORUS_FIXTURE_PATH = Path(
-    "/Users/rwalters/GitHub/chorus/hardware/chorus-test-revA/kicad/"
-    "chorus-test-revA_v19_stripped.kicad_pcb"
+CHORUS_FIXTURE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "boards"
+    / "external"
+    / "chorus-test-revA"
+    / "kicad"
+    / "chorus-test-revA_v19_stripped.kicad_pcb"
 )
 
 
