@@ -438,6 +438,23 @@ class EscalationPolicy(BaseModel):
             "CLI flag if recipe-by-recipe tuning becomes necessary."
         ),
     )
+    packing_overhead: float = Field(
+        default=2.5,
+        description=(
+            "Issue #3403: heuristic packing-density multiplier used by "
+            "the pre-route sum-of-clearances area estimator.  The estimator "
+            "computes ``packing_overhead * (sum(footprint_area + "
+            "clearance_perimeter) + routing_channel_estimate)`` -- the "
+            "multiplier accounts for the geometric inefficiency of routing "
+            "channels, vias, fillets, and component keepouts not modeled "
+            "by the per-footprint terms.  Default 2.5 is a moderate "
+            "prototype-density figure; bump to 3.0+ for tightly packed "
+            "designs or down to 1.8 for very loose layouts.  Set to 0 to "
+            "disable the pre-route check (reactive DRC-density backstop "
+            "still applies).  Tunable per recipe via spec or per invocation "
+            "via the ``--packing-overhead`` CLI flag."
+        ),
+    )
 
     @field_validator("max_layers")
     @classmethod
@@ -463,6 +480,14 @@ class EscalationPolicy(BaseModel):
             raise ValueError(
                 f"density_threshold_viols_per_cm2 must be positive, got {v}"
             )
+        return v
+
+    @field_validator("packing_overhead")
+    @classmethod
+    def validate_packing_overhead(cls, v: float) -> float:
+        """Packing overhead must be non-negative (0 disables the pre-route check)."""
+        if v < 0:
+            raise ValueError(f"packing_overhead must be >= 0, got {v}")
         return v
 
 

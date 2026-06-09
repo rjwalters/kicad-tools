@@ -253,6 +253,11 @@ def run_route_command(args) -> int:
     # --auto-layers per Q5 of the architect proposal.
     if getattr(args, "auto_pcb_size", False):
         sub_argv.append("--auto-pcb-size")
+    # Issue #3403: forward --packing-overhead when set (None means "use
+    # policy default", so we only forward an explicit override).
+    packing_overhead_attr = getattr(args, "packing_overhead", None)
+    if packing_overhead_attr is not None:
+        sub_argv.extend(["--packing-overhead", str(packing_overhead_attr)])
     if getattr(args, "min_trace", None) is not None:
         sub_argv.extend(["--min-trace", str(args.min_trace)])
     if getattr(args, "min_clearance_floor", None) is not None:
