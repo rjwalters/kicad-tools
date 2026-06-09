@@ -601,13 +601,31 @@ def detect_fine_pitch_regions(
         ys = [p.y for p in cluster]
         origin = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
 
+        # P_FP4 adaptive radius (Issue #3371 / P_FP3 builder decision #2):
+        # Wide packages (e.g. 14-pin SOIC at 1.27mm pitch with ~8mm body)
+        # have outermost pads sitting outside a fixed 5mm radius halo.
+        # The identity-match path (:meth:`FinePitchRegion.applies_to_pad`
+        # via :attr:`pad_refs`) defensively covers the package's own
+        # pads in this case, but neighbouring decoupling caps + signal
+        # start/end pads that sit just outside the body still need the
+        # escape clearance to thread through the package's pin field.
+        # The adaptive formula ``max(default_radius, bbox_diagonal/2)``
+        # ensures the halo always covers at least the package's own
+        # geometric extent plus the default halo for small packages.
+        # For SOIC-8 (~5mm diagonal) this is a no-op (5mm vs 2.5mm
+        # adaptive); for SOIC-14 (~9mm diagonal) this widens the halo
+        # to ~4.5mm-plus-default, so the outermost neighbour pads in
+        # the corridor pick up the escape clearance shrink.
+        bbox_diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+        adaptive_radius = max(radius_mm, bbox_diag / 2.0)
+
         pad_refs = frozenset((p.ref, p.pin) for p in cluster)
 
         regions.append(
             FinePitchRegion(
                 package_ref=ref,
                 package_origin=origin,
-                radius_mm=radius_mm,
+                radius_mm=adaptive_radius,
                 pin_pitch=pin_pitch,
                 pad_size_along_pitch=pad_size,
                 escape_clearance=default_escape_clearance,
