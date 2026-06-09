@@ -512,6 +512,84 @@ class TestUSBCBGAMisclassification:
         assert len(pads) == 22
         assert detect_package_type(pads) != PackageType.BGA
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Issue #3413: odd-dimension BGA grids (e.g. 7x7 BGA-49) have a "
+            "full row AND a full column directly on the package center "
+            "axes. ``_is_grid_pattern``'s strict ``if/elif/else`` quadrant "
+            "cascade lumps every axis pad into the ``else`` branch, "
+            "producing a 9/9/9/22 distribution for a perfectly symmetric "
+            "7x7 grid and failing the [0.3, 1.7] x avg balance check. "
+            "That misclassifies board 06's USB3 SS BGA-49 sink as "
+            "``PackageType.UNKNOWN`` and routes it through the radial-"
+            "escape fallback. A naive fix (distribute axis pads across "
+            "the two adjacent quadrants) makes detection pass AND fires "
+            "the diff-pair-aware paired escape pre-pass on this BGA, but "
+            "the resulting paired-escape geometry (tight 0.10mm intra-"
+            "pair lateral offset at the BGA edge, escape direction "
+            "perpendicular to the pair axis) drops the per-net A* "
+            "routing reach on board 06 from 41% (the documented baseline) "
+            "to ~27% because the per-net A* times out (30s default) "
+            "trying to leave the tight escape endpoints. The detection "
+            "fix needs to land alongside an escape-strategy refinement "
+            "for sparse-signal BGAs (paired escape direction toward the "
+            "partner connector, not outward from package center). "
+            "Tracked under #3419 (follow-up to #3413)."
+        ),
+    )
+    def test_odd_dimension_7x7_bga_detected(self):
+        """7x7 BGA (49 pads, odd grid) should be detected as BGA (Issue #3413).
+
+        REGRESSION TEST DOCUMENTING THE BUG.  See the ``xfail`` reason
+        above for the full root-cause analysis and why a naive
+        ``_is_grid_pattern`` fix is not safe to land on its own.
+
+        Board 06's BGA-49 USB3 SuperSpeed sink is a 7x7 grid at 1.27 mm
+        pitch.  The router currently misclassifies it as
+        ``PackageType.UNKNOWN`` and dispatches the 8 USB3 SS signal pads
+        through ``_escape_radial`` -- a simple per-pin surface escape
+        that happens to produce the 41% reach this issue captures.  When
+        the BGA detector is corrected in isolation, the paired-escape
+        pre-pass (gated on ``PackageType.BGA``) fires on the USB3 pairs,
+        produces tightly-coupled escape endpoints at the BGA edge, and
+        the per-net A* main router times out searching from those
+        endpoints.  Reach drops to ~27%.
+
+        Two-phase fix needed (tracked separately):
+          1. ``_is_grid_pattern``: distribute axis pads across the two
+             adjacent quadrants when checking the balance heuristic.
+          2. ``_escape_diff_pair_segment`` / ``_generate_paired_escapes``:
+             choose the launch direction based on partner-connector
+             proximity (e.g., consult ``net_class_map`` / the diff-pair
+             partner's package location) rather than outward from
+             package center.
+        """
+        pads = create_bga_pads(7, 7, pitch=1.27)
+        assert len(pads) == 49
+        assert detect_package_type(pads) == PackageType.BGA
+
+    def test_odd_dimension_9x9_bga_still_detected(self):
+        """9x9 BGA (81 pads, odd grid) IS detected correctly today (Issue #3413).
+
+        Sibling case for Issue #3413: confirms that the
+        ``_is_grid_pattern`` quadrant-balance bug only fires below a
+        critical grid size.  For 9x9 the quadrant counts come out
+        16/16/16/33 against avg 20.25 (range [6.1, 34.4]) so the
+        unbalanced 33 squeaks under the upper threshold and the BGA
+        path is still selected.  For 7x7 the counts are 9/9/9/22
+        against avg 12.25 (range [3.7, 20.8]) and the 22 exceeds the
+        upper threshold, triggering the bug (see the xfail-marked 7x7
+        test above).  The 7x7 case is the odd-dim threshold board 06
+        exercises.
+
+        Once the underlying ``_is_grid_pattern`` fix lands, this test
+        continues to pass -- the fix is upward compatible.
+        """
+        pads = create_bga_pads(9, 9, pitch=0.8)
+        assert len(pads) == 81
+        assert detect_package_type(pads) == PackageType.BGA
+
 
 class TestDetectPackageType:
     """Tests for detect_package_type function."""
