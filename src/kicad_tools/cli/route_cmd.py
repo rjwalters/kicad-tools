@@ -2273,6 +2273,7 @@ def _filter_layer_configs_for_pcb(
     pcb_path: Path,
     max_layers: int,
     quiet: bool = False,
+    starting_layers: int = 2,
 ) -> list[tuple[int, "LayerStack"]]:
     """Filter and reorder *layer_configs* to honour the PCB's declared stackup.
 
@@ -2283,7 +2284,7 @@ def _filter_layer_configs_for_pcb(
     that cannot succeed, leaving the real 4L attempt to start against an
     exhausted deadline (issue #2823 + #2802).
 
-    This helper applies three transformations:
+    This helper applies four transformations:
 
     1. **Floor by detected copper count.**  Entries whose ``layer_count`` is
        below the PCB's declared count are dropped.  A 4-copper-layer PCB has
@@ -2297,6 +2298,10 @@ def _filter_layer_configs_for_pcb(
        detected count, emit a warning and keep the cap (the user's explicit
        wish wins, but they are told that it is structurally below the
        declared stackup so a partial/failed result is expected).
+    4. **Honour ``starting_layers`` (Issue #3400).**  Drop entries below
+       ``starting_layers`` so a board can opt out of the 2L tax.  When
+       ``starting_layers=4`` the ladder becomes ``[4, 6]`` (skipping 2L
+       even on a board whose declared stackup is 2-copper).
 
     Args:
         layer_configs: The unfiltered escalation ladder
@@ -2305,12 +2310,15 @@ def _filter_layer_configs_for_pcb(
             declared copper count and inner-zone presence).
         max_layers: User-requested ``--max-layers`` cap.
         quiet: Suppress informational output.
+        starting_layers: Lower rung of the escalation ladder (Issue #3400).
+            Default 2 preserves historical behaviour.
 
     Returns:
-        A new list with entries below ``detected_count`` removed, plane-aware
-        variants promoted (when applicable), and capped at ``max_layers``.
-        Falls through to the input list unchanged when detection fails or the
-        detected count is <= 2 (the natural starting point for the ladder).
+        A new list with entries below ``detected_count`` and below
+        ``starting_layers`` removed, plane-aware variants promoted (when
+        applicable), and capped at ``max_layers``.  Falls through to the
+        input list unchanged when detection fails or the detected count is
+        <= 2 (the natural starting point for the ladder).
     """
     from kicad_tools.cli.progress import flush_print
 
@@ -2337,6 +2345,19 @@ def _filter_layer_configs_for_pcb(
 
     # Drop entries below the detected floor (or the user's cap if lower).
     filtered = [(n, s) for n, s in filtered if n >= effective_floor]
+
+    # Issue #3400: honour ``starting_layers`` as an additional floor.  When
+    # the user (or recipe) declares ``starting_layers=4`` we skip the 2L
+    # probe entirely even if the PCB's declared stackup is 2-copper.
+    if starting_layers > 2:
+        prior = filtered
+        filtered = [(n, s) for n, s in filtered if n >= starting_layers]
+        if not quiet and len(filtered) != len(prior):
+            ladder_str = ", ".join(f"{n}L" for n, _ in filtered)
+            flush_print(
+                f"  Issue #3400: starting_layers={starting_layers}; "
+                f"ladder filtered to [{ladder_str}]"
+            )
 
     # When inner-layer plane zones exist, promote the plane-aware 4L variant
     # ahead of the all-signal variant.  This matches the single-pass path
@@ -2373,9 +2394,14 @@ def _filter_layer_configs_for_pcb(
     # Defensive: if the filter wiped the ladder (e.g. detected count > 6 and
     # max_layers < detected), fall back to the original list capped at
     # max_layers so the loop still has something to try.  The warning above
-    # already alerted the user.
+    # already alerted the user.  Issue #3400: still respect starting_layers
+    # so the user's explicit floor is honoured.
     if not filtered:
-        filtered = [(n, s) for n, s in layer_configs if n <= max_layers]
+        filtered = [
+            (n, s)
+            for n, s in layer_configs
+            if n <= max_layers and n >= starting_layers
+        ]
 
     if not quiet and detected_count > 2:
         dropped = len(layer_configs) - len(filtered)
@@ -2795,8 +2821,14 @@ def route_with_layer_escalation(
     # Drops entries below the detected copper count (so a 4L board never
     # wastes budget on a 2L probe) and promotes the plane-aware 4L variant
     # ahead of all-signal when inner plane zones exist.
+    # Issue #3400: also honour ``--starting-layers`` so boards can opt
+    # out of the 2L probe explicitly.
     layer_configs = _filter_layer_configs_for_pcb(
-        layer_configs, pcb_path, args.max_layers, quiet=quiet
+        layer_configs,
+        pcb_path,
+        args.max_layers,
+        quiet=quiet,
+        starting_layers=int(getattr(args, "starting_layers", None) or 2),
     )
 
     # Issue #3371 / P_FP5: compose fine-pitch escape with the auto-layers
@@ -5426,6 +5458,68 @@ def _load_project_kct_for_escalation(pcb_path: Path, args) -> None:
                 args._hole_group = None
 
 
+def _resolve_starting_layers(pcb_path: Path, args) -> None:
+    """Resolve ``args.starting_layers`` from CLI > project.kct > default 2.
+
+    Issue #3400: ``EscalationPolicy.starting_layers`` lets boards opt out
+    of the 2L tax.  The CLI flag ``--starting-layers {2,4,6}`` takes
+    precedence over the spec field, and both override the default of 2.
+
+    After this helper returns, ``args.starting_layers`` is guaranteed to
+    be a concrete int in ``{2, 4, 6}``; the caller validates it against
+    ``args.max_layers``.
+
+    Args:
+        pcb_path: Path to the input ``.kicad_pcb`` file (the spec
+            discovery anchor; the helper walks ancestors looking for a
+            ``project.kct`` sibling).
+        args: Parsed CLI args; ``args.starting_layers`` may be ``None``
+            (CLI flag was not supplied).  Mutated in place with the
+            resolved value.
+    """
+    # If the CLI flag was supplied (parser stores the int), use it as-is.
+    cli_value = getattr(args, "starting_layers", None)
+    if cli_value is not None:
+        return
+
+    # Otherwise, look for a project.kct sibling and consume the spec
+    # value when present.  Discovery mirrors the bounded ancestor walk
+    # used by ``_load_project_kct_for_escalation`` (Issue #3352).
+    spec_value: int | None = None
+    pcb_dir = pcb_path.parent if pcb_path.parent != Path("") else Path.cwd()
+    candidate_paths: list[Path] = []
+    cur = pcb_dir.resolve()
+    for _ in range(6):  # bounded ancestor walk
+        candidate_paths.append(cur / "project.kct")
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    spec_path: Path | None = None
+    for p in candidate_paths:
+        if p.is_file():
+            spec_path = p
+            break
+
+    if spec_path is not None:
+        try:
+            from kicad_tools.spec.parser import load_spec
+
+            spec = load_spec(spec_path)
+            requirements = getattr(spec, "requirements", None)
+            if requirements is not None:
+                manufacturing = getattr(requirements, "manufacturing", None)
+                if manufacturing is not None:
+                    escalation = getattr(manufacturing, "escalation", None)
+                    if escalation is not None:
+                        spec_value = int(escalation.starting_layers)
+        except Exception:
+            # Be permissive: a malformed spec must not block routing.
+            spec_value = None
+
+    args.starting_layers = spec_value if spec_value is not None else 2
+
+
 def _print_size_escalation_refusal(
     reason: str,
     current_tier_index: int,
@@ -5690,8 +5784,13 @@ def route_with_combined_escalation(
     # Drops entries below the detected copper count (so a 4L board never
     # wastes budget on a 2L probe) and promotes the plane-aware 4L variant
     # ahead of all-signal when inner plane zones exist.
+    # Issue #3400: also honour ``--starting-layers``.
     layer_configs = _filter_layer_configs_for_pcb(
-        layer_configs, pcb_path, args.max_layers, quiet=quiet
+        layer_configs,
+        pcb_path,
+        args.max_layers,
+        quiet=quiet,
+        starting_layers=int(getattr(args, "starting_layers", None) or 2),
     )
 
     if not quiet:
@@ -7002,6 +7101,24 @@ def main(argv: list[str] | None = None) -> int:
             "Maximum layer count for auto-escalation (default: 6). Only used with --auto-layers."
         ),
     )
+    # Issue #3400: ``--starting-layers`` lets boards opt out of the 2L tax.
+    # Default 2 preserves the historical 2L->4L->6L ladder.  When the user
+    # passes ``--starting-layers 4`` the ladder skips 2L and starts at 4L
+    # directly.  Precedence: CLI flag > project.kct EscalationPolicy field
+    # > default 2.  Validated against ``--max-layers`` at startup.
+    parser.add_argument(
+        "--starting-layers",
+        type=int,
+        default=None,
+        choices=[2, 4, 6],
+        help=(
+            "Lower rung of the auto-escalation ladder (default: 2). "
+            "Use --starting-layers 4 to skip the 2L probe on boards with "
+            "no realistic chance of routing at 2L (Issue #3400). Only used "
+            "with --auto-layers. Must be <= --max-layers. Overrides any "
+            "starting_layers value in project.kct."
+        ),
+    )
     # Issue #3352 (P_AS3): --auto-pcb-size escalation.  Walks the
     # manufacturer's size-tier ladder when routing reach + DRC density
     # indicate the envelope (not layers or clearance) is the bottleneck.
@@ -7737,6 +7854,23 @@ def main(argv: list[str] | None = None) -> int:
                     )
         except ValueError:
             pass  # Unknown manufacturer -- edge_clearance stays None
+
+    # Issue #3400: resolve the effective ``starting_layers`` value with the
+    # precedence CLI flag > project.kct EscalationPolicy field > default 2.
+    # This runs before every escalation dispatch so all paths share the
+    # same source of truth (size-first, layers-only, mfr-tier, combined,
+    # plain --auto-layers).  Validation is performed against the resolved
+    # value of ``args.max_layers`` so we catch the structural error
+    # (starting > ceiling) up front rather than producing an empty ladder.
+    _resolve_starting_layers(pcb_path, args)
+    if args.starting_layers > args.max_layers:
+        print(
+            f"Error: --starting-layers={args.starting_layers} must be "
+            f"<= --max-layers={args.max_layers}.  Lower the floor or "
+            "raise the ceiling.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size

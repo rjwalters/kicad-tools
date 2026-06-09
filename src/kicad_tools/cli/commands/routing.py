@@ -238,6 +238,12 @@ def run_route_command(args) -> int:
         sub_argv.append("--no-auto-layers")
     if getattr(args, "max_layers", 6) != 6:
         sub_argv.extend(["--max-layers", str(args.max_layers)])
+    # Issue #3400: forward --starting-layers when explicitly supplied.
+    # The outer parser stores ``None`` when the user did not pass the flag;
+    # only forward a concrete value so the inner dispatcher's CLI > spec >
+    # default precedence is preserved.
+    if getattr(args, "starting_layers", None) is not None:
+        sub_argv.extend(["--starting-layers", str(args.starting_layers)])
     if getattr(args, "min_completion", 0.95) != 0.95:
         sub_argv.extend(["--min-completion", str(args.min_completion)])
     if getattr(args, "adaptive_rules", False):
