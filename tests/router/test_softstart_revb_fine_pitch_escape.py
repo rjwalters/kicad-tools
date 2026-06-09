@@ -253,6 +253,18 @@ def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
 
     Closing this gap is tracked separately and out of scope for #3390.
 
+    Issue #3395 update (Jun 2026):  investigated raising the
+    dispatcher gate (broadening the dual-row fine-pitch cap in
+    ``is_dense_package`` from 0.75 mm to 1.5 mm so UCC27211 SOIC-8
+    qualifies).  Empirical measurement: reach REGRESSES 18/30 ->
+    8/30 because the P_FP6 in-pad vias collide with the GATE/UCC
+    bus routing downstream.  See
+    ``test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached``
+    for the detailed measurement table.  The dispatcher gap is
+    INTENTIONAL until #3398 (the rescue ↔ main-router interaction
+    fix) lands.  This floor stays at 18 to prevent quiet acceptance
+    of the regression.
+
     Issue #3390: drives routing in-process with a strict 240 s
     budget.  Replaces the previous ``subprocess.run(kct route)``
     invocation that timed out at 660 s.
