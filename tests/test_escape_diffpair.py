@@ -333,6 +333,7 @@ class TestGate2EscapeRouterCtorReceivesMap:
         and refreshes an already-created escape router's map in place
         (Issue #3419).
         """
+        import contextlib
         from unittest.mock import MagicMock
 
         from kicad_tools.router.diffpair import DifferentialPairConfig
@@ -348,13 +349,11 @@ class TestGate2EscapeRouterCtorReceivesMap:
         ar._diffpair_router = MagicMock()
         ar._diffpair_router.route_all_with_diffpairs = MagicMock(return_value=([], []))
         ar._diffpair_router.intra_clearance_violations = MagicMock(return_value=[])
-        try:
+        # The mocked inner router may not satisfy the full post-route
+        # pipeline; the flag flip happens FIRST so it is still
+        # observable either way.
+        with contextlib.suppress(Exception):
             ar.route_all_with_diffpairs(DifferentialPairConfig(enabled=True))
-        except Exception:
-            # The mocked inner router may not satisfy the full post-route
-            # pipeline; the flag flip happens FIRST so it is still
-            # observable either way.
-            pass
         assert ar.paired_escape_coupling is True
         assert escape.diff_pair_map == {"USB_D+": "USB_D-", "USB_D-": "USB_D+"}
 
