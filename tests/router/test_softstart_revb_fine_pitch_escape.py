@@ -102,6 +102,7 @@ def _route_softstart_in_process(
     *,
     routing_timeout: float = 240.0,
     per_net_timeout: float = 30.0,
+    layer_stack: object | None = None,
 ) -> tuple[int, int, str]:
     """Drive softstart rev B routing in-process (Issue #3390 timeout fix).
 
@@ -116,6 +117,15 @@ def _route_softstart_in_process(
         pcb_path: Input PCB.
         routing_timeout: Overall budget for the main routing phase.
         per_net_timeout: Per-A* timeout in seconds.
+        layer_stack: Optional explicit ``LayerStack`` for routing.  When
+            ``None`` the PCB's declared layer count is used (2L for the
+            softstart unrouted PCB fixture).  Issue #3401 ships the
+            ``starting_layers=4`` recipe field; this test surfaces the
+            L=4 measurement by passing
+            ``LayerStack.four_layer_sig_gnd_pwr_sig()`` explicitly so the
+            in-process measurement matches what ``kct route`` does at
+            ``--starting-layers 4`` (route_cmd.py picks the plane-aware
+            stack first when escalating to L=4).
 
     Returns:
         Tuple ``(nets_routed, total_nets, captured_log)`` where
@@ -149,9 +159,14 @@ def _route_softstart_in_process(
             manufacturer="jlcpcb-tier1",
         )
 
-        router, _ = load_pcb_for_routing(
-            str(pcb_path), skip_nets=_SKIP_NETS, rules=rules,
-        )
+        load_kwargs: dict[str, object] = {
+            "skip_nets": _SKIP_NETS,
+            "rules": rules,
+        }
+        if layer_stack is not None:
+            load_kwargs["layer_stack"] = layer_stack
+
+        router, _ = load_pcb_for_routing(str(pcb_path), **load_kwargs)
         router.rules.manufacturer = "jlcpcb-tier1"
 
         router.route_with_escape(
@@ -227,17 +242,33 @@ def test_softstart_revb_fine_pitch_regions_install(tmp_path: Path) -> None:
 
 
 def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
-    """Softstart rev B routing reach holds at the L=2 single-attempt floor.
+    """Softstart rev B routing reach holds at the L=4 single-attempt floor.
 
     The Issue #3371 AC #4 target is >= 28/30 reach.  P_FP4 lands the
     infrastructure (adaptive radius, in-region clearance threading,
     escape helper, dense-package union); P_FP5 (PR #3380) wires
     per-ref escape clearance; P_FP6 (PR #3389) wires the SOP staggered
     in-pad rescue; PR #3386 lands the U1 LQFP-32 subgrid in-pad
-    rescue.  Issue #3390 verification measured 18/30 fully connected
-    at L=2 single-attempt with all four landed.  This test pins a
-    conservative floor of 18/30 to surface any infrastructure
-    regression while leaving headroom for future optimisation.
+    rescue.
+
+    Issue #3401 update (Jun 2026): the softstart recipe
+    (``boards/external/softstart/project.kct``) now declares
+    ``escalation.starting_layers=4`` (PR #3405 landed the schema field
+    + ``--starting-layers`` CLI flag, this PR sets the value in the
+    softstart spec).  Empirical measurement at L=4 with the plane-aware
+    stack ``four_layer_sig_gnd_pwr_sig`` is 20/30 fully connected --
+    a 2-net improvement over the prior 18/30 L=2 single-attempt floor.
+    The all-signal stack ``four_layer_all_signal`` measured worse at
+    17/30 (more verticals + denser inner layer congestion); the
+    plane-aware variant is therefore the production target.
+
+    Why not 30/30?  The remaining 10 unrouted nets are the deeper
+    rescue <-> main-router coupling problem tracked by #3398
+    (BLOCKED_BY_COMPONENT rip-up + adjacent-pin in-pad vias).  L=4
+    on its own does not close the gap -- it buys 2 nets of headroom
+    by giving the escape -> bus routing more vertical relief but
+    does not unblock the SOIC-8 / LQFP-32 interactions that #3398
+    targets.
 
     Why not 28/30?  The architect's +3 net P_FP6 estimate (Issue
     #3381 comment) assumed the SOP staggered dispatcher would run
@@ -251,41 +282,52 @@ def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
     ``test_softstart_revb_p_fp6_dispatcher_eligible``) but the
     SOP dispatcher does not invoke it during this end-to-end route.
 
-    Closing this gap is tracked separately and out of scope for #3390.
-
-    Issue #3395 update (Jun 2026):  investigated raising the
-    dispatcher gate (broadening the dual-row fine-pitch cap in
+    Issue #3395 (Jun 2026):  investigated raising the dispatcher
+    gate (broadening the dual-row fine-pitch cap in
     ``is_dense_package`` from 0.75 mm to 1.5 mm so UCC27211 SOIC-8
     qualifies).  Empirical measurement: reach REGRESSES 18/30 ->
     8/30 because the P_FP6 in-pad vias collide with the GATE/UCC
     bus routing downstream.  See
     ``test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached``
     for the detailed measurement table.  The dispatcher gap is
-    INTENTIONAL until #3398 (the rescue ↔ main-router interaction
-    fix) lands.  This floor stays at 18 to prevent quiet acceptance
-    of the regression.
+    INTENTIONAL until #3398 (the rescue <-> main-router interaction
+    fix) lands.
 
-    Issue #3390: drives routing in-process with a strict 240 s
+    Issue #3390: drives routing in-process with a strict routing
     budget.  Replaces the previous ``subprocess.run(kct route)``
-    invocation that timed out at 660 s.
+    invocation that timed out at 660 s.  Issue #3401 raises the
+    budget to 480 s to accommodate the L=4 main-routing phase
+    (the L=4 measurement took ~492 s wall on a baseline laptop
+    with the C++ backend; the floor still holds even when the
+    budget cuts in slightly earlier).
     """
     pcb_path = _regenerate_softstart_pcb(tmp_path / "softstart_reach")
+
+    # Issue #3401: drive the measurement at L=4 to mirror what the
+    # softstart project.kct spec opts into via ``starting_layers=4``.
+    # ``four_layer_sig_gnd_pwr_sig`` is the first stack ``kct route``
+    # tries at L=4 (see route_cmd.py).
+    from kicad_tools.router import LayerStack
+    layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+
     routed_count, total, _ = _route_softstart_in_process(
         pcb_path,
-        routing_timeout=240.0,
+        routing_timeout=480.0,
         per_net_timeout=30.0,
+        layer_stack=layer_stack,
     )
-    print(f"\nSoftstart rev B reach: {routed_count}/{total}")
+    print(f"\nSoftstart rev B reach: {routed_count}/{total} @ L=4")
 
-    # Issue #3390: floor empirically measured at 18-19/30 at L=2
-    # single-attempt + per-net=30 s + P_FP5/P_FP6/PR #3386 landed.
-    # Lowered from 20 to 18 because the L=2 single-attempt
-    # constraint (added to bound the test runtime) costs
-    # the L=4 fallback's last 1-2 nets.  Tighten this floor once the
-    # SOP/subgrid dispatcher gaps are closed.
-    floor = 18
+    # Issue #3401: floor empirically measured at 20/30 at L=4
+    # single-attempt + per-net=30 s + plane-aware stack with all
+    # P_FP infrastructure landed.  Conservative floor of 19 leaves
+    # 1 net of headroom for run-to-run variance while still
+    # surfacing infrastructure regressions.  Tighten this floor once
+    # #3398 (rescue <-> main-router coupling) lands.
+    floor = 19
     assert routed_count >= floor, (
-        f"Softstart rev B reach {routed_count}/{total} below floor {floor}/{total}."
+        f"Softstart rev B reach {routed_count}/{total} below floor {floor}/{total} "
+        f"(L=4 measurement, Issue #3401)."
     )
 
 
