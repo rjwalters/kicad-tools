@@ -74,9 +74,9 @@
 		)
 	)
 	(net 0 "")
-	(net 1 "VMOTOR")
+	(net 1 "+24V")
 	(net 2 "+5V")
-	(net 3 "+3.3V")
+	(net 3 "+3V3")
 	(net 4 "GND")
 	(net 5 "PHASE_A")
 	(net 6 "PHASE_B")
@@ -392,7 +392,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "80d2f3f8-d572-4238-857b-7d3a97b18243")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -529,7 +529,7 @@
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
 			(uuid "4252cd6a-eb0e-44e8-bb04-8112dd9482fa")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" thru_hole oval
 			(at 0 1.27)
@@ -664,7 +664,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "dc2badd4-bd26-455b-97fa-78d653603069")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at -4.175 -2)
@@ -776,7 +776,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "6945afe8-4891-4098-9a3f-504af70792f9")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "16" smd roundrect
 			(at 2.8 4.175)
@@ -792,7 +792,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "3b383ba3-2578-4560-a6ea-31f82ba1a213")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "18" smd roundrect
 			(at 4.175 2)
@@ -971,7 +971,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "0f4f5934-e1e5-4d09-ac2e-865d4075a844")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -1183,7 +1183,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "abe88d75-9de7-4a89-83b9-2b283db44a0f")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -1317,7 +1317,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "b083f566-7145-4f0f-b11a-6c1af3519b8e")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -1585,7 +1585,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "6d98e5f9-b49a-4f14-ab06-e42a9c2e2685")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(embedded_fonts no)
 	)
@@ -1770,7 +1770,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "71113318-26a3-4959-91a0-7036d81b74e2")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -1861,7 +1861,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "470e2d17-cff8-4dfb-892b-cb5a89f08c01")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "5" smd roundrect
 			(at -3.75 -4.75)
@@ -1869,7 +1869,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "28fbeba4-494e-4d77-babc-c0943f517ae9")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "6" smd roundrect
 			(at -3.75 -4.25)
@@ -1877,7 +1877,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "b09c1806-c268-4b97-ab04-e73927a5865c")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "7" smd roundrect
 			(at -3.75 -3.75)
@@ -1893,7 +1893,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "b2998b36-df38-41b2-9b5f-550184f50f75")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "9" smd roundrect
 			(at -3.75 -2.75)
@@ -1901,7 +1901,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "079c4e13-f992-45c2-9fd9-2e0807b4b9cb")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "10" smd roundrect
 			(at -3.75 -2.25)
@@ -1909,7 +1909,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "30cb86fa-889a-4ddf-91f8-66bd48837bbc")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "11" smd roundrect
 			(at -3.75 -1.75)
@@ -1917,7 +1917,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "6b9338af-067a-4747-83e6-fd2ad6b3a195")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "12" smd roundrect
 			(at -3.75 -1.25)
@@ -1957,7 +1957,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "70bd53e3-183e-40f7-b097-22e844ff4ca8")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "17" smd roundrect
 			(at -3.75 1.25)
@@ -2013,7 +2013,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "c451b629-0e12-4dc9-b2dd-bf40b37cf3c3")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "24" smd roundrect
 			(at -3.75 4.75)
@@ -2021,7 +2021,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "2d18667f-f6b1-44b9-bc70-62c62d91228c")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "25" smd roundrect
 			(at -3.75 5.25)
@@ -2061,7 +2061,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "1cebeb2c-5fa9-482b-80b9-c2f8c1ceefb1")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "30" smd roundrect
 			(at 3.75 6.25)
@@ -2133,7 +2133,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "887da363-3651-422a-b479-e6118d748491")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "39" smd roundrect
 			(at 3.75 1.75)
@@ -2173,7 +2173,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "09601aa5-402e-4060-8460-13ef683a3b9a")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "44" smd roundrect
 			(at 3.75 -0.75)
@@ -2213,7 +2213,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "7974616b-a463-4fe5-ad01-bda64dd169a0")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "49" smd roundrect
 			(at 3.75 -3.25)
@@ -2221,7 +2221,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "40fb8cc0-76cf-4906-8564-48afbf812846")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "50" smd roundrect
 			(at 3.75 -3.75)
@@ -2245,7 +2245,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "8d1c4b4c-b76e-43dc-90ce-84844fa6c62e")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "53" smd roundrect
 			(at 3.75 -5.25)
@@ -2253,7 +2253,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "40428859-151b-42db-9dcc-3a75971860c4")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "54" smd roundrect
 			(at 3.75 -5.75)
@@ -2261,7 +2261,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "1c01d544-aa03-4b67-9cf1-2188710eee0f")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "55" smd roundrect
 			(at 3.75 -6.25)
@@ -2269,7 +2269,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "eabd80a6-fadb-47b8-987e-275ec3337b89")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "56" smd roundrect
 			(at 3.75 -6.75)
@@ -2344,7 +2344,7 @@
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
 			(uuid "b0163302-57b7-4863-8138-fadc294c9891")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" thru_hole oval
 			(at 0 -3.81)
@@ -2448,7 +2448,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "14c7b08f-2c7a-44d3-b121-844f816a8946")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -2514,7 +2514,7 @@
 			(size 3 1.5)
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(uuid "144297f9-da59-44a9-bb75-26c5df73f63d")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd rect
 			(at -3.4 1.1)
@@ -3080,7 +3080,7 @@
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
 			(uuid "fb76ede8-45f6-4f90-9609-150f654f0cf9")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "3" thru_hole oval
 			(at 2.54 0)
@@ -3226,7 +3226,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "5ab382b3-7a95-44b1-a149-3f65e2c60b8f")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -3293,7 +3293,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "54bef575-b603-4b00-b3f8-db7157bf5453")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -3455,7 +3455,7 @@
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
 			(uuid "8cd6e755-8bfa-4d84-b8ad-6e59797364b8")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "5" thru_hole oval
 			(at 0 5.08)
@@ -3543,7 +3543,7 @@
 			(size 2 1.5)
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(uuid "ca0df463-5bdd-4598-bb20-bd6ca269e7c5")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(embedded_fonts no)
 	)
@@ -3602,7 +3602,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "d34a0998-98c6-4d6e-b5a5-a8d5ac9b0efb")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd roundrect
 			(at 1.5 0)
@@ -3610,7 +3610,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "2f8bd903-4b85-49b8-ade7-d1f442dab553")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(embedded_fonts no)
 	)
@@ -3736,7 +3736,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "fe5cc701-18fc-4580-8fe5-10589470ee7d")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -3921,7 +3921,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "1cb206e8-fda6-4c6b-ade4-4eec16946502")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -3998,7 +3998,7 @@
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
 			(uuid "5aab2e12-7ccb-4c11-b755-f75a51f0920e")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "3" thru_hole oval
 			(at 2.54 0)
@@ -4066,7 +4066,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "7f76a821-5c0f-43b8-9064-42bf71c10865")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -4200,7 +4200,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "6f9b5af2-d910-468b-9ad4-5ee2a50feb55")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -4344,7 +4344,7 @@
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
 			(uuid "5eb60540-7d73-48c4-a679-e6ba8188952b")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "3" thru_hole oval
 			(at 2.54 0)
@@ -4412,7 +4412,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "cdc4bee6-4ccc-4cf6-aca7-37b89d00ef7c")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -4479,7 +4479,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "245c6847-3992-4f28-8bfa-660b5d804d2a")
-			(net 3 "+3.3V")
+			(net 3 "+3V3")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -4546,7 +4546,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(uuid "f388e689-2366-4adb-8882-7ca9d94653fd")
-			(net 1 "VMOTOR")
+			(net 1 "+24V")
 		)
 		(pad "2" smd roundrect
 			(at 1 0)
@@ -6851,7 +6851,7 @@
 		)
 	)
 	(zone
-		(net "+3.3V")
+		(net "+3V3")
 		(layer "F.Cu")
 		(uuid "a84cd48f-672d-4923-ab43-6f66425a7ef2")
 		(hatch edge 0.5)
@@ -6880,7 +6880,7 @@
 		)
 	)
 	(zone
-		(net "VMOTOR")
+		(net "+24V")
 		(layer "F.Cu")
 		(uuid "acd6c2f0-fb2d-489d-87f1-eb169193dbe3")
 		(hatch edge 0.5)

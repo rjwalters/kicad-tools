@@ -58,7 +58,7 @@ MIN_THERMAL_VIAS_PER_MOSFET = 4
 # stitch implementation will only succeed on nets that have either a
 # zone or sufficient adjacent copper -- failures-by-net surface in
 # ``StitchResult.pads_skipped`` for diagnostic attribution.
-TARGET_NETS = ["VMOTOR", "PHASE_A", "PHASE_B", "PHASE_C", "GND"]
+TARGET_NETS = ["+24V", "PHASE_A", "PHASE_B", "PHASE_C", "GND"]
 
 # Stitch parameters tuned for the IRLZ44N TO-220 footprint on board 05.
 # The 0.4mm via with 0.15mm clearance fits the 5mm pitch between adjacent

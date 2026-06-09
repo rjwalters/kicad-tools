@@ -2,7 +2,7 @@
 title: "bldc_controller_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-05 | jlcpcb"
+date: "Rev 1 | 2026-06-09 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -89,7 +89,7 @@ Thermal analysis and high-current routing demo
 | 22 |  | 3 | R20, R21, R22 |
 | 5mR |  | 3 | R10, R11, R12 |
 | AMS1117-3.3 | SOT-223-3_TabPin2 | 1 | U2 |
-| DRV8301 |  | 1 | U3 |
+| DRV8301 | HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm | 1 | U3 |
 | LM2596-5.0 | TO-263-5_TabPin3 | 1 | U1 |
 | STM32G431K8Tx | LQFP-32_7x7mm_P0.8mm | 1 | U10 |
 | 8MHz |  | 1 | Y1 |
@@ -150,11 +150,11 @@ Thermal analysis and high-current routing demo
 
 ### Zone-Connected Nets
 
-- +3.3V
+- +24V
+- +3V3
 - +5V
 - GND
 - PWR_LED
-- VMOTOR
 
 ### Unrouted Signal Nets
 

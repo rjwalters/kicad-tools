@@ -124,8 +124,12 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # for GND) to its rail's left endpoint so the symbol pin meets a
     # real wire endpoint (silences ``pin_not_connected``) AND so the
     # symbol's global-net publication unifies with the rail's labelled
-    # net (e.g. "+24V" symbol joins the "VMOTOR" rail; "+3V3" symbol
-    # joins the "+3.3V" rail).
+    # net.  The rail net_labels use the stock-KiCad power-symbol global
+    # names ("+24V", "+3V3") so the schematic-side net name and the
+    # PCB-side NETS dict agree -- previously the rail used VMOTOR /
+    # +3.3V and the PCB used +24V / +3V3 (or vice versa),
+    # producing 19+ residual rail-rename mismatches in
+    # ``kct pcb sync-netlist``.  See issues #3393 and #3384.
     #
     # For rails that lack any Output-Power driver, a PWR_FLAG is added
     # on the same column to mark the net as externally driven (silences
@@ -139,7 +143,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # GND), an additional PWR_FLAG would trigger a ``pin_to_pin``
     # Output<->Power-output conflict — skip the flag on those rails.
     # See issue #3096.
-    sch.add_rail(RAIL_VMOTOR, x_start=X_POWER_IN, x_end=X_PHASE_C + 60, net_label="VMOTOR")
+    sch.add_rail(RAIL_VMOTOR, x_start=X_POWER_IN, x_end=X_PHASE_C + 60, net_label="+24V")
     sch.add_power("power:+24V", x=X_POWER_IN, y=RAIL_VMOTOR - 10, rotation=0)
     # Wire +24V symbol pin down to the rail's left endpoint.  The +24V
     # global net then unifies with the rail's VMOTOR labelled net.
@@ -188,7 +192,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # U2.VO (x=147.32) AND the LDO output cap C6 (x=160.02), whose pin-1
     # vertical wire endpoint was previously floating past the rail's
     # left edge (rail used to start at X_LDO+25=165 — east of both).
-    sch.add_rail(RAIL_3V3, x_start=X_LDO + 7, x_end=X_MCU + 80, net_label="+3.3V")
+    sch.add_rail(RAIL_3V3, x_start=X_LDO + 7, x_end=X_MCU + 80, net_label="+3V3")
     sch.add_power("power:+3V3", x=X_LDO + 25, y=RAIL_3V3 - 10, rotation=0)
     sch.add_wire(
         (X_LDO + 25, RAIL_3V3 - 10),
@@ -229,7 +233,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # wire, C18 pin-2 vertical wire, and the new extension).
     sch.add_junction(299.72, RAIL_GND)
 
-    print("   Added VMOTOR, +5V, +3.3V, and GND rails")
+    print("   Added +24V (VMOTOR), +5V, +3V3, and GND rails")
 
     # =========================================================================
     # Section 2: Power Input (12-24V DC)
@@ -346,19 +350,19 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ldo_ref="U2",
         buck_diode_ref="D2",  # D1 is used for TVS diode
         buck_inductor_ref="L1",
-        # U1 (LM2596-5.0): VIN <- VMOTOR rail, GND <- GND rail, FB tied
-        # to +5V (fixed-output variant senses output directly).
+        # U1 (LM2596-5.0): VIN <- +24V rail (VMOTOR), GND <- GND rail,
+        # FB tied to +5V (fixed-output variant senses output directly).
         buck_pin_nets={
-            "VIN": "VMOTOR",
+            "VIN": "+24V",
             "GND": "GND",
             "FB": "+5V",
         },
-        # U2 (AMS1117-3.3): VI <- +5V rail, VO -> +3.3V rail (drives the
+        # U2 (AMS1117-3.3): VI <- +5V rail, VO -> +3V3 rail (drives the
         # downstream MCU).  GND already wired by ``connect_to_rails`` but
         # we add a label here for symmetry / clarity.
         ldo_pin_nets={
             "VI": "+5V",
-            "VO": "+3.3V",
+            "VO": "+3V3",
             "GND": "GND",
         },
     )
@@ -590,12 +594,12 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # tuples here and emit them at the end of Section 11, after every
     # other section has finished drawing wires.
     deferred_mcu_labels: list[tuple[str, str, int, int]] = [
-        # Power pins (VDD/VDDA = +3.3V, VSS/VSSA = GND) get wired
-        # straight to rails. Pin 1 (VDD), 17 (VDD), 15 (VDDA) -> +3.3V.
+        # Power pins (VDD/VDDA = +3V3, VSS/VSSA = GND) get wired
+        # straight to rails. Pin 1 (VDD), 17 (VDD), 15 (VDDA) -> +3V3.
         # Pin 14 (VSSA), 16 (VSS), 32 (VSS) -> GND.
-        ("1", "+3.3V", -5, 0),
-        ("17", "+3.3V", -5, 0),
-        ("15", "+3.3V", -5, 0),
+        ("1", "+3V3", -5, 0),
+        ("17", "+3V3", -5, 0),
+        ("15", "+3V3", -5, 0),
         ("14", "GND", -5, 0),
         ("16", "GND", -5, 0),
         ("32", "GND", -5, 0),
@@ -689,7 +693,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         pins=6,
         ref="J4",
         pin_nets={
-            "1": "+3.3V",
+            "1": "+3V3",
             "2": "SWDIO",
             "3": "GND",
             "4": "SWCLK",
@@ -765,20 +769,20 @@ def create_bldc_controller(output_dir: Path) -> Path:
         "1": "GND",          # RT_CLK   (buck timing R)
         "2": "GND",          # COMP     (buck error amp output)
         "3": "+5V",          # VSENSE   (buck output FB = +5V rail)
-        "4": "+3.3V",        # PWRGD    (open-drain, pull-up)
-        "5": "+3.3V",        # nOCTW    (open-drain, pull-up)
-        "6": "+3.3V",        # nFAULT   (open-drain, pull-up)
+        "4": "+3V3",        # PWRGD    (open-drain, pull-up)
+        "5": "+3V3",        # nOCTW    (open-drain, pull-up)
+        "6": "+3V3",        # nFAULT   (open-drain, pull-up)
         "7": "GND",          # DTC      (dead-time, R to GND)
         # Pins 8-16: SPI / control / charge pump / GVDD.
-        "8": "+3.3V",        # nSCS     (idle high)
-        "9": "+3.3V",        # SDI
-        "10": "+3.3V",       # SDO      (open-drain, pull-up)
-        "11": "+3.3V",       # SCLK
+        "8": "+3V3",        # nSCS     (idle high)
+        "9": "+3V3",        # SDI
+        "10": "+3V3",       # SDO      (open-drain, pull-up)
+        "11": "+3V3",       # SCLK
         "12": "GND",         # DC_CAL   (normal operation)
         "13": "+5V",         # GVDD
         "14": "+5V",         # CP1      (charge pump cap 1)
         "15": "+5V",         # CP2      (charge pump cap 2)
-        "16": "+3.3V",       # EN_GATE  (always-on)
+        "16": "+3V3",       # EN_GATE  (always-on)
         # Pins 17-22: PWM logic inputs (driven by the MCU).
         "17": "PWM_AH",      # INH_A
         "18": "PWM_AL",      # INL_A
@@ -787,14 +791,14 @@ def create_bldc_controller(output_dir: Path) -> Path:
         "21": "PWM_CH",      # INH_C
         "22": "PWM_CL",      # INL_C
         # Pins 23-28: Analog supplies / current-sense amps (left-edge).
-        "23": "+3.3V",       # DVDD
-        "24": "+3.3V",       # REF
+        "23": "+3V3",       # DVDD
+        "24": "+3V3",       # REF
         "25": "ISENSE_A+",   # SO1      (op-amp 1 output)
         "26": "ISENSE_B+",   # SO2      (op-amp 2 output)
         "27": "+5V",         # AVDD
         "28": "GND",         # AGND
         # Pins 29-33: PVDD / current-sense diff inputs (right edge top).
-        "29": "VMOTOR",      # PVDD1
+        "29": "+24V",      # PVDD1
         "30": "ISENSE_B+",   # SP2
         "31": "ISENSE_B-",   # SN2
         "32": "ISENSE_A+",   # SP1
@@ -804,27 +808,27 @@ def create_bldc_controller(output_dir: Path) -> Path:
         "35": "GATE_CL",     # GL_C
         "36": "PHASE_C",     # SH_C
         "37": "GATE_DRV_CH", # GH_C
-        "38": "VMOTOR",      # BST_C (DC tie via cap to VMOTOR rail)
+        "38": "+24V",      # BST_C (DC tie via cap to VMOTOR rail)
         # Pins 39-43: Half-bridge B.
         "39": "ISENSE_B-",   # SL_B
         "40": "GATE_BL",     # GL_B
         "41": "PHASE_B",     # SH_B
         "42": "GATE_DRV_BH", # GH_B
-        "43": "VMOTOR",      # BST_B
+        "43": "+24V",      # BST_B
         # Pins 44-48: Half-bridge A.
         "44": "ISENSE_A-",   # SL_A
         "45": "GATE_AL",     # GL_A
         "46": "PHASE_A",     # SH_A
         "47": "GATE_DRV_AH", # GH_A
-        "48": "VMOTOR",      # BST_A
+        "48": "+24V",      # BST_A
         # Pins 49-56: SPI / buck pins (right edge bottom).
-        "49": "+3.3V",       # VDD_SPI
+        "49": "+3V3",       # VDD_SPI
         "50": "SW_OUT",      # PH (buck switch node)
         "51": "SW_OUT",      # PH (buck switch node, 2nd pin)
-        "52": "VMOTOR",      # BST_BK (buck bootstrap)
-        "53": "VMOTOR",      # PVDD2_1
-        "54": "VMOTOR",      # PVDD2_2
-        "55": "+3.3V",       # EN_BUCK
+        "52": "+24V",      # BST_BK (buck bootstrap)
+        "53": "+24V",      # PVDD2_1
+        "54": "+24V",      # PVDD2_2
+        "55": "+3V3",       # EN_BUCK
         "56": "GND",         # SS_TR (cap to GND)
         # Pin 57 is handled separately below (vertical pin orientation).
     }
@@ -1317,9 +1321,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # Net definitions - must match schematic nets
     NETS = {
         "": 0,
-        "VMOTOR": 1,
+        "+24V": 1,
         "+5V": 2,
-        "+3.3V": 3,
+        "+3V3": 3,
         "GND": 4,
         "PHASE_A": 5,
         "PHASE_B": 6,
@@ -1642,7 +1646,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd rect (at -3.4 3.3) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["VMOTOR"]} "VMOTOR"))
+    (pad "1" smd rect (at -3.4 3.3) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+24V"]} "+24V"))
     (pad "2" smd rect (at -3.4 1.1) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+5V"]} "+5V"))
     (pad "3" smd rect (at -3.4 -1.1) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["SW_OUT"]} "SW_OUT"))
     (pad "4" smd rect (at -3.4 -3.3) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
@@ -1746,32 +1750,32 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("1", "GND"),  # RT_CLK   (buck timing R)
         ("2", "GND"),  # COMP     (buck error-amp output)
         ("3", "+5V"),  # VSENSE   (buck output FB = +5V rail)
-        ("4", "+3.3V"),  # PWRGD    (open-drain, pull-up)
-        ("5", "+3.3V"),  # nOCTW    (open-drain, pull-up)
-        ("6", "+3.3V"),  # nFAULT   (open-drain, pull-up)
+        ("4", "+3V3"),  # PWRGD    (open-drain, pull-up)
+        ("5", "+3V3"),  # nOCTW    (open-drain, pull-up)
+        ("6", "+3V3"),  # nFAULT   (open-drain, pull-up)
         ("7", "GND"),  # DTC      (R to GND, programmable)
-        ("8", "+3.3V"),  # nSCS     (idle high)
-        ("9", "+3.3V"),  # SDI
-        ("10", "+3.3V"),  # SDO      (open-drain, pull-up)
-        ("11", "+3.3V"),  # SCLK
+        ("8", "+3V3"),  # nSCS     (idle high)
+        ("9", "+3V3"),  # SDI
+        ("10", "+3V3"),  # SDO      (open-drain, pull-up)
+        ("11", "+3V3"),  # SCLK
         ("12", "GND"),  # DC_CAL   (normal operation)
         ("13", "+5V"),  # GVDD     (gate-driver LDO, cap to GND)
         ("14", "+5V"),  # CP1      (charge pump cap 1)
         ("15", "+5V"),  # CP2      (charge pump cap 2)
-        ("16", "+3.3V"),  # EN_GATE  (always-on)
+        ("16", "+3V3"),  # EN_GATE  (always-on)
         ("17", "PWM_AH"),  # INH_A    (PWM input from MCU)
         ("18", "PWM_AL"),  # INL_A
         ("19", "PWM_BH"),  # INH_B
         ("20", "PWM_BL"),  # INL_B
         ("21", "PWM_CH"),  # INH_C
         ("22", "PWM_CL"),  # INL_C
-        ("23", "+3.3V"),  # DVDD     (internal 3.3-V LDO output)
-        ("24", "+3.3V"),  # REF      (current-sense reference)
+        ("23", "+3V3"),  # DVDD     (internal 3.3-V LDO output)
+        ("24", "+3V3"),  # REF      (current-sense reference)
         ("25", "ISENSE_A+"),  # SO1      (op-amp 1 output)
         ("26", "ISENSE_B+"),  # SO2      (op-amp 2 output)
         ("27", "+5V"),  # AVDD     (internal 6-V LDO output)
         ("28", "GND"),  # AGND
-        ("29", "VMOTOR"),  # PVDD1    (gate-driver supply)
+        ("29", "+24V"),  # PVDD1    (gate-driver supply)
         ("30", "ISENSE_B+"),  # SP2      (amp 2 + input)
         ("31", "ISENSE_B-"),  # SN2      (amp 2 - input)
         ("32", "ISENSE_A+"),  # SP1      (amp 1 + input)
@@ -1780,24 +1784,24 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("35", "GATE_CL"),  # GL_C
         ("36", "PHASE_C"),  # SH_C
         ("37", "GATE_DRV_CH"),  # GH_C     (via R22 to GATE_CH)
-        ("38", "VMOTOR"),  # BST_C    (bootstrap, via cap)
+        ("38", "+24V"),  # BST_C    (bootstrap, via cap)
         ("39", "ISENSE_B-"),  # SL_B
         ("40", "GATE_BL"),  # GL_B
         ("41", "PHASE_B"),  # SH_B
         ("42", "GATE_DRV_BH"),  # GH_B     (via R21 to GATE_BH)
-        ("43", "VMOTOR"),  # BST_B
+        ("43", "+24V"),  # BST_B
         ("44", "ISENSE_A-"),  # SL_A
         ("45", "GATE_AL"),  # GL_A
         ("46", "PHASE_A"),  # SH_A
         ("47", "GATE_DRV_AH"),  # GH_A     (via R20 to GATE_AH)
-        ("48", "VMOTOR"),  # BST_A
-        ("49", "+3.3V"),  # VDD_SPI  (SPI logic supply)
+        ("48", "+24V"),  # BST_A
+        ("49", "+3V3"),  # VDD_SPI  (SPI logic supply)
         ("50", "SW_OUT"),  # PH       (buck switch node)
         ("51", "SW_OUT"),  # PH       (buck switch node, second pin)
-        ("52", "VMOTOR"),  # BST_BK   (buck bootstrap, via cap)
-        ("53", "VMOTOR"),  # PVDD2    (buck input supply)
-        ("54", "VMOTOR"),  # PVDD2    (buck input supply, 2nd pin)
-        ("55", "+3.3V"),  # EN_BUCK  (always-on)
+        ("52", "+24V"),  # BST_BK   (buck bootstrap, via cap)
+        ("53", "+24V"),  # PVDD2    (buck input supply)
+        ("54", "+24V"),  # PVDD2    (buck input supply, 2nd pin)
+        ("55", "+3V3"),  # EN_BUCK  (always-on)
         ("56", "GND"),  # SS_TR    (cap to GND)
     ]
 
@@ -1869,7 +1873,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     #   * GPIO/TIM3 capture (PA6/PA7/PB0) -> HALL_A/B/C
     #   * SWD: PA13 SWDIO, PA14 SWCLK, PB3 SWO, PG10 NRST
     STM32G431K8_PINS: list[tuple[str, str]] = [
-        ("1", "+3.3V"),  # VDD
+        ("1", "+3V3"),  # VDD
         ("2", "OSC_IN"),  # PF0 -> RCC_OSC_IN
         ("3", "OSC_OUT"),  # PF1 -> RCC_OSC_OUT
         ("4", "NRST"),  # PG10 (NRST)
@@ -1883,9 +1887,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("12", "HALL_B"),  # PA7  TIM3_CH2
         ("13", "HALL_C"),  # PB0  TIM3_CH3
         ("14", "GND"),  # VSSA
-        ("15", "+3.3V"),  # VDDA
+        ("15", "+3V3"),  # VDDA
         ("16", "GND"),  # VSS
-        ("17", "+3.3V"),  # VDD
+        ("17", "+3V3"),  # VDD
         ("18", "PWM_AH"),  # PA8  TIM1_CH1   (HS PWM -> DRV8301 INH_A)
         ("19", "PWM_BH"),  # PA9  TIM1_CH2   (HS PWM -> DRV8301 INH_B)
         ("20", "PWM_CH"),  # PA10 TIM1_CH3   (HS PWM -> DRV8301 INH_C)
@@ -2103,8 +2107,8 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd roundrect (at -1.5 0) (size 1.2 1.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["VMOTOR"]} "VMOTOR"))
-    (pad "2" smd roundrect (at 1.5 0) (size 1.2 1.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["VMOTOR"]} "VMOTOR"))
+    (pad "1" smd roundrect (at -1.5 0) (size 1.2 1.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["+24V"]} "+24V"))
+    (pad "2" smd roundrect (at 1.5 0) (size 1.2 1.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["+24V"]} "+24V"))
   )"""
 
     def generate_pin_header(ref: str, pos: tuple, pins: int, value: str, pin_nets: list) -> str:
@@ -2153,17 +2157,17 @@ def create_bldc_pcb(output_dir: Path) -> Path:
 
     print("\n2. Adding power input section...")
     # J1: Power input connector (2-pin)
-    parts.append(generate_pin_header("J1", J1_POS, 2, "Power Input", ["VMOTOR", "GND"]))
+    parts.append(generate_pin_header("J1", J1_POS, 2, "Power Input", ["+24V", "GND"]))
     print(f"   J1 (Power Input) at {J1_POS}")
     # F1: Fuse
     parts.append(generate_fuse_holder("F1", F1_POS, "15A"))
     print(f"   F1 (15A Fuse) at {F1_POS}")
     # D1: TVS diode
-    parts.append(generate_diode_sma("D1", D1_POS, "SMBJ24A", "VMOTOR", "GND"))
+    parts.append(generate_diode_sma("D1", D1_POS, "SMBJ24A", "+24V", "GND"))
     print(f"   D1 (TVS) at {D1_POS}")
     # C1, C2: Bulk caps
-    parts.append(generate_cap_0805("C1", C1_POS, "470uF", "VMOTOR", "GND"))
-    parts.append(generate_cap_0805("C2", C2_POS, "100nF", "VMOTOR", "GND"))
+    parts.append(generate_cap_0805("C1", C1_POS, "470uF", "+24V", "GND"))
+    parts.append(generate_cap_0805("C2", C2_POS, "100nF", "+24V", "GND"))
     print(f"   C1, C2 (bulk caps) at {C1_POS}, {C2_POS}")
 
     print("\n3. Adding buck converter section...")
@@ -2177,23 +2181,23 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     parts.append(generate_diode_sma("D2", D2_POS, "SS34", "GND", "SW_OUT"))
     print(f"   D2 (SS34) at {D2_POS}")
     # C3, C4: Buck caps
-    parts.append(generate_cap_0805("C3", C3_POS, "220uF", "VMOTOR", "GND"))
+    parts.append(generate_cap_0805("C3", C3_POS, "220uF", "+24V", "GND"))
     parts.append(generate_cap_0805("C4", C4_POS, "220uF", "+5V", "GND"))
     print(f"   C3, C4 (buck caps) at {C3_POS}, {C4_POS}")
 
     print("\n4. Adding LDO section...")
     # U2: AMS1117-3.3
-    parts.append(generate_sot223("U2", U2_POS, "AMS1117-3.3", "+5V", "GND", "+3.3V"))
+    parts.append(generate_sot223("U2", U2_POS, "AMS1117-3.3", "+5V", "GND", "+3V3"))
     print(f"   U2 (AMS1117) at {U2_POS}")
     # C5, C6: LDO caps
     parts.append(generate_cap_0805("C5", C5_POS, "10uF", "+5V", "GND"))
-    parts.append(generate_cap_0805("C6", C6_POS, "10uF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C6", C6_POS, "10uF", "+3V3", "GND"))
     print(f"   C5, C6 (LDO caps) at {C5_POS}, {C6_POS}")
 
     print("\n5. Adding MCU bypass caps...")
-    parts.append(generate_cap_0805("C7", C7_POS, "100nF", "+3.3V", "GND"))
-    parts.append(generate_cap_0805("C8", C8_POS, "100nF", "+3.3V", "GND"))
-    parts.append(generate_cap_0805("C9", C9_POS, "4.7uF", "+3.3V", "GND"))
+    parts.append(generate_cap_0805("C7", C7_POS, "100nF", "+3V3", "GND"))
+    parts.append(generate_cap_0805("C8", C8_POS, "100nF", "+3V3", "GND"))
+    parts.append(generate_cap_0805("C9", C9_POS, "4.7uF", "+3V3", "GND"))
     print(f"   C7, C8, C9 at {C7_POS}, {C8_POS}, {C9_POS}")
 
     print("\n6. Adding crystal...")
@@ -2206,9 +2210,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     parts.append(generate_htssop56("U3", U3_POS, "DRV8301"))
     print(f"   U3 (DRV8301, HTSSOP-56) at {U3_POS}")
     # Bootstrap caps (VMOTOR to phase)
-    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "VMOTOR", "PHASE_A"))
-    parts.append(generate_cap_0805("C13", C13_POS, "100nF", "VMOTOR", "PHASE_B"))
-    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "VMOTOR", "PHASE_C"))
+    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "+24V", "PHASE_A"))
+    parts.append(generate_cap_0805("C13", C13_POS, "100nF", "+24V", "PHASE_B"))
+    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "+24V", "PHASE_C"))
     # Bypass caps
     parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+5V", "GND"))
     parts.append(generate_cap_0805("C16", C16_POS, "10uF", "+5V", "GND"))
@@ -2220,13 +2224,13 @@ def create_bldc_pcb(output_dir: Path) -> Path:
 
     print("\n8. Adding power MOSFETs (H-bridge)...")
     # Phase A: Q1 (high-side), Q2 (low-side)
-    parts.append(generate_to220("Q1", Q1_POS, "IRLZ44N", "GATE_AH", "VMOTOR", "PHASE_A"))
+    parts.append(generate_to220("Q1", Q1_POS, "IRLZ44N", "GATE_AH", "+24V", "PHASE_A"))
     parts.append(generate_to220("Q2", Q2_POS, "IRLZ44N", "GATE_AL", "PHASE_A", "ISENSE_A+"))
     # Phase B: Q3 (high-side), Q4 (low-side)
-    parts.append(generate_to220("Q3", Q3_POS, "IRLZ44N", "GATE_BH", "VMOTOR", "PHASE_B"))
+    parts.append(generate_to220("Q3", Q3_POS, "IRLZ44N", "GATE_BH", "+24V", "PHASE_B"))
     parts.append(generate_to220("Q4", Q4_POS, "IRLZ44N", "GATE_BL", "PHASE_B", "ISENSE_B+"))
     # Phase C: Q5 (high-side), Q6 (low-side)
-    parts.append(generate_to220("Q5", Q5_POS, "IRLZ44N", "GATE_CH", "VMOTOR", "PHASE_C"))
+    parts.append(generate_to220("Q5", Q5_POS, "IRLZ44N", "GATE_CH", "+24V", "PHASE_C"))
     parts.append(generate_to220("Q6", Q6_POS, "IRLZ44N", "GATE_CL", "PHASE_C", "ISENSE_C+"))
     print(f"   Q1-Q2 (Phase A), Q3-Q4 (Phase B), Q5-Q6 (Phase C)")
 
@@ -2253,7 +2257,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # J3: Hall sensors (5-pin)
     parts.append(
         generate_pin_header(
-            "J3", J3_POS, 5, "Hall Sensors", ["HALL_A", "HALL_B", "HALL_C", "+3.3V", "GND"]
+            "J3", J3_POS, 5, "Hall Sensors", ["HALL_A", "HALL_B", "HALL_C", "+3V3", "GND"]
         )
     )
     print(f"   J3 (Hall Sensors) at {J3_POS}")
@@ -2263,23 +2267,23 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # Issue #3210.
     parts.append(
         generate_pin_header(
-            "J4", J4_POS, 6, "SWD-6", ["+3.3V", "SWDIO", "SWCLK", "SWO", "NRST", "GND"]
+            "J4", J4_POS, 6, "SWD-6", ["+3V3", "SWDIO", "SWCLK", "SWO", "NRST", "GND"]
         )
     )
     print(f"   J4 (SWD-6) at {J4_POS}")
 
     print("\n11. Adding LEDs...")
-    parts.append(generate_resistor_0805("R3", R3_POS, "1k", "+3.3V", "PWR_LED"))
+    parts.append(generate_resistor_0805("R3", R3_POS, "1k", "+3V3", "PWR_LED"))
     parts.append(generate_led_0805("D3", D3_POS, "PWR", "PWR_LED", "GND"))
-    parts.append(generate_resistor_0805("R4", R4_POS, "1k", "+3.3V", "STATUS_LED"))
+    parts.append(generate_resistor_0805("R4", R4_POS, "1k", "+3V3", "STATUS_LED"))
     parts.append(generate_led_0805("D4", D4_POS, "STATUS", "STATUS_LED", "GND"))
     print(f"   D3 (PWR), D4 (STATUS) with resistors R3, R4")
 
     print("\n11b. Adding Hall sensor filter network...")
     # Pull-up resistors: +3.3V to each HALL_x signal
-    parts.append(generate_resistor_0805("R30", R30_POS, "10k", "+3.3V", "HALL_A"))
-    parts.append(generate_resistor_0805("R31", R31_POS, "10k", "+3.3V", "HALL_B"))
-    parts.append(generate_resistor_0805("R32", R32_POS, "10k", "+3.3V", "HALL_C"))
+    parts.append(generate_resistor_0805("R30", R30_POS, "10k", "+3V3", "HALL_A"))
+    parts.append(generate_resistor_0805("R31", R31_POS, "10k", "+3V3", "HALL_B"))
+    parts.append(generate_resistor_0805("R32", R32_POS, "10k", "+3V3", "HALL_C"))
     # Filter caps: each HALL_x signal to GND
     parts.append(generate_cap_0805("C30", C30_POS, "10nF", "HALL_A", "GND"))
     parts.append(generate_cap_0805("C31", C31_POS, "10nF", "HALL_B", "GND"))
@@ -2483,7 +2487,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     # Skip power and high-current nets (route manually or use copper pour zones)
     # Phase nets carry motor current (10A+) and need wide traces (2mm+)
-    skip_nets = ["VMOTOR", "+5V", "+3.3V", "GND", "PHASE_A", "PHASE_B", "PHASE_C"]
+    skip_nets = ["+24V", "+5V", "+3V3", "GND", "PHASE_A", "PHASE_B", "PHASE_C"]
 
     cmd = [
         sys.executable,
