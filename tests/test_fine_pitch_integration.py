@@ -517,5 +517,138 @@ class TestLoadPcbIntegration:
             )
 
 
+class TestInfeasibleRegionGuard:
+    """Issue #3421 -- regions whose package corridor stays infeasible at the
+    escape clearance must be inert, and the guard's decline must fall through
+    to the legacy ``min_trace_width`` shrink (pre-P_FP3 behaviour).
+
+    Regression context: board 06 (diffpair-test) routes at trace_width=0.15 /
+    trace_clearance=0.15 / min_trace_width=0.10 with five 0.8mm-pitch
+    packages (BGA-49, QFN-32 etc.).  At the jlcpcb escape clearance (0.14)
+    those corridors remain infeasible (0.8 - 2*0.14 - 0.15 = 0.37 < 0.43
+    required), so the regions cannot serve their purpose.  Pre-fix, the
+    P_FP3 region branch (a) hard-returned the STANDARD halo on guard
+    decline, clobbering the 0.05mm legacy halo the packages' own pads had
+    pre-P_FP3 (a 4.5x halo inflation), and (b) evaluated the guard against
+    the foreign pad's own pitch, so in-halo neighbours picked up the 0.14
+    escape clearance the region could never use.  Net effect: the board 06
+    seed-42 re-route regressed from 13 to 32 DRC errors (CI gate failure,
+    Issue #3421).
+    """
+
+    def _board06_like_setup(self) -> tuple[RoutingGrid, FinePitchRegion, DesignRules]:
+        rules = DesignRules(
+            grid_resolution=0.05,
+            trace_width=0.15,
+            trace_clearance=0.15,
+            manufacturer="jlcpcb",
+            min_trace_width=0.10,
+        )
+        grid = RoutingGrid(
+            width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer()
+        )
+        # QFN/BGA-style region: 0.8mm pitch, escape clearance 0.14.
+        # Corridor at escape clearance: 0.8 - 0.28 - 0.15 = 0.37 < 0.43
+        # required -> guard must decline for EVERY pad this region covers.
+        region = FinePitchRegion(
+            package_ref="U3",
+            package_origin=(25.0, 25.0),
+            radius_mm=7.07,
+            pin_pitch=0.8,
+            pad_size_along_pitch=0.3,
+            escape_clearance=0.14,
+            pad_refs=frozenset([("U3", "1")]),
+        )
+        grid.set_fine_pitch_regions([region])
+        return grid, region, rules
+
+    def test_own_pad_decline_falls_through_to_legacy_shrink(self) -> None:
+        """Guard decline must yield the legacy min_trace_width halo, not the
+        standard halo (the pre-P_FP3 value for board 06's 0.8mm pads)."""
+        grid, _, rules = self._board06_like_setup()
+        own_pad = Pad(
+            x=25.0, y=25.0, width=0.3, height=0.3,
+            net=1, net_name="SIG", layer=Layer.F_CU, ref="U3", pin="1",
+        )
+        halo = grid._clearance_for_pin_pitch(pin_pitch=0.8, pad=own_pad)
+        # Legacy shrink: min_trace_width / 2 = 0.05 (its own #2865 guard
+        # passes: 0.8 - 0.10 - 0.15 = 0.55 >= 0.45 required).
+        assert halo == pytest.approx(0.05), (
+            f"Guard decline must fall through to the legacy shrink (0.05), "
+            f"got {halo} (standard would be 0.225 -- the Issue #3421 bug)"
+        )
+
+    def test_foreign_pad_guard_uses_region_pitch(self) -> None:
+        """A foreign pad in the halo whose OWN pitch passes the guard must
+        still be declined when the region's package pitch is infeasible."""
+        grid, _, rules = self._board06_like_setup()
+        # 0402-style passive 2mm from the package origin; its own pitch
+        # (0.96) would pass the guard (0.96 - 0.28 - 0.15 = 0.53 >= 0.43)
+        # but the region's package pitch (0.8) must dominate.
+        foreign_pad = Pad(
+            x=27.0, y=25.0, width=0.5, height=0.5,
+            net=2, net_name="SIG2", layer=Layer.F_CU, ref="C7", pin="1",
+        )
+        halo = grid._clearance_for_pin_pitch(pin_pitch=0.96, pad=foreign_pad)
+        # Pre-P_FP3 value for this pad: legacy shrink (0.96 pitch passes
+        # the legacy #2865 guard) = 0.05.  The escape halo would be 0.215.
+        assert halo == pytest.approx(0.05), (
+            f"Foreign in-halo pad must not pick up the escape halo when the "
+            f"region's package corridor is infeasible; got {halo}"
+        )
+
+    def test_resolver_declines_for_all_in_region_pads(self) -> None:
+        """The C++ validator clearance source must return the standard
+        clearance for every pad covered by an infeasible region."""
+        grid, region, rules = self._board06_like_setup()
+        own_pad = Pad(
+            x=25.0, y=25.0, width=0.3, height=0.3,
+            net=1, net_name="SIG", layer=Layer.F_CU, ref="U3", pin="1",
+        )
+        foreign_pad = Pad(
+            x=27.0, y=25.0, width=0.5, height=0.5,
+            net=2, net_name="SIG2", layer=Layer.F_CU, ref="C7", pin="1",
+        )
+        for pad, pitch in ((own_pad, 0.8), (foreign_pad, 0.96), (foreign_pad, 2.54)):
+            clearance = resolve_clearance_with_escape_region(
+                rules, pad, net_class=None, regions=[region], pin_pitch=pitch
+            )
+            assert clearance == pytest.approx(rules.trace_clearance), (
+                f"Resolver must decline the 0.14 escape clearance for "
+                f"{pad.ref} (pitch={pitch}); got {clearance}"
+            )
+
+    def test_feasible_region_still_shrinks(self) -> None:
+        """Control: a SOIC-style region whose corridor IS feasible at the
+        escape clearance keeps the escape shrink (softstart behaviour)."""
+        rules = DesignRules(
+            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
+        )
+        grid = RoutingGrid(
+            width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer()
+        )
+        region = FinePitchRegion(
+            package_ref="U5",
+            package_origin=(25.0, 25.0),
+            radius_mm=5.0,
+            pin_pitch=1.27,
+            pad_size_along_pitch=0.3,
+            escape_clearance=0.14,
+            pad_refs=frozenset([("U5", "1")]),
+        )
+        grid.set_fine_pitch_regions([region])
+        own_pad = Pad(
+            x=25.0, y=25.0, width=0.3, height=1.55,
+            net=1, net_name="N1", layer=Layer.F_CU, ref="U5", pin="1",
+        )
+        # 1.27 - 0.28 - 0.30 = 0.69 >= 0.58 required -> shrink applies.
+        halo = grid._clearance_for_pin_pitch(pin_pitch=1.27, pad=own_pad)
+        assert halo == pytest.approx(0.14 + rules.trace_width / 2)
+        clearance = resolve_clearance_with_escape_region(
+            rules, own_pad, net_class=None, regions=[region], pin_pitch=1.27
+        )
+        assert clearance == pytest.approx(0.14)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--no-cov"])
