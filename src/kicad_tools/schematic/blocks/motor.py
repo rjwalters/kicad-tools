@@ -256,6 +256,7 @@ class HalfBridge(CircuitBlock):
         vin_rail_y: float,
         gnd_rail_y: float,
         add_junctions: bool = True,
+        inline_shunt: "CurrentSenseShunt | None" = None,
     ) -> None:
         """
         Connect half-bridge to power rails.
@@ -264,6 +265,18 @@ class HalfBridge(CircuitBlock):
             vin_rail_y: Y coordinate of VIN (motor voltage) rail
             gnd_rail_y: Y coordinate of ground rail
             add_junctions: Whether to add junction markers
+            inline_shunt: Optional :class:`CurrentSenseShunt` placed in
+                series between the low-side MOSFET source and GND.  When
+                provided, the LS-source-to-GND wire that this helper
+                normally emits is suppressed, because that wire would
+                short-circuit the shunt (the LS source belongs on the
+                shunt's IN+ side, not directly on GND).  The caller is
+                responsible for wiring the LS source to the shunt's
+                ``IN_POS`` port and for routing the shunt to GND (either
+                via ``CurrentSenseShunt.connect_to_rails`` or a Kelvin-
+                sense label).  When ``None`` (the default), behavior is
+                unchanged: a direct LS-source-to-GND wire is emitted.
+                See issue #3383 (board 05 ISENSE_X+ shunt-bridge).
         """
         sch = self.schematic
 
@@ -271,13 +284,20 @@ class HalfBridge(CircuitBlock):
         vin_pos = self._vin_pos
         sch.add_wire(vin_pos, (vin_pos[0], vin_rail_y), warn_on_collision=False)
 
-        # Connect LS source to GND rail
+        # Connect LS source to GND rail -- unless an in-line shunt sits
+        # between the LS source and GND, in which case this wire would
+        # short the shunt (issue #3383).  When ``inline_shunt`` is
+        # provided, we skip the LS-source-to-GND wire and let the caller
+        # wire LS source to the shunt's IN+ side and the shunt's IN-
+        # side to GND.
         gnd_pos = self._gnd_pos
-        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
+        if inline_shunt is None:
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
         if add_junctions:
             sch.add_junction(vin_pos[0], vin_rail_y)
-            sch.add_junction(gnd_pos[0], gnd_rail_y)
+            if inline_shunt is None:
+                sch.add_junction(gnd_pos[0], gnd_rail_y)
 
         # Connect bootstrap diode anode to VIN rail
         if self.has_bootstrap:
@@ -443,6 +463,7 @@ class ThreePhaseInverter(CircuitBlock):
         vin_rail_y: float,
         gnd_rail_y: float,
         add_junctions: bool = True,
+        inline_shunts: "list[CurrentSenseShunt | None] | None" = None,
     ) -> None:
         """
         Connect all half-bridges to power rails.
@@ -451,9 +472,34 @@ class ThreePhaseInverter(CircuitBlock):
             vin_rail_y: Y coordinate of VIN (motor voltage) rail
             gnd_rail_y: Y coordinate of ground rail
             add_junctions: Whether to add junction markers
+            inline_shunts: Optional per-phase :class:`CurrentSenseShunt`
+                instances (one per phase, in ``phase_labels`` order; use
+                ``None`` for phases without an in-line shunt).  When the
+                entry for a given phase is non-``None``, the
+                corresponding half-bridge's LS-source-to-GND wire is
+                suppressed -- see ``HalfBridge.connect_to_rails`` for
+                details and rationale (issue #3383).  Length must equal
+                the number of phases (``len(self.half_bridges)``).  When
+                ``None`` (the default), every half-bridge emits its
+                direct LS-source-to-GND wire as before.
+
+        Raises:
+            ValueError: If ``inline_shunts`` is provided and its length
+                does not match the number of phases.
         """
-        for hb in self.half_bridges:
-            hb.connect_to_rails(vin_rail_y, gnd_rail_y, add_junctions)
+        if inline_shunts is not None and len(inline_shunts) != len(self.half_bridges):
+            raise ValueError(
+                f"inline_shunts length ({len(inline_shunts)}) must equal "
+                f"number of phases ({len(self.half_bridges)})"
+            )
+        for i, hb in enumerate(self.half_bridges):
+            shunt = inline_shunts[i] if inline_shunts is not None else None
+            hb.connect_to_rails(
+                vin_rail_y,
+                gnd_rail_y,
+                add_junctions,
+                inline_shunt=shunt,
+            )
 
 
 class CurrentSenseShunt(CircuitBlock):
