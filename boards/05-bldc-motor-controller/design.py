@@ -44,6 +44,7 @@ from kicad_tools.schematic.blocks import (
     create_hall_sensor_input,
     create_mcu_decoupling_array,
 )
+from kicad_tools.schematic.blocks._stub_helpers import _stub_endpoint_would_collide
 from kicad_tools.schematic.models.schematic import Schematic
 
 # Warn if running source scripts with stale pipx install
@@ -462,59 +463,159 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # local label so the netlist matches the PCB nets.
     def _connect_mcu_pin_to_label(pin_id: str, label_text: str, dx: int = 0, dy: int = 0):
         """Drop a wire from a MCU pin to a local label; the label provides the
-        net connection by name (e.g. ``GATE_AH``)."""
+        net connection by name (e.g. ``GATE_AH``).
+
+        Collision-aware (issue #3379): the naive single-stub form silently
+        bridges nets when the label coordinate lands on the interior of an
+        unrelated foreign wire. Board 05's MCU SWDIO / SWCLK / ISENSE_A-/B-/C-
+        / GND pins all suffered this: PHASE_A and PHASE_B wires from the
+        motor connector run east-to-west across U10's right-side label
+        row, and a vertical HallSensorInput rail at x=227.33 crosses
+        through both the +3.3V and GND label rows. kicad-cli reported
+        U10.23->PHASE_A, U10.24->PHASE_B, U10.14/16/32->+3.3V (instead
+        of the intended SWDIO/SWCLK/GND), regressing DRC from 6 to 73
+        violations after a fresh ``kct pcb sync-netlist --apply``.
+
+        This implementation tries the requested geometry first, then
+        escalates through (a) longer horizontal stub, (b) primary-side
+        with a small vertical offset, (c) opposite-side stub, and (d)
+        L-shaped stub (horizontal then vertical to a free row).  Raises
+        ``ValueError`` if no candidate is collision-free -- silent
+        net-bridging is unrecoverable at netlist time, so the failure
+        must surface loudly.
+        """
         pin_pos = mcu.pin_position(pin_id)
-        # Pin is on the symbol perimeter; pull a stub away from the body
-        # in the direction of dx/dy (the caller picks based on which side the
-        # pin lives on so the wire doesn't cross the body).
-        end_pos = (pin_pos[0] + dx, pin_pos[1] + dy)
-        sch.add_wire(pin_pos, end_pos, warn_on_collision=False)
-        sch.add_label(label_text, end_pos[0], end_pos[1], rotation=0, validate_connection=False)
 
-    # Power pins (VDD/VDDA = +3.3V, VSS/VSSA = GND) get wired straight to
-    # rails.  Pin 1 (VDD), 17 (VDD), 15 (VDDA) -> +3.3V.
-    # Pin 14 (VSSA), 16 (VSS), 32 (VSS) -> GND.
-    # Local labels so any pin sharing the same net gets electrically connected.
-    for vdd_pin in ["1", "17", "15"]:
-        _connect_mcu_pin_to_label(vdd_pin, "+3.3V", dx=-5, dy=0)
-    for vss_pin in ["14", "16", "32"]:
-        _connect_mcu_pin_to_label(vss_pin, "GND", dx=-5, dy=0)
+        # Build a list of candidate label endpoints in priority order.
+        # Each candidate is either a straight stub (one wire) or an
+        # L-shaped stub (two wires) terminating at ``(lx, ly)``.
+        primary_dx = dx if dx != 0 else 5  # default outward direction
+        opposite_dx = -primary_dx
+        grid = 2.54  # KiCad default grid
 
-    # Pin 4 = PG10 (configured as NRST)
-    _connect_mcu_pin_to_label("4", "NRST", dx=-5, dy=0)
+        # Straight-stub candidates: try the requested geometry, then
+        # progressively longer stubs in the same direction, then a
+        # slight vertical nudge, then the opposite direction.
+        straight: list[tuple[float, float]] = []
+        for k in (1, 2, 3, 4, 5, 6):
+            straight.append((pin_pos[0] + primary_dx * k, pin_pos[1] + dy))
+        for k in (1, -1, 2, -2):
+            straight.append((pin_pos[0] + primary_dx, pin_pos[1] + dy + grid * k))
+        if opposite_dx != primary_dx:
+            for k in (1, 2, 3):
+                straight.append((pin_pos[0] + opposite_dx * k, pin_pos[1] + dy))
 
-    # ADC current-sense returns: PA0/PA1/PA2 -> ISENSE_A-/B-/C-
-    _connect_mcu_pin_to_label("5", "ISENSE_A-", dx=5, dy=0)
-    _connect_mcu_pin_to_label("6", "ISENSE_B-", dx=5, dy=0)
-    _connect_mcu_pin_to_label("7", "ISENSE_C-", dx=5, dy=0)
+        # L-shaped candidates: horizontal stub to a midpoint, then
+        # vertical to a row above/below.  Used when no straight stub
+        # clears (SWDIO/SWCLK rely on this when the row is dense).
+        l_shaped: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        for dy_off in (-grid, grid, -2 * grid, 2 * grid, -3 * grid, 3 * grid):
+            mid = (pin_pos[0] + primary_dx, pin_pos[1])
+            end = (mid[0], pin_pos[1] + dy_off)
+            l_shaped.append((mid, end))
 
-    # Hall sensor inputs: PA6/PA7/PB0 (TIM3 CH1/CH2/CH3 capable)
-    _connect_mcu_pin_to_label("11", "HALL_A", dx=5, dy=0)
-    _connect_mcu_pin_to_label("12", "HALL_B", dx=5, dy=0)
-    _connect_mcu_pin_to_label("13", "HALL_C", dx=5, dy=0)
+        def _endpoint_safe(point: tuple[float, float]) -> bool:
+            # Reject if the point lies on the interior of any existing
+            # wire (silent net-bridging risk).  ``_stub_endpoint_would_collide``
+            # also catches degenerate landing-on-existing-endpoint cases,
+            # but those usually mean the caller is wiring to an existing
+            # symbol pin -- conservative-reject is safer for MCU stubs.
+            # Check the SNAPPED endpoint coordinates so the check matches
+            # where the label actually lands after grid snapping.
+            sx = sch._snap_coord(point[0], "_connect_mcu_pin_to_label probe")
+            sy = sch._snap_coord(point[1], "_connect_mcu_pin_to_label probe")
+            return not _stub_endpoint_would_collide(sch, sx, sy)
 
-    # High-side gate PWM: PA8/PA9/PA10 (TIM1_CH1/CH2/CH3).  These drive the
-    # DRV8301 INH_A/B/C logic inputs (pins 17/19/21), not the MOSFET gates
-    # directly — gate output of the driver is GATE_DRV_*H, then through the
-    # R20/R21/R22 slew-rate resistors to GATE_*H on the MOSFET gates.
-    _connect_mcu_pin_to_label("18", "PWM_AH", dx=5, dy=0)
-    _connect_mcu_pin_to_label("19", "PWM_BH", dx=5, dy=0)
-    _connect_mcu_pin_to_label("20", "PWM_CH", dx=5, dy=0)
+        # Try straight stubs first.
+        for end_pos in straight:
+            if _endpoint_safe(end_pos):
+                sch.add_wire(pin_pos, end_pos, warn_on_collision=False)
+                sch.add_label(
+                    label_text,
+                    end_pos[0],
+                    end_pos[1],
+                    rotation=0,
+                    validate_connection=False,
+                )
+                return
 
-    # SWD debug pins
-    _connect_mcu_pin_to_label("23", "SWDIO", dx=5, dy=0)
-    _connect_mcu_pin_to_label("24", "SWCLK", dx=5, dy=0)
-    _connect_mcu_pin_to_label("26", "SWO", dx=5, dy=0)
+        # Fall back to L-shaped routing.  The label sits on the second
+        # wire's endpoint; check both the midpoint and the final endpoint
+        # for collisions.
+        for mid, end in l_shaped:
+            if _endpoint_safe(mid) and _endpoint_safe(end):
+                sch.add_wire(pin_pos, mid, warn_on_collision=False)
+                sch.add_wire(mid, end, warn_on_collision=False)
+                sch.add_label(
+                    label_text,
+                    end[0],
+                    end[1],
+                    rotation=0,
+                    validate_connection=False,
+                )
+                return
 
-    # Low-side gate PWM: PB6/PB7/PB8 (TIM4_CH1/CH2/CH3, sync'd with TIM1).
-    # Drives DRV8301 INL_A/B/C logic inputs (pins 18/20/22).
-    _connect_mcu_pin_to_label("29", "PWM_AL", dx=5, dy=0)
-    _connect_mcu_pin_to_label("30", "PWM_BL", dx=5, dy=0)
-    _connect_mcu_pin_to_label("31", "PWM_CL", dx=5, dy=0)
+        # No candidate worked.  Surface the failure loudly so the
+        # caller can move the MCU or split the colliding rail.
+        raise ValueError(
+            f"_connect_mcu_pin_to_label: cannot place label {label_text!r} for "
+            f"pin {pin_id} at {pin_pos} without colliding with a foreign wire. "
+            f"All straight and L-shaped stub candidates landed on existing "
+            f"wires (silent net-bridging risk). Move U10 or split the "
+            f"colliding rails."
+        )
 
-    # Crystal pins: PF0/PF1 -> OSC_IN/OSC_OUT
-    _connect_mcu_pin_to_label("2", "OSC_IN", dx=-5, dy=0)
-    _connect_mcu_pin_to_label("3", "OSC_OUT", dx=-5, dy=0)
+    # U10 pin-label emission is DEFERRED until after Sections 6-10 have
+    # added their wires (PHASE_A/B/C from J2, vertical HallSensorInput
+    # rails near x=227, +3.3V/GND symbol stubs near the bypass caps).
+    # Without deferral the collision check in ``_connect_mcu_pin_to_label``
+    # can't see those future wires, and labels end up silently bridged
+    # into PHASE_A / +3.3V / GND -- the original board 05 bug
+    # (issue #3379) that regressed DRC from 6 to 73 violations after a
+    # fresh sync-netlist. We record the desired (pin, label, dx, dy)
+    # tuples here and emit them at the end of Section 11, after every
+    # other section has finished drawing wires.
+    deferred_mcu_labels: list[tuple[str, str, int, int]] = [
+        # Power pins (VDD/VDDA = +3.3V, VSS/VSSA = GND) get wired
+        # straight to rails. Pin 1 (VDD), 17 (VDD), 15 (VDDA) -> +3.3V.
+        # Pin 14 (VSSA), 16 (VSS), 32 (VSS) -> GND.
+        ("1", "+3.3V", -5, 0),
+        ("17", "+3.3V", -5, 0),
+        ("15", "+3.3V", -5, 0),
+        ("14", "GND", -5, 0),
+        ("16", "GND", -5, 0),
+        ("32", "GND", -5, 0),
+        # Pin 4 = PG10 (configured as NRST)
+        ("4", "NRST", -5, 0),
+        # ADC current-sense returns: PA0/PA1/PA2 -> ISENSE_A-/B-/C-
+        ("5", "ISENSE_A-", 5, 0),
+        ("6", "ISENSE_B-", 5, 0),
+        ("7", "ISENSE_C-", 5, 0),
+        # Hall sensor inputs: PA6/PA7/PB0 (TIM3 CH1/CH2/CH3 capable)
+        ("11", "HALL_A", 5, 0),
+        ("12", "HALL_B", 5, 0),
+        ("13", "HALL_C", 5, 0),
+        # High-side gate PWM: PA8/PA9/PA10 (TIM1_CH1/CH2/CH3). These drive
+        # the DRV8301 INH_A/B/C logic inputs (pins 17/19/21), not the MOSFET
+        # gates directly -- gate output of the driver is GATE_DRV_*H, then
+        # through the R20/R21/R22 slew-rate resistors to GATE_*H on the
+        # MOSFET gates.
+        ("18", "PWM_AH", 5, 0),
+        ("19", "PWM_BH", 5, 0),
+        ("20", "PWM_CH", 5, 0),
+        # SWD debug pins
+        ("23", "SWDIO", 5, 0),
+        ("24", "SWCLK", 5, 0),
+        ("26", "SWO", 5, 0),
+        # Low-side gate PWM: PB6/PB7/PB8 (TIM4_CH1/CH2/CH3, sync'd with
+        # TIM1). Drives DRV8301 INL_A/B/C logic inputs (pins 18/20/22).
+        ("29", "PWM_AL", 5, 0),
+        ("30", "PWM_BL", 5, 0),
+        ("31", "PWM_CL", 5, 0),
+        # Crystal pins: PF0/PF1 -> OSC_IN/OSC_OUT
+        ("2", "OSC_IN", -5, 0),
+        ("3", "OSC_OUT", -5, 0),
+    ]
 
     # Unused STM32G431K8 GPIO pins (PA3-PA5, PA11-PA15, PB3-PB5 mapped to
     # LQFP-32 pins 8, 9, 10, 21, 22, 25, 27, 28).  This demo design does
@@ -524,7 +625,11 @@ def create_bldc_controller(output_dir: Path) -> Path:
         nc_pos = mcu.pin_position(nc_pin)
         sch.add_no_connect(nc_pos[0], nc_pos[1])
 
-    print("   Wired 16 floating nets (6 PWM, 3 HALL, 3 ISENSE-, 4 SWD) to MCU pins")
+    print(
+        f"   Deferred {len(deferred_mcu_labels)} U10 pin labels "
+        f"(6 PWM, 3 HALL, 3 ISENSE-, 4 SWD, 3 power, 1 NRST, 2 OSC); "
+        f"emitted after Section 11 (issue #3379)"
+    )
     print("   Marked 8 unused GPIO pins as no-connect (PA3-PA5, PA11-PA15, PB3-PB5)")
 
     # Crystal oscillator (8MHz)
@@ -815,7 +920,27 @@ def create_bldc_controller(output_dir: Path) -> Path:
             ref_start=10 + i,  # R10, R11, R12
             amplifier=False,  # No amplifier for basic sensing
         )
-        sense.connect_to_rails(gnd_rail_y=RAIL_GND)
+        # NOTE (issue #3379): we intentionally do NOT call
+        # ``sense.connect_to_rails(gnd_rail_y=RAIL_GND)`` here. That
+        # helper would wire the shunt's IN- pin straight down to the
+        # global GND rail, which short-circuits the ``ISENSE_X-`` label
+        # (placed on the same pin below) into the ``GND`` net.  The
+        # committed PCB and the U10 ADC topology treat ``ISENSE_X-``
+        # as a *separate* Kelvin-sense net (PCB nets 15/17/19),
+        # distinct from the bulk GND that carries phase current.  With
+        # the ``connect_to_rails`` call, kicad-cli collapses ISENSE_X-
+        # onto GND, then ``sync-netlist`` rewrites U10.5/6/7 ADC pins
+        # to ``GND`` instead of the intended ``ISENSE_X-`` nets --
+        # regressing the U10 round-trip that is the locus of #3379.
+        # The shunt's IN- pin is connected to GND *physically* via the
+        # LS MOSFET source / GND copper zone on the PCB; only the
+        # schematic label is needed for the netlister because
+        # ``ISENSE_X-`` is consumed only by the U10 ADC pins.  The
+        # IN+ side (R10/11/12.1) remains bridged to GND through the
+        # ``HalfBridge.connect_to_rails`` LS-source-to-GND wire -- a
+        # separate structural issue (the shunt should be in-line
+        # between LS source and GND, not in parallel) that is out of
+        # scope for #3379 and tracked elsewhere.
         current_sensors.append(sense)
 
         # Wire the inverter LS output to the current sense input
@@ -981,6 +1106,20 @@ def create_bldc_controller(output_dir: Path) -> Path:
         x=X_POWER_IN,
         y=RAIL_GND + 20,
     )
+
+    # =========================================================================
+    # Emit deferred U10 pin labels (issue #3379)
+    # =========================================================================
+    # Sections 5-10 added all the wires that could collide with U10's
+    # right-side label row (PHASE_A/B/C from J2, vertical
+    # HallSensorInput rails near x=227.33, bypass-cap rail stubs near
+    # the +3.3V/GND rows). Now that those wires exist, the collision
+    # check inside ``_connect_mcu_pin_to_label`` can see them and pick
+    # a non-bridging endpoint for each MCU pin label.
+    print("\n11b. Emitting deferred U10 pin labels (with collision avoidance)...")
+    for pin_id, label_text, dx, dy in deferred_mcu_labels:
+        _connect_mcu_pin_to_label(pin_id, label_text, dx=dx, dy=dy)
+    print(f"   Emitted {len(deferred_mcu_labels)} U10 pin labels")
 
     # =========================================================================
     # Validate Schematic
