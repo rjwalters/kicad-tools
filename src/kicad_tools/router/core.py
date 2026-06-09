@@ -781,6 +781,20 @@ class Autorouter:
         self._escape_router: EscapeRouter | None = None
         self._subgrid_router: SubGridRouter | None = None
 
+        # Issue #3419: gate for the diff-pair paired-escape pre-pass.
+        # The pre-pass emits two tightly-coupled escape endpoints (at the
+        # intra-pair clearance) that are only routable by a COUPLED
+        # consumer (``route_all_with_diffpairs`` -> CoupledPathfinder).
+        # When the board is routed per-net (plain ``route_all`` /
+        # ``route_all_negotiated`` without --differential-pairs), each
+        # half's A* start point sits inside the partner trace's clearance
+        # envelope and the search strands (30s/net timeouts -- the 41% ->
+        # 27% reach regression on board 06 documented in #3419).  The
+        # flag is flipped on by ``route_all_with_diffpairs`` before the
+        # escape phase; ``_escape`` consults it to decide whether to
+        # thread the diff_pair_map into the EscapeRouter.
+        self.paired_escape_coupling: bool = False
+
         # Issue #2838 (closes #2761 gap): Lazy-initialized via conflict
         # manager.  Wired into the single-ended PIN_ACCESS retry path in
         # ``route_net`` so vias from already-routed nets that sit within
@@ -10600,6 +10614,25 @@ class Autorouter:
                 ``diffpair_routing.py``).  When ``None`` (default) the
                 legacy unbounded behaviour is preserved for back-compat.
         """
+        # Issue #3419: enable the paired-escape pre-pass for this run.
+        # ``route_all_with_diffpairs`` routes pairs through the
+        # CoupledPathfinder which is the intended consumer of the
+        # tightly-coupled escape endpoints the pre-pass emits.  The flag
+        # must be set BEFORE the escape phase runs (escapes are generated
+        # lazily inside the delegated strategies).  If the escape router
+        # was already created by an earlier per-net phase (flag off), its
+        # map is refreshed in place so this run still gets paired escapes.
+        # ``getattr`` guards: some unit tests construct partially
+        # initialised Autorouter doubles (``__new__`` without
+        # ``__init__``); the flag flip must not crash on them.
+        self.paired_escape_coupling = bool(
+            diffpair_config is not None and diffpair_config.enabled
+        )
+        if getattr(self, "_escape_router", None) is not None:
+            self._escape_router.diff_pair_map = (
+                self.get_diff_pair_map() if self.paired_escape_coupling else {}
+            )
+
         # Issue #3321: derive a per-pair budget from --timeout when the
         # caller has not explicitly configured one.  This protects the
         # CoupledPathfinder from running unbounded just because the CLI's
@@ -10961,6 +10994,14 @@ class Autorouter:
     def _escape(self) -> EscapeRouter:
         """Lazy-initialize escape router."""
         if self._escape_router is None:
+            # Issue #3419: board-wide net -> pad positions map so the
+            # paired-escape pre-pass can aim the launch direction toward
+            # the partner connector (off-package endpoints) instead of
+            # blindly outward from the package center.
+            net_pad_positions: dict[str, list[tuple[float, float]]] = {}
+            for pad in self.pads.values():
+                if pad.net_name:
+                    net_pad_positions.setdefault(pad.net_name, []).append((pad.x, pad.y))
             self._escape_router = EscapeRouter(
                 self.grid, self.rules, net_class_map=self.net_class_map,
                 edge_clearance=self._edge_clearance,
@@ -10971,7 +11012,18 @@ class Autorouter:
                 # dense packages get coupled-at-launch escape routes.
                 # ``get_diff_pair_map`` returns {} when no pairs are
                 # detected, which preserves pre-#2639 behavior bit-for-bit.
-                diff_pair_map=self.get_diff_pair_map(),
+                #
+                # Issue #3419: only thread the map when a coupled consumer
+                # exists (``route_all_with_diffpairs`` flips
+                # ``paired_escape_coupling`` on before the escape phase).
+                # Paired escape endpoints sit at the intra-pair clearance
+                # and are unroutable by the plain per-net A* -- threading
+                # the map unconditionally regressed board 06 from 41% to
+                # 27% reach once the BGA-49 detection fix landed.
+                diff_pair_map=(
+                    self.get_diff_pair_map() if self.paired_escape_coupling else {}
+                ),
+                net_pad_positions=net_pad_positions,
             )
         return self._escape_router
 

@@ -512,58 +512,18 @@ class TestUSBCBGAMisclassification:
         assert len(pads) == 22
         assert detect_package_type(pads) != PackageType.BGA
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Issue #3413: odd-dimension BGA grids (e.g. 7x7 BGA-49) have a "
-            "full row AND a full column directly on the package center "
-            "axes. ``_is_grid_pattern``'s strict ``if/elif/else`` quadrant "
-            "cascade lumps every axis pad into the ``else`` branch, "
-            "producing a 9/9/9/22 distribution for a perfectly symmetric "
-            "7x7 grid and failing the [0.3, 1.7] x avg balance check. "
-            "That misclassifies board 06's USB3 SS BGA-49 sink as "
-            "``PackageType.UNKNOWN`` and routes it through the radial-"
-            "escape fallback. A naive fix (distribute axis pads across "
-            "the two adjacent quadrants) makes detection pass AND fires "
-            "the diff-pair-aware paired escape pre-pass on this BGA, but "
-            "the resulting paired-escape geometry (tight 0.10mm intra-"
-            "pair lateral offset at the BGA edge, escape direction "
-            "perpendicular to the pair axis) drops the per-net A* "
-            "routing reach on board 06 from 41% (the documented baseline) "
-            "to ~27% because the per-net A* times out (30s default) "
-            "trying to leave the tight escape endpoints. The detection "
-            "fix needs to land alongside an escape-strategy refinement "
-            "for sparse-signal BGAs (paired escape direction toward the "
-            "partner connector, not outward from package center). "
-            "Tracked under #3419 (follow-up to #3413)."
-        ),
-    )
     def test_odd_dimension_7x7_bga_detected(self):
-        """7x7 BGA (49 pads, odd grid) should be detected as BGA (Issue #3413).
-
-        REGRESSION TEST DOCUMENTING THE BUG.  See the ``xfail`` reason
-        above for the full root-cause analysis and why a naive
-        ``_is_grid_pattern`` fix is not safe to land on its own.
+        """7x7 BGA (49 pads, odd grid) is detected as BGA (Issues #3413/#3419).
 
         Board 06's BGA-49 USB3 SuperSpeed sink is a 7x7 grid at 1.27 mm
-        pitch.  The router currently misclassifies it as
-        ``PackageType.UNKNOWN`` and dispatches the 8 USB3 SS signal pads
-        through ``_escape_radial`` -- a simple per-pin surface escape
-        that happens to produce the 41% reach this issue captures.  When
-        the BGA detector is corrected in isolation, the paired-escape
-        pre-pass (gated on ``PackageType.BGA``) fires on the USB3 pairs,
-        produces tightly-coupled escape endpoints at the BGA edge, and
-        the per-net A* main router times out searching from those
-        endpoints.  Reach drops to ~27%.
-
-        Two-phase fix needed (tracked separately):
-          1. ``_is_grid_pattern``: distribute axis pads across the two
-             adjacent quadrants when checking the balance heuristic.
-          2. ``_escape_diff_pair_segment`` / ``_generate_paired_escapes``:
-             choose the launch direction based on partner-connector
-             proximity (e.g., consult ``net_class_map`` / the diff-pair
-             partner's package location) rather than outward from
-             package center.
+        pitch.  Odd-dimension grids have a full row AND a full column
+        directly on the package center axes; the pre-#3419
+        ``_is_grid_pattern`` quadrant cascade lumped every axis pad into
+        the last quadrant (9/9/9/22 for a symmetric 7x7 grid), failing
+        the [0.3, 1.7] x avg balance check and misclassifying the
+        package as ``PackageType.UNKNOWN``.  The #3419 fix distributes
+        axis pads fractionally across adjacent quadrants (12.25 each for
+        7x7), so symmetric odd grids classify as BGA.
         """
         pads = create_bga_pads(7, 7, pitch=1.27)
         assert len(pads) == 49
@@ -705,6 +665,35 @@ class TestEscapeRouter:
 
         # Should have escape for each pad
         assert len(escapes) == 16
+
+    def test_bga_rings_skip_plane_net_pads(self, grid_and_rules):
+        """BGA ring escape skips net=0 (plane/skipped) pads (Issue #3419).
+
+        Plane nets (GND, VCC, ...) are stitched via planes, not routed
+        through escapes; generating escapes for them wastes the BGA
+        perimeter channel the signal nets need.  Mirrors the equivalent
+        filter in ``_escape_qfp_alternating`` (Issue #2513).
+        """
+        from dataclasses import replace
+
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_bga_pads(4, 4, pitch=0.8)
+        # Mark 5 of the 16 balls as plane-net pads (net=0).
+        plane_positions = set()
+        for i in (0, 3, 5, 10, 15):
+            pads[i] = replace(pads[i], net=0, net_name="GND")
+            plane_positions.add((pads[i].x, pads[i].y))
+
+        info = router.analyze_package(pads)
+        assert info.package_type == PackageType.BGA
+        escapes = router.generate_escapes(info)
+
+        # No escape may be generated for a plane-net pad, and all 11
+        # signal pads still escape.
+        assert all(e.pad.net != 0 for e in escapes)
+        assert len(escapes) == 11
 
         # Check escape structure
         for escape in escapes:

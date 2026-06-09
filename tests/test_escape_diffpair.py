@@ -301,10 +301,60 @@ class TestGate2EscapeRouterCtorReceivesMap:
         return ar
 
     def test_autorouter_escape_property_passes_map(self):
-        """core.py:7271 _escape property threads the map."""
+        """core.py _escape property threads the map when coupling is active.
+
+        Issue #3419: the map is now gated on ``paired_escape_coupling``
+        (flipped on by ``route_all_with_diffpairs``).  Without a coupled
+        consumer, the tightly-coupled paired escape endpoints strand the
+        plain per-net A* (board 06: 41% -> 27% reach regression).
+        """
         ar = self._build_ar_with_pair()
+        ar.paired_escape_coupling = True
         escape = ar._escape
         assert isinstance(escape, EscapeRouter)
+        assert escape.diff_pair_map == {"USB_D+": "USB_D-", "USB_D-": "USB_D+"}
+
+    def test_autorouter_escape_property_empty_map_without_coupling(self):
+        """Issue #3419: per-net routing (no coupled consumer) -> empty map.
+
+        The paired-escape pre-pass emits endpoints at the intra-pair
+        clearance; only the CoupledPathfinder can route from them.  When
+        ``paired_escape_coupling`` is False (default; plain
+        ``route_all`` / ``route_all_negotiated``), the map must NOT be
+        threaded even though pairs are detected.
+        """
+        ar = self._build_ar_with_pair()
+        assert ar.paired_escape_coupling is False
+        escape = ar._escape
+        assert escape.diff_pair_map == {}
+
+    def test_route_all_with_diffpairs_flips_coupling_flag(self):
+        """``route_all_with_diffpairs`` enables the pre-pass before routing
+        and refreshes an already-created escape router's map in place
+        (Issue #3419).
+        """
+        import contextlib
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.diffpair import DifferentialPairConfig
+
+        ar = self._build_ar_with_pair()
+        # Simulate an earlier phase having created the escape router with
+        # the gate off.
+        escape = ar._escape
+        assert escape.diff_pair_map == {}
+
+        # ``Autorouter._diffpair`` is a lazy property over
+        # ``_diffpair_router`` -- mock the underlying attribute.
+        ar._diffpair_router = MagicMock()
+        ar._diffpair_router.route_all_with_diffpairs = MagicMock(return_value=([], []))
+        ar._diffpair_router.intra_clearance_violations = MagicMock(return_value=[])
+        # The mocked inner router may not satisfy the full post-route
+        # pipeline; the flag flip happens FIRST so it is still
+        # observable either way.
+        with contextlib.suppress(Exception):
+            ar.route_all_with_diffpairs(DifferentialPairConfig(enabled=True))
+        assert ar.paired_escape_coupling is True
         assert escape.diff_pair_map == {"USB_D+": "USB_D-", "USB_D-": "USB_D+"}
 
     def test_autorouter_escape_property_empty_map_for_no_pairs(self):
@@ -1462,3 +1512,143 @@ class TestBGA49InnerRingCorridorDriftPrevention:
             f"All B2/B3 corridor cells must be owned by the pair {{1, 2}}; "
             f"found unexpected owner sets {unique_owner_sets - {{frozenset({{1, 2}})}}}"
         )
+
+
+# =============================================================================
+# Issue #3419: partner-connector-aware paired-escape launch direction
+# =============================================================================
+
+
+class TestPairLaunchDirectionHeuristic:
+    """Issue #3419: paired escapes launch TOWARD the partner connector.
+
+    The original heuristic launched the pair outward from the package
+    center (quadrant rule).  On board 06's BGA-49 that strands the
+    tightly-coupled escape endpoints facing away from the USB-C source
+    and the per-net A* times out dragging the pair around the package.
+    ``_select_pair_launch_direction`` aims the launch at the centroid of
+    the pair's off-package endpoints when ``net_pad_positions`` is
+    provided, and falls back to the quadrant rule otherwise.
+    """
+
+    @staticmethod
+    def _pair_and_mid(pads):
+        pad_p = next(p for p in pads if p.net_name == "TX_P")
+        pad_n = next(p for p in pads if p.net_name == "TX_N")
+        mid_x = (pad_p.x + pad_n.x) / 2.0
+        mid_y = (pad_p.y + pad_n.y) / 2.0
+        return pad_p, pad_n, mid_x, mid_y
+
+    def test_fallback_without_positions(self, grid, rules):
+        """No net_pad_positions -> exact pre-#3419 quadrant behaviour."""
+        pads = make_bga_with_pair()
+        info = make_package_info(pads, PackageType.BGA, "U1")
+        er = EscapeRouter(grid, rules, diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"})
+        pad_p, pad_n, mid_x, mid_y = self._pair_and_mid(pads)
+        d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
+        assert d == er._get_quadrant_direction(mid_x, mid_y, *info.center)
+
+    def test_fallback_when_all_endpoints_on_package(self, grid, rules):
+        """Positions map containing ONLY the on-package pads -> fallback."""
+        pads = make_bga_with_pair()
+        info = make_package_info(pads, PackageType.BGA, "U1")
+        pad_p, pad_n, mid_x, mid_y = self._pair_and_mid(pads)
+        positions = {
+            "TX_P": [(pad_p.x, pad_p.y)],
+            "TX_N": [(pad_n.x, pad_n.y)],
+        }
+        er = EscapeRouter(
+            grid, rules,
+            diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            net_pad_positions=positions,
+        )
+        d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
+        assert d == er._get_quadrant_direction(mid_x, mid_y, *info.center)
+
+    def test_direction_points_toward_partner_connector(self, grid, rules):
+        """Connector due EAST -> launch EAST even though quadrant says SOUTH.
+
+        The B2/B3 pair of ``make_bga_with_pair`` sits on the south side
+        of the package (midpoint (0, -0.4) vs center (0, 0)), so the
+        quadrant rule launches SOUTH.  With the partner connector's pads
+        far to the east, the #3419 heuristic must launch EAST.
+        """
+        from kicad_tools.router.escape import EscapeDirection
+
+        pads = make_bga_with_pair()
+        info = make_package_info(pads, PackageType.BGA, "U1")
+        pad_p, pad_n, mid_x, mid_y = self._pair_and_mid(pads)
+        positions = {
+            "TX_P": [(pad_p.x, pad_p.y), (30.0, mid_y)],
+            "TX_N": [(pad_n.x, pad_n.y), (30.0, mid_y - 0.2)],
+        }
+        er = EscapeRouter(
+            grid, rules,
+            diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            net_pad_positions=positions,
+        )
+        d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
+        assert d == EscapeDirection.EAST
+
+    def test_never_launches_into_package_interior(self, grid, rules):
+        """Connector on the FAR side -> heuristic must not launch inward.
+
+        The pair sits on the south side; a connector due north would
+        naively suggest NORTH, but that crosses the BGA pad field on the
+        surface layer.  The interior veto must exclude NORTH.
+        """
+        from kicad_tools.router.escape import EscapeDirection
+
+        pads = make_bga_with_pair()
+        info = make_package_info(pads, PackageType.BGA, "U1")
+        pad_p, pad_n, mid_x, mid_y = self._pair_and_mid(pads)
+        positions = {
+            "TX_P": [(pad_p.x, pad_p.y), (0.0, 30.0)],
+            "TX_N": [(pad_n.x, pad_n.y), (0.2, 30.0)],
+        }
+        er = EscapeRouter(
+            grid, rules,
+            diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            net_pad_positions=positions,
+        )
+        d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
+        assert d != EscapeDirection.NORTH
+
+    def test_generate_escapes_threads_heuristic(self, grid, rules):
+        """End-to-end: paired escape endpoints move toward the connector."""
+        pads = make_bga_with_pair()
+        info = make_package_info(pads, PackageType.BGA, "U1")
+        pad_p, pad_n, mid_x, mid_y = self._pair_and_mid(pads)
+        positions = {
+            "TX_P": [(pad_p.x, pad_p.y), (30.0, mid_y)],
+            "TX_N": [(pad_n.x, pad_n.y), (30.0, mid_y - 0.2)],
+        }
+        er = EscapeRouter(
+            grid, rules,
+            diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            net_pad_positions=positions,
+        )
+        escapes = er.generate_escapes(info)
+        paired = [e for e in escapes if e.pad.net_name in ("TX_P", "TX_N")]
+        assert len(paired) == 2
+        for e in paired:
+            assert e.escape_point[0] > e.pad.x, (
+                f"{e.pad.net_name}: expected eastward launch toward the "
+                f"connector, got escape point {e.escape_point} from pad "
+                f"({e.pad.x}, {e.pad.y})"
+            )
+
+    def test_autorouter_threads_net_pad_positions(self):
+        """The Autorouter ``_escape`` property builds and threads the map."""
+        ar = Autorouter(width=20.0, height=20.0)
+        ar.net_class_map["SIG_A"] = NetClassRouting(name="Plain")
+        ar.add_component(
+            "J1",
+            [{"number": "1", "x": 5.0, "y": 6.0, "net": 1, "net_name": "SIG_A"}],
+        )
+        escape = ar._escape
+        assert escape.net_pad_positions.get("SIG_A") == [(5.0, 6.0)]
+
+    def test_default_positions_map_is_empty(self, grid, rules):
+        er = EscapeRouter(grid, rules)
+        assert er.net_pad_positions == {}
