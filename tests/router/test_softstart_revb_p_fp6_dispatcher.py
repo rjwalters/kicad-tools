@@ -17,15 +17,22 @@ end-to-end ``route_with_escape`` pipeline and directly verifies:
      ``route_with_escape`` dispatcher were to call it).
 
 Critically, this test also documents the **dispatcher gap** found
-during #3390 verification: the SOIC-8 1.27 mm-pitch packages do not
-pass :func:`kicad_tools.router.escape.is_dense_package` at the recipe
+during #3390 verification and re-confirmed by #3395 measurement:
+the SOIC-8 1.27 mm-pitch packages do not pass
+:func:`kicad_tools.router.escape.is_dense_package` at the recipe
 parameters above (dynamic threshold = 2 * (0.30 + 0.20) = 1.0 mm <
 1.27 mm pitch), so ``Autorouter.detect_dense_packages`` excludes
 them from the escape pre-pass.  P_FP6 wires the rescue path
-correctly but the dispatcher never invokes it on this fixture; the
-+3 UCC27211 net reach lift estimated by the architect (#3381 comment)
-is therefore unrealised in the empirical end-to-end run.  Closing
-this gap is tracked separately (out of scope for #3390).
+correctly but the dispatcher never invokes it on this fixture.
+
+Issue #3395 investigated raising the dispatcher gate and found
+that **opening the gate REGRESSES softstart rev B reach 18 -> 8**
+at L=2 single-attempt (the SOP rescue's in-pad vias collide with
+GATE/UCC bus routing downstream).  The dispatcher gap is therefore
+INTENTIONAL today, pending the P_FP6 rescue ↔ main-router
+interaction fix tracked in #3398.  See
+``test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached``
+below for the empirical detail.
 
 Runtime: <10 s.  Not gated on ``KICAD_RUN_SLOW_SOFTSTART_REACH=1``.
 
@@ -217,7 +224,7 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
 def test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached(
     tmp_path: Path,
 ) -> None:
-    """Documents the P_FP6 dispatcher-gap finding from #3390 verification.
+    """Documents the P_FP6 dispatcher-gap finding from #3390 / #3395.
 
     UCC27211 SOIC-8 at 1.27 mm pitch + 0.30 mm trace + 0.20 mm
     clearance does *not* pass
@@ -231,12 +238,35 @@ def test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached(
     ``test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias`` above);
     only the dispatcher gate prevents the rescue from firing.
 
-    This test is the negative control: if a future change updates the
-    is_dense_package heuristic to include SOIC-8 at fine-pitch, this
-    assertion will fail and the P_FP6 rescue will start contributing
-    to the end-to-end reach number.  At that point this test should
-    be updated to assert the new expected dense-package set, and
-    ``test_softstart_revb_reach_floor`` should be tightened.
+    **Why the dispatcher gap is intentional today (Issue #3395
+    investigation, Jun 9 2026):**  the gate is NOT a bug; it is
+    intentionally closed pending the P_FP6 rescue ↔ main-router
+    interaction work.  PR #XXXX investigated the architect's
+    proposed fix (raise the dual-row fine-pitch cap from 0.75 mm to
+    1.5 mm so UCC27211 SOIC-8 qualifies for the dense pre-pass) and
+    measured softstart rev B reach end-to-end:
+
+    +------------------------------+----------------+--------+
+    | Configuration                | Dense packages | Reach  |
+    +==============================+================+========+
+    | main (status quo)            | 3 packages     | 18/30  |
+    +------------------------------+----------------+--------+
+    | Threshold raised to 1.5 mm   | 6 packages     | 8/30   |
+    +------------------------------+----------------+--------+
+
+    Reach REGRESSES by 10 nets when UCC27211 SOIC-8 enters the
+    dense list.  The SOP rescue places 16 in-pad vias on U5/U6
+    signal pins (+3 on U7) as designed; the downstream detailed
+    router then cannot route GATE_POS/GATE_NEG/UCC_HO/UCC_LO/VGATE
+    because the in-pad via field collides with the tight bus +
+    snubber routing around the FET pairs.  See Issue #3398 for the
+    follow-up interaction-fix work.
+
+    When #3398 lands and the rescue no longer regresses end-to-end
+    reach, the dispatcher gate should be re-opened (re-implement the
+    threshold raise) and this test should flip from negative-control
+    to positive-assertion.  Until then, the negative assertion below
+    is the empirical record of the trade-off.
     """
     from kicad_tools.router.escape import is_dense_package
 
@@ -251,15 +281,18 @@ def test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached(
             trace_width=router.rules.trace_width,
             clearance=router.rules.trace_clearance,
         )
-        # The gap finding: NONE of the UCC27211 SOIC-8 packages are
-        # classified as dense under the current recipe.  When the
-        # heuristic is updated to fix this, this assertion flips.
+        # Issue #3395: NONE of the UCC27211 SOIC-8 packages are
+        # classified as dense under the current recipe BY DESIGN --
+        # opening the gate without the P_FP6 interaction fix (#3398)
+        # regresses end-to-end reach 18 -> 8 on this fixture.
         assert not dense, (
-            f"{ref} is now classified as dense at trace=0.30, clearance=0.20; "
-            "this is a positive change -- the P_FP6 SOP rescue should now "
-            "contribute to end-to-end reach.  Update the dispatcher-gap "
-            "documentation in test_softstart_revb_reach_floor and tighten "
-            "the reach floor accordingly."
+            f"{ref} is now classified as dense at trace=0.30, clearance=0.20.  "
+            "If this was intentional, the test needs updating AND the "
+            "softstart rev B reach floor "
+            "(`test_softstart_revb_reach_floor`) must be re-measured to "
+            "confirm the P_FP6 rescue ↔ main-router interaction (Issue "
+            "#3398) has been addressed.  See the docstring above for the "
+            "Jun 2026 reach-regression measurement details."
         )
 
 
