@@ -34,7 +34,6 @@ from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.blocks import (
     CurrentSenseShunt,
     DebugHeader,
-    GateDriverBlock,
     LEDIndicator,
     ThreePhaseInverter,
     create_bootstrap_capacitor_array,
@@ -44,7 +43,10 @@ from kicad_tools.schematic.blocks import (
     create_hall_sensor_input,
     create_mcu_decoupling_array,
 )
-from kicad_tools.schematic.blocks._stub_helpers import _stub_endpoint_would_collide
+from kicad_tools.schematic.blocks._stub_helpers import (
+    _emit_pin_net_stub,
+    _stub_endpoint_would_collide,
+)
 from kicad_tools.schematic.models.schematic import Schematic
 
 # Warn if running source scripts with stale pipx install
@@ -72,6 +74,17 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print("Creating BLDC Motor Controller schematic...")
     print("=" * 60)
 
+    # Path to the project-local symbol library shipped by PR #3388.  The
+    # stock KiCad library only ships ``Driver_Motor:DRV8308`` (a 39-pin
+    # sensorless-BLDC controller), but the BOM ships ``DRV8301`` (HTSSOP-56,
+    # 57-pin pre-driver, LCSC C129292) and the PCB carries the matching
+    # HTSSOP-56 footprint.  Registering the local lib lets ``add_symbol``
+    # resolve ``board05_custom:DRV8301`` against this file.  See issues
+    # #3384 / #3387.
+    _BOARD05_SYMBOL_LIB = (
+        Path(__file__).resolve().parent / "symbols" / "board05_custom.kicad_sym"
+    )
+
     # Create schematic with title block
     sch = Schematic(
         title="BLDC Motor Controller",
@@ -80,6 +93,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         company="kicad-tools Example",
         comment1="3-Phase Brushless DC Motor Driver",
         comment2="Thermal analysis and high-current routing demo",
+        local_symbol_libs=[_BOARD05_SYMBOL_LIB],
     )
 
     # Define power rail Y coordinates
@@ -687,157 +701,153 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print(f"   Debug header: {debug.header.reference}")
 
     # =========================================================================
-    # Section 6: Gate Driver (using GateDriverBlock + BootstrapCapacitorArray)
+    # Section 6: Gate Driver (DRV8301 manual placement + BootstrapCapacitorArray)
     # =========================================================================
     print("\n6. Adding gate driver...")
 
-    # 3-phase gate driver IC (no internal bootstrap cap composition --
-    # we instantiate BootstrapCapacitorArray explicitly below to demonstrate
-    # the new factory's composability).
-    # Note: C10-C11 are used by CrystalOscillator, so start at C15 for bypass
-    # The DRV8308 KiCad symbol used by ``GateDriverBlock`` (3-phase mode)
-    # exposes gate outputs under symbol names ``UHSG``/``ULSG``/``VHSG``/
-    # ``VLSG``/``WHSG``/``WLSG`` (pin numbers 32/34/35/37/38/40 on the
-    # symbol -- distinct from the DRV8301 footprint pin numbers in
-    # ``DRV8301_PINS`` below).  Passing ``pin_nets`` makes the block emit
-    # a short stub wire + label at each pin so KiCad's label-on-wire ERC
-    # check is satisfied (see #2980).  HS outputs feed the slew-rate
-    # resistor array (``GATE_DRV_*``); LS outputs are direct-driven to the
-    # MOSFET gates (``GATE_*L``).
-    # The ``Driver_Motor:DRV8308`` symbol exposes 39 pins.  PR #2985 wired
-    # only the six HS/LS gate outputs (``UHSG``/``ULSG``/...).  The remaining
-    # 33 pins fall into three residual categories (see #2986):
+    # 3-phase gate driver IC (DRV8301).  This board ships the real TI DRV8301
+    # (HTSSOP-56, LCSC C129292), NOT the stock-KiCad ``Driver_Motor:DRV8308``
+    # that GateDriverBlock auto-selects (39-pin sensorless-BLDC controller
+    # with a completely different pinout).  The project-local symbol
+    # library at ``symbols/board05_custom.kicad_sym`` -- shipped by PR
+    # #3388 -- provides a 57-pin DRV8301 symbol matching the HTSSOP-56
+    # pinout in the PCB footprint.  Registering that lib via
+    # ``Schematic(local_symbol_libs=[...])`` above lets ``add_symbol`` resolve
+    # ``board05_custom:DRV8301`` against this file.
     #
-    #   1. SPI + discrete control inputs (left edge of symbol).  No spare
-    #      MCU pins on the STM32G431K8 are allocated for these on this
-    #      demo board, so each input is tied to a static rail -- ``+3.3V``
-    #      for "idle high" / "always-on" pins, ``GND`` for "normal-mode"
-    #      strapping.  Output-type pins (``SDATAO``, ``FGFB``, ``FGOUT``,
-    #      ``~FAULTn``, ``~LOCKn``) each get a *unique* local net to avoid
-    #      ERC's ``pin_to_pin`` "Output-Output" error.
+    # We bypass ``GateDriverBlock`` here because the block hard-codes
+    # ``Driver_Motor:DRV8308`` as its 3-phase symbol AND its pin_nets
+    # heuristic assumes that symbol's pin names (UHSG/ULSG/...) -- neither
+    # of which apply to the DRV8301 (which uses GH_A/GL_A/INH_A/INL_A
+    # naming per TI's datasheet SLOS719F).  The bootstrap caps and bypass
+    # caps below are still created via the existing factory helpers so the
+    # net-name continuity to the rest of the board is preserved.  See
+    # issues #3384 and #3387.
     #
-    #   2. Phase bootstrap pins (right edge: ``UHP``/``UHN``/``VHP``/...)
-    #      connect via label-name continuity to the ``BST_*``/``PHASE_*``
-    #      nets driven by the bootstrap capacitor array and the inverter
-    #      below.  The current-sense phase-voltage inputs (``U``/``V``/
-    #      ``W``) also tie to ``PHASE_A``/``B``/``C``.
-    #
-    #   3. Power pins.  GND, charge-pump caps (CP1/CP2), and the current-
-    #      sense input (ISEN) all use the block's horizontal pin_nets
-    #      stubs.  The top-edge regulator pins (VM, VINT, VCP, VSW, VREG)
-    #      sit on a single y-row 2.54 mm apart in x, which collides with
-    #      the block's horizontal-stub direction; those are wired *outside*
-    #      the block via vertical stubs (see ``_U3_TOP_EDGE_NETS`` below).
-    #      Each top-edge regulator output gets a unique local net to avoid
-    #      ``pin_to_pin`` ERC conflicts; ``VM`` ties to the global
-    #      ``VMOTOR`` net (driven by the power-input section).
-    # Gate-driver y was 95 (CP2 at y=64.77, exactly on the RAIL_3V3 wire at
-    # y=64.77 -- a silent-net-bridge from DRV_CP2 -> +3.3V).  Bumping y by
-    # 1 grid (y=96) shifts CP2 to y=66.04, clear of the rail.  See issue
-    # #3015 (PR #3014 + #3015's _emit_pin_net_stub now raises ValueError
-    # on label-on-wire collisions instead of silently bridging nets).
-    gate_driver = GateDriverBlock(
-        sch,
-        x=X_GATE_DRV,
-        y=96,
-        driver_type="3-phase",
-        ref="U3",
-        value="DRV8301",
-        bootstrap_caps=None,  # bootstrap caps created externally below
-        bypass_caps=["100nF", "10uF"],
-        cap_ref_start=15,  # C15-C16 for bypass (C12-C14 reserved for bootstrap)
-        # Match the rest of the board's 0805 passives so C15/C16 land in the
-        # netlist with a non-empty footprint field (see issue #3009).
-        bypass_cap_footprint="Capacitor_SMD:C_0805_2012Metric",
-        pin_nets={
-            # --- Category 1: SPI + discrete control (left edge) ---
-            # SPI inputs: tied to +3.3V (idle high) since no MCU pin is
-            # allocated on this demo board.  These are Input-type pins, so
-            # tying multiple of them to the same +3.3V rail is fine.
-            "SCS": "+3.3V",  # SPI chip-select (idle high)
-            "SCLK": "+3.3V",  # SPI clock
-            "SDATAI": "+3.3V",  # SPI MOSI (idle high)
-            "SMODE": "+3.3V",  # SPI mode strap (3-wire vs 4-wire)
-            # Discrete control inputs: tied to static rails.
-            "ENABLE": "+3.3V",  # enable (always-on for demo)
-            "RESET": "+3.3V",  # active-low reset, idle high
-            "BRAKE": "+3.3V",  # active-low brake, idle high
-            "DIR": "+3.3V",  # direction strap
-            "CLKIN": "GND",  # external clock-in (unused, tied low)
-            # Feedback/tachometer inputs: tied low when unused.
-            "FGINP": "GND",  # tach +ve input (unused)
-            "FGINN_TACH": "GND",  # tach -ve / hall feedback (unused)
-            # Output pins MUST each have a unique net.  KiCad ERC reports
-            # ``pin_to_pin`` when two Output-type pins share a wire (e.g.
-            # tying ``FGOUT`` and ``~FAULTn`` both to ``+3.3V`` would
-            # produce an Output-Output conflict).  On a real board these
-            # would have external pull-ups to +3.3V and route to the MCU;
-            # for this demo we give each its own local label.
-            "SDATAO": "SPI_MISO",  # SPI MISO (Output)
-            "FGFB": "FGFB",  # speed-loop feedback (Output)
-            "FGOUT": "FGOUT",  # tach output (Output)
-            "~{FAULTn}": "DRV_FAULTn",  # fault status (Output, open-drain)
-            "~{LOCKn}": "DRV_LOCKn",  # PLL-lock status (Output, open-drain)
-            # --- Category 2: HS/LS gate outputs (right edge) ---
-            # High-side gate outputs (route through R20-R22 -> MOSFET gates).
-            "UHSG": "GATE_DRV_AH",
-            "VHSG": "GATE_DRV_BH",
-            "WHSG": "GATE_DRV_CH",
-            # Low-side gate outputs (direct-driven to MOSFET gates).
-            "ULSG": "GATE_AL",
-            "VLSG": "GATE_BL",
-            "WLSG": "GATE_CL",
-            # Phase bootstrap pins -- match BST_*/PHASE_* nets from the
-            # external bootstrap capacitor array below.
-            "UHP": "BST_A",
-            "UHN": "PHASE_A",
-            "VHP": "BST_B",
-            "VHN": "PHASE_B",
-            "WHP": "BST_C",
-            "WHN": "PHASE_C",
-            # Phase-voltage sense inputs (sinusoidal commutation feedback).
-            "U": "PHASE_A",
-            "V": "PHASE_B",
-            "W": "PHASE_C",
-            # Current-sense input: tied low (no shunt amp on this demo).
-            "ISEN": "GND",
-            # --- Category 3: Power pins (left/bottom-edge pins only) ---
-            # GND has two pins on the symbol (26 and 41).  pin_position
-            # resolves the name "GND" to pin 26; the second pin (41) is
-            # keyed by its number.
-            "GND": "GND",  # logic GND (pin 26)
-            "41": "GND",  # second GND pin (pin 41, same net)
-            # CP1/CP2 sit on the left edge of the symbol (despite the
-            # naming suggesting otherwise), so they fit the block's
-            # horizontal-stub pin_nets pattern.
-            "CP1": "DRV_CP1",  # charge-pump capacitor pin 1
-            "CP2": "DRV_CP2",  # charge-pump capacitor pin 2
-            # Top-edge pins (VINT, VCP, VM, VSW, VREG) cannot use the
-            # block's horizontal ``pin_nets`` stubs without colliding (the
-            # pins are spaced 2.54 mm in x and the stub is also 2.54 mm).
-            # They are wired below via vertical stubs outside the block.
-        },
+    # Layout note: U3 is placed at (X_U3, Y_U3) = (355, 145), well east
+    # of the J3 Hall connector (whose VCC/GND column wires at x=265.43
+    # would otherwise collide with the DRV8301's left-edge pin lines
+    # spanning x=264.16..267.3 if U3 sat at the historical X_GATE_DRV=280
+    # position; that collision silently bridged AGND to +3.3V, see #3387
+    # for the full investigation).  At (355, 145) the left-edge stubs land
+    # at x=337.82 (clear of R22's output-stub label at x=332.74, which
+    # at x=350 stacked GATE_CH on top of U3.12's GND label) and the
+    # right-edge stubs land at x=373.38 (well east of all other components).
+    X_U3 = 355
+    Y_U3 = 145
+    u3 = sch.add_symbol(
+        "board05_custom:DRV8301",
+        X_U3,
+        Y_U3,
+        "U3",
+        "DRV8301",
+        footprint="Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm",
     )
+    print("   Gate driver: U3 DRV8301 (board05_custom:DRV8301)")
 
-    # Top-edge pins of the DRV8308 symbol (VINT, VCP, VM, VSW, VREG) cannot
-    # use the block's horizontal ``pin_nets`` stubs without colliding (the
-    # pins are spaced 2.54 mm in x and the stub is also 2.54 mm).  Emit
-    # vertical stubs and labels manually so each pin gets a clean wire
-    # endpoint at a distinct label coordinate.
-    _U3_TOP_EDGE_NETS = (
-        ("VINT", "DRV_VINT"),
-        ("VCP", "DRV_VCP"),
-        ("VM", "VMOTOR"),
-        ("VSW", "DRV_VSW"),
-        ("VREG", "DRV_VREG"),
-    )
-    for _pin_name, _net_name in _U3_TOP_EDGE_NETS:
-        _pin_pos = gate_driver.driver.pin_position(_pin_name)
-        # Stub upward (away from symbol body which is below the pin row).
-        _stub_end = (_pin_pos[0], _pin_pos[1] - 2.54)
-        sch.add_wire(_pin_pos, _stub_end, warn_on_collision=False)
-        sch.add_label(_net_name, _stub_end[0], _stub_end[1], rotation=90, validate_connection=False)
-    gate_driver.connect_to_rails(vcc_rail_y=RAIL_5V, gnd_rail_y=RAIL_GND)
+    # Per-pin net mapping for the DRV8301 schematic symbol.  Mirrors
+    # ``DRV8301_PINS`` in the PCB-side block below (kept in lock-step --
+    # ``test_board_05_u3_drv8301_pin_nets.py`` asserts the two agree, so a
+    # divergence surfaces loudly).  See the PCB-side block for the full
+    # per-pin rationale (datasheet SLOS719F pin-function table).
+    #
+    # Special handling:
+    #   * Pin 28 (AGND) ties to the global GND net via a label, NOT a wire
+    #     to the rail -- the AGND-vs-PGND distinction is made on the PCB
+    #     copper via the analog-ground bridge (board-05 analyses #3178).
+    #   * Pin 57 (PowerPAD) is the exposed thermal pad on the bottom of
+    #     the package.  The symbol places this pin at the bottom-center,
+    #     orientation 90 (pin line points upward), so the standard
+    #     ``_emit_pin_net_stub`` horizontal heuristic does not apply --
+    #     we emit a vertical stub + GND label manually.
+    DRV8301_SCHEMATIC_PIN_NETS: dict[str, str] = {
+        # Pins 1-7: Buck regulator support.
+        "1": "GND",          # RT_CLK   (buck timing R)
+        "2": "GND",          # COMP     (buck error amp output)
+        "3": "+5V",          # VSENSE   (buck output FB = +5V rail)
+        "4": "+3.3V",        # PWRGD    (open-drain, pull-up)
+        "5": "+3.3V",        # nOCTW    (open-drain, pull-up)
+        "6": "+3.3V",        # nFAULT   (open-drain, pull-up)
+        "7": "GND",          # DTC      (dead-time, R to GND)
+        # Pins 8-16: SPI / control / charge pump / GVDD.
+        "8": "+3.3V",        # nSCS     (idle high)
+        "9": "+3.3V",        # SDI
+        "10": "+3.3V",       # SDO      (open-drain, pull-up)
+        "11": "+3.3V",       # SCLK
+        "12": "GND",         # DC_CAL   (normal operation)
+        "13": "+5V",         # GVDD
+        "14": "+5V",         # CP1      (charge pump cap 1)
+        "15": "+5V",         # CP2      (charge pump cap 2)
+        "16": "+3.3V",       # EN_GATE  (always-on)
+        # Pins 17-22: PWM logic inputs (driven by the MCU).
+        "17": "PWM_AH",      # INH_A
+        "18": "PWM_AL",      # INL_A
+        "19": "PWM_BH",      # INH_B
+        "20": "PWM_BL",      # INL_B
+        "21": "PWM_CH",      # INH_C
+        "22": "PWM_CL",      # INL_C
+        # Pins 23-28: Analog supplies / current-sense amps (left-edge).
+        "23": "+3.3V",       # DVDD
+        "24": "+3.3V",       # REF
+        "25": "ISENSE_A+",   # SO1      (op-amp 1 output)
+        "26": "ISENSE_B+",   # SO2      (op-amp 2 output)
+        "27": "+5V",         # AVDD
+        "28": "GND",         # AGND
+        # Pins 29-33: PVDD / current-sense diff inputs (right edge top).
+        "29": "VMOTOR",      # PVDD1
+        "30": "ISENSE_B+",   # SP2
+        "31": "ISENSE_B-",   # SN2
+        "32": "ISENSE_A+",   # SP1
+        "33": "ISENSE_A-",   # SN1
+        # Pins 34-38: Half-bridge C (low-side/gate/high-side/gate/bootstrap).
+        "34": "ISENSE_C-",   # SL_C
+        "35": "GATE_CL",     # GL_C
+        "36": "PHASE_C",     # SH_C
+        "37": "GATE_DRV_CH", # GH_C
+        "38": "VMOTOR",      # BST_C (DC tie via cap to VMOTOR rail)
+        # Pins 39-43: Half-bridge B.
+        "39": "ISENSE_B-",   # SL_B
+        "40": "GATE_BL",     # GL_B
+        "41": "PHASE_B",     # SH_B
+        "42": "GATE_DRV_BH", # GH_B
+        "43": "VMOTOR",      # BST_B
+        # Pins 44-48: Half-bridge A.
+        "44": "ISENSE_A-",   # SL_A
+        "45": "GATE_AL",     # GL_A
+        "46": "PHASE_A",     # SH_A
+        "47": "GATE_DRV_AH", # GH_A
+        "48": "VMOTOR",      # BST_A
+        # Pins 49-56: SPI / buck pins (right edge bottom).
+        "49": "+3.3V",       # VDD_SPI
+        "50": "SW_OUT",      # PH (buck switch node)
+        "51": "SW_OUT",      # PH (buck switch node, 2nd pin)
+        "52": "VMOTOR",      # BST_BK (buck bootstrap)
+        "53": "VMOTOR",      # PVDD2_1
+        "54": "VMOTOR",      # PVDD2_2
+        "55": "+3.3V",       # EN_BUCK
+        "56": "GND",         # SS_TR (cap to GND)
+        # Pin 57 is handled separately below (vertical pin orientation).
+    }
+
+    # Emit per-pin stubs + labels for pins 1-56 using the shared
+    # collision-aware helper.  Pin 57 (PowerPAD) needs vertical stubbing
+    # and is handled afterwards.
+    for _pin_num, _net_name in DRV8301_SCHEMATIC_PIN_NETS.items():
+        _pin_pos = u3.pin_position(_pin_num)
+        _emit_pin_net_stub(
+            sch, _pin_pos, X_U3, _net_name, None,
+            block_label="U3 DRV8301 ",
+        )
+
+    # Pin 57 (PowerPAD, exposed thermal pad) -- the symbol places this pin
+    # at the bottom-center with orientation 90 (pin line projects upward
+    # into the body).  The horizontal stub heuristic in
+    # ``_emit_pin_net_stub`` is invalid for vertical pins, so emit a short
+    # downward stub + GND label manually.
+    _pp_pos = u3.pin_position("57")
+    _pp_stub = (_pp_pos[0], _pp_pos[1] + 2.54)
+    sch.add_wire(_pp_pos, _pp_stub, warn_on_collision=False)
+    sch.add_label("GND", _pp_stub[0], _pp_stub[1], rotation=90, validate_connection=False)
 
     # External 3-phase bootstrap cap network (BST_x to PHASE_x).
     # Uses C12-C14 to preserve existing PCB-side ref numbering and layout.
@@ -855,9 +865,25 @@ def create_bldc_controller(output_dir: Path) -> Path:
         cap_footprint="Capacitor_SMD:C_0805_2012Metric",
     )
 
-    print("   Gate driver: DRV8301 (GateDriverBlock)")
     print("   Bootstrap caps: C12, C13, C14 (BootstrapCapacitorArray)")
-    print("   Bypass caps: C15, C16")
+
+    # Gate-driver bypass caps (C15=100nF, C16=10uF) between +5V and GND.
+    # These were previously instantiated by ``GateDriverBlock`` above the
+    # IC, but with U3 now placed standalone (see #3387 layout-fix above)
+    # we create them directly.  Keep them at the historical x positions
+    # (299.72 and 309.88) so the PCB-side cap layout does not need to
+    # move; the schematic-side x is purely cosmetic.
+    c15 = sch.add_symbol(
+        "Device:C", 300, 81, "C15", "100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c16 = sch.add_symbol(
+        "Device:C", 310, 81, "C16", "10uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    sch.wire_decoupling_cap(c15, RAIL_5V, RAIL_GND)
+    sch.wire_decoupling_cap(c16, RAIL_5V, RAIL_GND)
+    print("   Bypass caps: C15 (100nF), C16 (10uF) on +5V")
 
     # Series gate-drive (slew-rate) resistors between DRV8301 outputs and the
     # high-side MOSFET gates.  ``GATE_DRV_AH/BH/CH`` are the driver-IC outputs;
