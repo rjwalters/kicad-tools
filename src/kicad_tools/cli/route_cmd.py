@@ -2543,6 +2543,75 @@ def _apply_analog_net_class(router: "Autorouter", args, quiet: bool = False) -> 
             )
 
 
+def _log_fine_pitch_escape_regions(
+    router: "Autorouter",
+    quiet: bool = False,
+) -> int:
+    """Log the fine-pitch escape regions installed by ``load_pcb_for_routing``.
+
+    Issue #3371 (P_FP3) -- the detector + region install runs inside
+    :func:`kicad_tools.router.io.load_pcb_for_routing` (so the
+    Python-side pad halos pick up the in-region clearance at
+    ``add_pad`` time).  This helper just surfaces the result on the
+    routing console.
+
+    Detection is **unconditional** when the recipe-relative trigger
+    fires (Q_FP1) so every recipe with a fine-pitch SOIC/QFN/etc.
+    automatically picks up the manufacturer-aware escape clearance.
+    No CLI flag is required (per P_FP3 deliverable #1 -- this is the
+    new default behaviour).  When the detector finds no qualifying
+    package the helper is a strict no-op.
+
+    Manufacturer fallback warning (P_FP2 builder decision #6): when
+    no manufacturer is configured (neither via ``--manufacturer`` nor
+    via ``rules.manufacturer``), the region's escape clearance falls
+    back to ``rules.trace_clearance`` (no shrink).  We surface a
+    warning in that case so users notice the detector ran but did
+    not effectively shrink the corridor.
+
+    Args:
+        router: Autorouter returned by ``load_pcb_for_routing``;
+            ``router.grid.get_fine_pitch_regions()`` is consulted for
+            the installed regions.
+        quiet: When True, suppress all output.
+
+    Returns:
+        The number of installed regions (``0`` when nothing
+        qualifies).  Provided for tests; callers do not need to use
+        the return value.
+    """
+    if quiet:
+        return len(router.grid.get_fine_pitch_regions())
+
+    from kicad_tools.cli.progress import flush_print
+
+    regions = router.grid.get_fine_pitch_regions()
+    if not regions:
+        return 0
+
+    refs = ", ".join(r.package_ref for r in regions)
+    escape_clearance = regions[0].escape_clearance
+    flush_print(
+        f"  Fine-pitch escape regions detected: {len(regions)} "
+        f"({refs}); escape clearance {escape_clearance:.3f}mm"
+    )
+
+    # Manufacturer fallback warning (P_FP2 decision #6).  The detector
+    # marks a region as a NO-OP by leaving its ``escape_clearance``
+    # equal to ``rules.trace_clearance``; we surface this so users do
+    # not silently miss the fact that the detector ran without
+    # shrinking.
+    if regions[0].escape_clearance >= router.rules.trace_clearance:
+        flush_print(
+            "  WARNING: no manufacturer configured (rules.manufacturer "
+            "unset); fine-pitch escape regions detected but escape "
+            "clearance defaulted to rules.trace_clearance (no shrink). "
+            "Set --manufacturer to enable the tier-aware escape clearance."
+        )
+
+    return len(regions)
+
+
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -2788,6 +2857,11 @@ def route_with_layer_escalation(
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
         _apply_analog_net_class(router, args, quiet=quiet)
+
+        # Issue #3371 (P_FP3): surface the fine-pitch escape regions that
+        # ``load_pcb_for_routing`` installed (if any) and warn when the
+        # detector ran without a manufacturer floor.
+        _log_fine_pitch_escape_regions(router, quiet=quiet)
 
         # Issue #2396: Ensure pristine per-attempt state.  Today this is a
         # no-op (load_pcb_for_routing creates a fresh Autorouter) but it
@@ -3614,6 +3688,11 @@ def route_with_rule_relaxation(
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
         _apply_analog_net_class(router, args, quiet=quiet)
+
+        # Issue #3371 (P_FP3): surface the fine-pitch escape regions that
+        # ``load_pcb_for_routing`` installed (if any) and warn when the
+        # detector ran without a manufacturer floor.
+        _log_fine_pitch_escape_regions(router, quiet=quiet)
 
         # Issue #1841: Tell the autorouter which pour nets lack zones
         router._pour_nets_without_zones = set(_no_zone)
@@ -5404,6 +5483,9 @@ def route_with_combined_escalation(
             # Issue #3171: inject boosted analog routing class for --analog-nets
             # / --auto-analog selected nets (pour/ground nets left untouched).
             _apply_analog_net_class(router, args, quiet=quiet)
+
+            # Issue #3371 (P_FP3): surface fine-pitch escape regions.
+            _log_fine_pitch_escape_regions(router, quiet=quiet)
 
             # Issue #1841: Tell the autorouter which pour nets lack zones
             router._pour_nets_without_zones = set(_no_zone)
@@ -7539,6 +7621,10 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).
     _apply_analog_net_class(router, args, quiet=quiet)
+
+    # Issue #3371 (P_FP3): surface fine-pitch escape regions installed by
+    # ``load_pcb_for_routing``.
+    _log_fine_pitch_escape_regions(router, quiet=quiet)
 
     # Pass fine zones from multi-resolution plan to the router (Issue #1828).
     # This enables SubGridRouter to use fine-grid resolution for escape

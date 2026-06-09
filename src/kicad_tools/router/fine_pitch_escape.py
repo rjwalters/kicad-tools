@@ -545,8 +545,24 @@ def detect_fine_pitch_regions(
     regions: list[FinePitchRegion] = []
     for ref in ref_order:
         cluster = pads_by_ref[ref]
-        if len(cluster) < 2:
-            continue  # Single-pad clusters cannot be fine-pitch.
+        # Require at least 4 pads to qualify as a fine-pitch escape
+        # region (Issue #3371 / P_FP3 follow-up).  Two-pad clusters
+        # (R / C / L / D passives) and three-pad clusters (SOT-23
+        # ICs) have a trivially-routable corridor "between own pads"
+        # in the sense the Q_FP1 predicate measures, but the
+        # corridor is never threaded because external traces route
+        # around the package.  Without this guard the detector
+        # fires on every 0402 passive at strict clearance (their
+        # 0.96mm pitch + 0.56mm pads trips the geometry predicate
+        # at 0.20mm clearance + 0.30mm trace -- corridor = 0.40mm,
+        # required = 0.70mm), causing the C++ pad-segment validator
+        # to relax to ``escape_clearance`` for every passive on the
+        # board.  That makes the pathfinder commit to traces too
+        # close to passive pads, regressing reach on boards 03/05/07.
+        # Real fine-pitch escape candidates (SOIC-8, SSOP, TSSOP,
+        # LQFP, QFN, etc.) all have >= 4 pads.
+        if len(cluster) < 4:
+            continue
 
         pin_pitch = _calculate_min_pitch(cluster)
         if pin_pitch <= 0.0:
@@ -734,11 +750,47 @@ def resolve_clearance_with_escape_region(
     if regions:
         for region in regions:
             if region.applies_to_pad(pad):
-                # Per-net-class override wins (layer 3).
+                # Resolve the candidate escape clearance: per-net-class
+                # override wins over the region default.
                 if net_class is not None and net_class.escape_clearance is not None:
-                    return net_class.escape_clearance
-                # Otherwise use the region's pre-computed default (layer 4).
-                return region.escape_clearance
+                    candidate = net_class.escape_clearance
+                else:
+                    candidate = region.escape_clearance
+
+                # Issue #3371 / P_FP3 narrow-channel guard.  Apply the
+                # Issue #2867 corridor-feasibility check to the region
+                # path so the C++ validator does not accept geometrically
+                # infeasible through-channel routes.  Geometry (mirrors
+                # the grid halo's ``_clearance_for_pin_pitch`` guard):
+                #
+                #     effective_channel = pin_pitch - 2*candidate - trace_width
+                #     required_channel  = 2*candidate + trace_width
+                #
+                # ``effective_channel`` is the band available for a
+                # trace centred between two halo edges; ``required_channel``
+                # is the minimum copper-to-copper distance the candidate
+                # clearance demands.  When the channel cannot fit the
+                # trace at the candidate clearance, the shrink is
+                # infeasible -- fall through to the standard
+                # ``get_clearance_for_component`` so the validator
+                # rejects through-channel routes the same way the grid
+                # halo does.
+                pitch_for_guard = pin_pitch
+                if pitch_for_guard is None:
+                    pitch_for_guard = region.pin_pitch
+                if pitch_for_guard is not None:
+                    effective_channel = (
+                        pitch_for_guard - 2.0 * candidate - rules.trace_width
+                    )
+                    required_channel = 2.0 * candidate + rules.trace_width
+                    if effective_channel < required_channel:
+                        # Channel too narrow at candidate clearance --
+                        # decline the shrink for this in-region pad.
+                        return rules.get_clearance_for_component(
+                            pad.ref, pin_pitch, net_class=net_class
+                        )
+
+                return candidate
 
     # Layer 5: standard fall-through.  ``net_class`` is forwarded so
     # the global ``fine_pitch_clearance`` / per-component-pitch logic
