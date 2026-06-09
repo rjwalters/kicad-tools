@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from .rules import DesignRules
 
 from .layers import Layer
-from .primitives import Pad, Route, Segment
+from .primitives import Pad, Route, Segment, Via
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +84,27 @@ class SubGridEscape:
         segment: Trace segment from pad center to grid snap point
         grid_point: The main-grid (gx, gy) where the escape terminates
         snap_point: World coordinates of the grid snap point
+        via: Optional in-pad via for Phase 5 LQFP rescue (Issue #3385).
+            When present, the escape is a vertical via-in-pad drop from
+            the pad's surface layer into an inner / opposite layer where
+            the grid cell is free.  Used for fine-pitch QFP packages
+            (e.g. STM32G031 LQFP-32) whose inner-edge pads cannot escape
+            laterally because every neighbouring grid cell on the
+            surface layer is occupied by adjacent pad copper or
+            clearance halos.
+        via_layer: Layer the via terminates on (the layer where
+            ``grid_point`` lives).  Used by ``apply_escape_segments``
+            to unblock the inner-layer cell so the main router can
+            pick up the net from the via landing point.  ``None`` for
+            standard lateral escapes (the existing behaviour).
     """
 
     pad: Pad
     segment: Segment
     grid_point: tuple[int, int]
     snap_point: tuple[float, float]
+    via: Via | None = None
+    via_layer: Layer | None = None
 
 
 @dataclass
@@ -450,6 +465,15 @@ class SubGridRouter:
             # Determine which layers to unblock
             if pad.through_hole:
                 layer_indices = list(range(self.grid.num_layers))
+            elif escape.via is not None and escape.via_layer is not None:
+                # Issue #3385: in-pad via rescue.  The via connects the
+                # pad's surface layer to ``via_layer``; only the LANDING
+                # layer cell needs to be unblocked because the surface
+                # cell is the pad itself (already claimed by the pad's
+                # own copper).  The main router's pickup point is the
+                # via's landing cell on the inner / opposite layer.
+                landing_idx = self.grid.layer_to_index(escape.via_layer.value)
+                layer_indices = [landing_idx]
             else:
                 layer_indices = [self.grid.layer_to_index(pad.layer.value)]
 
@@ -1204,6 +1228,30 @@ class SubGridRouter:
             )
             return escape, "ok"
 
+        # --- Phase 5: In-pad via rescue (Issue #3385) ---
+        # When every surface-layer search radius is filled with adjacent
+        # pad copper + clearance halos (no lateral escape exists), drop
+        # a via dead-centre on the pad's surface and unblock an
+        # inner-layer cell where the routing grid is empty.  Gated on the
+        # manufacturer supporting via-in-pad processing.  Most directly
+        # rescues the inner-edge pins of fine-pitch LQFP/TQFP packages
+        # (e.g. STM32G031 LQFP-32 at 0.8 mm pitch) whose long-axis pad
+        # geometry comfortably hosts a 0.30-0.60 mm via while every
+        # surface neighbour cell is occupied.  Other strategies (1-4)
+        # are tried first because lateral escape preserves trace
+        # inductance and avoids a manufacturer surcharge; the in-pad-via
+        # path is the last-resort rescue when no lateral escape is
+        # geometrically possible at the configured manufacturer/pitch
+        # combination.
+        in_pad_escape = self._try_in_pad_via_rescue(sgp)
+        if in_pad_escape is not None:
+            logger.debug(
+                "Escape for %s.%s succeeded via in-pad via rescue "
+                "(Issue #3385)",
+                pad.ref, pad.pin,
+            )
+            return in_pad_escape, "ok"
+
         # All strategies exhausted -- determine the dominant failure reason.
         # If we never found any candidates at any radius, no grid point was
         # reachable.  Otherwise candidates existed but all violated clearance.
@@ -1215,10 +1263,309 @@ class SubGridRouter:
 
         logger.debug(
             "All escape strategies failed for %s.%s "
-            "(normal, expanded, relaxed, multi-hop): %s",
+            "(normal, expanded, relaxed, multi-hop, in-pad-via): %s",
             pad.ref, pad.pin, reason,
         )
         return None, reason
+
+    def _try_in_pad_via_rescue(self, sgp: SubGridPad) -> SubGridEscape | None:
+        """Phase 5 rescue: place a via-in-pad and escape onto an inner layer.
+
+        Issue #3385: For fine-pitch LQFP/TQFP packages (e.g. STM32G031
+        LQFP-32 at 0.8 mm pitch) the inner-edge pads cannot escape
+        laterally because every surface-layer neighbour cell is occupied
+        by adjacent pad copper or clearance halos.  When the manufacturer
+        supports via-in-pad processing (e.g. ``jlcpcb-tier1``,
+        ``pcbway``), drilling a via dead-centre on the pad lets the
+        escape exit vertically into an inner / opposite layer whose grid
+        cells are empty.  This mirrors the ``_try_in_pad_escape``
+        strategy already used by the QFP dispatcher in
+        :mod:`kicad_tools.router.escape`, surfacing it at the subgrid
+        layer so the prepass can recover pads that the surface-search
+        Phases 1-4 cannot reach.
+
+        Pre-conditions (return ``None`` if any fails):
+        - ``self.rules.manufacturer`` resolves to a profile with
+          ``via_in_pad_supported=True``.  Plain tier-0 ``jlcpcb`` returns
+          ``None``.
+        - Pad is a surface-mount pad (``not through_hole``) -- through-hole
+          pads already span every layer and do not benefit from a rescue.
+        - Pad is on a non-plane net (``net != 0``) -- plane-net pads are
+          stitched by ``kct stitch``, not routed by the subgrid router.
+        - Pad geometry hosts the via with annular ring: at jlcpcb-tier1
+          the standard 0.60 mm via fits on the long axis of the LQFP-32
+          0.8 mm-pitch pad (1.4 mm long); when even the long axis cannot
+          host the standard via, a micro-via OD (0.30 mm by default)
+          is tried before declining.
+        - The grid cell at the pad's snap point on the **opposite /
+          inner** layer must be free.  When every layer is already
+          occupied (e.g. dense plane-net mesh on a 2-layer board),
+          decline -- this pad is geometrically infeasible at the
+          configured stackup.
+
+        Returns:
+            A :class:`SubGridEscape` whose ``via`` field carries the
+            in-pad via, ``via_layer`` records the landing layer, and
+            ``grid_point`` is the snap cell on the landing layer the
+            main router should pick up from.  The ``segment`` is a
+            zero-length stub at the pad centre so existing consumers
+            of ``SubGridEscape.segment`` still see a non-None value.
+            Returns ``None`` when the gate fails.
+        """
+        pad = sgp.pad
+
+        # Capability gate -- only manufacturers with via-in-pad processing
+        # can accept a via dropped dead-centre on a pad without DRC errors.
+        mfr_name = getattr(self.rules, "manufacturer", None)
+        if mfr_name is None:
+            return None
+        try:
+            # Import here to avoid a heavy module-load dependency cycle
+            # (mfr_limits pulls in dataclass tables that the subgrid
+            # router does not otherwise need).
+            from .mfr_limits import get_mfr_limits
+
+            mfr = get_mfr_limits(mfr_name)
+        except Exception:
+            return None
+        if mfr is None or not mfr.via_in_pad_supported:
+            return None
+
+        # Through-hole pads already connect every layer, so an in-pad
+        # rescue does not add anything that the main router could not
+        # use directly.  Decline; the subgrid failure is itself harmless
+        # for THT pads because the per-net router can pick them up via
+        # the corresponding back-layer cell.
+        if pad.through_hole:
+            return None
+
+        # Plane-net pads (``net == 0``) are stitched to the plane copper
+        # by the ``kct stitch`` pass; they do not need a per-pad rescue
+        # route from the subgrid router.  Skipping them here avoids
+        # emitting a Route on net 0 (which several consumers treat as
+        # "no net") and prevents a wasted via on a pad whose plane
+        # connection already exists by construction.
+        if pad.net == 0:
+            return None
+
+        # Geometry: the via barrel + 2 * annular must fit inside the
+        # pad's larger dimension.  For LQFP-32 0.8 mm pitch the pad is
+        # 1.4 x 0.4 mm; the long-axis check accepts the standard 0.60 mm
+        # tier-1 via even though the short axis (0.4 mm) is narrower
+        # than the via OD -- the via barrel extends slightly beyond
+        # the pad on the short axis but stays inside the inter-pad
+        # channel because adjacent pads are 0.8 mm apart (channel
+        # 0.4 mm; via radius 0.30 mm).  When even the long axis cannot
+        # host the standard via, the micro-via OD (0.30 mm by default)
+        # is tried before declining.
+        std_via_diameter = mfr.min_via_diameter
+        std_via_drill = mfr.min_via_drill
+        std_annular = mfr.min_via_annular
+        std_required = std_via_drill + 2 * std_annular
+
+        larger_dim = max(pad.width, pad.height)
+        smaller_dim = min(pad.width, pad.height)
+
+        via_diameter = std_via_diameter
+        via_drill = std_via_drill
+        is_micro = False
+
+        if larger_dim + 1e-6 < std_required:
+            # Try micro-via fallback dimensions (0.30 OD / 0.15 drill
+            # by default, mirroring the escape-router defaults).
+            mv_diameter = 0.30
+            mv_drill = 0.15
+            mv_annular = (mv_diameter - mv_drill) / 2
+            mv_required = mv_drill + 2 * mv_annular
+            if larger_dim + 1e-6 < mv_required:
+                logger.debug(
+                    "In-pad via rescue for %s.%s skipped: pad %.3fx%.3fmm "
+                    "too small for even micro-via drill=%.3fmm + 2x "
+                    "annular=%.3fmm",
+                    pad.ref, pad.pin,
+                    pad.width, pad.height,
+                    mv_drill, mv_annular,
+                )
+                return None
+            via_diameter = mv_diameter
+            via_drill = mv_drill
+            is_micro = True
+
+        # Additionally, the via must respect clearance to NEIGHBOURING
+        # pads on the short axis.  On LQFP-32 0.8 mm pitch this means
+        # the standard 0.60 mm via violates 0.127 mm tier-1 clearance
+        # in the inter-pad channel; fall back to the micro-via (0.30 mm
+        # OD) which leaves a 0.25 mm gap to the neighbour pad edge.
+        if not is_micro:
+            # Conservative estimate: use the pad's smaller-axis pitch
+            # (smaller_dim + nominal channel) when no explicit pitch
+            # context is available.  Trigger the micro-via fallback
+            # when the standard via cannot satisfy ``min_clearance``
+            # against a neighbour pad whose edge sits one pitch away.
+            pitch_estimate = max(0.4, smaller_dim + 0.4)
+            via_radius = via_diameter / 2
+            # Available gap = (channel + smaller_dim) / 2 - via_radius
+            #               = pitch_estimate / 2 - via_radius
+            # (channel = pitch - smaller_dim; centre-to-channel-edge is
+            # channel / 2; via consumes via_radius from the centre).
+            available_gap = pitch_estimate / 2 - via_radius
+            if available_gap + 1e-6 < mfr.min_clearance:
+                # Try the micro fallback before declining.
+                mv_diameter = 0.30
+                mv_drill = 0.15
+                mv_annular = (mv_diameter - mv_drill) / 2
+                mv_required = mv_drill + 2 * mv_annular
+                if larger_dim + 1e-6 >= mv_required:
+                    via_diameter = mv_diameter
+                    via_drill = mv_drill
+                    is_micro = True
+
+        # Inner-layer cell: pick the layer the via terminates on -- B.Cu
+        # for the canonical 2-layer board (the only one the routing grid
+        # exposes in this method's call shape).  On 4-layer boards we
+        # prefer the first inner signal layer when the layer stack
+        # records it.
+        landing_layer_idx = self._select_in_pad_landing_layer(pad)
+        if landing_layer_idx is None:
+            logger.debug(
+                "In-pad via rescue for %s.%s skipped: no landing layer "
+                "available (single-layer grid?)",
+                pad.ref, pad.pin,
+            )
+            return None
+        landing_cell = self.grid.grid[landing_layer_idx][sgp.grid_y][sgp.grid_x]
+        if landing_cell.blocked:
+            # Even the inner layer is occupied -- decline.  At this point
+            # the pad is geometrically infeasible at the configured
+            # manufacturer + stackup combination.
+            logger.debug(
+                "In-pad via rescue for %s.%s skipped: inner-layer cell "
+                "(%d,%d) on layer %d is occupied",
+                pad.ref, pad.pin,
+                sgp.grid_x, sgp.grid_y, landing_layer_idx,
+            )
+            return None
+
+        # Build the via descriptor.  ``in_pad=True`` exempts the via from
+        # the pad-segment clearance check (the pad's own copper provides
+        # the annular ring); ``is_micro`` controls the KiCad
+        # serialisation token (``(via micro ...)`` vs ``(via ...)``).
+        landing_layer = self._layer_from_index(landing_layer_idx)
+        if landing_layer is None:
+            return None
+
+        via = Via(
+            x=pad.x,
+            y=pad.y,
+            drill=via_drill,
+            diameter=via_diameter,
+            layers=(pad.layer, landing_layer),
+            net=pad.net,
+            net_name=pad.net_name,
+            in_pad=True,
+            is_micro=is_micro,
+        )
+
+        # Zero-length segment so consumers of ``SubGridEscape.segment``
+        # still see a non-None value.  The segment lives on the pad's
+        # surface layer; ``apply_escape_segments`` unblocks the landing
+        # cell on ``via_layer`` so the main router picks up from there.
+        segment = Segment(
+            x1=pad.x,
+            y1=pad.y,
+            x2=pad.x,
+            y2=pad.y,
+            width=self.rules.trace_width,
+            layer=pad.layer,
+            net=pad.net,
+            net_name=pad.net_name,
+        )
+
+        logger.info(
+            "In-pad via rescue for %s.%s (net %s): %.2fmm via "
+            "%sat pad centre (%.3f, %.3f); landing on layer %d "
+            "(Issue #3385)",
+            pad.ref, pad.pin, pad.net_name,
+            via_diameter,
+            "(micro) " if is_micro else "",
+            pad.x, pad.y,
+            landing_layer_idx,
+        )
+
+        return SubGridEscape(
+            pad=pad,
+            segment=segment,
+            grid_point=(sgp.grid_x, sgp.grid_y),
+            snap_point=(pad.x, pad.y),
+            via=via,
+            via_layer=landing_layer,
+        )
+
+    def _select_in_pad_landing_layer(self, pad: Pad) -> int | None:
+        """Pick the layer the in-pad rescue via should terminate on.
+
+        Prefers the first inner signal layer (typically ``In1.Cu`` on
+        4-layer boards) over the opposite outer layer because inner
+        signal layers leave the back outer layer free for ground / power
+        and provide shorter via stubs.  Falls back to the opposite outer
+        layer (``B.Cu`` for an ``F.Cu`` pad; ``F.Cu`` for a ``B.Cu``
+        pad) when no inner signal layer is available -- the canonical
+        2-layer case.  Returns ``None`` when no other layer exists
+        (single-layer grid).
+        """
+        if self.grid.num_layers < 2:
+            return None
+        surface_idx = self.grid.layer_to_index(pad.layer.value)
+        # Prefer the inner signal layer when the grid carries a layer stack.
+        layer_stack = getattr(self.grid, "layer_stack", None)
+        if layer_stack is not None:
+            try:
+                from .layers import LayerType
+
+                inner_indices = layer_stack.get_inner_layer_indices()
+                for idx in inner_indices:
+                    layer_def = layer_stack.get_layer(idx)
+                    if (
+                        layer_def is not None
+                        and layer_def.layer_type == LayerType.SIGNAL
+                    ):
+                        # Use the layer's grid index when it differs
+                        # from the layer-stack index; on this code
+                        # path they match in practice but the explicit
+                        # lookup keeps the rescue robust.
+                        return idx
+            except Exception:
+                pass
+        # Fallback: opposite outer layer (B.Cu for F.Cu surface, and vice
+        # versa).  On a 2-layer grid this is always layer index 1 if the
+        # surface is 0, and 0 if the surface is 1.
+        if self.grid.num_layers == 2:
+            return 1 - surface_idx
+        # 3+ layer grid with no signal inner layer recorded -- prefer the
+        # numerically opposite outer layer.
+        return self.grid.num_layers - 1 - surface_idx
+
+    def _layer_from_index(self, layer_idx: int) -> Layer | None:
+        """Map a grid layer index back to a :class:`Layer` enum value.
+
+        Returns ``None`` when the index is outside the grid or no
+        canonical :class:`Layer` value corresponds to it (e.g. a custom
+        signal layer not in the standard enumeration).
+        """
+        layer_stack = getattr(self.grid, "layer_stack", None)
+        if layer_stack is not None:
+            try:
+                layer_def = layer_stack.get_layer(layer_idx)
+                if layer_def is not None and layer_def.layer_enum is not None:
+                    return layer_def.layer_enum
+            except Exception:
+                pass
+        # Fallback: canonical 2-layer mapping.
+        if layer_idx == 0:
+            return Layer.F_CU
+        if layer_idx == 1:
+            return Layer.B_CU
+        return None
 
     def _try_multi_hop_escape(
         self,
@@ -1335,6 +1682,13 @@ class SubGridRouter:
         Each escape segment becomes a single-segment Route that can be
         included in the final PCB output alongside the main routed traces.
 
+        Issue #3385: In-pad via rescues (Phase 5) are emitted as a Route
+        whose ``vias`` list carries the rescue via.  The rescue's
+        zero-length surface segment is omitted from the route (a 0 mm
+        segment is meaningless on the PCB and triggers spurious DRC
+        warnings on some tools) -- the via alone is the route payload,
+        with the pad's own copper providing the F.Cu landing.
+
         Args:
             result: SubGridResult with escape segments
 
@@ -1343,10 +1697,23 @@ class SubGridRouter:
         """
         routes: list[Route] = []
         for escape in result.escapes:
+            # Drop zero-length surface stubs (Issue #3385 in-pad rescue)
+            # so we do not emit degenerate (start, start) segments.
+            seg = escape.segment
+            seg_length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+            segments: list[Segment]
+            if seg_length < 1e-6:
+                segments = []
+            else:
+                segments = [seg]
+            vias: list[Via] = []
+            if escape.via is not None:
+                vias.append(escape.via)
             route = Route(
                 net=escape.pad.net,
                 net_name=escape.pad.net_name,
-                segments=[escape.segment],
+                segments=segments,
+                vias=vias,
             )
             routes.append(route)
         return routes
