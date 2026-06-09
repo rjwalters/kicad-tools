@@ -2363,3 +2363,298 @@ class TestSubGridEscapeFailureLogging:
         assert not warning_msgs, (
             f"Expected no WARNING on success but got: {warning_msgs}"
         )
+
+
+class TestInPadViaRescue:
+    """Tests for the Phase 5 in-pad via rescue (Issue #3385).
+
+    The rescue fires for fine-pitch QFP/TQFP/LQFP packages whose
+    inner-edge pads cannot escape laterally because every surface-layer
+    neighbour cell is occupied.  It places a via dead-centre on the
+    pad and unblocks an inner / opposite layer cell so the main router
+    can pick up the net from the via landing point.  Gated on the
+    manufacturer supporting via-in-pad (e.g. ``jlcpcb-tier1``,
+    ``pcbway``).
+    """
+
+    @staticmethod
+    def _make_lqfp32_box() -> tuple[RoutingGrid, DesignRules, list]:
+        """Build a synthetic LQFP-32 with 0.8 mm pitch on tier-1 rules.
+
+        Returns the populated grid, rules, and pad list.  Pad geometry
+        (1.4 mm x 0.4 mm) mirrors the KiCad
+        ``Package_QFP:LQFP-32_7x7mm_P0.8mm`` footprint so the rescue
+        gate fires for the LQFP-32 case the bug report targets.
+        """
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.30,
+            trace_clearance=0.20,
+            via_diameter=0.6,
+            via_drill=0.3,
+            min_trace_width=0.127,
+            manufacturer="jlcpcb-tier1",
+        )
+        grid = RoutingGrid(width=30.0, height=30.0, rules=rules)
+
+        # West edge: 8 pads at x=10.05, y=12.05..18.65 (0.8 mm pitch).
+        # Pads are 1.4 mm wide (perpendicular to body) x 0.4 mm tall
+        # (along the row).  The 0.05 mm offset puts every pad at
+        # half-grid-resolution, forcing the subgrid escape path so the
+        # rescue is exercised.  Without the offset the pads would be
+        # on-grid and never reach Phase 5.  Add a matching East-edge
+        # row so the perimeter clearance halo blocks lateral escape
+        # toward the package body and forces Phase 5.
+        pads = []
+        for i in range(8):
+            pads.append(
+                make_pad(
+                    x=10.05,
+                    y=12.05 + i * 0.8,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=1.4,
+                    height=0.4,
+                    net_name=f"SIG{i + 1}",
+                )
+            )
+        # East edge: 8 pads facing east on the opposite side of a
+        # 7 mm body, blocking lateral escape toward the package body
+        # for the west pads.
+        for i in range(8):
+            pads.append(
+                make_pad(
+                    x=10.05 + 7.0,
+                    y=12.05 + i * 0.8,
+                    net=i + 100,
+                    ref="U1",
+                    pin=str(i + 17),
+                    width=1.4,
+                    height=0.4,
+                    net_name=f"SIG{i + 17}",
+                )
+            )
+        for p in pads:
+            grid.add_pad(p)
+        return grid, rules, pads
+
+    def test_rescue_fires_for_lqfp32_inner_pad_on_tier1(self):
+        """LQFP-32 inner-edge pad escapes via Phase 5 when tier-1 supports it."""
+        grid, rules, pads = self._make_lqfp32_box()
+        subgrid = SubGridRouter(grid, rules)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # At least some pads should have been rescued via in-pad via.
+        rescues = [e for e in result.escapes if e.via is not None]
+        assert len(rescues) > 0, (
+            "Expected at least one Phase 5 in-pad rescue for the LQFP-32 "
+            "inner pads"
+        )
+
+        # Every rescue must (a) place an in-pad via, (b) target an
+        # inner / opposite layer, (c) be on a signal (non-plane) net.
+        for e in rescues:
+            assert e.via is not None
+            assert e.via.in_pad is True
+            assert e.via_layer is not None
+            assert e.via_layer != e.pad.layer
+            assert e.pad.net != 0
+
+    def test_rescue_skipped_when_mfr_does_not_support_via_in_pad(self):
+        """Plain jlcpcb (no via-in-pad capability) should not rescue."""
+        # Same fixture, but downgrade manufacturer to base jlcpcb.
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.30,
+            trace_clearance=0.20,
+            via_diameter=0.6,
+            via_drill=0.3,
+            min_trace_width=0.127,
+            manufacturer="jlcpcb",  # base tier -- no via-in-pad
+        )
+        grid = RoutingGrid(width=30.0, height=30.0, rules=rules)
+        pads = []
+        for i in range(8):
+            pads.append(
+                make_pad(
+                    x=10.0,
+                    y=12.0 + i * 0.8,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=1.4,
+                    height=0.4,
+                    net_name=f"SIG{i + 1}",
+                )
+            )
+        for p in pads:
+            grid.add_pad(p)
+        subgrid = SubGridRouter(grid, rules)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # No rescues should fire when the manufacturer does not support
+        # via-in-pad processing.
+        rescues = [e for e in result.escapes if e.via is not None]
+        assert len(rescues) == 0, (
+            "Expected zero Phase 5 rescues on base jlcpcb (no via-in-pad)"
+        )
+
+    def test_rescue_skipped_when_no_manufacturer_set(self):
+        """Rescue must not fire when no manufacturer profile is configured."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.30,
+            trace_clearance=0.20,
+            via_diameter=0.6,
+            via_drill=0.3,
+            min_trace_width=0.127,
+            # manufacturer unset -- conservative behaviour
+        )
+        grid = RoutingGrid(width=30.0, height=30.0, rules=rules)
+        pads = []
+        for i in range(8):
+            pads.append(
+                make_pad(
+                    x=10.0,
+                    y=12.0 + i * 0.8,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=1.4,
+                    height=0.4,
+                    net_name=f"SIG{i + 1}",
+                )
+            )
+        for p in pads:
+            grid.add_pad(p)
+        subgrid = SubGridRouter(grid, rules)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        rescues = [e for e in result.escapes if e.via is not None]
+        assert len(rescues) == 0, (
+            "Expected zero Phase 5 rescues when manufacturer is unset"
+        )
+
+    def test_rescue_skips_plane_net_pads(self):
+        """Plane-net pads (net == 0) must never be rescued."""
+        grid, rules, pads = self._make_lqfp32_box()
+        # Force the middle pads to plane net so they would otherwise
+        # be candidates for rescue if the skip were absent.
+        for p in pads[2:6]:
+            p.net = 0
+            p.net_name = "GND"
+        subgrid = SubGridRouter(grid, rules)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        rescues = [e for e in result.escapes if e.via is not None]
+        for e in rescues:
+            assert e.pad.net != 0, (
+                f"Plane-net pad {e.pad.ref}.{e.pad.pin} should not be rescued"
+            )
+
+    def test_rescue_skips_through_hole_pads(self):
+        """Through-hole pads connect every layer and need no Phase 5 rescue."""
+        grid, rules, pads = self._make_lqfp32_box()
+        # Flip pad 1 to through-hole; it should be ignored by the rescue.
+        pads[0].through_hole = True
+        subgrid = SubGridRouter(grid, rules)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # The THT pad must not have a Phase 5 rescue attached.  (It may
+        # still escape via the regular subgrid path -- THT pads expose
+        # cells on every layer so they tend to have grid candidates.)
+        rescues = [e for e in result.escapes if e.via is not None]
+        for e in rescues:
+            assert not e.pad.through_hole
+
+    def test_rescue_uses_micro_via_when_standard_violates_neighbour(self):
+        """Standard 0.60 mm tier-1 via clips LQFP-32 neighbour pad
+        clearance -- the rescue must fall back to the micro-via OD
+        (0.30 mm) so the in-pad rescue is geometrically clean.
+        """
+        grid, rules, pads = self._make_lqfp32_box()
+        subgrid = SubGridRouter(grid, rules)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+        rescues = [e for e in result.escapes if e.via is not None]
+        assert len(rescues) > 0
+        for e in rescues:
+            assert e.via.is_micro, (
+                f"Expected micro-via fallback on LQFP-32 0.8 mm pitch; "
+                f"got standard {e.via.diameter:.2f} mm via on "
+                f"{e.pad.ref}.{e.pad.pin}"
+            )
+            # Sanity: the via OD is the configured micro-via default.
+            assert abs(e.via.diameter - 0.30) < 1e-6
+
+    def test_get_escape_routes_includes_rescue_via(self):
+        """``get_escape_routes`` must emit the rescue via in the Route."""
+        grid, rules, pads = self._make_lqfp32_box()
+        subgrid = SubGridRouter(grid, rules)
+
+        result = subgrid.route_with_subgrid(pads)
+        routes = subgrid.get_escape_routes(result)
+
+        # At least one route must carry a via, and that via must be
+        # tagged ``in_pad`` so downstream tools (KiCad output, DRC
+        # exemptions) treat it as a via-in-pad.
+        with_via = [r for r in routes if r.vias]
+        assert len(with_via) > 0
+        for r in with_via:
+            assert all(v.in_pad for v in r.vias)
+            # Rescue routes do NOT emit a zero-length surface stub.
+            for seg in r.segments:
+                length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+                assert length > 1e-6, (
+                    "Rescue route should not emit a zero-length surface stub"
+                )
+
+    def test_apply_unblocks_inner_layer_cell_for_rescue(self):
+        """``apply_escape_segments`` must unblock the inner-layer
+        cell for in-pad rescues so the main router can pick up the
+        net from there.
+        """
+        grid, rules, pads = self._make_lqfp32_box()
+        subgrid = SubGridRouter(grid, rules)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+        rescues = [e for e in result.escapes if e.via is not None]
+        assert len(rescues) > 0
+
+        # Capture pre-apply state on the inner layer for the rescue
+        # landing cells.  The inner layer should already be free for
+        # a 2-layer board with all SMD pads on F.Cu (the rescue gate
+        # only fires when that's true).
+        landing_states = []
+        for e in rescues:
+            gx, gy = e.grid_point
+            landing_idx = grid.layer_to_index(e.via_layer.value)
+            cell = grid.grid[landing_idx][gy][gx]
+            landing_states.append((cell.blocked, cell.net))
+
+        subgrid.apply_escape_segments(result)
+
+        # After apply, the inner-layer cells must be unblocked and
+        # claimed by the rescue pad's net.
+        for (was_blocked, _was_net), e in zip(landing_states, rescues):
+            gx, gy = e.grid_point
+            landing_idx = grid.layer_to_index(e.via_layer.value)
+            cell = grid.grid[landing_idx][gy][gx]
+            assert cell.net == e.pad.net or not was_blocked, (
+                f"After apply, rescue landing cell ({gx},{gy}) for "
+                f"{e.pad.ref}.{e.pad.pin} should be claimed by net "
+                f"{e.pad.net}, got net {cell.net}"
+            )
