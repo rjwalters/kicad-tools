@@ -4262,8 +4262,34 @@ class EscapeRouter:
         escapes: list[EscapeRoute] = []
         dx, dy = self._direction_to_vector(direction)
 
+        # Issue #3371 / P_FP5: when this package sits in an installed
+        # fine-pitch escape region (e.g. UCC27211 SOIC-8 at strict 0.20mm
+        # clearance), the per-component helper returns the region's tighter
+        # ``escape_clearance`` (e.g. 0.14mm at jlcpcb-tier1).  The narrow-
+        # channel guard inside the helper declines the shrink when the
+        # corridor cannot accommodate it, so this never produces an
+        # infeasible escape stub on packages outside the fine-pitch ladder.
+        #
+        # Detection: we treat ``per_ref_clearance < rules.trace_clearance``
+        # as the signal that a region matched (because
+        # ``get_clearance_for_component`` falls back to ``trace_clearance``
+        # for non-fine-pitch refs / when no region is installed).  When
+        # detected, we use the tight clearance for the launch step;
+        # otherwise we preserve the pre-P_FP5 ``self.escape_clearance``
+        # exactly so existing boards see bit-identical SOP escape geometry.
+        per_ref_clearance = self._escape_clearance_for_ref(package.ref, pads)
+        legacy_clearance = self.escape_clearance
+        if per_ref_clearance < self.rules.trace_clearance - 1e-9:
+            # Fine-pitch region matched and the narrow-channel guard
+            # allowed the shrink; use the tighter clearance.
+            effective_escape_clearance = per_ref_clearance
+        else:
+            # No region matched (or guard declined the shrink); preserve
+            # the legacy launch distance bit-for-bit.
+            effective_escape_clearance = legacy_clearance
+
         # Calculate base escape distance and stagger offset
-        base_escape_dist = self.escape_clearance + self.rules.trace_width
+        base_escape_dist = effective_escape_clearance + self.rules.trace_width
         stagger_offset = self.via_spacing / 2
 
         for i, pad in enumerate(pads):
@@ -4275,7 +4301,16 @@ class EscapeRouter:
             via_x = pad.x + dx * escape_dist
             via_y = pad.y + dy * escape_dist
 
-            # Escape point is beyond the via
+            # Escape point is beyond the via.  P_FP5 (#3371): the post-via
+            # clearance is governed by ``rules.trace_clearance`` (the
+            # neighbour-trace clearance on the destination escape layer);
+            # we deliberately do NOT use the tighter
+            # ``effective_escape_clearance`` here because the post-via
+            # trace sits in the open space beyond the package, where the
+            # standard clearance applies.  Preserving ``trace_clearance``
+            # keeps the pre-P_FP5 escape-point geometry bit-identical for
+            # non-fine-pitch packages.  The launch step (above) is where
+            # the fine-pitch shrink saves corridor width inside the halo.
             escape_x = via_x + dx * (self.rules.via_diameter + self.rules.trace_clearance)
             escape_y = via_y + dy * (self.rules.via_diameter + self.rules.trace_clearance)
 
