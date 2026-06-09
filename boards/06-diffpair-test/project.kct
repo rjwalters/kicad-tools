@@ -128,6 +128,13 @@ requirements:
     min_space: "0.15mm"
     min_via: "0.3mm"
     assembly: smt
+    # Issue #3402: this board is purpose-built for diff-pair routing on a
+    # 4-layer JLCPCB tier-1 stackup; impedance formulas (Phase 3K) assume
+    # an inner GND plane.  Probing 2L is unproductive — opt out via
+    # starting_layers=4 so the escalation ladder skips the 2L rung.
+    # Residual reach gap at 4L (41%) tracked as gh:#3413.
+    escalation:
+      starting_layers: 4
 
   compliance:
     standards:

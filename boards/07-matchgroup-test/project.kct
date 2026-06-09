@@ -149,6 +149,13 @@ requirements:
     min_space: "0.15mm"
     min_via: "0.3mm"
     assembly: smt
+    # Issue #3402: match-group regression testbench mirrors board 06's
+    # 4-layer JLCPCB tier-1 stackup; impedance formulas (Phase 3K) assume
+    # an inner GND plane.  Probing 2L is unproductive — opt out via
+    # starting_layers=4 so the escalation ladder skips the 2L rung.
+    # Residual reach gap at 4L (84%) tracked as gh:#3414.
+    escalation:
+      starting_layers: 4
 
   compliance:
     standards:

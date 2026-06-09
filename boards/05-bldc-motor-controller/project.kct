@@ -84,13 +84,26 @@ requirements:
 
   manufacturing:
     layers:
-      preferred: 2
+      preferred: 4
+      # Issue #3402: bumped from 2 to 4 — the empirical routing audit
+      # showed 2L tops out at 46% reach while 4L reaches 60%+.  See the
+      # ``escalation.starting_layers`` note below for the manufacturable-
+      # bar rationale (100% LVS + 0 DRC).
     min_trace: "0.2mm"
     min_space: "0.2mm"
     min_drill: "0.3mm"
     copper_weight: "2oz"
     unit: "mm"
     notes: "2oz copper recommended for motor phase traces"
+    # Issue #3402: DRV8301 gate driver + STM32G431 MCU + 3-phase power
+    # routing combine high pin density with high-current motor phase
+    # traces.  Empirical routing audit (#3402) shows 2L tops out at 46%
+    # reach while 4L reaches 60% — a clear "more layers materially
+    # helps" signal.  Set starting_layers=4 to skip the 2L probe.
+    # Residual reach gap at 4L tracked separately as a follow-on issue
+    # (gh:#3412).
+    escalation:
+      starting_layers: 4
 
 suggestions:
   components:
