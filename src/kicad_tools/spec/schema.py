@@ -389,9 +389,18 @@ class EscalationPolicy(BaseModel):
     Hardcoded for now per Issue #3352 Q4 decision -- promote to a CLI
     flag if empirical evidence shows recipe-by-recipe tuning is needed.
 
+    The ``starting_layers`` field is the lower rung of the layer
+    escalation ladder.  Default 2 preserves the historical behaviour
+    (probe 2L first, then 4L, then 6L).  Boards that have no realistic
+    chance of routing at 2L can opt out of the 2L tax by declaring
+    ``starting_layers=4`` (ladder becomes ``[4, 6]``).  Per Issue #3400,
+    the field is bounded ``[2, 6]`` and must be ``<= max_layers``.
+
     Attributes:
         ladder: Escalation strategy selector.
         max_layers: Layer escalation ceiling (default 4 -- covers 2L, 4L).
+        starting_layers: Layer escalation floor (default 2 -- start at 2L).
+            Set to 4 to skip the 2L probe entirely (Issue #3400).
         max_size_tier: Size-tier ceiling (index into MFR_SIZE_TIER_LADDERS
             for the manufacturer; None = use manufacturer's max).
         density_threshold_viols_per_cm2: DRC violation density that
@@ -417,6 +426,18 @@ class EscalationPolicy(BaseModel):
             "Maximum layer count the escalation ladder may reach.  Default 4 "
             "covers the common 2L -> 4L transition; recipes that need 6L+ "
             "must opt in explicitly."
+        ),
+    )
+    starting_layers: int = Field(
+        default=2,
+        ge=2,
+        le=6,
+        description=(
+            "Lower rung of the layer escalation ladder (Issue #3400).  "
+            "Default 2 preserves the historical 2L->4L->6L ladder.  Boards "
+            "with no realistic chance of routing at 2L can opt out of the "
+            "2L tax by declaring ``starting_layers=4`` (ladder becomes "
+            "``[4, 6]``).  Must be <= max_layers."
         ),
     )
     max_size_tier: int | None = Field(
@@ -489,6 +510,17 @@ class EscalationPolicy(BaseModel):
         if v < 0:
             raise ValueError(f"packing_overhead must be >= 0, got {v}")
         return v
+
+    @model_validator(mode="after")
+    def validate_starting_layers_le_max(self) -> EscalationPolicy:
+        """Issue #3400: starting_layers must not exceed max_layers."""
+        if self.starting_layers > self.max_layers:
+            raise ValueError(
+                f"starting_layers ({self.starting_layers}) must be <= "
+                f"max_layers ({self.max_layers}); a ladder cannot start "
+                f"above its ceiling."
+            )
+        return self
 
 
 class ManufacturingRequirements(BaseModel):

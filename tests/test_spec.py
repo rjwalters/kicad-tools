@@ -717,6 +717,84 @@ class TestEscalationPolicy:
         mfg = ManufacturingRequirements()
         assert mfg.escalation is None
 
+    # Issue #3400: starting_layers field tests.
+    def test_starting_layers_default_is_2(self):
+        """starting_layers defaults to 2 (historical behaviour preserved)."""
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        policy = EscalationPolicy()
+        assert policy.starting_layers == 2
+
+    def test_starting_layers_accepts_2_4_6(self):
+        """starting_layers accepts the documented values {2, 4, 6}."""
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        # 2 with default max_layers=4: trivially valid.
+        assert EscalationPolicy(starting_layers=2).starting_layers == 2
+        # 4 with default max_layers=4: equal, valid.
+        assert EscalationPolicy(starting_layers=4).starting_layers == 4
+        # 6 requires bumping max_layers (cross-field constraint).
+        assert (
+            EscalationPolicy(starting_layers=6, max_layers=6).starting_layers == 6
+        )
+
+    def test_starting_layers_rejects_below_2(self):
+        """starting_layers < 2 raises ValidationError (Field ge=2 constraint)."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        with pytest.raises(ValidationError):
+            EscalationPolicy(starting_layers=1)
+        with pytest.raises(ValidationError):
+            EscalationPolicy(starting_layers=0)
+
+    def test_starting_layers_rejects_above_6(self):
+        """starting_layers > 6 raises ValidationError (Field le=6 constraint)."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        with pytest.raises(ValidationError):
+            EscalationPolicy(starting_layers=8, max_layers=8)
+
+    def test_starting_layers_must_not_exceed_max_layers(self):
+        """Issue #3400: starting_layers > max_layers raises ValidationError."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import EscalationPolicy
+
+        # Default max_layers is 4, so starting_layers=6 violates the
+        # cross-field constraint.
+        with pytest.raises(ValidationError, match="starting_layers"):
+            EscalationPolicy(starting_layers=6, max_layers=4)
+        # Equal is fine (the rung is reachable).
+        EscalationPolicy(starting_layers=4, max_layers=4)
+        # Strictly below is fine.
+        EscalationPolicy(starting_layers=2, max_layers=4)
+
+    def test_starting_layers_parses_from_yaml(self, tmp_path):
+        """A project.kct with starting_layers parses through load_spec."""
+        from kicad_tools.spec.parser import load_spec
+
+        spec_text = (
+            "project:\n"
+            "  name: 'starting_layers smoke'\n"
+            "  description: 'Issue #3400 smoke test'\n"
+            "requirements:\n"
+            "  manufacturing:\n"
+            "    escalation:\n"
+            "      ladder: layers-first\n"
+            "      starting_layers: 4\n"
+            "      max_layers: 6\n"
+        )
+        path = tmp_path / "project.kct"
+        path.write_text(spec_text)
+
+        spec = load_spec(path)
+        assert spec.requirements.manufacturing.escalation.starting_layers == 4
+        assert spec.requirements.manufacturing.escalation.max_layers == 6
+
 
 class TestBackCompatExistingBoards:
     """Smoke test: existing project.kct files parse cleanly without the new fields."""

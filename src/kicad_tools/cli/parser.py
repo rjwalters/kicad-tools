@@ -2685,6 +2685,19 @@ def _add_route_parser(subparsers) -> None:
         choices=[2, 4, 6],
         help="Maximum layer count for auto-escalation (default: 6)",
     )
+    # Issue #3400: ``--starting-layers`` lets boards opt out of the 2L tax.
+    # CLI flag > project.kct EscalationPolicy.starting_layers > default 2.
+    route_parser.add_argument(
+        "--starting-layers",
+        type=int,
+        default=None,
+        choices=[2, 4, 6],
+        help=(
+            "Lower rung of the auto-escalation ladder (default: 2). "
+            "Use --starting-layers 4 to skip the 2L probe (Issue #3400). "
+            "Must be <= --max-layers."
+        ),
+    )
     route_parser.add_argument(
         "--min-completion",
         type=float,
