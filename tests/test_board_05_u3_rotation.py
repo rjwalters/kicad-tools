@@ -124,8 +124,7 @@ class TestU3RotatedPadGeometry:
             if abs(ax - ex) > 1e-6 or abs(ay - ey) > 1e-6:
                 mismatches.append((pin, (ax, ay), (ex, ey)))
         assert not mismatches, (
-            f"U3 pads off the 90°-CW transform (pin, actual, expected): "
-            f"{mismatches[:8]!r}"
+            f"U3 pads off the 90°-CW transform (pin, actual, expected): {mismatches[:8]!r}"
         )
 
     def test_pad_sizes_swapped_for_rotation(self, pcb_text: str) -> None:
@@ -146,9 +145,7 @@ class TestU3RotatedPadGeometry:
             f"U3 EP size {sx}x{sy}; expected 6.35x3.61 (3.61x6.35 swapped)"
         )
 
-    def test_half_bridge_pins_face_south_in_29_to_56_order(
-        self, pcb_text: str
-    ) -> None:
+    def test_half_bridge_pins_face_south_in_29_to_56_order(self, pcb_text: str) -> None:
         """South edge runs 29..56 left-to-right (curator-corrected order).
 
         This is the geometric fact the phase-column swap is built on:
@@ -185,16 +182,14 @@ class TestPhaseColumnSwap:
         # Footprint blocks carry a fp_text reference line; find the
         # block for ``ref`` then the pad inside it.
         ref_m = re.search(
-            r'\(footprint[^\n]*\n(?:.*?\n)*?[^\n]*reference "%s"' % re.escape(ref),
+            rf'\(footprint[^\n]*\n(?:.*?\n)*?[^\n]*reference "{re.escape(ref)}"',
             pcb_text,
         )
         assert ref_m, f"footprint {ref} not found"
         start = pcb_text.rindex("(footprint", 0, ref_m.end())
         next_fp = pcb_text.find("(footprint ", start + 10)
         block = pcb_text[start : next_fp if next_fp != -1 else len(pcb_text)]
-        pad_m = re.search(
-            r'\(pad "%s"[\s\S]*?\(net \d+ "([^"]+)"\)' % re.escape(pad), block
-        )
+        pad_m = re.search(rf'\(pad "{re.escape(pad)}"[\s\S]*?\(net \d+ "([^"]+)"\)', block)
         assert pad_m, f"{ref} pad {pad} (with net) not found"
         return pad_m.group(1)
 

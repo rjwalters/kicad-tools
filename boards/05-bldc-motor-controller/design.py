@@ -2310,7 +2310,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # Phase C: Q5 (high-side), Q6 (low-side)
     parts.append(generate_to220("Q5", Q5_POS, "IRLZ44N", "GATE_AH", "+24V", "PHASE_A"))
     parts.append(generate_to220("Q6", Q6_POS, "IRLZ44N", "GATE_AL", "PHASE_A", "ISENSE_A+"))
-    print(f"   Q1-Q2 (Phase C), Q3-Q4 (Phase B), Q5-Q6 (Phase A) -- #3423 swap")
+    print("   Q1-Q2 (Phase C), Q3-Q4 (Phase B), Q5-Q6 (Phase A) -- #3423 swap")
 
     print("\n9. Adding current sense shunts...")
     # Issue #3423 phase-column swap: R10 <-> R12 net assignments.
@@ -2624,6 +2624,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # regression test from PR #3258.  DO NOT overwrite the
         # committed routed snapshot without manually verifying the
         # new fresh re-route is strictly better.
+        #
+        # Issue #3423 (2026-06-09): the U3 rotation moved all 56 U3
+        # pads, forcing the artifact refresh the paragraph above
+        # warned about.  The committed snapshot is now this recipe's
+        # deterministic seed-42 output (20 blocking; see Issue #3444
+        # for the B.Cu overlap families and the re-tightening plan;
+        # 2L reach improved 34% -> 66% from the rotation).
         "--backend",
         "python",
         "--seed",
