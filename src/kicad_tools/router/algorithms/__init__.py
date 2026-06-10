@@ -18,12 +18,16 @@ from .hierarchical import HierarchicalRouter
 from .monte_carlo import MonteCarloRouter
 from .mst import MSTRouter
 from .negotiated import (
+    GRACE_PASS_BUDGET_S,
+    GRACE_PASS_PER_NET_S,
+    GRACE_PASS_TIER_CAPS_S,
     NegotiatedRouter,
     calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
     detect_ripup_stagnation,
+    run_initial_pass_grace,
     select_seg_seg_demotion_nets,
     should_terminate_early,
 )
@@ -39,6 +43,11 @@ __all__ = [
     "RoutingChromosome",
     "TwoPhaseRouter",
     "build_rsmt",
+    # Initial-pass grace pass (Issue #3452)
+    "GRACE_PASS_BUDGET_S",
+    "GRACE_PASS_PER_NET_S",
+    "GRACE_PASS_TIER_CAPS_S",
+    "run_initial_pass_grace",
     # Adaptive parameter functions (Issue #633, #2333)
     "calculate_congestion_tuned_params",
     "calculate_history_increment",

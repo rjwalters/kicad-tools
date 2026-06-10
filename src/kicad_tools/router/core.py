@@ -37,6 +37,7 @@ from .algorithms import (
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
+    run_initial_pass_grace,
     select_seg_seg_demotion_nets,
     should_terminate_early,
 )
@@ -6596,10 +6597,15 @@ class Autorouter:
 
         else:
             # Sequential routing (original behavior)
+            # Issue #3452: when the wall-clock budget expires mid-list,
+            # record the starved tail for the bounded grace pass below
+            # instead of silently dropping every remaining net.
+            grace_nets: list[int] = []
             for i, net in enumerate(net_order):
                 if check_timeout():
                     print(f"  ⚠ Timeout reached at net {i}/{total_nets} ({elapsed_str()})")
                     timed_out = True
+                    grace_nets = list(net_order[i:])
                     break
 
                 # Progress output for every net with percentage
@@ -6620,6 +6626,38 @@ class Autorouter:
                     # Issue #2275: Update layer fill ratios after each net
                     if hasattr(self.router, "update_layer_fill_ratios"):
                         self.router.update_layer_fill_ratios()
+
+            # Issue #3452: budget-cliff grace pass.  Net order is
+            # difficulty-agnostic, so a block of pathological searches
+            # early in ``net_order`` can exhaust the wall-clock budget
+            # before the cheap majority gets ANY attempt (board 05: five
+            # ISENSE searches burn ~190s of a 420s budget, after which
+            # the remaining 24 nets route in under 10s -- the #3452
+            # 12/32 -> 3/32 collapse is that cliff, load-modulated).
+            # See :func:`run_initial_pass_grace` for the tiered-cap
+            # design and measured rationale.
+            if grace_nets:
+                grace_start = time.time()
+
+                def _grace_route(net: int, cap: float) -> list[Route]:
+                    return self._route_net_negotiated(
+                        net, present_factor, per_net_timeout=cap
+                    )
+
+                def _grace_commit(net: int, routes: list[Route]) -> None:
+                    net_routes[net] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        self.routes.append(route)
+
+                graced, attempted, skipped = run_initial_pass_grace(
+                    grace_nets, _grace_route, _grace_commit, per_net_timeout
+                )
+                flush_print(
+                    f"  Grace pass: {graced}/{attempted} starved net(s) routed in "
+                    f"{time.time() - grace_start:.1f}s "
+                    f"({skipped} skipped) (Issue #3452)"
+                )
 
         overflow = self.grid.get_total_overflow()
         overused = self.grid.find_overused_cells()

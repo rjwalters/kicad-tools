@@ -28,6 +28,100 @@ if TYPE_CHECKING:
 ProgressCallback = Callable[[str, dict], None]
 
 
+# Issue #3452: initial-pass grace-pass bounds, shared by the two
+# sequential initial passes (``core.Autorouter.route_all_negotiated`` and
+# ``two_phase.TwoPhaseRouter._route_detailed_negotiated``).  When the
+# wall-clock budget expires mid-list, the starved tail is swept in
+# escalating tiers: tier 1 gives every net a TINY per-A*-call cap so the
+# cheap majority commits in milliseconds no matter where pathological
+# searches sit in the order; tier 2 re-attempts the tier-1 failures with
+# a bigger cap from whatever budget remains.  The whole pass is bounded
+# by ``GRACE_PASS_BUDGET_S``.
+#
+# The caps are per-A*-CALL budgets, not per-net wall bounds: a failing
+# multi-edge net can legally spend several multiples of the cap
+# (cumulative-deadline RSMT edges x the pathfinder's 3x
+# ``_ESCAPE_HINT_DEADLINE_MULT`` for escape-flanked pads x relaxed-retry
+# calls -- measured ~15x on board 05's ISENSE family, where a single
+# starved ISENSE net consumed 31.2s of a 30s grace budget under a flat
+# 2.0s cap).  Tier 1's 0.3s cap keeps even that worst case to a few
+# seconds, which is why the tiny tier runs FIRST.
+GRACE_PASS_TIER_CAPS_S: tuple[float, ...] = (0.3, 2.0)
+# Total sweep bound.  Sized from the board-05 measurement: a 26-net
+# starved tail with three pathological ISENSE searches costs ~30s for
+# the first 12 tier-1 attempts under load (each failing escape-flanked
+# net legally spends ~15x the per-call cap; see above).  60s lets
+# tier 1 finish the WHOLE tail (the cheap majority) and still leaves
+# tier 2 room for second chances -- and stays small next to the ~140s
+# overrun the post-initial-pass stall-recovery path already tolerates.
+GRACE_PASS_BUDGET_S = 60.0
+# The largest (final-tier) per-call cap, re-exported for callers/tests
+# that reason about the upper bound of any single grace attempt.
+GRACE_PASS_PER_NET_S = GRACE_PASS_TIER_CAPS_S[-1]
+
+
+def run_initial_pass_grace(
+    grace_nets: list[int],
+    route_fn: Callable[[int, float], list],
+    commit_fn: Callable[[int, list], None],
+    per_net_timeout: float | None,
+) -> tuple[int, int, int]:
+    """Bounded best-effort sweep over nets starved by an initial-pass timeout.
+
+    Issue #3452: the sequential initial passes route nets in a
+    difficulty-agnostic order and used to HARD-BREAK on the wall-clock
+    check, silently dropping every net after the break point.  On board
+    05 (4L jlcpcb, seed 42) five pathological ISENSE searches burn ~190s
+    of a 420s budget, after which the remaining 24 nets route in under
+    10 seconds -- whether the budget line lands before or after that
+    window decided 28/32 vs 6/32 at the initial pass (the #3452
+    "12/32 -> 3/32" collapse, load-modulated; the #3442 in-loop pieces
+    never even execute in the collapsing runs because ``timed_out``
+    skips the iteration loop entirely).  This sweep gives each starved
+    net a bounded attempt instead of zero.
+
+    Args:
+        grace_nets: Net ids starved by the timeout, in original order.
+        route_fn: ``(net, per_net_timeout_cap) -> routes`` -- the
+            caller's single-net router.
+        commit_fn: ``(net, routes) -> None`` -- commits successful
+            routes (grid marking + bookkeeping), caller-specific.
+        per_net_timeout: The caller's own per-net budget; tier caps are
+            clamped to it so a grace attempt never receives MORE time
+            per call than the caller's normal pass would grant.
+
+    Returns:
+        ``(routed, attempted, skipped)``: nets successfully routed,
+        distinct nets given at least one attempt, and nets never
+        attempted because the grace budget ran out.
+    """
+    start = time.monotonic()
+    remaining = list(grace_nets)
+    attempted: set[int] = set()
+    routed = 0
+    out_of_budget = False
+    for tier_cap in GRACE_PASS_TIER_CAPS_S:
+        if out_of_budget or not remaining:
+            break
+        cap = min(tier_cap, per_net_timeout) if per_net_timeout else tier_cap
+        still_failing: list[int] = []
+        for idx, net in enumerate(remaining):
+            if time.monotonic() - start > GRACE_PASS_BUDGET_S:
+                out_of_budget = True
+                still_failing.extend(remaining[idx:])
+                break
+            attempted.add(net)
+            routes = route_fn(net, cap)
+            if routes:
+                routed += 1
+                commit_fn(net, routes)
+            else:
+                still_failing.append(net)
+        remaining = still_failing
+    skipped = sum(1 for n in grace_nets if n not in attempted)
+    return routed, len(attempted), skipped
+
+
 def select_seg_seg_demotion_nets(
     overlap_pairs: list[tuple[int, int]],
     demotable: set[int],
