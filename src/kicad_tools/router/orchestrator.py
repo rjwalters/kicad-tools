@@ -129,6 +129,25 @@ class RoutingOrchestrator:
         self.net_class_map: dict[str, NetClassRouting] = net_class_map or {}
         self.max_strategy_retries = max_strategy_retries
 
+        # Issue #3432 (mirrors ``Autorouter.paired_escape_coupling`` from
+        # #3419/#3431): gate for the diff-pair paired-escape pre-pass.
+        # The pre-pass emits two tightly-coupled escape endpoints (at the
+        # intra-pair clearance) that are only routable by a COUPLED
+        # consumer (CoupledPathfinder).  The orchestrator's escape
+        # consumer is the per-net GlobalRouter (Phase 2 of
+        # ``_route_escape_then_global``) and its diff-pair strategy
+        # delegates to the per-net AdaptiveAutorouter -- there is no
+        # coupled consumer on the ``kct route-auto`` path today, so this
+        # flag defaults to False and is never flipped.  Both EscapeRouter
+        # construction sites consult it before threading
+        # ``_get_diff_pair_map()``; with the flag off they pass an empty
+        # map, matching the Autorouter's default-off behaviour and
+        # avoiding the per-net A* stranding documented in #3419 (board
+        # 06: 41% -> 27% reach).  If a coupled consumer is ever added to
+        # the route-auto path, flip this flag on BEFORE the escape phase
+        # (escapes are generated lazily).
+        self.paired_escape_coupling: bool = False
+
         # Lazy-initialized routers (created on first use)
         self._global_router: GlobalRouter | None = None
         self._hierarchical: AdaptiveAutorouter | None = None
@@ -761,10 +780,18 @@ class RoutingOrchestrator:
                     manufacturer=getattr(self.rules, "manufacturer", None),
                     # Issue #2639 / Epic #2556 Phase 2F: thread the
                     # diff-pair partner map into the escape router for
-                    # coupled-at-launch escape routes.  ``_get_diff_pair_map``
-                    # returns {} when no pairs are detected, preserving
-                    # pre-#2639 single-ended behavior.
-                    diff_pair_map=self._get_diff_pair_map(),
+                    # coupled-at-launch escape routes.
+                    #
+                    # Issue #3432: gated on ``paired_escape_coupling``
+                    # (mirrors core.py's ``_escape`` property, #3419).
+                    # Phase 2 of this strategy is the per-net
+                    # GlobalRouter -- no CoupledPathfinder exists on the
+                    # route-auto path, so threading the map would emit
+                    # tightly-coupled paired escape endpoints that
+                    # strand the per-net search.
+                    diff_pair_map=(
+                        self._get_diff_pair_map() if self.paired_escape_coupling else {}
+                    ),
                     # Issue #3428: net -> pad-position map for target-aware
                     # in-pad rescue stub directions.  Same wiring as the
                     # Autorouter (``kct route``) path -- the orchestrator
@@ -1419,7 +1446,12 @@ class RoutingOrchestrator:
                     manufacturer=getattr(self.rules, "manufacturer", None),
                     # Issue #2639 / Epic #2556 Phase 2F: same threading
                     # as the escape_then_global ctor site above.
-                    diff_pair_map=self._get_diff_pair_map(),
+                    #
+                    # Issue #3432: same ``paired_escape_coupling`` gate
+                    # as the escape_then_global ctor site above.
+                    diff_pair_map=(
+                        self._get_diff_pair_map() if self.paired_escape_coupling else {}
+                    ),
                     # Issue #3428: same target-aware in-pad stub wiring
                     # as the escape_then_global ctor site above.
                     net_target_positions=self._build_net_target_positions(),
