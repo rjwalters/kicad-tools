@@ -155,41 +155,53 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     # Reuse existing net-name mapping
     net_names = parse_net_names(pcb_text)
 
-    # Match via S-expressions (multiline format).  Issue #3118: the
-    # optional ``micro`` / ``blind`` / ``buried`` token immediately
-    # after ``via`` (added by #3124/#3126 for round-trip preservation)
-    # is captured in group 1 so we can re-tag the deserialised primitive.
-    # Without the optional capture, a ``(via micro ...)`` line would
-    # not match this pattern at all, silently dropping the via from the
-    # "existing routes as obstacles" pre-pass.
-    # (via [micro|blind|buried]
-    #     (at X Y)
-    #     (size S)
-    #     (drill D)
-    #     (layers "L1" "L2")
-    #     (net N)
-    #     ...
-    # )
-    pattern = re.compile(
-        r"\(via\s+"
-        r"(micro\s+|blind\s+|buried\s+)?"
-        r"\(at\s+([\d.-]+)\s+([\d.-]+)\)\s*"
-        r"\(size\s+([\d.]+)\)\s*"
-        r"\(drill\s+([\d.]+)\)\s*"
-        r'\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s*'
-        r"\(net\s+(\d+)\)",
-        re.DOTALL,
-    )
+    # Issue #3414 / #3155: use the same balanced-parentheses walker as
+    # ``parse_segments`` so that fields may appear in any order and extra
+    # fields are silently ignored.  The previous implementation used a
+    # single ordered regex that required ``(net N)`` to immediately follow
+    # ``(layers ...)``.  KiCad 8+ files -- including every PCB written by
+    # ``kct route`` itself -- emit ``(uuid "...")`` between ``(layers)``
+    # and ``(net)``, so the ordered pattern matched ZERO vias on modern
+    # output.  Consequences before this fix:
+    #
+    #   * ``--preserve-existing`` (#3155) preserved segments but silently
+    #     DROPPED every via: preserved multi-layer routes were re-emitted
+    #     fragmented (inner/back-layer copper with no layer transitions)
+    #     and the routing grid did not block the via barrels, so new
+    #     routes could be laid straight through existing vias.
+    #   * The "existing routes as obstacles" pre-pass in
+    #     ``load_pcb_for_routing(load_existing_routes=True)`` had the
+    #     same blind spot.
+    #
+    # Issue #3118's ``micro``/``blind``/``buried`` token handling is
+    # preserved by matching the optional type token at the head of the
+    # block body.
+    _re_via_type = re.compile(r"^\(via\s+(micro|blind|buried)\b")
+    _re_at = re.compile(r"\(at\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
+    _re_size = re.compile(r"\(size\s+([\d.eE+-]+)\)")
+    _re_drill = re.compile(r"\(drill\s+([\d.eE+-]+)\)")
+    _re_layers = re.compile(r'\(layers\s+"([^"]+)"\s+"([^"]+)"\)')
 
-    for match in pattern.finditer(pcb_text):
-        via_type_token = match.group(1)
-        x = float(match.group(2))
-        y = float(match.group(3))
-        diameter = float(match.group(4))
-        drill = float(match.group(5))
-        layer_start_name = match.group(6)
-        layer_end_name = match.group(7)
-        net = int(match.group(8))
+    for _start, _end, block in _extract_balanced_blocks(pcb_text, "via"):
+        m_at = _re_at.search(block)
+        m_size = _re_size.search(block)
+        m_drill = _re_drill.search(block)
+        m_layers = _re_layers.search(block)
+        m_net = _RE_NET.search(block)
+
+        # All five core fields are required; skip malformed blocks.
+        if not (m_at and m_size and m_drill and m_layers and m_net):
+            continue
+
+        m_type = _re_via_type.match(block)
+        via_type_token = m_type.group(1) if m_type else None
+        x = float(m_at.group(1))
+        y = float(m_at.group(2))
+        diameter = float(m_size.group(1))
+        drill = float(m_drill.group(1))
+        layer_start_name = m_layers.group(1)
+        layer_end_name = m_layers.group(2)
+        net = int(m_net.group(1))
         net_name = net_names.get(net, f"Net{net}")
 
         # Convert layer names to Layer enum
@@ -206,7 +218,7 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
         # the ``micro`` token was matched so the dimensions DRC
         # exemption fires when this PCB is re-parsed after a route or
         # stitch pass.
-        is_micro = bool(via_type_token and via_type_token.strip() == "micro")
+        is_micro = via_type_token == "micro"
 
         via = Via(
             x=x,

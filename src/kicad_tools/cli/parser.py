@@ -2534,6 +2534,31 @@ def _add_route_parser(subparsers) -> None:
             "best-state restore."
         ),
     )
+    # Issue #3438 / #3414: targeted rip-up.  Mirror of the inner parser flag
+    # at route_cmd.py; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--targeted-ripup",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable targeted rip-up in the negotiated routing loop "
+            "(Issue #3438). Instead of ripping up every net sharing an "
+            "overused cell, displace only the specific nets blocking each "
+            "failed net. Helps parallel pad-array bundles (DDR byte lanes, "
+            "facing QFN pin columns) where the last-routed member finds "
+            "its escape corridor consumed by siblings."
+        ),
+    )
+    route_parser.add_argument(
+        "--max-ripups-per-net",
+        type=int,
+        default=3,
+        help=(
+            "Per-net displacement budget for --targeted-ripup (default: 3). "
+            "Ignored without --targeted-ripup."
+        ),
+    )
     # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to
     # ``route_all_negotiated``.  Opt-in (default off) so existing scripts and
     # CI runs see byte-identical routes; when set, the negotiated loop

@@ -496,3 +496,94 @@ class TestZoneFillDRCFallbackRegression:
             result = parse_segments(pcb_text)
             total = sum(len(segs) for segs in result.values())
             assert total > 0, f"parse_segments returned 0 segments for:\n{pcb_text[:200]}"
+
+
+# ---------------------------------------------------------------------------
+# parse_vias (Issue #3414 regression: uuid BEFORE net in via blocks)
+# ---------------------------------------------------------------------------
+
+# The format ``kct route`` itself writes (and KiCad 8+ saves): a multiline
+# via block with ``(uuid "...")`` between ``(layers ...)`` and ``(net N)``.
+# The pre-#3414 ordered regex required ``(net N)`` to immediately follow
+# ``(layers ...)`` and therefore matched ZERO vias on such files -- silently
+# dropping every via from the --preserve-existing capture (#3155) and from
+# the load_existing_routes obstacle pre-pass.
+_PCB_VIA_UUID_BEFORE_NET = """\
+(kicad_pcb
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+\t(via
+\t\t(at 124.219 128.626)
+\t\t(size 0.6)
+\t\t(drill 0.3)
+\t\t(layers "F.Cu" "B.Cu")
+\t\t(uuid "5e6fea07-c453-4f1d-8199-2fdfb31022f0")
+\t\t(net 1)
+\t)
+\t(via
+\t\t(at 130.823 122.022)
+\t\t(size 0.6)
+\t\t(drill 0.3)
+\t\t(layers "F.Cu" "B.Cu")
+\t\t(uuid "f6b751f7-9b74-4245-9b1b-c89525a6c9bd")
+\t\t(net 2)
+\t)
+)
+"""
+
+# Legacy order (net before uuid) and the #3118 micro token.
+_PCB_VIA_LEGACY_AND_MICRO = """\
+(kicad_pcb
+  (net 0 "")
+  (net 1 "VCC")
+  (via (at 10 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "aa"))
+  (via micro (at 12 10) (size 0.3) (drill 0.1) (layers "F.Cu" "In1.Cu") (uuid "bb") (net 1))
+)
+"""
+
+
+class TestParseVias:
+    """Order-independent via parsing (Issue #3414 / #3155 / #3118)."""
+
+    def test_uuid_before_net_kicad8_writer_order(self):
+        from kicad_tools.router.optimizer.pcb import parse_vias
+
+        vias = parse_vias(_PCB_VIA_UUID_BEFORE_NET)
+        assert sorted(vias) == ["GND", "VCC"], (
+            "parse_vias must match via blocks whose (uuid ...) precedes "
+            "(net N) -- the order kct route itself writes. Pre-#3414 this "
+            "returned zero vias, silently breaking --preserve-existing."
+        )
+        v = vias["VCC"][0]
+        assert (v.x, v.y) == (124.219, 128.626)
+        assert v.diameter == 0.6
+        assert v.drill == 0.3
+        assert v.net == 1
+        assert v.is_micro is False
+
+    def test_legacy_order_and_micro_token(self):
+        from kicad_tools.router.optimizer.pcb import parse_vias
+
+        vias = parse_vias(_PCB_VIA_LEGACY_AND_MICRO)
+        assert len(vias["VCC"]) == 2
+        by_x = {v.x: v for v in vias["VCC"]}
+        assert by_x[10.0].is_micro is False
+        assert by_x[12.0].is_micro is True, (
+            "#3118 micro token must survive the balanced-block rewrite"
+        )
+
+    def test_malformed_block_skipped(self):
+        from kicad_tools.router.optimizer.pcb import parse_vias
+
+        # Missing (size ...) -- must be skipped, not crash.
+        txt = '(kicad_pcb (net 1 "VCC") (via (at 1 2) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)))'
+        assert parse_vias(txt) == {}
+
+    def test_via_size_setup_token_not_matched(self):
+        from kicad_tools.router.optimizer.pcb import parse_vias
+
+        # (via_size ...) / (via_drill ...) in the setup section must not
+        # be mistaken for via blocks.
+        txt = '(kicad_pcb (net 1 "V") (setup (via_size 0.6) (via_drill 0.3)))'
+        assert parse_vias(txt) == {}

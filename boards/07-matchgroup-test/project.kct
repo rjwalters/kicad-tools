@@ -267,5 +267,6 @@ progress:
         - "[x] Net-class declarations engaging Phase 1A-2G features"
         - "[x] PCB routing via kct route"
         - "[x] net_class_map.json sidecar emission (Phase 3M)"
-        - "[ ] Phase 3H (#2723) --length-match-groups CLI flag wired into route step (deferred until #2723 lands)"
+        - "[x] Phase 3H (#2723) --length-match-groups CLI flag wired into route step (closed by Issue #2723 / PR #3098; verified by recipe at generate_design.py:552)"
         - "[ ] 0 DRC errors at JLCPCB tier-1 (allowlist tightened iteratively by Phase 3N)"
+        - "[ ] 100% routed reach: stalled at 28/31 (90%); 3 stranded nets (DQ3, MIPI_CLK_N, MIPI_DAT0_N).  Issue #3414 investigation showed this is NOT a CLI gap (the audit hypothesis on #3402 cited #2723; that flag is in the recipe).  Refined root cause (recovery run #3, 2026-06-09): the DDR bundle is a full bus reversal (all 11 nets pairwise cross between facing QFN-48 columns); failed nets abort with an empty A* frontier (foreign escape stubs/vias are hard even in sharing mode) so PathFinder gets no congestion signal, and the negotiated loop declares convergence at overflow==0 with nets still unrouted.  Tracked in #3438 with minimal 5/10/11-net repros; blocked on that router work."

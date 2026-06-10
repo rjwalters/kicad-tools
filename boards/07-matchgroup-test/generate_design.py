@@ -432,6 +432,66 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         When ``--length-match-groups`` and ``apply_match_group_tuning``
         land, the CLI itself will perform group-level meander
         insertion; no further change here will be required.
+
+    Issue #3414 (per-board manufacturable bar):
+        Issue #3402's per-board ``starting_layers`` audit cited Issue
+        #2723 (this CLI flag, now landed and in use here) as the likely
+        path to close the 84% routability gap.  Empirical validation in
+        the #3414 worktree DISPROVED that hypothesis: the flag engages
+        the orchestrator but reach plateaus at 28/31 (90%); three nets
+        (DQ3, MIPI_CLK_N, MIPI_DAT0_N) are stranded by the negotiated
+        single-ended router's ordering/escape dynamics, not by any
+        missing length-matching pass.  Isolation evidence (2026-06-09,
+        main @ post-#3431):
+
+          - The 3 stranded nets route 3/3 in 0.2s when everything
+            else is skipped.
+          - The 6-net MIPI bundle alone routes 6/6 in 11s.
+          - The 11-net DDR bundle ALONE on an empty board routes only
+            9/11 (DQ5, DM0 fail) -- the failure is order-dependent
+            chaos inside a trivially hand-routable parallel bundle.
+
+        Residual gap decomposition (filed by the #3414 recovery PR):
+        #3438 (negotiated bundle reach -- the 28/31 blocker),
+        #3439 (CoupledPathfinder 60s/pair budget overrun -- blocks the
+        diff-pair continuity/skew DRC errors), #3440 (match-group
+        tuner leaves ADDR_BUS at 15.4mm skew), #3441 (auto-grid
+        0.127mm puts every 0.1mm-aligned pad off-grid).
+
+    Recovery run #3 (2026-06-09, main @ post-#3437) -- refined #3438
+    root cause:
+        Re-measured baseline is unchanged: 28/31, 23 DRC errors,
+        stranded nets DQ3 / MIPI_CLK_N / MIPI_DAT0_N (solo, seed 42).
+        Iteration 0 dipped to 26/31 after PR #3434 but iteration 1's
+        whole-cell rip-up recovers the two TMDS_N nets, restoring 28.
+
+        The DDR bundle is a FULL BUS REVERSAL (U1 right column DQ0 at
+        +4.4mm faces U2 left column DQ0 at -4.4mm -- every pair of the
+        11 nets crosses), not a parallel bundle.  Isolation repros:
+
+          - 11-net DDR bundle alone:        10/11 (DQ3 fails in 0.04s)
+          - 10-net bundle (DQ0 removed):    10/10 in 5s
+          - 5-net bundle (DQS pair, DM0, DQ4, DQ3): 5/5
+          - priority-forced orders (monotone / reverse / outside-in):
+            10/11, 10/11, 8/11 -- the failing member shifts with the
+            order; no static order completes the reversal.
+
+        DQ3's failure is an INSTANT empty-frontier abort, not search
+        exhaustion: foreign escape stubs and vias are hard obstacles
+        even in sharing mode (``is_trace_blocked``'s
+        ``cell.net != net && usage_count == 0`` clause), and legal via
+        sites need ~0.5mm of F.Cu travel from the stub end (0.6mm via
+        vs 0.8mm pitch), so sibling vias + stub halos seal the exit.
+        Because the failure is hard (no overflow), PathFinder receives
+        no congestion signal AND the negotiated loop declares
+        "Convergence achieved" at overflow==0 with unrouted nets
+        remaining, abandoning unused wall budget (verified with
+        --timeout 1500: loop still exits at ~820s with 28/31).
+        Removing one net (DQ0) flips
+        ``_assign_matrix_layer_preferences``'s sorted-id parity for
+        every bundle member, which is why outcomes are chaotically
+        sensitive to the exact net set.  All of the above posted to
+        #3438.
     """
     print("\n" + "=" * 60)
     print("Routing PCB (via ``kct route`` flag recipe -- Issue #2991)...")
@@ -526,6 +586,83 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # (``length_match_group``, ``length_match_tolerance_mm``,
     # ``length_match_reference``) from the sidecar JSON to drive
     # ``apply_match_group_tuning`` after the main routing pass.
+    # Issue #3414 history: empirical validation in the #3414 worktree
+    # (origin/main @ ca8e6899) tested several router knobs to lift this
+    # board's reach above 28/31 (90%):
+    #
+    #   - ``--differential-pairs`` (with #3320 / #3330 fixed):  28/31
+    #   - ``--placement-feedback`` (default budget):            29/31
+    #     (iteration-0 preserved a +1 net but no component moves)
+    #   - ``--placement-feedback-no-anchor J1,J2,J3`` + long
+    #     outer-timeout:                                        26/31
+    #     (pf wandered to a WORSE placement over iterations)
+    #   - Pin swap (DQ3 -> outermost on U1.25 + U2.1, mirroring):
+    #     same 28/31 with the failures shifted to the NEW occupants
+    #     of the previously-failing pin positions -- proving the
+    #     blocker is the negotiated escape order, not net identity
+    #   - Wider channels (J1/U3 from 20mm -> 30mm; U1/U2 30mm -> 40mm):
+    #     27/31 (worse -- larger area gives the router more room to
+    #     waste in poor partial moves)
+    #
+    # Recovery-run addendum (2026-06-09, main @ post-#3426/#3431):
+    #
+    #   - ``--iterations 25 --early-stop-patience 8``: no gain --
+    #     iteration 0 is the high-water mark (the #3101 pattern);
+    #     later rip-up iterations only regress.
+    #   - ``--strategy monte-carlo --mc-trials 20``: unviable --
+    #     pure-Python multiprocessing workers, >25 min wall-clock
+    #     (CI budget is 10 min); killed.
+    #   - ``--micro-via-in-pad-fallback``: no gain on the 3 nets.
+    #   - ``--grid 0.1`` (board pads are 0.1mm-aligned): WORSE --
+    #     53 pads still classified off-grid and 15 nets end only
+    #     partially connected via waypoint injection (#3441).
+    #   - ``--differential-pairs`` re-test: CoupledPathfinder blows
+    #     its 60s/pair budget on EVERY pair (~14k iters/60s, pure
+    #     Python; #3439) and the burned budget collapsed the run.
+    #   - Two-pass (pre-route the 3 stranded nets, then the rest with
+    #     ``--preserve-existing``): failures SHIFT to the partners
+    #     (MIPI_CLK_P, MIPI_DAT1_P) -- ordering chaos, not geometry.
+    #   - PR #3434 head (target-aware in-pad stubs): 26/31 on this
+    #     board (TMDS_D0_N/TMDS_D1_N newly stranded; load-contended
+    #     probe -- warning posted on the PR).
+    #   - Load sensitivity: concurrent routing runs on the same host
+    #     degrade iteration-0 reach to 25-26/31 (wall-clock-budgeted
+    #     per-net A*).  Reach comparisons are only valid solo.
+    #
+    # Recovery-run #3 addendum (2026-06-09, main @ post-#3437, solo):
+    #
+    #   - Baseline re-measure: 28/31, 23 DRC (same 3 stranded nets).
+    #   - ``--targeted-ripup`` (NEW CLI flag wired by the #3414
+    #     recovery PR; the route_all_negotiated implementation existed
+    #     but was CLI-unreachable): WORSE -- 26/31.  Displacement is
+    #     lossy: displaced siblings are re-placed best-effort and the
+    #     (1 + N_blockers) x per-net-timeout cost blows the wall
+    #     budget (DQ3 pulls in 10 DDR siblings).
+    #   - ``--targeted-ripup --per-net-timeout 15 --timeout 1500``:
+    #     24/31 at iters 1-2; best-restore returns iter-0's 26.
+    #   - ``--per-net-timeout 60 --timeout 1500`` (default rip-up):
+    #     28/31 -- the per-net budget is NOT the binding constraint;
+    #     the loop exits "Convergence achieved" at overflow==0 with
+    #     3 nets unrouted and ~680s of budget unused.
+    #   - Per-net sidecar ``priority`` order forcing on the DDR
+    #     bundle (monotone/reverse/outside-in): 10/11, 10/11, 8/11.
+    #     The full-reversal bundle never completes under any static
+    #     order; the failing member follows the order position.
+    #   - Two-pass with ``--preserve-existing``: pass 2 is strictly
+    #     harder (preserved copper is a hard obstacle).  Also found
+    #     and fixed en route: ``parse_vias`` matched ZERO vias on
+    #     KiCad-8 output (uuid-before-net field order), so
+    #     --preserve-existing silently dropped every via -- this had
+    #     invalidated the earlier two-pass experiments repo-wide.
+    #
+    # Conclusion: the gap to 100% is an algorithmic gap in the
+    # negotiated router's handling of full-reversal pad-array bundles
+    # (hard-failing nets emit no PathFinder congestion signal, and the
+    # loop declares convergence at overflow==0 with unrouted nets),
+    # not a CLI/config gap.  The recipe stays at the proven 28/31
+    # baseline; the residual gap is tracked in #3438 (reach -- now
+    # with minimal 5/10/11-net repros), #3439 (coupled routing perf),
+    # #3440 (match-group tuner), #3441 (auto-grid).
     cmd = [
         sys.executable,
         "-m",

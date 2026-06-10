@@ -3105,6 +3105,11 @@ def route_with_layer_escalation(
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
+                    # Issue #3438 / #3414: forward --targeted-ripup so the
+                    # pre-existing targeted rip-up path in
+                    # route_all_negotiated is CLI-reachable.
+                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
+                    max_ripups_per_net=getattr(args, "max_ripups_per_net", 3),
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
@@ -3973,6 +3978,11 @@ def route_with_rule_relaxation(
                     # Issue #3051: forward checkpoint callback so kills
                     # mid-loop persist the best-so-far snapshot.
                     checkpoint_callback=_checkpoint_cb,
+                    # Issue #3438 / #3414: forward --targeted-ripup so the
+                    # pre-existing targeted rip-up path in
+                    # route_all_negotiated is CLI-reachable.
+                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
+                    max_ripups_per_net=getattr(args, "max_ripups_per_net", 3),
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
@@ -6012,6 +6022,11 @@ def route_with_combined_escalation(
                         # Issue #3051: forward checkpoint callback so kills
                         # mid-loop persist the best-so-far snapshot.
                         checkpoint_callback=_checkpoint_cb,
+                        # Issue #3438 / #3414: forward --targeted-ripup so the
+                        # pre-existing targeted rip-up path in
+                        # route_all_negotiated is CLI-reachable.
+                        use_targeted_ripup=getattr(args, "targeted_ripup", False),
+                        max_ripups_per_net=getattr(args, "max_ripups_per_net", 3),
                         # Issue #3101: best-metric early-stop patience.  0
                         # disables (matches pre-#3101 behaviour).
                         best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
@@ -6587,6 +6602,34 @@ def main(argv: list[str] | None = None) -> int:
             "best-state restore. Use 0 to disable (matches pre-#3101 "
             "behaviour where the loop ran until --iterations or one of "
             "the existing should_terminate_early heuristics fired)."
+        ),
+    )
+    parser.add_argument(
+        "--targeted-ripup",
+        action="store_true",
+        help=(
+            "Enable targeted rip-up in the negotiated routing loop "
+            "(Issue #3438 / #3414).  Instead of ripping up every net that "
+            "shares an overused cell, the negotiator identifies the "
+            "specific nets blocking each failed net (direct-path scan + "
+            "same-tier destination siblings) and displaces only those.  "
+            "Helps parallel pad-array bundles (facing QFN pin columns, "
+            "DDR byte lanes) where the last-ordered member finds its only "
+            "escape corridor consumed by siblings and whole-cell rip-up "
+            "cannot recover.  The underlying implementation "
+            "(route_all_negotiated(use_targeted_ripup=...)) predates this "
+            "flag but was previously unreachable from the CLI."
+        ),
+    )
+    parser.add_argument(
+        "--max-ripups-per-net",
+        type=int,
+        default=3,
+        help=(
+            "Per-net rip-up budget when --targeted-ripup is enabled "
+            "(default: 3).  Caps how many times any single net can be "
+            "displaced during targeted rip-up to prevent displacement "
+            "loops.  Ignored without --targeted-ripup."
         ),
     )
     parser.add_argument(
@@ -8591,6 +8634,11 @@ def main(argv: list[str] | None = None) -> int:
                                     partition_cols=getattr(args, "partition_cols", 2),
                                     max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                                     checkpoint_callback=_checkpoint_cb,
+                                    # Issue #3438 / #3414: forward --targeted-ripup so the
+                                    # pre-existing targeted rip-up path in
+                                    # route_all_negotiated is CLI-reachable.
+                                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
+                                    max_ripups_per_net=getattr(args, "max_ripups_per_net", 3),
                                     # Issue #3132: forward --early-stop-patience
                                     # to the inner main-path negotiator call so
                                     # the CLI flag is honored (the previous
@@ -8659,6 +8707,11 @@ def main(argv: list[str] | None = None) -> int:
                             partition_cols=getattr(args, "partition_cols", 2),
                             max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                             checkpoint_callback=_checkpoint_cb,
+                            # Issue #3438 / #3414: forward --targeted-ripup so the
+                            # pre-existing targeted rip-up path in
+                            # route_all_negotiated is CLI-reachable.
+                            use_targeted_ripup=getattr(args, "targeted_ripup", False),
+                            max_ripups_per_net=getattr(args, "max_ripups_per_net", 3),
                             # Issue #3132: forward --early-stop-patience to the
                             # inner main-path negotiator call so the CLI flag
                             # is honored (default 2 was silently overriding it).
@@ -8732,6 +8785,11 @@ def main(argv: list[str] | None = None) -> int:
                         partition_cols=getattr(args, "partition_cols", 2),
                         max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                         checkpoint_callback=_checkpoint_cb,
+                        # Issue #3438 / #3414: forward --targeted-ripup so the
+                        # pre-existing targeted rip-up path in
+                        # route_all_negotiated is CLI-reachable.
+                        use_targeted_ripup=getattr(args, "targeted_ripup", False),
+                        max_ripups_per_net=getattr(args, "max_ripups_per_net", 3),
                         # Issue #3132: forward --early-stop-patience to the
                         # inner negotiator so the CLI flag is honored.  This
                         # is the call site board 05's
@@ -8770,6 +8828,11 @@ def main(argv: list[str] | None = None) -> int:
                     partition_cols=getattr(args, "partition_cols", 2),
                     max_parallel_workers=getattr(args, "max_parallel_workers", 4),
                     checkpoint_callback=_checkpoint_cb,
+                    # Issue #3438 / #3414: forward --targeted-ripup so the
+                    # pre-existing targeted rip-up path in
+                    # route_all_negotiated is CLI-reachable.
+                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
+                    max_ripups_per_net=getattr(args, "max_ripups_per_net", 3),
                     # Issue #3132: forward --early-stop-patience to the inner
                     # negotiator call so the CLI flag is honored.  Previously
                     # the parameter silently defaulted to 2 even when the
