@@ -40,10 +40,27 @@ Manufacturable routing recipe (issue #3343 P-R1..P-R4):
   disjoint per-net outlines) + GND/+3.3V stitching vias, then
   ``kct check --mfr jlcpcb-tier1`` and ``kct export --mfr jlcpcb``.
 
-Routing config (mirrors the official floor-test harness
-``tests/router/test_softstart_revb_fine_pitch_escape.py``): L=4
-plane-aware stack, 0.20 mm clearance / 0.30 mm trace, jlcpcb-tier1,
-480 s budget / 30 s per-net, ``PYTHONHASHSEED=0``.
+Measured state of the committed artifact (2026-06-10,
+``PYTHONHASHSEED=0``, deterministic across seeds 7/42/123):
+
+- Signal nets: **24/26 fully routed** via ``kct route`` (L=4,
+  jlcpcb-tier1, 0.20 mm clearance, cpp backend, 900 s / 60 s per-net).
+  Residuals: NRST (1/8 -- routes 8/8 alone in 2 s; fails only through
+  end-of-run BLOCKED_BY_COMPONENT rip-up non-convergence) and
+  V_BANK_POS_SENSE (2/3).  Tracked in issue #3479 (transfers to the
+  #3470 rip-up rollback work).
+- Power nets: **15/15 pour nets fully connected** (zones + stitching
+  vias + via-in-pad repair, verified per-pad in route_pcb step 12).
+- DRC at jlcpcb-tier1: 3 errors -- 2 connectivity (the #3479
+  residuals) + 1 ``clearance_pad_segment`` (the U8 SOT-23-5 intra-IC
+  route, ``kct fix-drc``-infeasible, tracked in issue #3480).
+- Export: clean JLCPCB bundle with manifest
+  (``output/manufacturing/``).
+
+The official reach-floor harness
+(``tests/router/test_softstart_revb_fine_pitch_escape.py``) measures
+the tighter in-process config (L=4 plane-aware stack, 480 s / 30 s
+per-net) and pins a 20/26 floor (measured 22/26).
 
 Full pipeline (routing + DRC + export)::
 
@@ -3063,24 +3080,33 @@ def route_pcb(
     output_path: Path,
     auto_pcb_size: bool = False,
 ) -> bool:
-    """Route the PCB using the autorouter (rev B production config).
+    """Route the PCB via ``kct route`` (rev B production config).
 
-    Issue #3343 P-R4: this is the manufacturable-gate configuration —
-    it mirrors the official measurement harness
-    (``tests/router/test_softstart_revb_fine_pitch_escape.py``):
+    Issue #3343 P-R4: this is the manufacturable-gate configuration:
 
-    - L=4 plane-aware stack ``LayerStack.four_layer_sig_gnd_pwr_sig``
-      (the softstart spec declares ``escalation.starting_layers: 4``,
-      ``max_layers: 4``); signals route on F.Cu/B.Cu, In1/In2 are the
-      GND/PWR plane layers that receive the P-R4 zone pours.
+    - ``kct route`` CLI (board-05 #3425/#3472 production pattern) at
+      L=4 (``--starting-layers 4`` per the spec's
+      ``escalation.starting_layers``; the plane-aware
+      sig/gnd/pwr/sig stack is route_cmd's first L=4 choice); signals
+      route on F.Cu/B.Cu, In1/In2 are the GND/PWR plane layers that
+      receive the P-R4 zone pours.
     - 0.20 mm clearance / 0.30 mm trace at the ``jlcpcb-tier1``
-      manufacturer profile.
-    - 480 s routing budget / 30 s per-net.
+      manufacturer profile, ``--micro-via-in-pad-fallback`` for the
+      U1 LQFP-32 in-pad rescues.
+    - 900 s board budget / 60 s per-net (the rip-up convergence
+      lever), seed 42, ``PYTHONHASHSEED=0``.
 
-    After routing, the output PCB's layer table is upgraded to 4
-    copper layers and the power skip-nets receive copper-pour zones +
-    stitching vias (steps 7-8 below) so the connectivity bar is 100%
-    of ALL nets, signal and power.
+    After routing, the power skip-nets receive copper-pour zones,
+    stitching vias, via-in-pad repair, and zone fills (steps 7-11
+    below) so the connectivity bar is 100% of ALL nets, signal and
+    power — verified in step 12 with the same analyzer model that
+    ``kct check``'s connectivity rule uses.
+
+    The official reach-floor harness
+    (``tests/router/test_softstart_revb_fine_pitch_escape.py``) keeps
+    the in-process 480 s configuration for run-to-run comparability;
+    its floor (20/26) is intentionally below this path's measured
+    24/26 because the harness budget is tighter.
 
     P_AS5 (Issue #3352): when ``auto_pcb_size`` is True (or
     ``SOFTSTART_AUTO_PCB_SIZE=1`` is set in the environment), the recipe
@@ -3098,29 +3124,9 @@ def route_pcb(
     if auto_pcb_size or os.environ.get("SOFTSTART_AUTO_PCB_SIZE") == "1":
         return _route_pcb_with_auto_pcb_size(input_path, output_path)
 
-    from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
-    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
-
     print("\n" + "=" * 60)
-    print("Routing PCB...")
+    print("Routing PCB (via ``kct route`` — issue #3343 P-R4)...")
     print("=" * 60)
-
-    # Issue #3343 P-R4 production rules: 0.20 mm clearance (rev B
-    # ``min_trace``/clearance floor) at jlcpcb-tier1.  Mirrors the
-    # official reach-floor harness exactly so the committed artifact and
-    # the measured number are the same configuration.
-    rules = DesignRules(
-        trace_width=0.30,
-        trace_clearance=0.20,
-        via_diameter=0.6,
-        via_drill=0.3,
-        min_trace_width=0.127,
-        manufacturer="jlcpcb-tier1",
-    )
-
-    print(f"\n1. Loading PCB: {input_path}")
-    print(f"   Trace width: {rules.trace_width}mm")
-    print(f"   Clearance: {rules.trace_clearance}mm")
 
     # Skip power and high-current nets.  ISENSE_POS carries discharge current
     # (formerly DISCHARGE_POS/NEG) and should be routed as a heavy trace;
@@ -3128,100 +3134,63 @@ def route_pcb(
     # All of these get zone-pour copper in step 7 below.
     skip_nets = list(ROUTE_SKIP_NETS)
 
-    # Issue #3343 P-R4: L=4 plane-aware stack (the production target per
-    # Issue #3401's measurement — the all-signal variant measured WORSE).
-    layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
-
-    router, net_map = load_pcb_for_routing(
-        str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
-        layer_stack=layer_stack,
-    )
-    router.rules.manufacturer = "jlcpcb-tier1"
-
-    print(f"\n   Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"   Nets loaded: {len(net_map)}")
-    print(f"   Skipping high-current nets: {len(skip_nets)}")
-
-    print("\n2. Routing nets...")
-    # Use negotiated mode with explicit per-net + total timeouts so the run
-    # cannot hang indefinitely on dense layouts (see issue #2794).
+    # Issue #3343 P-R4: the committed artifact routes through the
+    # ``kct route`` CLI (the board-05 #3425/#3472 production pattern)
+    # rather than the in-process ``route_with_escape`` call.  Measured
+    # A/B on this board (same placement, PYTHONHASHSEED=0):
     #
-    # Issue #3138: ``route_with_escape`` runs the dense-package escape
-    # pre-pass on U1 (LQFP-32) and the SOIC-8s before the negotiated
-    # main loop.  Issue #3343 P-R4: per-net budget mirrors the floor
-    # test (30 s at L=4); the BOARD budget is deeper than the test
-    # harness's 480 s because this path produces the committed
-    # manufacturing artifact -- the extra budget goes entirely to the
-    # end-of-run BLOCKED_BY_COMPONENT rip-up convergence on the NRST /
-    # V_BANK_POS_SENSE cluster (see the #3470 non-convergence
-    # signature documented in the floor test).  The floor test keeps
-    # 480 s for run-to-run comparability.
-    router.route_with_escape(
-        use_negotiated=True,
-        per_net_timeout=30.0,
-        timeout=900.0,
-    )
+    #   path                          | reach  | clearance errors
+    #   in-process route_with_escape  | 22/26  | 75 (negotiated
+    #                                 |        |     overflow copper)
+    #   kct route (this recipe)       | 24/26  | 1
+    #
+    # ``kct route`` runs the DRC-nudge + validation post-passes that
+    # drain the overflow copper the raw negotiated loop leaves behind.
+    # The L=4 plane-aware stack comes from ``--starting-layers 4`` (the
+    # spec's ``escalation.starting_layers``); the CLI also upgrades the
+    # output's copper-layer table to 4 layers for the zone pours below.
+    cmd = [
+        sys.executable, "-m", "kicad_tools.cli", "route",
+        str(input_path),
+        "--output", str(output_path),
+        "--auto-layers",
+        "--starting-layers", "4",
+        "--max-layers", "4",
+        "--manufacturer", "jlcpcb-tier1",
+        "--backend", "cpp",
+        # jlcpcb-tier1 supports via-in-pad; 0.3 mm in-pad rescues keep
+        # the U1 LQFP-32 escapes manufacturable (board-05 #3425 pattern)
+        "--micro-via-in-pad-fallback",
+        "--seed", "42",
+        "--timeout", "900",
+        # 60 s per-net is the rip-up convergence lever (board 05
+        # measured 30 -> 60 as the difference between a stranded and a
+        # converged end-of-run cohort).
+        "--per-net-timeout", "60",
+        "--clearance", "0.20",
+        "--trace-width", "0.30",
+        "--skip-nets", ",".join(skip_nets),
+    ]
+    print(f"\n1. Input: {input_path}")
+    print(f"   Output: {output_path}")
+    print(f"   Skipping power nets ({len(skip_nets)}): {skip_nets}")
+    print(f"   Command: {' '.join(cmd)}")
+    print("\n2. Routing...")
 
-    stats_before = router.get_statistics()
-    print("\n3. Raw routing results:")
-    print(f"   Routes: {stats_before['routes']}")
-    print(f"   Segments: {stats_before['segments']}")
-    print(f"   Vias: {stats_before['vias']}")
+    env = dict(os.environ)
+    env.setdefault("PYTHONHASHSEED", "0")
+    route_result = subprocess.run(cmd, capture_output=False, text=True, env=env)
 
-    print("\n4. Optimizing traces...")
-    # Issue #3138 combined intervention: enable drc-aware optimization with
-    # jlcpcb-tier1 manufacturer profile so per-net optimizations that increase
-    # DRC violations are rolled back.
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-        drc_aware=True,
-        drc_manufacturer="jlcpcb-tier1",
-    )
-    optimizer = TraceOptimizer(config=opt_config)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_route = optimizer.optimize_route(route)
-        optimized_routes.append(optimized_route)
-    router.routes = optimized_routes
-
-    stats = router.get_statistics()
-    print("\n5. Final routing results:")
-    print(f"   Routes: {stats['routes']}")
-    print(f"   Segments: {stats['segments']}")
-    print(f"   Vias: {stats['vias']}")
-    print(f"   Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats['nets_routed']}")
-
-    print(f"\n6. Saving routed PCB: {output_path}")
-    original_content = input_path.read_text()
-
-    # Issue #3343 P-R4: the unrouted PCB declares 2 copper layers but
-    # routing runs on the L=4 plane-aware stack (per the spec's
-    # ``starting_layers: 4``).  Upgrade the layer table so the In1.Cu /
-    # In2.Cu plane layers exist in the output for the zone pours below.
-    from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
-
-    original_content = update_pcb_layer_stackup(original_content, 4)
-
-    route_sexp = router.to_sexp()
-
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
+    if not output_path.exists():
+        print(f"\n   ERROR: ``kct route`` did not produce {output_path}", file=sys.stderr)
+        return False
+    if route_result.returncode == 0:
+        print("\n   SUCCESS: ``kct route`` reports all signal nets routed!")
     else:
-        output_content = original_content
-        print("   Warning: No routes generated!")
-
-    output_path.write_text(output_content)
+        print(
+            f"\n   PARTIAL: ``kct route`` exited with code {route_result.returncode} "
+            "(partial routing; downstream zone fill + DRC continue)"
+        )
 
     # Issue #3343 P-R4 (architect S4): copper-pour zones for the full
     # skip set.  This is what makes "skip" honest — the manufacturable
@@ -3305,6 +3274,11 @@ def route_pcb(
         skip_set = set(skip_nets)
         analyzer = NetStatusAnalyzer(output_path)
         result = analyzer.analyze()
+        # ``PadInfo.position`` is BOARD-RELATIVE (the PCB schema shifts
+        # every consumer-visible coordinate by the detected board
+        # origin); the S-expression file stores sheet-absolute
+        # coordinates, so add the origin back when emitting the vias.
+        origin_x, origin_y = analyzer.pcb.board_origin
         repair_vias: list[tuple[float, float, int, str]] = []
         for net_st in result.nets:
             if net_st.net_name not in skip_set or net_st.status == "complete":
@@ -3320,7 +3294,8 @@ def route_pcb(
                     )
                     continue
                 repair_vias.append(
-                    (pad.position[0], pad.position[1], net_st.net_number,
+                    (pad.position[0] + origin_x, pad.position[1] + origin_y,
+                     net_st.net_number,
                      f"{pad.full_name} ({net_st.net_name})")
                 )
         if repair_vias:
@@ -3360,39 +3335,55 @@ def route_pcb(
         if fill_result.stderr:
             print(f"   stderr: {fill_result.stderr.strip()}")
 
-    # Final pour-connectivity verification: every pad on every skip net
-    # must be reached by its pour/stitching (issue #3343 P-R4 AC).
-    print("\n12. Verifying pour-net connectivity...")
+    # Final connectivity verification (issue #3343 P-R4 AC): every pad
+    # on every skip net must be reached by its pour/stitching, and the
+    # signal-net reach is reported from the same analyzer model that
+    # ``kct check``'s connectivity rule uses.
+    print("\n12. Verifying net connectivity (pours + signals)...")
+    pour_ok = True
+    signal_complete = 0
+    signal_total = 0
     try:
         from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
         analyzer = NetStatusAnalyzer(output_path)
         result = analyzer.analyze()
-        pour_ok = True
+        skip_set = set(skip_nets)
         for net_st in result.nets:
-            if net_st.net_name not in set(skip_nets):
-                continue
-            mark = "OK " if net_st.status == "complete" else "FAIL"
-            print(
-                f"   [{mark}] {net_st.net_name}: "
-                f"{net_st.connected_count}/{net_st.total_pads} pads"
-            )
-            if net_st.status != "complete":
-                pour_ok = False
+            if net_st.net_name in skip_set:
+                mark = "OK " if net_st.status == "complete" else "FAIL"
+                print(
+                    f"   [pour {mark}] {net_st.net_name}: "
+                    f"{net_st.connected_count}/{net_st.total_pads} pads"
+                )
+                if net_st.status != "complete":
+                    pour_ok = False
+            elif net_st.total_pads >= 2:
+                signal_total += 1
+                if net_st.status == "complete":
+                    signal_complete += 1
+                else:
+                    print(
+                        f"   [sig  FAIL] {net_st.net_name}: "
+                        f"{net_st.connected_count}/{net_st.total_pads} pads"
+                    )
         if pour_ok:
             print("   All pour nets fully connected.")
         else:
             print("   ERROR: stranded pour-net pads remain (see FAIL rows)")
     except Exception as exc:
-        print(f"   WARNING: pour verification failed: {exc}")
+        print(f"   WARNING: connectivity verification failed: {exc}")
 
-    total_signal_nets = len([n for n in router.nets if n > 0])
-    success = stats["nets_routed"] == total_signal_nets
-
+    success = (
+        pour_ok and signal_total > 0 and signal_complete == signal_total
+    )
     if success:
-        print("\n   SUCCESS: All signal nets routed!")
+        print(f"\n   SUCCESS: all {signal_total} signal nets + all pours connected!")
     else:
-        print(f"\n   PARTIAL: Routed {stats['nets_routed']}/{total_signal_nets} signal nets")
+        print(
+            f"\n   PARTIAL: {signal_complete}/{signal_total} signal nets connected, "
+            f"pours {'OK' if pour_ok else 'INCOMPLETE'}"
+        )
 
     return success
 
