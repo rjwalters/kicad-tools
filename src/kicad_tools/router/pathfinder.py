@@ -154,6 +154,14 @@ class Router:
     - GreedyHeuristic: Fast but suboptimal
     """
 
+    # Issue #3441: the pure-Python pathfinder implements waypoint injection
+    # (#2330) -- off-grid pad positions are injected directly into the A*
+    # search graph (see ``_create_waypoint`` / ``_waypoint_grid_edges``).
+    # ``Autorouter.use_waypoint_injection`` consults this capability flag so
+    # the off-grid recovery mechanisms (sub-grid escape pre-pass + PIN_ACCESS
+    # retry, issue #1603) are only disabled when waypoints can actually run.
+    supports_waypoint_injection: bool = True
+
     def __init__(
         self,
         grid: RoutingGrid,

@@ -204,7 +204,6 @@ class TestAutoSelectGridResolution:
         assert result.off_grid_pads == 0
         assert result.resolution in [0.065, 0.05]  # Either is valid
 
-
     def test_no_candidate_exceeds_clearance(self):
         """With clearance=0.15, no selected candidate should exceed 0.15.
 
@@ -457,10 +456,7 @@ class TestClearanceAwareMemoryBump:
             )
 
         # Acceptance criterion #2: bump is logged at INFO level
-        bump_logs = [
-            r for r in caplog.records
-            if "bumped memory cap" in r.message.lower()
-        ]
+        bump_logs = [r for r in caplog.records if "bumped memory cap" in r.message.lower()]
         assert bump_logs, (
             f"Expected INFO log mentioning the memory cap bump. "
             f"Got records: {[r.message for r in caplog.records]}"
@@ -543,13 +539,10 @@ class TestClearanceAwareMemoryBump:
         # without naming the cause.
         warning_texts = [str(w.message) for w in caught]
         actionable = [
-            t for t in warning_texts
-            if "memory budget cap" in t.lower()
-            and "max_cells" in t
+            t for t in warning_texts if "memory budget cap" in t.lower() and "max_cells" in t
         ]
         assert actionable, (
-            f"Expected an actionable warning naming the memory cap. "
-            f"Got warnings: {warning_texts}"
+            f"Expected an actionable warning naming the memory cap. Got warnings: {warning_texts}"
         )
         # The selected grid is still memory-capped and > clearance/2
         assert result.memory_capped is True
@@ -592,6 +585,234 @@ class TestClearanceAwareMemoryBump:
         # 0.3mm clearance / 2 = 0.15mm.  Default candidates include 0.1
         # which is <= 0.15.
         assert result.clearance_compliant_at_clearance_over_2 is True
+
+
+class TestLatticeRescue:
+    """Tests for issue #3441: lattice-aware auto-grid memory bump.
+
+    The #3239 bump only adopts a bumped candidate set when it reaches
+    ``clearance/2``, so a board-lattice-aligned grid that is merely
+    ``<= clearance`` (0.1mm at clearance 0.15mm) could never be rescued
+    -- the memory filter excluded it BEFORE the off-grid vote ever saw
+    it (board 07: 0.127mm selected with 190/244 pads off-grid while
+    0.1mm had only 53).  The lattice rescue retries the budget bump and
+    adopts it when the unlocked candidate strictly reduces the off-grid
+    count AND places >= 90% of pads on-grid (dominant lattice -- the
+    issue's own threshold).  Board 07 itself does NOT qualify (78%
+    on-grid; the off-lattice BGA-49 aligns exactly to 0.127mm and
+    routing it at 0.1mm measured WORSE: 26/31 vs 28/31), which is the
+    documented "why not" for the issue's scope item 3.
+    """
+
+    def _dominant_lattice_pads(self) -> list[PadPosition]:
+        """Synthetic layout with a genuinely dominant 0.1mm lattice plus a
+        small (< 10%) off-lattice BGA cluster at 1.27mm pitch with
+        0.635mm offsets.  66 pads total, 6 off-lattice -> 90.9% on-grid.
+        """
+        pads: list[PadPosition] = []
+        # Dominant lattice: 60 pads on varied 0.1mm multiples (0.7/0.9mm
+        # pitches), spread so no single 0.127mm origin offset can align a
+        # majority of them.
+        for i in range(10):
+            for j in range(6):
+                pads.append(PadPosition(x=10.0 + i * 0.7, y=20.0 + j * 0.9))
+        # Minority off-lattice cluster: 6 pads at 1.27mm pitch with
+        # 0.635mm offsets (0.635/0.1 = 6.35 -> off the 0.1mm lattice).
+        for k in range(6):
+            pads.append(PadPosition(x=60.635 + k * 1.27, y=50.635))
+        return pads
+
+    def test_lattice_rescue_selects_dominant_lattice_grid(self, caplog):
+        """100x100mm board at clearance 0.15, max_cells 500k:
+
+        - memory filter excludes everything finer than 0.127mm
+          (0.127 needs 620k > 500k cells, so even the coarsest fails and
+          the filter keeps [0.127] as the fallback);
+        - the #3239 bump (2M cells) unlocks 0.1mm (1M cells) but not
+          0.065mm (2.37M), and 0.1 > clearance/2 = 0.075 so the #3239
+          adoption predicate rejects it;
+        - the #3441 lattice rescue must adopt 0.1mm: it has strictly
+          fewer off-grid pads and >= 90% of pads on-grid.
+        """
+        pads = self._dominant_lattice_pads()
+        with caplog.at_level(logging.INFO, logger="kicad_tools.router.io"):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = auto_select_grid_resolution(
+                    pads,
+                    clearance=0.15,
+                    board_width=100.0,
+                    board_height=100.0,
+                    max_cells=500_000,
+                    candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+                )
+
+        assert result.resolution == 0.1, (
+            f"Expected lattice rescue to select 0.1mm, got "
+            f"{result.resolution}mm (candidates tried: "
+            f"{result.candidates_tried})"
+        )
+        assert result.lattice_rescued is True
+        assert result.memory_budget_used == 2_000_000
+        # Only the genuinely off-lattice BGA cluster remains off-grid.
+        assert result.off_grid_pads == 6
+
+        # INFO log names the rescue
+        rescue_logs = [r for r in caplog.records if "lattice rescue" in r.message.lower()]
+        assert rescue_logs, (
+            f"Expected INFO log for the lattice rescue. Got: {[r.message for r in caplog.records]}"
+        )
+
+        # The warning is the honest lattice-rescue variant, not the
+        # misleading "memory budget cap forces" one.
+        warning_texts = [str(w.message) for w in caught]
+        assert any("lattice rescue" in t.lower() for t in warning_texts), (
+            f"Expected lattice-rescue warning, got: {warning_texts}"
+        )
+        for t in warning_texts:
+            assert "memory budget cap forces" not in t, (
+                f"Misleading 'forces' warning emitted after rescue: {t}"
+            )
+
+    def test_no_rescue_without_dominant_lattice(self):
+        """When the unlocked candidate still leaves a majority of pads
+        off-grid, the rescue must NOT burn a 4x memory bump; the original
+        memory-cap warning fires instead."""
+        # Pads on a 0.127mm lattice (imperial): the unlocked 0.1mm
+        # candidate does not help them at all.
+        pads = [PadPosition(x=10.0 + i * 1.27 + 0.0635, y=20.0) for i in range(20)]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=100.0,
+                board_height=100.0,
+                max_cells=500_000,
+                candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+            )
+
+        assert result.lattice_rescued is False
+        assert result.memory_budget_used == 500_000
+        warning_texts = [str(w.message) for w in caught]
+        assert any("memory budget cap forces" in t for t in warning_texts), (
+            f"Expected original memory-cap warning, got: {warning_texts}"
+        )
+
+    def test_clearance_safe_bump_takes_priority_over_rescue(self, caplog):
+        """When the #3239 bump can reach a clearance/2 grid, it runs first
+        and the lattice rescue stays out of the way."""
+        pads = [
+            PadPosition(x=2.0, y=2.0),
+            PadPosition(x=4.0, y=2.0),
+            PadPosition(x=4.05, y=4.0),
+        ]
+        with caplog.at_level(logging.INFO, logger="kicad_tools.router.io"):
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=65.0,
+                board_height=56.0,
+                max_cells=500_000,
+            )
+        assert result.resolution <= 0.075
+        assert result.lattice_rescued is False
+
+    def test_no_rescue_when_memory_not_capped(self):
+        """Tiny board: no memory cap, no rescue."""
+        pads = [PadPosition(x=2.0, y=2.0), PadPosition(x=2.7, y=2.0)]
+        result = auto_select_grid_resolution(
+            pads,
+            clearance=0.15,
+            board_width=10.0,
+            board_height=10.0,
+        )
+        assert result.memory_capped is False
+        assert result.lattice_rescued is False
+        assert result.memory_budget_used == 500_000
+
+    def test_summary_mentions_lattice_rescue(self):
+        """GridAutoSelection.summary() surfaces the rescue."""
+        sel = GridAutoSelection(
+            resolution=0.1,
+            off_grid_pads=53,
+            total_pads=244,
+            off_grid_percentage=21.7,
+            candidates_tried=[(0.127, 190), (0.1, 53)],
+            memory_capped=True,
+            memory_budget_used=2_000_000,
+            lattice_rescued=True,
+        )
+        assert "lattice rescue" in sel.summary()
+
+    def test_mixed_lattice_below_dominance_bar_declines(self):
+        """A board-07-like mix (~78% on the 0.1 lattice, off-lattice
+        remainder is a 1.27mm BGA) must NOT be rescued: empirically the
+        0.127mm grid that aligns the BGA routes BETTER (28/31 vs 26/31
+        measured on board 07), so the dominance bar is load-bearing."""
+        pads: list[PadPosition] = []
+        # 36 pads on the 0.1mm lattice
+        for i in range(6):
+            for j in range(6):
+                pads.append(PadPosition(x=10.0 + i * 0.7, y=20.0 + j * 0.9))
+        # 10 off-lattice BGA pads (10/46 = 21.7% off-grid, like board 07)
+        for k in range(10):
+            pads.append(PadPosition(x=60.635 + k * 1.27, y=50.635))
+        result = None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=100.0,
+                board_height=100.0,
+                max_cells=500_000,
+                candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+            )
+        assert result.lattice_rescued is False
+        assert result.resolution == 0.127
+        assert result.memory_budget_used == 500_000
+
+    def test_board07_real_pcb_keeps_bga_aligned_grid(self):
+        """End-to-end on the committed board 07 PCB: the lattice rescue
+        must DECLINE (78% on the 0.1mm lattice < 90% dominance bar) and
+        keep 0.127mm, which aligns the BGA-49 exactly (1.27/0.127 = 10).
+
+        This is the issue's scope-item-3 "documents why not": forcing
+        0.1mm on this mixed-lattice board measured 26/31 routed nets vs
+        28/31 at 0.127mm (2026-06-10) because the six TMDS nets on the
+        off-grid BGA row congest each other once they need escape stubs.
+        """
+        import pathlib
+
+        pcb = (
+            pathlib.Path(__file__).parent.parent
+            / "boards"
+            / "07-matchgroup-test"
+            / "output"
+            / "matchgroup_test.kicad_pcb"
+        )
+        if not pcb.exists():
+            pytest.skip("board 07 artifact not present")
+        pads = extract_pad_positions(str(pcb))
+        dims = extract_board_dimensions(str(pcb))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=dims[0],
+                board_height=dims[1],
+            )
+        assert result.resolution == 0.127
+        assert result.lattice_rescued is False
+        # Confirm the curator's off-grid attribution at 0.1mm: 53 pads
+        # are genuinely off-lattice (U4 BGA-49 at 1.27mm pitch: 45 pads;
+        # J3 2.54mm THT header: 8 pads) -- NOT a grid-origin bug.
+        off_at_01 = _count_off_grid_with_offset(list(pads), 0.1, 0.0, 0.0)
+        assert off_at_01 == 53
+        # 53/244 = 21.7% off-grid -> below the 90% dominance bar.
+        assert off_at_01 * 10 > result.total_pads
 
 
 class TestGridAutoSelectionSummary:
@@ -914,7 +1135,7 @@ class TestGcdBasedGridSelection:
         )
         # The fine GCD candidates (0.065mm etc.) should be filtered out
         # by the memory budget; only coarser ones should survive.
-        cells = (100.0 * 100.0) / (result.resolution ** 2)
+        cells = (100.0 * 100.0) / (result.resolution**2)
         assert cells <= 500_000, (
             f"Selected grid {result.resolution}mm produces {cells:.0f} cells, "
             f"exceeds budget of 500000"
@@ -948,9 +1169,7 @@ class TestGcdBasedGridSelection:
             PadPosition(x=0.0, y=0.0),
             PadPosition(x=0.65, y=0.0),
         ]
-        result = auto_select_grid_resolution(
-            pads, clearance=1.5, candidates=[0.5, 0.25]
-        )
+        result = auto_select_grid_resolution(pads, clearance=1.5, candidates=[0.5, 0.25])
         resolutions_tried = [c[0] for c in result.candidates_tried]
         # Only the user-specified candidates should be tried
         assert 0.65 not in resolutions_tried
@@ -1293,8 +1512,7 @@ class TestIssue2387ClearanceFilterRelaxation:
         # 0.1mm is on the boundary (c <= clearance) and divides 0.8mm evenly
         resolutions_tried = [c[0] for c in result.candidates_tried]
         assert 0.1 in resolutions_tried, (
-            f"0.1mm candidate must survive c <= clearance filter; "
-            f"got tried = {resolutions_tried}"
+            f"0.1mm candidate must survive c <= clearance filter; got tried = {resolutions_tried}"
         )
         # And at this clearance, 0.1mm is the coarsest valid candidate
         assert result.resolution == 0.1
@@ -1333,10 +1551,18 @@ class TestIssue2387MultiResPlanWithBoardDims:
         pads: list[Pad] = []
         # TQFP-32 — 0.1mm-aligned positions
         for i in range(8):
-            pads.append(Pad(
-                x=cx - 2.8 + i * 0.8, y=cy + 2.8, width=0.5, height=1.5,
-                net=i + 1, net_name=f"NET{i + 1}", ref="U1", pin=str(i + 1),
-            ))
+            pads.append(
+                Pad(
+                    x=cx - 2.8 + i * 0.8,
+                    y=cy + 2.8,
+                    width=0.5,
+                    height=1.5,
+                    net=i + 1,
+                    net_name=f"NET{i + 1}",
+                    ref="U1",
+                    pin=str(i + 1),
+                )
+            )
 
         # Without board dimensions, inner auto-select picks finest GCD
         # candidate (0.1 from 0.8 pitch) but no memory budget guard is

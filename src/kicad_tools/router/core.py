@@ -826,7 +826,14 @@ class Autorouter:
         # When True, the pathfinder injects off-grid pad positions directly into
         # the A* search graph, eliminating the need for escape segments.
         # The sub-grid pre-pass is retained as a fallback when this is False.
-        self.use_waypoint_injection: bool = True
+        #
+        # Issue #3441: this is the *request* flag.  The effective value is
+        # exposed via the ``use_waypoint_injection`` property, which also
+        # requires the active backend to actually implement waypoint
+        # injection (Python pathfinder only -- the C++ backend has no
+        # waypoint support, so under ``CppPathfinder`` the sub-grid escape
+        # pre-pass and PIN_ACCESS retry stay active).
+        self._use_waypoint_injection: bool = True
 
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
@@ -1096,6 +1103,32 @@ class Autorouter:
         )
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
+
+    @property
+    def use_waypoint_injection(self) -> bool:
+        """Effective waypoint-injection state (Issue #3441).
+
+        True only when waypoint injection is both *requested* (the
+        historical default) AND the active pathfinder backend actually
+        implements it.  Waypoint injection (#2330) exists only in the
+        pure-Python ``Router``; the C++ ``CppPathfinder`` has no waypoint
+        support, so under the C++ backend this returns False and the
+        sub-grid escape pre-pass / PIN_ACCESS sub-grid retry (#1603)
+        remain active as the off-grid pad recovery mechanisms.
+
+        Before this gate, ``use_waypoint_injection`` was hardcoded True,
+        which under ``--backend cpp`` simultaneously disabled all three
+        off-grid recovery mechanisms (waypoints never ran in C++; the
+        flag disabled the other two) while logs claimed coverage --
+        the root cause of the board-07 ``--grid 0.1`` 13/31 regression.
+        """
+        return self._use_waypoint_injection and getattr(
+            self.router, "supports_waypoint_injection", False
+        )
+
+    @use_waypoint_injection.setter
+    def use_waypoint_injection(self, value: bool) -> None:
+        self._use_waypoint_injection = bool(value)
 
     @property
     def _cpp_grid(self) -> CppGrid | None:
@@ -2129,11 +2162,14 @@ class Autorouter:
             if has_pin_access_failure:
                 subgrid_recovered = False
                 # Sub-grid retry is only useful when waypoint injection is
-                # disabled (otherwise the C++ pathfinder already handles
-                # off-grid pads).  Sub-grid retry is also pointless when
-                # we already produced some routes for this net (it can't
-                # add coverage; the failing edge is what we need to
-                # un-block, and only via-conflict resolution can do that).
+                # not effective.  Issue #3441: ``use_waypoint_injection``
+                # is now backend-aware -- it is False under the C++
+                # backend (which has NO waypoint support, contrary to the
+                # pre-#3441 comment here), so this retry stays available
+                # there.  Sub-grid retry is also pointless when we already
+                # produced some routes for this net (it can't add
+                # coverage; the failing edge is what we need to un-block,
+                # and only via-conflict resolution can do that).
                 if not self.use_waypoint_injection and not new_routes:
                     retry_routes = self._retry_net_with_subgrid(net)
                     if retry_routes:
@@ -6351,7 +6387,17 @@ class Autorouter:
         # the negotiated loop would attempt to re-route diff-pair nets,
         # which wastes effort and can corrupt the carefully-coupled routing
         # produced by the CoupledPathfinder.
-        prerouted_nets: set[int] = {r.net for r in self.routes}
+        #
+        # Issue #3441: sub-grid escape stubs (#1603) are NOT full routes --
+        # they only connect an off-grid pad to its nearest grid point.
+        # With the pre-pass re-enabled under the C++ backend (waypoint
+        # injection is Python-only), counting them here made the loop skip
+        # every net whose off-grid pad got a stub (board 07's six TMDS
+        # nets ended permanently at 1/2 pads connected).  Escape stubs are
+        # excluded via ``Route.is_escape``.
+        prerouted_nets: set[int] = {
+            r.net for r in self.routes if not getattr(r, "is_escape", False)
+        }
         if prerouted_nets:
             skipped_nets = [n for n in net_order if n in prerouted_nets]
             if skipped_nets:
@@ -9945,6 +9991,10 @@ class Autorouter:
             - ``segments_restored``: Segments restored to preserve
               connectivity.
             - ``vias_restored``: Vias restored to preserve connectivity.
+            - ``orphan_escape_routes_removed``: Sub-grid escape stubs
+              (#1603) removed because their net has no real route
+              (Issue #3441) -- prevents failed nets from being reported
+              as "partially connected" via their stub copper.
         """
         stats: dict[str, int] = {
             "net0_routes_removed": 0,
@@ -9954,7 +10004,30 @@ class Autorouter:
             "oob_vias_removed": 0,
             "segments_restored": 0,
             "vias_restored": 0,
+            "orphan_escape_routes_removed": 0,
         }
+
+        # -- Step 0 (Issue #3441): Drop orphan escape stubs --
+        # Sub-grid escape stubs (#1603) are pad-access aids for the main
+        # routing pass.  When the net ultimately FAILED to route, its stub
+        # is dead copper touching the pad -- it makes the output report
+        # the net as "partially connected" (segments exist, pads not all
+        # connected) instead of cleanly unrouted, and leaves stray stubs
+        # on the board.  Remove escape-stub routes for nets that have no
+        # real (non-escape) route.  Runs before the connectivity snapshot
+        # so the restore guard below doesn't resurrect them.
+        nets_with_real_routes = {
+            r.net for r in self.routes if not getattr(r, "is_escape", False)
+        }
+        orphan_escapes = [
+            r
+            for r in self.routes
+            if getattr(r, "is_escape", False) and r.net not in nets_with_real_routes
+        ]
+        if orphan_escapes:
+            orphan_ids = {id(r) for r in orphan_escapes}
+            self.routes = [r for r in self.routes if id(r) not in orphan_ids]
+            stats["orphan_escape_routes_removed"] = len(orphan_escapes)
 
         # -- Snapshot pre-cleanup connectivity --
         pre_components = self._count_net_components(self.routes)
@@ -11229,7 +11302,11 @@ class Autorouter:
         Returns:
             List of net IDs that were not successfully routed
         """
-        routed_nets = {r.net for r in self.routes}
+        # Issue #3441: escape stubs (#1603) are pad-access aids, not full
+        # routes -- a net whose only copper is an escape stub is failed.
+        routed_nets = {
+            r.net for r in self.routes if not getattr(r, "is_escape", False)
+        }
         all_nets = {n for n in self.nets.keys() if n != 0}
         return list(all_nets - routed_nets)
 
@@ -12301,27 +12378,71 @@ class Autorouter:
         pad_list = list(self.pads.values())
         return self._subgrid.route_with_subgrid(pad_list)
 
+    def _pad_metal_covers_grid_cell(self, pad: "Pad") -> bool:
+        """Return True if the grid cell nearest *pad* lies within its metal.
+
+        Issue #3441: the A* pathfinder seeds start nodes from EVERY grid
+        cell inside the pad's metal area (#977) and accepts pad-covered
+        cells at the goal, so a pad whose nearest grid intersection falls
+        inside its copper is directly routable even when its center is
+        "off-grid" -- no escape stub is needed.  Conversely, a pad smaller
+        than the snap error genuinely cannot be landed on and needs the
+        sub-grid escape pre-pass.
+
+        Uses ``min(width, height) / 2`` as the half-extent so rotated
+        pads are handled conservatively (a false negative merely emits an
+        unnecessary stub; a false positive would leave the pad unreachable
+        until the PIN_ACCESS retry).
+        """
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+        half_extent = min(pad.width, pad.height) / 2
+        return (
+            abs(pad.x - snap_x) <= half_extent
+            and abs(pad.y - snap_y) <= half_extent
+        )
+
     def _run_subgrid_prepass(self) -> list[Route]:
         """Run sub-grid escape pre-pass for off-grid pads.
 
-        Analyzes all pads, generates escape segments for any that fall
-        between main grid points, and unblocks grid cells at escape
-        endpoints. This is a no-op for boards with no off-grid pads.
+        Analyzes pads that the A* cannot land on directly, generates
+        escape segments for them, and unblocks grid cells at escape
+        endpoints. This is a no-op for boards with no such pads.
 
         Issue #2330: When waypoint injection is enabled, the pathfinder
         handles off-grid pads directly via injected waypoint nodes in the
         A* search graph.  The sub-grid pre-pass is skipped entirely.
 
+        Issue #3441: under the C++ backend (no waypoint support) the
+        pre-pass runs, but ONLY for pads whose metal area contains no
+        grid cell (see :meth:`_pad_metal_covers_grid_cell`).  Pads with
+        a grid cell inside their copper are directly routable -- blanket
+        stub synthesis for every nominally off-grid pad measured WORSE
+        on board 07 (26/31 vs 28/31 at 0.127mm: 242 stubs congested the
+        QFN/BGA corridors), because the stubs consume corridor space the
+        real routes need.  Pads that are covered but whose cells are
+        blocked by foreign clearance are recovered by the failure-driven
+        PIN_ACCESS sub-grid retry instead (:meth:`_retry_net_with_subgrid`).
+
         Returns:
-            List of escape Route objects (empty if no off-grid pads)
+            List of escape Route objects (empty if no uncovered pads)
 
         Issue #1603: Wire sub-grid routing into default route_all pipeline.
         """
-        # Issue #2330: Skip sub-grid pre-pass when waypoint injection is active
+        # Issue #2330: Skip sub-grid pre-pass when waypoint injection is
+        # active.  Issue #3441: the property is backend-aware -- under the
+        # C++ backend (no waypoint support) it returns False and the
+        # pre-pass runs for genuinely unreachable pads.
         if self.use_waypoint_injection:
             return []
 
-        subgrid_result = self.prepare_subgrid_escapes()
+        uncovered = [
+            p for p in self.pads.values() if not self._pad_metal_covers_grid_cell(p)
+        ]
+        if not uncovered:
+            return []
+
+        subgrid_result = self._subgrid.route_with_subgrid(uncovered)
 
         if not (subgrid_result.analysis and subgrid_result.analysis.has_off_grid_pads):
             return []
@@ -12402,6 +12523,15 @@ class Autorouter:
 
         # Retry routing
         retry_routes = self.route_net(net, _subgrid_retry=True)
+        # Issue #3441: only report success when the retry actually routed
+        # the net.  Returning bare escape stubs made route_net's
+        # ``subgrid_recovered`` flag True and skipped the via-conflict
+        # resolver (#2838) even though the net was still unrouted -- the
+        # stub cannot fix a via blocker.  The stubs stay in self.routes
+        # (marked ``is_escape``); if the net never routes, the orphan
+        # escape cleanup in :meth:`cleanup_artifacts` removes them.
+        if not retry_routes:
+            return []
         return escape_routes + retry_routes
 
     @property

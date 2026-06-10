@@ -8308,6 +8308,12 @@ def main(argv: list[str] | None = None) -> int:
             clearance=args.clearance,
         )
         if fine_pitch_report.has_warnings:
+            # Issue #3441: ``use_waypoint_injection`` is backend-aware --
+            # waypoint injection (#2330) only exists in the pure-Python
+            # pathfinder.  Under the C++ backend it reports False and the
+            # sub-grid escape pre-pass + PIN_ACCESS retry (#1603) are the
+            # active off-grid recovery mechanisms, so the banner names the
+            # mechanism that will actually run.
             if router.use_waypoint_injection:
                 # Waypoint injection handles off-grid pads by injecting their
                 # exact positions into the A* search graph, so the grid-alignment
@@ -8315,13 +8321,22 @@ def main(argv: list[str] | None = None) -> int:
                 if fine_pitch_report.total_off_grid > 0:
                     flush_print(
                         f"\n  {fine_pitch_report.total_off_grid} pads off-grid; "
-                        "waypoint injection will handle pad connections"
+                        "waypoint injection will handle pad connections "
+                        "(Python pathfinder)"
                     )
                 # Still show full per-component detail at verbose (-v)
                 if args.verbose:
                     flush_print("\n--- Fine-Pitch Component Analysis (verbose) ---")
                     show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=True)
             else:
+                if fine_pitch_report.total_off_grid > 0:
+                    flush_print(
+                        f"\n  {fine_pitch_report.total_off_grid} pads off-grid; "
+                        "A* lands on pad metal directly, with the sub-grid "
+                        "escape pre-pass (uncovered pads) + PIN_ACCESS retry "
+                        "as recovery (waypoint injection unavailable on this "
+                        "backend)"
+                    )
                 flush_print("\n--- Fine-Pitch Component Analysis ---")
                 show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=args.verbose)
 
