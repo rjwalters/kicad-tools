@@ -6482,7 +6482,7 @@ class EscapeRouter:
         package: PackageInfo | None = None,
         skip_on_clearance_violation: bool = False,
         target_direction: EscapeDirection | None = None,
-        existing_escapes: list["EscapeRoute"] | None = None,
+        existing_escapes: list[EscapeRoute] | None = None,
     ) -> EscapeRoute | None:
         """Attempt an in-pad via escape for a fine-pitch SSOP/TSSOP pad.
 
@@ -7301,7 +7301,7 @@ class EscapeRouter:
         layer,
         net: int,
         clearance: float,
-        existing_escapes: list["EscapeRoute"],
+        existing_escapes: list[EscapeRoute],
     ) -> bool:
         """Check a proposed in-pad escape stub against already-generated escapes.
 
@@ -7320,7 +7320,7 @@ class EscapeRouter:
         copper clearance against any FOREIGN-net segment or via barrel
         of an already-generated escape route.
         """
-        from .geometry import point_to_segment_distance, segment_to_segment_distance
+        from .geometry import segment_to_segment_distance
 
         eps = 1e-6
         for esc in existing_escapes:

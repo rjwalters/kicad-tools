@@ -155,7 +155,7 @@ class TestInPadStubConflictDetection:
 class TestInPadStubDirectionRetry:
     """``_try_in_pad_escape`` flips the stub away from conflicting copper."""
 
-    def _gen(self, er: EscapeRouter, pad: Pad, existing) -> "EscapeRoute | None":
+    def _gen(self, er: EscapeRouter, pad: Pad, existing) -> EscapeRoute | None:
         return er._try_in_pad_escape(
             pad=pad,
             direction=EscapeDirection.WEST,
