@@ -114,7 +114,7 @@ def _run_kct_check(pcb_path: Path) -> int:
     """Run ``kct check`` on *pcb_path* and return the *blocking* error count.
 
     Mirrors ``scripts/ci/check_routed_drc.py::_count_blocking_errors`` --
-    uses ``--mfr jlcpcb --errors-only --format json`` to get a
+    uses ``--mfr jlcpcb-tier1 --errors-only --format json`` to get a
     machine-parsable count and applies the same advisory-rule filter
     (currently ``connectivity``) the CI gate uses.  Without the filter
     this test diverged from CI on boards that ship with non-zero
@@ -132,8 +132,13 @@ def _run_kct_check(pcb_path: Path) -> int:
         "kicad_tools.cli",
         "check",
         str(pcb_path),
+        # Issue #3425: board 05 routes + DRC-gates against jlcpcb-tier1
+        # (Capability-Plus legalizes the DRV8301 in-pad rescue vias).
+        # The CI gate reads the same profile from the manufacturers:
+        # override in .github/routed-drc-tolerance.yml; this test pins
+        # the profile inline to stay aligned with that verdict.
         "--mfr",
-        "jlcpcb",
+        "jlcpcb-tier1",
         "--errors-only",
         "--format",
         "json",

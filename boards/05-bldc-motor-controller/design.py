@@ -2636,44 +2636,89 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     full negotiator at iteration 0 which destroyed the iter-2 best
     state.  Net effect: 21/32 -> 12/32 (regression).  Skip it.
 
+    Issue #3425 (2026-06-10) rewrote the recipe for the jlcpcb-tier1 +
+    cpp + 4-layer manufacturing target.  Every flag below was chosen by
+    A/B measurement on the post-#3423 (U3 rotated) placement; the full
+    matrix lives in the #3425 PR body.  Headline rows:
+
+      recipe                                       | reach | blocking DRC
+      ---------------------------------------------+-------+-------------
+      2L python jlcpcb (old recipe, committed)     | 19/35 | 10
+      4L cpp tier1, pinned layers + old extras     | 25/35 | 28
+      4L cpp tier1 auto-layers (bare, #3424 cfg)   | 28/35 | 29 (!)
+      + --micro-via-in-pad-fallback                | 23/35 |  1
+      + --per-net-timeout 60          (seed 42)    | 27/35 |  1
+      + --per-net-timeout 60          (seed 7)     | 28/35 |  1  <- HERE
+      same, --timeout 1500                         | 23/35 |  1
+
+    The bare #3424 configuration's 28/35 carries 29 blocking
+    violations (21 clearance_pad_via + 8 clearance_via_via): the
+    0.6 mm in-pad rescue vias on U3's 0.5 mm-pitch pads clip the
+    NEIGHBOURING foreign-net pads.  tier1 legalizes the via-in-pad
+    *operation* (rule family suppressed) but NOT cross-net clearance
+    (see the #3425 curator's mechanism correction).
+    ``--micro-via-in-pad-fallback`` (#3118) retries those rescues at
+    0.3/0.15 mm micro-via dimensions, which fit the 0.3 mm pads without
+    clipping neighbours -- that is what collapses blocking 29 -> 1.
+
     What each flag does:
 
-    - ``--no-auto-layers --layers 2``: pin a 2-layer stackup so the
-      negotiator gets the full timeout budget on the right stack.  The
-      default auto-layers loop escalates 2->4->6 and throws away the
-      partial 2L result; pinning avoids that thrash.  Empirically a
-      forced 4-layer route on this board UNDER-performed 2L (#3096
-      builder measurement: 14/32 vs 18/32 in iteration 0) because the
-      negotiator's layer-preference matrix saturates the wider stack
-      with conflicting net routes that don't survive the recovery pass.
-    - ``--manufacturer jlcpcb``: triggers the jlcpcb design-rule profile.
-    - ``--differential-pairs``: enables the ISENSE_* matched-impedance
-      pair handling.
-    - **Backend selection (no explicit pin)**: the Issue #3096 ``--backend
-      python`` pin was removed as of Issue #3130 -- the C++ pathfinder
-      now accepts per-net ``emit_trace_width`` / ``emit_via_diameter`` /
-      ``emit_via_drill`` parameters, so the original rationale
-      ("C++ uses a single rules.trace_width") no longer applies.
-      Empirically the C++ backend routes more signal nets than Python
-      on this recipe (17/32 vs 15/32 at HEAD) and finishes in ~3 minutes
-      vs ~6 minutes.  Letting ``--backend auto`` (the default) select
-      cpp when the native extension is built preserves both the speed
-      and the Python fallback for environments without it.
-    - ``--seed 42``: deterministic output for byte-identical re-routes
-      in CI.
-    - ``--early-stop-patience 4``: per Issue #3101, the negotiator
-      stops after N consecutive non-improving rip-up iterations.
-      Default 2; bumped to 4 here to give the rip-up loop more shots
-      at hard-to-route SWCLK/SWDIO/NRST nets.
-    - ``--auto-fix --auto-fix-passes 3``: invoke fix-drc as a post-
-      route step with its own time budget (instead of in-line --auto-
-      fix which shares the routing deadline -- issue #2802).
+    - ``--auto-layers --starting-layers 4 --max-layers 4``: 4-layer
+      stack honoring project.kct ``escalation.starting_layers: 4``
+      (Issue #3402: 2L tops out at ~46-53% reach).  The auto-layers
+      orchestrator is deliberate (NOT ``--no-auto-layers --layers 4``):
+      the two code paths route differently, and the pinned-layers flow
+      measures 3-5 nets WORSE with 27-28 pad_segment grid-artifact
+      violations at U3 (see the matrix above).
+    - ``--manufacturer jlcpcb-tier1``: the JLCPCB Capability-Plus
+      design-rule profile (Issue #3425).  tier1 sets
+      ``via_in_pad_supported: true``, which legalizes the in-pad
+      rescue vias the router needs to escape the DRV8301 (U3,
+      HTSSOP-56, 0.5mm pitch) -- under the base jlcpcb tier those
+      rescues trip the ``via_in_pad`` rule family.  Cost note: tier1
+      via-in-pad (epoxy fill + plating-over) carries a per-order
+      surcharge (~$30 in 2026); accepted for this board per Issue
+      #3425's curator note.
+    - ``--micro-via-in-pad-fallback``: retry in-pad escape vias at
+      0.3 mm OD / 0.15 mm drill when the standard 0.6 mm via would clip
+      a neighbouring foreign-net pad (Issue #3118; same mechanism as
+      board 04's U2.23 LQFP-48 rescue).  Micro-vias are part of
+      tier1's Capability-Plus process.
+    - ``--backend cpp``: explicit C++ pathfinder pin (Issue #3425).
+      See the comment block on the ``--backend`` argument below for
+      the full history of the python-pin (#3221/#3337) and why it is
+      superseded under the tier1 + 4L recipe.  The explicit pin (vs
+      ``auto``) makes a missing native extension fail loudly instead
+      of silently falling back to python and producing a different
+      deterministic output -- build it with ``kct build-native``
+      (see CLAUDE.md fresh-worktree checklist).
+    - ``--seed 7``: deterministic output for byte-identical re-routes
+      in CI.  Seed selected by measurement (42 -> 27/35, 123 -> 27/35,
+      7 -> 28/35 at otherwise-identical flags); the DRC profile is the
+      same single residual across all three seeds.
+    - ``--timeout 900 --per-net-timeout 60``: the per-net budget is
+      the reach lever on this board -- at the default 30 s the
+      BLOCKED_BY_COMPONENT rip-up for ISENSE_A-/B- "did not converge"
+      and left HALL_A/B/C collateral-damaged (23/35); at 60 s the
+      rip-up re-lands the displaced siblings (27-28/35).  Raising the
+      wall budget instead (1500 s) is counter-productive: the extra
+      budget feeds a second destructive rip-up wave (23/35).
+    - Dropped vs the old 2L recipe (all by measurement, #3425):
+      ``--differential-pairs`` (the ISENSE pair classes refuse
+      engagement: ``opt_in_disabled``; flag was a no-op for pairing
+      and the bare config without it measures better),
+      ``--early-stop-patience 4`` (governs the outer negotiated
+      iteration loop, which the auto-layers two-phase flow does not
+      run -- no-op here), and ``--auto-fix --auto-fix-passes 3``
+      (measured neutral: identical reach + DRC with and without; the
+      single residual overlap is infeasible for fix-drc's nudge
+      repair).
 
     Skip nets remain the high-current power/phase nets that are carried
     by copper pours instead of routed traces.
     """
     print("\n" + "=" * 60)
-    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111)...")
+    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111, #3425)...")
     print("=" * 60)
 
     # Skip power and high-current nets (route manually or use copper pour zones)
@@ -2688,73 +2733,56 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         str(input_path),
         "--output",
         str(output_path),
-        "--no-auto-layers",
-        "--layers",
-        "2",
+        # Issue #3425: 4L via the auto-layers orchestrator (starting ==
+        # max == 4, so no escalation ladder) -- the pinned-layers flow
+        # routes measurably worse on this board (see docstring matrix).
+        "--auto-layers",
+        "--starting-layers",
+        "4",
+        "--max-layers",
+        "4",
         "--manufacturer",
-        "jlcpcb",
-        "--differential-pairs",
-        # Issue #3221: re-pin ``--backend python``.  PR #3131 (Issue
-        # #3130) removed this pin on the rationale that #3130's per-net
-        # trace-width / via-size emit landed in the C++ pathfinder, but
-        # the empirical board-05 measurement captured in that PR's body
-        # (32 -> 55 DRC errors with cpp vs python) confirmed the C++
-        # backend produces substantially more clearance violations on
-        # this dense MOSFET-bridge layout in exchange for +2 routed
-        # nets.  Bisect under #3221 traced board 05's 9 -> 37 blocking
-        # regression directly to that pin removal (pre-#3131 c3cee787
-        # produced 3 blocking; post-#3131 f653033f jumped to 35 blocking)
-        # -- the per-pad channel budget work (#3198/#3201) and A* tie-
-        # break changes (#3192/#3204) did not contribute, since A/B
-        # measurements at HEAD with the budget short-circuited and the
-        # comparator reverted to pre-#3192 both stayed at 36 blocking.
-        # Re-pinning python recovers the original floor=9 baseline that
-        # the routed-drc tolerance file documents.  Letting the backend
-        # auto-resolve will be revisited under a follow-up issue once
-        # the C++ pathfinder's per-net per-clearance cost surface
-        # matches the Python backend's behaviour on this layout.
+        "jlcpcb-tier1",  # Issue #3425: via-in-pad legal under Capability-Plus
+        "--micro-via-in-pad-fallback",  # Issue #3425/#3118: 0.3mm rescues at U3
+        # Backend history (#3221 / #3337 / #3425):
         #
-        # Issue #3337 (2026-06-08) re-measurement on current main
-        # (post Wave 9 fixes #3258/#3307): the gap remains substantial.
-        # Side-by-side A/B at HEAD (committed pin vs fresh cpp re-route):
+        # The ``--backend python`` pin (Issue #3221, re-affirmed by the
+        # #3337 re-measurement) was the correct call for the OLD recipe
+        # (2 layers, base jlcpcb tier).  Under that recipe the cpp
+        # pathfinder bought +7% reach at the cost of a 5x increase in
+        # blocking DRC errors, dominated by in-pad rescue vias on the
+        # DRV8301's 0.5mm-pitch pads -- vias the base jlcpcb profile
+        # cannot manufacture (no epoxy fill / plating-over), so they
+        # surfaced as DRC noise.
         #
-        #   backend    | total | blocking | pad_seg | seg_seg | seg_via | reach
-        #   committed  |   29  |     6    |    6    |    0    |    0    | 60%
-        #   python new |   32  |    11    |    3    |    5    |    3    | 60%
-        #   cpp new    |   68  |    54    |   11    |   31    |    9    | 67%
+        # Issue #3425 (2026-06-10) supersedes that rationale: under the
+        # jlcpcb-tier1 (Capability-Plus) profile via-in-pad is a
+        # supported manufacturing operation (the ``via_in_pad`` rule
+        # family is suppressed via ``via_in_pad_supported: true``), so
+        # the cpp backend's in-pad rescues are INTENDED OUTPUT, not
+        # noise.  Combined with the #3423 U3 rotation (which relieved
+        # the escape-band congestion), the micro-via in-pad fallback
+        # (#3118), and the 4-layer stack, the cpp backend is strictly
+        # better here:
         #
-        # The cpp backend buys +7% routing reach at the cost of a 9x
-        # increase in clearance_segment_segment violations and a 5x
-        # increase in total blocking errors -- the python pin remains
-        # the correct choice for this layout.  The committed PCB is
-        # also strictly better than a fresh python re-route under
-        # current main (6 vs 11 blocking), per the
-        # test_committed_pcb_has_no_segment_segment_or_segment_via
-        # regression test from PR #3258.  DO NOT overwrite the
-        # committed routed snapshot without manually verifying the
-        # new fresh re-route is strictly better.
+        #   recipe                          | reach        | blocking
+        #   2L python jlcpcb (pre-#3423)    | 60%          | 6
+        #   2L python jlcpcb (post-#3423)   | 53% (19/35)  | 10
+        #   4L cpp tier1 (this recipe)      | 28/35 (80%)  | 1
         #
-        # Issue #3423 (2026-06-09): the U3 rotation moved all 56 U3
-        # pads, forcing the artifact refresh the paragraph above
-        # warned about.  The committed snapshot is now this recipe's
-        # deterministic seed-42 output on the post-#3442 router
-        # (10 blocking = 6 pad_segment + 1 seg_seg + 3 seg_via; see
-        # Issue #3444 for the B.Cu overlap families and the
-        # re-tightening plan; 2L reach 53% at this recipe's 900s
-        # budget, 45.7% at the floor test's 240s recipe).
+        # The committed routed snapshot is this recipe's deterministic
+        # seed-7 output; tests/test_board_05_drc_hotspot_regression.py
+        # pins its DRC profile under jlcpcb-tier1.  DO NOT switch the
+        # backend or tier without regenerating the snapshot and
+        # re-baselining that test in the same PR.
         "--backend",
-        "python",
+        "cpp",
         "--seed",
-        "42",
+        "7",  # Issue #3425: measured best of {7, 42, 123} -- 28/35 vs 27/35
         "--timeout",
-        "900",  # Issue #3111: was 360; bumped so auto-fix has budget after negotiator finishes
+        "900",  # Issue #3111: was 360.  #3425: do NOT raise to 1500 (23/35, see docstring)
         "--per-net-timeout",
-        "30",
-        "--early-stop-patience",
-        "4",  # Issue #3111: default 2, bumped to 4 so iter 5-6 try harder nets
-        "--auto-fix",
-        "--auto-fix-passes",
-        "3",  # Issue #3111: post-route fix-drc with its own budget
+        "60",  # Issue #3425: 30 -> 60; the reach lever (rip-up convergence, see docstring)
         "--skip-nets",
         ",".join(skip_nets),
     ]
@@ -2916,6 +2944,13 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
         "kicad_tools.cli",
         "export",
         str(routed_path),
+        # Issue #3425: board 05 routes + DRC-gates against jlcpcb-tier1
+        # (Capability-Plus permits the DRV8301 in-pad rescue vias), but
+        # the `kct export` fab-spec layer only recognises the base
+        # `jlcpcb` profile name for CPL / spec-overlay generation
+        # (tier-1 is a routing/DRC capability tier, not a distinct fab
+        # house).  Export against `jlcpcb`, mirroring boards 03/04
+        # (#3150, #3033/#3038): route+check at tier-1, export at jlcpcb.
         "--mfr",
         "jlcpcb",
         "--output",
@@ -2948,8 +2983,20 @@ def run_drc(pcb_path: Path) -> bool:
     print("=" * 60)
 
     try:
+        # Issue #3425: align the local DRC summary with the jlcpcb-tier1
+        # profile this board routes and is CI-gated against (see
+        # route_pcb and the manufacturers: override in
+        # .github/routed-drc-tolerance.yml).  Mirrors board 03 (#3150).
         result = subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--mfr",
+                "jlcpcb-tier1",
+            ],
             capture_output=True,
             text=True,
         )

@@ -218,10 +218,21 @@ tolerances:
   # The rotation's payoff is reach topology, not 2L DRC: the 4L cpp
   # "No path found" list collapsed from 8+ structural crossing
   # blockers to ~2, and 2L completion rose 34% -> 53% (900s budget,
-  # post-#3442).  Tighten this floor when #3444 lands; #3425
-  # (cpp/tier1/4L recipe switch) will obsolete the 2L python
-  # snapshot entirely.
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 10
+  # post-#3442).
+  #
+  # Floor tightened 10 -> 1 by Issue #3425 (2026-06-10).  The recipe
+  # switched to jlcpcb-tier1 + cpp backend + 4 layers with
+  # --micro-via-in-pad-fallback (the CI gate now measures this board
+  # at --mfr jlcpcb-tier1 via the manufacturers: override below).
+  # The committed snapshot (seed 7, 28/35 nets routed) carries exactly
+  # 1 blocking violation: a clearance_segment_segment overlap between
+  # the ISENSE_A- and ISENSE_B- partial-route stubs on In1.Cu at
+  # (18.75, 53.75) -- copper from the two nets whose
+  # BLOCKED_BY_COMPONENT rip-up does not converge.  The violation is
+  # stable across seeds 7/42/123 (same nets, same location).  Remove
+  # this entry entirely (strict 0 gate) when the #3425 follow-on lands
+  # either the ISENSE rescue or stranded-stub pruning.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 1
 
   # Board 03 (USB-C joystick) was 22 (post-#2753 coord-space fix), then
   # 19 ``clearance_pad_segment`` after PR #2762 re-route.  All 19
@@ -1365,3 +1376,13 @@ manufacturers:
   # board now ships against in `boards/03-usb-joystick/generate_design.py`
   # (issue #3150).
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: jlcpcb-tier1
+  # Board-05 routes the DRV8301 (U3, HTSSOP-56, 0.5mm pitch) with
+  # in-pad rescue vias that only jlcpcb-tier1's Capability-Plus process
+  # manufactures legally (epoxy fill + plating-over,
+  # via_in_pad_supported: true) -- under the base jlcpcb tier those
+  # rescues trip the `via_in_pad` rule family.  The CI gate measures
+  # the board against the same `--mfr jlcpcb-tier1` profile its
+  # `design.py` route recipe ships against (issue #3425; same
+  # tier-split as boards 03/04: route+check at tier-1, export at
+  # jlcpcb).
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: jlcpcb-tier1

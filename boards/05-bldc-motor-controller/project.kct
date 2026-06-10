@@ -95,6 +95,18 @@ requirements:
     copper_weight: "2oz"
     unit: "mm"
     notes: "2oz copper recommended for motor phase traces"
+    # Issue #3425: the 4-layer stack is paired with the jlcpcb-tier1
+    # (Capability-Plus) fabricator profile — the DRV8301's HTSSOP-56
+    # 0.5mm-pitch escape requires in-pad rescue vias that only tier1
+    # manufactures legally (epoxy fill + plating-over,
+    # via_in_pad_supported: true).  design.py route_pcb() pins
+    # ``--manufacturer jlcpcb-tier1 --backend cpp --auto-layers
+    # --starting-layers 4 --max-layers 4``; the CI
+    # DRC gate measures the routed artifact against the same profile
+    # via the manufacturers: override in
+    # .github/routed-drc-tolerance.yml.  Do not change the layer count
+    # or the fab tier independently — they are a coupled recipe.
+    target_fab: "jlcpcb-tier1"
     # Issue #3402: DRV8301 gate driver + STM32G431 MCU + 3-phase power
     # routing combine high pin density with high-current motor phase
     # traces.  Empirical routing audit (#3402) shows 2L tops out at 46%
