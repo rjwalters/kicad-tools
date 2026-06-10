@@ -683,6 +683,25 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # preserving) but is not yet a quality win: no pair survives to a
     # committed coupled route until #3438 (MIPI reach) and #3320
     # (DQS swap overlap) land.  The recipe therefore still omits it.
+    #
+    # Issue #3441 addendum (2026-06-10): the "--grid 0.1: WORSE"
+    # entry above was a router bug, not a grid property.  Waypoint
+    # injection (#2330) exists only in the Python pathfinder, yet the
+    # hardcoded use_waypoint_injection=True ALSO disabled the sub-grid
+    # escape pre-pass and PIN_ACCESS retry -- under --backend cpp all
+    # three off-grid recovery mechanisms were off at once.  With the
+    # backend-aware gate (PR for #3441):
+    #
+    #   - auto-grid (this recipe, solo, seed 42): 29/31, 0 partial --
+    #     +1 over the 28/31 baseline (the re-enabled PIN_ACCESS retry
+    #     recovers an extra net); auto-grid deliberately KEEPS 0.127mm
+    #     (53/244 pads -- U4 BGA-49 45 + J3 8 -- are genuinely off the
+    #     0.1mm lattice, and 0.127 aligns the BGA exactly; forcing
+    #     --grid 0.1 measured 23-26/31 across the recovery work).
+    #   - explicit --grid 0.1: 13/31 + 15 partial -> 23/31 + 6 partial;
+    #     the residual TMDS_D0/D1 disconnects at U4 sit in the
+    #     two-phase EscapeRouter pipeline (#3143 escape endpoint
+    #     overrides), i.e. the #3438 lane.
     cmd = [
         sys.executable,
         "-m",
