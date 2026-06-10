@@ -626,6 +626,9 @@ class GridAutoSelection:
         memory_budget_used: The effective ``max_cells`` value the selector
             converged on. Equals the input ``max_cells`` for normal selection,
             or the bumped budget if the clearance-aware retry was applied.
+        lattice_rescued: True if the issue #3441 lattice rescue bumped the
+            memory budget to admit a candidate that aligns the board's
+            dominant pad lattice (<= clearance but > clearance/2).
     """
 
     resolution: float
@@ -638,6 +641,7 @@ class GridAutoSelection:
     origin_offset: tuple[float, float] = (0.0, 0.0)
     clearance_compliant_at_clearance_over_2: bool = False
     memory_budget_used: int = 0
+    lattice_rescued: bool = False
 
     def summary(self) -> str:
         """Human-readable summary of the selection."""
@@ -652,6 +656,12 @@ class GridAutoSelection:
         if self.memory_capped and self.uncapped_resolution is not None:
             lines.append(
                 f"  (capped from {self.uncapped_resolution}mm due to memory budget)"
+            )
+        if self.lattice_rescued:
+            lines.append(
+                "  (lattice rescue: memory budget bumped to "
+                f"{self.memory_budget_used:,} cells to admit the dominant "
+                "pad-lattice grid -- issue #3441)"
             )
         lines.extend([
             f"  Total pads: {self.total_pads}",
@@ -1074,6 +1084,32 @@ def auto_select_grid_resolution(
         valid_candidates, effective_max_cells
     )
 
+    # Memoized off-grid analysis per candidate resolution (used by both
+    # the issue #3441 lattice rescue below and the main analysis loop).
+    # Returns (off_grid_count, origin_offset) using the optimal origin
+    # offset search when zero-offset alignment is imperfect.
+    _off_grid_cache: dict[float, tuple[int, tuple[float, float]]] = {}
+
+    def _off_grid_for(resolution: float) -> tuple[int, tuple[float, float]]:
+        cached = _off_grid_cache.get(resolution)
+        if cached is not None:
+            return cached
+        off_no_offset = _count_off_grid_with_offset(pad_list, resolution, 0.0, 0.0)
+        if off_no_offset == 0:
+            result = (0, (0.0, 0.0))
+        else:
+            offset = _find_optimal_origin_offset(pad_list, resolution)
+            off_with_offset = _count_off_grid_with_offset(
+                pad_list, resolution, offset[0], offset[1]
+            )
+            # Keep zero offset if it's equal or better (simpler)
+            if off_no_offset <= off_with_offset:
+                result = (off_no_offset, (0.0, 0.0))
+            else:
+                result = (off_with_offset, offset)
+        _off_grid_cache[resolution] = result
+        return result
+
     # ------------------------------------------------------------------
     # Issue #3239: clearance-aware retry.
     #
@@ -1131,6 +1167,84 @@ def auto_select_grid_resolution(
                     clearance,
                 )
 
+    # ------------------------------------------------------------------
+    # Issue #3441: lattice rescue.
+    #
+    # The #3239 bump above only adopts a bumped candidate set when it
+    # reaches ``clearance/2`` -- a board-lattice-aligned grid that is
+    # merely ``<= clearance`` (e.g. 0.1mm at clearance 0.15mm) can never
+    # be rescued by it, even when the memory-capped selection puts the
+    # vast majority of pads off-grid (board 07: auto-grid picked
+    # 0.127mm with 190/244 pads off-grid while the excluded 0.1mm
+    # candidate had only 53 -- the genuinely off-lattice BGA-49 at
+    # 1.27mm pitch).
+    #
+    # Because the memory filter runs BEFORE the off-grid vote, the vote
+    # never even sees the lattice-aligned candidate.  Fix: when the
+    # clearance/2 bump did not fire, retry the budget bump and adopt it
+    # iff it unlocks a candidate that (a) is already known to be DRC-
+    # compliant (every pre_memory candidate passed the ``<= clearance``
+    # filter, which is sufficient because the router enforces edge-to-
+    # edge clearance during pathing -- issue #2387), (b) strictly
+    # reduces the off-grid pad count vs. the best memory-capped
+    # candidate, and (c) places a majority of pads ON-grid (a dominant
+    # board lattice, not a marginal improvement that wouldn't justify a
+    # 4x memory bump).
+    # ------------------------------------------------------------------
+    lattice_rescued = False
+    if (
+        not bumped
+        and memory_capped
+        and board_width is not None
+        and board_height is not None
+        and valid_candidates
+        and total_pads > 0
+    ):
+        bumped_budget = min(max(max_cells * 4, max_cells + 1), BUMP_CEILING)
+        if bumped_budget > effective_max_cells:
+            bumped_candidates, bumped_capped = _apply_memory_filter(
+                pre_memory_candidates, bumped_budget
+            )
+            newly_unlocked = [
+                c for c in bumped_candidates if c not in valid_candidates
+            ]
+            if newly_unlocked:
+                current_best_off = min(
+                    _off_grid_for(c)[0] for c in valid_candidates
+                )
+                # Prefer the unlocked candidate with the fewest off-grid
+                # pads; break ties toward the coarser grid (fewer cells).
+                unlocked_best = min(
+                    newly_unlocked, key=lambda c: (_off_grid_for(c)[0], -c)
+                )
+                unlocked_off = _off_grid_for(unlocked_best)[0]
+                if (
+                    unlocked_off < current_best_off
+                    and unlocked_off * 2 <= total_pads
+                ):
+                    old_cells = effective_max_cells
+                    valid_candidates = bumped_candidates
+                    memory_capped = bumped_capped
+                    effective_max_cells = bumped_budget
+                    lattice_rescued = True
+                    logger.info(
+                        "Auto-grid: lattice rescue bumped memory cap from "
+                        "%s to %s cells -- %.4fmm aligns the board's "
+                        "dominant pad lattice (%d/%d pads off-grid vs %d "
+                        "at the memory-capped selection). Grid is > "
+                        "clearance/2 (%.4fmm) but <= clearance (%.4fmm), "
+                        "which the router's edge-to-edge clearance "
+                        "enforcement accepts (issue #2387).",
+                        f"{old_cells:,}",
+                        f"{bumped_budget:,}",
+                        unlocked_best,
+                        unlocked_off,
+                        total_pads,
+                        current_best_off,
+                        recommended_max,
+                        clearance,
+                    )
+
     # Analyze off-grid pads for each candidate, using optimal origin offset.
     # For each candidate resolution, we find the grid origin offset that
     # maximizes on-grid pad count.  This handles mixed metric/imperial boards
@@ -1141,25 +1255,9 @@ def auto_select_grid_resolution(
     best_offset: tuple[float, float] = (0.0, 0.0)
 
     for resolution in valid_candidates:
-        # First, quick check with no offset
-        off_grid_no_offset = _count_off_grid_with_offset(
-            pad_list, resolution, 0.0, 0.0
-        )
-
-        if off_grid_no_offset == 0:
-            # Perfect alignment at zero offset -- no need to search
-            off_grid_count = 0
-            offset = (0.0, 0.0)
-        else:
-            # Search for the optimal origin offset for this resolution
-            offset = _find_optimal_origin_offset(pad_list, resolution)
-            off_grid_count = _count_off_grid_with_offset(
-                pad_list, resolution, offset[0], offset[1]
-            )
-            # Keep zero offset if it's equal or better (simpler)
-            if off_grid_no_offset <= off_grid_count:
-                off_grid_count = off_grid_no_offset
-                offset = (0.0, 0.0)
+        # Memoized off-grid analysis (zero-offset quick check + optimal
+        # origin offset search) -- shared with the #3441 lattice rescue.
+        off_grid_count, offset = _off_grid_for(resolution)
 
         candidates_tried.append((resolution, off_grid_count))
 
@@ -1194,15 +1292,32 @@ def auto_select_grid_resolution(
         and best_resolution > recommended_max
         and any(c <= recommended_max for c in pre_memory_candidates)
     ):
-        warnings.warn(
-            f"Auto-grid: memory budget cap forces grid {best_resolution}mm > "
-            f"clearance/2 ({recommended_max}mm) even at "
-            f"max_cells={effective_max_cells:,}. Routing may produce clearance "
-            f"violations at fine-pitch pads. Increase max_cells (currently "
-            f"capped at {BUMP_CEILING:,} by the auto-grid retry) or use a "
-            f"looser manufacturer profile.",
-            stacklevel=2,
-        )
+        if lattice_rescued:
+            # Issue #3441: the lattice rescue *chose* this grid because it
+            # aligns the board's dominant pad lattice; it is <= clearance
+            # (DRC-sufficient per #2387) but > clearance/2, so keep an
+            # honest -- and accurate -- heads-up rather than the "forced"
+            # phrasing of the generic memory-cap warning.
+            warnings.warn(
+                f"Auto-grid: lattice rescue selected grid {best_resolution}mm "
+                f"(> clearance/2 = {recommended_max}mm, <= clearance = "
+                f"{clearance}mm) because it aligns the board's dominant pad "
+                f"lattice ({best_off_grid}/{total_pads} pads off-grid). "
+                f"Quantisation margin is reduced at fine-pitch pads; the "
+                f"router's edge-to-edge clearance enforcement is the "
+                f"backstop.",
+                stacklevel=2,
+            )
+        else:
+            warnings.warn(
+                f"Auto-grid: memory budget cap forces grid {best_resolution}mm > "
+                f"clearance/2 ({recommended_max}mm) even at "
+                f"max_cells={effective_max_cells:,}. Routing may produce clearance "
+                f"violations at fine-pitch pads. Increase max_cells (currently "
+                f"capped at {BUMP_CEILING:,} by the auto-grid retry) or use a "
+                f"looser manufacturer profile.",
+                stacklevel=2,
+            )
 
     return GridAutoSelection(
         resolution=best_resolution,
@@ -1215,6 +1330,7 @@ def auto_select_grid_resolution(
         origin_offset=best_offset,
         clearance_compliant_at_clearance_over_2=best_resolution <= recommended_max,
         memory_budget_used=effective_max_cells,
+        lattice_rescued=lattice_rescued,
     )
 
 

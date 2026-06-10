@@ -196,9 +196,7 @@ class TestWaypointGridEdges:
 
         for gx, gy, cost in edges:
             gw_x, gw_y = grid.grid_to_world(gx, gy)
-            expected_dist = math.sqrt(
-                (1.037 - gw_x) ** 2 + (2.065 - gw_y) ** 2
-            )
+            expected_dist = math.sqrt((1.037 - gw_x) ** 2 + (2.065 - gw_y) ** 2)
             expected_cost = expected_dist / grid.resolution
             assert abs(cost - expected_cost) < 1e-6, (
                 f"Edge to ({gx},{gy}) cost {cost} != expected {expected_cost}"
@@ -366,20 +364,25 @@ class TestWaypointRouting:
 
 
 class TestSubgridPrepassSkipped:
-    """Tests that the sub-grid pre-pass is skipped when waypoints are active."""
+    """Tests that the sub-grid pre-pass is skipped when waypoints are active.
+
+    Issue #3441: ``use_waypoint_injection`` is backend-aware.  Waypoint
+    injection only exists in the pure-Python pathfinder, so the "enabled
+    by default" contract holds only under ``force_python=True``.
+    """
 
     def test_waypoint_injection_enabled_by_default(self):
-        """Autorouter has waypoint injection enabled by default."""
+        """Autorouter has waypoint injection enabled by default (Python backend)."""
         from kicad_tools.router.core import Autorouter
 
-        ar = Autorouter(width=10.0, height=10.0)
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
         assert ar.use_waypoint_injection is True
 
     def test_subgrid_prepass_skipped_with_waypoints(self):
         """_run_subgrid_prepass returns empty list when waypoints active."""
         from kicad_tools.router.core import Autorouter
 
-        ar = Autorouter(width=10.0, height=10.0)
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
         assert ar.use_waypoint_injection is True
         result = ar._run_subgrid_prepass()
         assert result == []
@@ -388,8 +391,102 @@ class TestSubgridPrepassSkipped:
         """_run_subgrid_prepass runs normally when waypoints disabled."""
         from kicad_tools.router.core import Autorouter
 
-        ar = Autorouter(width=10.0, height=10.0)
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
         ar.use_waypoint_injection = False
         # With no pads, subgrid should return empty (no off-grid pads)
         result = ar._run_subgrid_prepass()
         assert result == []
+
+
+class TestWaypointBackendGating:
+    """Issue #3441: ``use_waypoint_injection`` reflects backend capability.
+
+    Waypoint injection (#2330) was implemented only in the pure-Python
+    ``Router``; the C++ ``CppPathfinder`` has no waypoint support.  Before
+    #3441 the flag was hardcoded True, which under the C++ backend
+    simultaneously disabled the sub-grid escape pre-pass AND the
+    PIN_ACCESS sub-grid retry while waypoints never actually ran -- all
+    three off-grid recovery mechanisms were off at once (the board-07
+    ``--grid 0.1`` 13/31 regression).
+    """
+
+    def test_python_backend_supports_waypoints(self):
+        from kicad_tools.router.pathfinder import Router
+
+        assert Router.supports_waypoint_injection is True
+
+    def test_cpp_backend_does_not_support_waypoints(self):
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        assert CppPathfinder.supports_waypoint_injection is False
+
+    def test_effective_flag_false_under_cpp_backend(self):
+        """Under the C++ backend the effective flag must be False so the
+        sub-grid escape pre-pass and PIN_ACCESS retry stay available."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available
+
+        if not is_cpp_available():
+            pytest.skip("C++ backend not built")
+
+        ar = Autorouter(width=10.0, height=10.0)
+        assert isinstance(ar.router, CppPathfinder)
+        # Request flag is True (historical default) ...
+        assert ar._use_waypoint_injection is True
+        # ... but the effective, backend-aware value is False.
+        assert ar.use_waypoint_injection is False
+
+    def test_subgrid_prepass_not_skipped_under_cpp_backend(self):
+        """The waypoint gate must not skip the sub-grid pre-pass under cpp."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available
+
+        if not is_cpp_available():
+            pytest.skip("C++ backend not built")
+
+        ar = Autorouter(width=10.0, height=10.0)
+        assert isinstance(ar.router, CppPathfinder)
+        # The pre-pass must actually run (here a no-op result because the
+        # board has no pads -- the point is it is NOT short-circuited by
+        # the waypoint gate; we verify by checking the gate evaluates
+        # False rather than True).
+        assert ar.use_waypoint_injection is False
+        result = ar._run_subgrid_prepass()
+        assert result == []  # no pads -> no escapes, but the pass ran
+
+    def test_setter_can_disable_on_python_backend(self):
+        from kicad_tools.router.core import Autorouter
+
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
+        assert ar.use_waypoint_injection is True
+        ar.use_waypoint_injection = False
+        assert ar.use_waypoint_injection is False
+        ar.use_waypoint_injection = True
+        assert ar.use_waypoint_injection is True
+
+    def test_setter_cannot_force_waypoints_on_cpp_backend(self):
+        """Requesting waypoints on a backend without support stays False."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.cpp_backend import is_cpp_available
+
+        if not is_cpp_available():
+            pytest.skip("C++ backend not built")
+
+        ar = Autorouter(width=10.0, height=10.0)
+        ar.use_waypoint_injection = True
+        assert ar.use_waypoint_injection is False
+
+    def test_pin_access_subgrid_retry_gate_open_under_cpp(self):
+        """The route_net PIN_ACCESS retry condition uses the effective flag.
+
+        The retry at core.py is gated on ``not self.use_waypoint_injection``;
+        under cpp this must evaluate True (retry available).
+        """
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.cpp_backend import is_cpp_available
+
+        if not is_cpp_available():
+            pytest.skip("C++ backend not built")
+
+        ar = Autorouter(width=10.0, height=10.0)
+        assert (not ar.use_waypoint_injection) is True

@@ -763,6 +763,15 @@ class CppPathfinder:
     A* routing.
     """
 
+    # Issue #3441: the C++ pathfinder has NO waypoint-injection support
+    # (#2330 was implemented only in the pure-Python ``Router``).  This
+    # capability flag keeps ``Autorouter.use_waypoint_injection`` honest:
+    # under the C++ backend the sub-grid escape pre-pass and PIN_ACCESS
+    # sub-grid retry (#1603) remain the active off-grid pad recovery
+    # mechanisms.  Flip to True if/when waypoints are ported to
+    # ``cpp/src/pathfinder.cpp``.
+    supports_waypoint_injection: bool = False
+
     def __init__(
         self,
         grid: CppGrid,

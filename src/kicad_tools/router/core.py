@@ -826,7 +826,14 @@ class Autorouter:
         # When True, the pathfinder injects off-grid pad positions directly into
         # the A* search graph, eliminating the need for escape segments.
         # The sub-grid pre-pass is retained as a fallback when this is False.
-        self.use_waypoint_injection: bool = True
+        #
+        # Issue #3441: this is the *request* flag.  The effective value is
+        # exposed via the ``use_waypoint_injection`` property, which also
+        # requires the active backend to actually implement waypoint
+        # injection (Python pathfinder only -- the C++ backend has no
+        # waypoint support, so under ``CppPathfinder`` the sub-grid escape
+        # pre-pass and PIN_ACCESS retry stay active).
+        self._use_waypoint_injection: bool = True
 
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
@@ -1087,6 +1094,32 @@ class Autorouter:
         )
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
+
+    @property
+    def use_waypoint_injection(self) -> bool:
+        """Effective waypoint-injection state (Issue #3441).
+
+        True only when waypoint injection is both *requested* (the
+        historical default) AND the active pathfinder backend actually
+        implements it.  Waypoint injection (#2330) exists only in the
+        pure-Python ``Router``; the C++ ``CppPathfinder`` has no waypoint
+        support, so under the C++ backend this returns False and the
+        sub-grid escape pre-pass / PIN_ACCESS sub-grid retry (#1603)
+        remain active as the off-grid pad recovery mechanisms.
+
+        Before this gate, ``use_waypoint_injection`` was hardcoded True,
+        which under ``--backend cpp`` simultaneously disabled all three
+        off-grid recovery mechanisms (waypoints never ran in C++; the
+        flag disabled the other two) while logs claimed coverage --
+        the root cause of the board-07 ``--grid 0.1`` 13/31 regression.
+        """
+        return self._use_waypoint_injection and getattr(
+            self.router, "supports_waypoint_injection", False
+        )
+
+    @use_waypoint_injection.setter
+    def use_waypoint_injection(self, value: bool) -> None:
+        self._use_waypoint_injection = bool(value)
 
     @property
     def _cpp_grid(self) -> CppGrid | None:
@@ -2120,11 +2153,14 @@ class Autorouter:
             if has_pin_access_failure:
                 subgrid_recovered = False
                 # Sub-grid retry is only useful when waypoint injection is
-                # disabled (otherwise the C++ pathfinder already handles
-                # off-grid pads).  Sub-grid retry is also pointless when
-                # we already produced some routes for this net (it can't
-                # add coverage; the failing edge is what we need to
-                # un-block, and only via-conflict resolution can do that).
+                # not effective.  Issue #3441: ``use_waypoint_injection``
+                # is now backend-aware -- it is False under the C++
+                # backend (which has NO waypoint support, contrary to the
+                # pre-#3441 comment here), so this retry stays available
+                # there.  Sub-grid retry is also pointless when we already
+                # produced some routes for this net (it can't add
+                # coverage; the failing edge is what we need to un-block,
+                # and only via-conflict resolution can do that).
                 if not self.use_waypoint_injection and not new_routes:
                     retry_routes = self._retry_net_with_subgrid(net)
                     if retry_routes:
@@ -12296,7 +12332,10 @@ class Autorouter:
 
         Issue #1603: Wire sub-grid routing into default route_all pipeline.
         """
-        # Issue #2330: Skip sub-grid pre-pass when waypoint injection is active
+        # Issue #2330: Skip sub-grid pre-pass when waypoint injection is
+        # active.  Issue #3441: the property is backend-aware -- under the
+        # C++ backend (no waypoint support) it returns False and the
+        # pre-pass runs, restoring off-grid pad reachability.
         if self.use_waypoint_injection:
             return []
 
