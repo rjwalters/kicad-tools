@@ -224,9 +224,15 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
     # Expected far-consumer rescue pins per ref (Issue #3398 diag +
     # per-row cap: pin 8's consumer is farther than pin 7's, so pin 8
     # wins each row's single rescue).
+    # Issue #3343 P-R2 update: the GATE_*/PRECHARGE_* MCU pins moved
+    # to U1's NORTH face (PB3-PB8, pins 27-32), which faces the U5/U6
+    # drivers.  U6 (negative bank, y=174) is now ~14 mm from its MCU
+    # consumer -- BELOW the 15 mm far-consumer threshold -- so U6's
+    # pads all defer (consumer-aware rescue, like U7).  U5 (positive
+    # bank, y=142) remains ~44 mm away and keeps its pin-8 rescue.
     expected_rescued = {
-        "U5": {"8"},   # GATE_POS_A -> MCU, 53.8 mm (beats pin 7 @ 52.5)
-        "U6": {"8"},   # GATE_NEG_A -> MCU, 21.8 mm (beats pin 7 @ 20.5)
+        "U5": {"8"},   # GATE_POS_A -> MCU north face, ~44 mm (far)
+        "U6": set(),   # GATE_NEG_A -> MCU north face, ~14 mm (local, P-R2)
         "U7": set(),   # all consumers local (2-12 mm)
     }
 
@@ -259,22 +265,23 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
             )
 
     # Sanity check on log output -- the far-consumer rescues log the
-    # ``SOP in-pad rescue`` diagnostic; U5 and U6 must each appear
-    # exactly once (cap=1 phase only; the cap-0 phase logs nothing).
+    # ``SOP in-pad rescue`` diagnostic; only U5 qualifies post-P-R2
+    # (U6's consumer became local when the GATE pins moved to U1's
+    # north face -- issue #3343 P-R2), and it must appear exactly once
+    # (cap=1 phase only; the cap-0 phase logs nothing).
     rescue_lines = [
         rec.getMessage() for rec in caplog.records
         if "SOP in-pad rescue" in rec.getMessage()
     ]
-    assert len(rescue_lines) == 2, (
-        f"Expected exactly 2 rescue log lines (U5 pin 8 + U6 pin 8), "
-        f"got {len(rescue_lines)}: {rescue_lines}"
+    assert len(rescue_lines) == 1, (
+        f"Expected exactly 1 rescue log line (U5 pin 8; U6 defers "
+        f"post-#3343 P-R2), got {len(rescue_lines)}: {rescue_lines}"
     )
-    for ref in ("U5", "U6"):
-        matching = [l for l in rescue_lines if f" {ref} " in l]
-        assert len(matching) == 1, (
-            f"Expected 1 SOP in-pad rescue log for {ref} (per-row cap); "
-            f"all rescue lines: {rescue_lines}"
-        )
+    matching = [l for l in rescue_lines if " U5 " in l]
+    assert len(matching) == 1, (
+        f"Expected 1 SOP in-pad rescue log for U5 (per-row cap); "
+        f"all rescue lines: {rescue_lines}"
+    )
 
 
 def test_softstart_revb_dispatcher_gate_open_for_soic8(
