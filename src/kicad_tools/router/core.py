@@ -5261,10 +5261,12 @@ class Autorouter:
 
         On success, the failed-net routes are appended to ``self.routes``
         by ``targeted_ripup`` and the corresponding failure entries are
-        removed from ``self.routing_failures``.  Displaced sibling nets are
-        rerouted by the negotiated path (best-effort -- if any displaced
-        net fails its new routes are simply not added; its previous routes
-        stay ripped).
+        removed from ``self.routing_failures``.  Issue #3470:
+        ``targeted_ripup`` is transactional -- when the reroute does not
+        converge (failed net cannot fully route, or a displaced sibling
+        fails / degrades) the exact pre-rip-up routes are restored, so a
+        failed rescue can no longer strand siblings or leave partial stub
+        copper.
 
         Args:
             failed_net: ID of the net that just failed in ``route_all``.

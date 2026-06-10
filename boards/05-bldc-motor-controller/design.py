@@ -2747,9 +2747,45 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     Skip nets remain the high-current power/phase nets that are carried
     by copper pours instead of routed traces.
+
+    Issue #3470 (2026-06-10) -- rip-up rollback + ISENSE stub overlap fix.
+    Three router-side changes (no recipe flag changes):
+
+    1. ``targeted_ripup`` is now a TRANSACTION: a BLOCKED_BY_COMPONENT
+       rip-up that does not converge restores the exact pre-rip-up
+       routing state instead of stranding displaced siblings or leaving
+       partial stub copper for the failed net.  Measured effect: the
+       pnt=30 configuration recovers from 23/35 (HALL/GATE collateral,
+       see the #3425 matrix above) to 27/35.
+    2. The in-pad escape stub generator is conflict-aware: U3 pin 31
+       (ISENSE_B-) and pin 33 (ISENSE_A-) no longer emit mutually
+       overlapping In1.Cu stubs.  That overlap WAS the single blocking
+       ``clearance_segment_segment`` violation (actual -0.3135 mm at
+       (18.75, 53.75), stable across seeds) on every pre-#3470 route of
+       this board -- fresh routes now measure 0 blocking violations.
+    3. ``--max-ripups-per-net`` now also governs the two-phase stall
+       recovery and ``route_all`` destructive rip-up budgets.  Measured
+       on this board: budget 5 -> 26/35 (extra rip-up waves churn), so
+       the recipe keeps the default (3).
+
+    Post-#3470 measurement matrix (fixed code, t=900 unless noted):
+
+      config                       | reach | blocking DRC
+      -----------------------------+-------+-------------
+      pnt=60, seed 7 (SHIPPED)     | 27-28 | 0
+      pnt=60, seed 42              | 27/35 | 0
+      pnt=30, seed 7               | 27/35 | 0   (was 23/35 + 1)
+      pnt=60, seed 7, budget 5     | 26/35 | 0
+      pnt=30, t=1500               | 24/35 | 0
+      pnt=15                       | 23/35 | 0
+
+    The residual partial cluster (ISENSE A+/A-/B+/B-/C-, SW_OUT,
+    PWM_CL, sometimes GATE_CL) is congestion in the U3 / R10-R12 sense
+    band -- the per-edge A* searches burn the full per-net budget;
+    tracked in #3471.
     """
     print("\n" + "=" * 60)
-    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111, #3425)...")
+    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111, #3425, #3470)...")
     print("=" * 60)
 
     # Skip power and high-current nets (route manually or use copper pour zones)

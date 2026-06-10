@@ -224,15 +224,21 @@ tolerances:
   # switched to jlcpcb-tier1 + cpp backend + 4 layers with
   # --micro-via-in-pad-fallback (the CI gate now measures this board
   # at --mfr jlcpcb-tier1 via the manufacturers: override below).
-  # The committed snapshot (seed 7, 28/35 nets routed) carries exactly
-  # 1 blocking violation: a clearance_segment_segment overlap between
-  # the ISENSE_A- and ISENSE_B- partial-route stubs on In1.Cu at
-  # (18.75, 53.75) -- copper from the two nets whose
-  # BLOCKED_BY_COMPONENT rip-up does not converge.  The violation is
-  # stable across seeds 7/42/123 (same nets, same location).  Remove
-  # this entry entirely (strict 0 gate) when the #3425 follow-on lands
-  # either the ISENSE rescue or stranded-stub pruning.
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 1
+  #
+  # Entry REMOVED (strict 0 gate) by Issue #3470 (2026-06-10).  The
+  # single residual blocking violation (clearance_segment_segment,
+  # ISENSE_A-/ISENSE_B- stub overlap on In1.Cu at (18.75, 53.75),
+  # actual -0.3135 mm, stable across seeds) was traced to the in-pad
+  # escape generator emitting mutually-overlapping inner-layer stubs
+  # for U3 pins 31/33 -- each net's escape endpoint sat inside the
+  # other net's stub copper, so the overlap shipped on every route of
+  # this board.  #3470 made the stub generator conflict-aware
+  # (escape.py ``_try_in_pad_escape`` retries the stub direction
+  # against the escapes already generated) and made the
+  # BLOCKED_BY_COMPONENT rip-up transactional (negotiated.py
+  # ``targeted_ripup`` restores the pre-rip-up snapshot on
+  # non-convergence), so partial outputs no longer strand overlap
+  # copper.  Fresh routes measure 0 blocking at jlcpcb-tier1.
 
   # Board 03 (USB-C joystick) was 22 (post-#2753 coord-space fix), then
   # 19 ``clearance_pad_segment`` after PR #2762 re-route.  All 19

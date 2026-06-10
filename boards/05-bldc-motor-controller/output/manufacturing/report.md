@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 55 (0 SMD, 0 THT, 55 other) |
 | Nets | 52 |
-| Traces | 569 segments |
-| Vias | 55 |
+| Traces | 570 segments |
+| Vias | 52 |
 | Board Size | 80.0 x 100.0 mm |
 
 ## Design Overview
@@ -101,9 +101,9 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 18 |
+| Errors | 17 |
 | Warnings | 57 |
-| Blocking | 18 |
+| Blocking | 17 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -114,7 +114,6 @@ Thermal analysis and high-current routing demo
 | via_in_pad | 17 |
 | connectivity | 11 |
 | single_pad_net | 8 |
-| clearance_segment_segment | 1 |
 | zone_unfilled | 1 |
 
 
@@ -126,7 +125,7 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[CRITICAL]** Fix 18 blocking DRC violations (via_in_pad (17), clearance_segment_segment (1))
+- **[CRITICAL]** Fix 17 blocking DRC violations (via_in_pad (17))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.200mm required
 - **[OPTIONAL]** Verify zone fill in KiCad: 10 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 6 zone-connected nets

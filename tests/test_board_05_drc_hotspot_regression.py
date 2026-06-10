@@ -113,16 +113,25 @@ MAX_SHORTFALL_UM = 130
 #   (clipping neighbouring foreign-net pads).  A regression here means
 #   the fallback stopped engaging.
 # * ``clearance_segment_via``: absent on the measured snapshot.
-# * ``clearance_segment_segment`` is NOT pinned absent: the committed
-#   file carries exactly 1 (ISENSE_A-/ISENSE_B- partial-route stub
-#   overlap, In1.Cu) -- bounded by the allowlist value (1) in
-#   .github/routed-drc-tolerance.yml and tracked in the #3425
-#   follow-on issues.
+#
+# Issue #3470 (2026-06-10): ``clearance_segment_segment`` re-pinned
+# ABSENT.  The exactly-1 violation the #3425 snapshot carried
+# (ISENSE_A-/ISENSE_B- partial-route stub overlap on In1.Cu at
+# (18.75, 53.75), actual -0.3135 mm) was traced to the in-pad escape
+# generator emitting mutually-overlapping inner stubs for U3 pins
+# 31/33.  #3470 made the stub generator conflict-aware
+# (escape.py ``_try_in_pad_escape`` + ``_in_pad_stub_conflicts``) and
+# the BLOCKED_BY_COMPONENT rip-up transactional (negotiated.py
+# ``targeted_ripup`` snapshot/rollback), so partial outputs no longer
+# strand overlap copper.  The refreshed committed snapshot measures 0
+# blocking violations at jlcpcb-tier1; the board-05 allowlist entry in
+# .github/routed-drc-tolerance.yml was removed (strict 0 gate).
 ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset(
     {
         "clearance_pad_via",
         "clearance_via_via",
         "clearance_segment_via",
+        "clearance_segment_segment",
     }
 )
 
