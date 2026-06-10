@@ -68,24 +68,26 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 )
 
 # Expected per-family counts on board 07's committed routed artifact.
-# Re-baselined 2026-06-09 (issue #3458 inventory) after PR #3462 refreshed
-# the committed routed PCB: bare totals dropped 12 -> 9, with-sidecar
-# totals 23 -> 21, and the refreshed routing surfaces one more
-# match-group length-skew violation (5+5+1=11 -> 5+5+2=12 delta) while
-# the advisory connectivity count improves 6 -> 5 and blocking drops
-# 17 -> 16.  These pins measure the COMMITTED artifact and are
-# deterministic; the allowlist floor in .github/routed-drc-tolerance.yml
-# is 21 because the Match-Group gate RE-ROUTES from source and the
-# re-route DRC profile varies with machine load (CI loaded = 21, local
-# idle = 16 -- the #3466 wall-clock-budget cliff).
+# Re-baselined 2026-06-10 (Issue #3440) after the match-group tuner fixes
+# (reference auto-promotion, exact-fit distributed meanders, routes_by_net
+# staleness + commit-back fixes) brought ADDR_BUS skew 15.395mm -> 0.004mm
+# and DDR_DATA_BYTE_0 within its 0.1mm tolerance: BOTH
+# match_group_length_skew errors are gone (5+5+2=12 -> 5+5+0=10 delta,
+# with-sidecar totals 21 -> 19, blocking 16 -> 14).  The rule still FIRES
+# (rules_checked_by_rule >= 1) -- the matchgroup CI gate pins engagement
+# independently of the error count.  These pins measure the COMMITTED
+# artifact and are deterministic; the allowlist floor in
+# .github/routed-drc-tolerance.yml is 21 because the Match-Group gate
+# RE-ROUTES from source and the re-route DRC profile varies with machine
+# load (the #3466 wall-clock-budget cliff).
 #
-# Previous re-baseline: 2026-06-06 (Issue #3263) after PRs #3197/#3198/
-# #3202/#3203 brought net-yield from 25/31 -> 28/31 (4+4+1=9 ->
-# 5+5+1=11 delta, blocking steady at 17).
+# Previous re-baselines: 2026-06-09 (issue #3458 inventory, PR #3462:
+# 5+5+2=12 delta, blocking 16); 2026-06-06 (Issue #3263: 5+5+1=11 delta,
+# blocking 17).
 BOARD_07_EXPECTED_FAMILY_DELTA: dict[str, int] = {
     "diffpair_length_skew": 5,
     "diffpair_routing_continuity": 5,
-    "match_group_length_skew": 2,
+    "match_group_length_skew": 0,
 }
 
 
@@ -310,14 +312,22 @@ class TestBoard07KctCheckParity:
                 f"bare={count} sidecar={sidecar_counts.get(family, 0)}"
             )
 
-        # The added families are EXACTLY the three gated families.
+        # The added families are EXACTLY the gated families that the
+        # committed artifact still has errors for (Issue #3440: the
+        # match-group tuner now brings board 07's groups within
+        # tolerance, so match_group_length_skew is gated-but-clean --
+        # its ENGAGEMENT is pinned by the matchgroup CI gate's
+        # rules_checked_by_rule assertion, not by an error count here).
         added = {
             family
             for family in sidecar_counts
             if sidecar_counts[family] > bare_counts.get(family, 0)
         }
-        assert added == set(NET_CLASS_GATED_FAMILIES), (
-            f"sidecar added {sorted(added)}; expected exactly {sorted(NET_CLASS_GATED_FAMILIES)}"
+        expected_added = {
+            family for family, expected in BOARD_07_EXPECTED_FAMILY_DELTA.items() if expected > 0
+        }
+        assert added == expected_added, (
+            f"sidecar added {sorted(added)}; expected exactly {sorted(expected_added)}"
         )
 
     def test_family_delta_counts_pinned(self, bare: dict, with_sidecar: dict) -> None:
@@ -360,20 +370,21 @@ class TestCiGateCountsGatedFamilies:
         resolves the sidecar and sees the gated-family errors too
         (currently +12 = 5+5+2, see ``BOARD_07_EXPECTED_FAMILY_DELTA``).
 
-        Re-baselined 2026-06-09 (issue #3458 inventory) after PR #3462
-        refreshed the committed routed PCB: 21 total - 5 advisory
-        connectivity = 16 blocking (was 23 - 6 = 17).
+        Re-baselined 2026-06-10 (Issue #3440) after the match-group tuner
+        fixes (reference auto-promotion, exact-fit distributed meanders,
+        routes_by_net staleness + commit-back fixes) eliminated both
+        ``match_group_length_skew`` errors: 19 total - 5 advisory
+        connectivity = 14 blocking (was 21 - 5 = 16).
 
-        Previous re-baseline: 2026-06-06 (Issue #3263) after the
-        post-#3197/#3198/#3202/#3203 router improvements lifted net-yield
-        25/31 -> 28/31 (blocking held at 17).
+        Previous re-baselines: 2026-06-09 (issue #3458 inventory, PR
+        #3462: 21 - 5 = 16); 2026-06-06 (Issue #3263: 23 - 6 = 17).
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # 21 total - 5 advisory connectivity = 16 blocking.
-        assert blocking == 16, (
-            f"expected 16 blocking errors with net_class_map awareness, got {blocking}"
+        # 19 total - 5 advisory connectivity = 14 blocking.
+        assert blocking == 14, (
+            f"expected 14 blocking errors with net_class_map awareness, got {blocking}"
         )
         assert advisory.get("connectivity", 0) == 5

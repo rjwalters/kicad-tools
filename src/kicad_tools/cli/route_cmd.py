@@ -9140,6 +9140,26 @@ def main(argv: list[str] | None = None) -> int:
 
         if not quiet:
             print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
+        # Issue #3440: --length-match-groups silently no-ops without
+        # length_match_group declarations (detection consults
+        # NetClassRouting declarations exclusively when suffix inference
+        # is off; the built-in DEFAULT_NET_CLASS_MAP declares none).
+        # Warn LOUDLY -- on stderr, regardless of --quiet -- so a recipe
+        # that forgot --net-class-map doesn't sail through with untuned
+        # skew.
+        _has_group_declarations = any(
+            nc.effective_length_match_group() for nc in router.net_class_map.values()
+        )
+        if not _has_group_declarations:
+            print(
+                "WARNING: --length-match-groups is INACTIVE: no loaded net "
+                "class declares length_match_group, so no match groups can "
+                "be detected and no skew tuning will run.  Pass "
+                "--net-class-map <sidecar.json> (e.g. the board's "
+                "output/net_class_map.json) with length_match_group "
+                "declarations.",
+                file=sys.stderr,
+            )
         # Build net_to_class + a class-name-keyed routing map so the
         # explicit-declaration consultation in ``_gather_explicit_groups``
         # can find each net's NetClassRouting.  ``router.net_class_map`` is
@@ -9185,28 +9205,24 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not quiet:
                 # Aggregate per-member counters across all groups for a
-                # single end-of-phase summary line.
+                # single end-of-phase summary line.  Issue #3440: the
+                # shared formatter counts EVERY TuneResult.reason value
+                # (the legacy five-bucket line silently dropped
+                # ``reference`` / ``longer_than_reference`` / ``unrouted``
+                # members, producing the all-zeros line for a
+                # 15.4mm-skew group).
+                from kicad_tools.router.match_group_tuning import (
+                    format_reason_counts,
+                )
+
                 all_results = [
                     res
                     for member_dict in tune_results_groups.values()
                     for (_route, res) in member_dict.values()
                 ]
-                n_tuned = sum(1 for r in all_results if r.reason == "tuned")
-                n_clean = sum(1 for r in all_results if r.reason == "already_within_tolerance")
-                n_rollback = sum(
-                    1 for r in all_results if r.reason == "post_insertion_drc_violation"
-                )
-                n_budget = sum(
-                    1
-                    for r in all_results
-                    if r.reason in ("exceeded_max_inserts", "cascade_budget_exhausted")
-                )
-                n_skipped = sum(1 for r in all_results if r.reason == "not_length_critical")
                 print(
                     f"  Summary: {len(tune_results_groups)} groups, "
-                    f"{n_tuned} tuned, {n_clean} clean, "
-                    f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
-                    f"{n_skipped} skipped (not length-critical)"
+                    f"{format_reason_counts(r.reason for r in all_results)}"
                 )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)

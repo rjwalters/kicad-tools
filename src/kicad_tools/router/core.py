@@ -10694,6 +10694,20 @@ class Autorouter:
                 intra_pair_clearance_mm = net_class.effective_intra_pair_clearance()
                 length_critical = net_class.length_critical
 
+            # Issue #3440: the impedance resolver can overwrite a class's
+            # ``intra_pair_clearance`` with a physics-derived coupling gap
+            # (~8 mm on 100-ohm targets; see the resolver dormancy notes
+            # at ``_ensure_stackup_for_impedance``).  As a DRC floor for
+            # the within-pair coupling self-check that value is nonsense
+            # -- every mirrored meander is "too close" to its own partner
+            # and rolls back (board 07 HDMI/MIPI lanes rejected at
+            # ``1.0mm < 8.425mm``).  Within-pair clearance is by
+            # definition the TIGHTER floor, so clamp it to the
+            # intra-group floor.
+            intra_pair_clearance_mm = min(
+                intra_pair_clearance_mm, intra_group_clearance_mm
+            )
+
             # Phase 2F (#2701) requires intra_pair_clearance_mm
             # unconditionally for groups whose pair_ids is non-empty.  The
             # single-ended path inside tune_match_group_v2 ignores it
@@ -10725,44 +10739,55 @@ class Autorouter:
             # working ``routes_by_net`` map so subsequent groups' DRC
             # self-checks see the updated geometry.  Mirrors the
             # apply_diffpair_length_tuning per-pair commit-back loop.
+            #
+            # Issue #3440: compare against the CURRENT self.routes entry,
+            # not routes_by_net -- the tuner now publishes committed
+            # meanders into routes_by_net in place (the staleness fix),
+            # so ``new_route is not routes_by_net[net_id]`` is False for
+            # every tuned member and the legacy identity guard silently
+            # dropped all meanders from self.routes (they never reached
+            # the saved PCB).
             for net_id, (new_route, _result) in group_results.items():
-                if net_id in routes_by_net and new_route is not routes_by_net[net_id]:
-                    routes_by_net[net_id] = new_route
-                    for i, r in enumerate(self.routes):
-                        if r.net == net_id:
+                if net_id not in routes_by_net:
+                    continue  # unrouted member (empty-route placeholder)
+                routes_by_net[net_id] = new_route
+                for i, r in enumerate(self.routes):
+                    if r.net == net_id:
+                        if self.routes[i] is not new_route:
                             self.routes[i] = new_route
-                            break
+                        break
 
             results[group.name] = group_results
 
             if verbose:
-                tuned = sum(1 for (_r, res) in group_results.values() if res.reason == "tuned")
-                clean = sum(
-                    1
-                    for (_r, res) in group_results.values()
-                    if res.reason == "already_within_tolerance"
-                )
-                rolled = sum(
-                    1
-                    for (_r, res) in group_results.values()
-                    if res.reason == "post_insertion_drc_violation"
-                )
-                budget = sum(
-                    1
-                    for (_r, res) in group_results.values()
-                    if res.reason
-                    in ("exceeded_max_inserts", "cascade_budget_exhausted")
-                )
-                skipped = sum(
-                    1
-                    for (_r, res) in group_results.values()
-                    if res.reason == "not_length_critical"
-                )
+                # Issue #3440: count EVERY TuneResult.reason bucket via
+                # the shared formatter -- the legacy five-bucket line
+                # silently dropped ``reference`` / ``longer_than_reference``
+                # / ``unrouted`` members, producing an all-zeros summary
+                # while 15.4mm of skew went untouched on board 07.
+                from .match_group_tuning import format_reason_counts
+
                 print(
                     f"  {group.name}: {len(group_results)} members "
-                    f"({tuned} tuned, {clean} clean, {rolled} rolled back, "
-                    f"{budget} budget-exhausted, {skipped} skipped)"
+                    f"({format_reason_counts(res.reason for (_r, res) in group_results.values())})"
                 )
+                # Issue #3440 addendum: rollbacks / budget exhaustion /
+                # missing segments must say WHY (which DRC rule the
+                # candidate meander violated, requested-vs-achieved mm)
+                # so the count is actionable.
+                _diagnostic_reasons = (
+                    "post_insertion_drc_violation",
+                    "exceeded_max_inserts",
+                    "cascade_budget_exhausted",
+                    "no_suitable_segment",
+                )
+                for member_net_id in sorted(group_results):
+                    res = group_results[member_net_id][1]
+                    if res.reason in _diagnostic_reasons and res.message:
+                        member_name = self.net_names.get(
+                            member_net_id, f"net {member_net_id}"
+                        )
+                        print(f"    {member_name}: {res.reason} -- {res.message}")
 
         # Refresh the skew tracker after tuning so downstream consumers
         # (e.g. the Phase 2G match_group_length_skew DRC rule) see the

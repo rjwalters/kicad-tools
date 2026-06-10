@@ -27,14 +27,19 @@ from kicad_tools.router.diffpair_length_tuning import MAX_INSERTS_PER_PAIR
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.match_group_tuning import (
+    AMPLITUDE_BACKOFF_FACTORS,
     MAX_INSERTS_PER_GROUP_MEMBER,
     MAX_INSERTS_PER_GROUP_MEMBER_LARGE,
     MAX_INSERTS_PER_GROUP_MEMBER_SMALL,
     MAX_SEGMENT_RETRY_CANDIDATES,
     MAX_TOTAL_INSERTS_PER_GROUP,
+    REASON_SUMMARY_LABELS,
+    TUNE_RESULT_REASONS,
     TuneResult,
     _outer_normal_hint_group,
+    _post_insertion_clearance_detail_group,
     _post_insertion_clearance_ok_group,
+    format_reason_counts,
     tune_match_group_v2,
 )
 from kicad_tools.router.optimizer.serpentine import (
@@ -135,15 +140,22 @@ class TestReferencePolicyLongest:
 
 
 class TestReferencePolicyPaceCar:
-    """``reference_net_id = N`` targets net N's length (pace-car)."""
+    """``reference_net_id = N`` targets net N's length (pace-car).
+
+    Issue #3440 semantics: strict pace-car behavior applies only when
+    the declaration is SATISFIABLE for a lengthen-only tuner, i.e. when
+    no member is longer than the reference by more than tolerance.
+    Otherwise the tuner auto-promotes longest-in-group as the effective
+    reference (see :class:`TestReferenceAutoPromotion`).
+    """
 
     def test_pace_car_net_is_never_modified(self):
-        # Reference = net 2 (11mm).  Net 3 (12mm) is LONGER than reference
-        # -> longer_than_reference (the curator's new reason value).
+        # Reference = net 3 (12mm) -- the LONGEST member, so the strict
+        # pace-car declaration is satisfiable and preserved.
         group = _ddr_group(
             net_ids=[1, 2, 3, 4],
             tolerance=0.1,
-            reference_net_id=2,
+            reference_net_id=3,
         )
         routes = {
             1: _straight_route(1, "D0", 10.0, y=0.0),
@@ -160,16 +172,17 @@ class TestReferencePolicyPaceCar:
             config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
         )
 
-        # Net 2 is the explicit reference -> reason="reference", unchanged.
-        assert results[2][1].reason == "reference"
-        assert results[2][0] is routes[2]
-        assert results[2][0].segments is routes[2].segments
-        assert results[2][1].success is True
+        # Net 3 is the explicit reference -> reason="reference", unchanged.
+        assert results[3][1].reason == "reference"
+        assert results[3][0] is routes[3]
+        assert results[3][0].segments is routes[3].segments
+        assert results[3][1].success is True
 
-    def test_longer_than_reference_reason_is_distinct(self):
-        # Reference = net 2 (11mm).  Net 3 (12mm) is longer -> can't shorten.
-        # This must use the new reason "longer_than_reference", NOT
-        # "reference" (which is for THE reference itself).
+    def test_longer_within_tolerance_does_not_promote(self):
+        # Reference = net 2 (11mm).  Net 3 is 11.05mm -- longer than the
+        # reference but WITHIN the 0.1mm tolerance, so the declaration is
+        # satisfiable and NO auto-promotion happens: the reference keeps
+        # its strict pace-car reason and net 3 is already-within-tolerance.
         group = _ddr_group(
             net_ids=[1, 2, 3, 4],
             tolerance=0.1,
@@ -178,7 +191,7 @@ class TestReferencePolicyPaceCar:
         routes = {
             1: _straight_route(1, "D0", 10.0, y=0.0),
             2: _straight_route(2, "D1", 11.0, y=2.0),
-            3: _straight_route(3, "D2", 12.0, y=4.0),
+            3: _straight_route(3, "D2", 11.05, y=4.0),
             4: _straight_route(4, "D3", 9.0, y=6.0),
         }
 
@@ -190,13 +203,106 @@ class TestReferencePolicyPaceCar:
             config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
         )
 
-        # Net 3 is longer than the 11mm pace-car.
-        assert results[3][1].reason == "longer_than_reference"
-        assert results[3][0] is routes[3]
-        assert results[3][0].segments is routes[3].segments
-        # Distinct from "reference" -- the reference itself has the other reason.
         assert results[2][1].reason == "reference"
-        assert results[2][1].reason != results[3][1].reason
+        assert results[2][0] is routes[2]
+        assert results[2][0].segments is routes[2].segments
+        assert results[3][1].reason == "already_within_tolerance"
+        assert results[3][0] is routes[3]
+
+
+class TestReferenceAutoPromotion:
+    """Issue #3440: a shortest-member pace car is auto-promoted.
+
+    The tuner is lengthen-only; when the declared reference routes
+    shorter than another member by more than tolerance, strict pace-car
+    semantics are structurally unsatisfiable (board 07's ADDR_BUS with
+    ``length_match_reference="A0"`` while A0 routed shortest -> 15.4mm
+    skew left untouched).  Policy: log a structured warning and fall
+    back to longest-in-group semantics -- every member (including the
+    declared reference) becomes tunable toward the longest member.
+    """
+
+    def _routes(self) -> dict[int, Route]:
+        return {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 11.0, y=4.0),
+            3: _straight_route(3, "D2", 12.0, y=8.0),
+            4: _straight_route(4, "D3", 9.0, y=12.0),
+        }
+
+    def test_shortest_member_reference_promotes_longest(self, caplog):
+        import logging
+
+        # Reference = net 2 (11mm) but net 3 (12mm) is longer by more
+        # than the 0.1mm tolerance -> unsatisfiable -> auto-promotion.
+        group = _ddr_group(
+            net_ids=[1, 2, 3, 4],
+            tolerance=0.1,
+            reference_net_id=2,
+        )
+        routes = self._routes()
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.router.match_group_tuning"):
+            results = tune_match_group_v2(
+                group,
+                routes,
+                tolerance_mm=0.1,
+                intra_group_clearance_mm=0.2,
+                config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+            )
+
+        # A structured warning announces the promotion.
+        assert any("auto-promoting" in rec.getMessage().lower() for rec in caplog.records), (
+            f"expected an auto-promotion warning, got: {[r.getMessage() for r in caplog.records]}"
+        )
+
+        # The longest member (net 3) is the effective target -> it is
+        # already at the reference length.
+        assert results[3][1].reason == "already_within_tolerance"
+        assert results[3][0] is routes[3]
+
+        # The DECLARED reference (net 2) is now tunable: it must NOT
+        # carry the "reference" reason and the tuner attempted to
+        # lengthen it toward 12mm.
+        assert results[2][1].reason != "reference"
+        assert results[2][1].reason in (
+            "tuned",
+            "exceeded_max_inserts",
+            "cascade_budget_exhausted",
+            "post_insertion_drc_violation",
+            "no_suitable_segment",
+        )
+
+        # NOBODY is left in the dead-end "longer_than_reference" bucket
+        # -- that was the Issue #3440 regime-A defect.
+        assert all(res.reason != "longer_than_reference" for (_r, res) in results.values())
+
+    def test_promotion_converges_group_skew(self):
+        from kicad_tools.router.length import LengthTracker
+
+        group = _ddr_group(
+            net_ids=[1, 2, 3, 4],
+            tolerance=0.1,
+            reference_net_id=2,
+        )
+        routes = self._routes()
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        lengths = [
+            LengthTracker.calculate_route_length(route) for (route, _res) in results.values()
+        ]
+        skew = max(lengths) - min(lengths)
+        assert skew <= 0.1 + 1e-6, (
+            f"auto-promotion should converge max-min skew to tolerance; got "
+            f"{skew:.4f}mm (lengths: {[f'{length:.3f}' for length in lengths]})"
+        )
 
 
 # =============================================================================
@@ -2462,3 +2568,407 @@ class TestPhase2FFindCorrespondingN:
         n_route = _straight_route(11, "N", 10.0, y=2.0, layer=Layer.B_CU)
         result = _find_corresponding_n_segment(n_route, p_seg)
         assert result is None
+
+
+# =============================================================================
+# Issue #3440: reason registry + summary formatting (observability)
+# =============================================================================
+
+
+class TestReasonRegistry:
+    """Every TuneResult.reason value is registered and label-mapped."""
+
+    def test_labels_cover_registry_exactly(self):
+        assert set(REASON_SUMMARY_LABELS) == set(TUNE_RESULT_REASONS)
+
+    def test_every_reason_assigned_in_source_is_registered(self):
+        """Exhaustiveness: scan the tuner source for reason assignments.
+
+        A new reason value added to the tuner without a registry entry
+        (and therefore without a summary bucket) fails here instead of
+        silently vanishing from the route log -- the Issue #3440
+        "all-zeros summary while 15.4mm of skew goes untouched" defect.
+        """
+        import inspect
+        import re
+
+        import kicad_tools.router.match_group_tuning as mgt
+
+        src = inspect.getsource(mgt)
+        found: set[str] = set()
+        # ``reason="x"`` kwargs / ``.reason = "x"`` / ``last_failure_reason = "x"``
+        found |= set(re.findall(r'reason\s*=\s*\(?\s*"([a-z_]+)"', src))
+        # ``"tuned" if ... else "exceeded_max_inserts"`` conditional form.
+        found |= set(re.findall(r'reason\s*=\s*"[a-z_]+"\s+if\s+.+?\s+else\s+"([a-z_]+)"', src))
+        # ``<x>.reason or "fallback"`` / ``last_failure_reason or "fallback"``.
+        found |= set(re.findall(r'reason\s+or\s+"([a-z_]+)"', src))
+
+        unregistered = found - set(TUNE_RESULT_REASONS)
+        assert not unregistered, (
+            f"reasons assigned in match_group_tuning.py but missing from "
+            f"TUNE_RESULT_REASONS: {sorted(unregistered)}"
+        )
+        missing = set(TUNE_RESULT_REASONS) - found
+        assert not missing, (
+            f"registered reasons never assigned in match_group_tuning.py "
+            f"(stale registry entry?): {sorted(missing)}"
+        )
+
+
+class TestFormatReasonCounts:
+    """The shared summary formatter accounts for EVERY member."""
+
+    def test_every_member_is_counted(self):
+        import re
+
+        reasons = [
+            "tuned",
+            "already_within_tolerance",
+            "post_insertion_drc_violation",
+            "exceeded_max_inserts",
+            "cascade_budget_exhausted",
+            "not_length_critical",
+            "reference",
+            "longer_than_reference",
+            "unrouted",
+            "no_suitable_segment",
+            "weird_future_reason",
+        ]
+        out = format_reason_counts(reasons)
+        total = sum(int(m) for m in re.findall(r"(\d+) ", out))
+        assert total == len(reasons), f"silent bucket detected in: {out!r}"
+        assert "1 tuned" in out
+        assert "1 clean" in out
+        assert "1 rolled back" in out
+        assert "2 budget-exhausted" in out
+        assert "1 skipped" in out
+        assert "1 reference" in out
+        assert "1 longer-than-ref" in out
+        assert "1 unrouted" in out
+        assert "1 no-segment" in out
+        assert "1 other(weird_future_reason)" in out
+
+    def test_legacy_five_buckets_always_present(self):
+        out = format_reason_counts([])
+        assert out == "0 tuned, 0 clean, 0 rolled back, 0 budget-exhausted, 0 skipped"
+
+    def test_board07_regime_a_line_is_not_all_zeros(self):
+        # The exact regime-A composition from the issue: A0 declared
+        # reference + 7 members classified longer_than_reference.  The
+        # legacy printer rendered this as all-zeros; now both buckets
+        # surface explicitly.
+        out = format_reason_counts(["reference"] + ["longer_than_reference"] * 7)
+        assert "1 reference" in out
+        assert "7 longer-than-ref" in out
+
+
+# =============================================================================
+# Issue #3440: distributed meanders (amplitude back-off ladder)
+# =============================================================================
+
+
+class TestAmplitudeBackoffLadder:
+    """The tuner retries a candidate segment with smaller amplitudes."""
+
+    def test_factors_descend_from_unity(self):
+        assert AMPLITUDE_BACKOFF_FACTORS[0] == 1.0
+        assert all(
+            a > b
+            for a, b in zip(AMPLITUDE_BACKOFF_FACTORS, AMPLITUDE_BACKOFF_FACTORS[1:], strict=False)
+        )
+
+    def _group_and_routes(self, noise_y: float) -> tuple[MatchGroup, dict[int, Route]]:
+        """Candidate net 1 (10mm, y=0) + reference net 2 (12mm, y=10).
+
+        A NON-group neighbor ``NOISE`` runs parallel below the candidate
+        at ``y=noise_y``.  The outer-normal for net 1 points AWAY from
+        net 2 (the only other group member), i.e. straight at NOISE --
+        so the bulge amplitude decides whether the insert clears DRC.
+        """
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+            50: _straight_route(50, "NOISE", 30.0, y=noise_y),
+        }
+        return group, routes
+
+    def test_smaller_amplitude_recovers_blocked_insert(self):
+        # NOISE at y=-1.0.  Full amplitude (0.5mm) bulge bottoms out at
+        # y=-0.5 -> clearance 0.5 - 0.2 (half-widths) = 0.3mm < 0.35mm
+        # floor -> rejected.  Quarter amplitude (0.125..0.25) bottoms at
+        # y>=-0.25 -> clearance >= 0.55mm -> committed.  The legacy
+        # single-amplitude tuner rolled this member back.
+        group, routes = self._group_and_routes(noise_y=-1.0)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.35,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0, min_spacing=0.2),
+        )
+
+        res = results[1][1]
+        assert res.reason == "tuned", f"expected tuned, got {res.reason}: {res.message}"
+        assert res.inserts_applied >= 1
+        # The committed meander is the distributed (smaller-amplitude)
+        # variant: every committed serpentine segment stays above
+        # y=-0.5 (the full-amplitude envelope).
+        committed_route = results[1][0]
+        assert min(min(s.y1, s.y2) for s in committed_route.segments) > -0.5, (
+            "expected a smaller-amplitude meander, found a full-amplitude bulge"
+        )
+
+    def test_all_amplitudes_blocked_rolls_back_with_detail(self):
+        # NOISE at y=-0.3: even the smallest ladder amplitude (0.125mm)
+        # cannot clear the 0.35mm floor -> the member rolls back and the
+        # message names the violated rule, the neighbor, and the
+        # capacity shortfall (Issue #3440 addendum AC).
+        group, routes = self._group_and_routes(noise_y=-0.3)
+        original_route = routes[1]
+        original_segments = routes[1].segments
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.35,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0, min_spacing=0.2),
+        )
+
+        res = results[1][1]
+        assert res.reason == "post_insertion_drc_violation"
+        # Byte-for-byte rollback contract preserved.
+        assert results[1][0] is original_route
+        assert results[1][0].segments is original_segments
+        # Actionable rollback detail: rule + neighbor + capacity.
+        assert "NOISE" in res.message, res.message
+        assert "inter-net clearance" in res.message, res.message
+        assert "Capacity: requested" in res.message, res.message
+
+
+class TestPostInsertionDetailGroup:
+    """The detail variant names the first violation; the bool wrapper agrees."""
+
+    def test_detail_none_when_clear(self):
+        routes = {
+            1: _straight_route(1, "A", 10.0, y=0.0),
+            2: _straight_route(2, "B", 10.0, y=10.0),
+        }
+        new_segments = [
+            Segment(
+                x1=0.0,
+                y1=2.0,
+                x2=5.0,
+                y2=2.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="A",
+            )
+        ]
+        detail = _post_insertion_clearance_detail_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+        assert detail is None
+        assert _post_insertion_clearance_ok_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+
+    def test_detail_names_group_member_on_intra_group_violation(self):
+        routes = {
+            1: _straight_route(1, "A", 10.0, y=0.0),
+            2: _straight_route(2, "B", 10.0, y=0.3),
+        }
+        new_segments = [
+            Segment(
+                x1=0.0,
+                y1=0.25,
+                x2=5.0,
+                y2=0.25,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="A",
+            )
+        ]
+        detail = _post_insertion_clearance_detail_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+        assert detail is not None
+        assert "intra-group clearance" in detail
+        assert "'B'" in detail
+        assert not _post_insertion_clearance_ok_group(
+            new_segments=new_segments,
+            candidate_net_id=1,
+            group_net_ids={1, 2},
+            routes_by_net=routes,
+            intra_group_clearance_mm=0.2,
+        )
+
+
+# =============================================================================
+# Issue #3440: staleness publish + collinear-merge normalization + exact fit
+# =============================================================================
+
+
+class TestRoutesByNetPublish:
+    """Committed meanders are published into ``routes_by_net`` so later
+    members' DRC self-checks see them (the board 07 ``A2 vs A1`` stacked
+    meander defect)."""
+
+    def test_tuned_member_entry_is_replaced(self):
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 10.0, y=0.0),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+        }
+        original_1 = routes[1]
+        original_2 = routes[2]
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        assert results[1][1].reason == "tuned"
+        # The tuned route is published in place.
+        assert routes[1] is results[1][0]
+        assert routes[1] is not original_1
+        # The untouched (longest) member's entry is never replaced.
+        assert routes[2] is original_2
+
+
+class TestCollinearMergeNormalization:
+    """A* staircase micro-segments are merged before host ranking."""
+
+    def test_microsegmented_straight_run_is_tunable(self):
+        # Net 1 is a straight 10mm run split into 25 collinear 0.4mm
+        # segments -- each FAR below the 2.0mm host minimum.  Without
+        # the Issue #3440 collinear merge the tuner reported
+        # ``no_suitable_segment`` (board 07's A3 at 7mm residual skew);
+        # with it the merged 10mm run hosts the meander.
+        n = 25
+        step = 0.4
+        micro_segments = [
+            Segment(
+                x1=i * step,
+                y1=0.0,
+                x2=(i + 1) * step,
+                y2=0.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="D0",
+            )
+            for i in range(n)
+        ]
+        routes = {
+            1: Route(net=1, net_name="D0", segments=micro_segments, vias=[]),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+        }
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0),
+        )
+
+        res = results[1][1]
+        assert res.reason == "tuned", f"expected tuned, got {res.reason}: {res.message}"
+
+        # Endpoint preservation: the tuned route still spans pad to pad.
+        tuned = results[1][0]
+        xs = [tuned.segments[0].x1, tuned.segments[-1].x2]
+        assert xs[0] == 0.0 and abs(xs[1] - n * step) < 1e-9
+
+    def test_rollback_still_returns_original_reference(self):
+        # Same staircase, but a neighbor blocks every amplitude -> the
+        # member rolls back and the ORIGINAL (un-merged) route reference
+        # is returned byte-for-byte.
+        n = 25
+        step = 0.4
+        micro_segments = [
+            Segment(
+                x1=i * step,
+                y1=0.0,
+                x2=(i + 1) * step,
+                y2=0.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="D0",
+            )
+            for i in range(n)
+        ]
+        original = Route(net=1, net_name="D0", segments=micro_segments, vias=[])
+        routes = {
+            1: original,
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+            50: _straight_route(50, "NOISE", 30.0, y=-0.3),
+        }
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.35,
+            config=SerpentineConfig(amplitude=0.5, gap_factor=2.0, min_spacing=0.2),
+        )
+
+        assert results[1][1].reason == "post_insertion_drc_violation"
+        assert results[1][0] is original
+        assert results[1][0].segments is micro_segments
+
+
+class TestExactFitAmplitude:
+    """The meander amplitude is shrunk so loops add EXACTLY the needed
+    length -- no more ``2 * amplitude`` overshoot quanta (board 07's A6
+    landed 1.8mm past the reference at the fixed 1.0mm amplitude)."""
+
+    def test_small_correction_does_not_overshoot(self):
+        from kicad_tools.router.length import LengthTracker
+
+        # Net 1 needs +0.3mm; at the fixed 1.0mm base amplitude one loop
+        # would add 2.0mm (1.7mm overshoot, outside the 0.1mm tolerance).
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {
+            1: _straight_route(1, "D0", 11.7, y=0.0),
+            2: _straight_route(2, "D1", 12.0, y=10.0),
+        }
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+
+        res = results[1][1]
+        assert res.reason == "tuned", f"expected tuned, got {res.reason}: {res.message}"
+        tuned_length = LengthTracker.calculate_route_length(results[1][0])
+        assert abs(tuned_length - 12.0) <= 0.01, (
+            f"exact-fit amplitude should land within ~1um of the target, "
+            f"got {tuned_length:.4f}mm vs 12.0mm"
+        )
