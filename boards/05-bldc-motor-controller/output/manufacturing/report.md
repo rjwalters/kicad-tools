@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 55 (0 SMD, 0 THT, 55 other) |
 | Nets | 40 |
-| Traces | 238 segments |
-| Vias | 46 |
+| Traces | 259 segments |
+| Vias | 47 |
 | Board Size | 80.0 x 100.0 mm |
 
 ## Design Overview
@@ -101,9 +101,9 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 20 |
+| Errors | 10 |
 | Warnings | 56 |
-| Blocking | 20 |
+| Blocking | 10 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -111,10 +111,10 @@ Thermal analysis and high-current routing demo
 | Violation Type | Count |
 |----------------|-------|
 | pad_grid | 56 |
-| connectivity | 22 |
-| clearance_segment_segment | 7 |
-| clearance_segment_via | 7 |
+| connectivity | 20 |
 | clearance_pad_segment | 6 |
+| clearance_segment_via | 3 |
+| clearance_segment_segment | 1 |
 
 
 \newpage
@@ -125,8 +125,8 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[CRITICAL]** Fix 20 blocking DRC violations (clearance_segment_segment (7), clearance_segment_via (7), clearance_pad_segment (6))
-- **[OPTIONAL]** Verify zone fill in KiCad: 21 nets appear incomplete but may be connected via zone fills
+- **[CRITICAL]** Fix 10 blocking DRC violations (clearance_pad_segment (6), clearance_segment_via (3), clearance_segment_segment (1))
+- **[OPTIONAL]** Verify zone fill in KiCad: 19 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
 - **[OPTIONAL]** Review 56 DRC warnings
 - **[OPTIONAL]** Analog net: ISENSE_A+ — analog signal; noise-sensitive, avoid crossing digital signals
@@ -143,12 +143,12 @@ Thermal analysis and high-current routing demo
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 40.0% (14/35) |
-| Overall Completion | 45.0% |
-| Complete Nets | 18 / 40 |
+| Signal Net Completion | 45.7% (16/35) |
+| Overall Completion | 50.0% |
+| Complete Nets | 20 / 40 |
 | Zone-Connected Nets | 5 |
-| Incomplete Nets | 22 |
-| Unconnected Pads | 77 |
+| Incomplete Nets | 20 |
+| Unconnected Pads | 75 |
 
 ### Zone-Connected Nets
 
@@ -178,8 +178,6 @@ Thermal analysis and high-current routing demo
 - PWM_AH
 - PWM_BH
 - PWM_CL
-- SWCLK
-- SWO
 - SW_OUT
 
 ### Unrouted Signal Nets
@@ -202,8 +200,6 @@ Thermal analysis and high-current routing demo
 - PWM_AH
 - PWM_BH
 - PWM_CL
-- SWCLK
-- SWO
 - SW_OUT
 
 

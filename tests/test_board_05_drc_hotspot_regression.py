@@ -91,11 +91,12 @@ MAX_SHORTFALL_UM = 150
 # Issue #3423 (2026-06-09): the U3 rotation moved all 56 U3 pads, so
 # the unreproducible snapshot HAD to be refreshed; the refreshed
 # committed file is the deterministic ``design.py`` seed-42 output and
-# carries both families (7 + 7, all hard B.Cu overlaps in the corridor
-# south of the rotated U3 -- tracked in Issue #3444).  Per the refresh
-# policy both entries are dropped IN THE SAME PR as the re-route.
-# Re-add them (and tighten the tolerance allowlist back down) when
-# #3444 lands a router fix that removes the overlap families from the
+# carries both families (1 segment_segment + 3 segment_via residual
+# B.Cu overlaps in the corridor south of the rotated U3, down from
+# 7 + 7 pre-#3442 -- tracked in Issue #3444).  Per the refresh policy
+# both entries are dropped IN THE SAME PR as the re-route.  Re-add
+# them (and tighten the tolerance allowlist back down) when #3444
+# lands a router fix that removes the overlap families from the
 # fresh seed-42 route.
 ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset()
 
