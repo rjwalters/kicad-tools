@@ -196,6 +196,15 @@ def run_route_command(args) -> int:
     early_stop_val = getattr(args, "early_stop_patience", 2)
     if early_stop_val != 2:
         sub_argv.extend(["--early-stop-patience", str(early_stop_val)])
+    # Issue #3438 / #3414: forward --targeted-ripup / --max-ripups-per-net.
+    # Both outer and inner parsers declare --targeted-ripup as store_true
+    # defaulting to False and --max-ripups-per-net defaulting to 3, so only
+    # forward non-default values (matches the early-stop-patience pattern).
+    if getattr(args, "targeted_ripup", False):
+        sub_argv.append("--targeted-ripup")
+    max_ripups_val = getattr(args, "max_ripups_per_net", 3)
+    if max_ripups_val != 3:
+        sub_argv.extend(["--max-ripups-per-net", str(max_ripups_val)])
     timeout_val = getattr(args, "timeout", None)
     if timeout_val is not None:
         sub_argv.extend(["--timeout", str(timeout_val)])

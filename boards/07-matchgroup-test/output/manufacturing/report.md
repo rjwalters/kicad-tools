@@ -2,7 +2,7 @@
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-08 | jlcpcb"
+date: "Rev 1 | 2026-06-10 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -76,9 +76,9 @@ Epic #2661 Phase 3L (issue #2724)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 6 |
+| Errors | 4 |
 | Warnings | 12 |
-| Blocking | 6 |
+| Blocking | 4 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -89,10 +89,10 @@ Epic #2661 Phase 3L (issue #2724)
 | silkscreen_text_height | 4 |
 | pad_grid | 4 |
 | zone_unfilled | 3 |
-| clearance_segment_via | 2 |
-| diffpair_clearance_intra | 2 |
+| clearance_segment_via | 1 |
 | clearance_pad_segment | 1 |
 | clearance_pad_via | 1 |
+| diffpair_clearance_intra | 1 |
 | silkscreen_over_pad | 1 |
 
 
@@ -104,7 +104,7 @@ Epic #2661 Phase 3L (issue #2724)
 
 ### Action Items
 
-- **[CRITICAL]** Fix 6 blocking DRC violations (clearance_segment_via (2), diffpair_clearance_intra (2), clearance_pad_segment (1))
+- **[CRITICAL]** Fix 4 blocking DRC violations (clearance_segment_via (1), clearance_pad_segment (1), clearance_pad_via (1))
 - **[OPTIONAL]** Verify zone fill in KiCad: 4 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 - **[OPTIONAL]** Review 12 DRC warnings
