@@ -591,6 +591,23 @@ class DifferentialPairConfig:
             against pathological cases) AND
             ``per_pair_max_iterations`` (as the deterministic
             classifier).  Whichever fires first triggers the exit.
+        aggregate_timeout: Issue #3439: Optional wall-clock budget
+            (seconds) for the ENTIRE coupled diff-pair phase (all
+            pairs combined).  ``per_pair_timeout`` bounds any single
+            ``CoupledPathfinder.route_coupled`` call, but a board with
+            many pathological pairs can still burn
+            ``num_pairs * per_pair_timeout`` of the outer routing
+            budget before the single-ended main strategy ever runs --
+            the board-07 7/31-reach collapse (every one of 7 pairs
+            blew its 60 s budget, consuming 420 s of the 600 s
+            ``--timeout`` before fallback).  When the aggregate budget
+            is exhausted, all remaining pairs are deferred to the main
+            strategy WITHOUT attempting coupled routing, so a failed
+            coupled pre-pass can never reduce the final reach below
+            the ``--differential-pairs``-off baseline.  ``None``
+            (default) preserves the legacy per-pair-only behaviour;
+            ``Autorouter.route_all_with_diffpairs`` auto-derives a
+            value from ``--timeout`` when this is unset.
     """
 
     enabled: bool = False
@@ -600,6 +617,7 @@ class DifferentialPairConfig:
     add_serpentines: bool = True
     per_pair_timeout: float | None = None
     per_pair_max_iterations: int | None = None
+    aggregate_timeout: float | None = None
 
     def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get rules with any config overrides applied."""

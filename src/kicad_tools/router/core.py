@@ -11000,12 +11000,49 @@ class Autorouter:
                 derived_per_pair_timeout,
             )
 
+        # Issue #3439: derive an AGGREGATE coupled-phase budget from
+        # --timeout when the caller has not explicitly configured one.
+        # The per-pair budget alone is insufficient containment: a board
+        # with many pathological pairs burns ``num_pairs * per_pair``
+        # of the outer budget before the single-ended main strategy
+        # runs (board 07: 7 pairs x 60s = 420s of the 600s --timeout,
+        # collapsing final reach to 7/31).  Capping the whole coupled
+        # phase at 25% of --timeout (floored at one full per-pair
+        # budget so a single pair always gets a complete attempt)
+        # guarantees the main strategy retains at least ~75% of its
+        # budget no matter how many pairs fail.
+        derived_aggregate_timeout: float | None = None
+        if (
+            timeout is not None
+            and timeout > 0
+            and diffpair_config is not None
+            and diffpair_config.enabled
+            and getattr(diffpair_config, "aggregate_timeout", None) is None
+        ):
+            per_pair_floor = (
+                diffpair_config.per_pair_timeout
+                if diffpair_config.per_pair_timeout is not None
+                else (derived_per_pair_timeout or 0.0)
+            )
+            derived_aggregate_timeout = max(
+                float(per_pair_floor), float(timeout) * 0.25
+            )
+            logger.info(
+                "DIFFPAIR_AGGREGATE_TIMEOUT_AUTODERIVED: --timeout=%.1fs; "
+                "capping the aggregate coupled diff-pair phase at %.1fs so "
+                "a failed coupled pre-pass cannot starve the single-ended "
+                "main strategy (issue #3439)",
+                float(timeout),
+                derived_aggregate_timeout,
+            )
+
         result = self._diffpair.route_all_with_diffpairs(
             diffpair_config,
             net_order,
             non_diffpair_strategy=non_diffpair_strategy,
             coupled_only=coupled_only,
             per_pair_timeout=derived_per_pair_timeout,
+            aggregate_timeout=derived_aggregate_timeout,
         )
 
         # Issue #3040 Phase B: rip-up and retry any pairs whose coupled
