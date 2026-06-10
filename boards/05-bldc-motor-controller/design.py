@@ -2628,9 +2628,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # Issue #3423 (2026-06-09): the U3 rotation moved all 56 U3
         # pads, forcing the artifact refresh the paragraph above
         # warned about.  The committed snapshot is now this recipe's
-        # deterministic seed-42 output (20 blocking; see Issue #3444
-        # for the B.Cu overlap families and the re-tightening plan;
-        # 2L reach improved 34% -> 66% from the rotation).
+        # deterministic seed-42 output on the post-#3442 router
+        # (10 blocking = 6 pad_segment + 1 seg_seg + 3 seg_via; see
+        # Issue #3444 for the B.Cu overlap families and the
+        # re-tightening plan; 2L reach 53% at this recipe's 900s
+        # budget, 45.7% at the floor test's 240s recipe).
         "--backend",
         "python",
         "--seed",
