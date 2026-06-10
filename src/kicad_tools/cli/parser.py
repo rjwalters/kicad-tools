@@ -2553,10 +2553,14 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument(
         "--max-ripups-per-net",
         type=int,
-        default=3,
+        default=None,
         help=(
-            "Per-net displacement budget for --targeted-ripup (default: 3). "
-            "Ignored without --targeted-ripup."
+            "Per-net displacement budget for rip-up recovery (default: 3 "
+            "for --targeted-ripup and the two-phase stall path, 2 for the "
+            "standard route_all flow).  Issue #3470: previously this flag "
+            "only fed --targeted-ripup; it now also governs the "
+            "BLOCKED_BY_COMPONENT destructive rip-up budget in route_all "
+            "and the two-phase initial-pass stall recovery."
         ),
     )
     # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to

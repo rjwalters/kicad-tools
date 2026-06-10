@@ -75,11 +75,20 @@ def routed_pcb_path() -> Path:
 
 @pytest.fixture(scope="module")
 def board_05_allowlist_value() -> int:
-    """Read the board-05 entry from ``.github/routed-drc-tolerance.yml``.
+    """Resolve board 05's effective allowlist value (Issue #3470: 0).
 
-    Returns the integer max-allowed error count.  Failures are explicit
-    so a misconfigured allowlist surfaces as a clear test failure rather
-    than a confusing "key error" stack trace.
+    Issue #3470 (2026-06-10) removed the board-05 ``tolerances:`` entry
+    from ``.github/routed-drc-tolerance.yml`` -- per the file's policy
+    header, the ABSENCE of an entry is the strict 0-blocking-error gate.
+    The single residual blocking violation (ISENSE_A-/ISENSE_B- escape
+    stub overlap on In1.Cu at (18.75, 53.75)) was fixed at the source:
+    conflict-aware in-pad escape stub direction (escape.py) plus the
+    transactional rip-up rollback (negotiated.py ``targeted_ripup``).
+
+    This fixture now asserts the entry STAYS removed: re-adding a
+    board-05 tolerance is a loosening regression that requires explicit
+    reviewer sign-off per the allowlist policy, and this test makes it
+    loud.
     """
     if not ALLOWLIST_PATH.exists():
         pytest.skip(f"Allowlist file not found at {ALLOWLIST_PATH!s}")
@@ -92,22 +101,19 @@ def board_05_allowlist_value() -> int:
         )
 
     tolerances = data["tolerances"]
-    if BOARD_05_ALLOWLIST_KEY not in tolerances:
+    if BOARD_05_ALLOWLIST_KEY in tolerances:
         pytest.fail(
-            f"Board 05 entry {BOARD_05_ALLOWLIST_KEY!r} not found in "
-            f"allowlist {ALLOWLIST_PATH!s}.  The entry was present at the "
-            f"time this test was written (issue #2901); if board 05 "
-            f"reaches zero errors the entry should be REMOVED entirely "
-            f"(per the file's policy header) and this test updated to "
-            f"assert the strict 0-error gate."
+            f"Board 05 entry {BOARD_05_ALLOWLIST_KEY!r} reappeared in "
+            f"allowlist {ALLOWLIST_PATH!s} with value "
+            f"{tolerances[BOARD_05_ALLOWLIST_KEY]!r}.  Issue #3470 removed "
+            f"the entry (strict 0-blocking gate) after fixing the ISENSE "
+            f"stub-overlap at the source; re-adding a tolerance is a "
+            f"loosening regression that needs reviewer sign-off AND an "
+            f"update to this test."
         )
 
-    value = tolerances[BOARD_05_ALLOWLIST_KEY]
-    assert isinstance(value, int) and value >= 0, (
-        f"Board 05 allowlist value must be a non-negative int, "
-        f"got {value!r} ({type(value).__name__})"
-    )
-    return value
+    # Absence of the entry = strict 0-blocking-error gate.
+    return 0
 
 
 def _run_kct_check(pcb_path: Path) -> int:

@@ -62,6 +62,7 @@ class TwoPhaseRouter:
         get_partially_routed_nets: Callable[..., Any] | None = None,
         interleave_match_groups: Callable[[list[int]], list[int]] | None = None,
         apply_byte_lane_inner_priority: Callable[[list[int]], list[int]] | None = None,
+        stall_ripup_budget: int | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -102,6 +103,10 @@ class TwoPhaseRouter:
         self._attempt_blocked_component_ripup = attempt_blocked_component_ripup
         self._build_pads_by_net = build_pads_by_net
         self._get_partially_routed_nets = get_partially_routed_nets
+        # Issue #3470: CLI-configurable per-net rip-up budget for the
+        # initial-pass stall recovery in ``_detailed_negotiated``.  None
+        # preserves the historical hardcoded default of 3 (Issue #2527).
+        self._stall_ripup_budget = stall_ripup_budget
 
         # Issue #2597: Communicates the reason the negotiated outer loop in
         # ``_detailed_negotiated()`` exited.  Read by the progress-callback
@@ -620,7 +625,14 @@ class TwoPhaseRouter:
                 # adjacent escapes routinely need 2-3 rip-ups before they
                 # converge, and this stall path runs at most once before the
                 # iteration loop takes over.
-                stall_budget = 3
+                # Issue #3470: budget is now CLI-configurable via
+                # ``--max-ripups-per-net`` (threaded through
+                # ``Autorouter.stall_ripup_budget``).
+                stall_budget = (
+                    self._stall_ripup_budget
+                    if self._stall_ripup_budget is not None
+                    else 3
+                )
                 for failed_net in list(stall_failed):
                     if check_timeout():
                         timed_out = True

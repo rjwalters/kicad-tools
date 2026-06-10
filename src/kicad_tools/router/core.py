@@ -975,7 +975,16 @@ class Autorouter:
         # / matrix boards where multiple sibling NODE nets compete for the
         # same inter-row corridor.
         self._route_all_ripup_history: dict[int, int] = {}
+        # Issue #3470: both budgets are now CLI-configurable via
+        # ``--max-ripups-per-net`` (route_cmd sets these attributes after
+        # constructing the router).  ``_route_all_max_ripups_per_net``
+        # governs the standard ``route_all`` flow's destructive rip-up;
+        # ``stall_ripup_budget`` (None = flow default of 3) governs the
+        # two-phase initial-pass stall recovery, which is the binding
+        # budget for the default ``kct route`` entry point
+        # (``route_with_escape`` -> ``route_all_two_phase``).
         self._route_all_max_ripups_per_net: int = 2
+        self.stall_ripup_budget: int | None = None
 
         # Pre-route congestion estimator (Issue #2278)
         # Computed lazily before net ordering; provides RUDY-based
@@ -5252,10 +5261,12 @@ class Autorouter:
 
         On success, the failed-net routes are appended to ``self.routes``
         by ``targeted_ripup`` and the corresponding failure entries are
-        removed from ``self.routing_failures``.  Displaced sibling nets are
-        rerouted by the negotiated path (best-effort -- if any displaced
-        net fails its new routes are simply not added; its previous routes
-        stay ripped).
+        removed from ``self.routing_failures``.  Issue #3470:
+        ``targeted_ripup`` is transactional -- when the reroute does not
+        converge (failed net cannot fully route, or a displaced sibling
+        fails / degrades) the exact pre-rip-up routes are restored, so a
+        failed rescue can no longer strand siblings or leave partial stub
+        copper.
 
         Args:
             failed_net: ID of the net that just failed in ``route_all``.
@@ -5521,11 +5532,12 @@ class Autorouter:
         # the budget for each sibling it actually rips.
         ripup_history[failed_net] = ripup_history.get(failed_net, 0) + 1
 
-        # If the failed net somehow has stale routes still in net_routes
-        # (e.g. a partial route from an earlier iteration), rip them so
-        # the reroute below starts from a clean slate.
-        if net_routes.get(failed_net):
-            neg_router.rip_up_nets([failed_net], net_routes, self.routes)
+        # Issue #3470: stale (partial) routes for the failed net are now
+        # ripped INSIDE ``targeted_ripup``'s transaction (and restored
+        # verbatim if the reroute does not converge).  The pre-rip that
+        # used to live here ran outside the transaction, which is how a
+        # non-converging rip-up destroyed the failed net's pre-existing
+        # partial connectivity.
 
         def _mark_route(route: Route) -> None:
             self._mark_route(route)
@@ -8342,18 +8354,23 @@ class Autorouter:
                             )
                             blocking_nets |= sibling_blockers
 
-                            # Issue #2475/#2530: Rip up the partially-routed
-                            # net's existing routes only when we have blockers
-                            # to displace; otherwise targeted_ripup would skip
-                            # and we'd permanently lose the partial route on
-                            # single-net boards (or any board where no blockers
-                            # exist), regressing the prior partial connectivity
-                            # to zero routed segments.
+                            # Issue #2475/#2530: only invoke targeted_ripup
+                            # when we have blockers to displace; otherwise it
+                            # would skip and we'd permanently lose the partial
+                            # route on single-net boards (or any board where
+                            # no blockers exist).
+                            #
+                            # Issue #3470 (PR #3478 judge follow-up): the
+                            # out-of-transaction pre-rip of the failed net's
+                            # stale partial routes that used to live here is
+                            # gone.  ``targeted_ripup`` rips them INSIDE its
+                            # transaction and restores them verbatim when the
+                            # reroute does not converge, so the rollback
+                            # guarantee now covers this call site too --
+                            # previously the snapshot was taken AFTER the
+                            # external rip, losing the partial connectivity
+                            # on a failed rescue.
                             if blocking_nets:
-                                if failed_net in net_routes and net_routes[failed_net]:
-                                    neg_router.rip_up_nets(
-                                        [failed_net], net_routes, self.routes
-                                    )
 
                                 def _mark_route_fallback(route: Route) -> None:
                                     self._mark_route(route)
@@ -9080,6 +9097,10 @@ class Autorouter:
             # the DQ1/DQ6 inner-position bump in `kct route` (which goes
             # through ``route_with_escape``).
             apply_byte_lane_inner_priority=self._apply_byte_lane_inner_priority,
+            # Issue #3470: CLI-configurable stall-recovery rip-up budget
+            # (``--max-ripups-per-net``).  None preserves the historical
+            # default of 3.
+            stall_ripup_budget=self.stall_ripup_budget,
         )
 
     def route_all_two_phase(
