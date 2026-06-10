@@ -3511,25 +3511,33 @@ def _remove_conflicting_vias(pcb_text: str, clearance: float) -> str:
     Returns:
         PCB text with conflicting vias removed.
     """
-    # Parse via positions and net IDs from the text
-    via_pattern = re.compile(
-        r"(\(via\s+"
-        r"\(at\s+([\d.-]+)\s+([\d.-]+)\)\s*"
-        r"\(size\s+[\d.]+\)\s*"
-        r"\(drill\s+[\d.]+\)\s*"
-        r'\(layers\s+"[^"]+"\s+"[^"]+"\)\s*'
-        r"\(net\s+(\d+)\)"
-        r"[^)]*\)[^)]*\))",
-        re.DOTALL,
-    )
+    # Issue #3447: use the same balanced-parentheses walker as
+    # ``parse_vias`` (fixed in #3446) so that fields may appear in any
+    # order.  The previous implementation used a single ordered regex
+    # that required ``(net N)`` to immediately follow ``(layers ...)``.
+    # KiCad 8+ files -- including every PCB written by ``kct route``
+    # itself -- emit ``(uuid "...")`` between ``(layers)`` and
+    # ``(net)``, so the ordered pattern matched ZERO vias on modern
+    # output and conflict detection silently no-opped.  It also missed
+    # ``(via micro ...)`` / ``blind`` / ``buried`` blocks (#3118),
+    # whose type token sits between ``via`` and ``(at ...)``.
+    from .optimizer.pcb import _extract_balanced_blocks
 
-    # Collect all vias with their positions, nets, and match spans
-    vias: list[tuple[float, float, int, re.Match]] = []  # type: ignore[type-arg]
-    for match in via_pattern.finditer(pcb_text):
-        x = float(match.group(2))
-        y = float(match.group(3))
-        net = int(match.group(4))
-        vias.append((x, y, net, match))
+    _re_at = re.compile(r"\(at\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
+    _re_net = re.compile(r"\(net\s+(\d+)\)")
+
+    # Collect all vias with their positions, nets, and block spans
+    vias: list[tuple[float, float, int, tuple[int, int]]] = []
+    for start, end, block in _extract_balanced_blocks(pcb_text, "via"):
+        m_at = _re_at.search(block)
+        m_net = _re_net.search(block)
+        # Both core fields are required; skip malformed blocks.
+        if not (m_at and m_net):
+            continue
+        x = float(m_at.group(1))
+        y = float(m_at.group(2))
+        net = int(m_net.group(1))
+        vias.append((x, y, net, (start, end)))
 
     if len(vias) < 2:
         return pcb_text
@@ -3538,19 +3546,18 @@ def _remove_conflicting_vias(pcb_text: str, clearance: float) -> str:
     # Keep the first via encountered at each location; remove later conflicts
     spans_to_remove: list[tuple[int, int]] = []
     for i in range(len(vias)):
-        x_i, y_i, net_i, match_i = vias[i]
+        x_i, y_i, net_i, span_i = vias[i]
         # Skip vias already marked for removal
-        if (match_i.start(), match_i.end()) in spans_to_remove:
+        if span_i in spans_to_remove:
             continue
         for j in range(i + 1, len(vias)):
-            x_j, y_j, net_j, match_j = vias[j]
+            x_j, y_j, net_j, span_j = vias[j]
             if net_i == net_j:
                 continue
             dist = math.sqrt((x_i - x_j) ** 2 + (y_i - y_j) ** 2)
             if dist < clearance:
-                span = (match_j.start(), match_j.end())
-                if span not in spans_to_remove:
-                    spans_to_remove.append(span)
+                if span_j not in spans_to_remove:
+                    spans_to_remove.append(span_j)
                     logger.warning(
                         "Removed conflicting via at (%.4f, %.4f) net %d "
                         "(co-located with net %d, distance %.4fmm)",
@@ -3628,6 +3635,11 @@ def verify_output_connectivity(
     )
 
     # Parse vias: (via (at X Y) ... (net N) ...)
+    # NOTE (#3447 sweep): unlike the ordered regexes fixed in #3446
+    # (parse_vias) and #3447 (_remove_conflicting_vias), this pattern
+    # uses lazy ``.*?`` wildcards between fields, so it tolerates
+    # KiCad-8 field order (uuid before net) and via type tokens
+    # (micro/blind/buried).  Checked and intentionally left as-is.
     via_pattern = re.compile(
         r"\(via\s+"
         r".*?\(at\s+([\d.+-]+)\s+([\d.+-]+)\)"
