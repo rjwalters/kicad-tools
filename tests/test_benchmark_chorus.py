@@ -32,14 +32,21 @@ def test_chorus_test_revA_is_registered() -> None:
     assert case.difficulty.value == "hard"
 
 
-def test_chorus_test_revA_points_at_v18() -> None:
-    """Issue #2611: the stale v9_grid50 path was bumped to v18."""
+def test_chorus_test_revA_points_at_v21_stripped() -> None:
+    """Issue #3474 Phase 0: the stale v18 path was bumped to v21_stripped.
+
+    v18/v19 predate the chorus repo's 2026-05-11 netlist repair and the
+    2026-06-10 U1/U2 regulator-connectivity restoration; routing them to
+    100% would be fake-manufacturable.  (Issue #2611 had previously
+    bumped the even-staler v9_grid50 to v18.)
+    """
     case = get_case_by_name("chorus_test_revA")
     assert case is not None
     assert case.pcb_path is not None
-    assert "v18" in case.pcb_path, (
-        f"Expected v18 PCB, got: {case.pcb_path}.  See Issue #2611 — "
-        "the v9_grid50 path is 9 revisions and 214 net-mismatches stale."
+    assert "v21_stripped" in case.pcb_path, (
+        f"Expected v21_stripped PCB, got: {case.pcb_path}.  See Issue "
+        "#3474 Phase 0 — v18/v19 lack the 2026-05-11 schematic repairs "
+        "and the U1/U2 regulator connectivity restoration."
     )
 
 
@@ -242,12 +249,21 @@ def test_baseline_file_loads() -> None:
     results = load_baseline(baseline_path)
     assert len(results) >= 1
     chorus = next(r for r in results if r.case_name == "chorus_test_revA")
-    # Sanity-check the seed values from curator's investigation.
-    assert chorus.nets_unrouted == 8, (
-        "The 8-net structural floor is a load-bearing constant; changing it "
+    # Sanity-check the Issue #3474 Phase 0 v21 re-baseline (2026-06-10,
+    # cpp seed 42, pinned recipe -- see tests/test_chorus_reach_floor_3237.py
+    # CHORUS_V21_* constants for the full measurement record).
+    assert chorus.nets_total == 51, (
+        "nets_total must match the v21_stripped multi-pad signal-net "
+        "count (51 after the five power/ground nets are skipped)."
+    )
+    assert chorus.nets_unrouted == 19, (
+        "The 19-net unrouted floor is a load-bearing constant; changing it "
         "requires justification in the PR description per docs/benchmark.md."
     )
-    assert chorus.nets_fully_routed == 26
+    assert chorus.nets_fully_routed == 2, (
+        "The honest (low) v21 strict-reach baseline; expected to RISE as "
+        "#3474 phases R1/R2/P1 land -- bump with justification."
+    )
 
 
 # ---------------------------------------------------------------------------
