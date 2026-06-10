@@ -468,11 +468,18 @@ tolerances:
   #     USB_D+ A6 pad and share the same exit clause as the
   #     ``connectivity`` advisory (also USB_D+ A6).
   #
-  # Exit clause: tighten 5 -> 1 (structural ``diffpair_clearance_intra``
-  # only) once the J1 USB-C re-spin / DRC-rule USB-C-crossover
-  # exception lands -- they are the same J1-internal residuals already
-  # tracked in the structural commentary above (lines 312-330).
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 5
+  # Exit clause EXECUTED by Issue #3410 (June 9 2026): the J1 USB-C
+  # re-spin landed (``generate_pcb.py`` now exits same-signal SMT tails
+  # in the same column, eliminating the structural D+/D- X-crossover),
+  # together with: the MST intra-IC tie-group representative fix
+  # (``reduce_pads_after_intra_ic``), the column-aligned USB-C escape
+  # defer (``_escape_usb_c_connector``), the auto-pour
+  # double-origin-subtraction fix that previously DELETED the board's
+  # hand-tuned zones, and the ``--raw`` production recipe (the
+  # TraceOptimizer otherwise re-introduces one ``clearance_segment_via``
+  # at the XTAL cluster).  The committed routed PCB is now 13/13 routed
+  # with ZERO blocking DRC errors at jlcpcb-tier1 -- tightened 5 -> 0.
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 0
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner

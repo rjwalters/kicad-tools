@@ -1871,7 +1871,7 @@ class Autorouter:
         connected_indices |= block_connected
 
         # Build reduced pad list for inter-IC routing
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
+        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
         if len(pads_for_routing) < 2:
             return routes
 
@@ -5747,7 +5747,7 @@ class Autorouter:
         connected_indices |= block_connected
 
         # Build reduced pad list for inter-IC routing
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
+        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
         if len(pads_for_routing) < 2:
             return routes
 
@@ -8614,7 +8614,7 @@ class Autorouter:
             routes.append(route)
         connected_indices |= block_connected
 
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
+        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
         if len(pads_for_routing) < 2:
             return routes
 
@@ -9008,7 +9008,7 @@ class Autorouter:
             routes.append(route)
         connected_indices |= block_connected
 
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
+        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
         if len(pads_for_routing) < 2:
             return routes
 

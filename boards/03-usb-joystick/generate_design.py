@@ -406,379 +406,39 @@ def create_usb_joystick_schematic(output_dir: Path) -> Path:
 # =============================================================================
 # PCB Generation
 # =============================================================================
-
-BOARD_WIDTH = 60.0
-BOARD_HEIGHT = 40.0
-BOARD_ORIGIN_X = 100.0
-BOARD_ORIGIN_Y = 100.0
+#
+# Issue #3410: this script previously carried its OWN copy of the PCB
+# layout (60x40mm board, pre-#2527 USB pin assignment) which had drifted
+# from the canonical generator ``generate_pcb.py`` (80x60mm, schematic-
+# aligned pin map).  Because ``kct build --step pcb`` and the CI
+# ``regenerated_board`` fixture both run ``generate_pcb.py`` while this
+# script's main() wrote its stale internal copy over the committed
+# artifact, the two paths measured DIFFERENT boards (the #3402 audit's
+# "77% reach" was the stale 60x40 board).  Mirroring the #3308 route-
+# recipe consolidation, the PCB step now DELEGATES to ``generate_pcb.py``
+# so there is exactly one copy of the layout.
+#
+# Copper pours (GND/VCC/VBUS) are likewise emitted by ``generate_pcb.py:
+# generate_power_pours()`` -- see ``create_zones_for_pcb`` below.
 
 
 def create_usb_joystick_pcb(output_dir: Path) -> Path:
-    """
-    Create a PCB for the USB joystick.
+    """Create the PCB by delegating to the canonical ``generate_pcb.py``.
 
     Returns the path to the generated PCB file.
     """
     print("\n" + "=" * 60)
-    print("Creating USB Joystick PCB...")
+    print("Creating USB Joystick PCB (delegates to generate_pcb.py)...")
     print("=" * 60)
 
-    def generate_header() -> str:
-        # File-format version bumped from 20240108 (KiCad 8) to 20260206
-        # (KiCad 10).  The older version is rejected by KiCad 10.x's
-        # ``kicad-cli`` whenever the PCB contains ``(zone ...)`` blocks
-        # ("Failed to load board") -- a regression specific to the
-        # 20240108 grammar's zone children.  The newer version still
-        # works with the legacy layer numbering scheme this script emits
-        # (verified against board 01's routed PCB).
-        return """(kicad_pcb
-  (version 20260206)
-  (generator "kicad-tools-demo")
-  (generator_version "10.0")
-  (general
-    (thickness 1.6)
-    (legacy_teardrops no)
-  )
-  (paper "A4")
-  (layers
-    (0 "F.Cu" signal)
-    (31 "B.Cu" signal)
-    (32 "B.Adhes" user "B.Adhesive")
-    (33 "F.Adhes" user "F.Adhesive")
-    (34 "B.Paste" user)
-    (35 "F.Paste" user)
-    (36 "B.SilkS" user "B.Silkscreen")
-    (37 "F.SilkS" user "F.Silkscreen")
-    (38 "B.Mask" user)
-    (39 "F.Mask" user)
-    (44 "Edge.Cuts" user)
-    (46 "B.CrtYd" user "B.Courtyard")
-    (47 "F.CrtYd" user "F.Courtyard")
-    (48 "B.Fab" user)
-    (49 "F.Fab" user)
-  )
-  (setup
-    (pad_to_mask_clearance 0)
-  )"""
+    sys.path.insert(0, str(Path(__file__).parent))
+    import generate_pcb as _pcb_gen
 
-    def generate_nets() -> str:
-        lines = ['  (net 0 "")']
-        for name, num in NETS.items():
-            if num > 0:
-                lines.append(f'  (net {num} "{name}")')
-        return "\n".join(lines)
-
-    def generate_board_outline() -> str:
-        x1 = BOARD_ORIGIN_X
-        y1 = BOARD_ORIGIN_Y
-        x2 = BOARD_ORIGIN_X + BOARD_WIDTH
-        y2 = BOARD_ORIGIN_Y + BOARD_HEIGHT
-        return f"""  (gr_rect (start {x1} {y1}) (end {x2} {y2})
-    (stroke (width 0.1) (type default))
-    (fill none)
-    (layer "Edge.Cuts")
-    (uuid "{generate_uuid()}")
-  )"""
-
-    def generate_mcu() -> str:
-        x = BOARD_ORIGIN_X + 30
-        y = BOARD_ORIGIN_Y + 20
-        pitch = 0.8
-        pad_offset = 4.5
-
-        pin_nets = {
-            1: ("GND", 3),
-            2: ("XTAL1", 15),
-            3: ("XTAL2", 16),
-            4: ("VCC", 2),
-            5: ("GND", 3),
-            6: ("GND", 3),
-            7: ("GND", 3),
-            8: ("VCC", 2),
-            9: ("JOY_X", 8),
-            10: ("JOY_Y", 9),
-            11: ("JOY_BTN", 10),
-            12: ("BTN1", 11),
-            13: ("BTN2", 12),
-            14: ("BTN3", 13),
-            15: ("BTN4", 14),
-            16: ("GND", 3),
-            17: ("VCC", 2),
-            18: ("GND", 3),
-            19: ("GND", 3),
-            20: ("GND", 3),
-            21: ("GND", 3),
-            22: ("GND", 3),
-            23: ("GND", 3),
-            24: ("VCC", 2),
-            25: ("GND", 3),
-            26: ("USB_CC2", 7),
-            27: ("USB_CC1", 6),
-            28: ("USB_D-", 5),
-            29: ("USB_D+", 4),
-            30: ("VBUS", 1),
-            31: ("GND", 3),
-            32: ("GND", 3),
-        }
-
-        def pin_offset(i):
-            return (i - 3.5) * pitch
-
-        pads = []
-        for i in range(8):
-            pin = i + 1
-            net_name, net_num = pin_nets[pin]
-            net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-            py = pin_offset(i)
-            pads.append(
-                f'    (pad "{pin}" smd rect (at {-pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
-            )
-
-        for i in range(8):
-            pin = i + 9
-            net_name, net_num = pin_nets[pin]
-            net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-            px = pin_offset(i)
-            pads.append(
-                f'    (pad "{pin}" smd rect (at {px:.3f} {pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
-            )
-
-        for i in range(8):
-            pin = i + 17
-            net_name, net_num = pin_nets[pin]
-            net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-            py = pin_offset(i)
-            pads.append(
-                f'    (pad "{pin}" smd rect (at {pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
-            )
-
-        for i in range(8):
-            pin = i + 25
-            net_name, net_num = pin_nets[pin]
-            net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-            px = -pin_offset(i)
-            pads.append(
-                f'    (pad "{pin}" smd rect (at {px:.3f} {-pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
-            )
-
-        pads_str = "\n".join(pads)
-        return f"""  (footprint "Package_QFP:TQFP-32_7x7mm_P0.8mm"
-    (layer "F.Cu")
-    (uuid "{generate_uuid()}")
-    (at {x} {y})
-    (fp_text reference "U1" (at 0 -6) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (fp_text value "MCU" (at 0 6) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-{pads_str}
-  )"""
-
-    def generate_usb_connector() -> str:
-        x = BOARD_ORIGIN_X + 30
-        y = BOARD_ORIGIN_Y + 5
-
-        pins = [
-            ("A1", -2.75, "GND"),
-            ("A4", -1.75, "VBUS"),
-            ("A5", -1.0, "USB_CC1"),
-            ("A6", -0.25, "USB_D+"),
-            ("A7", 0.25, "USB_D-"),
-            ("A8", 1.0, ""),
-            ("A9", 1.75, "VBUS"),
-            ("A12", 2.75, "GND"),
-            ("B1", 2.75, "GND"),
-            ("B4", 1.75, "VBUS"),
-            ("B5", 1.0, "USB_CC2"),
-            ("B6", 0.25, "USB_D+"),
-            ("B7", -0.25, "USB_D-"),
-            ("B8", -1.0, ""),
-            ("B9", -1.75, "VBUS"),
-            ("B12", -2.75, "GND"),
-        ]
-
-        pads = []
-        for pin, px, net_name in pins:
-            net_num = NETS.get(net_name, 0)
-            net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-            py = 0 if pin.startswith("A") else 1.0
-            pads.append(
-                f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.25 0.35) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
-            )
-
-        pads.append(
-            '    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
-        )
-        pads.append(
-            '    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
-        )
-
-        pads_str = "\n".join(pads)
-        # Issue #3095: J1 is the USB-C receptacle whose location is
-        # mechanically constrained by the board edge.  The original
-        # `(attr smd locked)` annotation was removed because the
-        # in-tree S-expression writer re-emits the keyword as a quoted
-        # string `(attr smd "locked")` which KiCad 10.0.1's loader
-        # rejects ("Failed to load board").  The downstream router
-        # treats every footprint as fixed-in-place anyway because this
-        # script does not call `kct optimize-placement`, so the anchor
-        # behaviour is preserved.  If a future change wires placement
-        # optimisation in, switch to the modern KiCad 10 form
-        # `(attr smd)\n(locked yes)` which the writer round-trips
-        # cleanly.
-        return f"""  (footprint "Connector_USB:USB_C_Receptacle_GCT_USB4105"
-    (layer "F.Cu")
-    (uuid "{generate_uuid()}")
-    (at {x} {y})
-    (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (fp_text value "USB-C" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-{pads_str}
-  )"""
-
-    def generate_joystick() -> str:
-        x = BOARD_ORIGIN_X + 12
-        y = BOARD_ORIGIN_Y + 22
-
-        pins = [
-            ("1", -4, 0, "GND"),
-            ("2", -2, 0, "VCC"),
-            ("3", 0, 0, "JOY_X"),
-            ("4", 2, 0, "JOY_Y"),
-            ("5", 4, 0, "JOY_BTN"),
-        ]
-
-        pads = []
-        for pin, px, py, net_name in pins:
-            net_num = NETS[net_name]
-            pads.append(
-                f'    (pad "{pin}" thru_hole circle (at {px} {py}) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net {net_num} "{net_name}"))'
-            )
-
-        pads_str = "\n".join(pads)
-        # J2 is the analog joystick module.  See generate_usb_connector
-        # for why the ``(attr through_hole locked)`` annotation was
-        # removed (writer-side quoting incompatibility with KiCad 10).
-        return f"""  (footprint "Module:Joystick_Analog"
-    (layer "F.Cu")
-    (uuid "{generate_uuid()}")
-    (at {x} {y})
-    (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (fp_text value "Joystick" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-{pads_str}
-  )"""
-
-    def generate_button(ref: str, pos: tuple, net_name: str) -> str:
-        x, y = pos
-        net_num = NETS[net_name]
-        return f"""  (footprint "Button_Switch_SMD:SW_SPST_TL3342"
-    (layer "F.Cu")
-    (uuid "{generate_uuid()}")
-    (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (fp_text value "Button" (at 0 3.5) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (pad "1" smd rect (at -3.1 0) (size 1.8 1.4) (layers "F.Cu" "F.Paste" "F.Mask") (net {net_num} "{net_name}"))
-    (pad "2" smd rect (at 3.1 0) (size 1.8 1.4) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
-  )"""
-
-    def generate_crystal() -> str:
-        x = BOARD_ORIGIN_X + 45
-        y = BOARD_ORIGIN_Y + 18
-        return f"""  (footprint "Crystal:Crystal_HC49-U_Vertical"
-    (layer "F.Cu")
-    (uuid "{generate_uuid()}")
-    (at {x} {y})
-    (fp_text reference "Y1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (fp_text value "16MHz" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (pad "1" thru_hole circle (at -2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net 15 "XTAL1"))
-    (pad "2" thru_hole circle (at 2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net 16 "XTAL2"))
-  )"""
-
-    def generate_capacitor(ref: str, pos: tuple, net1: str, net2: str) -> str:
-        x, y = pos
-        net1_num = NETS[net1]
-        net2_num = NETS[net2]
-        return f"""  (footprint "Capacitor_SMD:C_0402_1005Metric"
-    (layer "F.Cu")
-    (uuid "{generate_uuid()}")
-    (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -1.2) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (fp_text value "100nF" (at 0 1.2) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 1 1) (thickness 0.15)))
-    )
-    (pad "1" smd roundrect (at -0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
-    (pad "2" smd roundrect (at 0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
-  )"""
-
-    # Build the PCB file
-    parts = [
-        generate_header(),
-        generate_nets(),
-        generate_board_outline(),
-        generate_mcu(),
-        generate_usb_connector(),
-        generate_joystick(),
-        generate_crystal(),
-    ]
-
-    print("\n1. Adding footprints...")
-    print("   U1 (MCU) at board center")
-    print("   J1 (USB-C) at top")
-    print("   J2 (Joystick) at left")
-    print("   Y1 (Crystal) near MCU")
-
-    button_y = BOARD_ORIGIN_Y + 35
-    button_positions = [
-        ("SW1", (BOARD_ORIGIN_X + 15, button_y), "BTN1"),
-        ("SW2", (BOARD_ORIGIN_X + 27, button_y), "BTN2"),
-        ("SW3", (BOARD_ORIGIN_X + 39, button_y), "BTN3"),
-        ("SW4", (BOARD_ORIGIN_X + 51, button_y), "BTN4"),
-    ]
-    for ref, pos, net in button_positions:
-        parts.append(generate_button(ref, pos, net))
-    print("   SW1-SW4 (Buttons) at bottom")
-
-    cap_positions = [
-        ("C1", (BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 18), "VCC", "GND"),
-        ("C2", (BOARD_ORIGIN_X + 38, BOARD_ORIGIN_Y + 18), "VCC", "GND"),
-        ("C3", (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 28), "VCC", "GND"),
-        ("C4", (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 10), "VBUS", "GND"),
-    ]
-    for ref, pos, net1, net2 in cap_positions:
-        parts.append(generate_capacitor(ref, pos, net1, net2))
-    print("   C1-C4 (Capacitors) near MCU")
-
-    parts.append(")")
-
-    pcb_content = "\n".join(parts)
-
-    print("\n2. Writing PCB file...")
     pcb_path = output_dir / "usb_joystick.kicad_pcb"
-    pcb_path.write_text(pcb_content)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pcb_path.write_text(_pcb_gen.generate_pcb())
     print(f"   PCB: {pcb_path}")
-
-    print(f"\n   Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
-    print("   Components: 1 MCU, 1 USB-C, 1 joystick, 4 buttons, 1 crystal, 4 caps")
-    print(f"   Nets: {len([n for n in NETS.values() if n > 0])}")
-
+    print(f"\n   Board size: {_pcb_gen.BOARD_WIDTH}mm x {_pcb_gen.BOARD_HEIGHT}mm")
     return pcb_path
 
 
@@ -849,97 +509,36 @@ def run_erc(sch_path: Path) -> bool:
 
 
 def create_zones_for_pcb(pcb_path: Path) -> int:
-    """Create copper-pour zones for power and ground nets on *pcb_path*.
+    """Verify the power-net copper pours exist in *pcb_path*.
 
-    Issue #3095: Without zone pours, GND/VCC/VBUS are listed in
-    ``skip_nets`` but the router does not produce any copper for them,
-    leaving 28/29 GND pads, 7/8 VCC pads, and 5/6 VBUS pads stranded.
+    Issue #3410 consolidation: the GND (F.Cu + B.Cu) / VCC / VBUS zone
+    definitions are now emitted by the canonical generator
+    (``generate_pcb.py:generate_power_pours``) so the layout and its
+    pour regions cannot drift apart again (the pre-#3410 version of
+    this function carried pour rectangles hand-tuned to a 60x40mm
+    layout this script no longer generates).  This step now only
+    VERIFIES the pours are present so a future generator regression
+    fails loudly here rather than as 40 stranded-pad connectivity
+    errors at DRC time.
 
-    Unlike ``auto_pour_if_missing`` (which assigns each pour net a
-    single layer and produced a B.Cu-only GND zone that misses the
-    TQFP-32 SMD pads on F.Cu), this helper emits an EXPLICIT zone for
-    GND on BOTH F.Cu and B.Cu.  The dual-layer GND plane catches every
-    SMD GND pad on F.Cu directly while still providing a return-current
-    plane on B.Cu.  VCC + VBUS keep a single F.Cu pour each (these are
-    only consumed by SMD pads on F.Cu, no B.Cu mirror needed).
-
-    Mirrors board-05's ``create_zones_for_pcb`` pattern at
-    ``boards/05-bldc-motor-controller/design.py:2066`` but with the
-    GND-dual-layer override required by board 03's pad distribution.
-
-    Returns the number of zones created.
+    Returns the number of zones found.
     """
-    from kicad_tools.router.mfr_limits import get_mfr_limits
-
     print("\n" + "=" * 60)
-    print("Creating copper-pour zones...")
+    print("Verifying copper-pour zones...")
     print("=" * 60)
 
-    edge_clearance = 0.3
-    try:
-        _limits = get_mfr_limits("jlcpcb")
-        if _limits.min_edge_clearance > 0:
-            edge_clearance = _limits.min_edge_clearance
-    except ValueError:
-        pass
-
-    # Board outline inset by edge_clearance for the zone polygon.
-    inset = edge_clearance
-    x1 = BOARD_ORIGIN_X + inset
-    y1 = BOARD_ORIGIN_Y + inset
-    x2 = BOARD_ORIGIN_X + BOARD_WIDTH - inset
-    y2 = BOARD_ORIGIN_Y + BOARD_HEIGHT - inset
-
-    # VCC region: north half of the board (caps + U1 power pads).
-    # Sized to avoid the VBUS zone and J2 footprint.
-    vcc_x1 = x1 + 8.2
-    vcc_y1 = y1 + 15.4
-    vcc_x2 = x1 + 38.72
-    vcc_y2 = y1 + 29.2
-
-    # VBUS region: small island around J1 + C4.
-    vbus_x1 = x1 + 26.45
-    vbus_y1 = y1 + 3.2
-    vbus_x2 = x1 + 32.95
-    vbus_y2 = y1 + 16.7
-
-    def zone_sexp(net_num: int, net_name: str, layer: str, priority: int,
-                  poly: tuple) -> str:
-        from uuid import uuid4
-        ux1, uy1, ux2, uy2 = poly
-        return f"""  (zone
-    (net {net_num})
-    (net_name "{net_name}")
-    (layer "{layer}")
-    (uuid "{uuid4()}")
-    (hatch edge 0.5)
-    (priority {priority})
-    (connect_pads (clearance 0.3))
-    (min_thickness 0.25)
-    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4) (island_removal_mode 0))
-    (polygon (pts (xy {ux1} {uy1}) (xy {ux2} {uy1}) (xy {ux2} {uy2}) (xy {ux1} {uy2})))
-  )"""
-
-    zones = []
-    # GND on F.Cu (priority 1, lower than VCC/VBUS so they win in overlap).
-    zones.append(zone_sexp(3, "GND", "F.Cu", 1, (x1, y1, x2, y2)))
-    # GND on B.Cu (full board, no overlap conflicts on this layer).
-    zones.append(zone_sexp(3, "GND", "B.Cu", 1, (x1, y1, x2, y2)))
-    # VCC on F.Cu, higher priority so it wins over GND in the VCC region.
-    zones.append(zone_sexp(2, "VCC", "F.Cu", 2, (vcc_x1, vcc_y1, vcc_x2, vcc_y2)))
-    # VBUS on F.Cu, highest priority so it wins over VCC + GND.
-    zones.append(zone_sexp(1, "VBUS", "F.Cu", 3,
-                           (vbus_x1, vbus_y1, vbus_x2, vbus_y2)))
-
-    # Inject zones into the PCB by appending before the closing paren.
     text = pcb_path.read_text()
-    closing = text.rstrip().rstrip(")")
-    new_text = closing.rstrip() + "\n" + "\n".join(zones) + "\n)\n"
-    pcb_path.write_text(new_text)
-
-    print(f"\n   Created {len(zones)} zone(s): GND on F.Cu+B.Cu, VCC on F.Cu, "
-          "VBUS on F.Cu")
-    return len(zones)
+    zone_count = text.count("(zone")
+    required = ("GND", "VCC", "VBUS")
+    missing = [n for n in required if f'(net_name "{n}")' not in text]
+    if missing:
+        raise RuntimeError(
+            f"Generated PCB {pcb_path} is missing pour zone(s) for "
+            f"{', '.join(missing)} -- generate_pcb.py:generate_power_pours() "
+            "must emit GND/VCC/VBUS zones (issue #3410)."
+        )
+    print(f"\n   {zone_count} zone(s) present (GND/VCC/VBUS pours OK)")
+    return zone_count
 
 
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:
@@ -982,87 +581,55 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """Route the PCB using the autorouter."""
-    import random
+    """Route the PCB with the production ``kct route`` recipe.
 
-    from kicad_tools.router import (
-        DesignRules,
-        DifferentialPairConfig,
-        create_net_class_map,
-        load_pcb_for_routing,
-    )
-    from kicad_tools.router.optimizer import (
-        GridCollisionChecker,
-        OptimizationConfig,
-        TraceOptimizer,
-    )
+    Issue #3410 (recipe consolidation, round 2): the previous version of
+    this function carried an in-process ``Autorouter.route_all()`` recipe
+    (0.05mm grid, in-pad rescues on U1, CoupledPathfinder disabled).
+    That simple per-net strategy tops out at 11-12/13 on this board: the
+    USB-C escape belt packs four signal columns into 3.5mm, and without
+    the negotiated two-phase strategy's rip-up/retry and fine-pitch
+    escape regions, whichever USB net routes last is left stranded
+    (USB_CC2 under current HEAD).
+
+    The production ``kct route`` invocation -- the SAME one pinned by
+    ``tests/router/test_board03_routing_baseline.py`` and used by the
+    fleet (board-05 precedent: "bake proven kct route flag recipe into
+    design.py", PR #2981) -- reaches 13/13 at 2 layers on the
+    regenerated board.  Delegating to it means the demo, the build
+    pipeline, and the reach-floor CI tests all measure ONE code path.
+
+    The function also emits the ``net_class_map.json`` sidecar next to
+    the routed PCB so the validate-side diff-pair rules
+    (``routing_continuity`` / ``length_skew``) can engage from
+    ``kct check --net-class-map`` (Issue #2684).
+
+    Returns True when every signal net is fully routed (the DRC gate is
+    reported separately by the caller via ``run_drc``).
+    """
+    import json as _json
+    import re as _re
+    import subprocess as _sp
+    from dataclasses import replace as _dc_replace
+
+    from kicad_tools.router import create_net_class_map
+    from kicad_tools.router.rules import net_class_map_to_dict
 
     print("\n" + "=" * 60)
-    print("Routing PCB...")
+    print("Routing PCB (production `kct route` recipe)...")
     print("=" * 60)
 
-    # Design rules - 0.05mm grid for USB-C off-grid pad escape (issue #3095).
-    # J1 (USB_C_Receptacle_GCT_USB4105) places A6/A7/B6/B7 (USB_D+/USB_D-) at
-    # +/-0.25mm offsets -- on a 0.1mm grid these land between cells and the
-    # router cannot generate a pin-escape segment that ends exactly on the
-    # pad center, so D+/D- never escape J1.  Halving the grid (0.05mm) gives
-    # the router an integer-cell landing for every USB-C pad while still
-    # satisfying ``grid <= clearance/2`` (0.05 <= 0.127/2 with the JLCPCB
-    # default 0.127mm clearance).
-    #
-    # ``trace_clearance`` is set to 0.2 (rather than the 0.127 JLCPCB
-    # minimum) because the diffpair_clearance_intra DRC rule on this board
-    # is dominated by the J1 USB-C pad geometry itself: the 0.25mm pads at
-    # +/-0.25mm offset put the D+/D- pad edges 0.25mm apart, which is below
-    # the 0.127mm intra-pair threshold but is a footprint-fixed constraint.
-    # Widening the trace-side clearance leaves more space for the per-net
-    # router to keep all OTHER segment pairs above the threshold so only the
-    # connector-pin region of the diff pair remains in tolerance.  See the
-    # YAML allowlist entry below.
-    rules = DesignRules(
-        grid_resolution=0.05,
-        trace_width=0.15,
-        trace_clearance=0.15,
-        via_drill=0.3,
-        via_diameter=0.6,
-        # Issue #3095: J1 USB-C (0.5mm pitch) and U1 TQFP-32 (0.8mm pitch)
-        # are both at/below the 0.8mm fine-pitch threshold.  Drop the
-        # local clearance to 0.08mm around their pads so escape traces
-        # can fit between adjacent pins.
-        fine_pitch_clearance=0.08,
-        fine_pitch_threshold=0.8,
-        # Issue #3183: declare the manufacturer profile so the
-        # EscapeRouter can resolve ``via_in_pad_supported`` from
-        # ``mfr_limits``.  Board 03's CI gate measures the routed PCB
-        # against ``jlcpcb-tier1`` (see ``.github/routed-drc-tolerance.yml``
-        # ``manufacturers:`` override at line ~1041 / Issue #3150), and the
-        # design ships against that tier's Capability-Plus process.
-        # Without this declaration the escape router would treat the
-        # board as "unknown manufacturer" and silently disable the in-pad
-        # rescue path -- exactly the failure mode #3183 closes.
-        manufacturer="jlcpcb-tier1",
-    )
-
+    # ------------------------------------------------------------------
+    # Net-class sidecar (Issue #2684): annotate the USB diff pair so the
+    # validate-side rules can re-derive engagement/skew state.  The
+    # intra_pair_clearance widening to 0.15mm mirrors #3095 (JLCPCB
+    # ``diffpair_clearance_intra`` threshold is 0.127mm).
+    # ------------------------------------------------------------------
     net_class_map = create_net_class_map(
         power_nets=["VCC", "VBUS", "GND"],
         high_speed_nets=["USB_D+", "USB_D-"],
         clock_nets=["XTAL1", "XTAL2"],
     )
-
-    # Annotate the diff-pair partners on the USB pair so the validate-side
-    # diff-pair rules (routing_continuity, length_skew) can engage from the
-    # routed-PCB sidecar (Issue #2684).  We mutate per-net (rather than the
-    # shared NET_CLASS_HIGH_SPEED singleton) by replacing those two entries
-    # with new dataclass instances carrying the partner field.
-    #
-    # Issue #3095: also raise ``intra_pair_clearance`` on the USB pair from
-    # the default 0.075mm to 0.15mm so the JLCPCB ``diffpair_clearance_intra``
-    # rule (threshold 0.127mm) clears even when ``CoupledPathfinder`` lays
-    # the pair down on adjacent 0.05mm grid cells.  Without this widening,
-    # the pair routes at ~0.05mm spacing (1 grid cell) which triggers 19
-    # ``diffpair_clearance_intra`` errors.
-    from dataclasses import replace as _dc_replace
-
     if "USB_D+" in net_class_map and "USB_D-" in net_class_map:
         net_class_map["USB_D+"] = _dc_replace(
             net_class_map["USB_D+"],
@@ -1074,197 +641,66 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             diffpair_partner="USB_D+",
             intra_pair_clearance=0.15,
         )
-
-    # Emit a JSON sidecar alongside the routed PCB so ``kct check
-    # --net-class-map <path>`` can re-derive the engagement / skew state
-    # (Issue #2684).  Without this sidecar, the diff-pair DRC rules
-    # degrade to no-ops on the routed board.
-    import json as _json
-
-    from kicad_tools.router.rules import net_class_map_to_dict
-
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
 
-    # Skip power planes (routed as pours via ``create_zones_for_pcb``).
-    # Issue #3095: USB_CC1 / USB_CC2 are no longer skipped -- with the
-    # 0.05mm grid (above) the on-grid +/-1.0mm CC pads now have routable
-    # escape paths.  The diff-pair detection still pairs USB_D+ with
-    # USB_D- via the explicit ``diffpair_partner`` annotation below, so
-    # the mis-pairing risk (#2744 / #3040) no longer applies.
-    skip_nets = ["VCC", "GND", "VBUS"]
-
-    print(f"\n1. Loading PCB: {input_path}")
-    print(f"   Grid resolution: {rules.grid_resolution}mm")
-    print(f"   Trace width: {rules.trace_width}mm")
-    print(f"   Clearance: {rules.trace_clearance}mm")
-    print(f"   Skipping nets: {skip_nets}")
-
-    router, net_map = load_pcb_for_routing(
+    # ------------------------------------------------------------------
+    # Production routing recipe.  EXACTLY the invocation pinned by
+    # tests/router/test_board03_routing_baseline.py::_run_kct_route --
+    # if you change a flag here, change it there in the same commit.
+    # ------------------------------------------------------------------
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
         str(input_path),
-        skip_nets=skip_nets,
-        rules=rules,
-    )
+        "--output",
+        str(output_path),
+        "--seed",
+        "42",
+        "--manufacturer",
+        "jlcpcb-tier1",
+        "--backend",
+        "cpp",
+        "--timeout",
+        "600",
+        # ``--raw`` (skip TraceOptimizer) is LOAD-BEARING for the 0-DRC
+        # acceptance: with optimization enabled, the segment-merge pass
+        # re-introduces exactly one deterministic
+        # ``clearance_segment_via`` violation (XTAL1's merged B.Cu run
+        # at y=+29.51 vs XTAL2's via at (+32.75, +29.10), 0.006mm gap,
+        # reproducible across seeds 42/43) because the optimizer's
+        # collision checker is grid-quantized while the DRC check is
+        # world-coordinate exact.  Raw grid-step segments follow the
+        # A*-validated path bit-for-bit: 13/13 nets, 0 DRC errors at
+        # jlcpcb-tier1.  Optimizer follow-up tracked in the #3410 PR.
+        "--raw",
+    ]
+    print(f"   $ {' '.join(cmd[1:])}")
+    proc = _sp.run(cmd, capture_output=True, text=True, timeout=1800, check=False)
+    # Echo the route output so reach parsers (and humans) see the full log.
+    print(proc.stdout)
+    if proc.returncode in (1, 5):
+        print(f"   ERROR: kct route failed with exit code {proc.returncode}")
+        if proc.stderr:
+            print(proc.stderr[-2000:])
+        return False
 
-    router.net_class_map.update(net_class_map)
+    # Parse the LAST "Nets routed: N/M" occurrence (escalation mode can
+    # emit several; the last reflects the final saved state).
+    matches = _re.findall(r"Nets routed:\s+(\d+)/(\d+)", proc.stdout)
+    if not matches:
+        print("   ERROR: could not parse 'Nets routed: N/M' from kct route output")
+        return False
+    routed, total = (int(matches[-1][0]), int(matches[-1][1]))
 
-    print(f"\n   Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"   Nets loaded: {len(net_map)}")
-
-    print("\n2. Routing nets...")
-    # Issue #3040: route the USB_D+/USB_D- pair through the diff-pair-aware
-    # entry point so Phase A (CoupledPathfinder) populates the intra-pair
-    # clearance buffer and Phase B (repair_intra_clearance_violations) can
-    # widen ``min_spacing_cells`` on any pair whose coupled route quantises
-    # to a clearance violation.  Previously this board called the per-net
-    # ``router.route_all()`` directly which left ``CoupledPathfinder``
-    # unrun -- so the entire Phase B repair pass was unreachable on this
-    # in-tree board even though the underlying mechanism was sound.
-    #
-    # Seed=42 makes the resulting routed PCB deterministic so the per-board
-    # DRC floor in ``.github/routed-drc-tolerance.yml`` reflects an
-    # actually-reproducible artifact rather than a lucky one-shot.  This
-    # mirrors the seed plumbing PR #3065 added to ``route_all_negotiated``;
-    # ``route_all_with_diffpairs`` does not (yet) accept a seed kwarg
-    # directly, so we pre-seed the global RNG which is what the diff-pair
-    # pre-pass and the inner per-net A* loop both consult.
-    random.seed(42)
-    # Issue #3095: ``CoupledPathfinder`` on the USB_D+/USB_D- pair packs
-    # both traces into adjacent 0.05mm grid cells when escaping the J1
-    # connector, producing 19 ``diffpair_clearance_intra`` violations
-    # (the routes physically overlap, generating negative clearances of
-    # up to -0.2mm).  The connector pad geometry itself constrains how
-    # close the pair must start (0.5mm pad-center spacing), so the
-    # coupled pre-pass has no useful slack to widen the pair.  Disabling
-    # the diff-pair pre-pass and falling through to ``route_all()``
-    # routes the two nets independently -- they still escape J1 on
-    # adjacent layers via the standard A* pathfinder, and the segment
-    # selector inserts enough lateral offset to clear the DRC threshold.
-    # The diff-pair length-match and impedance properties are still
-    # exposed via the net-class sidecar so downstream validate-side
-    # checks (length_skew, routing_continuity) keep firing.
-    diffpair_config = DifferentialPairConfig(enabled=False)
-    if diffpair_config.enabled:
-        router.route_all_with_diffpairs(diffpair_config=diffpair_config)
-    else:
-        # Issue #3183: Enable the dense-package escape pre-pass so U1
-        # (TQFP-32 at 0.8mm pitch) gets in-pad-fallback escape routes
-        # instead of routing inner signal pins (USB_CC1, BTN1, BTN4) through
-        # the 0.3mm inter-pad channel at <0.127mm clearance.
-        #
-        # The ``KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK`` env var raises
-        # the EscapeRouter's in-pad fallback gate from 0.55mm to 0.8mm so
-        # the TQFP-32 inner-row pins reach the fallback (capability gating
-        # is unchanged: ``via_in_pad_supported`` from
-        # ``manufacturer="jlcpcb-tier1"`` above is still required).  Set
-        # before ``load_pcb_for_routing`` would also work (the EscapeRouter
-        # is lazily constructed inside the Router), but setting it here
-        # makes the dependency on the route_all call explicit.
-        import os as _os
-
-        _prior_extended = _os.environ.get(
-            "KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"
-        )
-        _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = "1"
-        try:
-            # Force lazy escape router re-init now that the env var is set
-            # (it may already have been touched by an earlier helper).
-            router._escape_router = None
-            router.route_all(
-                enable_in_pad_escape_rescues=True,
-                # Issue #3183: explicit per-pin rescue map for U1's
-                # TQFP-32 (Package_QFP:TQFP-32_7x7mm_P0.8mm).  These
-                # pins are the cluster of adjacent signal pins on the
-                # U1 south + north edges whose F.Cu surface escape
-                # would route through the 0.3mm inter-pad channel at
-                # sub-clearance spacing (the issue body's table
-                # documents the 9 clearance_pad_segment near-misses
-                # this cluster produces under jlcpcb-tier1's 0.127mm
-                # rule):
-                #   - South edge: U1.12 BTN1, U1.13 BTN2, U1.14 BTN3,
-                #     U1.15 BTN4 -- four adjacent signal pins, each
-                #     pair clips the other.
-                #   - North edge: U1.26 USB_CC2, U1.27 USB_CC1 --
-                #     adjacent pair, USB_CC2 clips USB_CC1.
-                # Putting them on in-pad vias drops the escape onto
-                # B.Cu immediately, freeing the F.Cu inter-pad channel
-                # so the main per-net A* never lays a lateral trace
-                # through it.  J1 USB-C is also detected as a "dense"
-                # package by the auto-detector, but its escape
-                # geometry is handled by this board's diff-pair-aware
-                # routing path -- we omit it from the rescue map.
-                in_pad_escape_rescue_pins={
-                    "U1": ["12", "13", "14", "15", "26", "27"]
-                },
-                suppress_no_timeout_warning=True,
-            )
-        finally:
-            if _prior_extended is None:
-                _os.environ.pop(
-                    "KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", None
-                )
-            else:
-                _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = (
-                    _prior_extended
-                )
-
-    stats_before = router.get_statistics()
-
-    print("\n3. Raw routing results:")
-    print(f"   Routes: {stats_before['routes']}")
-    print(f"   Segments: {stats_before['segments']}")
-    print(f"   Vias: {stats_before['vias']}")
-
-    print("\n4. Optimizing traces...")
-    opt_config = OptimizationConfig(
-        merge_collinear=True,
-        eliminate_zigzags=True,
-        compress_staircase=True,
-        convert_45_corners=True,
-        minimize_vias=True,
-    )
-    collision_checker = GridCollisionChecker(router.grid)
-    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-    optimized_routes = []
-    for route in router.routes:
-        optimized_route = optimizer.optimize_route(route)
-        optimized_routes.append(optimized_route)
-    router.routes = optimized_routes
-
-    stats = router.get_statistics()
-
-    print("\n5. Final routing results:")
-    print(f"   Routes: {stats['routes']}")
-    print(f"   Segments: {stats['segments']}")
-    print(f"   Vias: {stats['vias']}")
-    print(f"   Total length: {stats['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats['nets_routed']}")
-
-    print(f"\n6. Saving routed PCB: {output_path}")
-
-    original_content = input_path.read_text()
-    route_sexp = router.to_sexp()
-
-    if route_sexp:
-        output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n"
-        output_content += f"  {route_sexp}\n"
-        output_content += ")\n"
-    else:
-        output_content = original_content
-        print("   Warning: No routes generated!")
-
-    output_path.write_text(output_content)
-
-    total_nets = len([n for n in router.nets if n > 0])
-    success = stats["nets_routed"] == total_nets
-
+    success = routed == total
     if success:
         print("\n   SUCCESS: All signal nets routed!")
     else:
-        print(f"\n   PARTIAL: Routed {stats['nets_routed']}/{total_nets} signal nets")
+        print(f"\n   PARTIAL: Routed {routed}/{total} signal nets")
 
     return success
 

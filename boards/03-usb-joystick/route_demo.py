@@ -18,20 +18,12 @@ so the demo and the end-to-end build recipe are guaranteed to be the
 same code path.  The two cannot drift again because there is now only
 one copy of the recipe.
 
-The canonical recipe (see ``generate_design.py:route_pcb()``) uses:
-
-  * 0.05mm routing grid (needed for J1 USB-C off-grid pad escape; #3095)
-  * 0.15mm trace width / 0.15mm trace clearance
-  * ``manufacturer="jlcpcb-tier1"`` declared on ``DesignRules`` so the
-    EscapeRouter can resolve ``via_in_pad_supported`` (#3183)
-  * fine-pitch clearance 0.08mm at 0.8mm threshold (#3095)
-  * Only VCC / GND / VBUS skipped -- USB_CC1 / USB_CC2 are now routable
-    on the finer grid (#3095)
-  * ``intra_pair_clearance=0.15mm`` on USB_D+/USB_D- (#3095)
-  * ``random.seed(42)`` for determinism
-  * ``KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK=1`` env (#3183)
-  * ``route_all`` with in-pad escape rescues on U1 pins 12-15, 26-27
-    (#3183)
+The canonical recipe (see ``generate_design.py:route_pcb()``) is the
+production ``kct route`` invocation -- the SAME flags pinned by
+``tests/router/test_board03_routing_baseline.py`` (Issue #3410
+consolidation; board-05 set the "bake the proven kct route recipe into
+the design script" precedent in PR #2981).  See ``route_pcb()`` for
+the exact flag list and the rationale.
 
 Usage:
     python route_demo.py [input_pcb] [output_pcb]

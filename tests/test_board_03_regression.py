@@ -88,22 +88,24 @@ PCB_FILE = OUTPUT_DIR / "usb_joystick.kicad_pcb"
 ROUTED_PCB_FILE = OUTPUT_DIR / "usb_joystick_routed.kicad_pcb"
 UNROUTED_PCB = PCB_FILE  # alias for the #2760 fixture below
 
-# Match the canonical recipe in ``generate_design.py:route_pcb()`` so the
-# in-process fixture below exercises exactly the same configuration the
-# demo does.  Issue #3308: ``route_demo.py`` was rewritten to delegate
-# to ``route_pcb()`` so they cannot drift again; only VCC / GND / VBUS
-# are skipped now (USB_CC1 / USB_CC2 were unblocked by the 0.05mm grid
-# in #3095).
+# Issue #3410: ``generate_design.py:route_pcb()`` now delegates to the
+# production ``kct route`` CLI invocation (pinned by
+# ``tests/router/test_board03_routing_baseline.py``), so the in-process
+# ``route_all`` fixture below is no longer "the recipe" -- it is kept
+# as a ROUTER-CAPABILITY regression net for the in-pad-rescue /
+# intra-IC-consolidation code paths on this board's geometry.  Only
+# VCC / GND / VBUS are skipped (served by the generator's pour zones).
 SKIP_NETS = ["VCC", "GND", "VBUS"]
 
 # Minimum number of multi-pad signal nets the demo router must fully
-# connect on the 2-layer board.  Post-#3095 / post-#3183 the canonical
-# recipe routes 11 of 13 signal nets (USB_D-, USB_CC1 partial under
-# current router HEAD; USB_D+ recovered through the in-pad rescue pass).
-# This matches the floor pinned by ``test_board03_routing_baseline.py``
-# (``REQUIRED_NETS_ROUTED = 11``) and the curator's #3308 AC #3
-# guard.
-MIN_FULLY_ROUTED_NETS = 11
+# connect.  Issue #3410 (June 9 2026): the canonical recipe now
+# delegates to the production ``kct route`` invocation (see
+# ``generate_design.py:route_pcb``) and, after the J1 USB-C re-spin +
+# MST tie-group fix + escape-defer + auto-pour zone-preservation fix,
+# reaches 13/13 with 0 DRC errors at jlcpcb-tier1.  This matches the
+# floor pinned by ``tests/router/test_board03_routing_baseline.py``
+# (``REQUIRED_NETS_ROUTED = 13``).
+MIN_FULLY_ROUTED_NETS = 13
 
 # References the schematic emits that the PCB generator MUST also emit
 # to keep sync clean.  This is the explicit anti-regression list from

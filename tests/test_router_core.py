@@ -1322,6 +1322,53 @@ class TestAutorouterIntraICRoutes:
         # Distance > 3mm should not create intra-IC route
         assert len(routes) == 0
 
+    def test_reduce_pads_picks_externally_facing_representative(self):
+        """Issue #3410: intra-IC group representative faces the net's other pads.
+
+        Models board 03's J1 USB-C USB_D- tie group: A7 (front row,
+        y=108) and B7 (south row, y=109) are stub-connected; the net's
+        only other pad is U1.28 far to the SOUTH (y=127.5).  The MST
+        edge must start from B7 (closest to the external centroid), not
+        the legacy "first in group" choice (A7), whose escape lane is
+        boxed in by the neighboring USB-C escape belt.
+        """
+        from kicad_tools.router.path import reduce_pads_after_intra_ic
+        from kicad_tools.router.primitives import Pad
+
+        def mk(ref, pin, x, y):
+            return Pad(
+                x=x,
+                y=y,
+                width=0.25,
+                height=0.35,
+                net=5,
+                net_name="USB_D-",
+                ref=ref,
+                pin=pin,
+            )
+
+        pads = [("J1", "A7"), ("J1", "B7"), ("U1", "28")]
+        lookup = {
+            ("J1", "A7"): mk("J1", "A7", 140.25, 108.0),
+            ("J1", "B7"): mk("J1", "B7", 140.25, 109.0),
+            ("U1", "28"): mk("U1", "28", 140.40, 127.5),
+        }
+
+        reduced = reduce_pads_after_intra_ic(
+            pads, connected_indices={0, 1}, pad_lookup=lookup
+        )
+        assert ("J1", "B7") in reduced, (
+            f"Expected externally-facing B7 as the J1 group representative, "
+            f"got {reduced}"
+        )
+        assert ("J1", "A7") not in reduced
+        assert ("U1", "28") in reduced
+
+        # Legacy behavior (no pad_lookup): first group member wins.
+        legacy = reduce_pads_after_intra_ic(pads, connected_indices={0, 1})
+        assert ("J1", "A7") in legacy
+        assert ("J1", "B7") not in legacy
+
 
 class TestAutorouterRouteAll:
     """Tests for route_all methods."""

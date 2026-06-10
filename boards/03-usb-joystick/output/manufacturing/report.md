@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-08 | jlcpcb"
+date: "Rev 1 | 2026-06-10 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,11 +18,11 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 12 (0 SMD, 0 THT, 12 other) |
+| Footprints | 19 (1 SMD, 1 THT, 17 other) |
 | Nets | 16 |
-| Traces | 96 segments |
-| Vias | 22 |
-| Board Size | 60.0 x 40.0 mm |
+| Traces | 5602 segments |
+| Vias | 15 |
+| Board Size | 80.0 x 60.0 mm |
 
 ## Design Overview
 
@@ -66,12 +66,15 @@ Demonstrates autolayout functionality
 
 | Value | Package | Qty | References |
 |-------|---------|-----|------------|
-| 100nF |  | 4 | C1, C2, C3, C4 |
-| Joystick |  | 1 | J2 |
-| USB-C |  | 1 | J1 |
-| Button |  | 4 | SW1, SW2, SW3, SW4 |
-| MCU |  | 1 | U1 |
-| 16MHz |  | 1 | Y1 |
+| 100nF | C_0402_1005Metric | 4 | C1, C2, C3, C4 |
+| 16nF | C_0402_1005Metric | 2 | C10, C11 |
+| 22pF | C_0402_1005Metric | 2 | C5, C6 |
+| Joystick | Joystick_Analog | 1 | J2 |
+| TYPE-C | USB_C_Receptacle_GCT_USB4105 | 1 | J1 |
+| 10k | R_0402_1005Metric | 3 | R10, R11, R12 |
+| Button | SW_SPST_TL3342 | 4 | SW1, SW2, SW3, SW4 |
+| MCU | TQFP-32_7x7mm_P0.8mm | 1 | U1 |
+| 16MHz | Crystal_HC49-U_Vertical | 1 | Y1 |
 
 
 \newpage
@@ -80,20 +83,17 @@ Demonstrates autolayout functionality
 
 | Metric | Count |
 |--------|-------|
-| Errors | 9 |
-| Warnings | 0 |
-| Blocking | 9 |
+| Errors | 4 |
+| Warnings | 16 |
+| Blocking | 4 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| via_in_pad | 6 |
-| clearance_segment_via | 1 |
-| clearance_pad_via | 1 |
-| connectivity | 1 |
-| diffpair_clearance_intra | 1 |
+| silkscreen_text_height | 16 |
+| via_in_pad | 4 |
 
 
 \newpage
@@ -104,9 +104,9 @@ Demonstrates autolayout functionality
 
 ### Action Items
 
-- **[CRITICAL]** Fix 9 blocking DRC violations (via_in_pad (6), clearance_segment_via (1), clearance_pad_via (1))
-- **[OPTIONAL]** Verify zone fill in KiCad: 1 nets appear incomplete but may be connected via zone fills
+- **[CRITICAL]** Fix 4 blocking DRC violations (via_in_pad (4))
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
+- **[OPTIONAL]** Review 16 DRC warnings
 
 
 \newpage
@@ -115,12 +115,12 @@ Demonstrates autolayout functionality
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 92.3% (12/13) |
-| Overall Completion | 93.8% |
-| Complete Nets | 15 / 16 |
+| Signal Net Completion | 100.0% (13/13) |
+| Overall Completion | 100.0% |
+| Complete Nets | 16 / 16 |
 | Zone-Connected Nets | 3 |
-| Incomplete Nets | 1 |
-| Unconnected Pads | 1 |
+| Incomplete Nets | 0 |
+| Unconnected Pads | 0 |
 
 ### Zone-Connected Nets
 
@@ -128,23 +128,15 @@ Demonstrates autolayout functionality
 - VBUS
 - VCC
 
-### Unrouted Signal Nets
-
-- USB_D+
-
-### Unrouted Signal Nets
-
-- USB_D+
-
 
 ## Cost Estimate
 
 | Metric | Per Board (estimated) |
 |--------|-------|
-| PCB Fabrication | ~0.88 USD |
-| Components (estimated) | ~1.31 USD |
-| Assembly (estimated) | ~1.98 USD |
-| **Total (estimated)** | **~4.17 USD** |
+| PCB Fabrication | ~1.36 USD |
+| Components (estimated) | ~1.33 USD |
+| Assembly (estimated) | ~2.03 USD |
+| **Total (estimated)** | **~4.72 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~20.87 USD |
+| Batch Total (estimated) | ~23.61 USD |
 
