@@ -100,16 +100,25 @@ BENCHMARK_CASES: list[BenchmarkCase] = [
     # Hard complexity -- 4-layer RPi DAC hat with dense PCM5122 SSOP-28
     # 0.65mm-pitch escape and I2S routing.
     #
-    # Issue #2611: pinned to v18 (was v9_grid50 — 9 revisions and 214 net
-    # mismatches out of date).  The PCB lives under boards/external/ which
-    # is local-only; runner.run_single handles the FileNotFoundError
+    # Issue #3474 Phase 0: pinned to v21_stripped (was v18 — predates the
+    # chorus repo's 2026-05-11 schematic netlist repair AND the 2026-06-10
+    # regulator/U1-U2 connectivity restoration; routing v18/v19 to 100%
+    # would be fake-manufacturable).  v21_stripped = v20 + ERC fixes +
+    # netlist sync + `kct pcb strip --include-power` + orphan-net cleanup;
+    # it has 51 multi-pad signal nets after the five power/ground nets
+    # below are skipped.  The PCB lives under boards/external/ which is
+    # local-only; runner.run_single handles the FileNotFoundError
     # gracefully when the fixture is absent.  See
     # scripts/ci/fetch_chorus_test.py and docs/benchmark.md for fetching
     # the board on a fresh runner.
     BenchmarkCase(
         name="chorus_test_revA",
-        pcb_path="boards/external/chorus-test-revA/kicad/chorus-test-revA_v18.kicad_pcb",
-        expected_completion=0.55,  # ~26/46 fully-routed baseline
+        pcb_path="boards/external/chorus-test-revA/kicad/chorus-test-revA_v21_stripped.kicad_pcb",
+        # Honest measured v21 baseline: 2/51 strict (3.9%) at the issue
+        # #3474 pinned recipe (2026-06-10, cpp seed 42).  Intentionally
+        # LOW -- this is a regression gate, not a target; raise it as
+        # #3474 phases R1/R2/P1 restore reach (do NOT inflate).
+        expected_completion=0.03,
         expected_max_vias=200,
         difficulty=Difficulty.HARD,
         skip_nets=["+3.3V", "+3.3VA", "+5V", "GNDA", "GNDD"],

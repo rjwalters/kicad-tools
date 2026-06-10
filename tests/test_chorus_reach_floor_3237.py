@@ -59,11 +59,13 @@ restoring reach to ~60% parity with May 10.
 
 This module's tests serve two purposes:
 
-1. **Floor assertion** (``test_chorus_reach_post_wave1_floor``): an
-   opt-in slow integration test that runs the chorus recipe end-to-end
-   and asserts the post-Wave-1 floor of ``nets_fully_routed >= 5``.
-   Marked ``@pytest.mark.slow`` (25+ min wall-clock) so it gates manual
-   verification and nightly runs only, not per-commit CI.
+1. **Floor assertion** (``test_chorus_reach_v21_floor``): an opt-in
+   slow integration test that runs the chorus recipe end-to-end and
+   asserts the measured v21 floor of ``nets_fully_routed >= 2`` (see
+   the fixture-migration section below; the v19-era floor of 5 is
+   frozen as history).  Marked ``@pytest.mark.slow`` (25+ min
+   wall-clock) so it gates manual verification and nightly runs only,
+   not per-commit CI.
 
 2. **Re-measurement record** (``test_post_wave1_measurement_documented``):
    a fast unit test that codifies the empirical numbers above so they
@@ -75,6 +77,30 @@ This module's tests serve two purposes:
 After #3238 lands and the regression is fully resolved, the floor in
 ``CHORUS_POST_WAVE1_FLOOR`` should be bumped to match the new reach.
 Issue body's AC #1 sets the target at ≥ 30/48 (May 10 parity).
+
+Fixture migration (Issue #3474 Phase 0, 2026-06-10)
+---------------------------------------------------
+
+All POST_WAVE constants in this module are **frozen v19-era historical
+records**: they were measured on
+``chorus-test-revA_v19_stripped.kicad_pcb`` (48 multi-pad signal nets)
+and stay untouched so future bisects have precise baselines.
+
+The v19 fixture is STALE: the chorus repo's 2026-05-11 repair (commit
+5b59e20) restored 7 nets that v19 lacks (Y2.3 TCXO output, U7.2 clock
+buffer input, R4/R16 envelope-detector pull-downs), and the 2026-06-10
+Phase 0 work additionally restored U1/U2 regulator connectivity (the
+embedded ``(extends)`` lib symbol in power.kicad_sch was unresolvable,
+so KiCad saw the regulators as pinless in both ERC and the netlist) and
+fixed the last ERC error.  Routing v19 to 100% would be
+fake-manufacturable.
+
+The live fixture is now ``chorus-test-revA_v21_stripped.kicad_pcb``
+(v20 + ERC fixes + netlist sync + ``kct pcb strip --include-power`` +
+orphan-net cleanup), with **51 multi-pad signal nets** after the five
+power/ground nets are excluded.  The slow integration test below routes
+the v21 fixture and asserts the freshly measured v21 floor — see the
+``CHORUS_V21_*`` constants for the measurement record.
 """
 
 from __future__ import annotations
@@ -320,12 +346,60 @@ CHORUS_POST_WAVE10_AUTOFIX_KEPT = True
 # floor constant retired.
 CHORUS_MAY10_TARGET = 30  # 30/48 = 62.5%
 
+# --------------------------------------------------------------------------
+# v21 fixture re-baseline (Issue #3474 Phase 0, 2026-06-10, HEAD d45ded4d).
+# --------------------------------------------------------------------------
+#
+# Everything above this block is a FROZEN v19-era record (48-net
+# denominator).  The constants below are the first measurement on the
+# repaired chorus-test-revA_v21_stripped fixture (51 multi-pad signal
+# nets after the five power/ground nets; +3 vs v19 because the
+# 2026-05-11 5b59e20 repair restored Y2/U7/envelope-detector
+# connectivity and Phase 0 restored U1/U2 regulator pins).
+#
+# Recipe (identical to the Wave-9/10 pinned recipe except the fixture):
+#   PYTHONHASHSEED=0 kct route chorus-test-revA_v21_stripped.kicad_pcb \
+#     --manufacturer jlcpcb-tier1 --backend cpp --placement-feedback \
+#     --placement-feedback-budget 5 --iterations 50 --auto-fix \
+#     --auto-fix-passes 2 --auto-layers --timeout 1200 --seed 42
+#
+#   Attempt 1 (4L SIG-GND-PWR-SIG):       2/51 -- detailed routing timed
+#     out at net 3/51 after 365.3s (SPI_SCK A* blowup, #3470 defect 3);
+#     grace pass burned 164.5s routing 0/1 starved nets (47 skipped).
+#   Attempt 2 (4L + via-in-pad fallback): 2/51 -- same fingerprint.
+#   Attempt 3:           never ran (wall-clock deadline, issue #2802).
+#   Placement feedback:  SKIPPED (deadline).
+#   Auto-fix:            RAN (7/49 nudge-resolved), then ROLLED BACK
+#     (connectivity regression 29 -> 28 nets);
+#     AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token NOT present.
+#   DRC on routed output: 101 errors / 56 warnings.
+#
+# Final: 2/51 strict-connected, 30/51 partial, 19/51 unrouted.  This
+# matches the 2026-06-10 v19 re-baseline in issue #3474 (2/48 strict,
+# 30 partial, 16 unrouted) -- the fixture migration did not change the
+# router's behavior class; the three restored-connectivity nets land in
+# the unrouted bucket because the budget still dies at net 3.
+#
+# The floor below is the honest measured baseline, NOT a target.  Per
+# feedback_manufacturable_means_100pct.md the bar is 100% + 0 DRC; this
+# constant only catches further regressions while Phases R1/R2/P1 of
+# #3474 are in flight.  Move it UP as those phases land.
+CHORUS_V21_NETS_TOTAL = 51
+CHORUS_V21_FLOOR = 2  # measured strict reach, cpp seed 42 (do not inflate)
+CHORUS_V21_PARTIAL_CPP_SEED42 = 30
+CHORUS_V21_UNROUTED_CPP_SEED42 = 19
+CHORUS_V21_AUTOFIX_ROLLED_BACK = True
+
 # The vendored chorus-test-revA fixture, surfaced via the
 # ``boards/external/chorus-test-revA`` symlink that points at the
-# canonical ``rjwalters/chorus`` repo checkout.  Resolves relative to
+# canonical chorus repo checkout.  Resolves relative to
 # the repository root (this file is two levels under it), matching the
 # pattern in ``test_chorus_test_placement_feedback.py`` and
 # ``src/kicad_tools/benchmark/cases.py``.
+#
+# Issue #3474 Phase 0: migrated from v19_stripped (stale netlist) to
+# v21_stripped (post-repair).  See the module docstring's "Fixture
+# migration" section.
 #
 # When the fixture is missing the slow integration test skips rather than
 # fails, matching the existing pattern in ``test_benchmark_chorus.py``
@@ -336,7 +410,7 @@ CHORUS_FIXTURE_PATH = (
     / "external"
     / "chorus-test-revA"
     / "kicad"
-    / "chorus-test-revA_v19_stripped.kicad_pcb"
+    / "chorus-test-revA_v21_stripped.kicad_pcb"
 )
 
 
@@ -371,8 +445,7 @@ def test_post_wave1_measurement_documented() -> None:
         "C++-specific regression' assertion needs to be revisited."
     )
     assert (
-        min(CHORUS_POST_WAVE1_FLOOR_PYTHON, CHORUS_POST_WAVE1_FLOOR_CPP)
-        == CHORUS_POST_WAVE1_FLOOR
+        min(CHORUS_POST_WAVE1_FLOOR_PYTHON, CHORUS_POST_WAVE1_FLOOR_CPP) == CHORUS_POST_WAVE1_FLOOR
     ), (
         "Global floor must equal the smaller of the per-backend floors; "
         "drift here means the constants were updated inconsistently."
@@ -433,18 +506,12 @@ def test_post_wave8_remeasurement_documented() -> None:
     assert 0 <= CHORUS_POST_WAVE8_BEST_CPP_SEED42 <= CHORUS_NETS_TOTAL
     # Partial-vs-strict gap is real per #3255: when 3-5 are strict-connected,
     # 28-29 have *some* route but not all pads reached.
-    assert (
-        CHORUS_POST_WAVE8_PARTIAL_PYTHON
-        > CHORUS_POST_WAVE8_BEST_PYTHON_SEED42 * 5
-    ), (
+    assert CHORUS_POST_WAVE8_PARTIAL_PYTHON > CHORUS_POST_WAVE8_BEST_PYTHON_SEED42 * 5, (
         "Partial count should significantly exceed strict count; if not, "
         "the partial-vs-strict gap from #3255 has been resolved -- "
         "celebrate and update the docstring."
     )
-    assert (
-        CHORUS_POST_WAVE8_PARTIAL_CPP
-        > CHORUS_POST_WAVE8_BEST_CPP_SEED42 * 5
-    )
+    assert CHORUS_POST_WAVE8_PARTIAL_CPP > CHORUS_POST_WAVE8_BEST_CPP_SEED42 * 5
 
 
 def test_post_wave9_remeasurement_documented() -> None:
@@ -485,9 +552,7 @@ def test_post_wave9_remeasurement_documented() -> None:
     # Detail-routing now completes 28 nets per attempt, materially more
     # than Wave-8 cpp (which mixed 24-30 per attempt with high variance).
     assert CHORUS_POST_WAVE9_DETAIL_ROUTED_CPP == 28
-    assert (
-        CHORUS_POST_WAVE9_DETAIL_ROUTED_CPP > CHORUS_POST_WAVE9_BEST_CPP_SEED42 * 5
-    ), (
+    assert CHORUS_POST_WAVE9_DETAIL_ROUTED_CPP > CHORUS_POST_WAVE9_BEST_CPP_SEED42 * 5, (
         "Detail-routed count should exceed strict-connected by 5x or more; "
         "this is the partial-vs-strict gap #3255 surfaces."
     )
@@ -618,16 +683,62 @@ def test_post_wave10_remeasurement_documented() -> None:
 def test_post_wave1_floor_matches_nets_total() -> None:
     """CHORUS_NETS_TOTAL is consistent with the v19 stripped fixture.
 
-    The v19 fixture is named in the issue body's reproduction recipe and
-    in the project memory file ``project_chorus_test_routing_2026_05_10b``.
-    If the fixture is regenerated or the case config changes the skip-set,
-    bump ``CHORUS_NETS_TOTAL`` to match the new multi-pad signal-net count.
+    FROZEN v19-era record (Issue #3474 Phase 0): the live fixture is now
+    v21_stripped with ``CHORUS_V21_NETS_TOTAL`` = 51; this constant stays
+    at the historical 48 so the POST_WAVE records above remain precise.
     """
     # 48 multi-pad signal nets is the v19 number reported in the issue
     # body (cf. the v18 baseline JSON which has 46 because v19 adds U7
     # 74LVC1G17 connections).
     assert CHORUS_NETS_TOTAL == 48
     assert CHORUS_POST_WAVE1_FLOOR < CHORUS_NETS_TOTAL
+
+
+def test_v21_rebaseline_documented() -> None:
+    """The v21 fixture re-baseline (Issue #3474 Phase 0) is recorded honestly.
+
+    The fixture migrated from v19_stripped (48 nets, stale netlist) to
+    v21_stripped (51 nets, post-repair).  The first measurement on the
+    new fixture (2026-06-10, HEAD d45ded4d, cpp seed 42, pinned 1200s
+    recipe) is 2/51 strict-connected -- the same behavior class as the
+    v19 re-baseline in the issue body (2/48): per-net A* blowup at the
+    head of the queue (SPI_SCK) starves the budget at net 3, attempt 3 /
+    placement feedback never run (#2802), and auto-fix rolls back.
+
+    Failure of this test means either:
+
+    1. The v21 constants were edited without updating the comment block
+       above them -- update both together.
+    2. A future PR moved chorus reach on the v21 fixture (good news!) --
+       bump ``CHORUS_V21_FLOOR`` to the new multi-seed-confirmed value
+       and document the responsible PR.  Phases R1/R2/P1 of #3474 are
+       expected to do exactly this.
+    """
+    # The denominator grew 48 -> 51 with the restored connectivity.
+    assert CHORUS_V21_NETS_TOTAL == 51
+    assert CHORUS_V21_NETS_TOTAL > CHORUS_NETS_TOTAL
+
+    # The measured floor is honest and low; it must sit strictly below
+    # the May-10-parity class of targets.  Do NOT inflate it -- the bar
+    # for "done" is 100% + 0 DRC (feedback_manufacturable_means_100pct),
+    # and this floor only exists to catch FURTHER regressions.
+    assert 1 <= CHORUS_V21_FLOOR < CHORUS_MAY10_TARGET
+
+    # strict + partial + unrouted must total the v21 signal-net count.
+    assert (
+        CHORUS_V21_FLOOR + CHORUS_V21_PARTIAL_CPP_SEED42 + CHORUS_V21_UNROUTED_CPP_SEED42
+        == CHORUS_V21_NETS_TOTAL
+    ), (
+        "strict + partial + unrouted must total all v21 chorus signal "
+        f"nets; got {CHORUS_V21_FLOOR} + {CHORUS_V21_PARTIAL_CPP_SEED42} "
+        f"+ {CHORUS_V21_UNROUTED_CPP_SEED42} != {CHORUS_V21_NETS_TOTAL}."
+    )
+
+    # Auto-fix rolled back on the v21 measurement (Wave-10 had it keeping
+    # a partial repair on v19; the rollback is fixture-shape-dependent,
+    # not a code regression -- both runs RAN auto-fix and the
+    # AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token was absent).
+    assert CHORUS_V21_AUTOFIX_ROLLED_BACK is True
 
 
 # --------------------------------------------------------------------------
@@ -648,7 +759,7 @@ def _chorus_fixture_present() -> bool:
 @pytest.mark.skipif(
     not _chorus_fixture_present(),
     reason=(
-        "chorus-test-revA_v19_stripped.kicad_pcb fixture not present at "
+        "chorus-test-revA_v21_stripped.kicad_pcb fixture not present at "
         f"{CHORUS_FIXTURE_PATH}.  See docs/benchmark.md for fetch "
         "instructions; this test is intentionally a no-op on machines "
         "without the external chorus repo checked out."
@@ -663,33 +774,31 @@ def _chorus_fixture_present() -> bool:
         "nightly runs that batch many slow tests."
     ),
 )
-def test_chorus_reach_post_wave1_floor(tmp_path: Path) -> None:
-    """Run the chorus recipe and assert ``nets_fully_routed >= 5``.
+def test_chorus_reach_v21_floor(tmp_path: Path) -> None:
+    """Run the chorus recipe on v21 and assert ``nets_fully_routed >= 2``.
 
-    This is the load-bearing acceptance criterion derived from Issue #3237's
-    re-measurement.  It uses the same recipe documented in the issue body's
-    "How to reproduce" section, pinned to the Python backend (which scored
-    6/48 on 2026-06-06, the higher of the two backends).  Wall-clock is
-    25-30 minutes; the test is double-guarded by ``@pytest.mark.slow`` AND
-    the ``KCT_RUN_CHORUS_REACH_FLOOR`` env var so it never runs by accident.
+    Issue #3474 Phase 0 migrated this test from the stale v19_stripped
+    fixture (and its post-Wave-1 floor of 5) to v21_stripped with a
+    freshly measured floor of ``CHORUS_V21_FLOOR`` = 2 (cpp seed 42,
+    2026-06-10, HEAD d45ded4d -- see the v21 constants block).  The
+    recipe is pinned to the C++ backend because that is the backend the
+    v21 floor was measured with.  Wall-clock is 20-30 minutes; the test
+    is double-guarded by ``@pytest.mark.slow`` AND the
+    ``KCT_RUN_CHORUS_REACH_FLOOR`` env var so it never runs by accident.
 
-    The assertion intentionally uses the FLOOR (5) rather than the May 10
-    target (30): until #3238 lands and unblocks auto-fix, reach is expected
-    to stay at the floor.  Once #3238 merges and reach jumps to 27-30/48,
-    update ``CHORUS_POST_WAVE1_FLOOR`` to the new measurement and (eventually)
-    flip this test's assertion to the May 10 target.
-
-    Note: this test does NOT validate the issue body's AC #3 ("auto-fix
-    successfully runs"), because that's the explicit territory of #3238's
-    sibling regression test.  We only validate that no further reach loss
-    happens while #3238 is in flight.
+    The assertion intentionally uses the measured FLOOR (2) rather than
+    any target: the floor is a regression tripwire, not a goal.  Phases
+    R1/R2/P1 of #3474 are expected to raise reach substantially; bump
+    ``CHORUS_V21_FLOOR`` (with multi-seed confirmation) as they land,
+    and at Phase F flip this assertion to the 100%-routed target per
+    ``feedback_manufacturable_means_100pct``.
     """
     output_pcb = tmp_path / "chorus_routed.kicad_pcb"
 
-    # Mirror the issue body's "How to reproduce" recipe exactly, except
-    # we pin to ``--backend python`` (the better-reaching backend in the
-    # re-measurement).  Determinism comes from ``--seed 42`` + the
-    # PYTHONHASHSEED env var (issue #3146 / PR #3193 finding).
+    # Mirror the issue #3474 pinned recipe exactly (cpp backend, the one
+    # the v21 floor was measured with).  Determinism comes from
+    # ``--seed 42`` + the PYTHONHASHSEED env var (issue #3146 / PR #3193
+    # finding).
     cmd = [
         sys.executable,
         "-m",
@@ -701,7 +810,7 @@ def test_chorus_reach_post_wave1_floor(tmp_path: Path) -> None:
         "--manufacturer",
         "jlcpcb-tier1",
         "--backend",
-        "python",
+        "cpp",
         "--placement-feedback",
         "--placement-feedback-budget",
         "5",
@@ -712,14 +821,14 @@ def test_chorus_reach_post_wave1_floor(tmp_path: Path) -> None:
         "2",
         "--auto-layers",
         "--timeout",
-        "1500",
+        "1200",
         "--seed",
         "42",
     ]
     env = {**os.environ, "PYTHONHASHSEED": "0"}
 
     # 30-minute timeout for the subprocess: the route itself is bounded
-    # by ``--timeout 1500``s but there's startup + checkpoint overhead.
+    # by ``--timeout 1200``s but there's startup + checkpoint overhead.
     result = subprocess.run(
         cmd,
         env=env,
@@ -728,12 +837,12 @@ def test_chorus_reach_post_wave1_floor(tmp_path: Path) -> None:
         timeout=1800,
     )
 
-    # Parse the "Nets routed: N/48" line from the tail of stdout.
+    # Parse the "Nets routed: N/51" line from the tail of stdout.
     last_routed = None
     for line in result.stdout.splitlines():
         stripped = line.strip()
         if stripped.startswith("Nets routed:"):
-            # Form: "Nets routed:     N/48"
+            # Form: "Nets routed:     N/51"
             rhs = stripped.split(":", 1)[1].strip()
             count_str = rhs.split("/", 1)[0].strip()
             try:
@@ -745,11 +854,10 @@ def test_chorus_reach_post_wave1_floor(tmp_path: Path) -> None:
         "Could not parse 'Nets routed:' from chorus route stdout. "
         "Last 500 chars:\n" + result.stdout[-500:]
     )
-    assert last_routed >= CHORUS_POST_WAVE1_FLOOR, (
-        f"chorus reach regressed: routed {last_routed}/{CHORUS_NETS_TOTAL} "
-        f"nets, below post-Wave-1 floor of {CHORUS_POST_WAVE1_FLOOR}.  "
-        "See Issue #3237 for context; if this is intentional (e.g. a "
+    assert last_routed >= CHORUS_V21_FLOOR, (
+        f"chorus reach regressed: routed {last_routed}/{CHORUS_V21_NETS_TOTAL} "
+        f"nets, below the measured v21 floor of {CHORUS_V21_FLOOR}.  "
+        "See Issue #3474 for context; if this is intentional (e.g. a "
         "router refactor with known short-term cost), bump the floor "
-        "constant in this module with justification.  Stdout tail:\n"
-        + result.stdout[-1000:]
+        "constant in this module with justification.  Stdout tail:\n" + result.stdout[-1000:]
     )

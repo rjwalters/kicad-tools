@@ -26,7 +26,7 @@ Sources are tried in order:
 Both paths converge on copying the ``chorus-test-revA/`` directory
 into ``boards/external/`` of the working tree.  The benchmark case
 in ``src/kicad_tools/benchmark/cases.py`` points at
-``boards/external/chorus-test-revA/kicad/chorus-test-revA_v18.kicad_pcb``.
+``boards/external/chorus-test-revA/kicad/chorus-test-revA_v21_stripped.kicad_pcb``.
 
 Exit codes
 ----------
@@ -46,7 +46,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TARGET_DIR = REPO_ROOT / "boards" / "external" / "chorus-test-revA"
-EXPECTED_PCB = TARGET_DIR / "kicad" / "chorus-test-revA_v18.kicad_pcb"
+EXPECTED_PCB = TARGET_DIR / "kicad" / "chorus-test-revA_v21_stripped.kicad_pcb"
 
 
 def _log(msg: str) -> None:
@@ -58,7 +58,7 @@ def _log(msg: str) -> None:
 
 
 def already_present() -> bool:
-    """Return True when the v18 PCB is already in place."""
+    """Return True when the v21_stripped PCB is already in place."""
     return EXPECTED_PCB.exists()
 
 
@@ -83,8 +83,8 @@ def fetch_from_local_path(local_path: Path) -> bool:
     if not (src / "kicad").exists() and (src / "chorus-test-revA" / "kicad").exists():
         src = src / "chorus-test-revA"
 
-    if not (src / "kicad" / "chorus-test-revA_v18.kicad_pcb").exists():
-        _log(f"local path has no chorus-test-revA_v18 PCB: {src}")
+    if not (src / "kicad" / "chorus-test-revA_v21_stripped.kicad_pcb").exists():
+        _log(f"local path has no chorus-test-revA_v21_stripped PCB: {src}")
         return False
 
     TARGET_DIR.parent.mkdir(parents=True, exist_ok=True)
