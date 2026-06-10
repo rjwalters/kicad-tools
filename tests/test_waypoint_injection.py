@@ -516,7 +516,43 @@ class TestEscapeStubNotPrerouted:
 
         ar = Autorouter(width=10.0, height=10.0, force_python=True)
         ar.use_waypoint_injection = False
-        # Off-grid pad: 0.137 is off the default grid
+        # Genuinely unreachable pad: tiny copper (0.05mm) whose center is
+        # farther from the nearest grid intersection than its half-extent,
+        # so no grid cell lands inside the pad metal.
+        pad = CorePad(
+            x=2.037,
+            y=2.0,
+            width=0.05,
+            height=0.05,
+            net=1,
+            net_name="N1",
+            ref="U1",
+            pin="1",
+            layer=Layer.F_CU,
+        )
+        ar.pads[("U1", "1")] = pad
+        ar.nets[1] = [("U1", "1")]
+        ar.net_names[1] = "N1"
+        ar.grid.add_pad(pad)
+        assert ar._pad_metal_covers_grid_cell(pad) is False
+        escape_routes = ar._run_subgrid_prepass()
+        assert escape_routes, "expected an escape stub for the uncovered pad"
+        for r in escape_routes:
+            assert r.is_escape is True
+
+    def test_prepass_skips_pads_with_grid_cell_in_metal(self):
+        """Issue #3441: pads whose metal contains a grid cell are directly
+        routable by A* (start nodes seed from all metal-area cells, #977)
+        -- the pre-pass must NOT synthesize stubs for them.  Blanket stub
+        synthesis measured WORSE on board 07 (242 stubs congested the
+        corridors: 26/31 vs 28/31)."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.primitives import Pad as CorePad
+
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
+        ar.use_waypoint_injection = False
+        # Nominally off-grid center, but 0.5mm copper easily covers the
+        # nearest grid intersection.
         pad = CorePad(
             x=2.037,
             y=2.0,
@@ -532,9 +568,8 @@ class TestEscapeStubNotPrerouted:
         ar.nets[1] = [("U1", "1")]
         ar.net_names[1] = "N1"
         ar.grid.add_pad(pad)
-        escape_routes = ar._run_subgrid_prepass()
-        for r in escape_routes:
-            assert r.is_escape is True
+        assert ar._pad_metal_covers_grid_cell(pad) is True
+        assert ar._run_subgrid_prepass() == []
 
     def test_get_failed_nets_ignores_escape_only_routes(self):
         from kicad_tools.router.core import Autorouter

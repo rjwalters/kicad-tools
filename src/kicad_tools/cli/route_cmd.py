@@ -8283,9 +8283,10 @@ def main(argv: list[str] | None = None) -> int:
                 if fine_pitch_report.total_off_grid > 0:
                     flush_print(
                         f"\n  {fine_pitch_report.total_off_grid} pads off-grid; "
-                        "sub-grid escape pre-pass + PIN_ACCESS retry will "
-                        "handle pad connections (waypoint injection "
-                        "unavailable on this backend)"
+                        "A* lands on pad metal directly, with the sub-grid "
+                        "escape pre-pass (uncovered pads) + PIN_ACCESS retry "
+                        "as recovery (waypoint injection unavailable on this "
+                        "backend)"
                     )
                 flush_print("\n--- Fine-Pitch Component Analysis ---")
                 show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=args.verbose)

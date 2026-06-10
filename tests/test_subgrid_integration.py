@@ -44,9 +44,14 @@ class TestSubgridPrepass:
 
     def _make_router_with_off_grid_pads(self):
         """Create a router with TSSOP-like off-grid pads (0.65mm pitch on 0.1mm grid)."""
-        # Use realistic TSSOP pad dimensions (0.3mm x 0.45mm) and fine-pitch
-        # trace/clearance settings so escape segments can pass clearance
-        # validation against neighboring pads (Issue #1626).
+        # Issue #3441: the pre-pass only synthesizes stubs for pads whose
+        # metal contains NO grid cell (A* lands on pad metal directly via
+        # the #977 all-metal-cell seeding, so covered pads need no stub --
+        # blanket stubs measured worse on board 07).  Use tiny 0.08mm
+        # copper so the 0.05mm snap offset exceeds the half-extent and the
+        # pads are genuinely uncovered.  Fine-pitch trace/clearance settings
+        # let escape segments pass clearance validation against neighboring
+        # pads (Issue #1626).
         rules = DesignRules(
             grid_resolution=0.1,
             trace_width=0.15,
@@ -73,8 +78,8 @@ class TestSubgridPrepass:
                 "y": 10.0,
                 "net": 2,
                 "net_name": "NET2",
-                "width": 0.3,
-                "height": 0.45,
+                "width": 0.08,
+                "height": 0.08,
             },
             {
                 "number": "3",
@@ -82,8 +87,8 @@ class TestSubgridPrepass:
                 "y": 10.0,
                 "net": 3,
                 "net_name": "NET3",
-                "width": 0.3,
-                "height": 0.45,
+                "width": 0.08,
+                "height": 0.08,
             },
         ]
 
@@ -291,8 +296,11 @@ class TestRunSubgridPrepass:
                 "y": 10.0,
                 "net": 1,
                 "net_name": "NET1",
-                "width": 0.3,
-                "height": 0.8,
+                # Issue #3441: tiny copper so the pad is genuinely
+                # uncovered (no grid cell within metal) and the
+                # coverage-gated pre-pass emits a stub for it.
+                "width": 0.08,
+                "height": 0.08,
             },
             {
                 "number": "2",
@@ -329,8 +337,11 @@ class TestRunSubgridPrepass:
                 "y": 10.0,
                 "net": 1,
                 "net_name": "NET1",
-                "width": 0.3,
-                "height": 0.8,
+                # Issue #3441: tiny copper so the pad is genuinely
+                # uncovered (no grid cell within metal) and the
+                # coverage-gated pre-pass emits a stub for it.
+                "width": 0.08,
+                "height": 0.08,
             },
             {
                 "number": "2",

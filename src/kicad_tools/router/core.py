@@ -12357,30 +12357,71 @@ class Autorouter:
         pad_list = list(self.pads.values())
         return self._subgrid.route_with_subgrid(pad_list)
 
+    def _pad_metal_covers_grid_cell(self, pad: "Pad") -> bool:
+        """Return True if the grid cell nearest *pad* lies within its metal.
+
+        Issue #3441: the A* pathfinder seeds start nodes from EVERY grid
+        cell inside the pad's metal area (#977) and accepts pad-covered
+        cells at the goal, so a pad whose nearest grid intersection falls
+        inside its copper is directly routable even when its center is
+        "off-grid" -- no escape stub is needed.  Conversely, a pad smaller
+        than the snap error genuinely cannot be landed on and needs the
+        sub-grid escape pre-pass.
+
+        Uses ``min(width, height) / 2`` as the half-extent so rotated
+        pads are handled conservatively (a false negative merely emits an
+        unnecessary stub; a false positive would leave the pad unreachable
+        until the PIN_ACCESS retry).
+        """
+        gx, gy = self.grid.world_to_grid(pad.x, pad.y)
+        snap_x, snap_y = self.grid.grid_to_world(gx, gy)
+        half_extent = min(pad.width, pad.height) / 2
+        return (
+            abs(pad.x - snap_x) <= half_extent
+            and abs(pad.y - snap_y) <= half_extent
+        )
+
     def _run_subgrid_prepass(self) -> list[Route]:
         """Run sub-grid escape pre-pass for off-grid pads.
 
-        Analyzes all pads, generates escape segments for any that fall
-        between main grid points, and unblocks grid cells at escape
-        endpoints. This is a no-op for boards with no off-grid pads.
+        Analyzes pads that the A* cannot land on directly, generates
+        escape segments for them, and unblocks grid cells at escape
+        endpoints. This is a no-op for boards with no such pads.
 
         Issue #2330: When waypoint injection is enabled, the pathfinder
         handles off-grid pads directly via injected waypoint nodes in the
         A* search graph.  The sub-grid pre-pass is skipped entirely.
 
+        Issue #3441: under the C++ backend (no waypoint support) the
+        pre-pass runs, but ONLY for pads whose metal area contains no
+        grid cell (see :meth:`_pad_metal_covers_grid_cell`).  Pads with
+        a grid cell inside their copper are directly routable -- blanket
+        stub synthesis for every nominally off-grid pad measured WORSE
+        on board 07 (26/31 vs 28/31 at 0.127mm: 242 stubs congested the
+        QFN/BGA corridors), because the stubs consume corridor space the
+        real routes need.  Pads that are covered but whose cells are
+        blocked by foreign clearance are recovered by the failure-driven
+        PIN_ACCESS sub-grid retry instead (:meth:`_retry_net_with_subgrid`).
+
         Returns:
-            List of escape Route objects (empty if no off-grid pads)
+            List of escape Route objects (empty if no uncovered pads)
 
         Issue #1603: Wire sub-grid routing into default route_all pipeline.
         """
         # Issue #2330: Skip sub-grid pre-pass when waypoint injection is
         # active.  Issue #3441: the property is backend-aware -- under the
         # C++ backend (no waypoint support) it returns False and the
-        # pre-pass runs, restoring off-grid pad reachability.
+        # pre-pass runs for genuinely unreachable pads.
         if self.use_waypoint_injection:
             return []
 
-        subgrid_result = self.prepare_subgrid_escapes()
+        uncovered = [
+            p for p in self.pads.values() if not self._pad_metal_covers_grid_cell(p)
+        ]
+        if not uncovered:
+            return []
+
+        subgrid_result = self._subgrid.route_with_subgrid(uncovered)
 
         if not (subgrid_result.analysis and subgrid_result.analysis.has_off_grid_pads):
             return []
