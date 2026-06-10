@@ -857,6 +857,9 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # Uses C12-C14 to preserve existing PCB-side ref numbering and layout.
     # Match the rest of the board's 0805 passives so C12/C13/C14 land in the
     # netlist with a non-empty footprint field (see issue #3017).
+    # Issue #3423 phase-column swap: C12 carries Phase C and C14 Phase A
+    # (C/B/A ordering) so the schematic refs match the PCB-side net
+    # assignments after the U3 rotation + MOSFET column swap.
     create_bootstrap_capacitor_array(
         sch,
         x=X_GATE_DRV - 20,
@@ -864,8 +867,9 @@ def create_bldc_controller(output_dir: Path) -> Path:
         phases=3,
         value="100nF",
         cap_ref_start=12,
-        high_nets=["BST_A", "BST_B", "BST_C"],
-        phase_nets=["PHASE_A", "PHASE_B", "PHASE_C"],
+        phase_labels=["C", "B", "A"],
+        high_nets=["BST_C", "BST_B", "BST_A"],
+        phase_nets=["PHASE_C", "PHASE_B", "PHASE_A"],
         cap_footprint="Capacitor_SMD:C_0805_2012Metric",
     )
 
@@ -893,6 +897,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # high-side MOSFET gates.  ``GATE_DRV_AH/BH/CH`` are the driver-IC outputs;
     # ``GATE_AH/BH/CH`` are the MOSFET-gate-side nets.  The array sits in the
     # path between them.  Low-side gates remain direct-driven for now.
+    # Issue #3423 phase-column swap: R20 drives Phase C, R22 Phase A.
     create_gate_drive_resistor_array(
         sch,
         x=X_GATE_DRV + 30,
@@ -900,8 +905,8 @@ def create_bldc_controller(output_dir: Path) -> Path:
         channels=3,
         value="22",
         ref_start=20,  # R20-R22 (R10-R12 are the current-sense shunts)
-        input_nets=["GATE_DRV_AH", "GATE_DRV_BH", "GATE_DRV_CH"],
-        output_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
+        input_nets=["GATE_DRV_CH", "GATE_DRV_BH", "GATE_DRV_AH"],
+        output_nets=["GATE_CH", "GATE_BH", "GATE_AH"],
     )
     print("   Gate-drive resistors: R20, R21, R22 (22 ohms, HS only)")
 
@@ -917,6 +922,10 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # connection -- this closes the second half of issue #2980 (without
     # the kwargs, Q1-Q6 gate pins floated and ERC reported six
     # ``pin_not_connected`` errors).
+    # Issue #3423 phase-column swap: phase order is C / B / A so the
+    # schematic refs (Q1/Q2 = first column, Q5/Q6 = third) match the
+    # PCB-side net assignments after the U3 rotation + MOSFET column
+    # swap (Q1/Q2 west column = Phase C, Q5/Q6 east column = Phase A).
     inverter = ThreePhaseInverter(
         sch,
         x=X_PHASE_A,
@@ -924,13 +933,13 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ref_start=1,
         ref_prefix="Q",
         mosfet_value="IRLZ44N",
-        phase_labels=["A", "B", "C"],
+        phase_labels=["C", "B", "A"],
         phase_spacing=75,
         hs_ls_spacing=40,
-        gate_hs_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
-        gate_ls_nets=["GATE_AL", "GATE_BL", "GATE_CL"],
+        gate_hs_nets=["GATE_CH", "GATE_BH", "GATE_AH"],
+        gate_ls_nets=["GATE_CL", "GATE_BL", "GATE_AL"],
     )
-    print("   Three-phase inverter: Q1-Q6 (ThreePhaseInverter block)")
+    print("   Three-phase inverter: Q1-Q6 (ThreePhaseInverter block, C/B/A)")
 
     # Add current sense shunts for each phase (R10-R12)
     # Using CurrentSenseShunt blocks for proper current sensing.
@@ -940,7 +949,10 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # this ordering, the half-bridge helper would emit a direct LS-source
     # to GND wire that shorts the shunt (the LS source belongs on the
     # shunt's IN+ side, not on GND).  See issue #3383.
-    phases = ["A", "B", "C"]
+    # Issue #3423 phase-column swap: C/B/A ordering keeps R10 (i=0) on
+    # Phase C and R12 (i=2) on Phase A, mirroring the PCB-side shunt
+    # net swap.
+    phases = ["C", "B", "A"]
     current_sensors = []
     for i, phase in enumerate(phases):
         x_phase = X_PHASE_A + (i * 75)
@@ -1392,56 +1404,94 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     C5_POS = (BOARD_ORIGIN_X + 38, BOARD_ORIGIN_Y + 30)  # LDO input cap
     C6_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 30)  # LDO output cap
 
-    # MCU bypass caps (center, row 3) -- 5mm spacing between caps
-    C7_POS = (BOARD_ORIGIN_X + 34, BOARD_ORIGIN_Y + 37)
-    C8_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 37)
-    C9_POS = (BOARD_ORIGIN_X + 46, BOARD_ORIGIN_Y + 37)
+    # MCU bypass caps (center, row 3) -- 6mm spacing between caps.
+    # Issue #3423: shifted from y=37 to y=32.5 and re-centred on the
+    # MCU's new column (U10 moved to (37, 39.5), see U10_POS below);
+    # at y=37 the old C7/C8 positions land inside the relocated U10
+    # footprint.  y=32.5 leaves ~1.4mm to U10's north pad edge and
+    # ~1.2mm to the C5/C6 LDO caps at y=30.
+    C7_POS = (BOARD_ORIGIN_X + 31, BOARD_ORIGIN_Y + 32.5)
+    C8_POS = (BOARD_ORIGIN_X + 37, BOARD_ORIGIN_Y + 32.5)
+    C9_POS = (BOARD_ORIGIN_X + 43, BOARD_ORIGIN_Y + 32.5)
 
     # Crystal (right side, row 3)
     Y1_POS = (BOARD_ORIGIN_X + 52, BOARD_ORIGIN_Y + 37)
     C10_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 37)
     C11_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 43)
 
-    # Gate driver (left, row 4) -- DRV8301 HTSSOP-56 (DCA package), 14x8.1mm
-    # body per TI SLOS719F.  Pin 1 is on the top-left of the long-axis-vertical
-    # orientation, so the body extends ~7mm above and below U3_POS along Y and
-    # ~4mm left/right along X (with leads).  Centred to clear the bypass caps
-    # at x=4 and x=24 and the MCU at x=40.
+    # Gate driver (center, row 4) -- DRV8301 HTSSOP-56 (DCA package),
+    # 14x8.1mm body per TI SLOS719F, rotated 90 degrees CLOCKWISE
+    # (Issue #3423; -90 deg in this repo's CCW-positive convention, baked
+    # into ``_htssop56_pad_xy``).  Long axis is now HORIZONTAL: the body
+    # extends ~7mm left/right of U3_POS along X and ~4.5mm above/below
+    # along Y (with leads).
     #
-    # Note on routing density: the DCA package places half-bridge pins
-    # (BST/GH/GL/SH/SL for A,B,C, pins 34-48) along the lower-right of the
-    # device, while the H-bridge MOSFETs sit south at y=68/76.  Historically
-    # (as of #2532 follow-up) the router achieved ~58-77% on this geometry
-    # with the C++ negotiated backend at ``--timeout 240 --layers 2``; the
-    # 2026-05-08 net-count growth (26 -> 35 after the block-refactor wave
-    # added PWM_AH/AL/BH/BL/CH/CL + GATE_DRV_AH/BH/CH + R20-R22/R30-R32/
-    # C30-C32) plus the per-net A* regression tracked in #2681 currently
-    # reduce that completion to 6% under the same default flags.  Placement
-    # has been re-tuned in issue #2682 (R20-R22 nudged north 2mm, Hall
-    # filter R30-R32/C30-C32 shifted south 3mm) to clear known component-
-    # courtyard overlaps and open fan-out corridors; the router-side fix
-    # is tracked separately in #2681.
-    U3_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 50)  # DRV8301 HTSSOP-56
-    C12_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 47)  # Bootstrap A
+    # Why rotated (Issue #3423, decomposition #3422): with the long axis
+    # vertical, the half-bridge pins (29-56, right edge) faced EAST while
+    # the MOSFET row sits SOUTH, so PWM nets crossed the U3 body and the
+    # GATE_*/ISENSE_* nets wrapped around the package -- categories 1-3
+    # of the #3422 unrouteable-net taxonomy.  After the CW rotation the
+    # half-bridge/buck pins (29-56) face SOUTH toward the MOSFETs and the
+    # logic pins (1-28, PWM/SPI/ISENSE outputs) face NORTH toward the MCU
+    # (U10, moved above U3).  South-edge pin order left-to-right is
+    # 29..56, which puts Phase C pins (34-38) mid-LEFT and Phase A pins
+    # (44-48) mid-RIGHT -- hence the MOSFET phase columns are swapped to
+    # C (x=8) / B (x=24) / A (x=40) so no two phases cross (see the
+    # curator analysis on #3423).  U3 is centred at x=24 over the middle
+    # (Phase B) MOSFET column.
+    U3_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 50)  # DRV8301 HTSSOP-56
+    C12_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 47)  # Bootstrap C (west column)
     C13_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 53)  # Bootstrap B
-    C14_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 59)  # Bootstrap C
-    C15_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 47)  # Bypass 100nF
-    C16_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 53)  # Bypass 10uF
+    C14_POS = (BOARD_ORIGIN_X + 4, BOARD_ORIGIN_Y + 59)  # Bootstrap A
+    # Bypass caps moved from x=24 to x=12 (Issue #3423): their previous
+    # positions (124, 147/153 abs) land inside the rotated U3 pad
+    # envelope (x 117.1-130.9, y 145.475-154.525).  x=12 sits in the
+    # corridor vacated by U3's old long-axis-vertical body, between the
+    # bootstrap column (x=4) and U3's west pad edge (x=17.1), close to
+    # the +5V pins (GVDD/CP1/CP2/AVDD) on U3's north edge.
+    C15_POS = (BOARD_ORIGIN_X + 12, BOARD_ORIGIN_Y + 47)  # Bypass 100nF
+    C16_POS = (BOARD_ORIGIN_X + 12, BOARD_ORIGIN_Y + 53)  # Bypass 10uF
 
-    # MCU (right side, row 4) -- LQFP-32 7x7mm body, 9x9mm with leads.
-    # Placed right of the gate driver, between the bypass caps row and the
-    # MOSFET row.
-    U10_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 50)
+    # MCU (row 3.5, north of the gate driver) -- LQFP-32 7x7mm body,
+    # 9x9mm with leads.  Issue #3423: moved from (40, 50) -- which sat
+    # EAST of U3, in the path of the rotated body -- to (37, 39.5),
+    # north-east of the rotated U3, so the PWM nets exit U3's north
+    # (logic) edge and reach U10 without crossing the U3 body.  x=37
+    # keeps U10's west edge (x ~32.1) clear of U3's east pad edge
+    # (x ~30.9); y=39.5 keeps U10's south edge (y ~44.4) clear of U3's
+    # north pad edge (y ~45.5) and its north edge (y ~34.6) clear of
+    # the relocated C7-C9 bypass row at y=32.5.
+    #
+    # Placement A/B note (#3423 builder measurement, cpp/jlcpcb-tier1/
+    # 4L, seed 42): this position measured 19/32 routed vs 17/32 for
+    # the alternative (40, 41) "fully east of U3" candidate and 18/32
+    # for the pre-rotation baseline.  The residual failures (5x
+    # ISENSE_*, 3x HALL_*, SW_OUT, 3-4x PWM_*) are invariant across
+    # all three placements -- they are congestion/via-strategy bound,
+    # not placement bound; see #3425 (via-in-pad tier) and #3424 (J4).
+    U10_POS = (BOARD_ORIGIN_X + 37, BOARD_ORIGIN_Y + 39.5)
 
     # Power MOSFETs - H-bridge configuration (bottom section)
     # TO-220 pads are 2.54mm pitch, body ~5mm wide
-    # Phase A (left)
+    #
+    # Issue #3423: phase columns are assigned C / B / A left-to-right
+    # (a NET swap relative to the historical A/B/C, not a placement
+    # change) so each column sits under its phase's half-bridge pins on
+    # the rotated U3's south edge (left-to-right: 34-38 Phase C, 39-43
+    # Phase B, 44-48 Phase A).  Keeping A/B/C would force the Phase A
+    # and Phase C gate/sense nets to cross each other over ~18mm.  The
+    # corresponding net swaps: Q1/Q2 <-> Q5/Q6, R10 <-> R12,
+    # C12 <-> C14, R20 <-> R22, J2 pin order, and the schematic-side
+    # block phase orderings (electrically arbitrary for a 3-phase
+    # motor -- phase order only changes spin direction, fixed in
+    # firmware).
+    # Phase C (left)
     Q1_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 68)  # HS
     Q2_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 76)  # LS
     # Phase B (center)
     Q3_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 68)  # HS
     Q4_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 76)  # LS
-    # Phase C (right)
+    # Phase A (right)
     Q5_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 68)  # HS
     Q6_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 76)  # LS
 
@@ -1464,9 +1514,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # the body north edge at y=162.65 with 1.95 mm clearance from the TO-220
     # courtyard, restoring routability for GATE_AH/BH/CH (previously
     # "No path found" because Q1/Q3/Q5 + R20-R22 footprints were touching).
-    R20_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 62)  # Phase A HS
+    R20_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 62)  # Phase C HS (#3423 swap)
     R21_POS = (BOARD_ORIGIN_X + 24, BOARD_ORIGIN_Y + 62)  # Phase B HS
-    R22_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 62)  # Phase C HS
+    R22_POS = (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 62)  # Phase A HS (#3423 swap)
 
     # Motor connector (right edge, bottom -- near MOSFETs)
     J2_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 76)
@@ -1808,20 +1858,38 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     def _htssop56_pad_xy(pin_index: int) -> tuple[float, float, float, float]:
         """Return (x, y, size_x, size_y) for the given HTSSOP-56 pin (1-56).
 
-        Layout matches the KiCad library footprint
-        ``Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm``:
-        long axis vertical, pin 1 at the top-left, pins 1-28 down the left
-        edge (top to bottom), pins 29-56 up the right edge (bottom to top),
-        0.5 mm pitch, pad geometry 1.55 mm wide (perpendicular to body) by
-        0.30 mm tall (parallel to body).  Pad centre offsets are +/-3.75 mm
-        in X with Y stepping by 0.5 mm from +/-6.75 mm.
+        Geometry is the KiCad library footprint
+        ``Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm`` rotated
+        90 degrees clockwise (i.e. -90 deg / 270 deg CCW in this repo's
+        CCW-positive rotation convention, PR #738).  Issue #3423: the
+        rotation is baked directly into the pad coordinates -- mapping
+        each library-canonical pad centre (x, y) -> (-y, x) and swapping
+        the pad size 1.55x0.30 -> 0.30x1.55 -- because
+        ``generate_htssop56`` hand-emits its S-expressions with a bare
+        ``(at x y)`` and no rotation attribute.
+
+        Resulting orientation (long axis HORIZONTAL):
+
+        * pins 1-28 across the NORTH edge, pin 1 at the right
+          (x=+6.75) stepping left to pin 28 at x=-6.75 -- logic /
+          PWM / SPI / ISENSE-output pins face the MCU (U10) above;
+        * pins 29-56 across the SOUTH edge, pin 29 at the left
+          (x=-6.75) stepping right to pin 56 at x=+6.75 -- half-bridge
+          and buck pins face the MOSFET row below.  South-edge order
+          left-to-right: 29-33 (ISENSE/AGND/PVDD1), 34-38 (Phase C),
+          39-43 (Phase B), 44-48 (Phase A), 49-56 (buck/SPI).
+          Phase columns are swapped to C/B/A to match (see Q1-Q6 net
+          assignments).
+
+        0.5 mm pitch; pad centre rows at y = -/+3.75 mm with X stepping
+        by 0.5 mm from +/-6.75 mm.
         """
         if 1 <= pin_index <= 28:
-            # Left edge, pin 1 at top (-6.75) -> pin 28 at bottom (+6.75)
-            return (-3.75, -6.75 + (pin_index - 1) * 0.5, 1.55, 0.3)
+            # North edge: pin 1 at right (+6.75) -> pin 28 at left (-6.75)
+            return (6.75 - (pin_index - 1) * 0.5, -3.75, 0.3, 1.55)
         if 29 <= pin_index <= 56:
-            # Right edge, pin 29 at bottom (+6.75) -> pin 56 at top (-6.75)
-            return (3.75, 6.75 - (pin_index - 29) * 0.5, 1.55, 0.3)
+            # South edge: pin 29 at left (-6.75) -> pin 56 at right (+6.75)
+            return (-6.75 + (pin_index - 29) * 0.5, 3.75, 0.3, 1.55)
         raise ValueError(f"HTSSOP-56 pin {pin_index} out of range")
 
     def generate_htssop56(ref: str, pos: tuple, value: str) -> str:
@@ -1830,7 +1898,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
 
         Emits all 56 perimeter pads plus the exposed PowerPAD (pin 57).
         Net assignments come from ``DRV8301_PINS`` above; pin 57 is GND.
-        Footprint matches TI's DCA package per SLOS719F.
+        Footprint matches TI's DCA package per SLOS719F, rotated 90
+        degrees clockwise via ``_htssop56_pad_xy`` (Issue #3423) so the
+        half-bridge pins face the MOSFET row to the south.
         """
         x, y = pos
         pad_lines = []
@@ -1845,9 +1915,10 @@ def create_bldc_pcb(output_dir: Path) -> Path:
                 f'(net {net_num} "{net_name}"))'
             )
         # PowerPAD / exposed pad (pin 57 == GND).  EP geometry per KiCad
-        # library footprint: 3.61 mm x 6.35 mm centred on the package.
+        # library footprint: 3.61 mm x 6.35 mm, swapped to 6.35 x 3.61
+        # for the 90-degree-CW package rotation (Issue #3423).
         pad_lines.append(
-            f'    (pad "57" smd rect (at 0 0) (size 3.61 6.35) '
+            f'    (pad "57" smd rect (at 0 0) (size 6.35 3.61) '
             f'(layers "F.Cu" "F.Paste" "F.Mask") '
             f'(net {NETS["GND"]} "GND"))'
         )
@@ -1856,10 +1927,10 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -8) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -6) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "{value}" (at 0 8) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "{value}" (at 0 6) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
 {pads}
@@ -2210,9 +2281,12 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     parts.append(generate_htssop56("U3", U3_POS, "DRV8301"))
     print(f"   U3 (DRV8301, HTSSOP-56) at {U3_POS}")
     # Bootstrap caps (VMOTOR to phase)
-    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "+24V", "PHASE_A"))
+    # Issue #3423 phase-column swap: C12 <-> C14 net assignments (the
+    # bootstrap column at x=4 sits next to the WEST MOSFET column, which
+    # is now Phase C).
+    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "+24V", "PHASE_C"))
     parts.append(generate_cap_0805("C13", C13_POS, "100nF", "+24V", "PHASE_B"))
-    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "+24V", "PHASE_C"))
+    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "+24V", "PHASE_A"))
     # Bypass caps
     parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+5V", "GND"))
     parts.append(generate_cap_0805("C16", C16_POS, "10uF", "+5V", "GND"))
@@ -2224,34 +2298,42 @@ def create_bldc_pcb(output_dir: Path) -> Path:
 
     print("\n8. Adding power MOSFETs (H-bridge)...")
     # Phase A: Q1 (high-side), Q2 (low-side)
-    parts.append(generate_to220("Q1", Q1_POS, "IRLZ44N", "GATE_AH", "+24V", "PHASE_A"))
-    parts.append(generate_to220("Q2", Q2_POS, "IRLZ44N", "GATE_AL", "PHASE_A", "ISENSE_A+"))
+    # Issue #3423 phase-column swap: Q1/Q2 (west column) carry Phase C
+    # and Q5/Q6 (east column) carry Phase A, matching the rotated U3's
+    # south-edge half-bridge pin order (C mid-left, B center, A
+    # mid-right).  Placement is unchanged; only nets swap.
+    parts.append(generate_to220("Q1", Q1_POS, "IRLZ44N", "GATE_CH", "+24V", "PHASE_C"))
+    parts.append(generate_to220("Q2", Q2_POS, "IRLZ44N", "GATE_CL", "PHASE_C", "ISENSE_C+"))
     # Phase B: Q3 (high-side), Q4 (low-side)
     parts.append(generate_to220("Q3", Q3_POS, "IRLZ44N", "GATE_BH", "+24V", "PHASE_B"))
     parts.append(generate_to220("Q4", Q4_POS, "IRLZ44N", "GATE_BL", "PHASE_B", "ISENSE_B+"))
     # Phase C: Q5 (high-side), Q6 (low-side)
-    parts.append(generate_to220("Q5", Q5_POS, "IRLZ44N", "GATE_CH", "+24V", "PHASE_C"))
-    parts.append(generate_to220("Q6", Q6_POS, "IRLZ44N", "GATE_CL", "PHASE_C", "ISENSE_C+"))
-    print(f"   Q1-Q2 (Phase A), Q3-Q4 (Phase B), Q5-Q6 (Phase C)")
+    parts.append(generate_to220("Q5", Q5_POS, "IRLZ44N", "GATE_AH", "+24V", "PHASE_A"))
+    parts.append(generate_to220("Q6", Q6_POS, "IRLZ44N", "GATE_AL", "PHASE_A", "ISENSE_A+"))
+    print("   Q1-Q2 (Phase C), Q3-Q4 (Phase B), Q5-Q6 (Phase A) -- #3423 swap")
 
     print("\n9. Adding current sense shunts...")
-    parts.append(generate_resistor_2512("R10", R10_POS, "5mR", "ISENSE_A+", "ISENSE_A-"))
+    # Issue #3423 phase-column swap: R10 <-> R12 net assignments.
+    parts.append(generate_resistor_2512("R10", R10_POS, "5mR", "ISENSE_C+", "ISENSE_C-"))
     parts.append(generate_resistor_2512("R11", R11_POS, "5mR", "ISENSE_B+", "ISENSE_B-"))
-    parts.append(generate_resistor_2512("R12", R12_POS, "5mR", "ISENSE_C+", "ISENSE_C-"))
+    parts.append(generate_resistor_2512("R12", R12_POS, "5mR", "ISENSE_A+", "ISENSE_A-"))
     print(f"   R10, R11, R12 (5mOhm shunts)")
 
     print("\n9b. Adding gate-drive (slew-rate) resistors...")
     # Series 22-ohm resistors between DRV8301 HS outputs and the MOSFET gates.
     # Each connects GATE_DRV_*H (driver IC output) to GATE_*H (MOSFET gate).
-    parts.append(generate_resistor_0805("R20", R20_POS, "22", "GATE_DRV_AH", "GATE_AH"))
+    # Issue #3423 phase-column swap: R20 <-> R22 net assignments.
+    parts.append(generate_resistor_0805("R20", R20_POS, "22", "GATE_DRV_CH", "GATE_CH"))
     parts.append(generate_resistor_0805("R21", R21_POS, "22", "GATE_DRV_BH", "GATE_BH"))
-    parts.append(generate_resistor_0805("R22", R22_POS, "22", "GATE_DRV_CH", "GATE_CH"))
+    parts.append(generate_resistor_0805("R22", R22_POS, "22", "GATE_DRV_AH", "GATE_AH"))
     print("   R20, R21, R22 (22 ohm gate-drive, HS only)")
 
     print("\n10. Adding connectors...")
     # J2: Motor output (3-pin)
     parts.append(
-        generate_pin_header("J2", J2_POS, 3, "Motor Output", ["PHASE_A", "PHASE_B", "PHASE_C"])
+        # Issue #3423 phase-column swap: pin order C/B/A (electrically
+        # arbitrary for a 3-phase motor; matches the swapped columns).
+        generate_pin_header("J2", J2_POS, 3, "Motor Output", ["PHASE_C", "PHASE_B", "PHASE_A"])
     )
     print(f"   J2 (Motor Output) at {J2_POS}")
     # J3: Hall sensors (5-pin)
@@ -2542,6 +2624,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # regression test from PR #3258.  DO NOT overwrite the
         # committed routed snapshot without manually verifying the
         # new fresh re-route is strictly better.
+        #
+        # Issue #3423 (2026-06-09): the U3 rotation moved all 56 U3
+        # pads, forcing the artifact refresh the paragraph above
+        # warned about.  The committed snapshot is now this recipe's
+        # deterministic seed-42 output on the post-#3442 router
+        # (10 blocking = 6 pad_segment + 1 seg_seg + 3 seg_via; see
+        # Issue #3444 for the B.Cu overlap families and the
+        # re-tightening plan; 2L reach 53% at this recipe's 900s
+        # budget, 45.7% at the floor test's 240s recipe).
         "--backend",
         "python",
         "--seed",

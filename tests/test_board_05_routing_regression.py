@@ -39,9 +39,19 @@ UNROUTED_PCB = BOARD_DIR / "output" / "bldc_controller.kicad_pcb"
 # on board 05 with default flags and ``--seed 42``.  Calibrated from
 # Issue #2681 acceptance criterion: "restore 2L completion to >=26% on
 # board 05 with default flags".  Post-#2698 placement the typical value
-# is ~34 %; the 26 % floor leaves ~8 percentage points of slack for
+# was ~34 %; the 26 % floor left ~8 percentage points of slack for
 # legitimate routing-quality variations across runs and platforms.
-MIN_2L_COMPLETION_PCT = 26
+#
+# Re-pinned 26 -> 35 by Issue #3423 (2026-06-09): the U3 (DRV8301)
+# 90-degree-CW rotation + C/B/A MOSFET phase-column swap structurally
+# removed the PWM/GATE crossing topology, raising the measured 2L
+# completion at this test's exact recipe (python backend, 240s budget,
+# seed 42, no skip-nets) to 16/35 = 45.7 % with the post-#3442 router
+# -- measured on a heavily loaded machine, so idle CI should do at
+# least as well.  The 35 % floor keeps ~10 points of slack, mirroring
+# the old 34-measured / 26-floor margin.  With the design recipe's
+# full 900s budget and skip-nets the same board reaches 17/32 = 53 %.
+MIN_2L_COMPLETION_PCT = 35
 
 
 @pytest.fixture(scope="module")

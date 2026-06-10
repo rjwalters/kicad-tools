@@ -198,7 +198,30 @@ tolerances:
   # requires care; see also Issue #2944 (U3 in-pad rescue "Proceeding
   # anyway" mechanism, the underlying cause of the residual 6,
   # explicitly out of scope for #3294).
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 6
+  #
+  # Floor re-pinned 6 -> 10 by Issue #3423 (2026-06-09).  The U3
+  # (DRV8301) 90-degree-CW rotation + C/B/A MOSFET phase-column swap
+  # moved all 56 U3 pads, so the unreproducible 6-blocking historical
+  # snapshot HAD to be refreshed.  The new committed file is the
+  # deterministic ``design.py`` seed-42 output (fresh regen now
+  # matches the committed artifact, eliminating the "better-than-
+  # average snapshot" asymmetry documented above).  Measured profile
+  # on the committed file (post-#3442 router):
+  #   * 6 clearance_pad_segment -- all at U3 south/north edge pins
+  #     (U3-41, U3-36, U3-21), shortfall band 14-139um
+  #   * 1 clearance_segment_segment + 3 clearance_segment_via --
+  #     residual B.Cu overlaps in the ISENSE/PWM corridor south of
+  #     the rotated U3.  PR #3442's demote-to-partial cut these
+  #     families from 7+7 (pre-#3442, stable across seeds 7/42/123)
+  #     to 1+3; the residual pairs are tracked in Issue #3444
+  #     (fix-drc cannot repair: rollback on connectivity loss).
+  # The rotation's payoff is reach topology, not 2L DRC: the 4L cpp
+  # "No path found" list collapsed from 8+ structural crossing
+  # blockers to ~2, and 2L completion rose 34% -> 53% (900s budget,
+  # post-#3442).  Tighten this floor when #3444 lands; #3425
+  # (cpp/tier1/4L recipe switch) will obsolete the 2L python
+  # snapshot entirely.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 10
 
   # Board 03 (USB-C joystick) was 22 (post-#2753 coord-space fix), then
   # 19 ``clearance_pad_segment`` after PR #2762 re-route.  All 19
