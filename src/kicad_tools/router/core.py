@@ -8645,7 +8645,7 @@ class Autorouter:
     def _demote_seg_seg_overlap_nets(
         self,
         net_routes: dict[int, list[Route]],
-        neg_router: "NegotiatedRouter",
+        neg_router: NegotiatedRouter,
     ) -> list[int]:
         """Strip nets whose committed copper physically overlaps a foreign net.
 

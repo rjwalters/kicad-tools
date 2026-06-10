@@ -1677,7 +1677,7 @@ class NegotiatedRouter:
         self,
         net_routes: dict[int, list[Route]],
         trace_clearance: float,
-        extra_routes: list["Route"] | None = None,
+        extra_routes: list[Route] | None = None,
         copper_overlap_only: bool = False,
     ) -> list[tuple[int, int]]:
         """Find cross-net same-layer segment pairs that violate clearance.
@@ -1735,7 +1735,7 @@ class NegotiatedRouter:
         # Bucket segments by layer; track rippability so extra-route
         # vs extra-route pairs can be skipped.
         # Entry: (net_id, seg, rippable)
-        segs_on_layer: dict[int, list[tuple[int, "Segment", bool]]] = {}
+        segs_on_layer: dict[int, list[tuple[int, Segment, bool]]] = {}
         max_half_width = 0.0
         for net_id, routes in net_routes.items():
             for route in routes:
@@ -1815,7 +1815,7 @@ class NegotiatedRouter:
         net_routes: dict[int, list[Route]],
         trace_clearance: float,
         cache_key: object | None = None,
-        extra_routes: list["Route"] | None = None,
+        extra_routes: list[Route] | None = None,
     ) -> list[int]:
         """Find nets whose committed segments clip foreign-net segments.
 

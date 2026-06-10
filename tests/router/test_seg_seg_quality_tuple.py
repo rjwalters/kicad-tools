@@ -77,9 +77,7 @@ def _seg(
     layer: Layer = Layer.F_CU,
     width: float = 0.2,
 ) -> Segment:
-    return Segment(
-        x1=x1, y1=y1, x2=x2, y2=y2, width=width, layer=layer, net=net
-    )
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=width, layer=layer, net=net)
 
 
 def _route(net: int, segments: list[Segment], name: str = "") -> Route:
@@ -128,9 +126,10 @@ class TestFindNetsWithSegmentSegmentViolations:
             1: [_route(1, [_seg(0.0, 5.0, 10.0, 5.0, 1)])],
             2: [_route(2, [_seg(0.0, 5.35, 10.0, 5.35, 2)])],
         }
-        assert self.neg.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=0.15
-        ) == []
+        assert (
+            self.neg.find_nets_with_segment_segment_violations(net_routes, trace_clearance=0.15)
+            == []
+        )
 
     def test_same_net_overlap_ignored(self):
         """Coincident same-net segments (stitching, re-traced spans)
@@ -143,9 +142,10 @@ class TestFindNetsWithSegmentSegmentViolations:
                 )
             ],
         }
-        assert self.neg.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=0.15
-        ) == []
+        assert (
+            self.neg.find_nets_with_segment_segment_violations(net_routes, trace_clearance=0.15)
+            == []
+        )
 
     def test_different_layer_overlap_ignored(self):
         """The committed-clean board resolves SWCLK/SWO by layer
@@ -154,9 +154,10 @@ class TestFindNetsWithSegmentSegmentViolations:
             1: [_route(1, [_seg(0.0, 5.0, 10.0, 5.0, 1, layer=Layer.F_CU)])],
             2: [_route(2, [_seg(0.0, 5.0, 10.0, 5.0, 2, layer=Layer.B_CU)])],
         }
-        assert self.neg.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=0.15
-        ) == []
+        assert (
+            self.neg.find_nets_with_segment_segment_violations(net_routes, trace_clearance=0.15)
+            == []
+        )
 
     def test_extra_routes_foreign_universe_only(self):
         """Issue #3077 parity: an escape-phase extra route overlapping a
@@ -178,12 +179,18 @@ class TestFindNetsWithSegmentSegmentViolations:
             _route(8, [_seg(0.0, 5.0, 10.0, 5.0, 8)]),
             _route(9, [_seg(0.0, 5.0, 10.0, 5.0, 9)]),
         ]
-        assert self.neg.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=0.15, extra_routes=extra
-        ) == []
-        assert self.neg.find_segment_segment_violation_pairs(
-            net_routes, trace_clearance=0.15, extra_routes=extra
-        ) == []
+        assert (
+            self.neg.find_nets_with_segment_segment_violations(
+                net_routes, trace_clearance=0.15, extra_routes=extra
+            )
+            == []
+        )
+        assert (
+            self.neg.find_segment_segment_violation_pairs(
+                net_routes, trace_clearance=0.15, extra_routes=extra
+            )
+            == []
+        )
 
     def test_memoization_same_cache_key_reuses_result(self):
         """Same cache_key -> cached result even after mutation; a new
@@ -260,9 +267,12 @@ class TestFindSegmentSegmentViolationPairs:
             1: [_route(1, [_seg(0.0, 5.0, 10.0, 5.0, 1)])],
             2: [_route(2, [_seg(0.0, 5.306, 10.0, 5.306, 2)])],
         }
-        assert self.neg.find_segment_segment_violation_pairs(
-            net_routes, trace_clearance=0.15, copper_overlap_only=True
-        ) == []
+        assert (
+            self.neg.find_segment_segment_violation_pairs(
+                net_routes, trace_clearance=0.15, copper_overlap_only=True
+            )
+            == []
+        )
         # ...but it IS a default-mode violation.
         assert self.neg.find_segment_segment_violation_pairs(
             net_routes, trace_clearance=0.15, copper_overlap_only=False
@@ -332,9 +342,7 @@ class TestSelectSegSegDemotionNets:
     def test_hub_net_preferred(self):
         """A net overlapping two others is demoted alone (vertex cover
         minimality) instead of demoting both leaves."""
-        assert _select_seg_seg_demotion_nets(
-            [(1, 2), (2, 3)], {1, 2, 3}
-        ) == [2]
+        assert _select_seg_seg_demotion_nets([(1, 2), (2, 3)], {1, 2, 3}) == [2]
 
     def test_non_demotable_member_forces_partner(self):
         """Pair (5, 9) where 5 is escape infra (not demotable): the
@@ -388,10 +396,14 @@ class TestDemoteSegSegOverlapNets:
         assert r1 not in ar.routes
         assert r2 in ar.routes and r3 in ar.routes
         # Post-demotion state contains no copper overlap.
-        assert neg.find_segment_segment_violation_pairs(
-            net_routes, trace_clearance=ar.rules.trace_clearance,
-            copper_overlap_only=True,
-        ) == []
+        assert (
+            neg.find_segment_segment_violation_pairs(
+                net_routes,
+                trace_clearance=ar.rules.trace_clearance,
+                copper_overlap_only=True,
+            )
+            == []
+        )
 
     def test_clean_board_untouched(self):
         ar = self._make_autorouter()
