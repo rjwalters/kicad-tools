@@ -46,8 +46,10 @@ Issue: https://github.com/rjwalters/kicad-tools/issues/3390
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -165,108 +167,139 @@ def test_softstart_revb_p_fp6_dispatcher_eligible(tmp_path: Path) -> None:
 def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Direct dispatch of the SOP escape generates in-pad vias on UCC27211.
+    """Dispatch is defer-all by default; env cap=1 rescues pin 8 only.
 
-    Issue #3390 AC #4 sub-check: when ``generate_escapes`` is called
-    directly on the UCC27211 SOIC-8 package (bypassing the
-    ``detect_dense_packages`` gate that excludes it from the
-    end-to-end ``route_with_escape`` pipeline), the SOP staggered
-    dispatcher produces an :class:`~kicad_tools.router.escape.EscapeRoute`
-    with a via for every pin on every signal net.  This is the
-    positive evidence that the P_FP6 wiring is correct -- the rescue
-    fires, places in-pad vias, and logs the
-    ``SOP in-pad rescue for ... (Issue #3381 / P_FP6)`` line.
+    Issue #3390 AC #4 sub-check, REVISED by Issue #3398: the UCC27211
+    SOIC-8 at 1.27 mm pitch sits in the rescue-only band (pitch above
+    the 1.0 mm dynamic threshold), so the SOP staggered dispatcher is
+    "rescue or nothing" and the rescue is consumer-aware:
+
+    - PRODUCTION DEFAULT (``KICAD_TOOLS_SOP_RESCUE_ROW_CAP`` unset =
+      cap 0): every pad defers and the packages emit NO escape
+      geometry at all -- the Jun 9 2026 same-machine A/B measurements
+      showed every rescue-firing configuration is net-negative on
+      softstart under production budgets (L=2: 17/30 main vs
+      15-16/30; L=4 floor test: 22/30 main vs 20/30).
+    - With ``KICAD_TOOLS_SOP_RESCUE_ROW_CAP=1`` (experiment mode):
+      pads whose net's nearest off-package consumer is LOCAL
+      (<= 15 mm: bootstrap caps, TVS clamps, gate resistors) defer;
+      among the FAR-consumer pads of a row (U5/U6 pins 7-8:
+      GATE_*_A/B driver inputs, 20-54 mm from the MCU) only the
+      FARTHEST one (pin 8: GATE_*_A) wins the row's single rescue.
+      Rescuing pins 7+8 together walled the row's B.Cu launch
+      corridor and turned the pin-7 nets into ``blocked_path``
+      failures (the original 18 -> 8/30 regression of #3395).
+    - U7 (LM393) has only local consumers (2-12 mm) -> zero rescues
+      at any cap.
     """
     from kicad_tools.router.escape import EscapeRouter
 
     pcb_path = _regenerate_softstart_pcb(tmp_path / "softstart_p_fp6_emit")
     router = _load_router(pcb_path)
 
-    er = EscapeRouter(router.grid, router.rules)
+    er = EscapeRouter(
+        router.grid,
+        router.rules,
+        net_target_positions=router._build_net_target_positions(),
+    )
     caplog.set_level(logging.INFO, logger="kicad_tools.router.escape")
 
-    total_vias = 0
-    total_pins = 0
-    for ref in UCC_REFS:
-        pads = [p for p in router.pads.values() if p.ref == ref]
-        package_info = er.analyze_package(pads)
-        routes = er.generate_escapes(package_info)
-        vias = sum(1 for r in routes if r.via is not None)
-        total_vias += vias
-        total_pins += len(pads)
-        # Each UCC27211 SOIC-8 has 8 pads -- but pads on net 0 (plane
-        # net) are skipped by the rescue gate.  At minimum every
-        # signal-net pad gets a via.
-        signal_pins = sum(1 for p in pads if p.net != 0)
-        assert vias >= signal_pins, (
-            f"{ref}: expected at least {signal_pins} in-pad vias "
-            f"(one per signal-net pin), got {vias}"
-        )
+    # --- Phase 1: production default (cap 0) -> NO geometry at all. ---
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if k != "KICAD_TOOLS_SOP_RESCUE_ROW_CAP"
+    }
+    with mock.patch.dict(os.environ, clean_env, clear=True):
+        for ref in UCC_REFS:
+            pads = [p for p in router.pads.values() if p.ref == ref]
+            package_info = er.analyze_package(pads)
+            routes = er.generate_escapes(package_info)
+            assert routes == [], (
+                f"{ref}: production default (row cap 0) must emit NO "
+                f"escape geometry on the rescue-only band; got "
+                f"{len(routes)} routes"
+            )
 
-    # Sanity check on log output -- at least one rescue line per ref
-    # confirms the P_FP6 path emitted the diagnostic.
+    # --- Phase 2: experiment mode (cap 1) -> pin 8 per row only. ---
+    # Expected far-consumer rescue pins per ref (Issue #3398 diag +
+    # per-row cap: pin 8's consumer is farther than pin 7's, so pin 8
+    # wins each row's single rescue).
+    expected_rescued = {
+        "U5": {"8"},   # GATE_POS_A -> MCU, 53.8 mm (beats pin 7 @ 52.5)
+        "U6": {"8"},   # GATE_NEG_A -> MCU, 21.8 mm (beats pin 7 @ 20.5)
+        "U7": set(),   # all consumers local (2-12 mm)
+    }
+
+    with mock.patch.dict(
+        os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+    ):
+        for ref in UCC_REFS:
+            pads = [p for p in router.pads.values() if p.ref == ref]
+            package_info = er.analyze_package(pads)
+            routes = er.generate_escapes(package_info)
+            in_pad_pins = {
+                r.pad.pin
+                for r in routes
+                if r.via is not None and getattr(r.via, "in_pad", False)
+            }
+            assert in_pad_pins == expected_rescued[ref], (
+                f"{ref}: expected in-pad rescues exactly on far-consumer "
+                f"pins {sorted(expected_rescued[ref])}, got "
+                f"{sorted(in_pad_pins)}"
+            )
+            # Rescue-only band: no staggered fallback geometry may appear.
+            staggered = [
+                r for r in routes
+                if r.via is not None and not getattr(r.via, "in_pad", False)
+            ]
+            assert not staggered, (
+                f"{ref}: rescue-only-band package emitted "
+                f"{len(staggered)} legacy staggered escapes (Issue #3398 "
+                "requires rescue-or-nothing)"
+            )
+
+    # Sanity check on log output -- the far-consumer rescues log the
+    # ``SOP in-pad rescue`` diagnostic; U5 and U6 must each appear
+    # exactly once (cap=1 phase only; the cap-0 phase logs nothing).
     rescue_lines = [
         rec.getMessage() for rec in caplog.records
         if "SOP in-pad rescue" in rec.getMessage()
     ]
-    assert len(rescue_lines) > 0, (
-        "Expected SOP in-pad rescue log lines from the P_FP6 path"
+    assert len(rescue_lines) == 2, (
+        f"Expected exactly 2 rescue log lines (U5 pin 8 + U6 pin 8), "
+        f"got {len(rescue_lines)}: {rescue_lines}"
     )
-    # Each of U5/U6/U7 should have at least one rescue line.
-    for ref in UCC_REFS:
+    for ref in ("U5", "U6"):
         matching = [l for l in rescue_lines if f" {ref} " in l]
-        assert matching, (
-            f"Expected at least one SOP in-pad rescue log for {ref}; "
-            f"all rescue lines: {rescue_lines[:5]}"
+        assert len(matching) == 1, (
+            f"Expected 1 SOP in-pad rescue log for {ref} (per-row cap); "
+            f"all rescue lines: {rescue_lines}"
         )
 
 
-def test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached(
+def test_softstart_revb_dispatcher_gate_open_for_soic8(
     tmp_path: Path,
 ) -> None:
-    """Documents the P_FP6 dispatcher-gap finding from #3390 / #3395.
+    """The #3398 SOIC-8 band classifies UCC27211/LM393 as dense.
 
-    UCC27211 SOIC-8 at 1.27 mm pitch + 0.30 mm trace + 0.20 mm
-    clearance does *not* pass
-    :func:`kicad_tools.router.escape.is_dense_package` -- the dynamic
-    threshold is ``2 * (0.30 + 0.20) = 1.0 mm`` which is below 1.27 mm.
-    Therefore ``Autorouter.detect_dense_packages`` excludes UCC27211
-    from the escape pre-pass and the P_FP6 SOP rescue path is
-    unreachable on this fixture during the actual end-to-end route.
+    History: #3390/#3395 documented the original dispatcher GAP
+    (UCC27211 at 1.27 mm pitch > dynamic threshold 1.0 mm -> not
+    dense -> P_FP6 unreachable end-to-end).  Naively opening the gate
+    regressed softstart rev B reach 18 -> 8/30 at L=2 because the
+    full-row rescue's 19-via field blocked the
+    GATE_POS/GATE_NEG/UCC_HO/UCC_LO/VGATE bus + snubber routing
+    around the FET pairs.
 
-    The wiring is correct (verified by
-    ``test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias`` above);
-    only the dispatcher gate prevents the rescue from firing.
-
-    **Why the dispatcher gap is intentional today (Issue #3395
-    investigation, Jun 9 2026):**  the gate is NOT a bug; it is
-    intentionally closed pending the P_FP6 rescue ↔ main-router
-    interaction work.  PR #XXXX investigated the architect's
-    proposed fix (raise the dual-row fine-pitch cap from 0.75 mm to
-    1.5 mm so UCC27211 SOIC-8 qualifies for the dense pre-pass) and
-    measured softstart rev B reach end-to-end:
-
-    +------------------------------+----------------+--------+
-    | Configuration                | Dense packages | Reach  |
-    +==============================+================+========+
-    | main (status quo)            | 3 packages     | 18/30  |
-    +------------------------------+----------------+--------+
-    | Threshold raised to 1.5 mm   | 6 packages     | 8/30   |
-    +------------------------------+----------------+--------+
-
-    Reach REGRESSES by 10 nets when UCC27211 SOIC-8 enters the
-    dense list.  The SOP rescue places 16 in-pad vias on U5/U6
-    signal pins (+3 on U7) as designed; the downstream detailed
-    router then cannot route GATE_POS/GATE_NEG/UCC_HO/UCC_LO/VGATE
-    because the in-pad via field collides with the tight bus +
-    snubber routing around the FET pairs.  See Issue #3398 for the
-    follow-up interaction-fix work.
-
-    When #3398 lands and the rescue no longer regresses end-to-end
-    reach, the dispatcher gate should be re-opened (re-implement the
-    threshold raise) and this test should flip from negative-control
-    to positive-assertion.  Until then, the negative assertion below
-    is the empirical record of the trade-off.
+    Issue #3398 closed the gap properly: the SOIC-8-class band in
+    :func:`kicad_tools.router.escape.is_dense_package` admits these
+    packages to the escape pre-pass, and the rescue-only-band
+    consumer-aware deferral in ``_create_staggered_row_escapes``
+    ensures they emit escape geometry ONLY for each row's single
+    farthest-consumer pad (see
+    ``test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias``).
+    This test is the flipped positive-assertion the original
+    negative-control (``..._dispatcher_gap_documents_p_fp6_unreached``)
+    promised once #3398 landed.
     """
     from kicad_tools.router.escape import is_dense_package
 
@@ -281,18 +314,15 @@ def test_softstart_revb_dispatcher_gap_documents_p_fp6_unreached(
             trace_width=router.rules.trace_width,
             clearance=router.rules.trace_clearance,
         )
-        # Issue #3395: NONE of the UCC27211 SOIC-8 packages are
-        # classified as dense under the current recipe BY DESIGN --
-        # opening the gate without the P_FP6 interaction fix (#3398)
-        # regresses end-to-end reach 18 -> 8 on this fixture.
-        assert not dense, (
-            f"{ref} is now classified as dense at trace=0.30, clearance=0.20.  "
-            "If this was intentional, the test needs updating AND the "
-            "softstart rev B reach floor "
-            "(`test_softstart_revb_reach_floor`) must be re-measured to "
-            "confirm the P_FP6 rescue ↔ main-router interaction (Issue "
-            "#3398) has been addressed.  See the docstring above for the "
-            "Jun 2026 reach-regression measurement details."
+        # Issue #3398: the SOIC-8 band (all-SMD dual-row, >= 8 pads,
+        # pitch in (0.75, 1.5] mm) now admits UCC27211/LM393 so the
+        # consumer-aware P_FP6 rescue can fire end-to-end.
+        assert dense, (
+            f"{ref} is no longer classified as dense at trace=0.30, "
+            "clearance=0.20.  The #3398 SOIC-8-class band in "
+            "is_dense_package appears to have regressed; without it "
+            "the P_FP6 SOP rescue is unreachable end-to-end and the "
+            "GATE_*_A/B reach contribution on softstart rev B is lost."
         )
 
 

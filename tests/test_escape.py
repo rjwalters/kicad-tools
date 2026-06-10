@@ -312,9 +312,25 @@ class TestIsDensePackage:
         assert len(pads) == 32
         assert is_dense_package(pads) is True
 
-    def test_sop_16_not_dense(self):
-        """SOP-16 with standard pitch is not dense."""
+    def test_sop_16_at_soic_pitch_dense_via_soic8_band(self):
+        """SOIC-16 at 1.27 mm pitch is dense via the #3398 SOIC-8-class band.
+
+        Issue #3398: all-SMD dual-row packages with >= 8 pads at
+        (0.75, 1.5] mm pitch enter the escape pre-pass so the
+        consumer-aware P_FP6 in-pad rescue can fire end-to-end.  The
+        SOP staggered dispatcher treats this band as "rescue or
+        nothing" (see ``_create_staggered_row_escapes``), so the
+        classification change emits NO escape geometry unless a
+        fine-pitch region + via-in-pad manufacturer + far consumer
+        all line up.
+        """
         pads = create_sop_pads(16, pitch=1.27)
+        assert len(pads) == 16
+        assert is_dense_package(pads) is True
+
+    def test_sop_16_wide_pitch_not_dense(self):
+        """SOP-16 at 2.54 mm pitch stays non-dense (above the SOIC band)."""
+        pads = create_sop_pads(16, pitch=2.54)
         assert len(pads) == 16
         assert is_dense_package(pads) is False
 
@@ -357,11 +373,17 @@ class TestIsDensePackage:
         assert is_dense_package(pads, trace_width=0.2, clearance=0.2) is True
 
     def test_wide_pitch_not_dense_with_clearance(self):
-        """Package with wide pitch is not dense even with clearance requirements."""
-        pads = create_sop_pads(16, pitch=1.27)  # Standard SOP
+        """Package with wide pitch is not dense even with clearance requirements.
+
+        Issue #3398: 1.27 mm now falls inside the SOIC-8-class band
+        (always dense for >= 8-pad all-SMD dual-row), so the wide-pitch
+        control uses 2.54 mm -- above both the band cap (1.5 mm) and any
+        reasonable dynamic threshold.
+        """
+        pads = create_sop_pads(16, pitch=2.54)  # Wide-pitch SOP
         assert len(pads) == 16
 
-        # 1.27mm pitch > 2 * (0.2 + 0.2) = 0.8mm threshold, so not dense
+        # 2.54mm pitch > 2 * (0.2 + 0.2) = 0.8mm threshold, so not dense
         assert is_dense_package(pads, trace_width=0.2, clearance=0.2) is False
 
     def test_dynamic_threshold_tight_clearance(self):
@@ -447,16 +469,27 @@ class TestTQFP32DenseRule:
         assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is False
 
     def test_sop16_at_1_27mm_not_caught_by_tqfp32_rule(self):
-        """SOIC-16 (dual-row, 1.27mm pitch) is correctly NOT dense.
+        """SOIC-16 (dual-row, 1.27mm pitch) never reaches the TQFP-32 rule.
 
-        Confirms the TQFP-32 rule doesn't fire for non-quad layouts.
-        SOIC has fewer than 20 pins so it doesn't trigger the existing
-        multi-row dense path either.
+        Confirms the TQFP-32 rule doesn't fire for non-quad layouts:
+        a 16-pad dual-row arrangement fails both the >= 32-pin count
+        and the quad-layout check.  Issue #3398: the package IS now
+        dense, but via the SOIC-8-class band (>= 8-pad all-SMD
+        dual-row at (0.75, 1.5] mm pitch), which evaluates BEFORE the
+        TQFP-32 rule -- the wide-pitch control below proves the
+        TQFP-32 rule still does not fire once the band is out of
+        range.
         """
         pads = create_sop_pads(16, pitch=1.27)
         assert len(pads) == 16
-        assert is_dense_package(pads) is False
-        assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is False
+        # Dense via the #3398 SOIC-8-class band (not the TQFP-32 rule).
+        assert is_dense_package(pads) is True
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.15) is True
+        # Control: above the band cap nothing else fires for a 16-pad
+        # dual-row layout (TQFP-32 rule requires >= 32 pads + quad).
+        wide = create_sop_pads(16, pitch=2.54)
+        assert is_dense_package(wide) is False
+        assert is_dense_package(wide, trace_width=0.2, clearance=0.15) is False
 
     def test_qfn32_at_0_5mm_pitch_dense_via_fine_pitch(self):
         """QFN-32 at 0.5mm pitch is dense (fine-pitch path), not via the new rule.
@@ -1137,8 +1170,11 @@ class TestAutorouterEscapeIntegration:
                 ],
             )
 
-        # Add a non-dense package
-        sop_pads = create_sop_pads(8, pitch=1.27, ref="U2")
+        # Add a non-dense package.  Issue #3398: SOIC-pitch (1.27 mm)
+        # dual-row SMD packages with >= 8 pads are now dense via the
+        # SOIC-8-class band, so the non-dense control uses a 2.54 mm
+        # wide-pitch SOP instead.
+        sop_pads = create_sop_pads(8, pitch=2.54, ref="U2")
         for i, pad in enumerate(sop_pads):
             router.add_component(
                 "U2",
@@ -1219,9 +1255,13 @@ class TestSOPStaggeredEscape:
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
-        # Create SOP-16 pads with 1.0mm pitch (standard SOP pitch)
-        # Note: 0.65mm pitch is now classified as SSOP with different routing
-        pads = create_sop_pads(16, pitch=1.0)
+        # Create SOP-16 pads with 0.75mm pitch (legacy dense dual-row band)
+        # Note: 0.65mm pitch is now classified as SSOP with different routing.
+        # Issue #3398: pitch 0.75mm keeps the package in the legacy always-
+        # dense dual-row band; 1.0mm would fall into the rescue-only SOIC
+        # band at these rules (dynamic threshold 0.8mm) and emit no
+        # staggered geometry at all.
+        pads = create_sop_pads(16, pitch=0.75)
         info = router.analyze_package(pads)
 
         assert info.package_type == PackageType.SOP
@@ -1236,9 +1276,13 @@ class TestSOPStaggeredEscape:
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
-        # Create SOP pads with 1.0mm pitch (standard SOP)
-        # Note: 0.65mm pitch is now classified as SSOP with different routing
-        pads = create_sop_pads(16, pitch=1.0)
+        # Create SOP pads with 0.75mm pitch (legacy dense dual-row band)
+        # Note: 0.65mm pitch is now classified as SSOP with different routing.
+        # Issue #3398: pitch 0.75mm keeps the package in the legacy always-
+        # dense dual-row band; 1.0mm would fall into the rescue-only SOIC
+        # band at these rules (dynamic threshold 0.8mm) and emit no
+        # staggered geometry at all.
+        pads = create_sop_pads(16, pitch=0.75)
         info = router.analyze_package(pads)
         escapes = router.generate_escapes(info)
 
@@ -1252,9 +1296,13 @@ class TestSOPStaggeredEscape:
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
-        # Create horizontal SOP (rows at different Y positions) with 1.0mm pitch
-        # Note: 0.65mm pitch is now classified as SSOP with different routing
-        pads = create_sop_pads(8, pitch=1.0)
+        # Create horizontal SOP (rows at different Y positions) with 0.75mm pitch
+        # Note: 0.65mm pitch is now classified as SSOP with different routing.
+        # Issue #3398: pitch 0.75mm keeps the package in the legacy always-
+        # dense dual-row band; 1.0mm would fall into the rescue-only SOIC
+        # band at these rules (dynamic threshold 0.8mm) and emit no
+        # staggered geometry at all.
+        pads = create_sop_pads(8, pitch=0.75)
         info = router.analyze_package(pads)
         escapes = router.generate_escapes(info)
 
