@@ -73,8 +73,11 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 # totals 23 -> 21, and the refreshed routing surfaces one more
 # match-group length-skew violation (5+5+1=11 -> 5+5+2=12 delta) while
 # the advisory connectivity count improves 6 -> 5 and blocking drops
-# 17 -> 16 (floor tightened in .github/routed-drc-tolerance.yml in the
-# same PR, per that file's update policy).
+# 17 -> 16.  These pins measure the COMMITTED artifact and are
+# deterministic; the allowlist floor in .github/routed-drc-tolerance.yml
+# is 21 because the Match-Group gate RE-ROUTES from source and the
+# re-route DRC profile varies with machine load (CI loaded = 21, local
+# idle = 16 -- the #3466 wall-clock-budget cliff).
 #
 # Previous re-baseline: 2026-06-06 (Issue #3263) after PRs #3197/#3198/
 # #3202/#3203 brought net-yield from 25/31 -> 28/31 (4+4+1=9 ->
