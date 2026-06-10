@@ -12502,6 +12502,15 @@ class Autorouter:
 
         # Retry routing
         retry_routes = self.route_net(net, _subgrid_retry=True)
+        # Issue #3441: only report success when the retry actually routed
+        # the net.  Returning bare escape stubs made route_net's
+        # ``subgrid_recovered`` flag True and skipped the via-conflict
+        # resolver (#2838) even though the net was still unrouted -- the
+        # stub cannot fix a via blocker.  The stubs stay in self.routes
+        # (marked ``is_escape``); if the net never routes, the orphan
+        # escape cleanup in :meth:`cleanup_artifacts` removes them.
+        if not retry_routes:
+            return []
         return escape_routes + retry_routes
 
     @property
