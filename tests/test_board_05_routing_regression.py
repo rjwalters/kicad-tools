@@ -46,13 +46,11 @@ UNROUTED_PCB = BOARD_DIR / "output" / "bldc_controller.kicad_pcb"
 # 90-degree-CW rotation + C/B/A MOSFET phase-column swap structurally
 # removed the PWM/GATE crossing topology, raising the measured 2L
 # completion at this test's exact recipe (python backend, 240s budget,
-# seed 42) to 14/32 = 43.75 % with the post-#3442 router (16/32 = 50 %
-# pre-#3442; #3442's demote-to-partial trades a little reach for hard
-# -0.2mm overlap removal).  Both measurements were taken on a heavily
-# loaded machine, so idle CI should do at least as well.  The 35 %
-# floor keeps ~9 points of slack, mirroring the old 34-measured /
-# 26-floor margin.  With the design recipe's full 900s budget the same
-# board reaches 17/32 = 53 %.
+# seed 42, no skip-nets) to 16/35 = 45.7 % with the post-#3442 router
+# -- measured on a heavily loaded machine, so idle CI should do at
+# least as well.  The 35 % floor keeps ~10 points of slack, mirroring
+# the old 34-measured / 26-floor margin.  With the design recipe's
+# full 900s budget and skip-nets the same board reaches 17/32 = 53 %.
 MIN_2L_COMPLETION_PCT = 35
 
 
