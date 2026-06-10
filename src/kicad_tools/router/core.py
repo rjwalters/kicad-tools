@@ -9970,6 +9970,10 @@ class Autorouter:
             - ``segments_restored``: Segments restored to preserve
               connectivity.
             - ``vias_restored``: Vias restored to preserve connectivity.
+            - ``orphan_escape_routes_removed``: Sub-grid escape stubs
+              (#1603) removed because their net has no real route
+              (Issue #3441) -- prevents failed nets from being reported
+              as "partially connected" via their stub copper.
         """
         stats: dict[str, int] = {
             "net0_routes_removed": 0,
@@ -9979,7 +9983,30 @@ class Autorouter:
             "oob_vias_removed": 0,
             "segments_restored": 0,
             "vias_restored": 0,
+            "orphan_escape_routes_removed": 0,
         }
+
+        # -- Step 0 (Issue #3441): Drop orphan escape stubs --
+        # Sub-grid escape stubs (#1603) are pad-access aids for the main
+        # routing pass.  When the net ultimately FAILED to route, its stub
+        # is dead copper touching the pad -- it makes the output report
+        # the net as "partially connected" (segments exist, pads not all
+        # connected) instead of cleanly unrouted, and leaves stray stubs
+        # on the board.  Remove escape-stub routes for nets that have no
+        # real (non-escape) route.  Runs before the connectivity snapshot
+        # so the restore guard below doesn't resurrect them.
+        nets_with_real_routes = {
+            r.net for r in self.routes if not getattr(r, "is_escape", False)
+        }
+        orphan_escapes = [
+            r
+            for r in self.routes
+            if getattr(r, "is_escape", False) and r.net not in nets_with_real_routes
+        ]
+        if orphan_escapes:
+            orphan_ids = {id(r) for r in orphan_escapes}
+            self.routes = [r for r in self.routes if id(r) not in orphan_ids]
+            stats["orphan_escape_routes_removed"] = len(orphan_escapes)
 
         # -- Snapshot pre-cleanup connectivity --
         pre_components = self._count_net_components(self.routes)

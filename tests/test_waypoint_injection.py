@@ -560,3 +560,47 @@ class TestEscapeStubNotPrerouted:
         ]
         prerouted = {r.net for r in routes if not getattr(r, "is_escape", False)}
         assert prerouted == {2}
+
+    def test_cleanup_removes_orphan_escape_stubs(self):
+        """cleanup_artifacts drops escape stubs of nets with no real route
+        so failed nets read as cleanly unrouted, not 'partially connected'
+        via their stub copper (Issue #3441)."""
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.primitives import Route, Segment
+
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
+        ar.nets[1] = [("U1", "1"), ("U2", "1")]
+        ar.net_names[1] = "N1"
+        ar.nets[2] = [("U3", "1"), ("U4", "1")]
+        ar.net_names[2] = "N2"
+
+        def _stub(net: int, name: str, x: float) -> Route:
+            return Route(
+                net=net,
+                net_name=name,
+                segments=[
+                    Segment(x, 2.0, x + 0.05, 2.0, 0.15, Layer.F_CU, net, name)
+                ],
+                is_escape=True,
+            )
+
+        # Net 1: stub only (failed net).  Net 2: stub + real route.
+        ar.routes.append(_stub(1, "N1", 2.0))
+        ar.routes.append(_stub(2, "N2", 5.0))
+        ar.routes.append(
+            Route(
+                net=2,
+                net_name="N2",
+                segments=[
+                    Segment(5.05, 2.0, 7.0, 2.0, 0.15, Layer.F_CU, 2, "N2")
+                ],
+            )
+        )
+
+        stats = ar.cleanup_artifacts()
+        assert stats["orphan_escape_routes_removed"] == 1
+        nets_left = {r.net for r in ar.routes}
+        assert 1 not in nets_left, "failed net's stub must be removed"
+        assert 2 in nets_left, "routed net keeps its copper (incl. stub)"
+        # Net 2's escape stub survives (its net has a real route).
+        assert any(r.is_escape for r in ar.routes if r.net == 2)

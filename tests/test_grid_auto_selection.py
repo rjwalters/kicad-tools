@@ -597,20 +597,24 @@ class TestLatticeRescue:
     it (board 07: 0.127mm selected with 190/244 pads off-grid while
     0.1mm had only 53).  The lattice rescue retries the budget bump and
     adopts it when the unlocked candidate strictly reduces the off-grid
-    count AND places a majority of pads on-grid (dominant lattice).
+    count AND places >= 90% of pads on-grid (dominant lattice -- the
+    issue's own threshold).  Board 07 itself does NOT qualify (78%
+    on-grid; the off-lattice BGA-49 aligns exactly to 0.127mm and
+    routing it at 0.1mm measured WORSE: 26/31 vs 28/31), which is the
+    documented "why not" for the issue's scope item 3.
     """
 
-    def _board07_like_pads(self) -> list[PadPosition]:
-        """Synthetic board-07-like layout: dominant 0.1mm lattice plus a
-        small genuinely-off-lattice BGA cluster at 1.27mm pitch with
-        0.635mm offsets.
+    def _dominant_lattice_pads(self) -> list[PadPosition]:
+        """Synthetic layout with a genuinely dominant 0.1mm lattice plus a
+        small (< 10%) off-lattice BGA cluster at 1.27mm pitch with
+        0.635mm offsets.  66 pads total, 6 off-lattice -> 90.9% on-grid.
         """
         pads: list[PadPosition] = []
-        # Dominant lattice: 40 pads on varied 0.1mm multiples (0.7/0.9mm
+        # Dominant lattice: 60 pads on varied 0.1mm multiples (0.7/0.9mm
         # pitches), spread so no single 0.127mm origin offset can align a
         # majority of them.
-        for i in range(8):
-            for j in range(5):
+        for i in range(10):
+            for j in range(6):
                 pads.append(PadPosition(x=10.0 + i * 0.7, y=20.0 + j * 0.9))
         # Minority off-lattice cluster: 6 pads at 1.27mm pitch with
         # 0.635mm offsets (0.635/0.1 = 6.35 -> off the 0.1mm lattice).
@@ -628,9 +632,9 @@ class TestLatticeRescue:
           0.065mm (2.37M), and 0.1 > clearance/2 = 0.075 so the #3239
           adoption predicate rejects it;
         - the #3441 lattice rescue must adopt 0.1mm: it has strictly
-          fewer off-grid pads and a majority of pads on-grid.
+          fewer off-grid pads and >= 90% of pads on-grid.
         """
-        pads = self._board07_like_pads()
+        pads = self._dominant_lattice_pads()
         with caplog.at_level(logging.INFO, logger="kicad_tools.router.io"):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
@@ -741,10 +745,44 @@ class TestLatticeRescue:
         )
         assert "lattice rescue" in sel.summary()
 
-    def test_board07_real_pcb_selects_lattice_grid(self):
-        """End-to-end on the committed board 07 PCB: auto-grid must now
-        select 0.1mm (the board's dominant pad lattice) instead of the
-        clearance-risky 0.127mm that put 190/244 pads off-grid."""
+    def test_mixed_lattice_below_dominance_bar_declines(self):
+        """A board-07-like mix (~78% on the 0.1 lattice, off-lattice
+        remainder is a 1.27mm BGA) must NOT be rescued: empirically the
+        0.127mm grid that aligns the BGA routes BETTER (28/31 vs 26/31
+        measured on board 07), so the dominance bar is load-bearing."""
+        pads: list[PadPosition] = []
+        # 36 pads on the 0.1mm lattice
+        for i in range(6):
+            for j in range(6):
+                pads.append(PadPosition(x=10.0 + i * 0.7, y=20.0 + j * 0.9))
+        # 10 off-lattice BGA pads (10/46 = 21.7% off-grid, like board 07)
+        for k in range(10):
+            pads.append(PadPosition(x=60.635 + k * 1.27, y=50.635))
+        result = None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = auto_select_grid_resolution(
+                pads,
+                clearance=0.15,
+                board_width=100.0,
+                board_height=100.0,
+                max_cells=500_000,
+                candidates=[0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508],
+            )
+        assert result.lattice_rescued is False
+        assert result.resolution == 0.127
+        assert result.memory_budget_used == 500_000
+
+    def test_board07_real_pcb_keeps_bga_aligned_grid(self):
+        """End-to-end on the committed board 07 PCB: the lattice rescue
+        must DECLINE (78% on the 0.1mm lattice < 90% dominance bar) and
+        keep 0.127mm, which aligns the BGA-49 exactly (1.27/0.127 = 10).
+
+        This is the issue's scope-item-3 "documents why not": forcing
+        0.1mm on this mixed-lattice board measured 26/31 routed nets vs
+        28/31 at 0.127mm (2026-06-10) because the six TMDS nets on the
+        off-grid BGA row congest each other once they need escape stubs.
+        """
         import pathlib
 
         pcb = (
@@ -766,12 +804,15 @@ class TestLatticeRescue:
                 board_width=dims[0],
                 board_height=dims[1],
             )
-        assert result.resolution == 0.1
-        assert result.lattice_rescued is True
-        # The 53 off-grid pads are the genuinely off-lattice components
-        # (U4 BGA-49 at 1.27mm pitch: 45 pads; J3 2.54mm THT header:
-        # 8 pads) -- NOT a grid-origin bug (curator diagnosis confirmed).
-        assert result.off_grid_pads == 53
+        assert result.resolution == 0.127
+        assert result.lattice_rescued is False
+        # Confirm the curator's off-grid attribution at 0.1mm: 53 pads
+        # are genuinely off-lattice (U4 BGA-49 at 1.27mm pitch: 45 pads;
+        # J3 2.54mm THT header: 8 pads) -- NOT a grid-origin bug.
+        off_at_01 = _count_off_grid_with_offset(list(pads), 0.1, 0.0, 0.0)
+        assert off_at_01 == 53
+        # 53/244 = 21.7% off-grid -> below the 90% dominance bar.
+        assert off_at_01 * 10 > result.total_pads
 
 
 class TestGridAutoSelectionSummary:

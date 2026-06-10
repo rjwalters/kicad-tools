@@ -1187,9 +1187,19 @@ def auto_select_grid_resolution(
     # filter, which is sufficient because the router enforces edge-to-
     # edge clearance during pathing -- issue #2387), (b) strictly
     # reduces the off-grid pad count vs. the best memory-capped
-    # candidate, and (c) places a majority of pads ON-grid (a dominant
-    # board lattice, not a marginal improvement that wouldn't justify a
-    # 4x memory bump).
+    # candidate, and (c) places >= 90% of pads ON-grid (the issue's
+    # "dominant lattice" threshold).
+    #
+    # The 90% dominance bar is empirical, not cosmetic: board 07 has
+    # 78% of pads on the 0.1mm lattice, but the off-lattice remainder
+    # is a BGA-49 at 1.27mm pitch that aligns EXACTLY to 0.127mm
+    # (1.27/0.127 = 10) -- routing it at 0.1mm measured 26/31 nets vs
+    # 28/31 at 0.127mm (2026-06-10, this issue's worktree), because the
+    # six TMDS nets terminating on the off-grid BGA row congest each
+    # other once their pads need escape stubs.  A mixed-lattice board
+    # is NOT a lattice-rescue candidate; only a genuinely dominant
+    # lattice (>= 90% of pads, per the issue's own framing) justifies
+    # trading a 4x memory bump for the alignment win.
     # ------------------------------------------------------------------
     lattice_rescued = False
     if (
@@ -1220,7 +1230,7 @@ def auto_select_grid_resolution(
                 unlocked_off = _off_grid_for(unlocked_best)[0]
                 if (
                     unlocked_off < current_best_off
-                    and unlocked_off * 2 <= total_pads
+                    and unlocked_off * 10 <= total_pads
                 ):
                     old_cells = effective_max_cells
                     valid_candidates = bumped_candidates
