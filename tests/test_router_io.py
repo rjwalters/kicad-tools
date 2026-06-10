@@ -3632,3 +3632,128 @@ class TestMergeRoutesViaConflicts:
         # Without flag, both vias stay (backward compat)
         result = merge_routes_into_pcb(original, new_routes)
         assert result.count("(via") == 2
+
+
+class TestRemoveConflictingViasFieldOrder:
+    """Order-independent via conflict detection (Issue #3447).
+
+    Mirrors the parse_vias regression tests from PR #3446: the old
+    ordered regex required ``(net N)`` to immediately follow
+    ``(layers ...)``, so KiCad-8 output (uuid before net) matched zero
+    vias and conflict detection silently no-opped.  It also missed
+    ``(via micro ...)`` blocks (#3118).
+    """
+
+    # The format kct route itself writes (and KiCad 8+ saves): a
+    # multiline via block with (uuid "...") between (layers) and (net).
+    _ORIGINAL_KICAD8 = """\
+(kicad_pcb
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+\t(via
+\t\t(at 110.0000 110.0000)
+\t\t(size 0.6)
+\t\t(drill 0.3)
+\t\t(layers "F.Cu" "B.Cu")
+\t\t(uuid "5e6fea07-c453-4f1d-8199-2fdfb31022f0")
+\t\t(net 1)
+\t)
+)"""
+
+    def test_uuid_before_net_kicad8_writer_order(self):
+        """Conflicts must be detected when (uuid ...) precedes (net N)."""
+        new_routes = (
+            "(via (at 110.0000 110.0000) (size 0.6) (drill 0.3) "
+            '(layers "F.Cu" "B.Cu") (uuid "v2") (net 2))'
+        )
+        result = merge_routes_into_pcb(
+            self._ORIGINAL_KICAD8, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        assert result.count("(via") == 1, (
+            "_remove_conflicting_vias must match via blocks whose "
+            "(uuid ...) precedes (net N) -- the order kct route itself "
+            "writes. Pre-#3447 this matched zero vias and the conflict "
+            "was silently kept."
+        )
+        assert "(net 1)" in result
+        assert '(uuid "v2")' not in result
+        assert _validate_sexp_parentheses(result), (
+            "Removal of conflicting via must not leave orphaned parentheses"
+        )
+
+    def test_mixed_kicad7_and_kicad8_order(self):
+        """Conflict between a legacy-order via and a KiCad-8-order via."""
+        original = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+)"""
+        # New via in KiCad-8 order (uuid before net), same position, different net
+        new_routes = (
+            "(via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) "
+            '(layers "F.Cu" "B.Cu") (uuid "v2") (net 2))'
+        )
+        result = merge_routes_into_pcb(
+            original, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        assert result.count("(via") == 1
+        assert "(net 1)" in result
+        assert _validate_sexp_parentheses(result)
+
+    def test_micro_via_conflict_detected(self):
+        """(via micro ...) blocks (#3118) participate in conflict detection."""
+        new_routes = (
+            "(via micro (at 110.0000 110.0000) (size 0.3) (drill 0.1) "
+            '(layers "F.Cu" "In1.Cu") (uuid "v2") (net 2))'
+        )
+        result = merge_routes_into_pcb(
+            self._ORIGINAL_KICAD8, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        assert result.count("(via") == 1, (
+            "#3118 micro token must survive the balanced-block rewrite"
+        )
+        assert "(net 1)" in result
+        assert _validate_sexp_parentheses(result)
+
+    def test_micro_via_same_net_kept(self):
+        """Co-located micro via on the SAME net is not removed."""
+        new_routes = (
+            "(via micro (at 110.0000 110.0000) (size 0.3) (drill 0.1) "
+            '(layers "F.Cu" "In1.Cu") (uuid "v2") (net 1))'
+        )
+        result = merge_routes_into_pcb(
+            self._ORIGINAL_KICAD8, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        assert result.count("(via") == 2
+
+    def test_malformed_block_skipped(self):
+        """A via block missing (at ...) is skipped, not crashed on."""
+        from kicad_tools.router.io import _remove_conflicting_vias
+
+        txt = """(kicad_pcb
+  (net 1 "A")
+  (net 2 "B")
+  (via (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "v0"))
+  (via (at 110.0 110.0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (uuid "v1") (net 1))
+  (via (at 110.0 110.0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (uuid "v2") (net 2))
+)"""
+        result = _remove_conflicting_vias(txt, 0.2)
+        # Malformed via kept (skipped from analysis); conflicting v2 removed
+        assert '(uuid "v0")' in result
+        assert '(uuid "v1")' in result
+        assert '(uuid "v2")' not in result
+        assert _validate_sexp_parentheses(result)
+
+    def test_via_size_setup_token_not_matched(self):
+        """(via_size ...) / (via_drill ...) in setup must not be treated as vias."""
+        from kicad_tools.router.io import _remove_conflicting_vias
+
+        txt = """(kicad_pcb
+  (net 1 "A")
+  (setup (via_size 0.6) (via_drill 0.3))
+  (via (at 110.0 110.0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (uuid "v1") (net 1))
+)"""
+        result = _remove_conflicting_vias(txt, 0.2)
+        assert result == txt
