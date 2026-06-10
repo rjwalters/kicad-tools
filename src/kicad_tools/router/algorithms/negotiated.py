@@ -2162,19 +2162,27 @@ class NegotiatedRouter:
         Returns:
             True if re-routing succeeded for all affected nets, False otherwise.
 
-            Issue #2814: when the failed net's A* search returns ``None`` even
-            with all sibling routes already removed from the grid, the blocker
-            is geometric (pad-clearance keepouts, board-edge limits, fixed
-            escape routes, component bodies) rather than sibling traces.  In
-            this case we fast-fail: the sibling routes are restored using a
-            short probe timeout (``min(per_net_timeout, 10s)``) so the grid
-            is not left in a worse state than we found it, and we return
-            ``False`` without re-routing the siblings at full
-            ``per_net_timeout``.  The caller is expected to escalate to a
-            different strategy (e.g. layer escalation, escape rework).  This
-            drops wall-clock on geometric-blocker failures from
-            ``(1 + N) * per_net_timeout`` to
-            ``per_net_timeout + N * min(per_net_timeout, 10s)``.
+            Issue #3470: this method is now a TRANSACTION.  Before any
+            rip-up, the current routes of the failed net and every sibling
+            are snapshotted.  The transaction commits only when (a) the
+            failed net re-routes FULLY (zero edge failures -- a partial
+            reroute is stranded-stub copper, the board-05
+            ISENSE_A-/ISENSE_B- overlap failure mode) and (b) every
+            displaced sibling re-routes with at least as many routes as it
+            had before.  On any other outcome the exact original Route
+            objects are re-marked on the grid and ``False`` is returned --
+            a failed rip-up never leaves the board worse than it found it.
+
+            Issue #2814 (superseded in mechanism, preserved in intent):
+            when the failed net's A* search cannot fully route even with
+            all sibling routes removed from the grid, the blocker is
+            geometric (pad-clearance keepouts, board-edge limits, fixed
+            escape routes, component bodies) rather than sibling traces.
+            We fast-fail by restoring the snapshot verbatim (exact
+            geometry, zero A* time -- strictly better than the previous
+            10s-probe fresh reroute, which routinely failed and stranded
+            previously-routed siblings) and return ``False`` so the caller
+            can escalate to a different strategy.
         """
         if ripup_history is None:
             ripup_history = {}
@@ -2192,8 +2200,52 @@ class NegotiatedRouter:
             # Fall back to normal routing with high congestion cost
             return False
 
-        # Rip up only the blocking nets
+        # Issue #3470: snapshot the pre-rip-up state for the failed net and
+        # every sibling we are about to displace.  The rip-up below is a
+        # TRANSACTION: it commits only when the failed net routes FULLY
+        # (zero edge failures) and no displaced sibling ends up with fewer
+        # routes than it had before.  On any other outcome the exact
+        # original Route objects are re-marked on the grid -- a failed
+        # rip-up must never leave partial stub copper for the failed net
+        # (the board-05 ISENSE_A-/ISENSE_B- overlap-stub failure mode) or
+        # strand a previously-routed sibling (the pnt=30 HALL/GATE
+        # collateral-damage failure mode).
+        snapshot_nets = set(nets_to_ripup) | {failed_net}
+        original_routes: dict[int, list[Route]] = {
+            net: list(net_routes.get(net, [])) for net in snapshot_nets
+        }
+
+        def _rollback_to_snapshot() -> None:
+            """Restore the exact pre-rip-up routing state for all nets."""
+            # Remove anything placed during this attempt.
+            for net in snapshot_nets:
+                for route in list(net_routes.get(net, [])):
+                    self.grid.unmark_route_usage(route)
+                    self.grid.unmark_route(route)
+                    if route in routes_list:
+                        routes_list.remove(route)
+                net_routes[net] = []
+            # Re-mark the original routes verbatim (same Route objects, so
+            # callers that fingerprint by ``id()`` correctly see "no new
+            # routes" after a rollback).
+            for net in snapshot_nets:
+                restored = list(original_routes.get(net, []))
+                net_routes[net] = restored
+                for route in restored:
+                    mark_route_callback(route)
+                    self.grid.mark_route_usage(route)
+                    if route not in routes_list:
+                        routes_list.append(route)
+
+        # Rip up the blocking nets.  Also rip any stale (partial) routes
+        # the FAILED net is still holding so its reroute starts from a
+        # clean slate -- previously callers did this pre-rip outside the
+        # transaction, which is exactly how a non-converging rip-up
+        # destroyed the failed net's pre-existing partial connectivity
+        # (Issue #3470).
         self.rip_up_nets(list(nets_to_ripup), net_routes, routes_list)
+        if original_routes.get(failed_net):
+            self.rip_up_nets([failed_net], net_routes, routes_list)
 
         # Issue #2795: emit progress before each long-running A* invocation.
         # Total work units = 1 (failed net) + N siblings, so index runs 1..total.
@@ -2223,54 +2275,47 @@ class NegotiatedRouter:
                 # Never let a buggy progress callback abort the rip-up.
                 pass
 
-        # Re-route the failed net first (it now has priority with cleared path)
+        # Re-route the failed net first (it now has priority with cleared
+        # path).  Issue #3470: track per-edge failures via the failure
+        # callback so a PARTIAL reroute (some RSMT edges placed, others
+        # failed/timed out) is treated as non-convergence -- a partial
+        # route is exactly the stranded-stub copper this transaction must
+        # never commit.
         failed_pads = pads_by_net.get(failed_net, [])
+        failed_edge_failures = 0
+
+        def _count_failed_edge(_source: Pad, _target: Pad) -> None:
+            nonlocal failed_edge_failures
+            failed_edge_failures += 1
+
         failed_net_success = False  # Issue #858: Track if failed net was routed
         if failed_pads and len(failed_pads) >= 2:
             _emit_progress("failed_net", failed_net, 1)
             routes = self.route_net_negotiated(
                 failed_pads, present_cost_factor, mark_route_callback,
                 per_net_timeout=per_net_timeout,
+                failure_callback=_count_failed_edge,
             )
             if routes:
                 net_routes[failed_net] = routes
                 for route in routes:
                     self.grid.mark_route_usage(route)
                     routes_list.append(route)
-                failed_net_success = True  # Failed net was successfully routed
+                # Issue #3470: only a FULL reroute counts as success.
+                failed_net_success = failed_edge_failures == 0
 
-        # Issue #2814: fast-fail when the failed net's A* still cannot find a
-        # path with the sibling routes already cleared from the grid (see the
-        # ``rip_up_nets`` call at the start of this method).  In that case the
-        # blocker is geometric -- pad-clearance keepouts, board-edge limits,
-        # fixed escape routes, or component bodies -- so re-routing every
-        # sibling with a full ``per_net_timeout`` cannot possibly help and
-        # would just waste ``len(siblings) * per_net_timeout`` wall-clock.
-        # Restore the sibling routes with a short probe timeout so we don't
-        # leave the grid in a worse state than we found it, then return
-        # False to let the caller (e.g.
-        # ``_attempt_blocked_component_ripup_negotiated``) escalate to a
-        # different strategy (layer escalation, escape rework).
+        # Issue #2814 / #3470: fail fast when the failed net's A* cannot
+        # fully route even with the sibling routes cleared from the grid.
+        # The blocker is geometric (pad-clearance keepouts, board-edge
+        # limits, fixed escape routes, component bodies) rather than
+        # sibling copper, so re-routing every sibling at full
+        # ``per_net_timeout`` cannot help.  Issue #3470 replaces the old
+        # "restore siblings via fresh A* at a 10s probe timeout" repair
+        # (which routinely failed and stranded previously-routed siblings,
+        # board-05 HALL/GATE collateral) with an EXACT restore of the
+        # snapshotted pre-rip-up routes: zero A* time, zero collateral.
         if not failed_net_success:
-            sibling_probe_timeout = (
-                min(per_net_timeout, 10.0)
-                if per_net_timeout is not None
-                else 10.0
-            )
-            sibling_order = sorted(nets_to_ripup)
-            for sibling_index, net in enumerate(sibling_order, start=2):
-                net_pads = pads_by_net.get(net, [])
-                if net_pads and len(net_pads) >= 2:
-                    _emit_progress("sibling", net, sibling_index)
-                    routes = self.route_net_negotiated(
-                        net_pads, present_cost_factor, mark_route_callback,
-                        per_net_timeout=sibling_probe_timeout,
-                    )
-                    if routes:
-                        net_routes[net] = routes
-                        for route in routes:
-                            self.grid.mark_route_usage(route)
-                            routes_list.append(route)
+            _rollback_to_snapshot()
             return False  # geometric blocker -- caller should escalate
 
         # Re-route the displaced nets
@@ -2285,14 +2330,27 @@ class NegotiatedRouter:
                     net_pads, present_cost_factor, mark_route_callback,
                     per_net_timeout=per_net_timeout,
                 )
-                if routes:
+                if routes and len(routes) >= len(original_routes.get(net, [])):
                     net_routes[net] = routes
                     for route in routes:
                         self.grid.mark_route_usage(route)
                         routes_list.append(route)
                 else:
-                    # Displaced net failed to re-route
-                    success = False
+                    # Issue #3470: the displaced sibling failed to re-route
+                    # (or came back with FEWER routes than it had before the
+                    # rip-up -- a degradation).  Commit nothing: roll the
+                    # whole transaction back so the board state is exactly
+                    # what it was before this rip-up attempt.  The wall
+                    # clock spent is lost but the routing state is not.
+                    if routes:
+                        # Stage the degraded routes so the rollback removes
+                        # them from the grid/routes_list uniformly.
+                        net_routes[net] = routes
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            routes_list.append(route)
+                    _rollback_to_snapshot()
+                    return False
 
         return success
 

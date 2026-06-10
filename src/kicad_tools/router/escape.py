@@ -2946,6 +2946,10 @@ class EscapeRouter:
                                     primary_dir=primary_dir,
                                 )
                             ),
+                            # Issue #3470: let the stub-direction picker
+                            # avoid copper conflicts with the escapes
+                            # generated earlier in this pass.
+                            existing_escapes=escapes,
                         )
                         if in_pad_route is not None:
                             if pocket_target is not None:
@@ -3351,6 +3355,9 @@ class EscapeRouter:
                     escape_width=escape_width,
                     package=package,
                     skip_on_clearance_violation=self.strict_in_pad_clearance,
+                    # Issue #3470: avoid stub copper conflicts with the
+                    # rescues generated earlier in this pass.
+                    existing_escapes=rescues,
                 )
                 if in_pad_route is not None:
                     rescues.append(in_pad_route)
@@ -6475,6 +6482,7 @@ class EscapeRouter:
         package: PackageInfo | None = None,
         skip_on_clearance_violation: bool = False,
         target_direction: EscapeDirection | None = None,
+        existing_escapes: list["EscapeRoute"] | None = None,
     ) -> EscapeRoute | None:
         """Attempt an in-pad via escape for a fine-pitch SSOP/TSSOP pad.
 
@@ -6561,6 +6569,17 @@ class EscapeRouter:
                 unaffected -- it is direction-independent.  ``None``
                 (default) preserves legacy behaviour byte-for-byte for
                 every existing call site.
+            existing_escapes: Optional list of escape routes already
+                generated in this pass (Issue #3470).  When supplied, the
+                proposed inner-layer stub is checked for copper clearance
+                against every FOREIGN-net stub/via in the list; on
+                conflict the stub direction is retried (opposite, then
+                perpendiculars) and the first conflict-free direction
+                wins.  This prevents two adjacent fine-pitch in-pad
+                rescues from emitting stubs that physically overlap and
+                mutually block their nets' escape endpoints (board-05
+                U3 pin31/pin33 ISENSE_B-/ISENSE_A-).  ``None`` (default)
+                preserves legacy behaviour byte-for-byte.
 
         Returns:
             An ``EscapeRoute`` with the in-pad via and inner-layer segment,
@@ -6760,14 +6779,11 @@ class EscapeRouter:
         # (and hence ``escape_point``) changes -- via placement above is
         # direction-independent.
         effective_direction = target_direction if target_direction is not None else direction
-        dx, dy = self._direction_to_vector(effective_direction)
         # Use a modest offset -- one via radius plus clearance plus a
         # trace width buffer is enough room for the main router to
         # connect onto the inner-layer endpoint without colliding with
         # the via barrel itself.
         offset = via_diameter / 2 + effective_clearance + self.rules.trace_width
-        escape_x = via_x + dx * offset
-        escape_y = via_y + dy * offset
 
         in_pad_via = Via(
             x=via_x,
@@ -6803,6 +6819,75 @@ class EscapeRouter:
             mfr_min_trace = self._mfr_limits.min_trace
             if mfr_min_trace is not None and mfr_min_trace < stub_width:
                 stub_width = mfr_min_trace
+
+        # Issue #3470: conflict-aware stub direction.  When the caller
+        # supplied the escapes generated so far, validate the proposed
+        # stub against every foreign-net escape stub/via and retry with
+        # the opposite then perpendicular directions on conflict.  On
+        # board 05's U3 this is what stops pin 31 (ISENSE_B-) and pin 33
+        # (ISENSE_A-) from emitting mutually-overlapping inner stubs that
+        # strand both nets.  Retried (non-primary) stubs are necked to
+        # the manufacturer minimum trace width like the #3428 redirected
+        # stubs, for the same adjacency reason.
+        dx, dy = self._direction_to_vector(effective_direction)
+        escape_x = via_x + dx * offset
+        escape_y = via_y + dy * offset
+        if existing_escapes is not None:
+            necked_width = stub_width
+            if self._mfr_limits is not None:
+                mfr_min_trace = self._mfr_limits.min_trace
+                if mfr_min_trace is not None and mfr_min_trace < necked_width:
+                    necked_width = mfr_min_trace
+            candidates: list[EscapeDirection] = [effective_direction]
+            opposite = self._OPPOSITE_DIRECTIONS.get(effective_direction)
+            if opposite is not None:
+                candidates.append(opposite)
+            candidates.extend(
+                self._PERPENDICULAR_DIRECTIONS.get(effective_direction, ())
+            )
+            for cand_index, cand_dir in enumerate(candidates):
+                cand_width = stub_width if cand_index == 0 else necked_width
+                cdx, cdy = self._direction_to_vector(cand_dir)
+                cand_x = via_x + cdx * offset
+                cand_y = via_y + cdy * offset
+                if not self._in_pad_stub_conflicts(
+                    via_x,
+                    via_y,
+                    cand_x,
+                    cand_y,
+                    cand_width,
+                    escape_layer,
+                    pad.net,
+                    effective_clearance,
+                    existing_escapes,
+                ):
+                    if cand_index != 0:
+                        logger.info(
+                            "In-pad stub for %s pin %s (net %s) redirected "
+                            "%s -> %s: primary stub direction conflicts "
+                            "with an already-generated foreign-net escape "
+                            "stub/via (Issue #3470).",
+                            pad.ref,
+                            pad.pin,
+                            pad.net_name,
+                            effective_direction.name,
+                            cand_dir.name,
+                        )
+                        effective_direction = cand_dir
+                        stub_width = cand_width
+                        escape_x, escape_y = cand_x, cand_y
+                    break
+            else:
+                logger.warning(
+                    "In-pad stub for %s pin %s (net %s): every candidate "
+                    "stub direction conflicts with an already-generated "
+                    "foreign-net escape; keeping primary direction %s "
+                    "(Issue #3470).",
+                    pad.ref,
+                    pad.pin,
+                    pad.net_name,
+                    effective_direction.name,
+                )
 
         inner_seg = Segment(
             x1=via_x,
@@ -7181,6 +7266,83 @@ class EscapeRouter:
                     return layer_def.layer_enum
         # Fallback: use B.Cu (opposite outer layer)
         return Layer.B_CU
+
+    # Issue #3470: opposite / perpendicular direction tables for the
+    # conflict-aware in-pad stub retry in ``_try_in_pad_escape``.
+    _OPPOSITE_DIRECTIONS = {
+        EscapeDirection.NORTH: EscapeDirection.SOUTH,
+        EscapeDirection.SOUTH: EscapeDirection.NORTH,
+        EscapeDirection.EAST: EscapeDirection.WEST,
+        EscapeDirection.WEST: EscapeDirection.EAST,
+        EscapeDirection.NORTHEAST: EscapeDirection.SOUTHWEST,
+        EscapeDirection.NORTHWEST: EscapeDirection.SOUTHEAST,
+        EscapeDirection.SOUTHEAST: EscapeDirection.NORTHWEST,
+        EscapeDirection.SOUTHWEST: EscapeDirection.NORTHEAST,
+    }
+
+    _PERPENDICULAR_DIRECTIONS = {
+        EscapeDirection.NORTH: (EscapeDirection.EAST, EscapeDirection.WEST),
+        EscapeDirection.SOUTH: (EscapeDirection.EAST, EscapeDirection.WEST),
+        EscapeDirection.EAST: (EscapeDirection.NORTH, EscapeDirection.SOUTH),
+        EscapeDirection.WEST: (EscapeDirection.NORTH, EscapeDirection.SOUTH),
+        EscapeDirection.NORTHEAST: (EscapeDirection.NORTHWEST, EscapeDirection.SOUTHEAST),
+        EscapeDirection.NORTHWEST: (EscapeDirection.NORTHEAST, EscapeDirection.SOUTHWEST),
+        EscapeDirection.SOUTHEAST: (EscapeDirection.SOUTHWEST, EscapeDirection.NORTHEAST),
+        EscapeDirection.SOUTHWEST: (EscapeDirection.SOUTHEAST, EscapeDirection.NORTHWEST),
+    }
+
+    def _in_pad_stub_conflicts(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        stub_width: float,
+        layer,
+        net: int,
+        clearance: float,
+        existing_escapes: list["EscapeRoute"],
+    ) -> bool:
+        """Check a proposed in-pad escape stub against already-generated escapes.
+
+        Issue #3470: on board 05's DRV8301 (U3) the in-pad rescues for
+        pin 31 (ISENSE_B-) and pin 33 (ISENSE_A-) emitted inner-layer
+        stubs pointing TOWARD each other across the intervening pin 32
+        column.  The stubs physically overlapped (DRC actual -0.3135 mm)
+        and each net's escape endpoint (virtual pad) landed inside the
+        other net's stub copper -- making both nets deterministically
+        unroutable (stable across seeds 7/42/123) and leaving overlap
+        stub copper in partial outputs (the single blocking violation on
+        board 05's committed snapshot).
+
+        Returns True when the proposed stub (centerline ``(x1,y1)``
+        -> ``(x2,y2)``, width ``stub_width``, on ``layer``) violates
+        copper clearance against any FOREIGN-net segment or via barrel
+        of an already-generated escape route.
+        """
+        from .geometry import point_to_segment_distance, segment_to_segment_distance
+
+        eps = 1e-6
+        for esc in existing_escapes:
+            esc_net = esc.pad.net if esc.pad is not None else 0
+            if esc_net == net:
+                continue  # Same-net copper may merge freely.
+            for seg in esc.segments:
+                if seg.layer != layer:
+                    continue
+                required = (stub_width + seg.width) / 2 + clearance
+                dist = segment_to_segment_distance(
+                    x1, y1, x2, y2, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+                if dist < required - eps:
+                    return True
+            via = getattr(esc, "via", None)
+            if via is not None:
+                required = stub_width / 2 + via.diameter / 2 + clearance
+                dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
+                if dist < required - eps:
+                    return True
+        return False
 
     def _direction_to_vector(self, direction: EscapeDirection) -> tuple[float, float]:
         """Convert escape direction to unit vector."""

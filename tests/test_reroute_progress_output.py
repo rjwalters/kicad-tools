@@ -656,6 +656,30 @@ class TestTwoPhaseRerouteProgressOutput:
 # ---------------------------------------------------------------------------
 
 
+def _progress_stub_route(net: int):
+    """Minimal Route for stubbing route_net_negotiated (Issue #3470).
+
+    The #3470 transactional rollback fast-fails (and skips the sibling
+    loop entirely) when the failed net's reroute returns no routes, so
+    the progress-contract tests below stub route_net_negotiated to
+    SUCCEED for every net -- the N+1 progress events are a property of
+    the convergence path now.
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    return Route(
+        net=net,
+        net_name=f"Net{net}",
+        segments=[
+            Segment(
+                x1=float(net), y1=0.0, x2=float(net) + 1.0, y2=1.0,
+                width=0.2, layer=Layer.F_CU, net=net,
+            ),
+        ],
+    )
+
+
 def _make_router_with_three_nets():
     """Three-net variant of ``_make_router_with_two_nets`` for rip-up tests.
 
@@ -732,7 +756,11 @@ class TestTargetedRipupProgressCallback:
         # progress callback fires BEFORE each call, so we still see N+1
         # invocations even though no routes are produced.
         with (
-            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(
+                NegotiatedRouter,
+                "route_net_negotiated",
+                lambda self_neg, pads, *a, **k: [_progress_stub_route(pads[0].net)],
+            ),
             patch.object(NegotiatedRouter, "rip_up_nets"),
         ):
             neg_router.targeted_ripup(
@@ -795,7 +823,11 @@ class TestTargetedRipupProgressCallback:
         net_routes: dict[int, list] = {2: [], 3: []}
 
         with (
-            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(
+                NegotiatedRouter,
+                "route_net_negotiated",
+                lambda self_neg, pads, *a, **k: [_progress_stub_route(pads[0].net)],
+            ),
             patch.object(NegotiatedRouter, "rip_up_nets"),
         ):
             # Should not raise; existing call sites pass no callback.
@@ -827,7 +859,11 @@ class TestTargetedRipupProgressCallback:
             raise RuntimeError("boom")
 
         with (
-            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(
+                NegotiatedRouter,
+                "route_net_negotiated",
+                lambda self_neg, pads, *a, **k: [_progress_stub_route(pads[0].net)],
+            ),
             patch.object(NegotiatedRouter, "rip_up_nets"),
         ):
             # Should not raise despite callback throwing each call.
@@ -887,7 +923,11 @@ class TestAttemptBlockedComponentRipupNegotiatedLogging:
             flush_print_calls.append(msg)
 
         with (
-            patch.object(NegotiatedRouter, "route_net_negotiated", return_value=[]),
+            patch.object(
+                NegotiatedRouter,
+                "route_net_negotiated",
+                lambda self_neg, pads, *a, **k: [_progress_stub_route(pads[0].net)],
+            ),
             patch.object(NegotiatedRouter, "rip_up_nets"),
             patch("kicad_tools.cli.progress.flush_print", side_effect=tracking_flush_print),
         ):

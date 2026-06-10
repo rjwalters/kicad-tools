@@ -975,7 +975,16 @@ class Autorouter:
         # / matrix boards where multiple sibling NODE nets compete for the
         # same inter-row corridor.
         self._route_all_ripup_history: dict[int, int] = {}
+        # Issue #3470: both budgets are now CLI-configurable via
+        # ``--max-ripups-per-net`` (route_cmd sets these attributes after
+        # constructing the router).  ``_route_all_max_ripups_per_net``
+        # governs the standard ``route_all`` flow's destructive rip-up;
+        # ``stall_ripup_budget`` (None = flow default of 3) governs the
+        # two-phase initial-pass stall recovery, which is the binding
+        # budget for the default ``kct route`` entry point
+        # (``route_with_escape`` -> ``route_all_two_phase``).
         self._route_all_max_ripups_per_net: int = 2
+        self.stall_ripup_budget: int | None = None
 
         # Pre-route congestion estimator (Issue #2278)
         # Computed lazily before net ordering; provides RUDY-based
@@ -5521,11 +5530,12 @@ class Autorouter:
         # the budget for each sibling it actually rips.
         ripup_history[failed_net] = ripup_history.get(failed_net, 0) + 1
 
-        # If the failed net somehow has stale routes still in net_routes
-        # (e.g. a partial route from an earlier iteration), rip them so
-        # the reroute below starts from a clean slate.
-        if net_routes.get(failed_net):
-            neg_router.rip_up_nets([failed_net], net_routes, self.routes)
+        # Issue #3470: stale (partial) routes for the failed net are now
+        # ripped INSIDE ``targeted_ripup``'s transaction (and restored
+        # verbatim if the reroute does not converge).  The pre-rip that
+        # used to live here ran outside the transaction, which is how a
+        # non-converging rip-up destroyed the failed net's pre-existing
+        # partial connectivity.
 
         def _mark_route(route: Route) -> None:
             self._mark_route(route)
@@ -9080,6 +9090,10 @@ class Autorouter:
             # the DQ1/DQ6 inner-position bump in `kct route` (which goes
             # through ``route_with_escape``).
             apply_byte_lane_inner_priority=self._apply_byte_lane_inner_priority,
+            # Issue #3470: CLI-configurable stall-recovery rip-up budget
+            # (``--max-ripups-per-net``).  None preserves the historical
+            # default of 3.
+            stall_ripup_budget=self.stall_ripup_budget,
         )
 
     def route_all_two_phase(
