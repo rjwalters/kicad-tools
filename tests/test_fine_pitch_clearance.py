@@ -134,12 +134,44 @@ class TestFinePitchClearanceReduction:
             grid_resolution=0.05,
         )
 
-    def test_fine_pitch_pads_use_reduced_clearance(self, fine_pitch_rules):
-        """0.65mm pitch SSOP pads should use reduced clearance envelope."""
+    def test_fine_pitch_pads_use_reduced_clearance(self):
+        """0.65mm pitch SSOP pads should use reduced clearance envelope.
+
+        Updated for Issue #2865 / PR #2866 (narrow-channel guard): the
+        shrink to ``min_trace_width / 2`` is now applied only when the
+        resulting inter-pad channel can host a trace at full clearance:
+
+            effective_channel = pitch - 2 * (min_trace_width/2) - trace_width
+            required_channel  = 2 * trace_clearance + trace_width
+
+        The original rules here (trace_width=0.2, trace_clearance=0.15)
+        give effective=0.323 < required=0.5, so the guard correctly
+        declines the shrink and blocks the channel -- that behavior is
+        covered by tests/test_grid_narrow_channel_guard.py.  This test
+        now uses relaxed-but-realistic rules where the channel IS
+        feasible, preserving the original Issue #1778 intent: verify the
+        shrink opens the channel when it is geometrically sound.
+        """
+        rules = DesignRules(
+            trace_width=0.15,
+            trace_clearance=0.1,
+            via_drill=0.3,
+            via_diameter=0.6,
+            grid_resolution=0.05,
+            # Fine-pitch settings
+            fine_pitch_clearance=0.127,
+            fine_pitch_threshold=0.8,
+            min_trace_width=0.127,
+            neck_down_threshold=0.8,
+        )
+        # Guard feasibility for these rules at 0.65mm pitch:
+        #   effective_channel = 0.65 - 2*0.0635 - 0.15 = 0.373
+        #   required_channel  = 2*0.1 + 0.15 = 0.35
+        #   0.373 >= 0.35 -> shrink permitted
         grid = RoutingGrid(
             width=10.0,
             height=4.0,
-            rules=fine_pitch_rules,
+            rules=rules,
             origin_x=-5.0,
             origin_y=-2.0,
         )
@@ -283,10 +315,22 @@ class TestFinePitchGridAccess:
     """Tests that A* can find paths between adjacent fine-pitch pads."""
 
     def test_ssop_row_has_passable_cells_between_pads(self):
-        """A row of 0.65mm SSOP pads should have passable cells between them."""
+        """A row of 0.65mm SSOP pads should have passable cells between them.
+
+        Updated for Issue #2865 / PR #2866 (narrow-channel guard): the
+        original rules (trace_width=0.2, trace_clearance=0.15) make the
+        0.65mm inter-pad channel geometrically infeasible (effective
+        0.323 < required 0.5), so the guard now correctly declines the
+        shrink and blocks every gap; that behavior is covered by
+        tests/test_grid_narrow_channel_guard.py.  This test uses
+        relaxed-but-realistic rules where the channel is feasible
+        (effective 0.373 >= required 0.35), preserving the Issue #1778
+        intent: A* must be able to thread between fine-pitch pads when
+        the shrink is geometrically sound.
+        """
         rules = DesignRules(
-            trace_width=0.2,
-            trace_clearance=0.15,
+            trace_width=0.15,
+            trace_clearance=0.1,
             via_drill=0.3,
             via_diameter=0.6,
             grid_resolution=0.05,
