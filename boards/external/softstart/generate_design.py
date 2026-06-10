@@ -5,67 +5,49 @@ Generator Soft-Start - Supercapacitor Power Assist
 Enables a Honda EU1000i (1000W) generator to start an 8000 BTU window AC
 by injecting supplemental current during the 300-500ms motor startup surge.
 
-Design sections:
+Design sections (rev B):
 1. AC Power Input - fuse, varistor, terminal block for 120VAC
-2. AC Voltage Sensing - resistor divider to scale mains for MCU ADC
+2. AC Voltage Sensing - 100:1 divider + MCP6001 envelope buffer + dV/dt
 3. Zero-Crossing Detection - H11AA1 optocoupler for AC phase detection
 4. Supercap Charging - resistor-limited charging via bridge rectifier
-5. Discharge Circuit - 2x IRFB4110 N-MOSFETs for supercap discharge
-6. Current Sensing - 0.005 ohm shunt + INA180A1 current sense amp
-7. MCU - STM32G031F6P6 (TSSOP-20) with decoupling, reset, boot, SWD
-8. 3.3V Power Supply - LDO from rectified DC
+5. Discharge Circuit - back-to-back IRFB4110 pairs + UCC27211 drivers
+   + AO3400 precharge + gate protection (TVS / bleeders / failsafe)
+6. Current Sensing - 0.005 ohm shunt + INA180A3 + LM393 hardware OC
+7. MCU - STM32G031K8T6 (LQFP-32) with decoupling, reset, boot, SWD
+8. Power - XC6206 3.3V LDO + LM7812 12V VGATE rail
 9. Status LED - power/status indicator
-10. Board - 150mm x 100mm, 2-layer, JLCPCB
+10. Board - 150mm x 100mm, 4-layer (sig/gnd/pwr/sig), 2oz, JLCPCB
 
-Audit-repair notes (2026-05-18, issue #3050):
-- Schematic now passes ERC (was 39 errors).
-- Netlist drift fixed: DISCHARGE_POS / DISCHARGE_NEG nets were merged with
-  ISENSE_POS so the discharge MOSFET sources and the current-shunt high side
-  share a single net (eliminates the 5 single_pad_net DRC errors).
-- TSSOP-20 MCU footprint now has all 20 pads with correct net assignments
-  (was only pads 1 and 20).
-- Remaining DRC errors are expected:
-  * Power nets (+3.3V, GND, VRECT, AC_LINE, AC_NEUTRAL, FUSED_LINE,
-    SCAP_POS+, SCAP_NEG+, ISENSE_POS) are intentionally skipped from the
-    auto-router; they are meant to be filled with copper pours / hand-routed
-    heavy traces.  DRC's connectivity check reports them as "partially
-    routed: N pads stranded" — this is expected for a board where the user
-    finishes the power layout in KiCad.
-  * Signal-net partial routing (V_AC_SENSE, GATE_*, ZC_DETECT, etc.) is the
-    pure-Python router's limit on this dense layout; switching to negotiated
-    routing with the C++ backend and longer timeouts will close most of
-    these but cannot finish a perfect route on the TSSOP-20 cluster.
+Manufacturable routing recipe (issue #3343 P-R1..P-R4):
 
-Manufacturability baseline (2026-06-06, post-Wave-3 router fixes):
+- **P-R1 skip-list alignment**: VGATE / SRC_POS / SRC_NEG / BUS_LINE
+  joined the route skip-list (``ROUTE_SKIP_NETS``).  They are power /
+  heavy-current nets per the rev B plan (BUS_LINE is the ~35 A bus
+  return) and get zone-pour copper, not 0.3 mm autorouted traces.
+  Signal-net denominator: 26.
+- **P-R2 north-face pin reassignment**: GATE_POS_A/B + GATE_NEG_A/B →
+  PB3-PB6 (pins 27-30) and PRECHARGE_POS/NEG → PB7/PB8 (pins 31/32) —
+  U1's north face points directly at the U5/U6 gate drivers.  Also
+  reconciled the LQFP-32 footprint pad-net map to the canonical
+  STM32G031K8Tx symbol numbering (the prior map was offset).
+- **P-R3 placement micro-moves**: R1/R2 divider relocated beside U8
+  (V_AC_SENSE_RAW 65 mm run → ~5 mm; the long run is now on
+  skip-listed AC_LINE); U3 nudged so its IN− pad faces the R9 pad
+  lane (ISENSE_NEG pocket); SW1/C5 dropped south of the MCU island to
+  clear the U1→J5 SWD lane.
+- **P-R4 power copper + gate**: zone pours for the full skip set
+  (GND → In1.Cu plane, +3.3V → In2.Cu plane, the rest on F.Cu with
+  disjoint per-net outlines) + GND/+3.3V stitching vias, then
+  ``kct check --mfr jlcpcb-tier1`` and ``kct export --mfr jlcpcb``.
 
-- ``python generate_design.py`` (this script, default path): 8/10 signal
-  nets fully routed, 32 DRC errors (23 real clearance + 9 expected
-  power-net connectivity).
-- ``kct route --backend cpp --layers 2 --skip-nets <power>`` (preferred
-  manufacturing path): **10/10 signal nets topologically connected**, 4
-  residual ``clearance_segment_segment`` violations on B.Cu between
-  SWDIO and STATUS_LED in the U1 east-side cluster.  ``kct fix-drc``
-  cannot resolve those 4 because nudges break connectivity in the tight
-  U1 cluster.
+Routing config (mirrors the official floor-test harness
+``tests/router/test_softstart_revb_fine_pitch_escape.py``): L=4
+plane-aware stack, 0.20 mm clearance / 0.30 mm trace, jlcpcb-tier1,
+480 s budget / 30 s per-net, ``PYTHONHASHSEED=0``.
 
-The 10/10 reach is pinned by
-``tests/router/test_softstart_manufacturable_baseline.py`` (gated on
-``KICAD_RUN_SLOW_SOFTSTART_REACH=1``).
+Full pipeline (routing + DRC + export)::
 
-Preferred manufacturing recipe (after running this script)::
-
-    SKIP="AC_LINE,AC_NEUTRAL,FUSED_LINE,GND,+3.3V,VRECT,SCAP_POS+,SCAP_POS_GND,SCAP_NEG+,SCAP_NEG_GND,ISENSE_POS"
-    kct route boards/external/softstart/output/softstart.kicad_pcb \\
-        --output boards/external/softstart/output/softstart_routed.kicad_pcb \\
-        --backend cpp --layers 2 --no-auto-layers \\
-        --manufacturer jlcpcb-tier1 \\
-        --skip-nets "$SKIP" \\
-        --seed 42 --timeout 300
-    kct check  boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb-tier1
-    kct export boards/external/softstart/output/softstart_routed.kicad_pcb --mfr jlcpcb-tier1
-
-The board is manufacturable modulo the 4 SWDIO/STATUS_LED residual
-clearance violations (filed as a follow-up issue per #3235).
+    SOFTSTART_RUN_FULL_PIPELINE=1 python generate_design.py [output_dir]
 
 Usage:
     python generate_design.py [output_dir]
@@ -95,6 +77,29 @@ from kicad_tools.schematic.models.schematic import Schematic
 _CUSTOM_SYMBOL_LIB = (
     Path(__file__).parent / "symbols" / "softstart_custom.kicad_sym"
 )
+
+# Power / heavy-current nets excluded from autorouting.  These get their
+# copper as zone pours + stitching (see ``route_pcb`` step 7) rather than
+# 0.3 mm autorouted traces.  Single source of truth for the recipe, the
+# auto-pcb-size wrapper, and the reach tests (issue #3343 P-R1 skip-list
+# alignment — architect S1):
+#
+# - Rev A set: AC mains, GND, +3.3V, VRECT, supercap bank rails, and
+#   ISENSE_POS (the shunt high side, carrying the full discharge pulse).
+# - Rev B additions (#3343 P-R1): VGATE (12 V gate-driver supply rail,
+#   8 pads board-wide), SRC_POS / SRC_NEG (back-to-back common-source
+#   Kelvin nodes — high-current pulse path, per the NETS dict plan), and
+#   BUS_LINE (the bus return joining both drain-Bs at the R9 shunt — the
+#   ~35 A pulse path; rev A's ISENSE_POS role.  It must NOT be a 0.3 mm
+#   trace).
+ROUTE_SKIP_NETS = [
+    "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
+    "+3.3V", "VRECT",
+    "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+    "ISENSE_POS",
+    # Rev B power additions (issue #3343 P-R1)
+    "VGATE", "SRC_POS", "SRC_NEG", "BUS_LINE",
+]
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -1404,8 +1409,18 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     print(f"   J5: 6-pin SWD debug header (SWDIO/SWCLK/NRST labels added; pin5 GND wired)")
 
     # MCU signal labels (rev B LQFP-32).  All right-side pins (PA0-PA15
-    # alternates) emit stubs to the RIGHT; the few left-side pins (PB0-PB2,
+    # alternates) emit stubs to the RIGHT; the left-side pins (PB3-PB8,
     # PF2, NC/PA9, NC/PA10) emit stubs to the LEFT to avoid collisions.
+    #
+    # Issue #3343 P-R2 (architect S2): the gate-drive and precharge
+    # signals moved from the package's SOUTH face (PA7/PB0-PB2/PA8/PC6,
+    # LQFP pins 14-20 — facing the board edge) to the NORTH face
+    # (PB3-PB8, LQFP pins 27-32 — pointing directly at the U5/U6 gate
+    # drivers).  This removes the wrap-around through the MCU-island
+    # band for all 6 nets.  PWM capability is preserved: PB3=TIM1_CH2,
+    # PB4=TIM3_CH1, PB5=TIM3_CH2, PB6=TIM1_CH3 (rev B is droop-triggered
+    # burst conduction, so plain GPIO would suffice anyway).  The spec
+    # (project.kct) pins only the SWD header, so this is recipe-controlled.
     #
     # Pin map for STM32G031K8Tx LQFP-32 (verified via SymbolDef pin numbering):
     #   pin 4  VDD              +3.3V
@@ -1418,17 +1433,18 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     #   pin 11 PA4              V_BANK_NEG_SENSE    ADC1_IN4
     #   pin 12 PA5              OC_TRIP             EXTI5 (from LM393)
     #   pin 13 PA6              ZC_DETECT           EXTI6
-    #   pin 14 PA7              GATE_POS_A          TIM3_CH2 → UCC27211 pos HI
-    #   pin 15 PB0              GATE_POS_B          → UCC27211 pos LI
-    #   pin 16 PB1              GATE_NEG_A          → UCC27211 neg HI
-    #   pin 17 PB2              GATE_NEG_B          → UCC27211 neg LI
-    #   pin 18 PA8              PRECHARGE_POS       → Q5 gate
-    #   pin 20 PC6              PRECHARGE_NEG       → Q6 gate
     #   pin 24 PA13             SWDIO
     #   pin 25 PA14             SWCLK (also BOOT0)
     #   pin 26 PA15             STATUS_LED
-    # Pins 1-3 (PB9, PC14, PC15), 19/21 (NC/PA9, NC/PA10), 22/23 (PA9/PA11,
-    # PA10/PA12), and 27-32 (PB3-PB8) are unused: marked no_connect.
+    #   pin 27 PB3              GATE_POS_A          TIM1_CH2 → UCC27211 pos HI
+    #   pin 28 PB4              GATE_POS_B          TIM3_CH1 → UCC27211 pos LI
+    #   pin 29 PB5              GATE_NEG_A          TIM3_CH2 → UCC27211 neg HI
+    #   pin 30 PB6              GATE_NEG_B          TIM1_CH3 → UCC27211 neg LI
+    #   pin 31 PB7              PRECHARGE_POS       → Q5 gate
+    #   pin 32 PB8              PRECHARGE_NEG       → Q6 gate
+    # Pins 1-3 (PB9, PC14, PC15), 14-18 (PA7, PB0-PB2, PA8), 19/21
+    # (NC/PA9, NC/PA10), 20 (PC6), and 22/23 (PA9/PA11, PA10/PA12) are
+    # unused: marked no_connect.
     # Right-side pins (PA0..PA15 alternates) — stub to the RIGHT.
     mcu_signal_map_right = {
         "PA0": "V_AC_SENSE",
@@ -1438,8 +1454,6 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         "PA4": "V_BANK_NEG_SENSE",
         "PA5": "OC_TRIP",
         "PA6": "ZC_DETECT",
-        "PA7": "GATE_POS_A",
-        "PA8": "PRECHARGE_POS",
         "PA13": "SWDIO",
         "PA14": "SWCLK",
         "PA15": "STATUS_LED",
@@ -1450,12 +1464,15 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         sch.add_wire(pin_pos, stub)
         sch.add_label(net_name, stub[0], stub[1])
 
-    # Left-side pins — stub to the LEFT.
+    # Left-side pins — stub to the LEFT.  PB3-PB8 sit on the symbol's
+    # left column (and on the LQFP-32 package's north face, pins 27-32).
     mcu_signal_map_left = {
-        "PB0": "GATE_POS_B",
-        "PB1": "GATE_NEG_A",
-        "PB2": "GATE_NEG_B",
-        "PC6": "PRECHARGE_NEG",
+        "PB3": "GATE_POS_A",
+        "PB4": "GATE_POS_B",
+        "PB5": "GATE_NEG_A",
+        "PB6": "GATE_NEG_B",
+        "PB7": "PRECHARGE_POS",
+        "PB8": "PRECHARGE_NEG",
     }
     for pin_name, net_name in mcu_signal_map_left.items():
         pin_pos = u1_mcu.pin_position(pin_name)
@@ -1480,16 +1497,16 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         "PB9",        # pin 1
         "PC14",       # pin 2
         "PC15",       # pin 3
+        "PA7",        # pin 14 (P-R2: gate signals moved to north face)
+        "PB0",        # pin 15
+        "PB1",        # pin 16
+        "PB2",        # pin 17
+        "PA8",        # pin 18
         "NC/PA9",     # pin 19 (unbonded — no_connect type)
+        "PC6",        # pin 20 (P-R2: precharge moved to PB8)
         "NC/PA10",    # pin 21 (unbonded — no_connect type)
         "PA9/PA11",   # pin 22
         "PA10/PA12",  # pin 23
-        "PB3",        # pin 27
-        "PB4",        # pin 28
-        "PB5",        # pin 29
-        "PB6",        # pin 30
-        "PB7",        # pin 31
-        "PB8",        # pin 32
     ]
     for nc_pin in mcu_no_connect_pins:
         pos = u1_mcu.pin_position(nc_pin)
@@ -1508,15 +1525,17 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         "pin 11 = PA4  -> V_BANK_NEG_SENSE (ADC IN4)\n"
         "pin 12 = PA5  -> OC_TRIP          (EXTI from LM393)\n"
         "pin 13 = PA6  -> ZC_DETECT        (EXTI from H11AA1)\n"
-        "pin 14 = PA7  -> GATE_POS_A       (TIM3_CH2 -> UCC27211 HI pos)\n"
-        "pin 15 = PB0  -> GATE_POS_B       (-> UCC27211 LI pos)\n"
-        "pin 16 = PB1  -> GATE_NEG_A       (-> UCC27211 HI neg)\n"
-        "pin 17 = PB2  -> GATE_NEG_B       (-> UCC27211 LI neg)\n"
-        "pin 18 = PA8  -> PRECHARGE_POS    (-> Q5 gate)\n"
-        "pin 20 = PC6  -> PRECHARGE_NEG    (-> Q6 gate)\n"
         "pin 24 = PA13 -> SWDIO\n"
         "pin 25 = PA14 -> SWCLK / BOOT0\n"
         "pin 26 = PA15 -> STATUS_LED\n"
+        "pin 27 = PB3  -> GATE_POS_A       (TIM1_CH2 -> UCC27211 HI pos)\n"
+        "pin 28 = PB4  -> GATE_POS_B       (TIM3_CH1 -> UCC27211 LI pos)\n"
+        "pin 29 = PB5  -> GATE_NEG_A       (TIM3_CH2 -> UCC27211 HI neg)\n"
+        "pin 30 = PB6  -> GATE_NEG_B       (TIM1_CH3 -> UCC27211 LI neg)\n"
+        "pin 31 = PB7  -> PRECHARGE_POS    (-> Q5 gate)\n"
+        "pin 32 = PB8  -> PRECHARGE_NEG    (-> Q6 gate)\n"
+        "Gate/precharge on the package NORTH face (issue #3343 P-R2):\n"
+        "they exit toward the U5/U6 gate drivers, not the board edge.\n"
         "All other GPIOs: no_connect\n",
         x=X_MCU - 40,
         y=230,
@@ -1841,9 +1860,19 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     RV1_POS = (BOARD_ORIGIN_X + 48, BOARD_ORIGIN_Y + 12)        # Varistor
     J2_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 28)          # AC output TB
 
-    # Voltage divider (now 100:1 = 1M + 10k)
-    R1_POS = (BOARD_ORIGIN_X + 58, BOARD_ORIGIN_Y + 22)         # 1M top
-    R2_POS = (BOARD_ORIGIN_X + 62, BOARD_ORIGIN_Y + 22)         # 10k bottom
+    # Voltage divider (now 100:1 = 1M + 10k).
+    # Issue #3343 P-R3 (architect S3): moved from the AC-input row
+    # (x≈158-162, y≈122) to directly WEST of U8 (the MCP6001 envelope
+    # buffer at x=225, y=158).  The divider output V_AC_SENSE_RAW was a
+    # 65 mm east diagonal — the single longest failing signal run in the
+    # P-R1/P-R2 measurements.  After the move, V_AC_SENSE_RAW is a ~5 mm
+    # local net (R1.2/R2.1 → U8 pin 3 at x=223.9) and the long run moves
+    # onto AC_LINE (R1's high side), which is already skip-listed heavy
+    # copper.  The pocket between the R20/R21 5 W axial pad columns
+    # (x=215.4 @ y=151/165) and U7's passives (x≈205) is free at
+    # x≈216-222, y≈155-161.
+    R1_POS = (BOARD_ORIGIN_X + 118, BOARD_ORIGIN_Y + 56)        # 1M (AC_LINE side)
+    R2_POS = (BOARD_ORIGIN_X + 118, BOARD_ORIGIN_Y + 60)        # 10k (GND side)
 
     # Zero-crossing detection (H11AA1 in DIP-6)
     U2_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 28)         # H11AA1 DIP-6
@@ -1896,9 +1925,17 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     # ---- Row 3: SHUNT + CURRENT SENSE + OC COMPARATOR + BUS ENVELOPE ----
     # R9 shunt (5mΩ 2512) sits at center as the star-ground tie.
     R9_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 58)
-    # INA180A3 (replacement for INA180A1, same SOT-23-5 footprint)
-    U3_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 56)
-    C1_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 62)
+    # INA180A3 (replacement for INA180A1, same SOT-23-5 footprint).
+    # Issue #3343 P-R3 (architect S3): opened the R9→U3 ISENSE_NEG
+    # pocket (board-05 #3449 analog).  U3 nudged WEST + dropped so its
+    # west-column IN− pad (pin 3 at U3_POS + (-1.1, -0.95)) sits at
+    # y≈158 — directly in R9's pad-2 lane — making ISENSE_NEG a ~3 mm
+    # straight shot instead of an offset 6.5 mm hop that measured
+    # UNROUTED (0/2) in the baseline.  C1 moves south-east out of the
+    # pocket so U3's +3.3V pad (pin 5) doesn't graze C1's pad-1
+    # courtyard.
+    U3_POS = (BOARD_ORIGIN_X + 82, BOARD_ORIGIN_Y + 59)
+    C1_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 64)
     # LM393 comparator (SOIC-8) + threshold divider + pull-up.
     # Passives placed directly NEXT to U7 body (not above/below) to avoid
     # collision with the precharge corridor at y=51 (R20) and y=65 (R21).
@@ -1951,10 +1988,14 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     C4_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 93)         # 4.7uF
 
     # ---- Row 6: MCU SUPPORT + STATUS LED + DEBUG ----
-    # SW1 is 8x7mm — give it space to the east of MCU.
-    SW1_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 90)        # reset button
+    # SW1 is 8x7mm — issue #3343 P-R3 (architect S3): dropped SW1 + C5
+    # into the empty y≈196 band SOUTH of the MCU island so SWDIO/SWCLK
+    # run straight east from U1 to J5 without threading the 8×7 mm
+    # switch body; NRST also benefits (its J5 + reset-cluster pads stop
+    # competing with SWD for the same pad-gap channels).
+    SW1_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 96)        # reset button
     R10_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 87)        # 10k NRST pull-up
-    C5_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 93)         # 100nF debounce
+    C5_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 96)         # 100nF debounce
     R11_POS = (BOARD_ORIGIN_X + 84, BOARD_ORIGIN_Y + 87)        # 10k BOOT0
     D2_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 88)         # Status LED
     R12_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 92)        # 1k LED limit
@@ -2546,83 +2587,88 @@ def create_softstart_pcb(output_dir: Path) -> Path:
             Side 3 (right, bottom to top):  pins 17-24 (x = +3.75, y from +2.8 to -2.8)
             Side 4 (top, right to left):    pins 25-32 (y = -3.75, x from +2.8 to -2.8)
 
-        STM32G031K8T6 pin map (architect proposal — rev B):
-          pin 1  VDD       +3.3V
+        STM32G031K8T6 pin map (issue #3343 P-R2 — reconciled to the
+        canonical ``MCU_ST_STM32G0:STM32G031K8Tx`` symbol numbering,
+        verified via SymbolDef; the previous "architect nominal" map was
+        offset and drifted from the schematic):
+          pin 1  PB9       NC
           pin 2  PC14      NC
           pin 3  PC15      NC
-          pin 4  PF2/NRST  NRST
-          pin 5  VDDA      +3.3V
-          pin 6  PA0       V_AC_SENSE       (ADC IN0)
-          pin 7  PA1       V_BUS_DVDT       (ADC IN1)
-          pin 8  PA2       I_SENSE_OUT      (ADC IN2)
-          pin 9  PA3       V_BANK_POS_SENSE (ADC IN3)
-          pin 10 PA4       V_BANK_NEG_SENSE (ADC IN4)
-          pin 11 PA5       OC_TRIP          (EXTI IRQ)
-          pin 12 PA6       ZC_DETECT        (EXTI)
-          pin 13 PA7       GATE_POS_A       (driver IN_HI)
-          pin 14 PB0       GATE_POS_B       (driver IN_LO)
-          pin 15 PB1       GATE_NEG_A       (driver IN_HI)
-          pin 16 PB2       GATE_NEG_B       (driver IN_LO)
-          pin 17 PA8       PRECHARGE_POS
-          pin 18 PA9       PRECHARGE_NEG
-          pin 19 PA10      NC (reserve)
-          pin 20 PA11      NC (reserve)
-          pin 21 PA12      STATUS_LED
-          pin 22 PA13      SWDIO
-          pin 23 PA14      SWCLK
-          pin 24 PA15      NC (reserve)
-          pin 25 PB3       NC (reserve)
-          pin 26 PB4       NC (reserve)
-          pin 27 PB5       NC (reserve)
-          pin 28 PB6       NC (reserve)
-          pin 29 PB7       NC (reserve)
-          pin 30 PB8       NC (reserve)
-          pin 31 VSS       GND
-          pin 32 VDD       +3.3V
+          pin 4  VDD       +3.3V
+          pin 5  VSS       GND
+          pin 6  PF2/NRST  NRST
+          pin 7  PA0       V_AC_SENSE       (ADC IN0)
+          pin 8  PA1       V_BUS_DVDT       (ADC IN1)
+          pin 9  PA2       I_SENSE_OUT      (ADC IN2)
+          pin 10 PA3       V_BANK_POS_SENSE (ADC IN3)
+          pin 11 PA4       V_BANK_NEG_SENSE (ADC IN4)
+          pin 12 PA5       OC_TRIP          (EXTI IRQ)
+          pin 13 PA6       ZC_DETECT        (EXTI)
+          pin 14 PA7       NC (P-R2: gates moved to north face)
+          pin 15 PB0       NC
+          pin 16 PB1       NC
+          pin 17 PB2       NC
+          pin 18 PA8       NC
+          pin 19 NC/PA9    NC (unbonded)
+          pin 20 PC6       NC
+          pin 21 NC/PA10   NC (unbonded)
+          pin 22 PA9/PA11  NC
+          pin 23 PA10/PA12 NC
+          pin 24 PA13      SWDIO
+          pin 25 PA14      SWCLK / BOOT0
+          pin 26 PA15      STATUS_LED
+          pin 27 PB3       GATE_POS_A       (driver IN_HI pos)
+          pin 28 PB4       GATE_POS_B       (driver IN_LO pos)
+          pin 29 PB5       GATE_NEG_A       (driver IN_HI neg)
+          pin 30 PB6       GATE_NEG_B       (driver IN_LO neg)
+          pin 31 PB7       PRECHARGE_POS
+          pin 32 PB8       PRECHARGE_NEG
 
-        Note: this pin-to-net mapping is a placement-stage mirror of the
-        schematic — actual net continuity is enforced by the schematic's
-        net labels.  Mismatches would surface as DRC unconnected-pad
-        errors in P4 routing; the architect proposal pin map above is
-        nominal and BUILDER notes any discrepancy from the actual KiCad
-        symbol numbering during P4.
+        Issue #3343 P-R2 (architect S2): pins 27-32 sit on the package's
+        TOP side in this generator's geometry (pad_y = -3.85, i.e. the
+        NORTH face on the board since +y points south).  U1 sits at
+        y=190 with the U5/U6 gate drivers due north (y=142/174), so all
+        six gate/precharge nets now exit pointing at their destination
+        instead of wrapping around the package through the MCU-island
+        band (SW1/R10/R11/D2/J5 row).
         """
         x, y = pos
         pitch = 0.8
-        # Pin-to-net map (rev B architect proposal)
+        # Pin-to-net map (canonical STM32G031K8Tx numbering — keep in
+        # sync with the schematic's mcu_signal_map_* dicts above).
         pin_net = {
-            1: "+3.3V",
+            1: "",  # PB9 NC
             2: "",  # PC14 NC
             3: "",  # PC15 NC
-            4: "NRST",
-            5: "+3.3V",   # VDDA tied to VDD
-            6: "V_AC_SENSE",
-            7: "V_BUS_DVDT",
-            8: "I_SENSE_OUT",
-            9: "V_BANK_POS_SENSE",
-            10: "V_BANK_NEG_SENSE",
-            11: "OC_TRIP",
-            12: "ZC_DETECT",
-            13: "GATE_POS_A",
-            14: "GATE_POS_B",
-            15: "GATE_NEG_A",
-            16: "GATE_NEG_B",
-            17: "PRECHARGE_POS",
-            18: "PRECHARGE_NEG",
-            19: "",  # PA10 reserve
-            20: "",  # PA11 reserve
-            21: "STATUS_LED",
-            22: "SWDIO",
-            23: "SWCLK",
-            24: "",  # PA15 reserve
-            25: "",  # PB3 reserve
-            26: "",  # PB4 reserve
-            27: "",  # PB5 reserve
-            28: "",  # PB6 reserve
-            29: "",  # PB7 reserve
-            30: "",  # PB8 reserve
-            31: "GND",
-            32: "+3.3V",
+            4: "+3.3V",   # VDD
+            5: "GND",     # VSS
+            6: "NRST",    # PF2/NRST
+            7: "V_AC_SENSE",
+            8: "V_BUS_DVDT",
+            9: "I_SENSE_OUT",
+            10: "V_BANK_POS_SENSE",
+            11: "V_BANK_NEG_SENSE",
+            12: "OC_TRIP",
+            13: "ZC_DETECT",
+            14: "",  # PA7 NC (P-R2)
+            15: "",  # PB0 NC (P-R2)
+            16: "",  # PB1 NC (P-R2)
+            17: "",  # PB2 NC (P-R2)
+            18: "",  # PA8 NC (P-R2)
+            19: "",  # NC/PA9 unbonded
+            20: "",  # PC6 NC (P-R2)
+            21: "",  # NC/PA10 unbonded
+            22: "",  # PA9/PA11 NC
+            23: "",  # PA10/PA12 NC
+            24: "SWDIO",
+            25: "SWCLK",
+            26: "STATUS_LED",
+            27: "GATE_POS_A",
+            28: "GATE_POS_B",
+            29: "GATE_NEG_A",
+            30: "GATE_NEG_B",
+            31: "PRECHARGE_POS",
+            32: "PRECHARGE_NEG",
         }
 
         # LQFP-32: 8 pads per side, pitch 0.8 mm.  Pad offset from center:
@@ -2958,12 +3004,7 @@ def _route_pcb_with_auto_pcb_size(input_path: Path, output_path: Path) -> bool:
             staged_spec.write_text(in_tree_spec.read_text())
             print(f"   Staged project.kct alongside PCB: {staged_spec}")
 
-    skip = ",".join([
-        "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-        "+3.3V", "VRECT",
-        "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
-        "ISENSE_POS",
-    ])
+    skip = ",".join(ROUTE_SKIP_NETS)
 
     cmd = [
         sys.executable, "-m", "kicad_tools.cli", "route",
@@ -3022,12 +3063,24 @@ def route_pcb(
     output_path: Path,
     auto_pcb_size: bool = False,
 ) -> bool:
-    """Route the PCB using the autorouter.
+    """Route the PCB using the autorouter (rev B production config).
 
-    Note: trace_clearance stays at 0.15mm in P2.  The 0.2mm DRC tightening
-    called out in the rev B architect plan is deferred to P4 (per issue
-    #3343 phase plan) — tightening now would defeat the gating purpose
-    and risks P4 routing failures before placement is finalised in P3.
+    Issue #3343 P-R4: this is the manufacturable-gate configuration —
+    it mirrors the official measurement harness
+    (``tests/router/test_softstart_revb_fine_pitch_escape.py``):
+
+    - L=4 plane-aware stack ``LayerStack.four_layer_sig_gnd_pwr_sig``
+      (the softstart spec declares ``escalation.starting_layers: 4``,
+      ``max_layers: 4``); signals route on F.Cu/B.Cu, In1/In2 are the
+      GND/PWR plane layers that receive the P-R4 zone pours.
+    - 0.20 mm clearance / 0.30 mm trace at the ``jlcpcb-tier1``
+      manufacturer profile.
+    - 480 s routing budget / 30 s per-net.
+
+    After routing, the output PCB's layer table is upgraded to 4
+    copper layers and the power skip-nets receive copper-pour zones +
+    stitching vias (steps 7-8 below) so the connectivity bar is 100%
+    of ALL nets, signal and power.
 
     P_AS5 (Issue #3352): when ``auto_pcb_size`` is True (or
     ``SOFTSTART_AUTO_PCB_SIZE=1`` is set in the environment), the recipe
@@ -3045,46 +3098,47 @@ def route_pcb(
     if auto_pcb_size or os.environ.get("SOFTSTART_AUTO_PCB_SIZE") == "1":
         return _route_pcb_with_auto_pcb_size(input_path, output_path)
 
-    from kicad_tools.router import DesignRules, load_pcb_for_routing
+    from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
     from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
     print("\n" + "=" * 60)
     print("Routing PCB...")
     print("=" * 60)
 
-    # Issue #3138: apply the empirically validated "combined intervention"
-    # baseline from #3134.  The four knobs together (tight clearance +
-    # placement spread + drc-aware optimizer + jlcpcb-tier1 manufacturer
-    # profile) lifted reach from 4/10 -> 6/10 on this board; the additional
-    # ``route_with_escape`` swap below is the algorithmic gap closer.
+    # Issue #3343 P-R4 production rules: 0.20 mm clearance (rev B
+    # ``min_trace``/clearance floor) at jlcpcb-tier1.  Mirrors the
+    # official reach-floor harness exactly so the committed artifact and
+    # the measured number are the same configuration.
     rules = DesignRules(
-        grid_resolution=0.075,
-        trace_width=0.3,
-        trace_clearance=0.15,  # P2 baseline; P4 tightens to 0.2mm per #3343 plan
-        via_drill=0.3,
+        trace_width=0.30,
+        trace_clearance=0.20,
         via_diameter=0.6,
+        via_drill=0.3,
+        min_trace_width=0.127,
+        manufacturer="jlcpcb-tier1",
     )
 
     print(f"\n1. Loading PCB: {input_path}")
-    print(f"   Grid resolution: {rules.grid_resolution}mm")
     print(f"   Trace width: {rules.trace_width}mm")
     print(f"   Clearance: {rules.trace_clearance}mm")
 
     # Skip power and high-current nets.  ISENSE_POS carries discharge current
-    # (formerly DISCHARGE_POS/NEG) and should be routed as a heavy trace by
-    # the user, so it's skipped from the auto-router too.
-    skip_nets = [
-        "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-        "+3.3V", "VRECT",
-        "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
-        "ISENSE_POS",
-    ]
+    # (formerly DISCHARGE_POS/NEG) and should be routed as a heavy trace;
+    # rev B adds VGATE / SRC_POS / SRC_NEG / BUS_LINE (issue #3343 P-R1).
+    # All of these get zone-pour copper in step 7 below.
+    skip_nets = list(ROUTE_SKIP_NETS)
+
+    # Issue #3343 P-R4: L=4 plane-aware stack (the production target per
+    # Issue #3401's measurement — the all-signal variant measured WORSE).
+    layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
 
     router, net_map = load_pcb_for_routing(
         str(input_path),
         skip_nets=skip_nets,
         rules=rules,
+        layer_stack=layer_stack,
     )
+    router.rules.manufacturer = "jlcpcb-tier1"
 
     print(f"\n   Board size: {router.grid.width}mm x {router.grid.height}mm")
     print(f"   Nets loaded: {len(net_map)}")
@@ -3092,26 +3146,22 @@ def route_pcb(
 
     print("\n2. Routing nets...")
     # Use negotiated mode with explicit per-net + total timeouts so the run
-    # cannot hang indefinitely on dense layouts (see issue #2794).  These
-    # bounds are generous enough for this board's signal-net count (~10) but
-    # short enough that any pathological case fails fast.
+    # cannot hang indefinitely on dense layouts (see issue #2794).
     #
-    # Issue #3138: switched from ``route_all_negotiated()`` to
-    # ``route_with_escape(use_negotiated=True, ...)`` so the dense-package
-    # escape pre-pass (``generate_escape_routes`` + virtual escape-endpoint
-    # pads, ``router/core.py:10783-10821``) runs on U1 (STM32G031F6P6 TSSOP-20
-    # at 0.65mm pitch -- flagged by ``is_dense_package()`` in
-    # ``router/escape.py:222``).  Without the pre-pass, the U1 east-side
-    # cluster (pins 11-20) cannot escape and routing reach was capped at
-    # 6/10 nets even with the combined intervention (#3134).  The pre-pass
-    # generates short orthogonal escape stubs from each TSSOP pad and
-    # registers virtual escape-endpoint pads (#2401) so the main router
-    # routes between those endpoints rather than the original congested
-    # pin centers.
+    # Issue #3138: ``route_with_escape`` runs the dense-package escape
+    # pre-pass on U1 (LQFP-32) and the SOIC-8s before the negotiated
+    # main loop.  Issue #3343 P-R4: per-net budget mirrors the floor
+    # test (30 s at L=4); the BOARD budget is deeper than the test
+    # harness's 480 s because this path produces the committed
+    # manufacturing artifact -- the extra budget goes entirely to the
+    # end-of-run BLOCKED_BY_COMPONENT rip-up convergence on the NRST /
+    # V_BANK_POS_SENSE cluster (see the #3470 non-convergence
+    # signature documented in the floor test).  The floor test keeps
+    # 480 s for run-to-run comparability.
     router.route_with_escape(
         use_negotiated=True,
-        per_net_timeout=45.0,
-        timeout=420.0,
+        per_net_timeout=30.0,
+        timeout=900.0,
     )
 
     stats_before = router.get_statistics()
@@ -3151,6 +3201,15 @@ def route_pcb(
 
     print(f"\n6. Saving routed PCB: {output_path}")
     original_content = input_path.read_text()
+
+    # Issue #3343 P-R4: the unrouted PCB declares 2 copper layers but
+    # routing runs on the L=4 plane-aware stack (per the spec's
+    # ``starting_layers: 4``).  Upgrade the layer table so the In1.Cu /
+    # In2.Cu plane layers exist in the output for the zone pours below.
+    from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+    original_content = update_pcb_layer_stackup(original_content, 4)
+
     route_sexp = router.to_sexp()
 
     if route_sexp:
@@ -3163,6 +3222,169 @@ def route_pcb(
         print("   Warning: No routes generated!")
 
     output_path.write_text(output_content)
+
+    # Issue #3343 P-R4 (architect S4): copper-pour zones for the full
+    # skip set.  This is what makes "skip" honest — the manufacturable
+    # bar is 100% connectivity including power, not just signal nets.
+    # Layer assignment is stackup-aware (4-layer here): GND gets the
+    # full-outline In1.Cu plane, the first POWER net (+3.3V) gets
+    # In2.Cu, and the remaining power/heavy-current nets get per-net
+    # bounding outlines on F.Cu with carve-based disjoint partitioning
+    # (see ``auto_create_zones_for_pour_nets``).
+    print("\n7. Generating copper-pour zones for power nets...")
+    try:
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        pour_nets_decl: list[tuple[str, NetClass]] = []
+        # Order matters: GND first (ground plane), then +3.3V (claims
+        # the In2.Cu power plane), then the rest on F.Cu.
+        for net_name in ["GND", "+3.3V"] + [
+            n for n in skip_nets if n not in ("GND", "+3.3V")
+        ]:
+            cls = NetClass.GROUND if net_name == "GND" else NetClass.POWER
+            pour_nets_decl.append((net_name, cls))
+        zone_count = auto_create_zones_for_pour_nets(
+            output_path, pour_nets_decl, edge_clearance=0.5
+        )
+        print(f"   Created {zone_count} zone(s) for {[n for n, _ in pour_nets_decl]}")
+    except Exception as exc:
+        print(f"   ERROR: zone generation failed: {exc}")
+        return False
+
+    # First fill pass: compute the pour copper so the stitcher and the
+    # connectivity analyzer below see actual filled polygons.
+    print("\n8. Filling zones (first pass)...")
+    fill_argv = [
+        sys.executable, "-m", "kicad_tools.cli", "zones", "fill",
+        str(output_path),
+    ]
+    fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+    if fill_result.returncode != 0:
+        print(f"   Zone fill failed (rc={fill_result.returncode}):")
+        if fill_result.stderr:
+            print(f"   stderr: {fill_result.stderr.strip()}")
+
+    # Issue #3343 P-R4: stitching vias for the inner-layer plane nets.
+    # GND (In1.Cu) and +3.3V (In2.Cu) SMD pads sit on F.Cu and need a
+    # via down to their plane; the remaining pour nets live on F.Cu
+    # where their SMD pads already touch the zone copper.
+    # ``--avoid-pad-overlap`` post-filters via placements that would
+    # land inside a neighbouring same-net pad (issue #3271).
+    print("\n9. Stitching plane-net pads (GND, +3.3V)...")
+    stitch_argv = [
+        sys.executable, "-m", "kicad_tools.cli", "stitch",
+        str(output_path),
+        "--mfr", "jlcpcb-tier1",
+        "--avoid-pad-overlap",
+        "--net", "GND",
+        "--net", "+3.3V",
+    ]
+    stitch_result = subprocess.run(stitch_argv, capture_output=True, text=True)
+    if stitch_result.returncode == 0:
+        for line in stitch_result.stdout.strip().split("\n")[-8:]:
+            print(f"   {line}")
+    else:
+        print(f"   Stitch failed (rc={stitch_result.returncode}):")
+        if stitch_result.stderr:
+            print(f"   stderr: {stitch_result.stderr.strip()}")
+
+    # Issue #3343 P-R4: pour-connectivity repair + verification.  The
+    # stitcher's geometric model accepts a via whose barrel overlaps a
+    # pad's copper, but ``NetStatusAnalyzer`` (the model behind
+    # ``kct check``'s connectivity rule) matches pad/via CENTERS with a
+    # 0.01 mm tolerance — so an overlapping-but-offset via leaves the
+    # pad "stranded" at the gate.  For any pour-net pad still stranded
+    # after stitching, place a through-via at the exact pad center
+    # (via-in-pad — supported by the jlcpcb-tier1 profile this board
+    # targets).  This is real copper AND closes the analyzer graph.
+    print("\n10. Pour-connectivity repair (via-in-pad for stranded plane pads)...")
+    try:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        skip_set = set(skip_nets)
+        analyzer = NetStatusAnalyzer(output_path)
+        result = analyzer.analyze()
+        repair_vias: list[tuple[float, float, int, str]] = []
+        for net_st in result.nets:
+            if net_st.net_name not in skip_set or net_st.status == "complete":
+                continue
+            for pad in net_st.unconnected_pads:
+                # Through-hole pads already span every copper layer; a
+                # stranded TH pad means the pour outline doesn't reach
+                # it and a via would not help (surface in diagnostics).
+                if "F.Cu" in pad.layers and "B.Cu" in pad.layers:
+                    print(
+                        f"   WARNING: {pad.full_name} ({net_st.net_name}) is a "
+                        f"TH pad outside its pour — needs outline review"
+                    )
+                    continue
+                repair_vias.append(
+                    (pad.position[0], pad.position[1], net_st.net_number,
+                     f"{pad.full_name} ({net_st.net_name})")
+                )
+        if repair_vias:
+            content = output_path.read_text()
+            via_lines = []
+            for x, y, net_num, label in repair_vias:
+                print(f"   via-in-pad @ ({x:.2f}, {y:.2f}) for {label}")
+                via_lines.append(
+                    f'  (via (at {x} {y}) (size 0.45) (drill 0.2) '
+                    f'(layers "F.Cu" "B.Cu") (net {net_num}) '
+                    f'(uuid "{generate_uuid()}"))'
+                )
+            content = content.rstrip().rstrip(")")
+            content += "\n" + "\n".join(via_lines) + "\n)\n"
+            output_path.write_text(content)
+            print(f"   Added {len(repair_vias)} repair via(s)")
+        else:
+            print("   No stranded pour-net pads — no repair needed")
+    except Exception as exc:
+        print(f"   WARNING: pour-connectivity repair failed: {exc}")
+
+    # Re-fill after stitching/repair: the new via barrels pass through
+    # the In1/In2 planes of the OTHER net, so the fills must be
+    # recomputed to carve clearance around them (and so the exported
+    # gerbers contain the final copper).
+    print("\n11. Re-filling zones (final pass)...")
+    fill_argv = [
+        sys.executable, "-m", "kicad_tools.cli", "zones", "fill",
+        str(output_path),
+    ]
+    fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+    if fill_result.returncode == 0:
+        for line in fill_result.stdout.strip().split("\n")[-6:]:
+            print(f"   {line}")
+    else:
+        print(f"   Zone fill failed (rc={fill_result.returncode}):")
+        if fill_result.stderr:
+            print(f"   stderr: {fill_result.stderr.strip()}")
+
+    # Final pour-connectivity verification: every pad on every skip net
+    # must be reached by its pour/stitching (issue #3343 P-R4 AC).
+    print("\n12. Verifying pour-net connectivity...")
+    try:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        analyzer = NetStatusAnalyzer(output_path)
+        result = analyzer.analyze()
+        pour_ok = True
+        for net_st in result.nets:
+            if net_st.net_name not in set(skip_nets):
+                continue
+            mark = "OK " if net_st.status == "complete" else "FAIL"
+            print(
+                f"   [{mark}] {net_st.net_name}: "
+                f"{net_st.connected_count}/{net_st.total_pads} pads"
+            )
+            if net_st.status != "complete":
+                pour_ok = False
+        if pour_ok:
+            print("   All pour nets fully connected.")
+        else:
+            print("   ERROR: stranded pour-net pads remain (see FAIL rows)")
+    except Exception as exc:
+        print(f"   WARNING: pour verification failed: {exc}")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets
@@ -3321,14 +3543,13 @@ def create_project(output_dir: Path, project_name: str) -> Path:
 def main() -> int:
     """Main entry point.
 
-    By default (rev B P2 ship-state) this generates the schematic and
-    runs the rev B schematic + ERC + PCB placement pipeline.  Routing,
-    DRC tightening, and manufacturing export are deferred to P4/P5 (see
-    issue #3343 phase plan).  Set the environment variable
-    ``SOFTSTART_RUN_FULL_PIPELINE=1`` to opt into routing + export
-    (rev A baseline regression — note rev B routing parameters are
-    P4-territory; running with the rev B PCB and rev A router settings
-    may produce reach regressions until the P4 0.2mm clearance landing).
+    By default this generates the schematic and runs the rev B
+    schematic + ERC + PCB placement pipeline (fast, ~15 s).  Set the
+    environment variable ``SOFTSTART_RUN_FULL_PIPELINE=1`` to also run
+    the manufacturable pipeline (issue #3343 P-R4): L=4 routing at the
+    jlcpcb-tier1 0.20 mm production config, power-net zone pours +
+    stitching + fill, ``kct check``, and the JLCPCB manufacturing
+    bundle export (~10 min wall on the C++ backend).
     """
     import os
 
@@ -3354,10 +3575,10 @@ def main() -> int:
 
         if not run_full_pipeline:
             print("\n" + "=" * 60)
-            print("Rev B P3: schematic + ERC + PCB placement complete.")
-            print("Routing (P4) + manufacturing bundle (P5) skipped — set")
-            print("SOFTSTART_RUN_FULL_PIPELINE=1 to run them (may have reach")
-            print("regressions until P4 tightens DRC to 0.2mm).")
+            print("Schematic + ERC + PCB placement complete.")
+            print("Routing + zones + DRC + manufacturing bundle skipped — set")
+            print("SOFTSTART_RUN_FULL_PIPELINE=1 to run the full rev B")
+            print("manufacturable pipeline (issue #3343 P-R4; ~10 min).")
             print("=" * 60)
             print("\nSUMMARY")
             print("=" * 60)
