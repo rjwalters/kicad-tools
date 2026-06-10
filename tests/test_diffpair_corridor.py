@@ -318,3 +318,172 @@ def test_guide_route_is_not_committed_to_route_list():
     net2_routes = [r for r in router.routes if r.net == 2]
     assert len(net1_routes) == 1
     assert len(net2_routes) == 1
+
+
+# ---------------------------------------------------------------------------
+# PR #3473 (review of #3439): shared per-pair budgets across the two
+# coupled attempts + bounded guide-route probe
+# ---------------------------------------------------------------------------
+
+
+def test_iteration_budget_is_split_between_corridor_and_fallback(monkeypatch):
+    """A failing pair must NOT receive the full iteration budget twice.
+
+    PR #3473 review (board 06 forensics): the corridor attempt was
+    passed the un-halved ``per_pair_max_iterations``, so every failing
+    pair burned 4000 corridor + 4000 open iterations, doubling the
+    diff-pair phase and tipping the CI job over its 15-minute ceiling.
+    The corridor attempt gets at most half; the open fallback gets the
+    remainder of the SHARED budget.
+    """
+    router = _two_pad_diffpair_router()
+    pairs = router._diffpair.detect_differential_pairs()
+    assert len(pairs) == 1
+
+    budgets_seen: list[int | None] = []
+
+    def fake_route_coupled(
+        self,
+        p_start,
+        p_end,
+        n_start,
+        n_end,
+        timeout_seconds=None,
+        max_iterations_budget=None,
+        corridor=None,
+    ):
+        budgets_seen.append(max_iterations_budget)
+        self.last_timeout_exceeded = False
+        # Simulate exhausting exactly the budget this attempt received.
+        self.last_iterations = max_iterations_budget or 0
+        return None
+
+    monkeypatch.setattr(CoupledPathfinder, "route_coupled", fake_route_coupled)
+
+    routes, warning = router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+        per_pair_max_iterations=4000,
+    )
+
+    assert routes == [] and warning is None
+    assert len(budgets_seen) == 2, (
+        f"expected corridor attempt + open fallback, got {budgets_seen}"
+    )
+    corridor_budget, fallback_budget = budgets_seen
+    assert corridor_budget == 2000, (
+        f"corridor attempt must get half the iteration budget, got {corridor_budget}"
+    )
+    assert fallback_budget == 2000, (
+        "open fallback must get only the remainder of the shared budget "
+        f"(4000 - 2000), got {fallback_budget}"
+    )
+
+
+def test_fallback_gets_full_remainder_when_corridor_exits_early(monkeypatch):
+    """If the corridor attempt fails after only a few iterations, the
+    open fallback inherits nearly the whole shared budget (mirrors the
+    wall-clock remaining-budget arithmetic)."""
+    router = _two_pad_diffpair_router()
+    pairs = router._diffpair.detect_differential_pairs()
+
+    budgets_seen: list[int | None] = []
+
+    def fake_route_coupled(
+        self,
+        p_start,
+        p_end,
+        n_start,
+        n_end,
+        timeout_seconds=None,
+        max_iterations_budget=None,
+        corridor=None,
+    ):
+        budgets_seen.append(max_iterations_budget)
+        self.last_timeout_exceeded = False
+        self.last_iterations = 100  # cheap corridor failure
+        return None
+
+    monkeypatch.setattr(CoupledPathfinder, "route_coupled", fake_route_coupled)
+
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+        per_pair_max_iterations=4000,
+    )
+
+    assert budgets_seen[0] == 2000
+    assert budgets_seen[1] == 3900, (
+        "fallback budget must be the shared budget minus iterations the "
+        f"corridor attempt actually used, got {budgets_seen[1]}"
+    )
+
+
+def test_guide_route_probe_receives_deadline(monkeypatch):
+    """The single-ended probe must be bounded by a per-net deadline.
+
+    PR #3473 review: the probe was called with no ``per_net_timeout``;
+    on hard P sides (C++ fails -> unbounded Python fallback) it ate
+    nearly the whole per-pair budget before either coupled attempt ran,
+    leaving the open fallback only the 1.0s floor.
+    """
+    router = _two_pad_diffpair_router()
+    pairs = router._diffpair.detect_differential_pairs()
+
+    probe_timeouts: list[float | None] = []
+    original_route = router.router.route
+
+    def spying_route(start, end, *args, per_net_timeout=None, **kwargs):
+        probe_timeouts.append(per_net_timeout)
+        return original_route(
+            start, end, *args, per_net_timeout=per_net_timeout, **kwargs
+        )
+
+    monkeypatch.setattr(router.router, "route", spying_route)
+
+    routes, _warning = router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+    )
+
+    assert probe_timeouts, "guide-route probe was never invoked"
+    assert probe_timeouts[0] == 60.0 * 0.125, (
+        "probe must get an eighth of the per-pair budget as its deadline, "
+        f"got {probe_timeouts[0]}"
+    )
+
+
+def test_failed_probe_clears_avoidance_costs():
+    """A probe that raises must still clear persistent avoidance costs.
+
+    PR #3473 review (non-blocking note): the C++ validation-failure
+    path mutates grid avoidance costs via ``_boost_avoidance_at``;
+    the normal cleanup lives in ``Autorouter._route_net``, which the
+    probe bypasses.
+    """
+    router = _two_pad_diffpair_router()
+
+    class _StubRouter:
+        def __init__(self):
+            self.cleared = 0
+
+        def route(self, start, end, per_net_timeout=None):
+            raise RuntimeError("probe failure")
+
+        def clear_avoidance_costs(self):
+            self.cleared += 1
+
+    stub = _StubRouter()
+    router.router = stub
+
+    pads = [p for p in router.pads.values() if p.net == 1]
+    start, end = pads[0], pads[1]
+
+    result = router._diffpair._single_ended_guide_route(start, end)
+    assert result is None
+    assert stub.cleared == 1, (
+        "clear_avoidance_costs must run even when the probe raises"
+    )
