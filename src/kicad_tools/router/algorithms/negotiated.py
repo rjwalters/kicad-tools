@@ -2173,6 +2173,19 @@ class NegotiatedRouter:
             objects are re-marked on the grid and ``False`` is returned --
             a failed rip-up never leaves the board worse than it found it.
 
+            Sibling-degradation proxy (known limitation): criterion (b)
+            compares ROUTE COUNTS only.  A sibling can re-land with an
+            equal route count but worse geometry (longer detour,
+            DRC-adjacent copper, extra vias) and the transaction will
+            still commit.  Route count is a deliberate tradeoff: it
+            catches the catastrophic failure mode (a sibling losing
+            connectivity outright, the board-05 HALL/GATE collateral)
+            without paying for a full per-transaction DRC pass, which
+            would multiply rip-up wall-clock by the DRC cost on every
+            attempt.  If geometric degradation ever becomes the binding
+            failure mode, tighten (b) to compare total routed length or
+            run an incremental DRC over the sibling's bounding box.
+
             Issue #2814 (superseded in mechanism, preserved in intent):
             when the failed net's A* search cannot fully route even with
             all sibling routes removed from the grid, the blocker is

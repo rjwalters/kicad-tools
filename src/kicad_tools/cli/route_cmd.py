@@ -2444,6 +2444,20 @@ def _apply_ripup_budget_override(router: "Autorouter", args) -> None:
     router.stall_ripup_budget = budget
 
 
+def _targeted_ripup_budget(args) -> int:
+    """Resolve ``--max-ripups-per-net`` for the negotiated targeted path.
+
+    Issue #3470 follow-up (judge note on PR #3478): the previous inline
+    ``getattr(args, "max_ripups_per_net", None) or 3`` coerced an explicit
+    ``--max-ripups-per-net 0`` to 3 on the negotiated targeted path while
+    ``_apply_ripup_budget_override`` correctly applied 0 to the route_all /
+    stall budgets.  ``None`` (flag absent) keeps the historical default of
+    3; any explicit value -- including 0 -- is honored as-is.
+    """
+    budget = getattr(args, "max_ripups_per_net", None)
+    return budget if budget is not None else 3
+
+
 def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False) -> None:
     """Merge the pre-loaded --net-class-map sidecar into the router (Issue #2996).
 
@@ -3131,7 +3145,7 @@ def route_with_layer_escalation(
                     # pre-existing targeted rip-up path in
                     # route_all_negotiated is CLI-reachable.
                     use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                    max_ripups_per_net=(getattr(args, "max_ripups_per_net", None) or 3),
+                    max_ripups_per_net=_targeted_ripup_budget(args),
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
@@ -4007,7 +4021,7 @@ def route_with_rule_relaxation(
                     # pre-existing targeted rip-up path in
                     # route_all_negotiated is CLI-reachable.
                     use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                    max_ripups_per_net=(getattr(args, "max_ripups_per_net", None) or 3),
+                    max_ripups_per_net=_targeted_ripup_budget(args),
                     # Issue #3101: best-metric early-stop patience.  0
                     # disables (matches pre-#3101 behaviour).
                     best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
@@ -6054,7 +6068,7 @@ def route_with_combined_escalation(
                         # pre-existing targeted rip-up path in
                         # route_all_negotiated is CLI-reachable.
                         use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                        max_ripups_per_net=(getattr(args, "max_ripups_per_net", None) or 3),
+                        max_ripups_per_net=_targeted_ripup_budget(args),
                         # Issue #3101: best-metric early-stop patience.  0
                         # disables (matches pre-#3101 behaviour).
                         best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
@@ -8673,7 +8687,7 @@ def main(argv: list[str] | None = None) -> int:
                                     # pre-existing targeted rip-up path in
                                     # route_all_negotiated is CLI-reachable.
                                     use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                                    max_ripups_per_net=(getattr(args, "max_ripups_per_net", None) or 3),
+                                    max_ripups_per_net=_targeted_ripup_budget(args),
                                     # Issue #3132: forward --early-stop-patience
                                     # to the inner main-path negotiator call so
                                     # the CLI flag is honored (the previous
@@ -8746,7 +8760,7 @@ def main(argv: list[str] | None = None) -> int:
                             # pre-existing targeted rip-up path in
                             # route_all_negotiated is CLI-reachable.
                             use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                            max_ripups_per_net=(getattr(args, "max_ripups_per_net", None) or 3),
+                            max_ripups_per_net=_targeted_ripup_budget(args),
                             # Issue #3132: forward --early-stop-patience to the
                             # inner main-path negotiator call so the CLI flag
                             # is honored (default 2 was silently overriding it).
@@ -8824,7 +8838,7 @@ def main(argv: list[str] | None = None) -> int:
                         # pre-existing targeted rip-up path in
                         # route_all_negotiated is CLI-reachable.
                         use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                        max_ripups_per_net=(getattr(args, "max_ripups_per_net", None) or 3),
+                        max_ripups_per_net=_targeted_ripup_budget(args),
                         # Issue #3132: forward --early-stop-patience to the
                         # inner negotiator so the CLI flag is honored.  This
                         # is the call site board 05's
@@ -8867,7 +8881,7 @@ def main(argv: list[str] | None = None) -> int:
                     # pre-existing targeted rip-up path in
                     # route_all_negotiated is CLI-reachable.
                     use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                    max_ripups_per_net=(getattr(args, "max_ripups_per_net", None) or 3),
+                    max_ripups_per_net=_targeted_ripup_budget(args),
                     # Issue #3132: forward --early-stop-patience to the inner
                     # negotiator call so the CLI flag is honored.  Previously
                     # the parameter silently defaulted to 2 even when the

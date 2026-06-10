@@ -8354,18 +8354,23 @@ class Autorouter:
                             )
                             blocking_nets |= sibling_blockers
 
-                            # Issue #2475/#2530: Rip up the partially-routed
-                            # net's existing routes only when we have blockers
-                            # to displace; otherwise targeted_ripup would skip
-                            # and we'd permanently lose the partial route on
-                            # single-net boards (or any board where no blockers
-                            # exist), regressing the prior partial connectivity
-                            # to zero routed segments.
+                            # Issue #2475/#2530: only invoke targeted_ripup
+                            # when we have blockers to displace; otherwise it
+                            # would skip and we'd permanently lose the partial
+                            # route on single-net boards (or any board where
+                            # no blockers exist).
+                            #
+                            # Issue #3470 (PR #3478 judge follow-up): the
+                            # out-of-transaction pre-rip of the failed net's
+                            # stale partial routes that used to live here is
+                            # gone.  ``targeted_ripup`` rips them INSIDE its
+                            # transaction and restores them verbatim when the
+                            # reroute does not converge, so the rollback
+                            # guarantee now covers this call site too --
+                            # previously the snapshot was taken AFTER the
+                            # external rip, losing the partial connectivity
+                            # on a failed rescue.
                             if blocking_nets:
-                                if failed_net in net_routes and net_routes[failed_net]:
-                                    neg_router.rip_up_nets(
-                                        [failed_net], net_routes, self.routes
-                                    )
 
                                 def _mark_route_fallback(route: Route) -> None:
                                     self._mark_route(route)

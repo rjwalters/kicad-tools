@@ -1131,7 +1131,31 @@ tolerances:
   # loaded CI runner, so the re-route DRC profile shifts with
   # machine load.  16 was a local-idle measurement, never a stable
   # CI floor.  Tighten after #3466 merges if CI stabilizes.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 21
+  #
+  # Raised 21 -> 28 (Issue #3470 / PR #3478, transactional rip-up
+  # rollback).  The transactional ``targeted_ripup`` commits only
+  # full-route transactions and restores the exact pre-rip-up routes
+  # on non-convergence, so the seed-42 negotiated re-route now lands
+  # MORE copper: net yield 29/31 -> 30/31 and route exit code 4 -> 3
+  # (threshold met, zero segment-segment clearance violations --
+  # categorically better).  The error-count increase is dominated by
+  # honest accounting on the newly COMPLETED diff pairs (DQS and one
+  # MIPI lane, previously stranded with one member unrouted): pairs
+  # that engage get measured by diffpair_length_skew +
+  # diffpair_routing_continuity (+2 each), where the disengaged pair
+  # contributed only a single connectivity error before (-1).  The
+  # remaining +2 is a clearance_segment_via reshuffle of the denser
+  # route (local profile shifts from 6 overlaps to 3 overlaps + 5
+  # sub-minimum near-misses).  Bisect evidence (PR #3478 doctor pass,
+  # 2026-06-10): main + escape-stub change alone reproduces main's
+  # profile exactly (25 local); main + transactional rip-up alone
+  # reproduces the full branch profile exactly (30 local) -- the
+  # rip-up transaction is 100% of the delta and the escape change is
+  # routing-neutral on this board.  Floor 28 = CI-empirical 27 (run
+  # 27289126468) + 1 slack, same convention as the 21 floor (CI 20).
+  # The diff-pair skew/continuity work on the now-engaged pairs is
+  # #3471-adjacent follow-up scope; tighten when it lands.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 28
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
