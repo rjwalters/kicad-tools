@@ -334,6 +334,87 @@ class CoupledNode:
     seq: int = field(compare=True, default=0)
 
 
+def build_corridor_mask(
+    grid: RoutingGrid,
+    guide_route: Route,
+    radius_cells: int,
+    extra_cells: tuple[tuple[int, int], ...] = (),
+) -> frozenset[tuple[int, int]]:
+    """Build a layer-agnostic corridor mask from a single-ended guide route.
+
+    Issue #3439: the coupled diff-pair A* searches the joint
+    ``(p_pos, n_pos)`` product state space, which is roughly quadratic
+    in the open-grid single-net search and intractable in pure Python
+    on a 4-layer 110x95 mm grid (~14k iterations/min vs the millions
+    needed).  Restricting both traces to a corridor dilated around a
+    known-routable single-ended path (found by the C++-accelerated
+    per-net router) converts the open 2D search into a near-1D one,
+    which the pure-Python coupled search completes in seconds.
+
+    The mask is intentionally layer-agnostic: the coupled search keeps
+    full freedom to choose layers (paired vias) within the spatial
+    tube.  This avoids over-constraining the pair to the guide path's
+    exact layer sequence, which was computed for a single trace and may
+    not have room for two.
+
+    Args:
+        grid: The routing grid (used for world->grid conversion and
+            bounds clamping).
+        guide_route: A single-ended :class:`Route` whose segments trace
+            the spatial path to dilate (typically the P-side of the
+            pair, routed by the standard per-net pathfinder WITHOUT
+            being committed to the grid).
+        radius_cells: Chebyshev dilation radius in grid cells.  Must be
+            at least the pair's center-to-center spacing plus a few
+            cells of maneuvering slack so the N trace fits alongside
+            the guide path and the search can detour around local
+            obstacles.
+        extra_cells: Additional ``(x, y)`` grid cells to include (with
+            the same dilation), e.g. the four pad endpoint cells so the
+            N-side endpoints are always inside the corridor even when
+            the start/end pad pitch exceeds ``radius_cells``.
+
+    Returns:
+        Frozenset of in-bounds ``(x, y)`` grid cells forming the
+        corridor.
+    """
+    base_cells: set[tuple[int, int]] = set(extra_cells)
+
+    for seg in guide_route.segments:
+        gx1, gy1 = grid.world_to_grid(seg.x1, seg.y1)
+        gx2, gy2 = grid.world_to_grid(seg.x2, seg.y2)
+        steps = max(abs(gx2 - gx1), abs(gy2 - gy1))
+        if steps == 0:
+            base_cells.add((gx1, gy1))
+            continue
+        for i in range(steps + 1):
+            t = i / steps
+            base_cells.add(
+                (
+                    int(round(gx1 + (gx2 - gx1) * t)),
+                    int(round(gy1 + (gy2 - gy1) * t)),
+                )
+            )
+
+    for via in guide_route.vias:
+        base_cells.add(grid.world_to_grid(via.x, via.y))
+
+    radius = max(0, int(radius_cells))
+    corridor: set[tuple[int, int]] = set()
+    cols, rows = grid.cols, grid.rows
+    for cx, cy in base_cells:
+        for dx in range(-radius, radius + 1):
+            x = cx + dx
+            if x < 0 or x >= cols:
+                continue
+            for dy in range(-radius, radius + 1):
+                y = cy + dy
+                if 0 <= y < rows:
+                    corridor.add((x, y))
+
+    return frozenset(corridor)
+
+
 class CoupledPathfinder:
     """A* pathfinder for coupled differential pair routing.
 
@@ -452,6 +533,15 @@ class CoupledPathfinder:
         # Reset to ``False`` at the start of every ``route_coupled``
         # invocation.
         self.last_timeout_exceeded: bool = False
+
+        # Issue #3473 (review of #3439): number of A* iterations the
+        # most recent ``route_coupled`` call consumed.  The two-phase
+        # corridor-then-open caller charges the corridor attempt's
+        # iterations against the shared per-pair iteration budget,
+        # mirroring the wall-clock split -- otherwise a failing pair
+        # receives the FULL ``max_iterations_budget`` twice (observed
+        # 4000+4000 on board 06, doubling the diff-pair phase).
+        self.last_iterations: int = 0
 
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
@@ -1011,6 +1101,7 @@ class CoupledPathfinder:
         n_end: Pad,
         timeout_seconds: float | None = None,
         max_iterations_budget: int | None = None,
+        corridor: frozenset[tuple[int, int]] | None = None,
     ) -> tuple[Route, Route] | None:
         """Route a differential pair with coupled pathfinding.
 
@@ -1053,6 +1144,20 @@ class CoupledPathfinder:
                 memory backstop; ``max_iterations_budget`` is the
                 user-tunable classifier and is expected to fire much
                 earlier than the backstop.
+            corridor: Issue #3439: Optional layer-agnostic corridor
+                mask (set of ``(x, y)`` grid cells, typically built by
+                :func:`build_corridor_mask` from a single-ended guide
+                route).  When set, every generated neighbor state must
+                place BOTH the P and N head positions inside the
+                corridor; states outside are pruned before they reach
+                the open set.  This converts the open joint-state
+                search (quadratic in the single-net state space and
+                intractable in pure Python on large boards) into a
+                corridor-bounded near-1D search that completes in
+                seconds.  Start/goal endpoint cells are exempt so an
+                under-dilated corridor can never disqualify the only
+                landing cells.  ``None`` (default) preserves the
+                unconstrained legacy search.
 
         Returns:
             Tuple of (p_route, n_route) or None if routing failed (no
@@ -1064,6 +1169,8 @@ class CoupledPathfinder:
         # this immediately after ``route_coupled`` returns ``None`` to
         # decide whether to attempt an independent-routing fallback.
         self.last_timeout_exceeded = False
+        # Issue #3473: reset the iteration counter for this call.
+        self.last_iterations = 0
 
         # Convert to grid coordinates
         p_start_gx, p_start_gy = self.grid.world_to_grid(p_start.x, p_start.y)
@@ -1121,6 +1228,19 @@ class CoupledPathfinder:
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
+        # Issue #3439: endpoint cells are exempt from the corridor
+        # check -- the corridor builder includes them by construction,
+        # but an under-dilated mask must never disqualify the search's
+        # only landing cells.
+        corridor_exempt: frozenset[tuple[int, int]] = frozenset(
+            (
+                (p_start_pos.x, p_start_pos.y),
+                (p_goal_pos.x, p_goal_pos.y),
+                (n_start_pos.x, n_start_pos.y),
+                (n_goal_pos.x, n_goal_pos.y),
+            )
+        )
+
         # A* setup
         open_set: list[CoupledNode] = []
         closed_set: set[tuple[GridPos, GridPos]] = set()
@@ -1160,6 +1280,12 @@ class CoupledPathfinder:
 
         while open_set and iterations < max_iterations:
             iterations += 1
+            # Issue #3473: keep the public counter current on every
+            # iteration so EVERY exit path (budget, timeout, goal,
+            # exhausted open set, exceptions) reports the true cost.
+            # A single attribute store is noise next to the heap and
+            # parent-chain work in this loop body.
+            self.last_iterations = iterations
 
             # Issue #3144: iteration budget classifier check.  Sits
             # adjacent to the wall-clock check so a single ``if`` body
@@ -1269,6 +1395,19 @@ class CoupledPathfinder:
                 p_visited=p_visited_frozen,
                 n_visited=n_visited_frozen,
             ):
+                # Issue #3439: corridor-bounded search.  Prune any
+                # state whose P or N head leaves the corridor mask
+                # (endpoint cells exempt).  Layer is intentionally
+                # ignored -- the corridor constrains the spatial tube,
+                # not the layer choice.
+                if corridor is not None:
+                    p_xy = (new_state.p_pos.x, new_state.p_pos.y)
+                    n_xy = (new_state.n_pos.x, new_state.n_pos.y)
+                    if (p_xy not in corridor and p_xy not in corridor_exempt) or (
+                        n_xy not in corridor and n_xy not in corridor_exempt
+                    ):
+                        continue
+
                 neighbor_key = (new_state.p_pos, new_state.n_pos)
                 if neighbor_key in closed_set:
                     continue
@@ -2162,6 +2301,58 @@ class DiffPairRouter:
             results.append(route)
         return results
 
+    def _single_ended_guide_route(
+        self,
+        start_pad: Pad,
+        end_pad: Pad,
+        per_net_timeout: float | None = None,
+    ) -> Route | None:
+        """Route one side of a pair single-ended to seed a corridor mask.
+
+        Issue #3439: the corridor-bounded coupled search needs a
+        known-routable spatial path to dilate.  We use the autorouter's
+        standard per-net pathfinder (C++-accelerated when available,
+        10-100x faster than the pure-Python coupled A*) to find the
+        P-side path.  The returned route is NOT committed to the grid
+        or the route list -- it exists only to bound the coupled
+        search's state space and is discarded afterwards.
+
+        Issue #3473 (review of #3439): the probe is bounded by
+        ``per_net_timeout``.  It is only a guide route -- if the
+        single-ended path cannot be found quickly, the corridor
+        attempt is skipped and the legacy open search gets the budget
+        instead.  Without this, a hard P side (C++ search fails ->
+        unbounded Python fallback) consumed nearly the whole per-pair
+        budget on board 06 BEFORE either coupled attempt ran, leaving
+        the open fallback just the 1.0s floor.
+
+        Returns ``None`` when no single-ended path exists within the
+        deadline (in which case the caller falls back to the
+        unconstrained coupled search) or when the pathfinder raises.
+        """
+        try:
+            return self.autorouter.router.route(
+                start_pad, end_pad, per_net_timeout=per_net_timeout
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug(
+                "corridor guide route raised for %r -> %r: %s",
+                start_pad.net_name,
+                end_pad.net_name,
+                exc,
+            )
+            return None
+        finally:
+            # Issue #3473 (judge note on #3439): the C++ backend's
+            # validation-failure path mutates persistent avoidance
+            # costs (``_boost_avoidance_at``); normally cleared in
+            # ``Autorouter._route_net``, which this probe bypasses.
+            # Clear them here so a failed probe cannot leak
+            # cost-shaping into subsequent searches.
+            router = self.autorouter.router
+            if hasattr(router, "clear_avoidance_costs"):
+                router.clear_avoidance_costs()
+
     def route_differential_pair_coupled(
         self,
         pair: DifferentialPair,
@@ -2346,13 +2537,144 @@ class DiffPairRouter:
                 f"    Routing {pair.positive.net_name}/{pair.negative.net_name}{polarity_marker}..."
             )
 
-            result = pathfinder.route_coupled(
-                spec.p_start,
-                spec.p_end,
-                spec.n_start,
-                spec.n_end,
-                timeout_seconds=per_pair_timeout,
-                max_iterations_budget=per_pair_max_iterations,
+            # Issue #3439: corridor-bounded attempt first.  The open
+            # joint-state coupled A* is pure Python and intractable on
+            # large boards (~14k iterations/min on board 07's 4-layer
+            # 110x95mm grid -- every pair blew its 60s budget).  Route
+            # the P side single-ended via the (C++-accelerated) per-net
+            # pathfinder, dilate its path into a spatial corridor, and
+            # run the coupled search restricted to that corridor.  This
+            # converts the open 2D product-space search into a near-1D
+            # one that completes in seconds.  The guide route is NEVER
+            # committed to the grid.  When the corridor attempt fails
+            # (no guide path, corridor too tight for two traces, or
+            # corridor budget exceeded) we fall back to the legacy
+            # unconstrained search with the remaining per-pair budget,
+            # preserving behaviour on boards where the open search
+            # already converged (boards 03/06).
+            spec_t0 = time.monotonic()
+            result: tuple[Route, Route] | None = None
+            coupled_phase = "open"
+            # Issue #3473: iterations the corridor attempt consumed,
+            # charged against the shared per-pair iteration budget so
+            # the open fallback gets the REMAINDER (not a fresh full
+            # budget -- the 4000+4000 double-spend on board 06).
+            corridor_iterations_used = 0
+
+            # Issue #3473: bound the probe.  It is only a guide route;
+            # give it a small slice of the corridor half-budget (an
+            # eighth of the per-pair budget, e.g. 7.5s of 60s).  If
+            # the P side cannot be routed single-ended that quickly,
+            # skip the corridor and hand the budget to the legacy
+            # open search instead of burning it before either coupled
+            # attempt runs.
+            probe_timeout = (
+                per_pair_timeout * 0.125 if per_pair_timeout is not None else None
+            )
+            guide_route = self._single_ended_guide_route(
+                spec.p_start, spec.p_end, per_net_timeout=probe_timeout
+            )
+            if guide_route is not None and guide_route.segments:
+                grid = self.autorouter.grid
+                resolution = grid.resolution
+                start_spacing_cells = (
+                    math.dist(
+                        (spec.p_start.x, spec.p_start.y),
+                        (spec.n_start.x, spec.n_start.y),
+                    )
+                    / resolution
+                )
+                end_spacing_cells = (
+                    math.dist(
+                        (spec.p_end.x, spec.p_end.y),
+                        (spec.n_end.x, spec.n_end.y),
+                    )
+                    / resolution
+                )
+                # The corridor must admit the N trace alongside the
+                # guide path at the WIDEST spacing the run will see
+                # (start/end pad pitch can exceed the target), plus
+                # maneuvering slack for local detours.
+                corridor_radius = int(
+                    math.ceil(max(spacing_cells, start_spacing_cells, end_spacing_cells))
+                ) + max(6, spacing_cells)
+                corridor = build_corridor_mask(
+                    grid,
+                    guide_route,
+                    corridor_radius,
+                    extra_cells=(
+                        grid.world_to_grid(spec.p_start.x, spec.p_start.y),
+                        grid.world_to_grid(spec.p_end.x, spec.p_end.y),
+                        grid.world_to_grid(spec.n_start.x, spec.n_start.y),
+                        grid.world_to_grid(spec.n_end.x, spec.n_end.y),
+                    ),
+                )
+                # Half the per-pair budget for probe + corridor
+                # attempt combined; the rest is reserved for the
+                # open-search fallback so a corridor pathology can
+                # never starve the legacy path entirely.  Issue #3473:
+                # the probe's elapsed time is deducted from the
+                # corridor half (it already counts against the pair
+                # via ``spec_t0``), keeping probe+corridor <= ~50% of
+                # the per-pair budget instead of 62.5%.
+                corridor_budget: float | None = None
+                if per_pair_timeout is not None:
+                    corridor_budget = max(
+                        0.5,
+                        per_pair_timeout * 0.5 - (time.monotonic() - spec_t0),
+                    )
+                # Issue #3473: split the ITERATION budget the same way
+                # as the wall-clock budget -- the corridor attempt gets
+                # at most half, so a failing pair cannot spend the full
+                # budget twice (4000 corridor + 4000 open on board 06).
+                corridor_iteration_budget: int | None = None
+                if per_pair_max_iterations is not None and per_pair_max_iterations > 0:
+                    corridor_iteration_budget = max(1, per_pair_max_iterations // 2)
+                result = pathfinder.route_coupled(
+                    spec.p_start,
+                    spec.p_end,
+                    spec.n_start,
+                    spec.n_end,
+                    timeout_seconds=corridor_budget,
+                    max_iterations_budget=corridor_iteration_budget,
+                    corridor=corridor,
+                )
+                corridor_iterations_used = pathfinder.last_iterations
+                if result is not None:
+                    coupled_phase = "corridor"
+
+            if result is None:
+                remaining_budget = per_pair_timeout
+                if per_pair_timeout is not None:
+                    remaining_budget = max(
+                        1.0, per_pair_timeout - (time.monotonic() - spec_t0)
+                    )
+                # Issue #3473: the open fallback gets the REMAINDER of
+                # the shared iteration budget.  Because the corridor
+                # attempt was capped at half, the fallback always
+                # retains at least ~half -- mirroring the wall-clock
+                # arithmetic above.
+                remaining_iterations = per_pair_max_iterations
+                if per_pair_max_iterations is not None and per_pair_max_iterations > 0:
+                    remaining_iterations = max(
+                        1, per_pair_max_iterations - corridor_iterations_used
+                    )
+                result = pathfinder.route_coupled(
+                    spec.p_start,
+                    spec.p_end,
+                    spec.n_start,
+                    spec.n_end,
+                    timeout_seconds=remaining_budget,
+                    max_iterations_budget=remaining_iterations,
+                )
+
+            spec_elapsed = time.monotonic() - spec_t0
+            logger.info(
+                "diffpair coupled timing: pair=%r phase=%s elapsed=%.2fs success=%s",
+                pair.name,
+                coupled_phase,
+                spec_elapsed,
+                result is not None,
             )
 
             if result is None:
@@ -3428,6 +3750,7 @@ class DiffPairRouter:
         coupled_only: bool = False,
         per_pair_timeout: float | None = None,
         per_pair_max_iterations: int | None = None,
+        aggregate_timeout: float | None = None,
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Route all nets with differential pair-aware routing.
 
@@ -3462,6 +3785,21 @@ class DiffPairRouter:
                 are supplied; ``None`` defers to the config value, and
                 if that is also ``None`` the legacy unbounded
                 behaviour is preserved.
+            aggregate_timeout: Issue #3439: Optional wall-clock budget
+                (seconds) for the ENTIRE coupled diff-pair phase.  Once
+                exhausted, all remaining pairs are deferred to the main
+                strategy WITHOUT attempting coupled routing (the same
+                budget-exit path as per-pair exits), so a board full of
+                pathological pairs can never burn
+                ``num_pairs * per_pair_timeout`` of the outer routing
+                budget before the single-ended fallback runs -- the
+                board-07 7/31-reach collapse.  Per-pair budgets are
+                additionally clamped to the remaining aggregate budget.
+                Takes precedence over
+                ``DifferentialPairConfig.aggregate_timeout``; ``None``
+                defers to the config value, and if that is also
+                ``None`` the legacy per-pair-only behaviour is
+                preserved.
         """
         # Issue #3089: prefer the explicit kwarg, otherwise fall back to
         # the config field so callers configuring everything via
@@ -3474,6 +3812,10 @@ class DiffPairRouter:
         effective_per_pair_max_iterations = per_pair_max_iterations
         if effective_per_pair_max_iterations is None and diffpair_config is not None:
             effective_per_pair_max_iterations = diffpair_config.per_pair_max_iterations
+        # Issue #3439: same precedence pattern for the aggregate budget.
+        effective_aggregate_timeout = aggregate_timeout
+        if effective_aggregate_timeout is None and diffpair_config is not None:
+            effective_aggregate_timeout = getattr(diffpair_config, "aggregate_timeout", None)
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
 
@@ -3514,6 +3856,16 @@ class DiffPairRouter:
         # them up normally (the per-net C++ A* router is the right tool
         # for any single net the coupled search couldn't converge on).
         budget_exit_diff_nets: set[int] = set()
+        # Issue #3439: aggregate coupled-phase deadline.  When set, the
+        # whole pair loop must finish by this time; pairs that would
+        # start after the deadline (or with <0.5s of budget left) are
+        # deferred to the main strategy via the budget-exit path so a
+        # failed coupled pre-pass can never starve the single-ended
+        # fallback of wall-clock budget (the board-07 7/31 collapse).
+        coupled_phase_deadline: float | None = None
+        if effective_aggregate_timeout is not None and effective_aggregate_timeout > 0:
+            coupled_phase_deadline = time.monotonic() + float(effective_aggregate_timeout)
+        aggregate_deferred_pairs = 0
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
             # Issue #2638, Epic #2556 Phase 2E: engagement gate.  Refuse
@@ -3531,12 +3883,38 @@ class DiffPairRouter:
                 refused_diff_nets.add(p_id)
                 refused_diff_nets.add(n_id)
                 continue
+            # Issue #3439: aggregate budget check + per-pair clamp.
+            pair_timeout = effective_per_pair_timeout
+            if coupled_phase_deadline is not None:
+                aggregate_remaining = coupled_phase_deadline - time.monotonic()
+                if aggregate_remaining <= 0.5:
+                    if aggregate_deferred_pairs == 0:
+                        logger.warning(
+                            "DIFFPAIR_AGGREGATE_BUDGET_EXCEEDED: coupled "
+                            "diff-pair phase consumed its %.1fs aggregate "
+                            "budget; deferring remaining pairs to the main "
+                            "strategy (issue #3439)",
+                            float(effective_aggregate_timeout),
+                        )
+                    print(
+                        f"  [diffpair-aggregate] budget exhausted; deferring "
+                        f"{pair} to main strategy"
+                    )
+                    budget_exit_diff_nets.add(p_id)
+                    budget_exit_diff_nets.add(n_id)
+                    aggregate_deferred_pairs += 1
+                    continue
+                pair_timeout = (
+                    min(pair_timeout, aggregate_remaining)
+                    if pair_timeout is not None
+                    else aggregate_remaining
+                )
             if coupled_only:
                 pair_routes, warning = self.route_differential_pair_coupled(
                     pair,
                     diffpair_config.spacing,
                     coupled_only=True,
-                    per_pair_timeout=effective_per_pair_timeout,
+                    per_pair_timeout=pair_timeout,
                     per_pair_max_iterations=effective_per_pair_max_iterations,
                 )
             else:
@@ -3544,7 +3922,7 @@ class DiffPairRouter:
                     pair,
                     diffpair_config.spacing,
                     use_coupled_routing=True,  # Use coupled routing by default
-                    per_pair_timeout=effective_per_pair_timeout,
+                    per_pair_timeout=pair_timeout,
                     per_pair_max_iterations=effective_per_pair_max_iterations,
                 )
             # Issue #3089: detect budget-exit via the pair's last_budget_exit
@@ -3568,6 +3946,13 @@ class DiffPairRouter:
             if warning:
                 warnings.append(warning)
 
+        if aggregate_deferred_pairs:
+            print(
+                f"  [diffpair-aggregate] deferred {aggregate_deferred_pairs} "
+                f"pair(s) to main strategy after the aggregate coupled-phase "
+                f"budget ({effective_aggregate_timeout:.1f}s) was exhausted"
+            )
+
         # Issue #2464: When coupled_only=True, only the nets actually
         # routed by the CoupledPathfinder are reserved.  Pairs that fell
         # through (e.g., 3-pad nets) remain in the routable set so the
@@ -3588,10 +3973,19 @@ class DiffPairRouter:
                 # the budget-exit nets would be excluded from the
                 # main strategy AND have no coupled routes, leaving
                 # them unrouted in the final PCB.
-                print(
-                    f"  Diff pairs deferred to main strategy due to "
-                    f"per-pair budget: {len(budget_exit_diff_nets) // 2}"
+                # Issue #3473 (cosmetic): aggregate-deferred pairs are
+                # also in ``budget_exit_diff_nets`` but already have
+                # their own "[diffpair-aggregate] deferred N pair(s)"
+                # print above; report only the genuinely per-pair
+                # budget exits under the per-pair label.
+                per_pair_deferred = max(
+                    0, len(budget_exit_diff_nets) // 2 - aggregate_deferred_pairs
                 )
+                if per_pair_deferred:
+                    print(
+                        f"  Diff pairs deferred to main strategy due to "
+                        f"per-pair budget: {per_pair_deferred}"
+                    )
                 diff_net_ids = diff_net_ids - budget_exit_diff_nets
 
         # Issue #3270: Surface budget-exit diff-pair nets to the
