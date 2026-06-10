@@ -1272,6 +1272,23 @@ tolerances:
   #       reset via the software-mediated path).
   # Floor 1 -> 0 (the SWDIO/BOOT0 clearance_segment_via that drove
   # the prior 1-floor is GONE from the refreshed PCB).
+  #
+  # Issue #3433 refresh (closes #3411's last blocker): the committed
+  # PCB is regenerated from the post-#3434 + post-#3433 router state
+  # at the same production recipe (PYTHONHASHSEED=42, --seed 42, C++
+  # backend).  9/9 signal nets routed -- NRST is RECOVERED via the
+  # #3434 target-aware in-pad stub, removing the NRST advisory and
+  # the functional SWD-reset gap documented above.  The #3433 fixes
+  # (seg-seg violators in the negotiated quality tuple at all metric
+  # sites incl. the two-phase loop, demote-to-partial safety net,
+  # overused-cells-only optimizer overflow tolerance, rect-aware
+  # stitch straight-trace pad check) eliminate the env-sensitive
+  # SWCLK/SWO -0.200mm overlap commits and the U2.8->U2.9 stitch
+  # trace pad crossing.  Residual advisory: 1 ``connectivity``
+  # finding (GND 3/18 stitch pads stranded: U2.8/U2.23/U2.35 -- the
+  # LQFP-48 corner cluster of #3267; U2.23 is newly blocked by the
+  # recovered NRST B.Cu track, a deliberate signal-over-stitch
+  # trade).  Floor stays 0.
   boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 0
 
 # Per-board manufacturer overrides for the CI gate (optional).

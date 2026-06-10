@@ -37,6 +37,7 @@ from .algorithms import (
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
+    select_seg_seg_demotion_nets,
     should_terminate_early,
 )
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
@@ -205,6 +206,13 @@ class IterationMetrics:
        back to the prior state.  Promoted ABOVE overflow because a
        DRC-clean board with marginally higher overflow is strictly
        preferable to a DRC-dirty board with lower overflow.
+       Issue #3433: the count covers all three quadrants of the
+       clearance matrix — seg-vs-foreign-via (#3002), via-vs-foreign-
+       seg (#3020), AND seg-vs-foreign-seg violators (#3433).  Before
+       #3433 an iteration with four cross-net trace FULL OVERLAPS
+       (board-04 SWCLK/SWO, edge actuals to -0.200 mm) scored
+       identically to a DRC-clean one and could win the post-loop
+       restore on ``routed_count`` dominance.
     4. ``overflow`` ascending — with equal route counts and equal
        clearance violations, lower overflow is better (the Issue #2803
        dimension).
@@ -216,9 +224,10 @@ class IterationMetrics:
         iteration: Iteration index (0 = initial pass, 1..N = rip-up iters).
         routed_count: Number of nets with at least one route at iter end.
         overflow: Grid total overflow at iter end (lower is better).
-        clearance_violations: Count of nets with segment-vs-foreign-via
-            clearance violations at iter end (Issue #3002; lower is
-            better).  Defaults to 0 for back-compat with existing call
+        clearance_violations: Count of nets with live clearance
+            violations at iter end — seg-vs-via (#3002), via-vs-seg
+            (#3020) and seg-vs-seg (#3433) violators summed; lower is
+            better.  Defaults to 0 for back-compat with existing call
             sites that don't compute the count.
         nets_fully_connected: Count of nets whose pads are all in a
             single connected component per
@@ -288,6 +297,13 @@ def _format_pad_ref(pad: "Pad") -> str:
         return pad.ref
     # Steiner point or other synthetic pad — identify by position
     return f"steiner@({pad.x:.3f},{pad.y:.3f})"
+
+
+# Issue #3433: greedy vertex-cover selection for the demote-to-partial
+# safety net.  Canonical implementation lives in ``algorithms.negotiated``
+# so the two-phase detailed loop can share it without a circular import;
+# re-bound here for the Autorouter call sites and existing tests.
+_select_seg_seg_demotion_nets = select_seg_seg_demotion_nets
 
 
 def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
@@ -6735,7 +6751,18 @@ class Autorouter:
             cache_key=("init",),
             extra_routes=_extra_init,
         )
-        initial_violations = len(initial_seg_via) + len(initial_via_seg)
+        # Issue #3433: third quadrant -- segment-vs-foreign-segment.
+        # Without it, an iteration with cross-net trace overlaps
+        # (board-04 SWCLK/SWO, actuals to -0.200 mm) ties a clean one
+        # in the lex tuple and can win the post-loop restore.
+        initial_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("init",),
+            extra_routes=_extra_init,
+        )
+        initial_violations = (
+            len(initial_seg_via) + len(initial_via_seg) + len(initial_seg_seg)
+        )
 
         # Issue #3117: compute ``nets_fully_connected`` for the lex tuple.
         # ``validate_net_connectivity`` is already called once per
@@ -6829,7 +6856,18 @@ class Autorouter:
                 cache_key=("post", iter_index),
                 extra_routes=_extra_post,
             )
-            violations_now = len(post_seg_via) + len(post_via_seg)
+            # Issue #3433: include segment-vs-segment violators so an
+            # iteration that resolved a trace overlap (e.g. by layer
+            # separation) beats an overlapping iteration with the same
+            # routed count in the best-snapshot comparator.
+            post_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("post", iter_index),
+                extra_routes=_extra_post,
+            )
+            violations_now = (
+                len(post_seg_via) + len(post_via_seg) + len(post_seg_seg)
+            )
             # Issue #3117: compute ``nets_fully_connected`` so the lex
             # tuple primary key can reward iterations that closed more
             # pad-to-pad paths (not just iterations that produced more
@@ -6950,7 +6988,16 @@ class Autorouter:
                     cache_key=("post", iteration - 1),
                     extra_routes=_extra_top,
                 )
-                current_violations = len(current_seg_via) + len(current_via_seg)
+                # Issue #3433: seg-seg parity at the top-of-iteration
+                # snapshot site (matches the end-of-iteration capture).
+                current_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iteration - 1),
+                    extra_routes=_extra_top,
+                )
+                current_violations = (
+                    len(current_seg_via) + len(current_via_seg) + len(current_seg_seg)
+                )
                 # Issue #3117: mirror the lex-tuple primary key at the
                 # top-of-iteration snapshot site so a prior iteration's
                 # end-state can still be promoted to "best" when it had
@@ -7263,6 +7310,38 @@ class Autorouter:
                         flush_print(
                             f"  Including {len(new_via_violators)} via-vs-foreign-segment "
                             f"violator(s) in recovery: {', '.join(violator_names)}"
+                        )
+
+                # Issue #3433: Third quadrant -- segment-vs-foreign-
+                # segment violators.  Cross-net trace overlaps (board-04
+                # SWCLK/SWO committed coincident in the SWD corridor)
+                # are invisible to the two via hooks above AND can be
+                # missed by ``find_nets_through_overused_cells`` when
+                # the overflow attribution lands elsewhere -- the
+                # overlapping nets then never enter the rip-up cohort
+                # and the loop stagnates with the overlap committed.
+                # Feed BOTH nets of each violating pair back so the
+                # next iteration can separate them (typically by layer).
+                seg_seg_violators = neg_router.find_nets_with_segment_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("post", iteration - 1),
+                    extra_routes=_extra_mid,
+                )
+                if seg_seg_violators:
+                    new_seg_seg_violators = [
+                        n for n in seg_seg_violators
+                        if n not in nets_to_reroute and n not in off_grid_nets
+                    ]
+                    if new_seg_seg_violators:
+                        for v_net in new_seg_seg_violators:
+                            nets_to_reroute.append(v_net)
+                        violator_names = [
+                            self.net_names.get(n, f"Net_{n}")
+                            for n in new_seg_seg_violators
+                        ]
+                        flush_print(
+                            f"  Including {len(new_seg_seg_violators)} segment-vs-foreign-"
+                            f"segment violator(s) in recovery: {', '.join(violator_names)}"
                         )
 
                 # Issue #2295: Per-net rip-up stall filtering.
@@ -8349,7 +8428,18 @@ class Autorouter:
             cache_key=("final", final_route_count, final_via_count),
             extra_routes=_extra_final,
         )
-        final_violations = len(final_seg_via) + len(final_via_seg)
+        # Issue #3433: seg-seg violators in the final comparator so a
+        # best snapshot that resolved trace overlaps by layer
+        # separation is never overwritten by an overlapping final
+        # state with equal routed count.
+        final_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("final", final_route_count, final_via_count),
+            extra_routes=_extra_final,
+        )
+        final_violations = (
+            len(final_seg_via) + len(final_via_seg) + len(final_seg_seg)
+        )
         # Issue #3117: include ``nets_fully_connected`` in the final
         # lex-tuple comparator so the post-loop restore preserves a
         # best snapshot whose pad-to-pad paths are more thoroughly
@@ -8428,6 +8518,25 @@ class Autorouter:
                     f"\n  Post-route clearance correction rerouted {corrected} net(s) "
                     f"({total_elapsed:.1f}s)"
                 )
+
+        # Issue #3433 (safety net): never commit physically-overlapping
+        # copper.  Even with seg-seg violators in the lex tuple, the
+        # loop can exit (stall patience, stagnation, timeout) with a
+        # best snapshot that still contains cross-net same-layer
+        # full overlaps (board-04 SWCLK/SWO, actual -0.200 mm).  Those
+        # are unmanufacturable hard-gate failures, whereas an unrouted
+        # net is an advisory connectivity finding -- the trade is
+        # strictly better.  Runs AFTER the correction pass (which gets
+        # first chance to actually fix the geometry) and ALSO on the
+        # ``timed_out`` path that skips the correction pass entirely.
+        demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router)
+        if demoted:
+            successful_nets = sum(1 for routes in net_routes.values() if routes)
+            flush_print(
+                f"\n  ⚠ Demoted {len(demoted)} net(s) with physically "
+                f"overlapping copper to unrouted: {sorted(demoted)} "
+                f"(now {successful_nets}/{total_nets} routed)"
+            )
 
         if progress_callback is not None:
             # Issue #2597: Distinguish ``stagnated`` from ``timeout`` and
@@ -8532,6 +8641,63 @@ class Autorouter:
         )
         routes.extend(new_routes)
         return routes
+
+    def _demote_seg_seg_overlap_nets(
+        self,
+        net_routes: dict[int, list[Route]],
+        neg_router: "NegotiatedRouter",
+    ) -> list[int]:
+        """Strip nets whose committed copper physically overlaps a foreign net.
+
+        Issue #3433 (safety net B): the negotiated loop can exit (stall
+        patience, stagnation, timeout) holding a best-by-lex-tuple
+        snapshot that still contains cross-net same-layer segment pairs
+        with NEGATIVE edge-to-edge clearance -- traces routed on top of
+        each other (board-04 SWCLK/SWO, actual -0.200 mm).  Overlapping
+        copper is an unmanufacturable hard-gate DRC failure; an
+        unrouted net is an advisory connectivity finding.  This method
+        enforces that trade in the right direction: any net selected by
+        the greedy cover over copper-overlap pairs is demoted to
+        unrouted (grid unmarked, routes removed) rather than committed.
+
+        Only fires for PHYSICAL overlap (``copper_overlap_only=True``),
+        never for positive-clearance near-misses -- those remain the
+        province of ``_post_route_clearance_correction`` and the DRC
+        nudge pass, which can actually repair them.
+
+        Args:
+            net_routes: Mapping of net ID to committed routes (mutated:
+                demoted nets are reset to ``[]``).
+            neg_router: Negotiated router (pair detection + grid unmark
+                conventions live there).
+
+        Returns:
+            Sorted list of demoted net ids (empty when the result is
+            already overlap-free, the common case).
+        """
+        extra = self._collect_extra_routes_for_revalidation(net_routes)
+        overlap_pairs = neg_router.find_segment_segment_violation_pairs(
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
+            extra_routes=extra,
+            copper_overlap_only=True,
+        )
+        if not overlap_pairs:
+            return []
+
+        demotable = {net for net, routes in net_routes.items() if routes}
+        victims = _select_seg_seg_demotion_nets(overlap_pairs, demotable)
+        if not victims:
+            return []
+
+        for net in victims:
+            for route in net_routes.get(net, []):
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                if route in self.routes:
+                    self.routes.remove(route)
+            net_routes[net] = []
+        return victims
 
     def _post_route_clearance_correction(
         self,

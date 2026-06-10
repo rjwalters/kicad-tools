@@ -821,6 +821,134 @@ def find_smd_pad_bboxes_on_nets(
     return bboxes
 
 
+def find_all_pad_bboxes(
+    sexp: SExp, exclude_nets: set[int] | None = None
+) -> list[tuple[float, float, float, float, int]]:
+    """Return AABBs for ALL pads, optionally excluding specific nets.
+
+    Issue #3433: rectangle-aware clearance source for the straight
+    pad-to-via trace check in :func:`calculate_via_position`.  The
+    bounding-circle model in :func:`find_all_pads` uses
+    ``max(w, h) / 2`` which is wildly conservative along the SHORT
+    axis of elongated QFP pads (a 1.5 x 0.3 mm LQFP pad becomes a
+    0.75 mm disc) -- circle-checking the connecting trace there both
+    over-rejects legitimate escapes (board-04 U2.47) and was
+    historically omitted entirely, letting a diagonal cross the
+    neighbouring pad's copper (board-04 U2.8 -> across U2.9).
+
+    Bbox computation mirrors :func:`find_smd_pad_bboxes_on_nets`
+    (cardinal rotations swap dimensions; other rotations use the
+    conservative AABB of the rotated rect).  Unlike that helper this
+    includes through-hole pads too -- a stitch trace must clear their
+    annular copper just the same.
+
+    Args:
+        sexp: PCB S-expression.
+        exclude_nets: Net numbers to exclude (e.g., the stitched nets).
+
+    Returns:
+        List of ``(min_x, min_y, max_x, max_y, net_num)`` tuples in
+        board coordinates (mm).
+    """
+    bboxes: list[tuple[float, float, float, float, int]] = []
+    if exclude_nets is None:
+        exclude_nets = set()
+
+    for fp in sexp.iter_children():
+        if fp.tag != "footprint":
+            continue
+
+        at_node = fp.find_child("at")
+        if not at_node:
+            continue
+        fp_x = at_node.get_float(0) or 0.0
+        fp_y = at_node.get_float(1) or 0.0
+        fp_rotation_deg = at_node.get_float(2) or 0.0
+        rad = math.radians(fp_rotation_deg)
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+
+        for pad in fp.find_children("pad"):
+            net_node = pad.find_child("net")
+            if not net_node:
+                continue
+            net_num = net_node.get_int(0)
+            if net_num is None or net_num in exclude_nets:
+                continue
+
+            pad_at = pad.find_child("at")
+            if not pad_at:
+                continue
+            rel_x = pad_at.get_float(0) or 0.0
+            rel_y = pad_at.get_float(1) or 0.0
+            board_x = fp_x + rel_x * cos_r - rel_y * sin_r
+            board_y = fp_y + rel_x * sin_r + rel_y * cos_r
+
+            size_node = pad.find_child("size")
+            if not size_node:
+                continue
+            width = size_node.get_float(0) or 0.0
+            height = size_node.get_float(1) or 0.0
+
+            total_rotation = fp_rotation_deg % 360
+            if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
+                bbox_w, bbox_h = height, width
+            elif abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
+                bbox_w, bbox_h = width, height
+            else:
+                abs_cos = abs(cos_r)
+                abs_sin = abs(sin_r)
+                bbox_w = width * abs_cos + height * abs_sin
+                bbox_h = width * abs_sin + height * abs_cos
+
+            half_w = bbox_w / 2
+            half_h = bbox_h / 2
+            bboxes.append(
+                (
+                    board_x - half_w,
+                    board_y - half_h,
+                    board_x + half_w,
+                    board_y + half_h,
+                    net_num,
+                )
+            )
+
+    return bboxes
+
+
+def _segment_to_rect_distance(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+) -> float:
+    """Minimum distance between a segment and an axis-aligned rectangle.
+
+    Issue #3433: exact narrow-phase predicate for the straight
+    pad-to-via trace vs foreign-pad check.  Returns 0.0 when the
+    segment intersects or is contained by the rectangle; otherwise the
+    minimum of the segment-to-edge distances.
+    """
+    # Endpoint containment -> overlapping copper.
+    if (min_x <= x1 <= max_x and min_y <= y1 <= max_y) or (
+        min_x <= x2 <= max_x and min_y <= y2 <= max_y
+    ):
+        return 0.0
+
+    # Distance to each of the four rect edges; segment_to_segment_distance
+    # returns 0 on proper intersection, covering the pass-through case.
+    return min(
+        segment_to_segment_distance(x1, y1, x2, y2, min_x, min_y, max_x, min_y),
+        segment_to_segment_distance(x1, y1, x2, y2, max_x, min_y, max_x, max_y),
+        segment_to_segment_distance(x1, y1, x2, y2, max_x, max_y, min_x, max_y),
+        segment_to_segment_distance(x1, y1, x2, y2, min_x, max_y, min_x, min_y),
+    )
+
+
 def _via_drill_inside_pad_bbox(
     via_x: float,
     via_y: float,
@@ -1379,6 +1507,7 @@ def calculate_via_position(
     other_net_pads: list[tuple[float, float, float, int]] | None = None,
     trace_width: float = 0.0,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
+    other_net_pad_bboxes: list[tuple[float, float, float, float, int]] | None = None,
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -1401,6 +1530,11 @@ def calculate_via_position(
         trace_width: Width of the connecting trace from pad to via in mm.
             When > 0, the trace path is checked for clearance violations.
         other_net_filled_polygons: Filled polygons from other-net zone fills
+        other_net_pad_bboxes: Optional AABBs ``(min_x, min_y, max_x,
+            max_y, net)`` from :func:`find_all_pad_bboxes` for the
+            rect-aware straight-trace pad check (Issue #3433).  When
+            ``None`` the trace-vs-pad check falls back to the
+            bounding-circle model from ``other_net_pads``.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -1533,6 +1667,45 @@ def calculate_via_position(
                     if dist < min_dist:
                         conflict = True
                         break
+
+                if conflict:
+                    continue
+
+                # Check trace path against other-net pads (Issue #3433).
+                # The dog-leg (`_check_dogleg_path_clearance`) and
+                # extended-escape (`_check_multileg_path_clearance`)
+                # validators both walk their legs against
+                # ``other_net_pads``, but the straight-line path here
+                # did not -- only the VIA position was pad-checked.  On
+                # board 04 the U2.8 (GND) pad-to-via diagonal passed
+                # every other check and crossed the adjacent U2.9
+                # (+3.3V) pad at -0.100 mm, the lone blocking error in
+                # an otherwise-clean refresh.
+                #
+                # Rect-aware when bboxes are supplied: the bounding-
+                # circle model (``max(w, h) / 2``) would reject every
+                # legitimate escape that runs parallel to the SHORT
+                # axis of an elongated QFP pad (board-04 U2.47 went
+                # from stitched to stranded under the circle check).
+                if other_net_pad_bboxes is not None:
+                    for bmin_x, bmin_y, bmax_x, bmax_y, _pnet in other_net_pad_bboxes:
+                        dist = _segment_to_rect_distance(
+                            pad.x, pad.y, via_x, via_y,
+                            bmin_x, bmin_y, bmax_x, bmax_y,
+                        )
+                        if dist < trace_half_width + clearance:
+                            conflict = True
+                            break
+                else:
+                    # Fallback for callers that only supply the circle
+                    # model (back-compat with existing call sites).
+                    for px, py, p_radius, _pnet in other_net_pads:
+                        dist = point_to_segment_distance(
+                            px, py, pad.x, pad.y, via_x, via_y,
+                        )
+                        if dist < trace_half_width + p_radius + clearance:
+                            conflict = True
+                            break
 
                 if conflict:
                     continue
@@ -3635,6 +3808,9 @@ def run_stitch(
     other_net_vias = find_all_board_vias(sexp, exclude_nets=net_numbers)
     other_net_pads = find_all_pads(sexp, exclude_nets=net_numbers)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=net_numbers)
+    # Issue #3433: rect-aware pad geometry for the straight pad-to-via
+    # trace check (see calculate_via_position / find_all_pad_bboxes).
+    other_net_pad_bboxes = find_all_pad_bboxes(sexp, exclude_nets=net_numbers)
 
     # Net-number -> net-name lookup so skip diagnostics can name the
     # offending signal (e.g. ``net 8 'SWO'``) instead of just a number.
@@ -3668,6 +3844,7 @@ def run_stitch(
             other_net_pads=other_net_pads,
             trace_width=trace_width,
             other_net_filled_polygons=other_net_filled_polys,
+            other_net_pad_bboxes=other_net_pad_bboxes,
         )
 
         # Track if we're using dog-leg or extended escape routing
@@ -3723,6 +3900,7 @@ def run_stitch(
                             other_net_pads=other_net_pads,
                             trace_width=trace_width,
                             other_net_filled_polygons=other_net_filled_polys,
+                            other_net_pad_bboxes=other_net_pad_bboxes,
                         )
                         if micro_pos is None:
                             # Also try dogleg with micro-via size

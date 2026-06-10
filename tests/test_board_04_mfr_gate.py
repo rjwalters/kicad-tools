@@ -23,18 +23,20 @@ the same gate the CI ``routed-pcb-drc-check`` job uses
    surface the issue at PR time rather than discovering it in fleet
    status weeks later.
 
-The fleet-status fingerprint (54/55 pads ~ 98% manufacturer-readiness)
-is the higher-level invariant this pin is protecting.  Today board 04
-ships at:
+The fleet-status fingerprint is the higher-level invariant this pin is
+protecting.  Today board 04 ships at (post-#3433 / post-#3434 refresh):
 
-  * 8/9 signal nets routed (committed PCB; NRST stranded as advisory
-    connectivity, documented as correct router behaviour per #3286 --
-    the U2.7/U2.8 channel is below the 0.127 mm jlcpcb-tier1 clearance
-    floor that the post-#3128 clearance cluster correctly enforces).
-  * 0 blocking errors (the SWDIO/BOOT0 ``clearance_segment_via`` that
-    drove the prior 1-error floor is gone in the post-#3286 routed PCB).
-  * 2 advisory connectivity findings: NRST (J1.5 -> U2.7 stranded per
-    #3286) plus the U2.8/U2.35 LQFP-48 corner GND stitch gap (#3267).
+  * 9/9 signal nets routed -- NRST is RECOVERED by the #3434
+    target-aware in-pad stub (the prior #3286 stranding is gone).
+  * 0 blocking errors.  The #3433 fixes close the environment-
+    sensitive SWCLK/SWO -0.200 mm trace-overlap commits (seg-seg
+    violators in the negotiated quality tuple, demote-to-partial
+    safety net, overused-cells-only optimizer overflow tolerance)
+    and the stitch straight-trace pad crossing (U2.8 -> U2.9).
+  * 1 advisory connectivity finding: GND stitch with 3/18 pads
+    stranded (U2.8/U2.23/U2.35, the LQFP-48 corner cluster of #3267;
+    U2.23 is newly blocked by the recovered NRST B.Cu track -- a
+    deliberate signal-over-stitch trade).
   * CI gate: PASS (0 <= floor of 0; advisory excluded per ``DRCChecker``).
 
 This test is a stateless source pin -- it does NOT re-route the board.
@@ -52,6 +54,12 @@ References:
   tightened floor 1 -> 0 (closes #3266).
 - PR #3288 -- narrowed NC-pin plane-net classifier so stripped 2L recipe
   also reaches 8/9 (closes #3281, #3268).
+- PR #3434 -- target-aware in-pad stub recovers NRST (9/9 reach,
+  closes #3428, refs #3411).
+- Issue #3433 -- seg-seg violators in the negotiated quality tuple +
+  demote-to-partial safety net + scoped optimizer overflow tolerance +
+  rect-aware stitch pad check; artifact refreshed at 9/9 with 0
+  blocking errors (last blocker for #3411).
 - Issue #2834 -- the manufacturing-ready cluster the residuals ride with.
 - Issue #3298 -- post-#3286 refresh verification against current main.
 """
@@ -186,15 +194,16 @@ def test_board_04_advisory_connectivity_does_not_balloon(
 ) -> None:
     """Advisory connectivity findings must stay within the documented bound.
 
-    The post-#3286 committed PCB carries TWO advisory connectivity
-    findings:
+    The post-#3433/#3434 committed PCB carries ONE advisory
+    connectivity finding:
 
-      1. NRST is stranded at J1.5 because the U2.7 NRST -> U2.8 GND
-         channel is below the 0.127 mm jlcpcb-tier1 clearance floor;
-         this is correct router behaviour per #3286.
-      2. The U2.8/U2.35 LQFP-48 corner GND stitch gap (#3267) -- the
-         standard 0.6 mm and 0.3 mm micro-vias both collide with
-         neighbouring escape traces.
+      1. The GND stitch gap (#3267): U2.8/U2.23/U2.35 LQFP-48 corner
+         pads -- the standard 0.6 mm and 0.3 mm micro-vias both
+         collide with neighbouring escape traces (U2.23's slot is
+         occupied by the NRST B.Cu track that #3434 recovered).
+
+    The prior NRST stranding finding (#3286) is GONE -- NRST is routed
+    9/9 since #3434.
 
     Both are documented in ``.github/routed-drc-tolerance.yml``. If a
     future router change strands additional pads, the fleet-status
@@ -211,8 +220,8 @@ def test_board_04_advisory_connectivity_does_not_balloon(
     connectivity = [v for v in violations if v.get("rule_id") == "connectivity"]
     connectivity_count = len(connectivity)
 
-    # Soft cap: 3 advisory findings.  Post-#3286 count is 2 (NRST
-    # strand + U2.8/U2.35 GND stitch gap).  A jump to 4+ signals a
+    # Soft cap: 3 advisory findings.  Post-#3433 count is 1 (the GND
+    # stitch gap; NRST is routed since #3434).  A jump to 4+ signals a
     # multi-net stranding event worth investigating.
     SOFT_CAP = 3
     assert connectivity_count <= SOFT_CAP, (

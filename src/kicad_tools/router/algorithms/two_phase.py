@@ -456,6 +456,7 @@ class TwoPhaseRouter:
         from ..algorithms import NegotiatedRouter
         from ..algorithms.negotiated import (
             detect_ripup_stagnation,
+            select_seg_seg_demotion_nets,
             should_terminate_early,
         )
 
@@ -662,7 +663,20 @@ class TwoPhaseRouter:
             cache_key=("two_phase_init",),
             extra_routes=_extra_init,
         )
-        best_clearance_violations = len(_init_seg_via) + len(_init_via_seg)
+        # Issue #3433: third quadrant -- segment-vs-foreign-segment.
+        # This is the PRODUCTION board-04 path (route_with_escape ->
+        # route_all_two_phase); without seg-seg in the comparator an
+        # initial pass that committed SWCLK on top of SWO scores
+        # clearance_viol=0 and the loop has no reason to prefer a
+        # layer-separated snapshot.
+        _init_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("two_phase_init",),
+            extra_routes=_extra_init,
+        )
+        best_clearance_violations = (
+            len(_init_seg_via) + len(_init_via_seg) + len(_init_seg_seg)
+        )
         best_routes: list[Route] = copy.deepcopy(list(self.routes))
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_iteration = 0  # 0 = initial pass
@@ -799,6 +813,38 @@ class TwoPhaseRouter:
                         f"violator(s) in recovery: {', '.join(violator_names)}"
                     )
 
+                # Issue #3433: third-quadrant hook -- segment-vs-foreign-
+                # segment violators.  Board-04's SWCLK/SWO full overlaps
+                # never entered the rip-up cohort: the overflow cells were
+                # attributed to OSC_OUT/OSC_IN, so
+                # ``find_nets_through_overused_cells`` kept ripping the
+                # oscillator nets while the coincident SWD traces stayed
+                # committed and the stagnation detector exited the loop.
+                # Feeding BOTH nets of each overlapping pair gives A* a
+                # chance to separate them (typically by layer, which is
+                # exactly how the committed-clean board resolves the SWD
+                # corridor).
+                seg_seg_violators = neg_router.find_nets_with_segment_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
+                    extra_routes=_extra_iter,
+                )
+                new_seg_seg_violators = [
+                    v_net for v_net in seg_seg_violators
+                    if v_net not in nets_to_reroute
+                ]
+                for v_net in new_seg_seg_violators:
+                    nets_to_reroute.append(v_net)
+                if new_seg_seg_violators:
+                    violator_names = [
+                        self.net_names.get(n, f"Net_{n}")
+                        for n in new_seg_seg_violators
+                    ]
+                    flush_print(
+                        f"  Including {len(new_seg_seg_violators)} segment-vs-foreign-segment "
+                        f"violator(s) in recovery: {', '.join(violator_names)}"
+                    )
+
                 flush_print(
                     f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets ({elapsed_str()})"
                 )
@@ -868,8 +914,16 @@ class TwoPhaseRouter:
                     cache_key=("two_phase_post", iteration),
                     extra_routes=_extra_post,
                 )
+                # Issue #3433: seg-seg parity at the end-of-iteration
+                # capture so an iteration that separated overlapping
+                # traces wins the best-state comparator.
+                _post_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration),
+                    extra_routes=_extra_post,
+                )
                 current_clearance_violations = (
-                    len(_post_seg_via) + len(_post_via_seg)
+                    len(_post_seg_via) + len(_post_via_seg) + len(_post_seg_seg)
                 )
                 flush_print(
                     f"  Iteration {iteration} complete: "
@@ -974,8 +1028,16 @@ class TwoPhaseRouter:
             cache_key=("two_phase_final", final_route_count, final_via_count),
             extra_routes=_extra_final,
         )
+        # Issue #3433: seg-seg violators in the final comparator so a
+        # best snapshot that resolved trace overlaps is never
+        # overwritten by an overlapping final state.
+        _final_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+            net_routes, trace_clearance=self.rules.trace_clearance,
+            cache_key=("two_phase_final", final_route_count, final_via_count),
+            extra_routes=_extra_final,
+        )
         final_clearance_violations = (
-            len(_final_seg_via) + len(_final_via_seg)
+            len(_final_seg_via) + len(_final_via_seg) + len(_final_seg_seg)
         )
         best_key = (best_clearance_violations, best_overflow)
         final_key = (final_clearance_violations, final_overflow)
@@ -999,6 +1061,40 @@ class TwoPhaseRouter:
             # Update net_routes to best state
             net_routes.clear()
             net_routes.update(best_net_routes)
+
+        # Issue #3433 (safety net): never commit physically-overlapping
+        # copper.  Even with seg-seg violators in the comparator and the
+        # mid-iteration rip-up feed, the loop can exit (stagnation,
+        # early-stop, timeout) with every observed snapshot containing
+        # cross-net same-layer FULL overlaps.  Overlapping copper is an
+        # unmanufacturable hard-gate DRC failure; an unrouted net is an
+        # advisory connectivity finding -- enforce the trade in the
+        # right direction by demoting the greedy-cover victims to
+        # unrouted rather than committing them.
+        _overlap_pairs = neg_router.find_segment_segment_violation_pairs(
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
+            extra_routes=self._collect_extra_routes_for_revalidation(net_routes),
+            copper_overlap_only=True,
+        )
+        if _overlap_pairs:
+            _demotable = {n for n, r in net_routes.items() if r}
+            _victims = select_seg_seg_demotion_nets(_overlap_pairs, _demotable)
+            if _victims:
+                for _net in _victims:
+                    for _route in net_routes.get(_net, []):
+                        self.grid.unmark_route_usage(_route)
+                        self.grid.unmark_route(_route)
+                        if _route in self.routes:
+                            self.routes.remove(_route)
+                    net_routes[_net] = []
+                _victim_names = [
+                    self.net_names.get(n, f"Net_{n}") for n in _victims
+                ]
+                flush_print(
+                    f"  ⚠ Demoted {len(_victims)} net(s) with physically "
+                    f"overlapping copper to unrouted: {', '.join(_victim_names)}"
+                )
 
         # Issue #2597: Surface the iteration-loop exit reason to the caller
         # so the progress-callback status string can distinguish between

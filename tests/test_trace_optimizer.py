@@ -1496,6 +1496,14 @@ class TestOverflowTolerantCollisionChecker:
     multiple nets share the same cell), the optimizer's collision checker
     should not treat these soft blocks as hard obstacles.  Otherwise the
     optimizer fragments routes and destroys connectivity.
+
+    Issue #3433 scoped the tolerance to GENUINELY overused cells
+    (``usage_count > 1``).  The original blanket skip made the checker
+    blind to EVERY foreign-net trace whenever ANY residual overflow
+    existed anywhere on the board: on board 04 (overflow=2 in an
+    unrelated OSC corridor) the staircase-compression pass straightened
+    SWO's zigzag straight across SWCLK's clean run, committing
+    -0.200 mm full overlaps.
     """
 
     @pytest.fixture
@@ -1509,8 +1517,15 @@ class TestOverflowTolerantCollisionChecker:
         grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
         return grid, rules
 
-    def _mark_blocking_route(self, grid, net_id=2):
-        """Place a vertical route for net_id crossing x=3."""
+    def _mark_blocking_route(self, grid, net_id=2, usage=0):
+        """Place a vertical route for net_id crossing x=3.
+
+        Args:
+            usage: How many times to additionally mark route USAGE on
+                the cells.  ``usage >= 2`` simulates an overused
+                (overflow) corridor; ``0``/``1`` is a clean committed
+                trace.
+        """
         from kicad_tools.router import Route
         from kicad_tools.router import Segment as RouteSegment
 
@@ -1520,6 +1535,8 @@ class TestOverflowTolerantCollisionChecker:
         )
         route = Route(net=net_id, net_name=f"NET{net_id}", segments=[seg])
         grid.mark_route(route)
+        for _ in range(usage):
+            grid.mark_route_usage(route)
 
     def test_default_blocks_other_net(self, grid_and_rules):
         """Without ignore_overflow, path crossing another net is blocked."""
@@ -1533,10 +1550,21 @@ class TestOverflowTolerantCollisionChecker:
         )
         assert result is False
 
-    def test_ignore_overflow_allows_soft_block(self, grid_and_rules):
-        """With ignore_overflow=True, path crossing a soft block is allowed."""
+    def test_ignore_overflow_allows_overused_soft_block(self, grid_and_rules):
+        """With ignore_overflow=True, a path crossing OVERUSED cells
+        (usage_count > 1, i.e. cells already shared by multiple nets)
+        is allowed -- the Issue #2303 anti-fragmentation contract.
+
+        Issue #3433: the tolerance is decided per cell on the SAME
+        predicate ``get_total_overflow`` uses (``usage_count > 1``).
+        Force the whole region overused so the path's clearance buffer
+        (which also touches the blocking route's zero-usage halo
+        cells) reflects a genuine everything-overflowed corridor.
+        """
         grid, _rules = grid_and_rules
-        self._mark_blocking_route(grid, net_id=2)
+        self._mark_blocking_route(grid, net_id=2, usage=2)
+        # Simulate a fully-overflowed corridor: every cell shared.
+        grid._usage_count[:] = 2
 
         checker = GridCollisionChecker(grid, ignore_overflow=True)
         result = checker.path_is_clear(
@@ -1544,6 +1572,22 @@ class TestOverflowTolerantCollisionChecker:
             layer=Layer.F_CU, width=0.2, exclude_net=1,
         )
         assert result is True
+
+    def test_ignore_overflow_still_blocks_clean_foreign_trace(self, grid_and_rules):
+        """Issue #3433: with ignore_overflow=True, a CLEAN foreign trace
+        (usage_count <= 1) still blocks.  The blanket tolerance let the
+        optimizer straighten board-04 SWO straight across SWCLK
+        (-0.200 mm full overlaps) whenever ANY residual overflow
+        existed anywhere on the board."""
+        grid, _rules = grid_and_rules
+        self._mark_blocking_route(grid, net_id=2, usage=1)
+
+        checker = GridCollisionChecker(grid, ignore_overflow=True)
+        result = checker.path_is_clear(
+            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
+            layer=Layer.F_CU, width=0.2, exclude_net=1,
+        )
+        assert result is False
 
     def test_ignore_overflow_still_blocks_hard_obstacles(self, grid_and_rules):
         """With ignore_overflow=True, hard obstacles (pads) still block."""
