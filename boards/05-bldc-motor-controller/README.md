@@ -150,6 +150,23 @@ Each MOSFET pad should have thermal vias:
 └─────────────────┘
 ```
 
+### Debug Header (J4) Placement
+
+J4 (SWD-6) stays in the top-right corner at board offset (65, 22).
+Issue #3424 proposed moving it east of the MCU because the four SWD
+nets (SWDIO/SWCLK/SWO/NRST) were unrouteable on every 4-layer
+configuration tested at curation time, but the router grace-pass fix
+(#3452/#3466) resolved that at the original position before the move
+landed. A/B measurements at the production recipe (4L, cpp backend,
+jlcpcb-tier1, seed 42, 900s) show the corner position routes all four
+SWD nets at 28/35 reach, while every relocation candidate — (72, 50),
+(72, 45), and (55, 47) — strands NRST and drops reach to 27/35: NRST
+leaves U10's west edge, and from there the empty NE quadrant is the
+only uncongested corridor to a header. Do not move J4 east or south
+without re-measuring reach at the production recipe (measurement log
+in issue #3424); the (55, 50) candidate additionally overlaps R31's
+pad and the y=54-56 HALL routing corridor.
+
 ### Trace Width Requirements
 
 | Net Class | Min Width | Current |
