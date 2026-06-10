@@ -263,3 +263,48 @@ class TestDriftPrevention:
         engaged_b, thresholds_b = derive_engagement_state(pcb, from_sidecar)
         assert engaged_a == engaged_b
         assert thresholds_a == thresholds_b
+
+
+# =============================================================================
+# Issue #3440: loud warning when skew rules are inactive (no sidecar)
+# =============================================================================
+
+
+class TestInactiveSkewRuleWarning:
+    """``kct check`` without ``--net-class-map`` degrades the skew rules to
+    silent no-ops; Issue #3440 requires a LOUD stderr warning so a recipe
+    that forgot the sidecar cannot sail through green.
+    """
+
+    def test_warning_on_stderr_without_sidecar(self, diffpair_pcb: Path, capsys):
+        from kicad_tools.cli.check_cmd import main
+
+        main([str(diffpair_pcb), "--format", "summary"])
+        captured = capsys.readouterr()
+        assert "INACTIVE without --net-class-map" in captured.err
+        assert "match_group_length_skew" in captured.err
+        assert "diffpair_length_skew" in captured.err
+
+    def test_no_warning_with_sidecar(
+        self, diffpair_pcb: Path, usb_net_class_map_sidecar: Path, capsys
+    ):
+        from kicad_tools.cli.check_cmd import main
+
+        main(
+            [
+                str(diffpair_pcb),
+                "--format",
+                "summary",
+                "--net-class-map",
+                str(usb_net_class_map_sidecar),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert "INACTIVE without --net-class-map" not in captured.err
+
+    def test_no_warning_when_skew_rules_not_selected(self, diffpair_pcb: Path, capsys):
+        from kicad_tools.cli.check_cmd import main
+
+        main([str(diffpair_pcb), "--format", "summary", "--only", "clearance"])
+        captured = capsys.readouterr()
+        assert "INACTIVE without --net-class-map" not in captured.err

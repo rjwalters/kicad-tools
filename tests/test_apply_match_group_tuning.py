@@ -473,3 +473,116 @@ class TestEdgeCases:
         # Net 3 is unrouted -> reason="unrouted".
         per_member = results["MIXED"]
         assert per_member[3][1].reason == "unrouted"
+
+
+# =============================================================================
+# Issue #3440: per-group summary line counts EVERY reason bucket
+# =============================================================================
+
+
+class TestVerboseSummaryCountsAllBuckets:
+    """The per-group verbose line must account for every member.
+
+    Issue #3440 root cause: the legacy five-bucket line counted only
+    tuned/clean/rolled-back/budget/skipped, so a group whose members all
+    landed in ``reference`` / ``longer_than_reference`` / ``unrouted``
+    printed all-zeros while 15.4mm of skew went untouched.
+    """
+
+    def test_reference_and_unrouted_members_appear_in_summary(self, capsys):
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "A0", 2: "A1", 3: "A2"}
+        # Net 1 is the (longest) explicit reference; net 2 within
+        # tolerance; net 3 unrouted.
+        ar.routes = [
+            _straight_route(1, "A0", 12.0, y=0.0),
+            _straight_route(2, "A1", 11.95, y=10.0),
+        ]
+        group = MatchGroup(
+            name="ADDR_BUS",
+            net_ids=[1, 2, 3],
+            tolerance=0.5,
+            reference_net_id=1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=True)
+        out = capsys.readouterr().out
+
+        assert "1 reference" in out, f"reference bucket missing from: {out!r}"
+        assert "1 unrouted" in out, f"unrouted bucket missing from: {out!r}"
+        # Every member accounted: 1 reference + 1 clean + 1 unrouted.
+        assert "1 clean" in out
+
+    def test_rollback_diagnostic_line_names_member(self, capsys):
+        """When a member rolls back, the verbose output carries a
+        per-member diagnostic line with the reason and message."""
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "A0", 2: "A1", 50: "NOISE"}
+        # Net 2 needs +2mm but a non-group neighbor hugs its outer
+        # corridor so every ladder amplitude fails the self-check.
+        ar.routes = [
+            _straight_route(1, "A0", 12.0, y=10.0),
+            _straight_route(2, "A1", 10.0, y=0.0),
+            _straight_route(50, "NOISE", 30.0, y=-0.3),
+        ]
+        group = MatchGroup(
+            name="ADDR_BUS",
+            net_ids=[1, 2],
+            tolerance=0.1,
+            reference_net_id=1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=True)
+        out = capsys.readouterr().out
+
+        assert "A1: post_insertion_drc_violation" in out, out
+        assert "NOISE" in out, out
+
+
+# =============================================================================
+# Issue #3440: tuned meanders must reach self.routes (the saved PCB)
+# =============================================================================
+
+
+class TestTunedRoutesReachSelfRoutes:
+    """The orchestrator's commit-back must publish tuned routes into
+    ``self.routes``.
+
+    Issue #3440 regression: the tuner publishes committed meanders into
+    ``routes_by_net`` in place (so later members' DRC self-checks see
+    them), which made the legacy identity guard
+    (``new_route is not routes_by_net[net_id]``) False for every tuned
+    member -- ALL meanders were silently dropped from ``self.routes``
+    and never reached the saved PCB.
+    """
+
+    def test_meander_is_committed_to_self_routes(self):
+        from kicad_tools.router.length import LengthTracker
+
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "D0", 2: "D1"}
+        ar.routes = [
+            _straight_route(1, "D0", 10.0, y=0.0),
+            _straight_route(2, "D1", 12.0, y=10.0),
+        ]
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["G"][1][1].reason == "tuned"
+
+        committed = next(r for r in ar.routes if r.net == 1)
+        committed_length = LengthTracker.calculate_route_length(committed)
+        assert abs(committed_length - 12.0) <= 0.1, (
+            f"tuned meander did not reach self.routes: committed length "
+            f"{committed_length:.3f}mm, expected ~12.0mm"
+        )
+        # And the committed object IS the tuner's returned route.
+        assert committed is results["G"][1][0]

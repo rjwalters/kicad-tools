@@ -256,3 +256,34 @@ class TestBackwardCompat:
             "route_cmd.py must gate the match-group tuning dispatch on "
             "args.length_match_groups (AC1)."
         )
+
+
+# =============================================================================
+# Issue #3440: loud warning when --length-match-groups lacks a net-class map
+# =============================================================================
+
+
+class TestMissingNetClassMapWarning:
+    """``--length-match-groups`` without ``--net-class-map`` silently no-ops
+    (detection consults NetClassRouting declarations exclusively when suffix
+    inference is off).  Issue #3440 requires a LOUD stderr warning so the
+    skew tuner can never be silently inactive.
+    """
+
+    def test_route_cmd_warns_when_net_class_map_missing(self):
+        import inspect
+
+        from kicad_tools.cli import route_cmd
+
+        src = inspect.getsource(route_cmd)
+        assert "--length-match-groups is INACTIVE" in src, (
+            "route_cmd.py must warn on stderr when --length-match-groups is "
+            "passed without a net-class map (Issue #3440)."
+        )
+        # The warning must go to stderr (visible even under --quiet).
+        warn_idx = src.index("--length-match-groups is INACTIVE")
+        tail = src[warn_idx : warn_idx + 600]
+        assert "sys.stderr" in tail, (
+            "the --length-match-groups inactivity warning must print to "
+            "sys.stderr so --quiet runs still surface it"
+        )

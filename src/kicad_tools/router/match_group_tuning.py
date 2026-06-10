@@ -102,6 +102,23 @@ Design notes
   N>=3 the over-length case is genuinely different from the
   "you are the reference" case.
 
+  **Auto-promotion when the pace car routes short (Issue #3440).**
+  Strict pace-car semantics are structurally unsatisfiable for a
+  lengthen-only tuner whenever ANY member routes longer than the
+  declared reference by more than the group tolerance: the reference
+  is untouchable and members above it cannot be shortened, so the
+  max-min skew can never converge (board 07's ADDR_BUS declared
+  ``length_match_reference="A0"`` while A0 routed shortest -> 15.4mm
+  of skew left untouched).  In that case the single-ended tuner logs
+  a structured warning and falls back to **longest-in-group**
+  semantics for the run: the effective reference length becomes the
+  longest member's length and every member -- INCLUDING the declared
+  pace car -- becomes tunable.  This satisfies the
+  ``match_group_length_skew`` DRC rule (which measures max-min
+  spread, not distance to the declared reference).  When the declared
+  reference IS the longest member (the satisfiable declaration),
+  strict pace-car behavior is preserved byte-for-byte.
+
   For pair-aware groups the **lane length** is the average of the pair's
   two halves: ``L_lane = (L_p + L_n) / 2``.  The reference selection
   policy is unchanged -- a scalar reference (clock) or a paired-half
@@ -137,6 +154,8 @@ Out of scope for Phase 2F:
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -151,8 +170,13 @@ from .optimizer.serpentine import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .match_group_length import MatchGroup
     from .primitives import Pad, Route, Segment
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +227,133 @@ MAX_INSERTS_PER_GROUP_MEMBER: int = MAX_INSERTS_PER_GROUP_MEMBER_SMALL
 #: covering the typical "best segment is blocked but the next two are
 #: clear" case observed on board 07's ADDR_BUS group.
 MAX_SEGMENT_RETRY_CANDIDATES: int = 3
+
+
+#: Amplitude back-off ladder for distributed meanders (Issue #3440).
+#: When the full-amplitude trombone on a candidate segment fails the
+#: post-insertion DRC self-check, the tuner retries the SAME segment
+#: with progressively smaller bulge amplitudes before moving to the
+#: next candidate segment.  Smaller amplitudes produce many small humps
+#: instead of one large blob: each loop adds ``2 * amplitude`` of
+#: length, so a 15 mm correction at amplitude 1.0 needs ~8 deep loops
+#: (which collide with parallel bus neighbors), while the same
+#: correction at amplitude 0.25 spreads across ~30 shallow loops that
+#: stay inside the candidate's own corridor.  The trade-off is forward
+#: room (each loop consumes ``2 * gap`` along the segment), which
+#: :meth:`SerpentineGenerator.generate_trombone` already handles by
+#: reducing the loop count to fit -- partial corrections are committed
+#: and the cascade continues on the next attempt / segment.
+#:
+#: The 0.125 rung exists for tight parallel-bus corridors: board 07's
+#: A2 meander missed the 0.150mm floor against A1 by 8 microns at the
+#: 0.25-rung exact-fit amplitude (0.241mm); halving the amplitude again
+#: doubles the loop count and pulls the bulge envelope ~0.12mm back
+#: into A2's own corridor.
+AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
+
+
+# ---------------------------------------------------------------------------
+# Reason registry + summary formatting (Issue #3440 observability)
+# ---------------------------------------------------------------------------
+
+
+#: Canonical registry of EVERY value :attr:`TuneResult.reason` can carry.
+#: Both summary printers (``Autorouter.apply_match_group_tuning`` per-group
+#: line in ``router/core.py`` and the aggregate line in
+#: ``cli/route_cmd.py``) derive their buckets from this tuple via
+#: :func:`format_reason_counts`, so a future reason value added to the
+#: tuner without a registry entry fires the exhaustiveness test in
+#: ``tests/test_match_group_tuning.py`` rather than silently vanishing
+#: from the logs (the Issue #3440 "all-zeros summary while 15.4mm of
+#: skew goes untouched" defect).
+TUNE_RESULT_REASONS: tuple[str, ...] = (
+    "tuned",
+    "already_within_tolerance",
+    "reference",
+    "longer_than_reference",
+    "exceeded_max_inserts",
+    "cascade_budget_exhausted",
+    "post_insertion_drc_violation",
+    "no_suitable_segment",
+    "unrouted",
+    "not_length_critical",
+)
+
+
+#: Human-readable summary-bucket label for each registered reason.
+#: Multiple reasons may share a bucket (the two budget reasons both
+#: surface as ``budget-exhausted`` -- preserves the legacy line shape).
+REASON_SUMMARY_LABELS: dict[str, str] = {
+    "tuned": "tuned",
+    "already_within_tolerance": "clean",
+    "post_insertion_drc_violation": "rolled back",
+    "exceeded_max_inserts": "budget-exhausted",
+    "cascade_budget_exhausted": "budget-exhausted",
+    "not_length_critical": "skipped",
+    "reference": "reference",
+    "longer_than_reference": "longer-than-ref",
+    "unrouted": "unrouted",
+    "no_suitable_segment": "no-segment",
+}
+
+#: Buckets that are ALWAYS printed (the legacy five) in canonical order.
+_ALWAYS_SHOWN_BUCKETS: tuple[str, ...] = (
+    "tuned",
+    "clean",
+    "rolled back",
+    "budget-exhausted",
+    "skipped",
+)
+
+#: Buckets printed only when non-zero, in canonical order.  These are
+#: the reason buckets that were previously counted by NOTHING (Issue
+#: #3440 root cause): ``reference`` / ``longer_than_reference`` /
+#: ``unrouted`` plus ``no_suitable_segment``.
+_OPTIONAL_BUCKETS: tuple[str, ...] = (
+    "reference",
+    "longer-than-ref",
+    "unrouted",
+    "no-segment",
+)
+
+
+def format_reason_counts(reasons: Iterable[str]) -> str:
+    """Format per-member tuner outcomes as a summary fragment.
+
+    Counts EVERY member: the five legacy buckets (``tuned`` / ``clean``
+    / ``rolled back`` / ``budget-exhausted`` / ``skipped``) always
+    appear; the remaining registered buckets (``reference``,
+    ``longer-than-ref``, ``unrouted``, ``no-segment``) appear when
+    non-zero; any UNREGISTERED reason value appears as
+    ``N other(<reason>)`` so no member can ever fall into a silent
+    bucket (Issue #3440 observability AC).
+
+    Args:
+        reasons: ``TuneResult.reason`` values, one per group member.
+
+    Returns:
+        A comma-joined fragment such as
+        ``"2 tuned, 0 clean, 5 rolled back, 0 budget-exhausted, 0
+        skipped, 1 reference"``.  The sum of all displayed counts
+        equals the number of input reasons.
+    """
+    bucket_counts: Counter[str] = Counter()
+    other_counts: Counter[str] = Counter()
+    for reason in reasons:
+        label = REASON_SUMMARY_LABELS.get(reason)
+        if label is None:
+            other_counts[reason] += 1
+        else:
+            bucket_counts[label] += 1
+
+    parts: list[str] = [f"{bucket_counts.get(label, 0)} {label}" for label in _ALWAYS_SHOWN_BUCKETS]
+    parts.extend(
+        f"{bucket_counts[label]} {label}"
+        for label in _OPTIONAL_BUCKETS
+        if bucket_counts.get(label, 0) > 0
+    )
+    parts.extend(f"{count} other({reason})" for reason, count in sorted(other_counts.items()))
+    return ", ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +476,13 @@ def tune_match_group_v2(
             the board.  Used both to fetch the group's members AND as
             the corpus against which the post-insertion DRC self-check
             looks for newly-introduced clearance violations against
-            non-group nets.
+            non-group nets.  **Updated in place** (Issue #3440): when a
+            member commits one or more meanders, its entry is replaced
+            with the tuned Route so subsequent members' self-checks see
+            the committed geometry -- without this, two adjacent
+            members could stack meanders on top of each other (each
+            checked only against the other's pre-meander route).
+            Untouched members' entries are never replaced.
         tolerance_mm: Per-group skew tolerance.  When ``None`` defaults
             to ``group.tolerance`` (the value set when the group was
             declared / detected).  A member is considered "matched" to
@@ -572,6 +729,47 @@ def _tune_match_group_single_ended(
         # Longest-in-group default.
         ref_length = max(member_lengths.values()) if member_lengths else None
 
+    # --- Issue #3440: auto-promote when the pace car is not the longest -
+    # The tuner is lengthen-only.  When the declared reference routes
+    # SHORTER than another member (by more than tolerance), strict
+    # pace-car semantics are structurally unsatisfiable: the reference
+    # is untouchable and the over-length members cannot be shortened,
+    # so the group's max-min skew can never reach tolerance (board 07
+    # ADDR_BUS, A0 declared as reference but routed shortest -> 15.4mm
+    # skew left untouched).  Policy decision (curator option (a)): log
+    # a structured warning and fall back to longest-in-group semantics
+    # -- the effective reference length becomes the longest member's
+    # length and EVERY member (including the declared pace car) becomes
+    # tunable.  This satisfies the DRC ``match_group_length_skew`` rule,
+    # which measures max-min spread, not distance-to-declared-reference.
+    #
+    # When the declared reference is longer than (or within tolerance
+    # of) every member, strict pace-car semantics are preserved
+    # byte-for-byte: the reference returns ``reason="reference"`` and
+    # members within tolerance above it return
+    # ``reason="longer_than_reference"``.
+    effective_reference_net_id: int | None = group.reference_net_id
+    if group.reference_net_id is not None and ref_length is not None and member_lengths:
+        longest_id, longest_len = max(member_lengths.items(), key=lambda kv: kv[1])
+        if longest_len > ref_length + tolerance_mm:
+            logger.warning(
+                "[match_group] group %r: declared reference net %s (%.3fmm) "
+                "is shorter than member net %s (%.3fmm) by more than the "
+                "%.3fmm tolerance.  The lengthen-only tuner cannot satisfy "
+                "a shortest-member pace car; auto-promoting longest-in-group "
+                "as the effective reference (the declared reference will be "
+                "lengthened toward %.3fmm).",
+                group.name,
+                group.reference_net_id,
+                ref_length,
+                longest_id,
+                longest_len,
+                tolerance_mm,
+                longest_len,
+            )
+            effective_reference_net_id = None
+            ref_length = longest_len
+
     # --- Per-member iteration -------------------------------------------
     total_inserts_committed = 0  # group-level cumulative counter
 
@@ -608,7 +806,10 @@ def _tune_match_group_single_ended(
             continue
 
         # Explicit-reference member is the pace car; never touch.
-        if group.reference_net_id == net_id:
+        # (After Issue #3440 auto-promotion the effective reference may
+        # be ``None`` even when ``group.reference_net_id`` is set -- the
+        # declared reference is then tuned like any other member.)
+        if effective_reference_net_id == net_id:
             results[net_id] = (
                 route,
                 TuneResult(
@@ -673,6 +874,32 @@ def _tune_match_group_single_ended(
         current_route = route
         current_skew = abs(delta)
 
+        # Issue #3440: normalize the working geometry by merging
+        # adjacent collinear segments BEFORE ranking host candidates.
+        # The tuner runs before ``_finalize_routes`` cleanup, so an A*
+        # staircase route arrives as hundreds of grid-step micro
+        # segments -- none long enough to host a trombone -- even
+        # though the merged geometry has multi-mm straight runs (board
+        # 07's A3 reported ``no_suitable_segment`` at 7mm of residual
+        # skew for exactly this reason).  The merge is geometry- and
+        # length-preserving (collinear + connected runs only), so the
+        # member's measured length is unchanged.  Rollback paths still
+        # return the ORIGINAL route reference; the merged route is only
+        # ever returned when at least one insert commits.
+        if len(route.segments) > 1:
+            from .optimizer.algorithms import merge_collinear as _merge_collinear
+            from .optimizer.config import OptimizationConfig as _OptConfig
+            from .primitives import Route as _RouteForMerge
+
+            merged_segments = _merge_collinear(route.segments, _OptConfig())
+            if len(merged_segments) < len(route.segments):
+                current_route = _RouteForMerge(
+                    net=route.net,
+                    net_name=route.net_name,
+                    segments=merged_segments,
+                    vias=route.vias.copy(),
+                )
+
         per_member_result = TuneResult(
             length_before_mm=current_length,
         )
@@ -719,11 +946,29 @@ def _tune_match_group_single_ended(
             # Rank up to MAX_SEGMENT_RETRY_CANDIDATES candidate
             # segments for this attempt.  The top-ranked candidate is
             # byte-for-byte what ``find_best_segment`` would return.
+            host_floor = base_config.min_segment_length
             candidates = _rank_candidate_segments(
                 current_route,
-                min_segment_length=base_config.min_segment_length,
+                min_segment_length=host_floor,
                 max_candidates=MAX_SEGMENT_RETRY_CANDIDATES,
             )
+            if not candidates:
+                # Issue #3440 fallback: heavily-jogged routes (post
+                # rip-up A* staircases) may have no segment at the
+                # standard host length even after the collinear merge.
+                # Retry at the geometric minimum hostable length -- the
+                # shortest segment on which ONE trombone loop fits
+                # (entry + 2 forward gaps + exit within the 90% margin
+                # the generator enforces).
+                gap_mm = base_config.min_spacing * base_config.gap_factor
+                fallback_floor = (3.0 * gap_mm) / 0.9 + 1e-6
+                if fallback_floor < host_floor:
+                    host_floor = fallback_floor
+                    candidates = _rank_candidate_segments(
+                        current_route,
+                        min_segment_length=host_floor,
+                        max_candidates=MAX_SEGMENT_RETRY_CANDIDATES,
+                    )
             if not candidates:
                 per_member_result.reason = "no_suitable_segment"
                 per_member_result.message = (
@@ -762,6 +1007,19 @@ def _tune_match_group_single_ended(
             last_failure_reason = ""
             last_failure_message = ""
 
+            # Compute foreign pads (every pad whose net != net_id) for
+            # the segment-vs-pad clearance pass.  When ``pads_by_net``
+            # is omitted (legacy callers / unit tests), the pass is
+            # skipped silently inside the helper.  Constant across the
+            # candidate x amplitude fan.
+            foreign_pads: list[Pad] | None = None
+            if pads_by_net is not None:
+                foreign_pads = []
+                for other_net_id, pads in pads_by_net.items():
+                    if other_net_id == net_id:
+                        continue
+                    foreign_pads.extend(pads)
+
             for _cand_idx, (seg_idx, insertion_segment) in enumerate(candidates):
                 # Outer-normal hint vs the NEAREST other group member.
                 hint = _outer_normal_hint_group(
@@ -770,117 +1028,147 @@ def _tune_match_group_single_ended(
                     group_routes=other_group_routes,
                 )
 
-                # Build the per-candidate config.
-                attempt_config = SerpentineConfig(
-                    style=base_config.style,
-                    amplitude=base_config.amplitude,
-                    min_spacing=base_config.min_spacing,
-                    min_segment_length=base_config.min_segment_length,
-                    gap_factor=base_config.gap_factor,
-                    max_iterations=base_config.max_iterations,
-                    side="outer",
-                    outer_normal_hint=hint,
-                )
-                attempt_generator = SerpentineGenerator(attempt_config)
+                # Issue #3440 distributed meanders: try the candidate
+                # segment with a descending amplitude ladder.  A large
+                # correction (e.g. board 07's 15.4mm ADDR_BUS skew) at
+                # the base amplitude produces one tall blob that fails
+                # the DRC self-check against parallel bus neighbors;
+                # the same correction at a smaller amplitude spreads
+                # into many shallow humps that stay inside the
+                # candidate's own corridor.
+                for amp_factor in AMPLITUDE_BACKOFF_FACTORS:
+                    import math as _math
 
-                # Generate the trombone on THIS specific segment (not
-                # the one ``find_best_segment`` would pick -- we splice
-                # by hand so the per-segment retry actually tries a
-                # different segment).
-                serp_result = attempt_generator.generate_trombone(
-                    insertion_segment, length_needed
-                )
-                per_member_result.serpentine_results.append(serp_result)
+                    # Exact-fit amplitude (Issue #3440): the trombone
+                    # generator adds length in ``2 * amplitude`` quanta
+                    # (``num_loops = ceil(needed / (2 * amplitude))``),
+                    # so a fixed ladder amplitude overshoots the target
+                    # by up to ``2 * amplitude - epsilon`` (board 07's
+                    # A6 landed 1.8mm past the reference at the 1.0mm
+                    # base amplitude).  Pick the loop count at the
+                    # ladder amplitude, then shrink the amplitude so
+                    # those loops add EXACTLY the needed length.  The
+                    # tiny relative bump keeps the generator's own
+                    # ceil() from rounding up to one extra loop.
+                    ladder_amplitude = base_config.amplitude * amp_factor
+                    planned_loops = max(1, _math.ceil(length_needed / (2.0 * ladder_amplitude)))
+                    exact_amplitude = (length_needed / (2.0 * planned_loops)) * (1.0 + 1e-9)
 
-                if not serp_result.success:
-                    last_failure_reason = "no_suitable_segment"
-                    last_failure_message = (
-                        f"Trombone generation failed on net {net_id} "
-                        f"segment {seg_idx}: {serp_result.message}"
+                    # Build the per-(candidate, amplitude) config.
+                    attempt_config = SerpentineConfig(
+                        style=base_config.style,
+                        amplitude=exact_amplitude,
+                        min_spacing=base_config.min_spacing,
+                        min_segment_length=host_floor,
+                        gap_factor=base_config.gap_factor,
+                        max_iterations=base_config.max_iterations,
+                        side="outer",
+                        outer_normal_hint=hint,
                     )
-                    continue  # try next candidate
+                    attempt_generator = SerpentineGenerator(attempt_config)
 
-                # Splice the generated trombone into the route at the
-                # chosen segment index (mirrors
-                # ``SerpentineGenerator.add_serpentine`` body verbatim).
-                new_segments_full = (
-                    current_route.segments[:seg_idx]
-                    + serp_result.new_segments
-                    + current_route.segments[seg_idx + 1 :]
-                )
-                from .primitives import Route as _Route
-
-                candidate_route = _Route(
-                    net=current_route.net,
-                    net_name=current_route.net_name,
-                    segments=new_segments_full,
-                    vias=current_route.vias.copy(),
-                )
-
-                # Compute foreign pads (every pad whose net != net_id)
-                # for the segment-vs-pad clearance pass.  When
-                # ``pads_by_net`` is omitted (legacy callers / unit
-                # tests), the pass is skipped silently inside the
-                # helper.
-                foreign_pads: list[Pad] | None = None
-                if pads_by_net is not None:
-                    foreign_pads = []
-                    for other_net_id, pads in pads_by_net.items():
-                        if other_net_id == net_id:
-                            continue
-                        foreign_pads.extend(pads)
-
-                # Post-insertion DRC self-check.  Issue #3317 follow-up
-                # (judge change-request): also check segment-vs-via at
-                # ``via_clearance_mm``, diff-pair intra-pair at
-                # ``intra_pair_clearance_mm``, and segment-vs-pad at
-                # ``pad_clearance_mm`` so inserts that would fail the
-                # broader DRC validator are rejected at insertion time
-                # -- not after the cascade has committed them.
-                if not _post_insertion_clearance_ok_group(
-                    new_segments=serp_result.new_segments,
-                    candidate_net_id=net_id,
-                    group_net_ids=set(group.net_ids),
-                    routes_by_net=routes_by_net,
-                    intra_group_clearance_mm=intra_group_clearance_mm,
-                    via_clearance_mm=via_clearance_mm,
-                    diff_pair_partners=diff_pair_partners,
-                    intra_pair_clearance_mm=intra_pair_clearance_mm,
-                    foreign_pads=foreign_pads,
-                    pad_clearance_mm=pad_clearance_mm,
-                ):
-                    last_failure_reason = "post_insertion_drc_violation"
-                    last_failure_message = (
-                        f"Post-insertion DRC self-check failed on net {net_id} "
-                        f"segment {seg_idx} "
-                        f"(intra={intra_group_clearance_mm:.4f}mm); "
-                        "trying next candidate."
+                    # Generate the trombone on THIS specific segment
+                    # (not the one ``find_best_segment`` would pick --
+                    # we splice by hand so the per-segment retry
+                    # actually tries a different segment).
+                    serp_result = attempt_generator.generate_trombone(
+                        insertion_segment, length_needed
                     )
-                    continue  # try next candidate
+                    per_member_result.serpentine_results.append(serp_result)
 
-                # Commit this candidate.
-                current_route = candidate_route
-                per_member_result.inserts_applied += 1
-                total_inserts_committed += 1
-                committed_this_attempt = True
+                    if not serp_result.success:
+                        last_failure_reason = "no_suitable_segment"
+                        last_failure_message = (
+                            f"Trombone generation failed on net {net_id} "
+                            f"segment {seg_idx}: {serp_result.message}"
+                        )
+                        # Generation failure means the segment is too
+                        # short to host ANY trombone -- a smaller
+                        # amplitude cannot fix that; move to the next
+                        # candidate segment.
+                        break
 
-                new_length = LengthTracker.calculate_route_length(current_route)
-                current_skew = abs(target_length - new_length)
+                    # Splice the generated trombone into the route at
+                    # the chosen segment index (mirrors
+                    # ``SerpentineGenerator.add_serpentine`` verbatim).
+                    new_segments_full = (
+                        current_route.segments[:seg_idx]
+                        + serp_result.new_segments
+                        + current_route.segments[seg_idx + 1 :]
+                    )
+                    from .primitives import Route as _Route
 
-                if current_skew <= tolerance_mm:
-                    per_member_result.success = True
-                    per_member_result.reason = "tuned"
-                break  # exit candidate loop on successful commit
+                    candidate_route = _Route(
+                        net=current_route.net,
+                        net_name=current_route.net_name,
+                        segments=new_segments_full,
+                        vias=current_route.vias.copy(),
+                    )
+
+                    # Post-insertion DRC self-check.  Issue #3317
+                    # follow-up: also check segment-vs-via at
+                    # ``via_clearance_mm``, diff-pair intra-pair at
+                    # ``intra_pair_clearance_mm``, and segment-vs-pad
+                    # at ``pad_clearance_mm`` so inserts that would
+                    # fail the broader DRC validator are rejected at
+                    # insertion time.  Issue #3440: the detail variant
+                    # names WHICH rule / neighbor rejected the
+                    # candidate meander so rollbacks are actionable.
+                    drc_detail = _post_insertion_clearance_detail_group(
+                        new_segments=serp_result.new_segments,
+                        candidate_net_id=net_id,
+                        group_net_ids=set(group.net_ids),
+                        routes_by_net=routes_by_net,
+                        intra_group_clearance_mm=intra_group_clearance_mm,
+                        via_clearance_mm=via_clearance_mm,
+                        diff_pair_partners=diff_pair_partners,
+                        intra_pair_clearance_mm=intra_pair_clearance_mm,
+                        foreign_pads=foreign_pads,
+                        pad_clearance_mm=pad_clearance_mm,
+                    )
+                    if drc_detail is not None:
+                        last_failure_reason = "post_insertion_drc_violation"
+                        last_failure_message = (
+                            f"Candidate meander rejected on net {net_id} "
+                            f"segment {seg_idx} (amplitude "
+                            f"{attempt_config.amplitude:.3f}mm): {drc_detail}"
+                        )
+                        continue  # try the next (smaller) amplitude
+
+                    # Commit this candidate.
+                    current_route = candidate_route
+                    per_member_result.inserts_applied += 1
+                    total_inserts_committed += 1
+                    committed_this_attempt = True
+
+                    new_length = LengthTracker.calculate_route_length(current_route)
+                    current_skew = abs(target_length - new_length)
+
+                    if current_skew <= tolerance_mm:
+                        per_member_result.success = True
+                        per_member_result.reason = "tuned"
+                    break  # exit amplitude ladder on successful commit
+
+                if committed_this_attempt:
+                    break  # exit candidate loop on successful commit
 
             if not committed_this_attempt:
                 # Every candidate in this attempt failed.  Surface the
                 # LAST failure reason (typically
                 # ``post_insertion_drc_violation``) and roll back the
                 # whole member -- the cascade for this member is done.
-                per_member_result.reason = (
-                    last_failure_reason or "post_insertion_drc_violation"
-                )
+                per_member_result.reason = last_failure_reason or "post_insertion_drc_violation"
                 per_member_result.length_after_mm = current_length
+                # Issue #3440 capacity diagnosis: name the shortfall
+                # (requested mm vs achieved mm) so a rollback is
+                # actionable rather than a bare count.
+                achieved_mm = LengthTracker.calculate_route_length(current_route) - current_length
+                capacity_note = (
+                    f" Capacity: requested {abs(delta):.3f}mm of added length, "
+                    f"achieved {achieved_mm:.3f}mm before giving up "
+                    f"(residual skew {current_skew:.3f}mm vs tol "
+                    f"{tolerance_mm:.3f}mm)."
+                )
                 per_member_result.message = (
                     last_failure_message
                     or (
@@ -888,7 +1176,7 @@ def _tune_match_group_single_ended(
                         f"on net {net_id} (intra={intra_group_clearance_mm:.4f}mm); "
                         "rolled back."
                     )
-                )
+                ) + capacity_note
                 # Byte-for-byte rollback to the ORIGINAL route -- we
                 # discard any commits made earlier in this cascade so
                 # the drift-prevention invariant
@@ -914,7 +1202,9 @@ def _tune_match_group_single_ended(
                 f"Cascade budget exhausted on net {net_id} "
                 f"(attempts={per_member_result.attempts}, "
                 f"inserts_applied={per_member_result.inserts_applied}, "
-                f"skew={current_skew:.4f}mm vs tol={tolerance_mm:.4f}mm)"
+                f"skew={current_skew:.4f}mm vs tol={tolerance_mm:.4f}mm; "
+                f"capacity: requested {abs(delta):.3f}mm, achieved "
+                f"{LengthTracker.calculate_route_length(current_route) - current_length:.3f}mm)"
             )
 
         # Final length.
@@ -930,6 +1220,18 @@ def _tune_match_group_single_ended(
             assert current_route.segments is original_segments
 
         results[net_id] = (current_route, per_member_result)
+
+        # Issue #3440 staleness fix: publish the tuned route into
+        # ``routes_by_net`` so SUBSEQUENT members' post-insertion DRC
+        # self-checks see the committed meander geometry.  Without this,
+        # member k+1 is checked against member k's PRE-meander route and
+        # two adjacent meanders can be committed on top of each other
+        # (the board 07 ``A2 vs A1`` clearance underflows at the
+        # serpentine corners).  The orchestrator's own commit-back loop
+        # (``Autorouter.apply_match_group_tuning``) is idempotent with
+        # this in-place update.
+        if per_member_result.inserts_applied > 0:
+            routes_by_net[net_id] = current_route
 
     return results
 
@@ -1149,7 +1451,48 @@ def _post_insertion_clearance_ok_group(
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
 ) -> bool:
-    """Return True if the proposed serpentine segments are DRC-safe.
+    """Boolean wrapper around :func:`_post_insertion_clearance_detail_group`.
+
+    Preserved for callers / tests that only need the pass-fail verdict.
+    Returns ``True`` when no clearance violation is introduced.
+    """
+    return (
+        _post_insertion_clearance_detail_group(
+            new_segments=new_segments,
+            candidate_net_id=candidate_net_id,
+            group_net_ids=group_net_ids,
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=intra_group_clearance_mm,
+            via_clearance_mm=via_clearance_mm,
+            diff_pair_partners=diff_pair_partners,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+            foreign_pads=foreign_pads,
+            pad_clearance_mm=pad_clearance_mm,
+        )
+        is None
+    )
+
+
+def _post_insertion_clearance_detail_group(
+    *,
+    new_segments: list[Segment],
+    candidate_net_id: int,
+    group_net_ids: set[int],
+    routes_by_net: dict[int, Route],
+    intra_group_clearance_mm: float,
+    via_clearance_mm: float | None = None,
+    diff_pair_partners: dict[int, int] | None = None,
+    intra_pair_clearance_mm: float | None = None,
+    foreign_pads: list[Pad] | None = None,
+    pad_clearance_mm: float | None = None,
+) -> str | None:
+    """Return ``None`` if the proposed serpentine segments are DRC-safe,
+    else a human-readable description of the FIRST violation found.
+
+    Issue #3440: the description names the violated rule (which of the
+    five passes), the offending neighbor (net name / via / pad), the
+    layer, and the measured-vs-required clearance so a tuner rollback
+    in the route log is actionable instead of a bare count.
 
     Five-pronged generalization of
     :func:`~kicad_tools.router.diffpair_length_tuning._post_insertion_clearance_ok`
@@ -1260,8 +1603,9 @@ def _post_insertion_clearance_ok_group(
             Typical value: ``DesignRules.trace_clearance`` (0.2 mm).
 
     Returns:
-        ``True`` if no clearance violation is introduced; ``False``
-        otherwise (the caller must roll back).
+        ``None`` if no clearance violation is introduced; otherwise a
+        description of the first violation found (the caller must roll
+        back).
     """
     from kicad_tools.core.geometry import (
         point_to_segment_distance,
@@ -1292,7 +1636,11 @@ def _post_insertion_clearance_ok_group(
                     pseg.width,
                 )
                 if clearance + 1e-9 < intra_group_clearance_mm:
-                    return False
+                    return (
+                        f"intra-group clearance vs group member "
+                        f"{other_route.net_name!r} on {new_seg.layer}: "
+                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                    )
 
     # Pass 2: inter-net.  Every non-group routed net.
     for other_net_id, other_route in routes_by_net.items():
@@ -1317,7 +1665,11 @@ def _post_insertion_clearance_ok_group(
                     oseg.width,
                 )
                 if clearance + 1e-9 < intra_group_clearance_mm:
-                    return False
+                    return (
+                        f"inter-net clearance vs neighbor net "
+                        f"{other_route.net_name!r} on {new_seg.layer}: "
+                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                    )
 
     # Pass 3 (Issue #3317 follow-up): segment-vs-via clearance.
     # Skipped when via_clearance_mm is None (legacy behavior).  When
@@ -1346,7 +1698,12 @@ def _post_insertion_clearance_ok_group(
                     )
                     edge_clearance = center_dist - via_radius - new_seg.width / 2.0
                     if edge_clearance + 1e-9 < via_clearance_mm:
-                        return False
+                        return (
+                            f"segment-vs-via clearance vs net "
+                            f"{other_route.net_name!r} via at "
+                            f"({via.x:.2f}, {via.y:.2f}) on {new_seg.layer}: "
+                            f"{edge_clearance:.3f}mm < {via_clearance_mm:.3f}mm"
+                        )
 
     # Pass 4 (Issue #3317 follow-up): diff-pair intra-pair clearance.
     # When the candidate net is half of a differential pair AND its
@@ -1375,7 +1732,12 @@ def _post_insertion_clearance_ok_group(
                             pseg.width,
                         )
                         if clearance + 1e-9 < intra_pair_clearance_mm:
-                            return False
+                            return (
+                                f"diff-pair intra-pair clearance vs partner "
+                                f"net {partner_route.net_name!r} on "
+                                f"{new_seg.layer}: {clearance:.3f}mm < "
+                                f"{intra_pair_clearance_mm:.3f}mm"
+                            )
 
     # Pass 5 (Issue #3317 follow-up): segment-vs-pad clearance.  Reject
     # inserts whose new segments land within ``pad_clearance_mm`` of any
@@ -1410,9 +1772,13 @@ def _post_insertion_clearance_ok_group(
                 )
                 edge_clearance = center_dist - pad_radius - new_seg.width / 2.0
                 if edge_clearance + 1e-9 < pad_clearance_mm:
-                    return False
+                    return (
+                        f"segment-vs-pad clearance vs foreign pad at "
+                        f"({pad.x:.2f}, {pad.y:.2f}) on {new_seg.layer}: "
+                        f"{edge_clearance:.3f}mm < {pad_clearance_mm:.3f}mm"
+                    )
 
-    return True
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1741,7 +2107,42 @@ def _post_insertion_clearance_ok_pair_group(
     intra_group_clearance_mm: float,
     intra_pair_clearance_mm: float,
 ) -> bool:
+    """Boolean wrapper around :func:`_post_insertion_clearance_detail_pair_group`.
+
+    Preserved for callers / tests that only need the pass-fail verdict.
+    Returns ``True`` when no clearance violation is introduced.
+    """
+    return (
+        _post_insertion_clearance_detail_pair_group(
+            new_p_segments=new_p_segments,
+            new_n_segments=new_n_segments,
+            candidate_p_id=candidate_p_id,
+            candidate_n_id=candidate_n_id,
+            group_net_ids=group_net_ids,
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=intra_group_clearance_mm,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+        )
+        is None
+    )
+
+
+def _post_insertion_clearance_detail_pair_group(
+    *,
+    new_p_segments: list[Segment],
+    new_n_segments: list[Segment],
+    candidate_p_id: int,
+    candidate_n_id: int,
+    group_net_ids: set[int],
+    routes_by_net: dict[int, Route],
+    intra_group_clearance_mm: float,
+    intra_pair_clearance_mm: float,
+) -> str | None:
     """Paired DRC self-check for pair-aware serpentine insertion.
+
+    Issue #3440: returns ``None`` when DRC-safe, else a description of
+    the FIRST violation found (rule + offending neighbor + layer +
+    measured-vs-required clearance) so pair rollbacks are actionable.
 
     Three-pronged generalization of
     :func:`_post_insertion_clearance_ok_group` for the pair-aware case:
@@ -1776,8 +2177,9 @@ def _post_insertion_clearance_ok_pair_group(
             pass (must be smaller than ``intra_group_clearance_mm``).
 
     Returns:
-        ``True`` if no clearance violation is introduced; ``False``
-        otherwise (the caller must roll back BOTH halves).
+        ``None`` if no clearance violation is introduced; otherwise a
+        description of the first violation found (the caller must roll
+        back BOTH halves).
     """
     from kicad_tools.core.geometry import segment_clearance
 
@@ -1799,7 +2201,11 @@ def _post_insertion_clearance_ok_pair_group(
                 new_n.width,
             )
             if clearance + 1e-9 < intra_pair_clearance_mm:
-                return False
+                return (
+                    f"within-pair coupling clearance (P vs N mirrored "
+                    f"segments) on {new_p.layer}: {clearance:.3f}mm < "
+                    f"{intra_pair_clearance_mm:.3f}mm"
+                )
 
     # Pass 2: intra-group.  Every other group member.
     for other_id in group_net_ids:
@@ -1825,7 +2231,11 @@ def _post_insertion_clearance_ok_pair_group(
                     pseg.width,
                 )
                 if clearance + 1e-9 < intra_group_clearance_mm:
-                    return False
+                    return (
+                        f"intra-group clearance vs group member "
+                        f"{other_route.net_name!r} on {new_seg.layer}: "
+                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                    )
 
     # Pass 3: inter-net.  Every non-group routed net.
     for other_net_id, other_route in routes_by_net.items():
@@ -1850,9 +2260,13 @@ def _post_insertion_clearance_ok_pair_group(
                     oseg.width,
                 )
                 if clearance + 1e-9 < intra_group_clearance_mm:
-                    return False
+                    return (
+                        f"inter-net clearance vs neighbor net "
+                        f"{other_route.net_name!r} on {new_seg.layer}: "
+                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                    )
 
-    return True
+    return None
 
 
 def _tune_match_group_of_pairs(
@@ -2141,6 +2555,25 @@ def _tune_match_group_of_pairs(
                     for r in (per_pair_result_p, per_pair_result_n):
                         r.success = current_skew <= tolerance_mm
                         r.reason = "tuned" if r.success else "exceeded_max_inserts"
+                else:
+                    # Issue #3440: zero inserts means the pair arrived
+                    # with its P half already at/over the reference
+                    # while the lane AVERAGE is short (N much shorter
+                    # than P).  The mirrored-geometry tuner cannot fix
+                    # within-pair asymmetry; classify explicitly so the
+                    # member never lands in an empty / silent reason
+                    # bucket (the ``other()`` line this branch produced
+                    # on board 07's TMDS_D0 lane).
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.success = True
+                        r.reason = "longer_than_reference"
+                        r.message = (
+                            f"Pair ({p_id}, {n_id}): P half already at/over "
+                            f"the reference ({current_p_length:.4f}mm >= "
+                            f"{target_length:.4f}mm) while the lane average "
+                            "is short; mirrored insertion cannot fix "
+                            "within-pair asymmetry."
+                        )
                 break
 
             if total_inserts_committed >= MAX_TOTAL_INSERTS_PER_GROUP:
@@ -2249,7 +2682,7 @@ def _tune_match_group_of_pairs(
             )
 
             # --- Step 6: paired DRC self-check.
-            if not _post_insertion_clearance_ok_pair_group(
+            pair_drc_detail = _post_insertion_clearance_detail_pair_group(
                 new_p_segments=p_serp_result.new_segments,
                 new_n_segments=new_n_segments,
                 candidate_p_id=p_id,
@@ -2258,7 +2691,8 @@ def _tune_match_group_of_pairs(
                 routes_by_net=routes_by_net,
                 intra_group_clearance_mm=intra_group_clearance_mm,
                 intra_pair_clearance_mm=intra_pair_clearance_mm,
-            ):
+            )
+            if pair_drc_detail is not None:
                 # Rollback BOTH halves atomically -- the drift-prevention
                 # invariant that Phase 2F AC #4 tests.
                 for r in (per_pair_result_p, per_pair_result_n):
@@ -2266,10 +2700,7 @@ def _tune_match_group_of_pairs(
                     r.length_after_mm = member_lengths[p_id if r is per_pair_result_p else n_id]
                     r.message = (
                         f"Pair-aware DRC self-check failed on pair "
-                        f"({p_id}, {n_id}) "
-                        f"(intra_group={intra_group_clearance_mm:.4f}mm, "
-                        f"intra_pair={intra_pair_clearance_mm:.4f}mm); "
-                        "rolled back."
+                        f"({p_id}, {n_id}): {pair_drc_detail}; rolled back."
                     )
                 current_p = original_p_route
                 current_n = original_n_route
@@ -2326,6 +2757,14 @@ def _tune_match_group_of_pairs(
 
         results[p_id] = (current_p, per_pair_result_p)
         results[n_id] = (current_n, per_pair_result_n)
+
+        # Issue #3440 staleness fix (pair-path sibling of the
+        # single-ended publish): subsequent lanes / the trailing scalar
+        # sub-pass must self-check against the committed mirrored
+        # meanders, not the pre-meander pair geometry.
+        if per_pair_result_p.inserts_applied > 0:
+            routes_by_net[p_id] = current_p
+            routes_by_net[n_id] = current_n
 
     # --- Scalar pass: tune scalar members in net_ids -------------------
     # Mixed-group case (Phase 2F AC #5): scalar members are handled by
@@ -2393,11 +2832,15 @@ def _empty_route(net_id: int) -> Route:
 
 # Compatibility re-exports.
 __all__ = [
+    "AMPLITUDE_BACKOFF_FACTORS",
     "MAX_INSERTS_PER_GROUP_MEMBER",
     "MAX_INSERTS_PER_GROUP_MEMBER_LARGE",
     "MAX_INSERTS_PER_GROUP_MEMBER_SMALL",
     "MAX_TOTAL_INSERTS_PER_GROUP",
+    "REASON_SUMMARY_LABELS",
+    "TUNE_RESULT_REASONS",
     "TuneResult",
+    "format_reason_counts",
     "tune_match_group_v2",
 ]
 

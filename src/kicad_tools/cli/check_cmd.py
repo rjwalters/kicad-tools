@@ -389,6 +389,34 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
             return 1
 
+    # Issue #3440: the skew rules (match_group_length_skew,
+    # diffpair_length_skew, diffpair_routing_continuity) degrade to
+    # silent no-ops without the --net-class-map sidecar -- "Rules
+    # checked" excludes them and the check PASSES even with 15mm of
+    # group skew on the board.  Warn LOUDLY when any of those rules is
+    # selected but cannot engage, so a recipe that forgot the sidecar
+    # doesn't sail through green.
+    if net_class_map is None:
+        _sidecar_dependent_rules = (
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+        )
+        _inactive_rules = [
+            rule
+            for rule in _sidecar_dependent_rules
+            if (only_set is None or rule in only_set) and rule not in skip_set
+        ]
+        if _inactive_rules:
+            print(
+                "WARNING: the following rules are INACTIVE without "
+                "--net-class-map and will silently pass: "
+                f"{', '.join(_inactive_rules)}.  Pass the routed board's "
+                "sidecar (e.g. output/net_class_map.json) to validate "
+                "length-match skew.",
+                file=sys.stderr,
+            )
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
