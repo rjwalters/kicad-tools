@@ -2692,10 +2692,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       of silently falling back to python and producing a different
       deterministic output -- build it with ``kct build-native``
       (see CLAUDE.md fresh-worktree checklist).
-    - ``--seed 7``: deterministic output for byte-identical re-routes
-      in CI.  Seed selected by measurement (42 -> 27/35, 123 -> 27/35,
-      7 -> 28/35 at otherwise-identical flags); the DRC profile is the
-      same single residual across all three seeds.
+    - ``--seed 7``: deterministic per-net ordering.  NOTE: with
+      ``--per-net-timeout`` the route is *semantically* deterministic
+      (same reach, same partial set, same single residual violation at
+      the same location across re-runs) but NOT byte-identical -- the
+      60 s wall-clock cutoffs are timing-sensitive.  All CI gates
+      measure the COMMITTED artifact, not a fresh re-route, so CI is
+      stable.  Seed selected by measurement (42 -> 27/35, 123 ->
+      27/35, 7 -> 28/35 at otherwise-identical flags); the DRC profile
+      is the same single residual across all three seeds.
     - ``--timeout 900 --per-net-timeout 60``: the per-net budget is
       the reach lever on this board -- at the default 30 s the
       BLOCKED_BY_COMPONENT rip-up for ISENSE_A-/B- "did not converge"
