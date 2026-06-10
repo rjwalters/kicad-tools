@@ -663,6 +663,26 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # baseline; the residual gap is tracked in #3438 (reach -- now
     # with minimal 5/10/11-net repros), #3439 (coupled routing perf),
     # #3440 (match-group tuner), #3441 (auto-grid).
+    #
+    # Issue #3439 addendum (2026-06-10): the CoupledPathfinder now has
+    # (a) a corridor-bounded search mode (P side routed single-ended
+    # via the C++ backend, coupled A* restricted to the dilated
+    # corridor) and (b) an aggregate coupled-phase cap auto-derived as
+    # ``max(per_pair, 0.25 * timeout)``.  Empirical re-test with
+    # ``--differential-pairs`` on this recipe (load-contended host):
+    #   - DQS coupled search COMPLETES in ~4s (vs blowing the 60s
+    #     budget at 14k iterations before) but is rejected for the
+    #     #3320 polarity-swap centerline overlap.
+    #   - MIPI pairs still budget-exit: their P sides cannot route
+    #     single-ended at all (the #3438 reach gap), so no corridor
+    #     exists; the open search remains intractable.
+    #   - The aggregate cap fires at 150s and defers the 3 TMDS pairs;
+    #     total coupled phase = 150s vs 420s pre-#3439, and reach no
+    #     longer collapses (26-28/31 vs the 7/31 incident).
+    # ``--differential-pairs`` is now SAFE to enable (bounded, reach-
+    # preserving) but is not yet a quality win: no pair survives to a
+    # committed coupled route until #3438 (MIPI reach) and #3320
+    # (DQS swap overlap) land.  The recipe therefore still omits it.
     cmd = [
         sys.executable,
         "-m",
