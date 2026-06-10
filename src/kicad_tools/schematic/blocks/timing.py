@@ -289,7 +289,15 @@ class CrystalOscillator(CircuitBlock):
         sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
         if add_junction:
+            # Junction at the rail end (T onto the GND rail wire).
             sch.add_junction(gnd_pos[0], gnd_rail_y)
+            # Junction at the bus end: ``gnd_pos`` is the MIDPOINT of the
+            # cap-bottom bus wire (c1_pin2 -> c2_pin2) — the interior of a
+            # segment, not an endpoint.  Without an explicit junction the
+            # vertical rail wire does not electrically join the bus,
+            # leaving both load caps on a floating auto-named net (board
+            # 05's ``Net-(C10-Pad2)`` sync mismatch; issue #3397).
+            sch.add_junction(gnd_pos[0], gnd_pos[1])
 
 
 # Factory functions
