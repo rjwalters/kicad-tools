@@ -300,6 +300,18 @@ def create_bldc_controller(output_dir: Path) -> Path:
     fuse_out = fuse.pin_position("2")
 
     sch.add_wire(pin1_pos, fuse_in)
+    # Name the pre-fuse net explicitly (issue #3397 defect 7).  Without a
+    # label the netlister auto-names this segment ``Net-(J1-Pin_1)`` while
+    # the PCB generator used ``+24V`` on J1.1/F1.1 — which net-shorted the
+    # fuse on the PCB side.  ``VIN`` is the raw, unprotected input; the
+    # ``+24V`` rail begins at the fuse output (F1.2).
+    #
+    # The label must NOT sit directly on the F1.1 pin point: the
+    # fuse-output-to-rail vertical wire (added below) passes straight
+    # through that coordinate, and a label there silently bridges the
+    # pre-fuse net onto +24V.  Use the collision-aware stub helper
+    # instead (same mechanism as the U3/J4 pin labels).
+    _emit_pin_net_stub(sch, fuse_in, X_POWER_IN + 20, "VIN", None, block_label="F1 fuse ")
     sch.add_wire(fuse_out, (fuse_out[0], RAIL_VMOTOR), warn_on_collision=False)
     sch.add_junction(fuse_out[0], RAIL_VMOTOR)
 
@@ -425,6 +437,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
             sch.add_junction(on_off_pos[0], RAIL_GND)
         except KeyError:
             pass  # Pin not found, may not be present on this symbol variant
+
+    # Name the buck switch node explicitly (issue #3397).  The PCB
+    # generator calls this net ``SW_OUT`` (U1.2 / L1.1 / D2 cathode);
+    # without a label the schematic netlister auto-names it
+    # ``Net-(D2-K)``, producing 3 sync-netlist mismatches on every
+    # fresh build.  ``buck.ports["SW"]`` is the inductor input pin —
+    # a real wire endpoint shared by the regulator-OUT and diode-K
+    # wires, so the label lands on the merged SW net.
+    sw_pos = buck.ports["SW"]
+    sch.add_label("SW_OUT", sw_pos[0], sw_pos[1], rotation=0, validate_connection=False)
 
     print(f"   Buck regulator: {buck.regulator.reference} (LM2596-5.0)")
     print(f"   Inductor: {buck.inductor.reference} = 33uH")
@@ -677,14 +699,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
         "OSC_OUT", xtal_out_pos[0] + 5, xtal_out_pos[1], rotation=0, validate_connection=False
     )
 
-    # Debug header (SWD).  SWD-6 pinout: 1=VCC, 2=SWDIO, 3=GND, 4=SWCLK,
-    # 5=GND, 6=NRST.  ``connect_to_rails`` already wires pin 1 (VCC) and
-    # pin 3 (first GND) via topology, but ERC requires a label-on-wire
-    # stub at each pin to see it as driven.  Pin 5 (second GND) is not
-    # covered by the block's ``_build_ports`` dedup logic, so it falls
-    # through to ``pin_not_connected``.  Use ``pin_nets`` to declare the
-    # rail nets for pins 1 and 5 explicitly; signal pins 2/4/6 follow
-    # below with the same kwarg (replaces the prior inline stub loop).
+    # Debug header (SWD).  Issue #3397 defect 4: the PCB pad map for J4
+    # is 1=+3V3, 2=SWDIO, 3=SWCLK, 4=SWO, 5=NRST, 6=GND (see
+    # ``generate_pin_header("J4", ...)`` in ``create_bldc_pcb``); the
+    # schematic previously emitted the generic SWD-6 pinout
+    # (3=GND, 4=SWCLK, 5=GND, 6=NRST, no SWO) which mismatched four
+    # pads AND dropped the MCU's SWO trace pin from the header.  The
+    # ``pin_nets`` stubs+labels below are the single source of pin->net
+    # truth; net-name continuity ties +3V3/GND to their rails, so the
+    # block's ``connect_to_rails`` (which would wire pin 3 — now SWCLK —
+    # straight onto the GND rail) must NOT be called.
     debug = DebugHeader(
         sch,
         x=X_MCU + 100,
@@ -695,13 +719,12 @@ def create_bldc_controller(output_dir: Path) -> Path:
         pin_nets={
             "1": "+3V3",
             "2": "SWDIO",
-            "3": "GND",
-            "4": "SWCLK",
-            "5": "GND",
-            "6": "NRST",
+            "3": "SWCLK",
+            "4": "SWO",
+            "5": "NRST",
+            "6": "GND",
         },
     )
-    debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
     print(f"   Debug header: {debug.header.reference}")
 
     # =========================================================================
@@ -808,19 +831,19 @@ def create_bldc_controller(output_dir: Path) -> Path:
         "35": "GATE_CL",     # GL_C
         "36": "PHASE_C",     # SH_C
         "37": "GATE_DRV_CH", # GH_C
-        "38": "+24V",      # BST_C (DC tie via cap to VMOTOR rail)
+        "38": "BST_C",       # BST_C (bootstrap cap C12 to PHASE_C; #3397)
         # Pins 39-43: Half-bridge B.
         "39": "ISENSE_B-",   # SL_B
         "40": "GATE_BL",     # GL_B
         "41": "PHASE_B",     # SH_B
         "42": "GATE_DRV_BH", # GH_B
-        "43": "+24V",      # BST_B
+        "43": "BST_B",       # BST_B (bootstrap cap C13 to PHASE_B; #3397)
         # Pins 44-48: Half-bridge A.
         "44": "ISENSE_A-",   # SL_A
         "45": "GATE_AL",     # GL_A
         "46": "PHASE_A",     # SH_A
         "47": "GATE_DRV_AH", # GH_A
-        "48": "+24V",      # BST_A
+        "48": "BST_A",       # BST_A (bootstrap cap C14 to PHASE_A; #3397)
         # Pins 49-56: SPI / buck pins (right edge bottom).
         "49": "+3V3",       # VDD_SPI
         "50": "SW_OUT",      # PH (buck switch node)
@@ -1129,6 +1152,17 @@ def create_bldc_controller(output_dir: Path) -> Path:
         resistor_value="1k",
     )
     led_pwr.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
+    # Name the LED-cathode/resistor junction net (issue #3397 defect 1).
+    # The PCB calls this net ``PWR_LED``; without a label the schematic
+    # netlister auto-names it ``Net-(D3-K)``.  Topology is
+    # +3V3 -> D3 anode, D3 cathode -> PWR_LED -> R3 -> GND (the PCB-side
+    # generator was flipped — anode at GND — and is fixed in
+    # ``create_bldc_pcb`` in the same change).  Use the collision-aware
+    # stub helper: a bare label on the vertical K-to-R wire can land on
+    # a foreign wire sharing the LED's x column (D4's column is crossed
+    # by a full-height connector wire) and silently bridge nets.
+    _pwr_k = led_pwr.led.pin_position("K")
+    _emit_pin_net_stub(sch, _pwr_k, X_LDO + 50, "PWR_LED", None, block_label="D3 LED ")
     print(f"   Power LED: {led_pwr.led.reference}")
 
     # Status LED
@@ -1141,6 +1175,9 @@ def create_bldc_controller(output_dir: Path) -> Path:
         resistor_value="1k",
     )
     led_status.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
+    # Same net-naming fix as D3 above: PCB net name is ``STATUS_LED``.
+    _sts_k = led_status.led.pin_position("K")
+    _emit_pin_net_stub(sch, _sts_k, X_LDO + 70, "STATUS_LED", None, block_label="D4 LED ")
     print(f"   Status LED: {led_status.led.reference}")
 
     # =========================================================================
@@ -1378,6 +1415,33 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         "PWM_BL": 38,
         "PWM_CH": 39,
         "PWM_CL": 40,
+        # Issue #3397: raw (pre-fuse) input net.  J1.1 -> F1.1; the +24V
+        # rail starts at the fuse output F1.2.  Previously both fuse pads
+        # were +24V, net-shorting F1.
+        "VIN": 41,
+        # Issue #3397: DRV8301 bootstrap nets.  Each BST_x pin (38/43/48)
+        # connects through a 100nF cap (C12-C14) to its phase node.
+        # Previously the BST pins and the cap high sides were DC-tied to
+        # +24V, which defeats the bootstrap supply.
+        "BST_A": 42,
+        "BST_B": 43,
+        "BST_C": 44,
+        # Issue #3397: unused STM32G431K8 GPIOs are no-connects in the
+        # schematic (see the ``add_no_connect`` loop in
+        # ``create_bldc_controller``).  The PCB previously tied these
+        # pads to GND "for the autorouter", which contradicts the
+        # schematic NC markers and would short any future firmware use
+        # of the pins.  Net names follow KiCad's netlist-export
+        # convention ``unconnected-(<ref>-<pinname>-Pad<n>)`` so a
+        # fresh ``kct pcb sync-netlist`` is a no-op on these pads.
+        "unconnected-(U10-PA3-Pad8)": 45,
+        "unconnected-(U10-PA4-Pad9)": 46,
+        "unconnected-(U10-PA5-Pad10)": 47,
+        "unconnected-(U10-PA11-Pad21)": 48,
+        "unconnected-(U10-PA12-Pad22)": 49,
+        "unconnected-(U10-PA15-Pad25)": 50,
+        "unconnected-(U10-PB4-Pad27)": 51,
+        "unconnected-(U10-PB5-Pad28)": 52,
     }
 
     # =========================================================================
@@ -1684,7 +1748,18 @@ def create_bldc_pcb(output_dir: Path) -> Path:
   )"""
 
     def generate_d2pak(ref: str, pos: tuple, value: str) -> str:
-        """Generate D2PAK/TO-263 footprint for buck regulator."""
+        """Generate D2PAK/TO-263 footprint for buck regulator.
+
+        LM2596 TO-263-5 pinout (TI SNVS124, "5-Lead DDPAK/TO-263"):
+        1=VIN, 2=Output (switch node), 3=GND, 4=Feedback, 5=~ON/OFF.
+        Issue #3397 defect 6: pads 2/3/4 previously carried
+        +5V/SW_OUT/GND (a one-pin rotation of the real pinout), so the
+        switch node drove the FB pin's pad and GND landed on FB.  The
+        map below matches the datasheet AND the schematic emission
+        (U1.2=SW_OUT, U1.3=GND, U1.4=+5V fixed-output feedback sense,
+        U1.5=GND always-on).  The tab pad ("5" at x=+3.4) keeps GND —
+        electrically the ~ON/OFF tie.
+        """
         x, y = pos
         return f"""  (footprint "Package_TO_SOT_SMD:TO-263-5_TabPin3"
     (layer "F.Cu")
@@ -1697,9 +1772,9 @@ def create_bldc_pcb(output_dir: Path) -> Path:
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" smd rect (at -3.4 3.3) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+24V"]} "+24V"))
-    (pad "2" smd rect (at -3.4 1.1) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+5V"]} "+5V"))
-    (pad "3" smd rect (at -3.4 -1.1) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["SW_OUT"]} "SW_OUT"))
-    (pad "4" smd rect (at -3.4 -3.3) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+    (pad "2" smd rect (at -3.4 1.1) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["SW_OUT"]} "SW_OUT"))
+    (pad "3" smd rect (at -3.4 -1.1) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+    (pad "4" smd rect (at -3.4 -3.3) (size 3 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+5V"]} "+5V"))
     (pad "5" smd rect (at 3.4 0) (size 3 8) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
   )"""
 
@@ -1760,21 +1835,21 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     #    35  GL_C                                  -> GATE_CL
     #    36  SH_C                                  -> PHASE_C
     #    37  GH_C                                  -> GATE_DRV_CH (via R22 to GATE_CH)
-    #    38  BST_C    (high-side bootstrap)        -> VMOTOR (via cap, DC tie)
+    #    38  BST_C    (high-side bootstrap)        -> BST_C (cap C12 to PHASE_C; #3397)
     #
     #   Half-bridge B (39-43):
     #    39  SL_B                                  -> ISENSE_B-
     #    40  GL_B                                  -> GATE_BL
     #    41  SH_B                                  -> PHASE_B
     #    42  GH_B                                  -> GATE_DRV_BH (via R21 to GATE_BH)
-    #    43  BST_B                                 -> VMOTOR
+    #    43  BST_B                                 -> BST_B (cap C13 to PHASE_B; #3397)
     #
     #   Half-bridge A (44-48):
     #    44  SL_A                                  -> ISENSE_A-
     #    45  GL_A                                  -> GATE_AL
     #    46  SH_A                                  -> PHASE_A
     #    47  GH_A                                  -> GATE_DRV_AH (via R20 to GATE_AH)
-    #    48  BST_A                                 -> VMOTOR
+    #    48  BST_A                                 -> BST_A (cap C14 to PHASE_A; #3397)
     #
     #   SPI / buck pins (49-57):
     #    49  VDD_SPI  (SPI logic supply)           -> +3.3V
@@ -1834,17 +1909,17 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("35", "GATE_CL"),  # GL_C
         ("36", "PHASE_C"),  # SH_C
         ("37", "GATE_DRV_CH"),  # GH_C     (via R22 to GATE_CH)
-        ("38", "+24V"),  # BST_C    (bootstrap, via cap)
+        ("38", "BST_C"),  # BST_C    (bootstrap cap C12 to PHASE_C; #3397)
         ("39", "ISENSE_B-"),  # SL_B
         ("40", "GATE_BL"),  # GL_B
         ("41", "PHASE_B"),  # SH_B
         ("42", "GATE_DRV_BH"),  # GH_B     (via R21 to GATE_BH)
-        ("43", "+24V"),  # BST_B
+        ("43", "BST_B"),  # BST_B    (bootstrap cap C13 to PHASE_B; #3397)
         ("44", "ISENSE_A-"),  # SL_A
         ("45", "GATE_AL"),  # GL_A
         ("46", "PHASE_A"),  # SH_A
         ("47", "GATE_DRV_AH"),  # GH_A     (via R20 to GATE_AH)
-        ("48", "+24V"),  # BST_A
+        ("48", "BST_A"),  # BST_A    (bootstrap cap C14 to PHASE_A; #3397)
         ("49", "+3V3"),  # VDD_SPI  (SPI logic supply)
         ("50", "SW_OUT"),  # PH       (buck switch node)
         ("51", "SW_OUT"),  # PH       (buck switch node, second pin)
@@ -1951,9 +2026,15 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("5", "ISENSE_A-"),  # PA0  ADC1_IN1
         ("6", "ISENSE_B-"),  # PA1  ADC1_IN2
         ("7", "ISENSE_C-"),  # PA2  ADC1_IN3
-        ("8", "GND"),  # PA3 (unused -> GND for autorouter)
-        ("9", "GND"),  # PA4 (unused)
-        ("10", "GND"),  # PA5 (unused)
+        # Unused GPIOs carry per-pad no-connect nets (issue #3397 defect
+        # 3).  The schematic marks these 8 pins with ``add_no_connect``;
+        # the PCB previously tied them to GND "for the autorouter",
+        # contradicting the NC markers and grounding pins firmware may
+        # later drive.  Names follow KiCad's netlist-export convention
+        # so a fresh ``kct pcb sync-netlist`` is a no-op on these pads.
+        ("8", "unconnected-(U10-PA3-Pad8)"),  # PA3 (unused, NC)
+        ("9", "unconnected-(U10-PA4-Pad9)"),  # PA4 (unused, NC)
+        ("10", "unconnected-(U10-PA5-Pad10)"),  # PA5 (unused, NC)
         ("11", "HALL_A"),  # PA6  TIM3_CH1
         ("12", "HALL_B"),  # PA7  TIM3_CH2
         ("13", "HALL_C"),  # PB0  TIM3_CH3
@@ -1964,14 +2045,14 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         ("18", "PWM_AH"),  # PA8  TIM1_CH1   (HS PWM -> DRV8301 INH_A)
         ("19", "PWM_BH"),  # PA9  TIM1_CH2   (HS PWM -> DRV8301 INH_B)
         ("20", "PWM_CH"),  # PA10 TIM1_CH3   (HS PWM -> DRV8301 INH_C)
-        ("21", "GND"),  # PA11 (unused)
-        ("22", "GND"),  # PA12 (unused)
+        ("21", "unconnected-(U10-PA11-Pad21)"),  # PA11 (unused, NC)
+        ("22", "unconnected-(U10-PA12-Pad22)"),  # PA12 (unused, NC)
         ("23", "SWDIO"),  # PA13
         ("24", "SWCLK"),  # PA14
-        ("25", "GND"),  # PA15 (unused)
+        ("25", "unconnected-(U10-PA15-Pad25)"),  # PA15 (unused, NC)
         ("26", "SWO"),  # PB3 (SWO/TIM2_CH2)
-        ("27", "GND"),  # PB4 (unused)
-        ("28", "GND"),  # PB5 (unused)
+        ("27", "unconnected-(U10-PB4-Pad27)"),  # PB4 (unused, NC)
+        ("28", "unconnected-(U10-PB5-Pad28)"),  # PB5 (unused, NC)
         ("29", "PWM_AL"),  # PB6  TIM4_CH1   (LS PWM -> DRV8301 INL_A)
         ("30", "PWM_BL"),  # PB7  TIM4_CH2   (LS PWM -> DRV8301 INL_B)
         ("31", "PWM_CL"),  # PB8  TIM4_CH3   (LS PWM -> DRV8301 INL_C)
@@ -2092,6 +2173,12 @@ def create_bldc_pcb(output_dir: Path) -> Path:
         (e.g. ``"PWR"`` / ``"STATUS"``).  Hardcoding ``"LED"`` here
         previously caused a schematic<->PCB value drift on every fresh
         build — see issue #3210.
+
+        Pad polarity (issue #3397 defect 1): KiCad's
+        ``LED_SMD:LED_0805_2012Metric`` footprint and the ``Device:LED``
+        symbol both number the CATHODE as pin/pad 1.  This generator
+        previously put ``net_a`` (anode) on pad 1, reversing D3/D4 on
+        copper relative to the schematic.
         """
         x, y = pos
         net_a_num = NETS.get(net_a, 0)
@@ -2106,8 +2193,8 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net_a_num} "{net_a}"))
-    (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net_k_num} "{net_k}"))
+    (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net_k_num} "{net_k}"))
+    (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net_a_num} "{net_a}"))
   )"""
 
     def generate_crystal_hc49(ref: str, pos: tuple, value: str) -> str:
@@ -2166,7 +2253,13 @@ def create_bldc_pcb(output_dir: Path) -> Path:
   )"""
 
     def generate_fuse_holder(ref: str, pos: tuple, value: str) -> str:
-        """Generate fuse holder footprint."""
+        """Generate fuse holder footprint.
+
+        Issue #3397 defect 7: both pads previously carried ``+24V``,
+        net-shorting the fuse.  Pad 1 (west, facing J1) is the raw input
+        ``VIN``; pad 2 is the protected ``+24V`` rail, matching the
+        schematic's J1.1 -> F1.1 / F1.2 -> rail topology.
+        """
         x, y = pos
         return f"""  (footprint "Fuse:Fuse_1206_3216Metric"
     (layer "F.Cu")
@@ -2178,7 +2271,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd roundrect (at -1.5 0) (size 1.2 1.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["+24V"]} "+24V"))
+    (pad "1" smd roundrect (at -1.5 0) (size 1.2 1.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["VIN"]} "VIN"))
     (pad "2" smd roundrect (at 1.5 0) (size 1.2 1.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["+24V"]} "+24V"))
   )"""
 
@@ -2227,14 +2320,18 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     print(f"   4x M3 mounting holes at corners")
 
     print("\n2. Adding power input section...")
-    # J1: Power input connector (2-pin)
-    parts.append(generate_pin_header("J1", J1_POS, 2, "Power Input", ["+24V", "GND"]))
+    # J1: Power input connector (2-pin).  Pin 1 is the raw pre-fuse VIN
+    # net (issue #3397 defect 7); +24V starts at the fuse output.
+    parts.append(generate_pin_header("J1", J1_POS, 2, "Power Input", ["VIN", "GND"]))
     print(f"   J1 (Power Input) at {J1_POS}")
-    # F1: Fuse
+    # F1: Fuse (pad 1 = VIN, pad 2 = +24V; see generate_fuse_holder)
     parts.append(generate_fuse_holder("F1", F1_POS, "15A"))
     print(f"   F1 (15A Fuse) at {F1_POS}")
-    # D1: TVS diode
-    parts.append(generate_diode_sma("D1", D1_POS, "SMBJ24A", "+24V", "GND"))
+    # D1: TVS clamping the +24V rail.  Args are (net_a, net_k): the SMA
+    # cathode (pad 1, band) must face +24V and the anode GND — the
+    # previous call had them swapped, installing the TVS backwards
+    # (issue #3397 defect 1).
+    parts.append(generate_diode_sma("D1", D1_POS, "SMBJ24A", "GND", "+24V"))
     print(f"   D1 (TVS) at {D1_POS}")
     # C1, C2: Bulk caps
     parts.append(generate_cap_0805("C1", C1_POS, "470uF", "+24V", "GND"))
@@ -2257,8 +2354,12 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     print(f"   C3, C4 (buck caps) at {C3_POS}, {C4_POS}")
 
     print("\n4. Adding LDO section...")
-    # U2: AMS1117-3.3
-    parts.append(generate_sot223("U2", U2_POS, "AMS1117-3.3", "+5V", "GND", "+3V3"))
+    # U2: AMS1117-3.3.  SOT-223 pinout is 1=GND/ADJ, 2=VOUT (+ tab),
+    # 3=VIN.  The previous call used the 78xx-style (VIN, GND, VOUT)
+    # order, putting +5V on the GND pin and +3V3 on VIN (issue #3397
+    # defect 5).  Now matches the schematic (U2.1=GND, U2.2=+3V3,
+    # U2.3=+5V).
+    parts.append(generate_sot223("U2", U2_POS, "AMS1117-3.3", "GND", "+3V3", "+5V"))
     print(f"   U2 (AMS1117) at {U2_POS}")
     # C5, C6: LDO caps
     parts.append(generate_cap_0805("C5", C5_POS, "10uF", "+5V", "GND"))
@@ -2280,13 +2381,16 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     print("\n7. Adding gate driver...")
     parts.append(generate_htssop56("U3", U3_POS, "DRV8301"))
     print(f"   U3 (DRV8301, HTSSOP-56) at {U3_POS}")
-    # Bootstrap caps (VMOTOR to phase)
+    # Bootstrap caps (BST_x to phase node — issue #3397 defect 2: the
+    # high side previously DC-tied to +24V, which both defeats the
+    # bootstrap supply and disagreed with the schematic's
+    # BootstrapCapacitorArray nets).
     # Issue #3423 phase-column swap: C12 <-> C14 net assignments (the
     # bootstrap column at x=4 sits next to the WEST MOSFET column, which
     # is now Phase C).
-    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "+24V", "PHASE_C"))
-    parts.append(generate_cap_0805("C13", C13_POS, "100nF", "+24V", "PHASE_B"))
-    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "+24V", "PHASE_A"))
+    parts.append(generate_cap_0805("C12", C12_POS, "100nF", "BST_C", "PHASE_C"))
+    parts.append(generate_cap_0805("C13", C13_POS, "100nF", "BST_B", "PHASE_B"))
+    parts.append(generate_cap_0805("C14", C14_POS, "100nF", "BST_A", "PHASE_A"))
     # Bypass caps
     parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+5V", "GND"))
     parts.append(generate_cap_0805("C16", C16_POS, "10uF", "+5V", "GND"))
@@ -2355,10 +2459,15 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     print(f"   J4 (SWD-6) at {J4_POS}")
 
     print("\n11. Adding LEDs...")
-    parts.append(generate_resistor_0805("R3", R3_POS, "1k", "+3V3", "PWR_LED"))
-    parts.append(generate_led_0805("D3", D3_POS, "PWR", "PWR_LED", "GND"))
-    parts.append(generate_resistor_0805("R4", R4_POS, "1k", "+3V3", "STATUS_LED"))
-    parts.append(generate_led_0805("D4", D4_POS, "STATUS", "STATUS_LED", "GND"))
+    # Topology matches the schematic LEDIndicator block (issue #3397
+    # defect 1): +3V3 -> LED anode; LED cathode -> PWR_LED/STATUS_LED
+    # net -> resistor -> GND.  The previous emission put the resistor on
+    # the anode side AND mapped the anode to pad 1 (the footprint's
+    # cathode pad), reversing both LEDs on copper.
+    parts.append(generate_resistor_0805("R3", R3_POS, "1k", "PWR_LED", "GND"))
+    parts.append(generate_led_0805("D3", D3_POS, "PWR", "+3V3", "PWR_LED"))
+    parts.append(generate_resistor_0805("R4", R4_POS, "1k", "STATUS_LED", "GND"))
+    parts.append(generate_led_0805("D4", D4_POS, "STATUS", "+3V3", "STATUS_LED"))
     print(f"   D3 (PWR), D4 (STATUS) with resistors R3, R4")
 
     print("\n11b. Adding Hall sensor filter network...")

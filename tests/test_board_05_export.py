@@ -23,12 +23,11 @@ future "clean preflight" state:
   the routed PCB integrity, both of which #2904 and prior work claim to
   fix.  This is the strict assertion.
 
-* The *clean preflight* assertion (exit 0, no FAIL entries) is marked
-  ``@pytest.mark.xfail(strict=False)`` so it is documented and runs
-  on every test invocation -- but does not fail PR-time CI today.
-  When the BOM↔PCB drift is fixed (separate work), the xfail will
-  start UNEXPECTEDLY PASSING and the marker can be removed to lock in
-  the clean state as the new floor.
+* The *clean preflight* assertion (exit 0, no FAIL entries) was
+  historically marked ``@pytest.mark.xfail(strict=False)`` for the
+  BOM↔PCB drift tracked by #2773 / #2901.  The drift has since been
+  fixed and the marker removed (issue #3397), so the clean state is
+  now a hard floor.
 """
 
 from __future__ import annotations
@@ -214,18 +213,12 @@ class TestBoard05ExportPreflight:
             "zones / outline) or the preflight implementation."
         )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Board 05 has known BOM↔PCB drift (C18/C19 in BOM but not on "
-            "PCB; C15/C16/MH1-MH4 on PCB but not in BOM; LCSC + "
-            "footprint fields missing).  Tracked by closed #2773 "
-            "(preflight only) and out-of-scope per #2901.  When the "
-            "drift is fixed at the design.py / project.kct level, this "
-            "test will start unexpectedly passing -- remove the xfail "
-            "marker in the same PR to lock in the clean state."
-        ),
-    )
+    # NOTE: this test carried ``@pytest.mark.xfail(strict=False)`` for the
+    # historical BOM↔PCB drift (#2773 / #2901).  The drift has since been
+    # fixed at the design.py level and the test started xpassing (observed
+    # while refreshing board-05 artifacts for issue #3397), so the marker
+    # was removed per its own instructions to lock in the clean state as a
+    # hard regression guard.
     def test_clean_preflight_status_aspirational(
         self,
         export_strict_preflight_result: dict,
@@ -236,10 +229,9 @@ class TestBoard05ExportPreflight:
         preflight check passes (no FAIL entries), and the export command
         returns exit code 0 with ``--strict-preflight``.
 
-        Marked ``xfail(strict=False)`` because the board has known
-        BOM↔PCB drift that issue #2901 explicitly declares out-of-scope.
-        When the drift is fixed (separate work), the marker should be
-        removed in the same PR to make this a hard regression guard.
+        Previously marked ``xfail(strict=False)`` for the historical
+        BOM↔PCB drift (#2773 / #2901).  The drift is fixed; this is now
+        a hard regression guard (marker removed under issue #3397).
         """
         exit_code = export_strict_preflight_result["__exit_code"]
         preflight = export_strict_preflight_result["preflight"]
