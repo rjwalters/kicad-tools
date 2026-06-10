@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from kicad_tools.cli.progress import flush_print
 
+from .negotiated import run_initial_pass_grace
+
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
@@ -501,12 +503,17 @@ class TwoPhaseRouter:
         timed_out = False
 
         # Initial routing pass
+        # Issue #3452: when the wall-clock budget expires mid-list, record
+        # the starved tail for the bounded grace pass below instead of
+        # silently dropping every remaining net.
+        grace_nets: list[int] = []
         for i, net in enumerate(net_order):
             if check_timeout():
                 flush_print(
                     f"  ⚠ Timeout during detailed routing at net {i}/{total_nets} ({elapsed_str()})"
                 )
                 timed_out = True
+                grace_nets = list(net_order[i:])
                 break
 
             net_name = self.net_names.get(net, f"Net {net}")
@@ -519,6 +526,38 @@ class TwoPhaseRouter:
                 for route in routes:
                     self.grid.mark_route_usage(route)
                     self.routes.append(route)
+
+        # Issue #3452: budget-cliff grace pass.  Net order is
+        # difficulty-agnostic, so a block of pathological searches early
+        # in ``net_order`` can exhaust the wall-clock budget before the
+        # cheap majority gets ANY attempt.  Board 05 (bldc, 4L jlcpcb,
+        # seed 42) is the measured case -- see
+        # :func:`run_initial_pass_grace` for the full rationale and the
+        # tiered-cap design.  The overrun past ``--timeout`` is bounded
+        # by ``GRACE_PASS_BUDGET_S`` (well inside the slack the recipe
+        # already tolerates from the stall-recovery path).
+        if grace_nets:
+            grace_start = time.monotonic()
+
+            def _grace_route(net: int, cap: float) -> list[Route]:
+                return self._route_net_with_corridor(
+                    net, present_factor, per_net_timeout=cap
+                )
+
+            def _grace_commit(net: int, routes: list[Route]) -> None:
+                net_routes[net] = routes
+                for route in routes:
+                    self.grid.mark_route_usage(route)
+                    self.routes.append(route)
+
+            graced, attempted, skipped = run_initial_pass_grace(
+                grace_nets, _grace_route, _grace_commit, per_net_timeout
+            )
+            flush_print(
+                f"  Grace pass: {graced}/{attempted} starved net(s) routed in "
+                f"{time.monotonic() - grace_start:.1f}s "
+                f"({skipped} skipped) (Issue #3452)"
+            )
 
         overflow = self.grid.get_total_overflow()
         flush_print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
