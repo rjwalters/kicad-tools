@@ -6375,7 +6375,17 @@ class Autorouter:
         # the negotiated loop would attempt to re-route diff-pair nets,
         # which wastes effort and can corrupt the carefully-coupled routing
         # produced by the CoupledPathfinder.
-        prerouted_nets: set[int] = {r.net for r in self.routes}
+        #
+        # Issue #3441: sub-grid escape stubs (#1603) are NOT full routes --
+        # they only connect an off-grid pad to its nearest grid point.
+        # With the pre-pass re-enabled under the C++ backend (waypoint
+        # injection is Python-only), counting them here made the loop skip
+        # every net whose off-grid pad got a stub (board 07's six TMDS
+        # nets ended permanently at 1/2 pads connected).  Escape stubs are
+        # excluded via ``Route.is_escape``.
+        prerouted_nets: set[int] = {
+            r.net for r in self.routes if not getattr(r, "is_escape", False)
+        }
         if prerouted_nets:
             skipped_nets = [n for n in net_order if n in prerouted_nets]
             if skipped_nets:
@@ -11244,7 +11254,11 @@ class Autorouter:
         Returns:
             List of net IDs that were not successfully routed
         """
-        routed_nets = {r.net for r in self.routes}
+        # Issue #3441: escape stubs (#1603) are pad-access aids, not full
+        # routes -- a net whose only copper is an escape stub is failed.
+        routed_nets = {
+            r.net for r in self.routes if not getattr(r, "is_escape", False)
+        }
         all_nets = {n for n in self.nets.keys() if n != 0}
         return list(all_nets - routed_nets)
 

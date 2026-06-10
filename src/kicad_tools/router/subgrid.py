@@ -1714,6 +1714,11 @@ class SubGridRouter:
                 net_name=escape.pad.net_name,
                 segments=segments,
                 vias=vias,
+                # Issue #3441: mark as an escape stub so the negotiated
+                # loop's pre-routed-net filter (#2464) does not mistake a
+                # net that merely has an escape stub for a fully-routed
+                # net and skip it.
+                is_escape=True,
             )
             routes.append(route)
         return routes

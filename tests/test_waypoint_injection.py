@@ -490,3 +490,73 @@ class TestWaypointBackendGating:
 
         ar = Autorouter(width=10.0, height=10.0)
         assert (not ar.use_waypoint_injection) is True
+
+
+class TestEscapeStubNotPrerouted:
+    """Issue #3441 follow-on: escape stubs must not count as full routes.
+
+    With the sub-grid pre-pass re-enabled under the C++ backend, the
+    escape stubs it emits land in ``Autorouter.routes`` BEFORE the
+    negotiated loop builds its #2464 pre-routed-net filter
+    (``{r.net for r in self.routes}``).  Without the ``is_escape``
+    exclusion, every net whose off-grid pad received a stub was skipped
+    by the loop entirely -- board 07's six TMDS nets ended permanently
+    at 1/2 pads connected.
+    """
+
+    def test_route_default_not_escape(self):
+        from kicad_tools.router.primitives import Route
+
+        r = Route(net=1, net_name="N1")
+        assert r.is_escape is False
+
+    def test_subgrid_escape_routes_are_marked(self):
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.primitives import Pad as CorePad
+
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
+        ar.use_waypoint_injection = False
+        # Off-grid pad: 0.137 is off the default grid
+        pad = CorePad(
+            x=2.037,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="N1",
+            ref="U1",
+            pin="1",
+            layer=Layer.F_CU,
+        )
+        ar.pads[("U1", "1")] = pad
+        ar.nets[1] = [("U1", "1")]
+        ar.net_names[1] = "N1"
+        ar.grid.add_pad(pad)
+        escape_routes = ar._run_subgrid_prepass()
+        for r in escape_routes:
+            assert r.is_escape is True
+
+    def test_get_failed_nets_ignores_escape_only_routes(self):
+        from kicad_tools.router.core import Autorouter
+        from kicad_tools.router.primitives import Route
+
+        ar = Autorouter(width=10.0, height=10.0, force_python=True)
+        ar.nets[1] = [("U1", "1"), ("U2", "1")]
+        ar.net_names[1] = "N1"
+        # Net 1 has ONLY an escape stub -- it is not routed.
+        ar.routes.append(Route(net=1, net_name="N1", is_escape=True))
+        assert ar.get_failed_nets() == [1]
+        # A real route clears it.
+        ar.routes.append(Route(net=1, net_name="N1"))
+        assert ar.get_failed_nets() == []
+
+    def test_prerouted_filter_excludes_escape_stubs(self):
+        """The #2464 filter expression must ignore escape stubs."""
+        from kicad_tools.router.primitives import Route
+
+        routes = [
+            Route(net=1, net_name="TMDS_D0_P", is_escape=True),
+            Route(net=2, net_name="USB_DP"),
+        ]
+        prerouted = {r.net for r in routes if not getattr(r, "is_escape", False)}
+        assert prerouted == {2}

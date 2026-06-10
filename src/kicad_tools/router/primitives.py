@@ -245,6 +245,14 @@ class Route:
     net_name: str
     segments: list[Segment] = field(default_factory=list)
     vias: list[Via] = field(default_factory=list)
+    # Issue #3441: True for sub-grid escape stubs (#1603) emitted by the
+    # pre-pass.  An escape stub only connects an off-grid pad to its
+    # nearest grid point -- it is NOT a full net route, so the negotiated
+    # loop's pre-routed-net filter (#2464) must not treat nets that have
+    # only escape stubs as already routed (doing so left board 07's six
+    # TMDS nets permanently at 1/2 pads connected when the pre-pass was
+    # re-enabled under the C++ backend).
+    is_escape: bool = False
 
     def to_sexp(self) -> str:
         """Generate all S-expressions for this route."""
