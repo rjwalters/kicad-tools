@@ -6639,9 +6639,26 @@ class Autorouter:
                 f"single-pad net(s): {', '.join(single_pad_names)}"
             )
 
+        # Issue #3448: the count comparison alone cannot see PARTIALLY
+        # routed nets -- a multi-pad net whose main A* failed still lands
+        # in ``net_routes`` with fragments (intra-IC stubs, a subset of
+        # its MST edges), so verify full per-net pad connectivity before
+        # declaring the initial pass complete.
+        initial_partial: set[int] = set()
+        if (
+            not timed_out
+            and overflow == 0
+            and len(net_routes) == total_nets - len(single_pad_nets)
+        ):
+            initial_partial = self._get_partially_routed_nets(net_routes, pads_by_net)
+
         if timed_out:
             print("  ⚠ Returning partial result due to timeout")
-        elif overflow == 0 and len(net_routes) == total_nets - len(single_pad_nets):
+        elif (
+            overflow == 0
+            and len(net_routes) == total_nets - len(single_pad_nets)
+            and not initial_partial
+        ):
             # Only declare complete if all routable nets were routed AND no conflicts.
             # Single-pad nets cannot be routed (no MST edges) so they don't
             # contribute to the "complete" check.
@@ -6659,6 +6676,15 @@ class Autorouter:
             # diff-pair skew bookkeeping (see _finalize_routing docstring).
             self._finalize_routing()
             return list(self.routes)
+        elif initial_partial:
+            partial_names = sorted(
+                self.net_names.get(n, f"Net_{n}") for n in initial_partial
+            )
+            print(
+                f"  ⚠ {len(initial_partial)} net(s) partially routed despite "
+                f"zero overflow - attempting recovery (Issue #3448): "
+                f"{', '.join(partial_names)}"
+            )
         elif overflow == 0 and len(net_routes) < total_nets - len(single_pad_nets):
             # Some routable nets failed to route but no overflow - need rip-up.
             # Exclude single-pad nets from the failed count: they have no
@@ -6796,6 +6822,50 @@ class Autorouter:
                 all_routes.extend(routes_list_local)
             conn = _validate_conn(all_routes, net_pads)
             return sum(1 for info in conn.values() if info.get("connected"))
+
+        def _stranded_nets() -> list[int]:
+            """Routable nets that must block a convergence declaration.
+
+            Issue #3448: ``len(net_routes) == total_nets`` is NOT a valid
+            "all nets routed" predicate, on two counts:
+
+            1. ``rip_up_nets`` leaves ``net_routes[n] == []`` behind, so a
+               net that was ripped up and then hard-failed its re-route
+               (instant empty A* frontier => ZERO overflow, e.g. board-07
+               DQ3 in 0.04s) still counts toward the total.
+            2. A multi-pad net whose main A* failed can sit in
+               ``net_routes`` with partial fragments (intra-IC stubs,
+               escape segments, a subset of its MST edges) that connect
+               only some of its pads.
+
+            Either way the loop saw ``overflow == 0`` plus a full-looking
+            count and printed "Convergence achieved" while nets were
+            stranded and most of the wall budget was unused (board 07:
+            exit at ~820s of a 1500s budget with 3 nets unrouted).
+
+            Returns the nets in ``net_order`` that are NOT structurally
+            unroutable (single-pad / off-grid) and whose pads are not all
+            in one connected component -- i.e. nets the loop must keep
+            working on before it may declare convergence.
+            """
+            candidate_pads: dict[int, list[Pad]] = {}
+            for n in net_order:
+                if n in single_pad_nets or n in off_grid_nets:
+                    continue
+                pads = pads_by_net.get(n)
+                if pads and len(pads) >= 2:
+                    candidate_pads[n] = pads
+            if not candidate_pads:
+                return []
+            all_routes: list[Route] = []
+            for routes_list_local in net_routes.values():
+                all_routes.extend(routes_list_local)
+            conn = _validate_conn(all_routes, candidate_pads)
+            return [
+                n
+                for n in candidate_pads
+                if not conn.get(n, {}).get("connected", False)
+            ]
 
         initial_connected = _compute_nets_fully_connected()
         best_metrics = IterationMetrics(
@@ -7044,7 +7114,12 @@ class Autorouter:
                 # instead of terminating early. Only terminate if
                 # perturbation has already been active for 3+ iterations
                 # without finding a new best.
-                unrouted = total_nets - len(net_routes)
+                # Issue #3448: count empty-list entries (ripped up then
+                # failed re-route) as unrouted -- ``len(net_routes)``
+                # treats them as routed, which defeats the Issue #2297
+                # "keep going at overflow==0 with unrouted nets" guard
+                # inside ``should_terminate_early``.
+                unrouted = total_nets - sum(1 for r in net_routes.values() if r)
                 if adaptive and should_terminate_early(overflow_history, iteration, unrouted_count=unrouted):
                     if perturbation and perturbation_stagnation_count < 3:
                         # Activate perturbation instead of terminating
@@ -7061,7 +7136,7 @@ class Autorouter:
                         unrouted_names = sorted(
                             self.net_names.get(n, f"Net_{n}")
                             for n in net_order
-                            if n not in net_routes and n in pads_by_net
+                            if not net_routes.get(n) and n in pads_by_net
                         )
                         partial_at_term = self._get_partially_routed_nets(
                             net_routes, pads_by_net
@@ -7190,10 +7265,14 @@ class Autorouter:
                 # masked legitimate failures whose pads were not yet in the
                 # ``pads_by_net`` cache.  We now make the structural-unroutable
                 # filter explicit via the ``single_pad_nets`` set built up front.
+                # Issue #3448: ``not net_routes.get(n)`` instead of
+                # ``n not in net_routes`` -- ``rip_up_nets`` leaves an empty
+                # list behind, so a ripped-then-failed net was invisible to
+                # this detector and never re-entered the recovery set.
                 failed_nets_to_recover = [
                     n
                     for n in net_order
-                    if n not in net_routes
+                    if not net_routes.get(n)
                     and n not in single_pad_nets
                     and n not in off_grid_nets
                 ]
@@ -7519,9 +7598,10 @@ class Autorouter:
                             net_routes, overused
                         )
                         # Re-add still-failed nets and partial nets after recovery
+                        # (Issue #3448: empty-list entries count as failed too)
                         for fn in net_order:
                             if (
-                                fn not in net_routes
+                                not net_routes.get(fn)
                                 and fn in pads_by_net
                                 and fn not in off_grid_nets
                                 and fn not in nets_to_reroute
@@ -7548,7 +7628,11 @@ class Autorouter:
                     recovered = 0
                     attempted = 0
                     for fn in list(failed_net_ids):
-                        if fn in stalled_nets or fn in net_routes:
+                        # Issue #3448: ``net_routes.get(fn)`` (not bare
+                        # membership) so a ripped-then-failed net with an
+                        # empty-list entry still receives the elevated-cost
+                        # recovery attempt.
+                        if fn in stalled_nets or net_routes.get(fn):
                             continue
                         attempted += 1
                         routes = self._route_net_negotiated(
@@ -7596,7 +7680,9 @@ class Autorouter:
                     # "remaining unrouted nets are all structurally
                     # unroutable" so the operator understands why the loop
                     # exited at iteration 1 with nets still missing.
-                    remaining_unrouted = [n for n in net_order if n not in net_routes]
+                    remaining_unrouted = [
+                        n for n in net_order if not net_routes.get(n)
+                    ]
                     structurally_unroutable = [
                         n for n in remaining_unrouted if n in single_pad_nets or n in off_grid_nets
                     ]
@@ -7615,7 +7701,7 @@ class Autorouter:
                         unrouted_names = sorted(
                             self.net_names.get(n, f"Net_{n}")
                             for n in net_order
-                            if n not in net_routes and n in pads_by_net
+                            if not net_routes.get(n) and n in pads_by_net
                         )
                         partial_at_term = self._get_partially_routed_nets(
                             net_routes, pads_by_net
@@ -7865,10 +7951,27 @@ class Autorouter:
 
                     # Check for convergence in targeted mode
                     # Issue #858: Also check that all nets were routed
-                    if overflow == 0 and len(net_routes) == total_nets:
-                        self._reset_perturbation()
-                        print(f"  Convergence achieved at iteration {iteration}!")
-                        break
+                    # Issue #3448: "all nets routed" must mean full pad
+                    # connectivity, not a ``len(net_routes)`` count --
+                    # empty-list entries (ripped then hard-failed) and
+                    # partial fragments both inflate the count and caused
+                    # premature "Convergence achieved" exits with stranded
+                    # nets and unused wall budget (board 07).
+                    if overflow == 0:
+                        stranded_targeted = _stranded_nets()
+                        if not stranded_targeted:
+                            self._reset_perturbation()
+                            print(f"  Convergence achieved at iteration {iteration}!")
+                            break
+                        stranded_names = sorted(
+                            self.net_names.get(n, f"Net_{n}")
+                            for n in stranded_targeted
+                        )
+                        flush_print(
+                            f"  Overflow clean but {len(stranded_targeted)} "
+                            f"net(s) still stranded -- continuing "
+                            f"(Issue #3448): {', '.join(stranded_names)}"
+                        )
 
                     # Issue #2274: Neighborhood rip-up when stalled with 0
                     # overflow but unrouted nets remain.
@@ -7929,7 +8032,9 @@ class Autorouter:
                                     f"({new_count}/{total_nets} nets) ({elapsed_str()})"
                                 )
 
-                            if overflow == 0 and len(net_routes) == total_nets:
+                            # Issue #3448: full-connectivity predicate, not
+                            # a ``len(net_routes)`` count (see above).
+                            if overflow == 0 and not _stranded_nets():
                                 print(f"  Convergence achieved at iteration {iteration}!")
                                 break
 
@@ -8069,10 +8174,13 @@ class Autorouter:
                     # in net_routes but missing pad-to-pad connectivity), since
                     # they too cannot make further progress without rip-up.
                     partial_failed = self._get_partially_routed_nets(net_routes, pads_by_net)
+                    # Issue #3448: ``not net_routes.get(n)`` so empty-list
+                    # entries (ripped up above, then failed re-route) also
+                    # qualify for the targeted fallback.
                     still_failed = [
                         n for n in net_order
                         if (
-                            (n not in net_routes or n in partial_failed)
+                            (not net_routes.get(n) or n in partial_failed)
                             and n in pads_by_net
                             and n not in off_grid_nets
                         )
@@ -8113,10 +8221,11 @@ class Autorouter:
                             )
                             # Recompute the still-failed list -- some nets
                             # may now be routed thanks to the targeted via
-                            # blocker rip-up.
+                            # blocker rip-up.  (Issue #3448: empty-list
+                            # entries count as failed.)
                             still_failed = [
                                 n for n in net_order
-                                if n not in net_routes and n in pads_by_net
+                                if not net_routes.get(n) and n in pads_by_net
                                 and n not in off_grid_nets
                             ]
 
@@ -8161,10 +8270,11 @@ class Autorouter:
                                     f"({elapsed_str()})"
                                 )
                                 # Recompute still_failed for the Bresenham
-                                # fallback below.
+                                # fallback below.  (Issue #3448: empty-list
+                                # entries count as failed.)
                                 still_failed = [
                                     n for n in net_order
-                                    if n not in net_routes and n in pads_by_net
+                                    if not net_routes.get(n) and n in pads_by_net
                                     and n not in off_grid_nets
                                 ]
 
@@ -8289,7 +8399,9 @@ class Autorouter:
                                     f"({new_count}/{total_nets} nets) ({elapsed_str()})"
                                 )
 
-                            if overflow == 0 and len(net_routes) == total_nets:
+                            # Issue #3448: full-connectivity predicate, not
+                            # a ``len(net_routes)`` count (see _stranded_nets).
+                            if overflow == 0 and not _stranded_nets():
                                 print(f"  Convergence achieved at iteration {iteration}!")
                                 break
 
@@ -8318,10 +8430,25 @@ class Autorouter:
                     perturbation_best_overflow = overflow
 
                 # Issue #858: Also check that all nets were routed
-                if overflow == 0 and len(net_routes) == total_nets:
-                    self._reset_perturbation()
-                    print(f"  Convergence achieved at iteration {iteration}!")
-                    break
+                # Issue #3448: "routed" must mean full pad connectivity --
+                # ``len(net_routes)`` counts empty-list entries (ripped then
+                # hard-failed, zero overflow) and partial fragments, which
+                # caused premature "Convergence achieved" exits with
+                # stranded nets and ~680s of a 1500s budget unused (board 07).
+                if overflow == 0:
+                    stranded_std = _stranded_nets()
+                    if not stranded_std:
+                        self._reset_perturbation()
+                        print(f"  Convergence achieved at iteration {iteration}!")
+                        break
+                    stranded_names_std = sorted(
+                        self.net_names.get(n, f"Net_{n}") for n in stranded_std
+                    )
+                    flush_print(
+                        f"  Overflow clean but {len(stranded_std)} net(s) "
+                        f"still stranded -- continuing (Issue #3448): "
+                        f"{', '.join(stranded_names_std)}"
+                    )
 
                 # Issue #2518: short-circuit out of the iteration loop if a
                 # nested per-net loop already tripped the wall-clock budget.
@@ -8551,8 +8678,14 @@ class Autorouter:
             # ``False`` in this branch, but the branch is exposed so the
             # status string is symmetric with the two-phase callback.
             stagnation_detected = False
-            if overflow == 0:
+            # Issue #3448: only report ``converged`` when overflow is clean
+            # AND every routable net is fully connected; an overflow-free
+            # exit with stranded nets is reported as ``stranded`` so
+            # callers/CI never mistake a partial-reach exit for success.
+            if overflow == 0 and not _stranded_nets():
                 status = "converged"
+            elif overflow == 0:
+                status = "stranded"
             elif timed_out:
                 status = "timeout"
             elif stagnation_detected:
