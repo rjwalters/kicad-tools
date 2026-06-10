@@ -1588,7 +1588,33 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # Hall sensor connector (right edge, middle)
     J3_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 58)
 
-    # Debug header (right edge, top)
+    # Debug header (right edge, top).
+    #
+    # Issue #3424 (decomposition #3422, category 4) proposed moving J4
+    # east of U10 because all four SWD nets (SWDIO/SWCLK/SWO/NRST)
+    # reported "No path found" on every 4L configuration tested at the
+    # time.  That premise no longer holds: the router's initial-pass
+    # grace fix (#3452/#3466, merged 2026-06-09) plus the #3467 net
+    # repairs unblocked the SWD nets at THIS position.  Measured on
+    # 2026-06-10 with the production recipe (cpp backend, jlcpcb-tier1,
+    # --auto-layers --starting-layers 4 --max-layers 4, seed 42, 900 s
+    # budget, power/phase nets skipped):
+    #
+    #   J4 position           reach   SWD nets
+    #   (65, 22) HERE         28/35   SWDIO+SWCLK+SWO+NRST all routed
+    #   (72, 50) [#3424 A]    27/35   NRST stranded (blocked_path)
+    #   (72, 45) [variant]    27/35   NRST stranded
+    #   (55, 47) [#3424 B]    27/35   NRST stranded
+    #
+    # All three relocation candidates strand NRST: U10 pin 4 sits on
+    # the MCU's WEST edge (abs (132.825, 139.1)), and from there every
+    # path to a mid-board/east J4 must cross the congested U10/U3
+    # escape band, while the route to the top-right corner runs through
+    # the empty NE quadrant.  The residual failures at this recipe
+    # (5x ISENSE_*, PWM_BH, PWM_CL) are invariant across all four J4
+    # positions -- they are via-strategy bound (#3425), not J4-bound.
+    # DO NOT move J4 east/south without re-measuring reach at the
+    # production recipe; see issue #3424 for the full measurement log.
     J4_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 22)
 
     # LEDs (top-right corner)
