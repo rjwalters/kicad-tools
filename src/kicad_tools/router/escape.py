@@ -401,6 +401,71 @@ def is_usb_c_class_connector(pads: list[Pad]) -> bool:
     return True
 
 
+def _is_column_aligned_connector(smt_pads: list[Pad], tol: float = 0.05) -> bool:
+    """Return True when every pad column of a 2-row connector is single-net.
+
+    Issue #3410: a 2-row connector whose SMT tail columns each carry ONE
+    net (e.g. board 03's re-spun GCT USB4105 with USB_D+ on A6/B6 both
+    at x-0.25 and USB_D- on A7/B7 both at x+0.25) needs no escape
+    pre-pass: same-net pads in a column tie together with a vertical
+    surface stub (the main router's intra-IC consolidation) and each
+    signal exits through its outer-row pad into open board area.
+    Legacy tongue-mirrored footprints place DIFFERENT nets in the same
+    column (B7 = USB_D- directly under A6 = USB_D+), forcing the
+    diagonal X-crossover that the #2919 alternating-layer escape
+    exists to untangle -- those return False and keep the legacy
+    behaviour.
+
+    Args:
+        smt_pads: The connector's SMT signal pads (through-hole shield
+            tabs already filtered out by the caller).
+        tol: Column-coordinate tolerance in mm.  USB-C pitch is 0.5mm,
+            so 0.05mm cleanly separates "same column" from "adjacent
+            column" while absorbing float noise.
+
+    Returns:
+        True when every column's netted pads (net > 0) share one net and
+        at least one column actually pairs two same-net pads (otherwise
+        there is nothing the column-tie geometry buys and the legacy
+        escape treatment is kept).  Vertical (rotated) connectors are
+        handled symmetrically by grouping on y instead when the pads
+        span more in y than in x.
+    """
+    xs = [p.x for p in smt_pads]
+    ys = [p.y for p in smt_pads]
+    horizontal = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+
+    # Group netted pads into columns along the row axis.  Each column
+    # records the set of nets and the pad count it carries.
+    columns: dict[int, tuple[set[int], int]] = {}
+    for p in smt_pads:
+        if not p.net or p.net <= 0:
+            continue
+        coord = p.x if horizontal else p.y
+        key = round(coord / tol) if tol > 0 else 0
+        # Absorb boundary rounding: merge into a neighbouring key when
+        # one exists within a single tolerance step.
+        for k in (key, key - 1, key + 1):
+            if k in columns:
+                key = k
+                break
+        nets, count = columns.get(key, (set(), 0))
+        nets.add(p.net)
+        columns[key] = (nets, count + 1)
+
+    if not columns:
+        return False
+
+    # Any column carrying two different nets forces the X-crossover
+    # geometry -- keep the legacy alternating-layer escape.
+    if any(len(nets) > 1 for nets, _count in columns.values()):
+        return False
+
+    # Require at least one true same-net column pair so the defer only
+    # fires for re-spun (tie-friendly) connectors.
+    return any(count >= 2 for _nets, count in columns.values())
+
+
 def detect_package_type(pads: list[Pad]) -> PackageType:
     """Detect the package type from pad arrangement.
 
@@ -3531,6 +3596,28 @@ class EscapeRouter:
         smt_pads = [p for p in package.pads if not p.through_hole]
 
         if not smt_pads:
+            return []
+
+        # Issue #3410: column-aligned USB-C connectors do not need escape
+        # routes at all.  Board 03's J1 "re-spin" reordered the B-row SMT
+        # tails so each multi-pad net (USB_D+ on A6/B6, USB_D- on A7/B7,
+        # VBUS, GND) occupies a SINGLE column -- same-net pads are
+        # vertically adjacent and tie together with a plain surface stub
+        # (the main router's intra-IC consolidation), and every signal
+        # exits its outer-row pad straight into open board area.  For
+        # such connectors the dual-row alternating-layer escape (vias
+        # between 0.5mm-pitch pads) is not only unnecessary, it is
+        # actively harmful: the via fanout packs 0.6mm vias at sub-pitch
+        # spacing producing clearance_via_via / clearance_segment_via /
+        # clearance_segment_segment violations INSIDE the connector
+        # footprint (the dominant DRC error cluster in the #3410 audit).
+        # Defer the whole connector to the main router instead.
+        #
+        # Legacy tongue-mirrored footprints (e.g. board 06's USB-C, where
+        # USB_D+ sits on A6/B6 at DIFFERENT x positions) fail the
+        # column-alignment test and keep the #2919 alternating-layer
+        # escape behaviour unchanged.
+        if _is_column_aligned_connector(smt_pads):
             return []
 
         # Rebuild package metadata against the SMT subset so

@@ -65,11 +65,20 @@ NETS = {
 
 
 def generate_header() -> str:
-    """Generate the PCB file header."""
+    """Generate the PCB file header.
+
+    File-format version is 20260206 (KiCad 10), NOT 20240108 (KiCad 8):
+    KiCad 10's ``kicad-cli`` rejects the older grammar whenever the PCB
+    contains ``(zone ...)`` blocks ("Failed to load board").  With the
+    old version stamp, the zone-fill step (``generate_design.py:
+    fill_zones_in_routed_pcb`` and ``kct route``'s post-route fill)
+    fails silently and every power-net pad is left stranded at DRC time
+    (issue #3410; mirrors the header comment in ``generate_design.py``).
+    """
     return """(kicad_pcb
-  (version 20240108)
+  (version 20260206)
   (generator "kicad-tools-demo")
-  (generator_version "9.0")
+  (generator_version "10.0")
   (general
     (thickness 1.6)
     (legacy_teardrops no)
@@ -264,8 +273,25 @@ def generate_usb_connector() -> str:
     x = BOARD_ORIGIN_X + 40  # Center of board
     y = BOARD_ORIGIN_Y + 8  # Near top edge
 
-    # Simplified USB-C with main pins
-    # A side and B side pins are mirrored
+    # Simplified USB-C with main pins.
+    #
+    # A side and B side pins are mirrored EXCEPT the D+/D- tails (issue
+    # #3410 "J1 re-spin" -- the exit clause named by the board's DRC
+    # allowlist entry in .github/routed-drc-tolerance.yml):
+    #
+    # The pre-#3410 footprint mirrored the B row exactly like the
+    # receptacle TONGUE (B7 under A6, B6 under A7).  With nets
+    # A6=B6=USB_D+ / A7=B7=USB_D-, the two same-net tie stubs
+    # (A6->B6, A7->B7) were forced into a diagonal X-crossover that
+    # physically overlapped on F.Cu -- the source of the structural
+    # ``diffpair_clearance_intra`` (-0.200mm) allowlist entry AND of the
+    # BLOCKED_BY_COMPONENT stranding of whichever of D+/D- routed
+    # second (77%-reach root cause #1).  Real USB 2.0-only USB-C
+    # receptacles (GCT USB4105 et al.) reorder the SMT tails inside the
+    # connector body so same-signal tails exit adjacent; this simplified
+    # demo footprint now does the same by placing B6 under A6 and B7
+    # under A7, giving both diff-pair nets straight vertical tie stubs
+    # and a clean south escape.
     pins = [
         # Pin, X offset, Net
         ("A1", -2.75, "GND"),
@@ -276,12 +302,13 @@ def generate_usb_connector() -> str:
         ("A8", 1.0, ""),  # SBU1, NC
         ("A9", 1.75, "VBUS"),
         ("A12", 2.75, "GND"),
-        # B side (directly below A)
+        # B side (directly below A; B6/B7 tails exit under their
+        # same-signal A-side partners, see #3410 re-spin note above)
         ("B1", 2.75, "GND"),
         ("B4", 1.75, "VBUS"),
         ("B5", 1.0, "USB_CC2"),
-        ("B6", 0.25, "USB_D+"),
-        ("B7", -0.25, "USB_D-"),
+        ("B6", -0.25, "USB_D+"),
+        ("B7", 0.25, "USB_D-"),
         ("B8", -1.0, ""),  # SBU2, NC
         ("B9", -1.75, "VBUS"),
         ("B12", -2.75, "GND"),
@@ -312,16 +339,23 @@ def generate_usb_connector() -> str:
     pads_str = "\n".join(pads)
 
     # J1 is a perimeter-mounted USB-C receptacle whose location is mechanically
-    # constrained by the board edge. Mark it `(attr smd locked)` so that
+    # constrained by the board edge. Mark it locked so that
     # placement-feedback passes from `kct route --placement-feedback` and
     # `--anchor-weight` (PR #2825) treat it as an immovable anchor. Without
     # this, the centroid pull would relocate the connector and starve VBUS /
     # USB_CC1 / USB_CC2 of routing corridors (see #2833 sub-issue A / #2836).
+    #
+    # Issue #3410: the lock is the MODERN top-level ``(locked yes)`` form,
+    # NOT the legacy ``(attr smd locked)`` token — KiCad 10's kicad-cli
+    # rejects the legacy form ("Failed to load board"), which silently
+    # broke zone fill + DRC + gerber export for every artifact generated
+    # from this script.
     return f"""  (footprint "Connector_USB:USB_C_Receptacle_GCT_USB4105"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (attr smd locked)
+    (attr smd)
+    (locked yes)
     (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -379,7 +413,8 @@ def generate_joystick() -> str:
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (attr through_hole locked)
+    (attr through_hole)
+    (locked yes)
     (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -616,11 +651,27 @@ def generate_joystick_filter() -> str:
     filt_cx = joy_cx + 14
 
     # Three rows aligned vertically: JOY_X filter above, JOY_Y filter below,
-    # BTN pull-up further below. 2.5 mm row pitch is generous for 0402 parts.
-    row_dy = 2.5
-    x_row_y = joy_cy - row_dy
-    y_row_y = joy_cy
-    btn_row_y = joy_cy + 2 * row_dy
+    # BTN pull-up further below.
+    #
+    # Issue #3410: NO filter row may sit on a Steiner-junction line.  The
+    # router's Steiner branch points for the JOY nets land at the
+    # intersection of the filter COLUMN (x = filt_cx) with the rows of
+    # the nets' other pads -- J2's pad row (y = joy_cy = +35) and U1's
+    # south pad row (y = +36.5).  A filter pad at exactly such a junction
+    # strands the net with pin_access "PADS_OFF_GRID ... blocked by
+    # <other JOY net> (pad at 0.02mm)":
+    #
+    #   * pre-#3410, R11 sat at (filt_cx, +35) and JOY_X's Steiner point
+    #     collided with R11-1;
+    #   * an intermediate fix moved R11 to (filt_cx, +36.5) and the SAME
+    #     collision re-appeared on JOY_BTN's Steiner point (junction of
+    #     the filter column with U1.11's row).
+    #
+    # Keep all three rows clear of y = +35 and y = +36.5:
+    #   JOY_X filter at +32.5, JOY_Y filter at +34.0, BTN pull-up at +40.
+    x_row_y = joy_cy - 2.5
+    y_row_y = joy_cy - 1.0
+    btn_row_y = joy_cy + 5.0
 
     parts = [
         # R10/C10: JOY_X anti-alias filter (10k series + 16nF to GND)
@@ -668,44 +719,84 @@ def generate_joystick_filter() -> str:
     return "\n".join(parts)
 
 
-def generate_gnd_pour() -> str:
-    """Generate a B.Cu GND copper pour covering the board outline.
+def generate_power_pours() -> str:
+    """Generate GND / VCC / VBUS copper-pour zones.
 
-    Board 03 has 32 of ~40 GND pads spread across the board — at every
-    decoupling cap, the joystick, J1's shield, and U1's pin 1 / pin 16 /
-    pin 25 / pin 32. Routing GND as individual traces on F.Cu fails
-    structurally (`#2833` shows 32 GND pads unconnected with only F.Cu
-    signal traces available). The fix is a B.Cu copper pour bound to net
-    GND, which short-circuits the connectivity problem to "every pad
-    over the pour is one stitching via away from GND."
+    Board 03's routing recipe (``generate_design.py:route_pcb``) skips
+    VCC / GND / VBUS — those nets are served by copper pours, not traces.
+    The pours must therefore be part of the GENERATED board, otherwise a
+    fresh ``generate_pcb.py`` + route leaves 28/29 GND pads, 7/8 VCC
+    pads, and 5/6 VBUS pads stranded (``connectivity`` DRC errors).
 
-    The pour polygon inset is ~0.5mm from the Edge.Cuts rectangle so it
-    cannot violate edge-clearance DRC even with default 0.2mm
-    `clearance` and 0.25mm `min_thickness` (the standard kicad-tools zone
-    template, matching `boards/00-simple-led/output/simple_led.kicad_pcb`).
+    Zone set (mirrors the pattern proven by the pre-#3410 board and
+    board-05's ``create_zones_for_pcb``, recomputed for THIS board's
+    80x60 placement):
+
+      * GND on F.Cu + B.Cu (priority 1): full-board planes.  GND pads
+        exist on every component; the F.Cu plane catches the SMD pads
+        directly, B.Cu provides the return-current plane (#2833).
+      * VCC on F.Cu (priority 2): island over the VCC consumers —
+        J2 pin 2 (111,135), R12 pull-up (127.5,140), C1/C2/C3
+        (131.5/147.5/139.5 x 128..142) and U1 pins 4/8/17/24
+        (135.5..144.5 x 129.2..134.8).
+      * VBUS on F.Cu (priority 3): island covering J1's VBUS row
+        (A4/A9/B4/B9 at 138.25..141.75 x 108..109), C4 (146,112) and
+        U1 pin 26 (142,127.5).  The island deliberately spans the
+        J1->U1 area; the fill engine flows around the USB_D+/USB_D-
+        pads and traces (which cross it at x = 39.6..40.4 board-rel).
+
+    Priorities: VBUS > VCC > GND so the islands win their overlap
+    regions.  Inset is 0.3mm (jlcpcb min_edge_clearance), comfortably
+    above ``kct route`` auto-pour's re-inset threshold of
+    ``edge_clearance * 0.5``.
     """
-    gnd_net = NETS["GND"]
-    inset = 0.5  # mm — keep zone copper clear of board edge for DRC
+    inset = 0.3  # mm — jlcpcb-tier1 min_edge_clearance
     x1 = BOARD_ORIGIN_X + inset
     y1 = BOARD_ORIGIN_Y + inset
     x2 = BOARD_ORIGIN_X + BOARD_WIDTH - inset
     y2 = BOARD_ORIGIN_Y + BOARD_HEIGHT - inset
-    return f"""  (zone
-    (net {gnd_net})
-    (net_name "GND")
-    (layer "B.Cu")
+
+    # VCC island: bounding box of all VCC pads + 1.5mm margin.
+    vcc_x1 = BOARD_ORIGIN_X + 9.5
+    vcc_y1 = BOARD_ORIGIN_Y + 26.5
+    vcc_x2 = BOARD_ORIGIN_X + 49.0
+    vcc_y2 = BOARD_ORIGIN_Y + 44.0
+
+    # VBUS island: J1 VBUS row + C4 + U1.26 with ~1.2mm margin.
+    vbus_x1 = BOARD_ORIGIN_X + 37.4
+    vbus_y1 = BOARD_ORIGIN_Y + 6.4
+    vbus_x2 = BOARD_ORIGIN_X + 47.6
+    vbus_y2 = BOARD_ORIGIN_Y + 28.6
+
+    def zone_sexp(
+        net_name: str, layer: str, priority: int, poly: tuple[float, float, float, float]
+    ) -> str:
+        zx1, zy1, zx2, zy2 = poly
+        return f"""  (zone
+    (net {NETS[net_name]})
+    (net_name "{net_name}")
+    (layer "{layer}")
     (uuid "{generate_uuid()}")
     (hatch edge 0.5)
-    (priority 1)
+    (priority {priority})
     (connect_pads (clearance 0.3)
     )
     (min_thickness 0.25)
     (filled_areas_thickness no)
     (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
     )
-    (polygon (pts (xy {x1} {y1}) (xy {x2} {y1}) (xy {x2} {y2}) (xy {x1} {y2}))
+    (polygon (pts (xy {zx1} {zy1}) (xy {zx2} {zy1}) (xy {zx2} {zy2}) (xy {zx1} {zy2}))
     )
   )"""
+
+    return "\n".join(
+        [
+            zone_sexp("GND", "F.Cu", 1, (x1, y1, x2, y2)),
+            zone_sexp("GND", "B.Cu", 1, (x1, y1, x2, y2)),
+            zone_sexp("VCC", "F.Cu", 2, (vcc_x1, vcc_y1, vcc_x2, vcc_y2)),
+            zone_sexp("VBUS", "F.Cu", 3, (vbus_x1, vbus_y1, vbus_x2, vbus_y2)),
+        ]
+    )
 
 
 def generate_pcb() -> str:
@@ -744,17 +835,26 @@ def generate_pcb() -> str:
         ("C1", (BOARD_ORIGIN_X + 32, BOARD_ORIGIN_Y + 28), "VCC", "GND"),
         ("C2", (BOARD_ORIGIN_X + 48, BOARD_ORIGIN_Y + 28), "VCC", "GND"),
         ("C3", (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 42), "VCC", "GND"),
-        ("C4", (BOARD_ORIGIN_X + 40, BOARD_ORIGIN_Y + 15), "VBUS", "GND"),  # USB input cap
+        # C4 (VBUS input cap) sits EAST of the J1->U1 USB channel, not on
+        # the board's vertical centerline: J1 is at (+40, +8) and U1's
+        # USB_D+/USB_D- pads are at x = +39.6 / +40.4 (pads 29/28), so a
+        # cap at (+40, +15) lands directly on the D+/D- corridor and
+        # forces the diff pair around its courtyard (issue #3410 — this
+        # was one of the 3 stranded-net root causes at the 77% plateau).
+        # (+46, +12) keeps C4 within 7mm of J1's VBUS pads for its
+        # decoupling role while leaving the x in [39, 41.5] channel clear.
+        ("C4", (BOARD_ORIGIN_X + 46, BOARD_ORIGIN_Y + 12), "VBUS", "GND"),  # USB input cap
     ]
     for ref, pos, net1, net2 in cap_positions:
         parts.append(generate_capacitor(ref, pos, net1, net2))
 
-    # B.Cu GND pour. Emitted after all footprints (KiCad accepts zones
-    # in any order inside `(kicad_pcb ...)`, but emitting last keeps
-    # the file readable: footprints define geometry, the pour reacts to
-    # it). The fill polygon covers the board outline minus a 0.5mm
-    # edge inset and is bound to net GND. Sub-issue A of #2833.
-    parts.append(generate_gnd_pour())
+    # GND/VCC/VBUS pours. Emitted after all footprints (KiCad accepts
+    # zones in any order inside `(kicad_pcb ...)`, but emitting last
+    # keeps the file readable: footprints define geometry, the pours
+    # react to it). Sub-issue A of #2833; extended to the full power
+    # set by #3410 so the canonical skip-nets recipe has copper for
+    # every skipped net.
+    parts.append(generate_power_pours())
 
     parts.append(")")  # Close kicad_pcb
 
@@ -780,7 +880,9 @@ def main():
     print("    - 4 Decoupling capacitors (C1-C4)")
     print("    - Joystick RC filter + BTN pull-up (R10/C10, R11/C11, R12)")
     print("  Zones:")
-    print("    - 1 GND copper pour on B.Cu (board outline minus 0.5mm inset)")
+    print("    - GND pours on F.Cu + B.Cu (full board, 0.3mm edge inset)")
+    print("    - VCC island on F.Cu (priority 2)")
+    print("    - VBUS island on F.Cu (priority 3)")
     print(f"  Nets: {len([n for n in NETS.values() if n > 0])}")
 
 

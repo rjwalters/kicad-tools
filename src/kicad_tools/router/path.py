@@ -125,15 +125,32 @@ def create_intra_ic_routes(
 def reduce_pads_after_intra_ic(
     pads: list[tuple[str, str]],
     connected_indices: set[int],
+    pad_lookup: dict[tuple[str, str], Pad] | None = None,
 ) -> list[tuple[str, str]]:
     """Build reduced pad list after intra-IC routing.
 
     Groups connected pads by component and returns one representative
     per group plus all unconnected pads.
 
+    Representative selection (issue #3410): when ``pad_lookup`` is
+    provided, the representative of each intra-IC group is the member
+    CLOSEST to the centroid of the net's pads OUTSIDE that component.
+    The previous "first pad in the group" choice was arbitrary and could
+    hand the MST an edge endpoint that faces AWAY from every other pad
+    on the net.  Board 03's USB-C made this concrete: J1's USB_D- tie
+    group {A7 (front row, boxed in by neighboring escape lanes), B7
+    (south row, open escape)} was represented by A7, so the A* had to
+    thread the J1 escape belt from the worst possible start cell and
+    failed with BLOCKED_BY_COMPONENT even on an empty board.  Picking
+    the externally-facing member (B7) gives the pathfinder a start pad
+    whose escape direction already points at the rest of the net.
+
     Args:
         pads: Original list of (ref, pin) tuples
         connected_indices: Set of pad indices connected by intra-IC routing
+        pad_lookup: Optional mapping of (ref, pin) -> Pad used for the
+            target-aware representative choice.  When omitted (legacy
+            callers), the first group member is used as before.
 
     Returns:
         Reduced list of pads for inter-IC routing
@@ -149,11 +166,33 @@ def reduce_pads_after_intra_ic(
             ref_to_indices[ref] = []
         ref_to_indices[ref].append(i)
 
+    def _pick_representative(ref: str, indices: list[int]) -> int:
+        """Pick the group member closest to the net's external centroid."""
+        if pad_lookup is None or len(indices) < 2:
+            return indices[0]
+        # Centroid of all pads NOT on this component (the places the
+        # MST will have to route to from this group).
+        external = [pad_lookup[p] for p in pads if p[0] != ref and p in pad_lookup]
+        if not external:
+            return indices[0]
+        cx = sum(p.x for p in external) / len(external)
+        cy = sum(p.y for p in external) / len(external)
+        best = indices[0]
+        best_d = float("inf")
+        for i in indices:
+            pad = pad_lookup.get(pads[i])
+            if pad is None:
+                continue
+            d = (pad.x - cx) ** 2 + (pad.y - cy) ** 2
+            if d < best_d:
+                best_d = d
+                best = i
+        return best
+
     # Create reduced pads list: one representative per connected group + unconnected pads
     reduced_pad_indices: list[int] = []
-    for indices in ref_to_indices.values():
-        # Use first pad from each intra-IC group as representative
-        reduced_pad_indices.append(indices[0])
+    for ref, indices in ref_to_indices.items():
+        reduced_pad_indices.append(_pick_representative(ref, indices))
 
     # Add pads that weren't connected intra-IC
     for i in range(len(pads)):

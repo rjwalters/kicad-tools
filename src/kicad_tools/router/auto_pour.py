@@ -166,8 +166,6 @@ def _detect_uninset_zones(
     if not outline:
         return set()
 
-    ox, oy = pcb.board_origin
-
     # Build board-edge bounding box from the outline
     outline_xs = [p[0] for p in outline]
     outline_ys = [p[1] for p in outline]
@@ -190,9 +188,20 @@ def _detect_uninset_zones(
             continue
 
         for px, py in polygon:
-            # Convert from sheet-absolute to board-relative
-            bx = px - ox
-            by = py - oy
+            # Issue #3410: ``Zone.polygon`` is ALREADY board-relative --
+            # ``PCB._detect_board_origin()`` converts every copper
+            # primitive (segments, vias, zone polygons) to board-relative
+            # coordinates at load time (see its "Coordinate-space
+            # invariant" docstring).  This code previously subtracted
+            # ``pcb.board_origin`` a SECOND time, which pushed every
+            # vertex of a properly-inset zone out to ~-origin and flagged
+            # the zone as "insufficient edge clearance".  ``kct route``
+            # then silently REPLACED hand-tuned zone sets (e.g. board
+            # 03's GND-dual-layer + VCC/VBUS islands) with generic
+            # auto-pour zones whose priorities conflict ("zone will get
+            # zero copper") -- stranding pour-net pads at DRC time.
+            bx = px
+            by = py
             # Check distance to each edge of the bounding box
             dist_left = bx - edge_x_min
             dist_right = edge_x_max - bx

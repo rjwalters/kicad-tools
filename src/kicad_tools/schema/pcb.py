@@ -736,6 +736,19 @@ class Footprint:
             fp.description = descr.get_string(0) or ""
         if tags := sexp.find("tags"):
             fp.tags = tags.get_string(0) or ""
+
+        # Modern lock form: a top-level ``(locked yes)`` child (KiCad 9/10).
+        # KiCad 10's kicad-cli REJECTS the legacy ``locked`` token inside
+        # ``(attr ...)`` ("Failed to load board"), so generators that need
+        # kicad-cli interop (zone fill, DRC, gerber export) emit the
+        # top-level form instead -- without this branch the router's
+        # anchor logic (``getattr(fp, "locked", False)``, issue #2845)
+        # would silently stop seeing those footprints as locked
+        # (issue #3410).
+        if locked_node := sexp.find("locked"):
+            if (locked_node.get_string(0) or "yes") in ("yes", "true"):
+                fp.locked = True
+
         if attr := sexp.find("attr"):
             # The footprint *type* token (``smd`` / ``through_hole``)
             # is optional in KiCad's emitted form. When KiCad omits the

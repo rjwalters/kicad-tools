@@ -560,3 +560,85 @@ class TestUsbCFixture:
                 f"Through-hole pad {esc.pad.ref}.{esc.pad.pin} found in "
                 f"escape list; PTH shield tabs must defer to main router."
             )
+
+
+# ---------------------------------------------------------------------------
+# Issue #3410: column-aligned (re-spun) USB-C connectors defer to main router
+# ---------------------------------------------------------------------------
+
+
+def _make_respun_usb_c_pads(ref: str = "J1") -> list[Pad]:
+    """USB-C pad set with the board-03 #3410 re-spin tail order.
+
+    Same geometry as :func:`_make_usb_c_pads` except the B6/B7 tails sit
+    directly under their same-signal A-side partners (B6 under A6 at
+    x=-0.25, B7 under A7 at x=+0.25), so every column carries a single
+    net and the same-net pairs tie with a vertical surface stub.
+    """
+    pads = _make_usb_c_pads(ref)
+    for p in pads:
+        if p.pin == "B6":
+            p.x = -0.25
+        elif p.pin == "B7":
+            p.x = 0.25
+        elif p.pin in ("A8", "B8"):
+            # True no-connects (net 0), matching board 03's generator
+            # output ``("A8", 1.0, "")`` -- the synthetic legacy fixture
+            # gives them standalone named nets instead.
+            p.net = 0
+            p.net_name = ""
+    return pads
+
+
+class TestUsbCColumnAlignedDefer:
+    """Issue #3410: re-spun USB-C footprints skip the escape pre-pass."""
+
+    def test_respun_connector_is_column_aligned(self):
+        from kicad_tools.router.escape import _is_column_aligned_connector
+
+        smt = [p for p in _make_respun_usb_c_pads() if not p.through_hole]
+        assert _is_column_aligned_connector(smt)
+
+    def test_legacy_mirrored_connector_is_not_column_aligned(self):
+        from kicad_tools.router.escape import _is_column_aligned_connector
+
+        smt = [p for p in _make_usb_c_pads() if not p.through_hole]
+        assert not _is_column_aligned_connector(smt)
+
+    def test_respun_connector_generates_no_escapes(self):
+        """The escape router defers the whole re-spun connector.
+
+        The #2919 alternating-layer via fanout packs 0.6mm vias at
+        sub-pitch spacing inside the connector footprint -- on the
+        re-spun (column-aligned) layout that fanout is unnecessary and
+        was the dominant DRC error cluster in the #3410 audit.  The
+        main router (with intra-IC same-net consolidation) routes the
+        connector cleanly without any escape pre-pass.
+        """
+        pads = _make_respun_usb_c_pads()
+        rules = _make_rules(manufacturer="jlcpcb-tier1")
+        grid = _make_grid(rules)
+        escape_router = EscapeRouter(grid, rules)
+
+        package_info = escape_router.analyze_package(pads)
+        assert package_info.package_type == PackageType.USB_C_CONNECTOR
+
+        escapes = escape_router.generate_escapes(package_info)
+        assert escapes == [], (
+            f"Re-spun (column-aligned) USB-C connector must defer to the "
+            f"main router; got {len(escapes)} escape route(s)."
+        )
+
+    def test_legacy_connector_still_generates_escapes(self):
+        """Tongue-mirrored footprints keep the #2919 escape behaviour."""
+        pads = _make_usb_c_pads()
+        rules = _make_rules(manufacturer="jlcpcb-tier1")
+        grid = _make_grid(rules)
+        escape_router = EscapeRouter(grid, rules)
+
+        package_info = escape_router.analyze_package(pads)
+        escapes = escape_router.generate_escapes(package_info)
+        assert escapes, (
+            "Legacy mirrored USB-C connector lost its alternating-layer "
+            "escapes; the #3410 column-aligned defer must not fire here."
+        )
