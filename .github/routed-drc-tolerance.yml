@@ -1095,7 +1095,15 @@ tolerances:
   # 0.5 mm tolerance, unchanged -- this is upstream of
   # apply_match_group_tuning's reach and is tracked as a
   # follow-up under the M-G campaign).
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 25
+  #
+  # Tightened 25 -> 16 (issue #3458 failure inventory).  PR #3462
+  # refreshed the committed routed PCB and the gate now measures
+  # 16 blocking errors (21 total - 5 advisory connectivity) on it;
+  # the old floor went stale silently because the nightly slow-tests
+  # job did not gate on the pytest exit code.  Pinned exactly (no
+  # slack) per this file's update policy; the parity pins in
+  # tests/test_kct_check_parity.py were re-baselined in the same PR.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 16
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
