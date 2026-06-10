@@ -72,7 +72,6 @@ import pytest
 
 from kicad_tools.router import (
     DesignRules,
-    DifferentialPairConfig,
     create_net_class_map,
     load_pcb_for_routing,
 )
@@ -602,11 +601,26 @@ def regenerated_board() -> Path:
     happens to manually re-export the PCB later.
 
     Skips the test if a generator script is missing (e.g. the board was
-    relocated by a future refactor without updating this test).
+    relocated by a future refactor without updating this test), or if no
+    KiCad symbol libraries are installed (generate_schematic.py resolves
+    symbols like Connector_Generic from the system libraries; the nightly
+    slow-tests runner installs the ``kicad-symbols`` apt package -- see
+    .github/workflows/slow-tests.yml and the issue #3458 inventory).
     """
     for required in (GEN_SCH_SCRIPT, GEN_PCB_SCRIPT, ROUTE_DEMO_SCRIPT):
         if not required.exists():
             pytest.skip(f"Required board 03 script missing: {required}")
+
+    from kicad_tools.schematic.registry import _default_symbol_paths
+
+    if not _default_symbol_paths():
+        pytest.skip(
+            "No KiCad symbol libraries found (see "
+            "kicad_tools.schematic.registry._default_symbol_paths); "
+            "generate_schematic.py cannot resolve symbols. Install the "
+            "system KiCad symbol libraries (apt: kicad-symbols) or set "
+            "KICAD_SYMBOL_DIR."
+        )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

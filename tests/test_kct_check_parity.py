@@ -68,19 +68,24 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 )
 
 # Expected per-family counts on board 07's committed routed artifact.
-# Re-baselined 2026-06-06 (Issue #3263) after PRs #3197/#3198/#3202/#3203
-# brought net-yield from 25/31 -> 28/31 (DQ3, MIPI_CLK_N, MIPI_DAT0_N
-# remain unrouted; previously also DQS_N, MIPI_CLK_P, MIPI_DAT1_P,
-# TMDS_D1_P, A1).  The extra successfully-routed pairs surface 1 more
-# diff-pair length-skew + 1 more routing-continuity violation than the
-# pre-rebase artifact tracked (4+4+1=9 -> 5+5+1=11 delta).  The 2-error
-# clearance budget on the committed PCB drops from 17 blocking -> 17
-# blocking (advisory connectivity drops from 7 -> 6 with the better
-# routing yield, keeping the blocking count steady at 17).
+# Re-baselined 2026-06-09 (issue #3458 inventory) after PR #3462 refreshed
+# the committed routed PCB: bare totals dropped 12 -> 9, with-sidecar
+# totals 23 -> 21, and the refreshed routing surfaces one more
+# match-group length-skew violation (5+5+1=11 -> 5+5+2=12 delta) while
+# the advisory connectivity count improves 6 -> 5 and blocking drops
+# 17 -> 16.  These pins measure the COMMITTED artifact and are
+# deterministic; the allowlist floor in .github/routed-drc-tolerance.yml
+# is 21 because the Match-Group gate RE-ROUTES from source and the
+# re-route DRC profile varies with machine load (CI loaded = 21, local
+# idle = 16 -- the #3466 wall-clock-budget cliff).
+#
+# Previous re-baseline: 2026-06-06 (Issue #3263) after PRs #3197/#3198/
+# #3202/#3203 brought net-yield from 25/31 -> 28/31 (4+4+1=9 ->
+# 5+5+1=11 delta, blocking steady at 17).
 BOARD_07_EXPECTED_FAMILY_DELTA: dict[str, int] = {
     "diffpair_length_skew": 5,
     "diffpair_routing_continuity": 5,
-    "match_group_length_skew": 1,
+    "match_group_length_skew": 2,
 }
 
 
@@ -352,20 +357,23 @@ class TestCiGateCountsGatedFamilies:
         """``check_routed_drc.count_errors`` on board 07 includes the families.
 
         Before #3151 the gate ran bare and saw 11 blocking errors; now it
-        resolves the sidecar and sees 17 (the +11 = 5+5+1 gated-family errors).
+        resolves the sidecar and sees the gated-family errors too
+        (currently +12 = 5+5+2, see ``BOARD_07_EXPECTED_FAMILY_DELTA``).
 
-        Re-baselined 2026-06-06 (Issue #3263) after the post-#3197/#3198/
-        #3202/#3203 router improvements lifted net-yield 25/31 -> 28/31.
-        The extra successfully-routed pairs cost +1 diffpair_length_skew
-        + +1 diffpair_routing_continuity but produce 1 fewer connectivity
-        advisory (7 -> 6), so blocking holds at 17 (was 20).
+        Re-baselined 2026-06-09 (issue #3458 inventory) after PR #3462
+        refreshed the committed routed PCB: 21 total - 5 advisory
+        connectivity = 16 blocking (was 23 - 6 = 17).
+
+        Previous re-baseline: 2026-06-06 (Issue #3263) after the
+        post-#3197/#3198/#3202/#3203 router improvements lifted net-yield
+        25/31 -> 28/31 (blocking held at 17).
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # 23 total - 6 advisory connectivity = 17 blocking.
-        assert blocking == 17, (
-            f"expected 17 blocking errors with net_class_map awareness, got {blocking}"
+        # 21 total - 5 advisory connectivity = 16 blocking.
+        assert blocking == 16, (
+            f"expected 16 blocking errors with net_class_map awareness, got {blocking}"
         )
-        assert advisory.get("connectivity", 0) == 6
+        assert advisory.get("connectivity", 0) == 5

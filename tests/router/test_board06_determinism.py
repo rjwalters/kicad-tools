@@ -28,6 +28,7 @@ tests).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,13 +47,48 @@ def _slow_tests_enabled() -> bool:
     return os.environ.get("KICAD_RUN_SLOW_BOARD06_DETERMINISM") == "1"
 
 
-pytestmark = pytest.mark.skipif(
+# NOTE: this gate is applied per-class (not via module-level ``pytestmark``)
+# so the fast CLI-interface contract test below always runs in PR CI.
+# Issue #3460: the determinism test invoked ``check_routed_drc.py --pcb``
+# after the script's CLI had moved to positional ``files``, and because the
+# whole module was env-gated, no CI lane ever caught the drift.
+_slow_gate = pytest.mark.skipif(
     not _slow_tests_enabled(),
     reason=(
         "Slow board-06 determinism test (45-60 min total).  Set "
         "KICAD_RUN_SLOW_BOARD06_DETERMINISM=1 to enable."
     ),
 )
+
+
+def _drc_checker_cmd(pcb_path: Path) -> list[str]:
+    """Build the canonical ``check_routed_drc.py`` invocation for one PCB.
+
+    Shared between the slow determinism test and the fast CLI-interface
+    contract test below so the arg shape exercised in PR CI is the SAME
+    shape the determinism runs use -- if the script's CLI drifts again
+    (issue #3460: the ``--pcb`` flag was dropped in favour of positional
+    ``files``), the fast test fails instead of the drift hiding behind the
+    ``KICAD_RUN_SLOW_BOARD06_DETERMINISM`` gate.
+    """
+    return [sys.executable, str(DRC_CHECKER), str(pcb_path)]
+
+
+def _extract_drc_error_count(stdout: str) -> int | None:
+    """Parse the blocking-error count from ``check_routed_drc.py`` output.
+
+    The script prints one of (see ``check_file`` in the script):
+
+    * ``OK: <path> -- 0 errors (strict gate, --mfr jlcpcb).``
+    * ``OK: <path> -- N errors (--mfr ..., allowlist max M; ...)``
+    * ``::error file=<path>::DRC errors detected ...: N blocking error(s) ...``
+    * ``::error file=<path>::DRC regression: N blocking error(s) ...``
+
+    Returns the first ``N <blocking >error`` match, or ``None`` if no line
+    matches (caller fails loudly with the full output).
+    """
+    match = re.search(r"(\d+)\s+(?:blocking\s+)?error", stdout)
+    return int(match.group(1)) if match else None
 
 
 def _route_and_count_drc(out_dir: Path, seed: int, run_index: int) -> tuple[int, Path]:
@@ -89,41 +125,111 @@ def _route_and_count_drc(out_dir: Path, seed: int, run_index: int) -> tuple[int,
     assert src_pcb.exists(), f"Routed PCB not produced: {src_pcb}"
     shutil.copy2(src_pcb, pcb_dst)
 
-    # Use the standard CI DRC checker to count errors.
-    drc_cmd = [
-        sys.executable,
-        str(DRC_CHECKER),
-        str(BOARD_DIR / "output"),
-        "--pcb",
-        str(pcb_dst),
-    ]
+    # Use the standard CI DRC checker to count errors.  The PCB path is
+    # passed POSITIONALLY -- the script's CLI is ``check_routed_drc.py
+    # [--allowlist X] files...`` (issue #3460: the old ``--pcb`` flag no
+    # longer exists and argparse exits 2 with "unrecognized arguments").
+    drc_cmd = _drc_checker_cmd(pcb_dst)
     drc_result = subprocess.run(drc_cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
-    # ``check_routed_drc.py`` prints "DRC error count: N" somewhere in
-    # its output; pull the integer out.  When the script's output
-    # format changes, this test will fail loudly with the full output
-    # captured below for diagnostics.
-    count_line = next(
-        (
-            line
-            for line in drc_result.stdout.splitlines()
-            if "DRC error count" in line or "errors" in line.lower()
-        ),
-        None,
-    )
-    if count_line is None:
+
+    # Fail loudly on interface drift instead of falling through to the
+    # count parser with empty stdout (issue #3460's failure mode).
+    if "unrecognized arguments" in drc_result.stderr:
+        pytest.fail(
+            "check_routed_drc.py rejected its arguments -- the CLI drifted "
+            f"again (issue #3460).  cmd: {drc_cmd}\nstderr:\n{drc_result.stderr}"
+        )
+    # Exit 0 = within tolerance, exit 2 = over tolerance; BOTH print a
+    # parseable error count and both are fine here (this is a determinism
+    # probe, not a pass/fail gate).  Exit 1 = tool failure.
+    if drc_result.returncode not in (0, 2):
+        pytest.fail(
+            f"check_routed_drc.py failed (exit {drc_result.returncode}).\n"
+            f"stdout:\n{drc_result.stdout}\nstderr:\n{drc_result.stderr}"
+        )
+
+    count = _extract_drc_error_count(drc_result.stdout)
+    if count is None:
         pytest.fail(
             "Could not find DRC error count line in check_routed_drc.py output.  "
             f"stdout:\n{drc_result.stdout}\nstderr:\n{drc_result.stderr}"
         )
-
-    # Extract trailing integer; the format historically is
-    # "DRC error count: 35".
-    digits = "".join(c for c in count_line if c.isdigit() or c == " ").split()
-    if not digits:
-        pytest.fail(f"Could not parse integer from DRC count line: {count_line!r}")
-    return int(digits[-1]), pcb_dst
+    return count, pcb_dst
 
 
+class TestDRCCheckerCLIInterface:
+    """Fast contract tests: the checker accepts the determinism arg shape.
+
+    Always runs (PR CI included) -- NOT behind the
+    ``KICAD_RUN_SLOW_BOARD06_DETERMINISM`` gate.  Issue #3460: when
+    ``check_routed_drc.py`` replaced ``--pcb`` with positional ``files``,
+    the determinism test kept passing ``--pcb`` and nothing in CI noticed
+    because the only caller was env-gated.  These tests pin the shared
+    ``_drc_checker_cmd`` shape against the real script so CLI drift fails
+    a fast lane immediately.
+    """
+
+    def test_checker_accepts_determinism_invocation_shape(self, tmp_path: Path) -> None:
+        """The exact argv shape the determinism test uses parses cleanly.
+
+        Uses a nonexistent PCB path: the script's contract is to warn and
+        skip missing files (exit 0), which proves argparse accepted the
+        arguments without paying for a real ``kct check`` run.
+        """
+        missing_pcb = tmp_path / "does_not_exist.kicad_pcb"
+        cmd = _drc_checker_cmd(missing_pcb)
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+        assert "unrecognized arguments" not in result.stderr, (
+            f"check_routed_drc.py rejected the determinism test's arg shape "
+            f"(issue #3460 regression).  cmd: {cmd}\nstderr:\n{result.stderr}"
+        )
+        assert result.returncode == 0, (
+            f"Expected exit 0 (missing file is warn-and-skip), got "
+            f"{result.returncode}.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+    def test_legacy_pcb_flag_is_rejected(self, tmp_path: Path) -> None:
+        """``--pcb`` is gone; pin that so a partial revert can't half-restore it.
+
+        If a future change deliberately restores a ``--pcb`` alias, update
+        this test AND ``_drc_checker_cmd`` together.
+        """
+        missing_pcb = tmp_path / "does_not_exist.kicad_pcb"
+        cmd = [sys.executable, str(DRC_CHECKER), "--pcb", str(missing_pcb)]
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+        assert result.returncode == 2
+        assert "unrecognized arguments" in result.stderr
+
+    def test_error_count_parser_handles_all_output_formats(self) -> None:
+        """``_extract_drc_error_count`` parses every format the script emits."""
+        assert (
+            _extract_drc_error_count("OK: x.kicad_pcb -- 0 errors (strict gate, --mfr jlcpcb).")
+            == 0
+        )
+        assert (
+            _extract_drc_error_count(
+                "OK: x.kicad_pcb -- 4 errors (--mfr jlcpcb, allowlist max 6; reduce ...)."
+            )
+            == 4
+        )
+        assert (
+            _extract_drc_error_count(
+                "::error file=x::DRC errors detected by `kct check --mfr jlcpcb "
+                "--errors-only`: 35 blocking error(s) (advisory rules excluded)."
+            )
+            == 35
+        )
+        assert (
+            _extract_drc_error_count(
+                "::error file=x::DRC regression: 7 blocking error(s) (--mfr jlcpcb, "
+                "advisory rules excluded) exceeds allowlist value 5 ..."
+            )
+            == 7
+        )
+        assert _extract_drc_error_count("no counts here") is None
+
+
+@_slow_gate
 class TestBoard06DRCDeterminism:
     """Multi-run DRC count determinism for board 06 at the same seed."""
 

@@ -13,7 +13,7 @@ jobs:
   slow-tests:
     name: Slow / Benchmark Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -21,9 +21,33 @@ jobs:
         with:
           version: "latest"
 
+      - name: Install KiCad symbol libraries
+        # tests/test_board_03_regression.py regenerates the board 03
+        # schematic from source, which resolves symbols from the system
+        # KiCad libraries (see kicad_tools.schematic.registry). Without
+        # this the regenerated_board fixture errors with "Library not
+        # found: Connector_Generic.kicad_sym" (issue #3458 inventory).
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends kicad-symbols
+
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Build native router extension
+        # uv sync does NOT build the C++ router extension; without it the
+        # A* loop is 10-100x slower and multi-minute routing tests blow
+        # any per-test timeout (this was most of the issue #3458 failure
+        # inventory). --check makes a silent build failure fatal here
+        # instead of surfacing as timeouts downstream.
+        run: |
+          uv run kct build-native
+          uv run kct build-native --check
+
       - name: Run slow tests
-        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=120 -m slow --cov=kicad_tools --cov-report=term-missing
-        continue-on-error: true
+        # No continue-on-error here: the whole point of this job is to
+        # gate on the pytest exit code (issue #3458 -- the nightly was
+        # green with 9 failures, so every slow reach/DRC floor was
+        # advisory-only). --timeout=1200 because -m slow tests
+        # legitimately run 5-20 minutes each (routing subprocesses with
+        # internal 600-900s budgets); the old --timeout=120 could never
+        # pass them deterministically.
+        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=1200 -m slow --cov=kicad_tools --cov-report=term-missing
