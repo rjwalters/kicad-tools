@@ -17,31 +17,38 @@ Why a separate test:
   the cpp-backend mechanism (27µm shortfall band at actual=100µm) to the
   in-pad rescue's "Proceeding anyway" path on tier-1 manufacturers, NOT
   to the auto-grid resolution selector as initially hypothesized.
-* The committed routed PCB at HEAD ships with **6 ``clearance_pad_segment``
-  violations** under jlcpcb rules.  Pre-#3423 these were at U3-30
-  (ISENSE_B+), U10-12 (HALL_B), and U10-3 (OSC_OUT); after the #3423
-  U3-rotation artifact refresh they all sit on U3's south/north edges
-  (U3-41 GATE_DRV_BH x2, U3-36 GATE_DRV_CH x2, U3-21 PWM_BL x2).  A
-  future fix targeting either hot-spot should drop the count for THAT
-  hot-spot; a fix that accidentally moves the violations to a NEW pin
-  instead of removing them should be caught loudly.
+* Issue #3425 (2026-06-10) switched the board recipe to jlcpcb-tier1 +
+  cpp backend + 4 layers with ``--micro-via-in-pad-fallback``, and this
+  test now measures against ``--mfr jlcpcb-tier1`` (the profile the
+  board routes and is CI-gated against).  The committed routed PCB
+  ships with **0 ``clearance_pad_segment`` violations**: the 0.3 mm
+  micro-via in-pad rescues fit the DRV8301's 0.3 mm-wide pads without
+  clipping neighbours, eliminating the historical U3/U10 escape
+  hot-spots.  The single residual blocking violation is 1
+  ``clearance_segment_segment`` (ISENSE_A- / ISENSE_B- partial-route
+  stub overlap on In1.Cu at (18.75, 53.75)) -- gated by the allowlist
+  (= 1) in ``.github/routed-drc-tolerance.yml`` and tracked in the
+  #3425 follow-on issues.
 
 The test does NOT pin the exact set of violating pins (that would be
 too brittle).  It asserts:
 
-1. The total ``clearance_pad_segment`` count is at-or-below 6 (the
-   measured floor at the time issue #3251 closed).
+1. The total ``clearance_pad_segment`` count is 0 (the measured floor
+   after issue #3425; was 6 under the pre-#3425 2L python recipe).
 2. All ``clearance_pad_segment`` violations are at fine-pitch hot-spot
    components (U3, U10, R10-R12 current-sense resistors); a violation
-   somewhere ELSE is treated as a new-mechanism regression.
+   somewhere ELSE is treated as a new-mechanism regression.  (Vacuous
+   at the current 0-count; retained so a future regression that
+   reintroduces the rule also gets shape-checked.)
 3. The violation shortfalls are within the documented band (< 130µm);
    a violation OUTSIDE that band points at a new mechanism that should
-   be triaged before merging.
+   be triaged before merging.  (Also vacuous at 0.)
 
 Updating this test:
 
-* If a router improvement drops the count below 6, tighten ``MAX_PAD_SEGMENT``
-  in the same PR so the new floor is enforced.
+* ``MAX_PAD_SEGMENT`` is 0 -- any reappearance of the rule is a
+  regression in the micro-via in-pad fallback / escape paths and
+  must be triaged, not allowlisted.
 * If a placement / library change legitimately moves the hot-spot to a
   new pin (e.g., U3 footprint switched from HTSSOP-56 to QFN-56), update
   ``HOT_SPOT_REFS`` in the same PR with reviewer justification.
@@ -63,9 +70,10 @@ BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
 
 # Maximum allowed ``clearance_pad_segment`` violations on the committed
-# routed PCB.  The current measurement (Issue #3251, 2026-06-06) is 6.
-# Lower this when a router fix drops the count.
-MAX_PAD_SEGMENT = 6
+# routed PCB.  History: 6 (Issue #3251, 2026-06-06, 2L python recipe at
+# base jlcpcb); 0 since Issue #3425 (2026-06-10, jlcpcb-tier1 + cpp +
+# 4L + --micro-via-in-pad-fallback recipe measured at jlcpcb-tier1).
+MAX_PAD_SEGMENT = 0
 
 # Component references where ``clearance_pad_segment`` is expected
 # (fine-pitch escapes and current-sense passive 0402s on board 05).
@@ -76,10 +84,13 @@ HOT_SPOT_REFS = frozenset({"U3", "U10", "R10", "R11", "R12"})
 # * Issue #3251 (2026-06-06): 113um at U10-3 (OSC_OUT vs OSC_IN) -> 130.
 # * Issue #3423 (2026-06-09): the U3 rotation + artifact refresh moved
 #   the hot-spot entirely onto U3's south edge; worst is 139um at U3-36
-#   (GATE_DRV_CH trace overlapping the PHASE_C pad by 12um).  The
-#   in-pad overlap mechanism is tracked in Issue #3444 -- tighten back
-#   toward 130 when that fix lands.
-MAX_SHORTFALL_UM = 150
+#   (GATE_DRV_CH trace overlapping the PHASE_C pad by 12um) -> 150.
+# * Issue #3425 (2026-06-10): 0 clearance_pad_segment violations on the
+#   tier1 + micro-via-fallback snapshot -- the band check is vacuous;
+#   re-tightened to the historical 130 so a regression that
+#   reintroduces the rule is also band-checked against the
+#   pre-#3423 norm.
+MAX_SHORTFALL_UM = 130
 
 # Rule families that the committed PCB at HEAD does NOT exhibit.
 #
@@ -89,16 +100,31 @@ MAX_SHORTFALL_UM = 150
 # re-routes could not reproduce (fresh = 11 blocking vs committed 6).
 #
 # Issue #3423 (2026-06-09): the U3 rotation moved all 56 U3 pads, so
-# the unreproducible snapshot HAD to be refreshed; the refreshed
-# committed file is the deterministic ``design.py`` seed-42 output and
-# carries both families (1 segment_segment + 3 segment_via residual
-# B.Cu overlaps in the corridor south of the rotated U3, down from
-# 7 + 7 pre-#3442 -- tracked in Issue #3444).  Per the refresh policy
-# both entries are dropped IN THE SAME PR as the re-route.  Re-add
-# them (and tighten the tolerance allowlist back down) when #3444
-# lands a router fix that removes the overlap families from the
-# fresh seed-42 route.
-ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset()
+# the unreproducible snapshot HAD to be refreshed; the refreshed file
+# carried 1 segment_segment + 3 segment_via, so both entries were
+# dropped per the refresh policy.
+#
+# Issue #3425 (2026-06-10): re-derived from the tier1 + cpp + 4L +
+# micro-via-fallback snapshot measured at ``--mfr jlcpcb-tier1``:
+#
+# * ``clearance_pad_via`` / ``clearance_via_via``: absent BECAUSE OF
+#   ``--micro-via-in-pad-fallback`` -- without it the 0.6 mm in-pad
+#   rescue vias on U3's 0.5 mm-pitch pads produce 21 + 8 violations
+#   (clipping neighbouring foreign-net pads).  A regression here means
+#   the fallback stopped engaging.
+# * ``clearance_segment_via``: absent on the measured snapshot.
+# * ``clearance_segment_segment`` is NOT pinned absent: the committed
+#   file carries exactly 1 (ISENSE_A-/ISENSE_B- partial-route stub
+#   overlap, In1.Cu) -- bounded by the allowlist value (1) in
+#   .github/routed-drc-tolerance.yml and tracked in the #3425
+#   follow-on issues.
+ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset(
+    {
+        "clearance_pad_via",
+        "clearance_via_via",
+        "clearance_segment_via",
+    }
+)
 
 
 @pytest.fixture(scope="module")
@@ -121,8 +147,12 @@ def _kct_check_violations(pcb_path: Path) -> list[dict]:
         "kicad_tools.cli",
         "check",
         str(pcb_path),
+        # Issue #3425: board 05 routes + DRC-gates against jlcpcb-tier1
+        # (Capability-Plus legalizes the DRV8301 in-pad rescue vias).
+        # Matches design.py route_pcb() and the manufacturers: override
+        # in .github/routed-drc-tolerance.yml.
         "--mfr",
-        "jlcpcb",
+        "jlcpcb-tier1",
         "--errors-only",
         "--format",
         "json",
@@ -185,10 +215,11 @@ class TestBoard05DRCHotspotRegression:
         assert len(pad_seg) <= MAX_PAD_SEGMENT, (
             f"Board 05 routed PCB reports {len(pad_seg)} "
             f"clearance_pad_segment violation(s); max allowed is "
-            f"{MAX_PAD_SEGMENT} (Issue #3251 floor).  This indicates a "
-            f"regression in the fine-pitch escape / pad-halo / clearance-"
-            f"kernel paths (#3225 / #3232 / #3248 / #3250).  Investigate "
-            f"before raising the floor."
+            f"{MAX_PAD_SEGMENT} (Issue #3425 floor under jlcpcb-tier1 + "
+            f"micro-via in-pad fallback).  This indicates a regression in "
+            f"the fine-pitch escape / pad-halo / clearance-kernel / "
+            f"micro-via-fallback paths (#3225 / #3232 / #3248 / #3250 / "
+            f"#3118).  Investigate before raising the floor."
         )
 
     def test_pad_segment_violations_at_known_hotspots_only(
@@ -225,12 +256,11 @@ class TestBoard05DRCHotspotRegression:
     ) -> None:
         """All ``clearance_pad_segment`` shortfalls are ≤ ``MAX_SHORTFALL_UM``.
 
-        The committed file's largest shortfall is 113um at U10-3
-        (OSC_OUT / OSC_IN at the oscillator load network).  A shortfall
-        above 130um points at a structural failure (trace centerline on
-        pad metal, ``actual=0``), which is the cpp-backend's
-        ``U3-33 ISENSE_A+ vs ISENSE_A-`` mechanism — that path should
-        not exist on the python-routed committed file.  Catch it
+        Vacuous on the current 0-violation snapshot (Issue #3425);
+        retained so a regression that reintroduces the rule is also
+        band-checked.  A shortfall above 130um points at a structural
+        failure (trace centerline on pad metal, ``actual=0``) rather
+        than the historical 13-27um grid-quantization band.  Catch it
         loudly if it appears.
         """
         viols = _kct_check_violations(routed_pcb_path)
@@ -251,26 +281,25 @@ class TestBoard05DRCHotspotRegression:
                 f"investigate before merge (Issue #3251 hot-spot table)."
             )
 
-    def test_committed_pcb_has_no_segment_segment_or_segment_via(
+    def test_committed_pcb_absent_rule_families(
         self,
         routed_pcb_path: Path,
     ) -> None:
-        """No ``clearance_segment_segment`` / ``clearance_segment_via`` on the committed PCB.
+        """Rule families in ``ABSENT_RULES_ON_COMMITTED_PCB`` stay absent.
 
-        Issue #3294 measurement (2026-06-07): a fresh re-route from
-        current main produces 4 ``clearance_segment_segment`` and
-        3 ``clearance_segment_via`` violations on top of 4
-        ``clearance_pad_segment``, which is *worse* than the committed
-        snapshot's 0 + 0 + 6.  Pinning the absence of these two rule
-        families on the committed file makes the "fresh re-route
-        accidentally got committed" regression loud — without this
-        guard a refresh that widened blocking errors from 6 to 11 would
-        still pass the allowlist if the allowlist were ever raised
-        above 11 for unrelated reasons.
+        Issue #3425 measurement (2026-06-10): the committed tier1 + cpp
+        + 4L + micro-via-fallback snapshot carries NO
+        ``clearance_pad_via`` / ``clearance_via_via`` /
+        ``clearance_segment_via`` violations.  The first two are the
+        signature of the micro-via in-pad fallback NOT engaging: the
+        same recipe without ``--micro-via-in-pad-fallback`` produces
+        21 pad_via + 8 via_via violations from 0.6 mm rescue vias
+        clipping U3's neighbouring 0.5 mm-pitch pads.  Pinning their
+        absence makes that regression loud even while the aggregate
+        allowlist would otherwise tolerate a count drift.
 
-        Refresh policy: when a router improvement legitimately makes
-        the fresh re-route strictly better than the committed snapshot,
-        re-route AND drop the entries in
+        Refresh policy: when a recipe/router change legitimately alters
+        the committed snapshot's rule mix, re-route AND re-derive
         :data:`ABSENT_RULES_ON_COMMITTED_PCB` in the same PR.
         """
         viols = _kct_check_violations(routed_pcb_path)
@@ -281,11 +310,11 @@ class TestBoard05DRCHotspotRegression:
                 offenders[rid] = offenders.get(rid, 0) + 1
         assert not offenders, (
             f"Board 05 committed routed PCB now reports rule families "
-            f"that the historical snapshot does not have: {offenders!r}. "
-            f"This usually means an unintended re-route was committed — "
-            f"the fresh ``--backend python`` re-route under current main "
-            f"introduces these mechanisms (Issue #3294 measurement).  "
-            f"Either revert the routed-PCB change or, if the re-route is "
-            f"intentional and strictly better, remove the offending "
-            f"rule(s) from ABSENT_RULES_ON_COMMITTED_PCB in the same PR."
+            f"that the #3425 baseline snapshot does not have: "
+            f"{offenders!r}.  pad_via/via_via reappearing usually means "
+            f"the --micro-via-in-pad-fallback rescue stopped engaging "
+            f"(0.6 mm in-pad vias clipping U3 neighbours).  Either "
+            f"revert the routed-PCB change or, if the re-route is "
+            f"intentional and strictly better, re-derive "
+            f"ABSENT_RULES_ON_COMMITTED_PCB in the same PR."
         )
