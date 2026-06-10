@@ -154,9 +154,27 @@ class GridCollisionChecker:
                 # Cell is occupied by another net's route (soft block).
                 # When ignore_overflow is set, skip this check so the
                 # optimizer does not fragment routes through overused cells.
+                #
+                # Issue #3433: the tolerance is scoped to cells that are
+                # GENUINELY overused (``usage_count > 1`` -- the same
+                # predicate ``get_total_overflow`` uses).  The original
+                # #2303 blanket skip made the checker blind to EVERY
+                # foreign-net trace whenever the router finished with
+                # ANY residual overflow: on board 04 (overflow=2 in an
+                # unrelated OSC corridor) the staircase-compression pass
+                # straightened SWO's B.Cu zigzag into a long diagonal
+                # running straight across SWCLK's clearance-respecting
+                # run, committing -0.200 mm full overlaps that no later
+                # pass can repair.  The bug is environment-sensitive:
+                # machines with the ``rtree`` package use
+                # ``VectorCollisionChecker``, whose exact narrow phase
+                # never honored ``ignore_overflow`` for foreign
+                # segments -- only this grid fallback was blind.
                 if cell.net != 0 and cell.net != exclude_net:
                     if not self.ignore_overflow:
                         return False  # Blocked by another net
+                    if cell.usage_count <= 1:
+                        return False  # Clean foreign trace -- never cross.
 
         return True
 

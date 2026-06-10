@@ -11,9 +11,11 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 155 segments / 24 vias /
-  324.66mm total length identical across seeds 42/43/44 -- this small
-  2-layer board has fully converged.
+- **Deterministic output**: 22 routes / 206 segments / 24 vias /
+  324.92mm total length identical across seeds 42/43/44 -- this small
+  2-layer board has fully converged.  (155 segments / 324.66mm before
+  the #3433 collision-checker scoping; see the 2026-06-09 re-baseline
+  note below.)
 
 **Re-verified 2026-06-07** on current main (issue #3292):
 - Includes Wave 6/7 PRs #3286 (board-04 NRST refresh), #3288 (plane-net
@@ -39,6 +41,24 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - ``kct fleet status`` reports ``ship_ready=YES`` for board 02, manifest
   ``fresh`` (no artifact refresh needed -- the routed PCB and manifest
   from the #3292 verification round remain byte-identical).
+
+**Re-baselined 2026-06-09** for Issue #3433 (collision-checker
+overflow-tolerance scoping):
+- #3433 scoped ``GridCollisionChecker``'s ``ignore_overflow`` tolerance
+  to GENUINELY overused cells (``usage_count > 1``).  Board 02 finishes
+  with residual overflow, so the post-route trace optimizer previously
+  ran in blanket-tolerant mode and compressed staircases ACROSS clean
+  foreign-net traces (the same mechanism that committed board-04's
+  -0.200 mm SWCLK/SWO overlaps).  With the tolerance scoped, those
+  compressions are correctly declined and more staircase segments are
+  retained: 155 -> 206 segments.  Routes (22), vias (24) and reach
+  (8/8) are unchanged; total length moves +0.26 mm (324.66 -> 324.92).
+  DRC still passes at jlcpcb-tier1 across all 3 seeds.
+- This also CONVERGES local (no rtree -> grid checker) behavior with
+  rtree-equipped environments (vector checker), whose exact narrow
+  phase never honored the blanket tolerance for foreign segments.
+- All 3 cpp seeds (42/43/44) produce bit-perfect 22/206/24/324.92mm
+  output, 8/8 nets, DRC PASS at jlcpcb-tier1.
 
 Board 02 is the smallest non-trivial routing target in the repo
 (~37mm x ~22mm, 10 nets, 34 pads).  The 4 NODE_x charlieplex matrix
@@ -395,12 +415,17 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
             "before relaxing the assertion."
         )
 
-    # Exact baseline numbers (re-verified 2026-06-07 on current main).
+    # Exact baseline numbers (re-baselined 2026-06-09 for Issue #3433:
+    # the collision-checker overflow-tolerance scoping stops the trace
+    # optimizer from compressing staircases across clean foreign-net
+    # traces, retaining 51 more segments; routes/vias/reach unchanged,
+    # +0.26mm length.  Prior pin: (22, 155, 24, 324.66), re-verified
+    # 2026-06-07).
     # Pinning these catches "all-seeds drift identically" regressions
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
-    EXPECTED = (22, 155, 24, 324.66)
+    EXPECTED = (22, 206, 24, 324.92)
     assert ref == EXPECTED, (
         f"Board 02 routing baseline drifted: got {ref}, expected "
         f"{EXPECTED}. This is consistent across seeds (so no determinism "

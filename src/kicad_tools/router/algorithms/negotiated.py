@@ -20,12 +20,60 @@ if TYPE_CHECKING:
     from ..congestion_estimator import CongestionEstimator
     from ..grid import RoutingGrid
     from ..pathfinder import Router
-    from ..primitives import Pad, Route, Via
+    from ..primitives import Pad, Route, Segment, Via
     from ..rules import DesignRules, NetClassRouting
 
 # Issue #2795: progress callback signature for visibility into long-running
 # rip-up operations.  Callback receives a phase string and a metadata dict.
 ProgressCallback = Callable[[str, dict], None]
+
+
+def select_seg_seg_demotion_nets(
+    overlap_pairs: list[tuple[int, int]],
+    demotable: set[int],
+) -> list[int]:
+    """Pick the minimal-ish set of nets to demote so no overlap pair survives.
+
+    Issue #3433 (demote-to-partial safety net): given the cross-net
+    copper-overlap pairs reported by
+    :meth:`NegotiatedRouter.find_segment_segment_violation_pairs`
+    (``copper_overlap_only=True``), choose which nets to strip from the
+    committed result so that no kept pair has both members still routed.
+
+    Greedy vertex cover: repeatedly demote the net that participates in
+    the most unresolved pairs (tie-break: lowest net id, for
+    determinism), until every pair has at least one demoted member.
+    Pairs where NEITHER member is demotable (e.g. both sides are
+    non-rippable escape infrastructure) are skipped -- nothing can be
+    done about them at this layer.
+
+    Shared by the post-loop safety nets in ``core.route_all_negotiated``
+    and ``two_phase.TwoPhaseRouter._detailed_negotiated``.
+
+    Args:
+        overlap_pairs: ``(net_lo, net_hi)`` tuples, ``net_lo < net_hi``.
+        demotable: Net ids eligible for demotion (committed,
+            negotiated-loop-owned nets).
+
+    Returns:
+        Sorted list of net ids to demote (may be empty).
+    """
+    pending = [
+        (a, b) for a, b in overlap_pairs if a in demotable or b in demotable
+    ]
+    demoted: set[int] = set()
+    while pending:
+        counts: dict[int, int] = {}
+        for a, b in pending:
+            if a in demotable:
+                counts[a] = counts.get(a, 0) + 1
+            if b in demotable:
+                counts[b] = counts.get(b, 0) + 1
+        # Highest pair-participation first; lowest net id on ties.
+        victim = min(counts, key=lambda n: (-counts[n], n))
+        demoted.add(victim)
+        pending = [p for p in pending if victim not in p]
+    return sorted(demoted)
 
 
 # =========================================================================
@@ -642,6 +690,14 @@ class NegotiatedRouter:
         # to 4 same-iteration calls), same invalidation semantics
         # (implicit on cache_key change).
         self._via_seg_violations_cache: tuple[object, list[int]] | None = None
+
+        # Issue #3433: single-slot memo for
+        # :meth:`find_nets_with_segment_segment_violations` -- the
+        # third quadrant of the clearance matrix (segment vs foreign
+        # segment).  Same cadence as the two sibling caches above (up
+        # to 4 same-iteration calls), same invalidation semantics
+        # (implicit on cache_key change).
+        self._seg_seg_violations_cache: tuple[object, list[int]] | None = None
 
     def route_net_negotiated(
         self,
@@ -1615,6 +1671,217 @@ class NegotiatedRouter:
         result = list(violators)
         if effective_cache_key is not None:
             self._via_seg_violations_cache = (effective_cache_key, result)
+        return result
+
+    def find_segment_segment_violation_pairs(
+        self,
+        net_routes: dict[int, list[Route]],
+        trace_clearance: float,
+        extra_routes: list[Route] | None = None,
+        copper_overlap_only: bool = False,
+    ) -> list[tuple[int, int]]:
+        """Find cross-net same-layer segment pairs that violate clearance.
+
+        Issue #3433: the raw pair-detection engine behind
+        :meth:`find_nets_with_segment_segment_violations` and the
+        post-loop demote-to-partial safety net in ``core.py``.
+
+        Walks every committed segment against every foreign-net
+        same-layer segment and flags pairs whose centerline distance is
+        below the copper-aware threshold:
+
+        * default mode (``copper_overlap_only=False``): threshold is
+          ``(w_a + w_b) / 2 + trace_clearance`` -- any DRC clearance
+          violation (matches ``kct check``'s
+          ``clearance_segment_segment`` class, e.g. the board-04
+          SWCLK/SWO 0.106 mm near-misses).
+        * ``copper_overlap_only=True``: threshold is ``(w_a + w_b) / 2``
+          -- the copper polygons physically intersect (negative
+          edge-to-edge actual, e.g. the board-04 -0.200 mm full
+          overlaps).  Used by the demote-to-partial safety net, which
+          must only fire for unmanufacturable geometry, never for
+          nudgeable near-misses.
+
+        ``extra_routes`` segments (escape-phase infrastructure, see
+        Issue #3077) participate in the foreign universe: a pair where
+        exactly one side is an extra-route segment is reported with
+        both net ids, but a pair where BOTH sides are extra-route
+        segments is skipped (escape infra is non-rippable; nothing the
+        negotiated loop can do about it here).
+
+        Performance: segments are bucketed per layer, sorted by
+        ``min_x`` and swept -- the inner loop breaks as soon as the
+        partner's ``min_x`` exceeds the current segment's reach
+        envelope, so the typical cost is near-linear in segment count
+        rather than quadratic.
+
+        Args:
+            net_routes: Dictionary of ``net_id -> list of Route``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm (``DesignRules.trace_clearance``).
+            extra_routes: Optional escape-phase routes whose segments
+                join the foreign universe but are not rippable.
+            copper_overlap_only: When True, only report pairs whose
+                copper physically overlaps (see above).
+
+        Returns:
+            Sorted list of unique ``(net_lo, net_hi)`` tuples with
+            ``net_lo < net_hi``.
+        """
+        # Import here to avoid a top-level circular dependency
+        # (algorithms.negotiated -> geometry -> core.geometry).
+        from ..geometry import segment_to_segment_distance
+
+        # Bucket segments by layer; track rippability so extra-route
+        # vs extra-route pairs can be skipped.
+        # Entry: (net_id, seg, rippable)
+        segs_on_layer: dict[int, list[tuple[int, Segment, bool]]] = {}
+        max_half_width = 0.0
+        for net_id, routes in net_routes.items():
+            for route in routes:
+                for seg in route.segments:
+                    segs_on_layer.setdefault(seg.layer.value, []).append(
+                        (net_id, seg, True)
+                    )
+                    if seg.width / 2 > max_half_width:
+                        max_half_width = seg.width / 2
+        if extra_routes:
+            for route in extra_routes:
+                for seg in route.segments:
+                    segs_on_layer.setdefault(seg.layer.value, []).append(
+                        (route.net, seg, False)
+                    )
+                    if seg.width / 2 > max_half_width:
+                        max_half_width = seg.width / 2
+
+        # Float-noise guard: geometry exactly AT the required clearance
+        # must not be flagged (grid-snapped routes routinely land at
+        # exactly trace_width + trace_clearance pitch).
+        eps = 1e-6
+
+        pairs: set[tuple[int, int]] = set()
+        for layer_entries in segs_on_layer.values():
+            if len(layer_entries) < 2:
+                continue
+            # Sweep preparation: sort by min_x; precompute bboxes.
+            prepared = []
+            for net_id, seg, rippable in layer_entries:
+                prepared.append((
+                    min(seg.x1, seg.x2),  # 0: min_x (sort key)
+                    max(seg.x1, seg.x2),  # 1: max_x
+                    min(seg.y1, seg.y2),  # 2: min_y
+                    max(seg.y1, seg.y2),  # 3: max_y
+                    seg.width / 2,        # 4: half width
+                    net_id,               # 5
+                    seg,                  # 6
+                    rippable,             # 7
+                ))
+            prepared.sort(key=lambda e: e[0])
+
+            for i, a in enumerate(prepared):
+                # Largest possible reach of segment ``a`` against ANY
+                # partner on this layer: its half-width + the largest
+                # half-width present + clearance.
+                reach = a[1] + a[4] + max_half_width + trace_clearance
+                for j in range(i + 1, len(prepared)):
+                    b = prepared[j]
+                    if b[0] > reach:
+                        break  # Sorted by min_x -- no later partner can hit.
+                    if a[5] == b[5]:
+                        continue  # Same net.
+                    if not a[7] and not b[7]:
+                        continue  # Both non-rippable escape infra.
+                    pair_key = (a[5], b[5]) if a[5] < b[5] else (b[5], a[5])
+                    if pair_key in pairs:
+                        continue
+                    required = a[4] + b[4]
+                    if not copper_overlap_only:
+                        required += trace_clearance
+                    # y-bbox prefilter before the exact distance.
+                    if b[2] > a[3] + required or b[3] < a[2] - required:
+                        continue
+                    sa, sb = a[6], b[6]
+                    dist = segment_to_segment_distance(
+                        sa.x1, sa.y1, sa.x2, sa.y2,
+                        sb.x1, sb.y1, sb.x2, sb.y2,
+                    )
+                    if dist < required - eps:
+                        pairs.add(pair_key)
+
+        return sorted(pairs)
+
+    def find_nets_with_segment_segment_violations(
+        self,
+        net_routes: dict[int, list[Route]],
+        trace_clearance: float,
+        cache_key: object | None = None,
+        extra_routes: list[Route] | None = None,
+    ) -> list[int]:
+        """Find nets whose committed segments clip foreign-net segments.
+
+        Issue #3433: third quadrant of the clearance matrix, completing
+        the lex-tuple blind spot.  The negotiated loop's best-iteration
+        comparator (``IterationMetrics``) previously counted only
+        seg-via (#3002) and via-seg (#3020) violators -- an iteration
+        with four SWCLK/SWO full overlaps scored identically to a
+        DRC-clean one, so ``routed_count`` dominance let the
+        overlapping snapshot win the post-loop restore and physically
+        overlapping copper reached the saved board (board-04
+        ``clearance_segment_segment`` actuals down to -0.200 mm).
+
+        Unlike the via hooks, BOTH nets of a violating pair are
+        surfaced: two overlapping traces are rippable peers -- either
+        re-route can clear the conflict, and feeding both back into
+        ``nets_to_reroute`` lets the congestion machinery pick.
+
+        Args:
+            net_routes: Dictionary of ``net_id -> list of Route``.
+            trace_clearance: Manufacturer minimum copper-to-copper
+                clearance in mm (``DesignRules.trace_clearance``).
+            cache_key: Optional hashable identifier for memoization
+                across consecutive same-iteration calls (same protocol
+                as the sibling hooks).
+            extra_routes: Optional escape-phase routes whose segments
+                join the foreign universe but whose nets are NOT
+                eligible for the violator set (Issue #3077 parity).
+
+        Returns:
+            Sorted list of net IDs (members of ``net_routes``) involved
+            in at least one cross-net same-layer clearance violation.
+        """
+        effective_cache_key: object | None
+        if cache_key is not None:
+            if extra_routes:
+                extras_fingerprint = tuple(id(r) for r in extra_routes)
+            else:
+                extras_fingerprint = ()
+            effective_cache_key = (cache_key, extras_fingerprint)
+            cached = self._seg_seg_violations_cache
+            if cached is not None and cached[0] == effective_cache_key:
+                return list(cached[1])
+        else:
+            effective_cache_key = None
+
+        pairs = self.find_segment_segment_violation_pairs(
+            net_routes,
+            trace_clearance=trace_clearance,
+            extra_routes=extra_routes,
+            copper_overlap_only=False,
+        )
+
+        # Only nets the negotiated loop owns (present in net_routes)
+        # are eligible violators -- extra-route nets are reported in
+        # pair form but are non-rippable here.
+        violators: set[int] = set()
+        for net_a, net_b in pairs:
+            if net_a in net_routes:
+                violators.add(net_a)
+            if net_b in net_routes:
+                violators.add(net_b)
+
+        result = sorted(violators)
+        if effective_cache_key is not None:
+            self._seg_seg_violations_cache = (effective_cache_key, result)
         return result
 
     def rip_up_nets(
