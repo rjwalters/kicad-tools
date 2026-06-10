@@ -67,6 +67,86 @@ logger = logging.getLogger(__name__)
 # the literal.
 FINE_PITCH_THRESHOLD_MM: float = 1.5
 
+# Issue #3398: locality radius for the consumer-aware SOP rescue deferral.
+#
+# When a rescue-only-band SOP pad's net has its nearest off-package pad
+# within this distance, the P_FP6 in-pad rescue is DEFERRED and the pad
+# emits no escape geometry at all.  Empirical basis (softstart rev B,
+# Jun 2026): the UCC27211 gate-driver pins with local consumers sit
+# 2-12 mm from their targets (bootstrap caps, TVS clamps, gate
+# resistors, Kelvin-source stitches), while the genuinely-far driver
+# input nets are 20-54 mm away (MCU).  Rescuing the local-consumer pads
+# placed 19 in-pad vias whose B.Cu via field blocked the FET bus +
+# snubber routing and DROPPED reach 18 -> 8/30; the short local hops
+# route better with no canned escape at all.  15 mm splits the two
+# observed clusters with margin on both sides.
+SOP_LOCAL_CONSUMER_RADIUS_MM: float = 15.0
+
+# Issue #3398: maximum number of in-pad rescues granted per SOP row on a
+# rescue-only-band package, awarded to the candidate(s) with the FARTHEST
+# off-package consumer.  Override with the
+# ``KICAD_TOOLS_SOP_RESCUE_ROW_CAP`` environment variable (integer) for
+# reach experiments.
+#
+# DEFAULT 0 (= defer every rescue; rescue-only-band packages enter the
+# dense list but emit NO escape geometry, reproducing the pre-#3398
+# not-dense routing bit-for-bit).  This is an EMPIRICAL decision, from
+# four same-machine paired A/B measurements on softstart rev B
+# (Jun 9 2026, PYTHONHASHSEED=0, C++ backend):
+#
+#   | Config                  | L=2 (2400 s)   | L=4 (480 s floor test) |
+#   | ----------------------- | -------------- | ---------------------- |
+#   | main (no rescue)        | 17/30          | 22/30 (all attempted)  |
+#   | cap=1/row + target stub | 15/30          | --                     |
+#   | cap=1/row + perp stub   | 16/30          | 20/30 (timeout @28/30) |
+#
+# Mechanisms observed:
+#
+# - Full-row rescue (pre-cap): the U5/U6 pin 7+8 via pairs walled the
+#   rows' shared back-layer launch corridor; the pin-7 nets that route
+#   in < 3 s from their surface pads went to ``blocked_path`` after
+#   ~45 s of search each (18 -> 8/30 in the #3395 measurement).
+# - cap=1 (pin 8 only): the pin-7 nets recover, but GATE_POS_A -- the
+#   one net the rescue targets -- stays ``blocked_path`` WITH its own
+#   in-pad via, at both L=2 and L=4.  The via field does not unblock
+#   it; the binding constraint is corridor capacity near the MCU, not
+#   the driver-side launch.
+# - Wall-clock: the rescues enlarge the explorable B.Cu space around
+#   the FET pairs, slowing failed searches; at L=4 the 480 s production
+#   budget then truncates 2 nets that unmodified main has time to
+#   route (22/30 -> 20/30 with an identical blocked-set minus SWDIO).
+# - A static back-layer congestion gate cannot discriminate: softstart
+#   is all-SMD, so B.Cu is 0% occupied at escape time everywhere; the
+#   congestion that kills these nets is created dynamically during
+#   routing.
+#
+# Net: until the detailed router can exploit (rather than merely
+# tolerate) a pre-placed in-pad via field on this geometry class, the
+# correct production setting is "admit to dense list, emit nothing".
+# Keeping the band admission + this machinery means the dispatcher
+# plumbing is in place and a one-variable experiment
+# (KICAD_TOOLS_SOP_RESCUE_ROW_CAP=1) re-enables the rescue.
+SOP_RESCUE_MAX_PER_ROW: int = 0
+
+
+def _sop_rescue_row_cap() -> int:
+    """Resolve the per-row rescue cap (env override, Issue #3398)."""
+    import os
+
+    raw = os.environ.get("KICAD_TOOLS_SOP_RESCUE_ROW_CAP")
+    if raw is None:
+        return SOP_RESCUE_MAX_PER_ROW
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid KICAD_TOOLS_SOP_RESCUE_ROW_CAP=%r "
+            "(expected integer); using default %d.",
+            raw,
+            SOP_RESCUE_MAX_PER_ROW,
+        )
+        return SOP_RESCUE_MAX_PER_ROW
+
 
 @dataclass(frozen=True)
 class _SegmentAdapter:
@@ -241,6 +321,36 @@ def is_dense_package(
     # Fine-pitch SSOP/TSSOP check (0.75mm or less is always dense)
     # These packages need escape routing regardless of design rules
     if min_pitch <= 0.75 and _is_dual_row(pads):
+        return True
+
+    # Issue #3398: SOIC-8-class dual-row SMD band ((0.75, 1.5] mm pitch).
+    # UCC27211 / LM393 SOIC-8 at 1.27 mm pitch sit ABOVE the dynamic
+    # threshold at common power recipes (2 * (0.30 + 0.20) = 1.0 mm),
+    # so the escape pre-pass previously skipped them and the P_FP6 SOP
+    # in-pad rescue was unreachable end-to-end (Issue #3395).  The band
+    # matches :data:`FINE_PITCH_THRESHOLD_MM` (the same cap the
+    # fine-pitch classifier and ``_sop_in_pad_rescue_eligible`` use)
+    # and is deliberately narrow:
+    #
+    # - ``len(pads) >= 8``: SOIC-8 and up; SOT-23-5/6 class parts keep
+    #   their pre-#3398 classification (dynamic threshold only).
+    # - all-SMD: dual-row connectors with through-hole anchor tabs
+    #   (e.g. board 07's J1/J2 1.0 mm receptacles) are NOT SOPs and
+    #   must not enter the escape pre-pass -- their TH tabs fail this
+    #   guard.  A real SOP/SOIC body is all-SMD.
+    # - ``_is_dual_row``: quad/grid parts are handled by their own
+    #   rules above.
+    #
+    # The consumer-aware SOP rescue deferral (Issue #3398, see
+    # ``_create_staggered_row_escapes``) ensures entering the dense
+    # list does not regress nets whose consumers are local: those pads
+    # emit NO escape geometry and route exactly as before.
+    if (
+        len(pads) >= 8
+        and min_pitch <= FINE_PITCH_THRESHOLD_MM + 1e-9
+        and not any(getattr(p, "through_hole", False) for p in pads)
+        and _is_dual_row(pads)
+    ):
         return True
 
     # TQFP-32-class quad packages (issue #2513).
@@ -4607,6 +4717,184 @@ class EscapeRouter:
 
         return escapes
 
+    def _rescue_only_band_escapes(
+        self,
+        pads: list[Pad],
+        direction: EscapeDirection,
+        package: PackageInfo,
+        effective_clearance: float,
+        escape_width: float,
+        rescue_eligible: bool,
+    ) -> list[EscapeRoute]:
+        """Consumer-aware in-pad rescues for one rescue-only-band SOP row.
+
+        Issue #3398: P_FP6's naive full-row rescue on UCC27211 SOIC-8
+        placed 19 in-pad vias around the softstart FET pairs and dropped
+        reach 18 -> 8/30 -- the via field blocked the GATE/UCC/VGATE
+        nets whose consumers sit 2-12 mm away (bootstrap caps, TVS
+        clamps, gate resistors).  The rescue's value proposition (free
+        the launch corridor by escaping vertically) only pays off when
+        the net must TRAVERSE the congested neighbourhood to a far
+        consumer; for local hops the via + back-layer stub costs more
+        corridor than it frees.
+
+        Decision ladder (every "defer" emits no escape geometry at all,
+        reproducing the pre-#3398 not-dense behaviour for that pad):
+
+        1. Plane/skipped pads (``net == 0``) -> defer (pours connect
+           them; an escape would burn corridor for nothing).
+        2. Package not rescue-eligible (no fine-pitch region, tier-0
+           manufacturer, pitch/headroom fail) -> defer all.
+        3. No off-package consumer information in
+           ``net_target_positions`` -> defer (cannot prove the rescue
+           helps; the conservative choice is the pre-#3398 behaviour).
+        4. Nearest off-package consumer within
+           :data:`SOP_LOCAL_CONSUMER_RADIUS_MM` -> defer (local hop).
+        5. Row cap (:data:`SOP_RESCUE_MAX_PER_ROW`, env-overridable via
+           ``KICAD_TOOLS_SOP_RESCUE_ROW_CAP``): among the surviving
+           far-consumer candidates, only the pad(s) with the FARTHEST
+           consumer get the rescue; the rest defer.  The DEFAULT cap is
+           0 -- defer everything -- because four same-machine paired
+           A/B measurements on softstart rev B showed every
+           rescue-firing configuration is net-negative under production
+           budgets (see the :data:`SOP_RESCUE_MAX_PER_ROW` comment for
+           the measurement table and mechanisms).
+        6. Winner -> attempt :meth:`_try_in_pad_escape`.  The stub
+           direction comes from :meth:`_compute_target_direction`
+           (Issue #3428 machinery) but is only honoured when it agrees
+           with the row's outward perpendicular -- a stub running ALONG
+           the row axis sweeps the row's shared back-layer launch
+           corridor (the Jun 9 A/B failure geometry), so perpendicular
+           targets fall back to the legacy outward stub.  ``None`` from
+           the rescue -> that pad emits nothing and the next-farthest
+           candidate is tried (the cap counts SUCCESSFUL rescues).
+
+        Args:
+            pads: Row of pads sorted by position.
+            direction: Outward perpendicular escape direction for this
+                row (legacy stub direction when the target map has no
+                opinion).
+            package: Package context.
+            effective_clearance: Launch clearance from the caller (per-
+                ref fine-pitch value when a region matched).
+            escape_width: Stub trace width from the caller.
+            rescue_eligible: Package-level
+                :meth:`_sop_in_pad_rescue_eligible` result.
+
+        Returns:
+            At most :data:`SOP_RESCUE_MAX_PER_ROW` in-pad
+            ``EscapeRoute`` objects for the row (possibly empty).
+        """
+        row_cap = _sop_rescue_row_cap()
+        if not rescue_eligible or row_cap <= 0:
+            # Default (row_cap == 0, Issue #3398): every pad defers and
+            # the package routes exactly as it did before entering the
+            # dense list.  See :data:`SOP_RESCUE_MAX_PER_ROW` for the
+            # empirical A/B basis of the defer-all default.
+            return []
+
+        # Steps 1-4: collect far-consumer candidates.
+        candidates: list[tuple[float, int, Pad]] = []
+        for i, pad in enumerate(pads):
+            if pad.net == 0:
+                continue
+            positions = self.net_target_positions.get(pad.net) or []
+            off_package = [(x, y) for x, y, ref in positions if ref != package.ref]
+            if not off_package:
+                continue
+            nearest = min(math.hypot(x - pad.x, y - pad.y) for x, y in off_package)
+            if nearest <= SOP_LOCAL_CONSUMER_RADIUS_MM:
+                logger.debug(
+                    "SOP rescue deferred for %s pin %s (net %s): nearest "
+                    "off-package consumer %.2f mm <= %.2f mm locality radius "
+                    "(Issue #3398).",
+                    package.ref,
+                    pad.pin,
+                    pad.net_name,
+                    nearest,
+                    SOP_LOCAL_CONSUMER_RADIUS_MM,
+                )
+                continue
+            candidates.append((nearest, i, pad))
+
+        # Step 5: farthest consumer first; row index breaks exact ties
+        # deterministically.
+        candidates.sort(key=lambda c: (-c[0], c[1]))
+
+        routes: list[EscapeRoute] = []
+        for nearest, _i, pad in candidates:
+            if len(routes) >= row_cap:
+                logger.debug(
+                    "SOP rescue deferred for %s pin %s (net %s): row cap "
+                    "of %d rescue(s) already granted (far consumer at "
+                    "%.2f mm; Issue #3398).",
+                    package.ref,
+                    pad.pin,
+                    pad.net_name,
+                    row_cap,
+                    nearest,
+                )
+                continue
+
+            # Step 6: attempt the rescue for the winner.
+            target_dir = self._compute_target_direction(pad, package, direction)
+            # Issue #3398 (Jun 9 A/B measurement): an inner stub running
+            # ALONG the row axis (target perpendicular to the outward
+            # escape direction) sweeps the row's shared back-layer
+            # launch corridor and the sibling pads' B.Cu landing zones
+            # -- on softstart the SOUTH-pointing stubs from U5/U6 pin 8
+            # crossed the pin 5-7 column and degraded the FET-bus
+            # neighbourhood even with the row cap in place.  Only keep
+            # the target-aware override when it agrees with the outward
+            # perpendicular; otherwise fall back to the legacy
+            # perpendicular stub (``target_direction=None``) and let
+            # the main router turn toward the consumer in open space.
+            if target_dir is not None and target_dir != direction:
+                logger.debug(
+                    "SOP rescue stub for %s pin %s (net %s): target "
+                    "direction %s runs along the row axis; using outward "
+                    "perpendicular %s instead (Issue #3398).",
+                    package.ref,
+                    pad.pin,
+                    pad.net_name,
+                    target_dir.name,
+                    direction.name,
+                )
+                target_dir = None
+            in_pad_route = self._try_in_pad_escape(
+                pad=pad,
+                direction=direction,
+                effective_clearance=effective_clearance,
+                escape_width=escape_width,
+                package=package,
+                skip_on_clearance_violation=self.strict_in_pad_clearance,
+                target_direction=target_dir,
+            )
+            if in_pad_route is None:
+                logger.debug(
+                    "SOP rescue infeasible for %s pin %s (net %s): "
+                    "_try_in_pad_escape declined; trying next-farthest "
+                    "candidate (Issue #3398).",
+                    package.ref,
+                    pad.pin,
+                    pad.net_name,
+                )
+                continue
+            logger.info(
+                "SOP in-pad rescue for %s pin %s (net %s): rescue-only "
+                "band, far consumer at %.2f mm, stub direction %s, "
+                "in-pad via at (%.3f, %.3f) (Issue #3398).",
+                package.ref,
+                pad.pin,
+                pad.net_name,
+                nearest,
+                (target_dir or direction).name,
+                in_pad_route.via_pos[0] if in_pad_route.via_pos else 0.0,
+                in_pad_route.via_pos[1] if in_pad_route.via_pos else 0.0,
+            )
+            routes.append(in_pad_route)
+        return routes
+
     def _sop_in_pad_rescue_eligible(
         self,
         package: PackageInfo,
@@ -4781,6 +5069,49 @@ class EscapeRouter:
             if self.rules.min_trace_width is not None
             else self._get_trace_width_for_net(pads[0].net_name if pads else "")
         )
+
+        # Issue #3398: rescue-only band detection.  A dual-row SMD package
+        # whose pitch sits ABOVE both the always-dense 0.75 mm cap and the
+        # dynamic between-pin-trace threshold is NOT geometrically dense --
+        # a trace fits between adjacent pins at the active design rules.
+        # Such packages (UCC27211 / LM393 SOIC-8 at 1.27 mm pitch under
+        # 0.30/0.20 rules) only enter the dense list via the #3398
+        # SOIC-8-class band in :func:`is_dense_package`, and they enter it
+        # for exactly ONE reason: to give the P_FP6 in-pad rescue a chance
+        # to free the launch corridor for far-away consumers.  Emitting the
+        # legacy staggered via geometry for them would CREATE congestion
+        # where none existed (the pre-#3398 router placed no escape
+        # geometry at all and reached 18/30 on softstart; naive full-row
+        # rescue dropped it to 8/30).  Therefore rescue-only-band packages
+        # are "rescue or nothing": each pad either gets a consumer-aware
+        # in-pad rescue (far target only) or NO escape geometry.
+        dynamic_threshold = 2 * (self.rules.trace_width + self.rules.trace_clearance)
+        package_pitch = getattr(package, "pin_pitch", None) or 0.0
+        rescue_only_band = (
+            package_pitch > 0.75 + 1e-9 and package_pitch >= dynamic_threshold - 1e-9
+        )
+
+        # Issue #3398: rescue-only band -- never fall through to the
+        # staggered geometry.  Pads with local consumers, plane pads,
+        # ineligible packages, geometric rescue failures, and row-cap
+        # losers all emit NOTHING, which reproduces the pre-#3398
+        # (not-dense) routing behaviour bit-for-bit for those pads.
+        # At most ``_sop_rescue_row_cap()`` pad(s) per row -- the one(s)
+        # with the farthest off-package consumer -- get an in-pad
+        # rescue; the production default cap is 0 (defer all; see the
+        # :data:`SOP_RESCUE_MAX_PER_ROW` measurement table).
+        if rescue_only_band:
+            escapes.extend(
+                self._rescue_only_band_escapes(
+                    pads=pads,
+                    direction=direction,
+                    package=package,
+                    effective_clearance=effective_escape_clearance,
+                    escape_width=rescue_escape_width,
+                    rescue_eligible=in_pad_rescue_eligible,
+                )
+            )
+            return escapes
 
         # Calculate base escape distance and stagger offset
         base_escape_dist = effective_escape_clearance + self.rules.trace_width
