@@ -2556,8 +2556,18 @@ def create_zones_for_pcb(pcb_path: Path) -> int:
     before the router consumes it -- makes the design self-contained:
     the router preserves zones via its raw-text concatenation (the
     write path fixed in #2770), so the committed routed PCB now ships
-    with VMOTOR / +5V / +3.3V / GND / PWR_LED zones regardless of
-    whether ``kct build`` runs the ZONES step or not.
+    with VMOTOR / +5V / +3.3V / GND zones regardless of whether
+    ``kct build`` runs the ZONES step or not.
+
+    PWR_LED is intentionally NOT in the pour set (issue #3513): it is a
+    2-pad indicator-signal net (D3 cathode -> R3) whose 0.65mm zone
+    strip was geometrically unfillable -- the zone carried no copper,
+    the router auto-skipped the "pour" net, and the committed artifact
+    shipped an open circuit.  The net-name classifier no longer treats
+    ``PWR_LED`` as POWER (``net_class.py`` POWER pattern fix in this
+    same change), so neither this helper nor ``kct route``'s own
+    auto-pour recreates the zone; the router routes it as a normal
+    signal trace.
 
     The implementation reuses ``auto_pour_if_missing`` (the same helper
     that ``kct route`` invokes) so layer assignment, priority handling,
