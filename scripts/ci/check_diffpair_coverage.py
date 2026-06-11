@@ -213,7 +213,43 @@ def find_routed_pcb(board_dir: Path) -> Path | None:
 # script's public surface (and its tests) are unchanged.  ``scripts/ci`` is
 # on ``sys.path`` because this file lives in it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from net_class_map_resolver import build_net_class_map_for_board  # noqa: E402
+from net_class_map_resolver import (  # noqa: E402
+    build_net_class_map_for_board,
+    load_board_recipe_module,
+)
+
+
+def measure_signal_reach(
+    pcb_path: Path, pour_nets: set[str]
+) -> tuple[int, int, list[str]]:
+    """Measure routed-signal-net reach on a routed PCB.
+
+    Issue #3413 phase 5: the gate previously asserted only the DRC error
+    count + rule-exercise, so a reach regression (e.g. 18/21 with 3
+    connectivity errors) stayed green as long as the error count fit
+    under the allowlist floor.  This helper counts COMPLETE signal nets
+    per :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` --
+    the same per-net completeness model the connectivity DRC rule uses.
+
+    Pour nets are excluded: their connectivity is plane/stitching-based
+    and is gated separately (the board recipe's copper-union audit;
+    see boards/06-diffpair-test/generate_design.py step 11).
+
+    Args:
+        pcb_path: Routed PCB to measure.
+        pour_nets: Net names excluded from the signal universe (the
+            board module's ``POUR_NETS``).
+
+    Returns:
+        ``(complete_count, signal_total, incomplete_names)``.
+    """
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    result = NetStatusAnalyzer(pcb_path).analyze()
+    signal = [n for n in result.nets if n.net_name and n.net_name not in pour_nets]
+    complete = [n for n in signal if n.status == "complete"]
+    incomplete_names = sorted(n.net_name for n in signal if n.status != "complete")
+    return len(complete), len(signal), incomplete_names
 
 
 def _measure_skew_data_from_pcb(
@@ -476,6 +512,23 @@ def check_board(
         )
         return 1
 
+    # Issue #3413 phase 5: read the board's reach contract.  Boards that
+    # declare ``REQUIRED_SIGNAL_REACH`` get a hard reach assertion;
+    # boards without it (none today in this gate's matrix) skip it.
+    required_reach: int | None = None
+    pour_nets: set[str] = set()
+    try:
+        recipe_mod = load_board_recipe_module(board_dir)
+        if recipe_mod is not None:
+            required_reach = getattr(recipe_mod, "REQUIRED_SIGNAL_REACH", None)
+            pour_nets = set(getattr(recipe_mod, "POUR_NETS", ()) or ())
+    except Exception as e:
+        annotate_error(
+            str(board_dir),
+            f"Failed to read reach contract from {board_dir}: {e}",
+        )
+        return 1
+
     # Compute the allowlist key in the same way check_routed_drc.py does:
     # repo-relative path string.
     try:
@@ -509,6 +562,39 @@ def check_board(
     print(f"[diffpair-coverage] rules_checked_by_rule: {rules_by_rule}")
 
     failed = False
+
+    # Issue #3413 phase 5: reach assertion.  Without it the gate is
+    # green at ANY reach as long as the connectivity errors fit under
+    # the allowlist floor (the 18/21 regression shape from the #3413
+    # re-measure).  Reach is measured with the same NetStatusAnalyzer
+    # completeness model the connectivity DRC rule uses.
+    if required_reach is not None:
+        try:
+            complete, signal_total, incomplete_names = measure_signal_reach(
+                routed_pcb, pour_nets
+            )
+        except Exception as e:
+            annotate_error(str(routed_pcb), f"Reach measurement failed: {e}")
+            return 1
+        print(
+            f"[diffpair-coverage] Signal reach: {complete}/{signal_total} "
+            f"(required: {required_reach})"
+        )
+        if complete < required_reach:
+            annotate_error(
+                str(routed_pcb),
+                f"Reach regression on re-routed {routed_pcb}: only "
+                f"{complete}/{signal_total} signal nets complete "
+                f"(required {required_reach}).  Incomplete: "
+                f"{', '.join(incomplete_names)}.  See "
+                f"{board_dir.name}/generate_design.py REQUIRED_SIGNAL_REACH.",
+            )
+            failed = True
+        else:
+            print(
+                f"[diffpair-coverage] OK: reach {complete}/{signal_total} "
+                f">= {required_reach}."
+            )
 
     # AC #4: each of the three diff-pair rules must have been exercised.
     missing = check_rule_coverage(rules_by_rule)

@@ -424,3 +424,87 @@ class TestCliExitCodes:
         (tmp_path / "generate_design.py").write_text("def build_net_class_map(): return {}\n")
         rc = mod.main([str(tmp_path), "--skip-route"])
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #3413 phase 5: reach assertion
+# ---------------------------------------------------------------------------
+
+# Two-net PCB: VCC fully routed (R1.1 -> R2.1), GND unrouted.  Borrowed
+# from tests/test_analysis_net_status.py's fixture shape.
+_REACH_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (segment (start 9.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 1))
+)
+"""
+
+
+class TestMeasureSignalReach:
+    """Unit tests for the Issue #3413 phase-5 reach measurement.
+
+    Without a reach assertion the gate was green at ANY reach as long as
+    connectivity errors fit under the allowlist floor (the 18/21 shape
+    from the #3413 re-measure).
+    """
+
+    @pytest.fixture
+    def reach_pcb(self, tmp_path):
+        p = tmp_path / "reach.kicad_pcb"
+        p.write_text(_REACH_PCB)
+        return p
+
+    def test_counts_complete_signal_nets(self, reach_pcb):
+        mod = _load_helper_module()
+        complete, total, incomplete = mod.measure_signal_reach(reach_pcb, set())
+        assert (complete, total) == (1, 2)
+        assert incomplete == ["GND"]
+
+    def test_pour_nets_excluded_from_signal_universe(self, reach_pcb):
+        mod = _load_helper_module()
+        complete, total, incomplete = mod.measure_signal_reach(reach_pcb, {"GND"})
+        assert (complete, total) == (1, 1)
+        assert incomplete == []
+
+    def test_board_06_declares_reach_contract(self):
+        """Board 06's recipe must expose the constants the gate reads."""
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        repo_root = _Path(__file__).resolve().parent.parent
+        ci_dir = repo_root / "scripts" / "ci"
+        _sys.path.insert(0, str(ci_dir))
+        try:
+            from net_class_map_resolver import load_board_recipe_module
+        finally:
+            _sys.path.pop(0)
+
+        mod = load_board_recipe_module(repo_root / "boards" / "06-diffpair-test")
+        assert mod is not None
+        assert mod.REQUIRED_SIGNAL_REACH == 21
+        assert set(mod.POUR_NETS) == {"GND", "VBUS_USB", "+3V3", "+1V8", "+1V2"}

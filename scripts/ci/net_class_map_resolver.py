@@ -65,6 +65,37 @@ def _import_module_from_path(module_name: str, path: Path) -> Any:
     return module
 
 
+def load_board_recipe_module(board_dir: Path) -> Any | None:
+    """Import a board's ``generate_design.py`` module by path.
+
+    Returns ``None`` when the board has no ``generate_design.py``.  The
+    imported module exposes the board's declarative routing contract:
+    ``build_net_class_map()`` (boards 06/07), and -- Issue #3413 phase 5
+    -- the optional ``POUR_NETS`` / ``REQUIRED_SIGNAL_REACH`` constants
+    the diff-pair coverage gate uses for its reach assertion.
+
+    Args:
+        board_dir: Path to the board directory (e.g.
+            ``boards/06-diffpair-test``).
+    """
+    script = board_dir / "generate_design.py"
+    if not script.is_file():
+        return None
+
+    # The board's generate_design.py imports its sibling modules via a
+    # ``sys.path.insert(0, str(Path(__file__).parent))`` -- replicate that
+    # so the import resolves correctly.
+    saved_path = list(sys.path)
+    sys.path.insert(0, str(board_dir))
+    try:
+        return _import_module_from_path(
+            f"_ncm_resolver_generate_design_{board_dir.name.replace('-', '_')}",
+            script,
+        )
+    finally:
+        sys.path[:] = saved_path
+
+
 def build_net_class_map_for_board(board_dir: Path) -> dict | None:
     """Import ``generate_design.build_net_class_map()`` from a board dir.
 
@@ -80,23 +111,9 @@ def build_net_class_map_for_board(board_dir: Path) -> dict | None:
     Returns:
         The ``{net_name: NetClassRouting}`` map, or ``None``.
     """
-    script = board_dir / "generate_design.py"
-    if not script.is_file():
+    mod = load_board_recipe_module(board_dir)
+    if mod is None:
         return None
-
-    # The board's generate_design.py imports its sibling modules via a
-    # ``sys.path.insert(0, str(Path(__file__).parent))`` -- replicate that
-    # so the import resolves correctly.
-    saved_path = list(sys.path)
-    sys.path.insert(0, str(board_dir))
-    try:
-        mod = _import_module_from_path(
-            f"_ncm_resolver_generate_design_{board_dir.name.replace('-', '_')}",
-            script,
-        )
-    finally:
-        sys.path[:] = saved_path
-
     builder = getattr(mod, "build_net_class_map", None)
     if builder is None:
         return None

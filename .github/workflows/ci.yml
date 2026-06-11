@@ -378,15 +378,22 @@ jobs:
     # ceiling.  If the typical run creeps above 5 minutes, move to a
     # nightly schedule per the epic's runtime guidance.
     #
-    # Issue #3413 (phase 3): 15 -> 20 min.  The board 06 recipe KEEPS
-    # its 240s negotiated budget (a 360s A/B was measured and REJECTED;
-    # see boards/06-diffpair-test/generate_design.py), but the run now
-    # pays for the overflow-silent rescue work inside the loop plus a
+    # Issue #3413 (phase 3): 15 -> 20 min.  The run pays for the
+    # overflow-silent rescue work inside the negotiated loop plus a
     # bounded (<= 90s) post-route correction pass on the timed-out
     # exit.  Local M-series wall is ~17 min; the 2-core ubuntu runner
     # needs the extra headroom.  Also closes #3477 (sub-minute margin
     # under the prior 15-min ceiling; option 1 -- ceiling bump -- was
     # its preferred fix).
+    #
+    # Issue #3413 (phases 4-6): the recipe's negotiated budget is now
+    # 360s (the phase-3 A/B that rejected 360s pre-dates the
+    # tightly-coupled width re-solve; see the budget rationale in
+    # boards/06-diffpair-test/generate_design.py).  Despite the higher
+    # in-loop budget the total wall does not grow: the narrower diff
+    # widths cut per-net A* dramatically (21/21 connected at ~40s vs
+    # the historical 18-20/21 grind), and the post-route zone
+    # fill/stitch/repair steps add only ~1-2 min.  Ceiling retained.
     timeout-minutes: 20
     # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
     #

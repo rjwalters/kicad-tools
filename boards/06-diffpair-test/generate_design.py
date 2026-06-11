@@ -50,6 +50,23 @@ warn_if_stale()
 
 
 # =============================================================================
+# Board routing contract (Issue #3413 phase 5)
+# =============================================================================
+# POUR_NETS is the authoritative plane-net declaration: these nets are
+# excluded from the trace router (``route_pcb``'s skip list) and carried
+# by copper pours + stitching vias instead.  The CI gate
+# (``scripts/ci/check_diffpair_coverage.py``) reads both constants to
+# assert the re-routed artifact's reach: every non-pour net with >= 2
+# pads must be COMPLETE per ``NetStatusAnalyzer``.  21 = 26 declared
+# nets - 5 pour nets (the issue's original ``kct route`` repro counted
+# 22 because it included VBUS_USB as a signal net; the recipe's 21 is
+# the canonical number).
+# =============================================================================
+POUR_NETS: list[str] = ["GND", "VBUS_USB", "+3V3", "+1V8", "+1V2"]
+REQUIRED_SIGNAL_REACH: int = 21
+
+
+# =============================================================================
 # Per-Protocol Net Class Declarations
 # =============================================================================
 # These NetClassRouting instances are the authoritative "scenario" data the
@@ -235,6 +252,921 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
 
 
 # =============================================================================
+# Plane-connectivity helpers (Issue #3413 phase 4)
+# =============================================================================
+# Recipe-local copies of the softstart hardened pour pipeline (PR #3481).
+# ``NetStatusAnalyzer`` counts a pad as zone-connected when it falls inside
+# the zone's *boundary* polygon even if the zone produced zero (or islanded)
+# filled polygons -- the false-positive mode tracked in issue #3482.  The
+# audit below is geometric (shapely copper union), so it cannot be fooled
+# by a dead pour.  Kept recipe-local per the softstart precedent: the gate
+# must not wait for the analyzer fix.
+# =============================================================================
+
+
+def _find_sexp_blocks(text: str, token: str) -> list[str]:
+    """Return every balanced S-expression block starting with ``token``."""
+    blocks: list[str] = []
+    i = 0
+    while True:
+        j = text.find(token, i)
+        if j < 0:
+            break
+        depth = 0
+        k = j
+        while True:
+            c = text[k]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        blocks.append(text[j : k + 1])
+        i = k
+    return blocks
+
+
+def _generate_uuid() -> str:
+    import uuid as _uuid
+
+    return str(_uuid.uuid4())
+
+
+def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
+    """Geometric per-net copper-connectivity audit (PR #3481 pattern).
+
+    For each net, builds the set of physical copper elements (zone
+    ``filled_polygon`` regions, segments at their actual width, via
+    barrels, pad copper) and unions elements that geometrically overlap
+    on a shared copper layer.  A net is electrically continuous iff all
+    of its pads land in ONE connected component.
+
+    Pad copper is approximated by the pad's *inscribed* circle, which is
+    conservative (an audit "connected" verdict implies real overlap; a
+    thermal-spoke connection always overlaps the inscribed circle).
+
+    Returns:
+        ``{net_name: {"connected": bool, "pad_groups": [[(pad, is_th)]],
+        "zero_fill_zones": int}}``.  Requires shapely; raises
+        ImportError if unavailable (a silent skip is how dead pours
+        shipped on softstart in the first place -- see PR #3481).
+    """
+    import math
+    import re
+
+    from shapely.geometry import LineString, Point, Polygon
+
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    text = pcb_path.read_text()
+    all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
+
+    # Zone fills per net (+ zero-fill bookkeeping for the explicit gate).
+    fills: dict[str, list] = {n: [] for n in net_names}
+    zero_fill_zones: dict[str, int] = dict.fromkeys(net_names, 0)
+    for zone in _find_sexp_blocks(text, "\n\t(zone") + _find_sexp_blocks(text, "\n  (zone"):
+        # The zone's net is serialized as ``(net "NAME")`` by the
+        # ``zones fill`` round-trip writer and as ``(net N)`` +
+        # ``(net_name "NAME")`` by KiCad itself -- accept both.
+        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(
+            r'\(net "([^"]*)"\)', zone
+        )
+        if not m or m.group(1) not in fills:
+            continue
+        net = m.group(1)
+        polys = _find_sexp_blocks(zone, "(filled_polygon")
+        if "(fill yes" in zone and not polys:
+            zero_fill_zones[net] += 1
+        for block in polys:
+            lay = re.search(r'\(layer "([^"]*)"\)', block).group(1)
+            pts = re.findall(r"\(xy ([\d.-]+) ([\d.-]+)\)", block)
+            poly = Polygon([(float(a), float(b)) for a, b in pts])
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            fills[net].append((poly, frozenset({lay})))
+
+    # Segments (actual width) and via barrels per net.
+    net_ids = dict(re.findall(r'\(net (\d+) "([^"]*)"\)', text))
+    segs: dict[str, list] = {n: [] for n in net_names}
+    vias: dict[str, list] = {n: [] for n in net_names}
+    for seg in _find_sexp_blocks(text, "\n\t(segment") + _find_sexp_blocks(text, "\n  (segment"):
+        name = net_ids.get(re.search(r"\(net (\d+)\)", seg).group(1))
+        if name not in segs:
+            continue
+        st = re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", seg)
+        en = re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", seg)
+        wd = re.search(r"\(width ([\d.]+)\)", seg)
+        lay = re.search(r'\(layer "([^"]*)"\)', seg).group(1)
+        width = float(wd.group(1)) if wd else 0.3
+        line = LineString(
+            [
+                (float(st.group(1)), float(st.group(2))),
+                (float(en.group(1)), float(en.group(2))),
+            ]
+        )
+        segs[name].append((line.buffer(width / 2.0), frozenset({lay})))
+    for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
+        name = net_ids.get(re.search(r"\(net (\d+)\)", via).group(1))
+        if name not in vias:
+            continue
+        at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
+        sz = re.search(r"\(size ([\d.]+)\)", via)
+        radius = (float(sz.group(1)) if sz else 0.6) / 2.0
+        vias[name].append(
+            (Point(float(at.group(1)), float(at.group(2))).buffer(radius), all_layers)
+        )
+
+    # Pads (absolute sheet coordinates via the analyzer's PCB model).
+    analyzer = NetStatusAnalyzer(pcb_path)
+    origin_x, origin_y = analyzer.pcb.board_origin
+    pads: dict[str, list] = {n: [] for n in net_names}
+    for fp in analyzer.pcb.footprints:
+        theta = math.radians(fp.rotation or 0.0)
+        for pad in fp.pads:
+            if pad.net_name not in pads:
+                continue
+            px, py = pad.position
+            rx = px * math.cos(theta) + py * math.sin(theta)
+            ry = -px * math.sin(theta) + py * math.cos(theta)
+            x = fp.position[0] + rx + origin_x
+            y = fp.position[1] + ry + origin_y
+            is_th = any("*" in str(layer) for layer in pad.layers)
+            layers = (
+                all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
+            )
+            radius = min(pad.size) / 2.0
+            pads[pad.net_name].append(
+                (
+                    f"{fp.reference}.{pad.number}",
+                    Point(x, y).buffer(radius),
+                    layers,
+                    is_th,
+                )
+            )
+
+    results: dict[str, dict] = {}
+    for net in net_names:
+        elems: list[tuple] = list(fills[net]) + segs[net] + vias[net]
+        n_fills = len(fills[net])
+        pad_indices: list[tuple[int, str, bool]] = []
+        for name, geom, layers, is_th in pads[net]:
+            elems.append((geom, layers))
+            pad_indices.append((len(elems) - 1, name, is_th))
+
+        parent = list(range(len(elems)))
+
+        def _find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(len(elems)):
+            gi, li = elems[i]
+            for j in range(i + 1, len(elems)):
+                gj, lj = elems[j]
+                if (li & lj) and gi.intersects(gj):
+                    parent[_find(i)] = _find(j)
+
+        groups: dict[int, list[tuple[str, bool]]] = {}
+        for idx, name, is_th in pad_indices:
+            groups.setdefault(_find(idx), []).append((name, is_th))
+        pad_groups = sorted(groups.values(), key=len, reverse=True)
+
+        # Fill-anchored stranded set (Issue #3413 phase 4 repair input):
+        # a pad is "stranded" when its copper component contains NO zone
+        # fill element.  This matters when NO pad reaches the pour --
+        # the naive "repair everything but the largest pad group" rule
+        # would leave the largest group unrepaired even though it floats
+        # (the exact shape of board 06's +3V3/+1V8/+1V2 B.Cu pours,
+        # whose pads all live on F.Cu).  Nets with zero fill elements
+        # fall back to "all but the largest group" (trace-skeleton nets).
+        anchored_roots = {_find(i) for i in range(n_fills)}
+        stranded: list[tuple[str, bool]] = []
+        if anchored_roots:
+            for idx, name, is_th in pad_indices:
+                if _find(idx) not in anchored_roots:
+                    stranded.append((name, is_th))
+        else:
+            for group in pad_groups[1:]:
+                stranded.extend(group)
+
+        results[net] = {
+            "connected": len(pad_groups) <= 1,
+            "pad_groups": pad_groups,
+            "stranded_pads": stranded,
+            "zero_fill_zones": zero_fill_zones[net],
+        }
+    return results
+
+
+def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
+    """Repair pour-net connectivity: offset vias + stubs + island bridges.
+
+    Issue #3413 phase 4.  Three residual classes survive the zone fill +
+    ``kct stitch --avoid-pad-overlap`` pipeline on board 06:
+
+    1. **Stranded pads** -- the stitcher's via-in-pad filter / "manual
+       placement needed" skips (the GND 48/122 residual).  Fixed with an
+       offset via + 0.15 mm F.Cu stub that stays legal at the jlcpcb
+       standard tier (NO via-in-pad).  Candidate via positions ring the
+       pad on 8 compass directions at increasing offsets (the diagonal
+       hollow of the 1.27 mm BGA field sits at 0.898 mm); candidates
+       whose barrel lands on the net's PRIMARY copper component are
+       preferred.
+
+    2. **Enclave pads** -- the ``_compute_pour_outlines`` carve makes
+       sibling outlines disjoint, so a pad cluster of net X inside net
+       Y's region has no own-net pour underneath (board 06: the +3V3
+       BGA corners inside the +1V2 region, U4.12 inside the +1V8 strip,
+       J3.3/J3.10 on the card edge).  The via lands locally and a
+       **bridge trace** carries the connection to the net's primary
+       copper on a shared layer.
+
+    3. **Fill islands** -- signal traces on a plane layer can moat off a
+       pocket of fill (board 06: an In1.Cu GND island west of the
+       BGA-49).  Bridged like (2): the nearest element pair across the
+       two components that shares a routable layer gets a straight
+       validated trace (vias span all layers, so via-to-via bridges can
+       cross on B.Cu where F.Cu/In1.Cu are blocked).
+
+    Every via and trace is validated with shapely against ALL existing
+    copper: foreign pads / segments / vias by >= 0.15 mm on the relevant
+    layers, no overlap with ANY pad (the via-in-pad ban, same-net
+    included), drill-to-drill >= 0.45 mm center distance.  Foreign zone
+    FILLS are not obstacles -- the re-fill that follows this pass
+    recomputes them and carves clearance around the new copper.
+
+    Placed geometry is registered in the obstacle index immediately so
+    later placements cannot collide with it.
+
+    Returns:
+        ``(vias_placed, bridges_placed)``.
+    """
+    import math
+    import re
+
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import nearest_points
+
+    from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+    text = pcb_path.read_text()
+    net_id_by_name = {
+        name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)
+    }
+    id_to_name = {str(v): k for k, v in net_id_by_name.items()}
+    all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
+
+    # --- global obstacle index ---------------------------------------------
+    analyzer = NetStatusAnalyzer(pcb_path)
+    origin_x, origin_y = analyzer.pcb.board_origin
+
+    # Pads: (geom, net, layers, drill_r, center, name, is_th)
+    pad_index: list[tuple] = []
+    for fp in analyzer.pcb.footprints:
+        theta = math.radians(fp.rotation or 0.0)
+        for pad in fp.pads:
+            px, py = pad.position
+            rx = px * math.cos(theta) + py * math.sin(theta)
+            ry = -px * math.sin(theta) + py * math.cos(theta)
+            x = fp.position[0] + rx + origin_x
+            y = fp.position[1] + ry + origin_y
+            is_th = any("*" in str(layer) for layer in pad.layers)
+            layers = (
+                all_layers
+                if is_th
+                else frozenset({l for l in pad.layers if l.endswith(".Cu")})
+            )
+            # Conservative obstacle: circumscribed half-diagonal so square
+            # pad corners are respected.  The CONNECTIVITY geometry uses
+            # the inscribed circle instead (matching ``_audit_pour_nets``)
+            # -- using the circumscribed circle for own-net union would
+            # make the repair believe pads are connected that the audit
+            # (correctly, conservatively) reports stranded.
+            half_diag = math.hypot(pad.size[0], pad.size[1]) / 2.0
+            inscribed_r = min(pad.size) / 2.0
+            drill_r = float(getattr(pad, "drill", 0.0) or 0.0) / 2.0
+            pad_index.append(
+                (
+                    Point(x, y).buffer(half_diag),
+                    pad.net_name,
+                    layers,
+                    drill_r,
+                    (x, y),
+                    f"{fp.reference}.{pad.number}",
+                    is_th,
+                    Point(x, y).buffer(inscribed_r),
+                )
+            )
+
+    # Segments: (geom, net, layer)
+    seg_index: list[tuple] = []
+    for seg in _find_sexp_blocks(text, "\n\t(segment") + _find_sexp_blocks(text, "\n  (segment"):
+        st = re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", seg)
+        en = re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", seg)
+        wd = re.search(r"\(width ([\d.]+)\)", seg)
+        lay = re.search(r'\(layer "([^"]+)"\)', seg).group(1)
+        nid = re.search(r"\(net (\d+)\)", seg).group(1)
+        width = float(wd.group(1)) if wd else 0.3
+        line = LineString(
+            [
+                (float(st.group(1)), float(st.group(2))),
+                (float(en.group(1)), float(en.group(2))),
+            ]
+        )
+        seg_index.append((line.buffer(width / 2.0), id_to_name.get(nid, ""), lay))
+
+    # Vias: (center_point, net, radius)
+    via_index: list[tuple] = []
+    for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
+        at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
+        sz = re.search(r"\(size ([\d.]+)\)", via)
+        nid = re.search(r"\(net (\d+)\)", via).group(1)
+        radius = (float(sz.group(1)) if sz else 0.6) / 2.0
+        via_index.append(
+            (Point(float(at.group(1)), float(at.group(2))), id_to_name.get(nid, ""), radius)
+        )
+
+    # Zone fills: net -> [(poly, layer)]
+    fills_by_net: dict[str, list] = {n: [] for n in net_names}
+    for zone in _find_sexp_blocks(text, "\n\t(zone") + _find_sexp_blocks(text, "\n  (zone"):
+        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(
+            r'\(net "([^"]*)"\)', zone
+        )
+        if not m or m.group(1) not in fills_by_net:
+            continue
+        for block in _find_sexp_blocks(zone, "(filled_polygon"):
+            lay = re.search(r'\(layer "([^"]*)"\)', block).group(1)
+            pts = re.findall(r"\(xy ([\d.-]+) ([\d.-]+)\)", block)
+            poly = Polygon([(float(a), float(b)) for a, b in pts])
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            fills_by_net[m.group(1)].append((poly, lay))
+
+    # Board outline (inset 0.5 mm) from generate_pcb constants.
+    min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
+    min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
+    max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
+    max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
+
+    VIA_R = 0.225  # 0.45 mm via
+    CLEAR = 0.15
+    STUB_W = 0.15
+    BRIDGE_W = 0.2
+    DRILL_CC = 0.45  # min center-to-center vs other drills
+
+    def _via_ok(net: str, vx: float, vy: float) -> bool:
+        if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
+            return False
+        vpt = Point(vx, vy)
+        vgeom = vpt.buffer(VIA_R)
+        for entry in pad_index:
+            geom, pnet, _layers, drill_r, (px, py) = entry[:5]
+            if vgeom.intersects(geom):
+                return False  # via-in-pad ban (same-net included)
+            if pnet != net and vgeom.distance(geom) < CLEAR:
+                return False
+            if drill_r > 0 and math.hypot(vx - px, vy - py) < drill_r + 0.125 + 0.2:
+                return False
+        for geom, snet, _lay in seg_index:
+            if snet != net and vgeom.distance(geom) < CLEAR:
+                return False
+        for pt, vnet, radius in via_index:
+            if pt.distance(vpt) < DRILL_CC:
+                return False
+            if vnet != net and vgeom.distance(pt.buffer(radius)) < CLEAR:
+                return False
+        return True
+
+    def _path_ok(
+        net: str,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        layer: str,
+        width: float,
+    ) -> bool:
+        for x, y in (p0, p1):
+            if not (min_x - 0.3 <= x <= max_x + 0.3 and min_y - 0.3 <= y <= max_y + 0.3):
+                return False
+        path = LineString([p0, p1]).buffer(width / 2.0)
+        for entry in pad_index:
+            geom, pnet, layers = entry[:3]
+            if pnet != net and layer in layers and path.distance(geom) < CLEAR:
+                return False
+        for geom, snet, lay in seg_index:
+            if snet != net and lay == layer and path.distance(geom) < CLEAR:
+                return False
+        for pt, vnet, radius in via_index:
+            if vnet != net and path.distance(pt.buffer(radius)) < CLEAR:
+                return False
+        return True
+
+    directions = [
+        (math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)
+    ]
+    # Near offsets first (the BGA diagonal hollow sits at 0.898 mm); the
+    # long tail handles lane escapes -- a pad boxed in by parallel
+    # traces (board 06: U2.F1 between USB3_TX2+/TX2- on F.Cu with
+    # USB3_RX2+ on In1.Cu overhead) can still exit with a straight
+    # inter-trace-lane stub to a via placed PAST the congestion.
+    offsets = [0.55, 0.65, 0.75, 0.9, 1.1, 1.4, 1.8, 2.5, 3.5, 5.0, 7.0, 10.0, 14.0, 18.0]
+
+    via_lines: list[str] = []
+    seg_lines: list[str] = []
+    vias_placed = 0
+    bridges_placed = 0
+    failed: list[str] = []
+
+    def _emit_via(net: str, vx: float, vy: float) -> None:
+        nonlocal vias_placed
+        nid = net_id_by_name[net]
+        via_lines.append(
+            f'  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) '
+            f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
+        )
+        via_index.append((Point(vx, vy), net, VIA_R))
+        vias_placed += 1
+
+    def _emit_seg(
+        net: str,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        layer: str,
+        width: float,
+    ) -> None:
+        nid = net_id_by_name[net]
+        seg_lines.append(
+            f"  (segment (start {p0[0]:.3f} {p0[1]:.3f}) (end {p1[0]:.3f} {p1[1]:.3f}) "
+            f'(width {width}) (layer "{layer}") (net {nid}) '
+            f'(uuid "{_generate_uuid()}"))'
+        )
+        seg_index.append((LineString([p0, p1]).buffer(width / 2.0), net, layer))
+
+    # --- per-net connectivity loop ------------------------------------------
+    for net in net_names:
+        # Own elements: (geom, layerset, label).  Pads carry their name.
+        own: list[tuple] = []
+        for poly, lay in fills_by_net.get(net, []):
+            own.append((poly, frozenset({lay}), "fill"))
+        for geom, snet, lay in seg_index:
+            if snet == net:
+                own.append((geom, frozenset({lay}), "seg"))
+        for pt, vnet, radius in via_index:
+            if vnet == net:
+                own.append((pt.buffer(radius), all_layers, "via"))
+        for entry in pad_index:
+            _obst, pnet, layers, _dr, center, name, is_th, inscribed = entry
+            if pnet == net:
+                # Inscribed-circle copper for own-net union (matches the
+                # audit's conservative connectivity model).
+                own.append((inscribed, layers, f"pad:{name}"))
+        pad_center = {
+            entry[5]: entry[4] for entry in pad_index if entry[1] == net
+        }
+
+        # Union-find over own elements, built ONCE and maintained
+        # incrementally as repair geometry is appended (a full O(n^2)
+        # shapely re-union per round is prohibitively slow for GND's
+        # ~300 elements).
+        parent = list(range(len(own)))
+
+        def _find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(len(own)):
+            gi, li, _ = own[i]
+            for j in range(i + 1, len(own)):
+                gj, lj, _ = own[j]
+                if (li & lj) and gi.intersects(gj):
+                    parent[_find(i)] = _find(j)
+
+        def _append_own(elem: tuple) -> None:
+            """Append a new element and union it against all others."""
+            own.append(elem)
+            parent.append(len(own) - 1)
+            gi, li, _ = elem
+            for j in range(len(own) - 1):
+                gj, lj, _ = own[j]
+                if (li & lj) and gi.intersects(gj):
+                    parent[_find(len(own) - 1)] = _find(j)
+
+        max_rounds = 40
+        skipped_roots: set[int] = set()
+        for _round in range(max_rounds):
+            comps: dict[int, list[int]] = {}
+            for i in range(len(own)):
+                comps.setdefault(_find(i), []).append(i)
+            # Only components carrying a pad or a fill matter (a floating
+            # via/stub from an earlier round merges or is harmless).
+            live = [
+                idxs
+                for idxs in comps.values()
+                if any(own[i][2] == "fill" or own[i][2].startswith("pad:") for i in idxs)
+            ]
+            if len(live) <= 1:
+                break
+
+            def _score(idxs: list[int]) -> tuple:
+                n_fill = sum(1 for i in idxs if own[i][2] == "fill")
+                n_pad = sum(1 for i in idxs if own[i][2].startswith("pad:"))
+                area = sum(own[i][0].area for i in idxs if own[i][2] == "fill")
+                return (n_pad, n_fill, area)
+
+            live.sort(key=_score, reverse=True)
+            primary = live[0]
+            primary_set = set(primary)
+            # Connect the largest not-yet-skipped secondary component; a
+            # component that failed every strategy is set aside so the
+            # remaining components still get their repair attempt.
+            candidates = [
+                idxs for idxs in live[1:] if _find(idxs[0]) not in skipped_roots
+            ]
+            if not candidates:
+                break
+            target = candidates[0]
+
+            merged = False
+
+            # Sub-stage A: lone SMD pad (or pad cluster) with no via -- try
+            # an offset via + stub whose barrel lands on PRIMARY copper.
+            comp_pads = [
+                own[i][2][4:] for i in target if own[i][2].startswith("pad:")
+            ]
+            comp_has_via = any(own[i][2] == "via" for i in target)
+            if comp_pads and not comp_has_via:
+                pad_name = comp_pads[0]
+                x0, y0 = pad_center[pad_name]
+                best = None
+                best_touches = False
+                for off in offsets:
+                    for dx, dy in directions:
+                        vx, vy = x0 + dx * off, y0 + dy * off
+                        if not _via_ok(net, vx, vy):
+                            continue
+                        if not _path_ok(net, (x0, y0), (vx, vy), "F.Cu", STUB_W):
+                            continue
+                        vgeom = Point(vx, vy).buffer(VIA_R)
+                        if any(vgeom.intersects(own[i][0]) for i in primary_set):
+                            best = (vx, vy)
+                            best_touches = True
+                            break
+                        if best is None:
+                            best = (vx, vy)
+                    if best_touches:
+                        break
+                if best is not None:
+                    vx, vy = best
+                    _emit_via(net, vx, vy)
+                    _emit_seg(net, (x0, y0), (vx, vy), "F.Cu", STUB_W)
+                    _append_own((Point(vx, vy).buffer(VIA_R), all_layers, "via"))
+                    _append_own(
+                        (
+                            LineString([(x0, y0), (vx, vy)]).buffer(STUB_W / 2.0),
+                            frozenset({"F.Cu"}),
+                            "seg",
+                        )
+                    )
+                    merged = True  # geometry changed; recompute components
+
+            # Sub-stage B: bridge the target component to primary on a
+            # shared layer (nearest element pairs first).
+            if not merged:
+                pairs: list[tuple[float, int, int, str]] = []
+                for i in target:
+                    gi, li, ki = own[i]
+                    for j in primary:
+                        gj, lj, kj = own[j]
+                        shared = li & lj
+                        if not shared:
+                            continue
+                        d = gi.distance(gj)
+                        for lay in sorted(shared):
+                            pairs.append((d, i, j, lay))
+                pairs.sort(key=lambda t: t[0])
+                for d, i, j, lay in pairs[:24]:
+                    gi, gj = own[i][0], own[j][0]
+                    pa, pb = nearest_points(gi, gj)
+                    # Overshoot 0.35 mm into each geometry so the bridge
+                    # endpoint survives fill re-quantisation.
+                    vec = (pb.x - pa.x, pb.y - pa.y)
+                    norm = math.hypot(*vec) or 1.0
+                    ux, uy = vec[0] / norm, vec[1] / norm
+                    p0 = (pa.x - ux * 0.35, pa.y - uy * 0.35)
+                    p1 = (pb.x + ux * 0.35, pb.y + uy * 0.35)
+                    if not _path_ok(net, p0, p1, lay, BRIDGE_W):
+                        continue
+                    _emit_seg(net, p0, p1, lay, BRIDGE_W)
+                    _append_own(
+                        (
+                            LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
+                            frozenset({lay}),
+                            "seg",
+                        )
+                    )
+                    bridges_placed += 1
+                    merged = True
+                    break
+
+            # Sub-stage C: ray-cast bridges.  The nearest-pair line is
+            # often blocked by a pad row (e.g. a +3V3 BGA-corner exit must
+            # thread the 0.82 mm inter-pad corridor, which only a
+            # corridor-ALIGNED line clears).  Cast straight rays from the
+            # target's via centers along the 8 compass directions; the
+            # first intersection with primary copper within 12 mm becomes
+            # the bridge endpoint.
+            if not merged:
+                ray_origins = [
+                    own[i][0].centroid for i in target if own[i][2] == "via"
+                ]
+                for origin in ray_origins:
+                    for dx, dy in directions:
+                        ray = LineString(
+                            [
+                                (origin.x, origin.y),
+                                (origin.x + dx * 12.0, origin.y + dy * 12.0),
+                            ]
+                        )
+                        # First primary element the ray crosses (smallest
+                        # distance along the ray), on any layer the
+                        # origin via reaches.
+                        best_t = None
+                        best_lay = None
+                        for j in primary:
+                            gj, lj, _ = own[j]
+                            if not ray.intersects(gj):
+                                continue
+                            hit = ray.intersection(gj)
+                            t_along = ray.project(
+                                hit.representative_point()
+                                if hasattr(hit, "representative_point")
+                                else hit
+                            )
+                            if best_t is None or t_along < best_t:
+                                best_t = t_along
+                                best_lay = sorted(lj)[0]
+                        if best_t is None or best_t < 0.2:
+                            continue
+                        end = ray.interpolate(min(best_t + 0.35, 12.0))
+                        p0 = (origin.x, origin.y)
+                        p1 = (end.x, end.y)
+                        if not _path_ok(net, p0, p1, best_lay, BRIDGE_W):
+                            continue
+                        _emit_seg(net, p0, p1, best_lay, BRIDGE_W)
+                        _append_own(
+                            (
+                                LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
+                                frozenset({best_lay}),
+                                "seg",
+                            )
+                        )
+                        bridges_placed += 1
+                        merged = True
+                        break
+                    if merged:
+                        break
+
+            # Sub-stage D: via-hop bridge.  When the target and primary
+            # copper share a layer but the direct same-layer line is
+            # blocked by a foreign trace (the B.Cu carve that splits a
+            # bbox-carved pour), hop OVER it: drop a via inside each
+            # copper region near the gap and cross on a different layer.
+            if not merged:
+                pairs_d: list[tuple[float, int, int]] = []
+                for i in target:
+                    gi = own[i][0]
+                    for j in primary:
+                        gj = own[j][0]
+                        pairs_d.append((gi.distance(gj), i, j))
+                pairs_d.sort(key=lambda x: x[0])
+                for _d, i, j in pairs_d[:14]:
+                    gi, gj = own[i][0], own[j][0]
+                    pa, pb = nearest_points(gi, gj)
+                    vec = (pb.x - pa.x, pb.y - pa.y)
+                    norm = math.hypot(*vec) or 1.0
+                    ux, uy = vec[0] / norm, vec[1] / norm
+                    done = False
+                    for back_a in (0.5, 0.9, 1.4):
+                        va = (pa.x - ux * back_a, pa.y - uy * back_a)
+                        if not Point(va).intersects(gi) or not _via_ok(net, *va):
+                            continue
+                        for back_b in (0.5, 0.9, 1.4):
+                            vb = (pb.x + ux * back_b, pb.y + uy * back_b)
+                            if not Point(vb).intersects(gj) or not _via_ok(net, *vb):
+                                continue
+                            for lay in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+                                if not _path_ok(net, va, vb, lay, BRIDGE_W):
+                                    continue
+                                _emit_via(net, *va)
+                                _emit_via(net, *vb)
+                                _emit_seg(net, va, vb, lay, BRIDGE_W)
+                                _append_own(
+                                    (Point(va).buffer(VIA_R), all_layers, "via")
+                                )
+                                _append_own(
+                                    (Point(vb).buffer(VIA_R), all_layers, "via")
+                                )
+                                _append_own(
+                                    (
+                                        LineString([va, vb]).buffer(BRIDGE_W / 2.0),
+                                        frozenset({lay}),
+                                        "seg",
+                                    )
+                                )
+                                bridges_placed += 1
+                                merged = True
+                                done = True
+                                break
+                            if done:
+                                break
+                        if done:
+                            break
+                    if done:
+                        break
+
+            if not merged:
+                names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
+                failed.append(
+                    f"{net}: cannot reconnect component "
+                    f"{[n[4:] for n in names] or '(fill island)'}"
+                )
+                skipped_roots.add(_find(target[0]))
+
+    if via_lines or seg_lines:
+        content = pcb_path.read_text().rstrip().rstrip(")")
+        content += "\n" + "\n".join(via_lines + seg_lines) + "\n)\n"
+        pcb_path.write_text(content)
+    for msg in failed:
+        print(f"   UNREPAIRED: {msg}")
+    return vias_placed, bridges_placed
+
+
+def _repair_pair_overlap_solo(router, net_map: dict[str, int]) -> list[str]:
+    """Rip + solo-re-route a diff-pair side whose copper rides its partner.
+
+    Issue #3413 phase 6 residual: the negotiated loop's banked best
+    snapshot can carry a small unresolved overflow where one side of a
+    declared pair physically overlaps the other side's copper (seed-42
+    measurement: USB3_RX1- over USB3_RX1+ at the J1 fan-out, overflow=2,
+    -> 4 ``diffpair_clearance_intra`` + 6 ``clearance_segment_via``
+    errors).  Single-net ``route_net`` treats ALL committed copper as
+    hard obstacles, so a successful solo re-route of one side is
+    overlap-free by construction.
+
+    Transactional per pair: the ripped side's routes are restored
+    verbatim if the solo re-route fails or still overlaps.
+
+    Returns the list of net names that were re-routed.
+    """
+    from shapely.geometry import LineString, Point
+
+    def _net_geoms(net_id: int):
+        """(same-layer segment geoms by layer, via geoms) for a net."""
+        by_layer: dict = {}
+        vias = []
+        nseg = 0
+        for r in router.routes:
+            if r.net != net_id:
+                continue
+            for s in r.segments:
+                by_layer.setdefault(str(s.layer), []).append(
+                    LineString([(s.x1, s.y1), (s.x2, s.y2)]).buffer(s.width / 2.0)
+                )
+                nseg += 1
+            for v in r.vias:
+                vias.append(Point(v.x, v.y).buffer(v.diameter / 2.0))
+        return by_layer, vias, nseg
+
+    def _sides_overlap(a_id: int, b_id: int) -> bool:
+        ag, av, _ = _net_geoms(a_id)
+        bg, bv, _ = _net_geoms(b_id)
+        # same-layer segment/segment overlap
+        for lay, geoms in ag.items():
+            for g in geoms:
+                for h in bg.get(lay, []):
+                    if g.intersects(h):
+                        return True
+        # via barrels span all layers -> check against everything
+        for v in av:
+            for geoms in bg.values():
+                for h in geoms:
+                    if v.intersects(h):
+                        return True
+            for w in bv:
+                if v.intersects(w):
+                    return True
+        for v in bv:
+            for geoms in ag.values():
+                for h in geoms:
+                    if v.intersects(h):
+                        return True
+        return False
+
+    repaired: list[str] = []
+    for p_name, n_name in generate_pcb.DIFFPAIRS.items():
+        p_id = net_map.get(p_name)
+        n_id = net_map.get(n_name)
+        if p_id is None or n_id is None:
+            continue
+        if not _sides_overlap(p_id, n_id):
+            continue
+        _, _, p_segs = _net_geoms(p_id)
+        _, _, n_segs = _net_geoms(n_id)
+        side_id, side_name = (
+            (n_id, n_name) if n_segs <= p_segs else (p_id, p_name)
+        )
+        partner_id = p_id if side_id == n_id else n_id
+        print(
+            f"   {p_name}/{n_name}: physically overlapping copper -- "
+            f"ripping {side_name} for solo re-route"
+        )
+        import contextlib as _ctx
+
+        old_routes = [r for r in router.routes if r.net == side_id]
+        for r in old_routes:
+            with _ctx.suppress(Exception):
+                router.grid.unmark_route_usage(r)
+            router.grid.unmark_route(r)
+            router.routes.remove(r)
+
+        new_routes = router.route_net(side_id)
+
+        def _rollback() -> None:
+            for r in list(new_routes or []):
+                with _ctx.suppress(Exception):
+                    router.grid.unmark_route(r)
+                if r in router.routes:
+                    router.routes.remove(r)
+            for r in old_routes:
+                router.routes.append(r)
+                try:
+                    router._mark_route(r)
+                except Exception:
+                    router.grid.mark_route(r)
+
+        if not new_routes:
+            print(f"   {side_name}: solo re-route FAILED -- restoring original")
+            _rollback()
+            continue
+        if _sides_overlap(side_id, partner_id):
+            print(
+                f"   {side_name}: solo re-route still overlaps partner -- "
+                f"restoring original"
+            )
+            _rollback()
+            continue
+        # The optimizer/nudge passes mutate ``router.routes`` geometry
+        # WITHOUT re-marking the grid, so the solo A* may have routed
+        # against stale cells.  Validate the new copper against every
+        # OTHER net's CURRENT route geometry (not the grid) and roll
+        # back on any cross-net contact.
+        cross = False
+        new_by_layer: dict = {}
+        new_vias = []
+        for r in new_routes:
+            for s in r.segments:
+                new_by_layer.setdefault(str(s.layer), []).append(
+                    LineString([(s.x1, s.y1), (s.x2, s.y2)]).buffer(s.width / 2.0)
+                )
+            for v in r.vias:
+                new_vias.append(Point(v.x, v.y).buffer(v.diameter / 2.0))
+        for other in router.routes:
+            if other.net == side_id or cross:
+                continue
+            for s in other.segments:
+                og = LineString([(s.x1, s.y1), (s.x2, s.y2)]).buffer(s.width / 2.0)
+                if any(g.intersects(og) for g in new_by_layer.get(str(s.layer), [])):
+                    cross = True
+                    break
+                if any(v.intersects(og) for v in new_vias):
+                    cross = True
+                    break
+            if cross:
+                break
+            for v in other.vias:
+                ov = Point(v.x, v.y).buffer(v.diameter / 2.0)
+                if any(
+                    g.intersects(ov) for geoms in new_by_layer.values() for g in geoms
+                ) or any(w.intersects(ov) for w in new_vias):
+                    cross = True
+                    break
+        if cross:
+            print(
+                f"   {side_name}: solo re-route contacts foreign copper -- "
+                f"restoring original"
+            )
+            _rollback()
+            continue
+        repaired.append(side_name)
+    return repaired
+
+
+# =============================================================================
 # Pipeline Steps
 # =============================================================================
 
@@ -330,8 +1262,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     # Power and ground nets are handled via copper pours on the inner planes
     # (In1.Cu = GND, In2.Cu = PWR).  Skip them at the trace router so they
-    # don't fight for outer-layer corridors.
-    skip_nets = ["GND", "VBUS_USB", "+3V3", "+1V8", "+1V2"]
+    # don't fight for outer-layer corridors.  POUR_NETS is module-level so
+    # the CI gate's reach assertion derives the signal-net universe from
+    # the same declaration (Issue #3413 phase 5).
+    skip_nets = list(POUR_NETS)
 
     print(f"\n1. Loading PCB: {input_path}")
     print(
@@ -437,22 +1371,91 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             # diff-pair routing -- an explicit author choice that takes
             # precedence over the solver's "loosely coupled" branch.
             # Re-apply the recipe's per-class ``intra_pair_clearance``
-            # (and ``clearance``) on each resolved class, keeping the
-            # resolver's impedance-driven ``trace_width`` override.
+            # (and ``clearance``) on each resolved class.
+            #
+            # Issue #3413 (phase 6) -- re-solve the WIDTH on the
+            # tightly-coupled branch instead of keeping the resolver's
+            # loosely-coupled width.  The historical combination
+            # ("resolver width 0.475 mm + recipe gap 0.10 mm") was
+            # physically inconsistent (measured Zdiff ~62 Ω vs the 90 Ω
+            # target, 31% off) AND operationally toxic: a 0.475 mm trace
+            # needs 0.775 mm of fabric (width + 2x0.15 clearance), which
+            # exceeds J1's 0.7 mm inter-pad channel -- the USB-C fan-out
+            # was geometrically SEALED for any net that had to thread
+            # between J1 pads, and the A* search at that width was so
+            # constrained that USB3_RX1- needed 27 s on an EMPTY board
+            # (vs the 30 s per-net budget).  This is the root cause of
+            # the USB3_RX1- residual diagnosed in PR #3500 ("hard
+            # obstacles at the J1 fan-out").
+            #
+            # Given the author-chosen tight gap, solve
+            # ``Zdiff(width, gap) = target`` for width via bisection on
+            # the same ``CoupledLines.edge_coupled_microstrip`` model the
+            # resolver uses.  Measured solutions on jlcpcb_4layer F.Cu:
+            #   USB2  90 Ω @ 0.075 mm gap -> 0.250 mm (Zdiff 89.6, 0.4% off)
+            #   USB3  90 Ω @ 0.100 mm gap -> 0.275 mm (Zdiff 90.4, 0.4% off)
+            #   PCIe 100 Ω @ 0.100 mm gap -> 0.225 mm (Zdiff 102.3, 2.3% off)
+            #   MIPI 100 Ω @ 0.100 mm gap -> 0.225 mm (Zdiff 102.3, 2.3% off)
+            # All are within the classes' 10% tolerance; 0.275 + 0.3 mm
+            # clearance = 0.575 mm fits J1's 0.7 mm channels and the
+            # BGA-49's 0.82 mm channels with margin.  Single-ended
+            # classes (Sideband) keep the resolver's width -- the
+            # sidecar DRC gate validates SE impedance against it.
             import dataclasses as _dc
+
+            from kicad_tools.physics import CoupledLines as _CoupledLines
+
+            _cl = _CoupledLines(stackup)
+
+            def _tightly_coupled_width(
+                target_zdiff: float, gap_mm: float, fallback: float
+            ) -> float:
+                """Bisect Zdiff(width, gap)=target on F.Cu; round to 0.025mm."""
+                try:
+                    lo, hi = 0.1, 1.0
+                    for _ in range(40):
+                        mid = (lo + hi) / 2
+                        z = _cl.edge_coupled_microstrip(mid, gap_mm, "F.Cu").zdiff
+                        if z > target_zdiff:
+                            lo = mid
+                        else:
+                            hi = mid
+                    w = round(round(((lo + hi) / 2) / 0.025) * 0.025, 4)
+                    return max(w, rules.min_trace_width or w)
+                except (ValueError, AttributeError):
+                    return fallback
+
             for _name, _resolved_nc in list(resolved_map.items()):
                 _original_nc = net_class_map.get(_name)
                 if _original_nc is None:
                     continue
+                _width = _resolved_nc.trace_width
+                if (
+                    _original_nc.target_diff_impedance is not None
+                    and _original_nc.intra_pair_clearance is not None
+                ):
+                    _width = _tightly_coupled_width(
+                        _original_nc.target_diff_impedance,
+                        _original_nc.intra_pair_clearance,
+                        _resolved_nc.trace_width,
+                    )
                 resolved_map[_name] = _dc.replace(
                     _resolved_nc,
+                    trace_width=_width,
                     intra_pair_clearance=_original_nc.intra_pair_clearance,
                     clearance=_original_nc.clearance,
                 )
 
             net_class_map = resolved_map
             print("   Impedance sizing applied (stackup: jlcpcb_4layer)")
-            print("   Recipe intra_pair_clearance preserved (resolver-computed gap discarded)")
+            print("   Recipe intra_pair_clearance preserved; diff widths re-solved tightly-coupled")
+            for _name in ("USB2_D+", "USB3_RX1-", "PCIE_TX+", "MIPI_CLK+", "MIPI_RST"):
+                _nc = net_class_map.get(_name)
+                if _nc is not None:
+                    print(
+                        f"     {_name}: width={_nc.trace_width:.3f}mm "
+                        f"gap={_nc.intra_pair_clearance}"
+                    )
             if mismatch_warnings:
                 print(f"   Stackup mismatch warnings: {len(mismatch_warnings)}")
             if clamp_errors:
@@ -590,22 +1593,25 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # it composes with the diff-pair pre-pass via the
     # ``non_diffpair_strategy`` callable hook (Issue #2464).
     # Issue #3413 (phase 3): the 240s budget was A/B-measured against
-    # 360s and KEPT.  At 360s the loop reaches iterations 3-4, where it
-    # banks a routed=21/connected=20 snapshot whose extra copper is a
-    # PARTIAL USB3_RX1- route carrying a heavy post-optimizer violation
-    # load (measured: DRC 36 vs the 9-13 band at 240s) -- the lex tuple
-    # prefers the higher routed count when connected ties.  At 240s the
-    # #3413 overflow-silent rescue still fires inside iteration 2
-    # (MIPI_RST rescued at ~110-215s), the stagnation recovery's
-    # no-net-loss restore bounds the mid-surgery timeout, and the
-    # bounded post-timeout correction pass repairs the USB2_D+
-    # crossover -- yielding the stable 20/21 @ 9-13 error trajectory.
-    # USB3_RX1- does not fully connect at either budget (J1 fan-out
-    # geometry; see #3413 phase-3 residual notes).
+    # 360s and KEPT -- under the OLD loosely-coupled 0.475mm widths.  At
+    # those widths 360s banked a routed=21/connected=20 snapshot whose
+    # extra copper was a PARTIAL USB3_RX1- route carrying a heavy
+    # violation load (DRC 36 vs the 9-13 band at 240s).
+    #
+    # Issue #3413 (phase 6) RE-MEASURED after the tightly-coupled width
+    # re-solve (0.225-0.275mm): the premise of the 240s choice no longer
+    # holds.  USB3_RX1- now connects FULLY inside iteration 1-2 (21/21
+    # connected at ~40s wall), so there is no partial-route snapshot for
+    # the lex tuple to bank.  The loop's remaining work is overflow
+    # relief (a 2-cell USB_CC1 residual at the J1 fan-out): at 240s the
+    # timeout fires mid-iteration-4 right after the oscillation-escape
+    # finds an overflow 9 -> 0 strategy, restoring the iter-2
+    # overflow=2 snapshot.  360s gives the loop the room to BANK the
+    # overflow-0 state instead of just discovering it.
     def _negotiated_non_diffpair_strategy() -> list:
         return router.route_all_negotiated(
             per_net_timeout=30.0,
-            timeout=240.0,
+            timeout=360.0,
             seed=42,
         )
 
@@ -653,6 +1659,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     else:
         print("   No in-router DRC violations detected")
 
+    # Issue #3413 phase 6 (residual cleanup): surgical intra-pair
+    # overlap repair -- AFTER the optimizer + nudge passes, which is
+    # where the overlap is actually introduced (measured on seed 42: at
+    # the post-route stage the pair copper is overlap-free; after
+    # optimization/nudge USB3_RX1- copper rides USB3_RX1+ segments + a
+    # via at the J1 fan-out, producing 4 diffpair_clearance_intra + 4-6
+    # clearance_segment_via errors at identical coordinates run-to-run).
+    # For each declared pair whose two sides have physically overlapping
+    # copper, rip the side with fewer segments and re-route it SOLO --
+    # single-net A* treats all committed copper as hard obstacles, so a
+    # successful re-route is overlap-free by construction.
+    # Transactional: if the solo route fails or still overlaps, the
+    # original routes are restored.
+    print("\n6b. Surgical intra-pair overlap repair...")
+    try:
+        repaired_pairs = _repair_pair_overlap_solo(router, net_map)
+        if repaired_pairs:
+            print(f"   Re-routed {len(repaired_pairs)} pair side(s): {repaired_pairs}")
+        else:
+            print("   No physically-overlapping pair sides detected")
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        print(f"   WARNING: pair-overlap repair skipped: {exc}")
+
     stats = router.get_statistics()
     print(
         f"\n7. Final: {stats['routes']} routes / {stats['segments']} segments / {stats['vias']} vias"
@@ -678,40 +1707,86 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     # Issue #2835: emit copper-pour zones for GND + power nets so the
     # net-status report doesn't flag pour-net pads as "incomplete".
-    # Without zones, PR #2777's per-net bounding-box partitioning never
-    # runs on this board.  We invoke auto_create_zones_for_pour_nets on
-    # the routed PCB so the zones land on the same file kct check / kct
-    # export consume.  Layer assignment is stackup-aware (4-layer here):
-    # GND -> In1.Cu (full board outline, plane continuity), power nets
-    # -> In2.Cu / F.Cu with per-net bounding outlines.
     #
-    # We use the board's authoritative ``skip_nets`` declaration (rather
-    # than the heuristic ``classify_pour_candidates``) because
-    # ``VBUS_USB`` matches both the USB high-speed pattern and the VBUS
-    # power pattern and the classifier picks high_speed.  The board's
-    # designer intent is that VBUS_USB is a pour net, so we honour the
-    # explicit declaration.
-    print("\n9. Generating copper-pour zones...")
+    # Issue #3413 phase 4: layer assignment is now RECIPE-LOCAL instead
+    # of ``auto_create_zones_for_pour_nets``'s allocator.  The allocator
+    # puts the 2nd..Nth power nets on F.Cu -- but board 06's F.Cu
+    # carries ~270 signal segments (the entire diff-pair fabric), so the
+    # F.Cu pours fragmented into pad-island slivers and the +3V3/+1V8/
+    # +1V2 "planes" were dead copper (the #3482 analyzer gap hid this:
+    # a pad inside a zone *boundary* counts as connected even when the
+    # zone has zero/islanded fill).  B.Cu carries ~13 segments and
+    # In2.Cu ~16 on this board, so the power rails pour there:
+    #   GND      -> In1.Cu p1 (full board outline -- the return plane)
+    #   VBUS_USB -> In2.Cu p1 (pad bbox: its 5 pads are all top-left)
+    #   +1V2     -> In2.Cu p2 (pad bbox -- the split-PWR-plane intent
+    #               from generate_pcb's stackup comment).  Keeping +1V2
+    #               OFF B.Cu is deliberate: its bbox covers the whole
+    #               BGA-49 field, and as a B.Cu zone it carved the +3V3
+    #               pour away from the BGA's +3V3 corner pads (C2/C6/
+    #               E2/E6), leaving them enclaved behind a via-crowded
+    #               corridor that no straight repair bridge could cross
+    #               (measured: 3 unrepairable pads).  On In2.Cu the
+    #               +1V2 region coexists with VBUS instead, and the
+    #               BGA-area B.Cu stays +3V3-contiguous.
+    #   +1V8     -> B.Cu  p2 (pad bbox)
+    #   +3V3     -> B.Cu  p1 (pad bbox minus the +1V8 strip)
+    # ``_compute_pour_outlines`` (#2771/#3043/#3240) carves shared-layer
+    # outlines so they are geometrically disjoint.
+    print("\n9. Generating copper-pour zones (recipe-local layer plan)...")
     try:
-        from kicad_tools.router.net_class import NetClass
-        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
-
-        # GND is the sole ground net on this board; the rest of
-        # ``skip_nets`` are power rails.
-        pour_nets_decl: list[tuple[str, NetClass]] = []
-        for net_name in skip_nets:
-            if net_name == "GND":
-                pour_nets_decl.append((net_name, NetClass.GROUND))
-            else:
-                pour_nets_decl.append((net_name, NetClass.POWER))
-        # JLCPCB tier-1 minimum mask-to-copper clearance is ~0.2mm;
-        # inset by 0.5mm for a conservative margin.
-        zone_count = auto_create_zones_for_pour_nets(
-            output_path, pour_nets_decl, edge_clearance=0.5
+        from kicad_tools.zones.generator import (
+            ZoneGenerator,
+            _compute_pour_outlines,
         )
-        print(f"   Created {zone_count} zone(s) for {[n for n, _ in pour_nets_decl]}")
+
+        zone_assignments: list[tuple[str, str, int]] = [
+            ("GND", "In1.Cu", 1),
+            ("VBUS_USB", "In2.Cu", 1),
+            ("+1V2", "In2.Cu", 2),
+            ("+1V8", "B.Cu", 2),
+            ("+3V3", "B.Cu", 1),
+        ]
+        # JLCPCB minimum mask-to-copper clearance is ~0.2mm; inset by
+        # 0.5mm for a conservative margin.
+        zone_gen = ZoneGenerator.from_pcb(output_path, edge_clearance=0.5)
+        pour_outlines = _compute_pour_outlines(
+            zone_gen.pcb, zone_assignments, zone_gen.board_outline
+        )
+        for zone_net, zone_layer, zone_priority in zone_assignments:
+            zone_gen.add_zone(
+                net=zone_net,
+                layer=zone_layer,
+                priority=zone_priority,
+                boundary=pour_outlines.get(zone_net),
+            )
+        zone_gen.save(output_path)
+        print(f"   Created {len(zone_assignments)} zone(s): {zone_assignments}")
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   Zone generation skipped: {exc}")
+
+    # Issue #3413 phase 4: FILL the zones.  The historical recipe never
+    # invoked the filler, so the committed artifact had zone boundaries
+    # with zero ``filled_polygon`` copper -- every pour net's
+    # connectivity was a boundary-test illusion (#3482).  The stitcher
+    # and the copper-union audit below need real fill geometry.
+    print("\n9b. Filling zones (first pass)...")
+    fill_argv = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "zones",
+        "fill",
+        str(output_path),
+    ]
+    fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+    if fill_result.returncode == 0:
+        for line in fill_result.stdout.strip().split("\n")[-4:]:
+            print(f"   {line}")
+    else:
+        print(f"   Zone fill failed (rc={fill_result.returncode}):")
+        if fill_result.stderr:
+            print(f"   stderr: {fill_result.stderr.strip()}")
 
     # Issue #3271: pad-aware post-route stitching for plane-net pad
     # connectivity.  GND and VBUS_USB are pour nets -- the router skips
@@ -733,6 +1808,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # via the zone fill's thermal relief.
     print("\n10. Pad-aware post-route stitching for plane nets (issue #3271)...")
     try:
+        # Issue #3413 phase 4: the stitcher covers ONLY GND + VBUS_USB.
+        # An earlier iteration stitched all 5 pour nets; the stitcher's
+        # stub placement does not validate stub-vs-stub / stub-vs-pad
+        # conflicts in dense mixed-net pad fields (measured: +3V3/+1V2
+        # stub overlaps inside the BGA-49 inner field and at J1's A-row,
+        # ~10 clearance errors).  The +3V3/+1V8/+1V2 pads are instead
+        # connected by ``_repair_pour_connectivity`` below, which
+        # validates every via + stub against ALL existing copper with
+        # shapely before placing it.
         stitch_nets = ["GND", "VBUS_USB"]
         stitch_argv = [
             sys.executable,
@@ -759,6 +1843,88 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                 print(f"   stderr: {stitch_result.stderr.strip()}")
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   Stitch step skipped: {exc}")
+
+    # Issue #3413 phase 4: repair the stitcher's residual.  On this board
+    # ``--avoid-pad-overlap`` historically left 27 via-in-pad filters +
+    # 27 "manual placement needed" skips = the GND 48/122 stranded
+    # residual.  ``_repair_pour_connectivity`` audits geometrically
+    # (shapely copper union -- immune to the #3482 boundary-test false
+    # positive) and places offset vias + F.Cu stubs + island bridges that
+    # stay legal at the jlcpcb standard tier (no via-in-pad).
+    #
+    # Repair and re-fill ITERATE (max 3 rounds): each re-fill recomputes
+    # the pours with the new copper carved in, which can shift fill
+    # edges away from a previous round's bridge endpoint (measured: a
+    # +1V8 bridge connected against the round-1 fill, then the round-2
+    # fill quantised away from it).  The loop converges when the
+    # copper-union audit reports every pour net in one component.
+    def _run_pour_audit(tag: str) -> bool:
+        ok = True
+        try:
+            audit = _audit_pour_nets(output_path, skip_nets)
+            for net in skip_nets:
+                info = audit[net]
+                n_pads = sum(len(g) for g in info["pad_groups"])
+                problems = []
+                if not info["connected"]:
+                    problems.append(
+                        f"{len(info['pad_groups'])} disjoint pad groups "
+                        f"(largest "
+                        f"{len(info['pad_groups'][0]) if info['pad_groups'] else 0}"
+                        f"/{n_pads})"
+                    )
+                if info["zero_fill_zones"]:
+                    problems.append(f"{info['zero_fill_zones']} zero-fill zone(s)")
+                if problems:
+                    ok = False
+                    print(f"   {tag} FAIL {net}: {'; '.join(problems)}")
+                    for group in info["pad_groups"][1:][:5]:
+                        print(f"        stranded: {[p for p, _ in group]}")
+                else:
+                    print(f"   {tag} OK   {net}: {n_pads} pads in one copper component")
+        except ImportError as exc:
+            ok = False
+            print(f"   {tag} FAIL: audit unavailable ({exc}) -- unverifiable artifact")
+        except Exception as exc:
+            ok = False
+            print(f"   {tag} FAIL: audit crashed ({exc})")
+        return ok
+
+    pour_ok = False
+    for repair_round in range(1, 4):
+        print(
+            f"\n10b. Pour-connectivity repair round {repair_round} "
+            f"(offset vias + stubs + island bridges)..."
+        )
+        try:
+            rep_vias, rep_bridges = _repair_pour_connectivity(output_path, skip_nets)
+            print(f"   Placed {rep_vias} repair via(s) + {rep_bridges} bridge trace(s)")
+        except Exception as exc:
+            print(f"   WARNING: pour-connectivity repair failed: {exc}")
+
+        # Re-fill after repair: the new via barrels pass through the
+        # OTHER nets' planes, so the fills must be recomputed to carve
+        # clearance around them (and so the exported copper is final).
+        print(f"10c. Re-filling zones (round {repair_round})...")
+        fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+        if fill_result.returncode != 0:
+            print(f"   Zone re-fill failed (rc={fill_result.returncode}):")
+            if fill_result.stderr:
+                print(f"   stderr: {fill_result.stderr.strip()}")
+
+        # Issue #3413 phase 4 acceptance gate: every pour net must be
+        # GEOMETRICALLY continuous (all pads in one copper component) and
+        # no fill-enabled pour zone may have zero filled polygons.  This
+        # is the copper-union audit, NOT the analyzer's boundary test
+        # (#3482).
+        print(f"11. Copper-union pour-connectivity audit (round {repair_round})...")
+        pour_ok = _run_pour_audit(f"[r{repair_round}]")
+        if pour_ok:
+            break
+    if not pour_ok:
+        print("   POUR CONNECTIVITY: FAIL (see above)")
+    else:
+        print("   POUR CONNECTIVITY: PASS")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets

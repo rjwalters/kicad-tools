@@ -112,11 +112,19 @@ class TestRoutedPcbArtifact:
         """AC#1 corollary: stackup is the 4-layer JLCPCB tier-1 layout
         (F.Cu / In1.Cu / In2.Cu / B.Cu) that the Phase 3K impedance
         formulas were calibrated against.
+
+        Issue #3413 phase 4: assertions are name-based rather than
+        pinning numeric layer IDs.  The recipe's zone-fill round trip
+        re-serialises the PCB through ``schema.pcb``'s writer, which
+        normalises copper layer IDs to the modern KiCad numbering
+        (F.Cu=0, B.Cu=2, In1.Cu=4, In2.Cu=6) -- the generator's
+        original 0/1/2/31 numbering does not survive, and both forms
+        are valid KiCad 10.
         """
-        assert '(0 "F.Cu" signal)' in routed_pcb_text
-        assert '(1 "In1.Cu" signal)' in routed_pcb_text
-        assert '(2 "In2.Cu" signal)' in routed_pcb_text
-        assert '(31 "B.Cu" signal)' in routed_pcb_text
+        for layer_name in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+            assert re.search(
+                rf'\(\d+ "{re.escape(layer_name)}" signal\)', routed_pcb_text
+            ), f"Copper layer {layer_name} missing from the routed PCB stackup"
 
     @pytest.mark.parametrize(
         "net_name",
@@ -649,35 +657,39 @@ class TestManufacturabilityFloor:
                 "before loosening this test."
             )
 
-        # Issue #3313 lift: the modal width is now 0.375 mm (impedance-
-        # resolved width for 50 Ω SE on F.Cu + 100 Ω diff on F.Cu, both
-        # of which round to the same value at the JLCPCB tier-1 stackup).
-        # 0.20 mm (the pre-#3313 modal) is still present on the few
-        # non-impedance-targeted nets but is no longer the modal width.
-        modal_width, modal_count = width_counts.most_common(1)[0]
-        assert modal_width == pytest.approx(0.375, abs=0.001), (
-            f"Committed PCB modal trace width is {modal_width}mm "
-            f"({modal_count} of {sum(width_counts.values())} segments); "
-            f"expected 0.375mm (Issue #3313 impedance-resolved 50 Ω SE / "
-            f"100 Ω diff width).  If this PR intentionally refreshes the "
-            f"routed PCB with new widths, you MUST verify it passes "
-            f"`scripts/ci/check_routed_drc.py` WITH the impedance "
-            f"sidecar (see PR #3273 trap; see net_class_map_resolver.py). "
-            f"If the refresh is intentional and the strict gate passes, "
-            f"update this test to the new modal width.  Width "
+        # Issue #3413 phase 6 update: the diff classes are now sized on
+        # the TIGHTLY-COUPLED branch (width solved for the target Zdiff
+        # at the recipe's intra_pair_clearance):
+        #   USB3  90 Ω @ 0.100 mm gap -> 0.275 mm
+        #   USB2  90 Ω @ 0.075 mm gap -> 0.250 mm
+        #   PCIe/MIPI 100 Ω @ 0.100 mm gap -> 0.225 mm
+        #   Sideband 50 Ω SE (resolver) -> 0.375 mm (unchanged)
+        # The historical loosely-coupled 0.475 mm width must be GONE:
+        # combined with the recipe's tight gap it measured ~62 Ω (31%
+        # off target) and geometrically sealed J1's 0.7 mm channels
+        # (0.475 + 2x0.15 clearance = 0.775 mm) -- the root cause of the
+        # USB3_RX1- residual.  Modal width is NOT asserted anymore: the
+        # phase-4 plane stitching adds ~100 pad-to-via stub traces at
+        # 0.2 mm which dominate the modal count and carry no impedance
+        # meaning.
+        for canary, label in (
+            (0.275, "90 Ω tightly-coupled USB3"),
+            (0.250, "90 Ω tightly-coupled USB2"),
+            (0.225, "100 Ω tightly-coupled PCIe/MIPI"),
+            (0.375, "50 Ω SE sideband"),
+        ):
+            assert any(abs(w - canary) < 0.001 for w in width_counts), (
+                f"Committed PCB does not carry the {label} impedance width "
+                f"({canary} mm) on any segment.  This is the canary that "
+                f"the impedance pipeline (tightly-coupled re-solve, Issue "
+                f"#3413 phase 6) is wired through to the emitted geometry. "
+                f"Width distribution: {dict(width_counts)}"
+            )
+        assert not any(abs(w - 0.475) < 0.001 for w in width_counts), (
+            f"Committed PCB carries the loosely-coupled 0.475 mm width -- "
+            f"the Issue #3413 phase-6 tightly-coupled re-solve regressed "
+            f"(see boards/06-diffpair-test/generate_design.py).  Width "
             f"distribution: {dict(width_counts)}"
-        )
-
-        # Belt-and-braces: also assert the 90 Ω diff width (0.475 mm)
-        # appears in the distribution.  This catches a regression where
-        # the resolver is silently disabled (e.g. APPLY_IMPEDANCE_DRIVEN_
-        # SIZING flipped back to False, or the recipe-clearance-restore
-        # block accidentally clobbers the resolver-set trace_width).
-        assert any(abs(w - 0.475) < 0.001 for w in width_counts), (
-            f"Committed PCB does not carry the 90 Ω diff impedance-resolved "
-            f"width (0.475 mm) on any segment.  This is the canary that "
-            f"the impedance pipeline is wired all the way through to the "
-            f"emitted geometry.  Width distribution: {dict(width_counts)}"
         )
 
 
@@ -712,23 +724,33 @@ class TestBoard06StrictGateGuard:
     impedance / diff-pair rule families are actually counted.
 
     The expected count is sourced from the live measurement on the
-    committed PCB at the time this test was written (Issue #3338,
-    HEAD = 21076e6c):
+    committed PCB (Issue #3413 phases 4-6 refresh):
 
-    *   strict gate WITH sidecar = ``17`` blocking errors
-    *   advisory ``connectivity`` = ``4`` (3 unrouted blocking nets
-        ``USB3_TX1+``, ``USB3_TX1-``, ``MIPI_RST`` plus partial GND plane)
+    *   strict gate WITH sidecar = ``33`` blocking errors
+    *   advisory ``connectivity`` = ``2`` (GND + +1V2 -- the analyzer's
+        per-net model cannot follow the pad -> stub -> via -> plane-fill
+        chain the phase-4 stitching uses; the recipe's copper-union
+        audit (and ``TestPourCopperUnionAudit`` below) verifies all 5
+        pour nets are GENUINELY one copper component, so these 2 are
+        analyzer false positives, tracked with the #3482 analyzer gap)
 
-    Both counts are excluded-from-gate per the audit pipeline's classifier;
-    only the 17 blocking value gates CI.  The allowlist at
-    ``.github/routed-drc-tolerance.yml:767`` is currently ``21`` (post-#3326
-    tightening), leaving 4-error headroom for seed-dependent variance in
-    the negotiated rip-up cohort -- this test pins the *current* floor
-    (17) so a regression is caught even within the 21 headroom.
+    Blocking composition (vs the pre-refresh 17 = 8 skew + 8 continuity
+    + 1 intra at 18/21 reach): 8 ``diffpair_length_skew`` + 8
+    ``diffpair_routing_continuity`` (single-ended fallback measurements
+    -- the coupled phase still converges 0/9, the board's remaining
+    quality phase) + 7 ``diffpair_clearance_intra`` + 10
+    ``clearance_segment_via`` (one optimizer/nudge-introduced
+    USB3_RX1+/RX1- overlap cluster at the J1 fan-out -- diagnosed in
+    the #3413 phase 4-6 PR; the recipe's transactional solo-re-route
+    repair detects it but rolls back because the post-optimizer grid
+    state is stale).  The count GREW with reach: unrouted nets cannot
+    contribute skew/continuity/clearance errors, so 18/21 -> 21/21
+    engagement surfaces previously-unmeasured violations -- the same
+    engagement-over-silence story as the #3145 floor bump.
     """
 
-    EXPECTED_STRICT_GATE_ERRORS = 17
-    EXPECTED_ADVISORY_CONNECTIVITY = 4
+    EXPECTED_STRICT_GATE_ERRORS = 33
+    EXPECTED_ADVISORY_CONNECTIVITY = 2
 
     @pytest.fixture(scope="class")
     def routed_pcb(self) -> Path:
@@ -886,15 +908,19 @@ class TestBoard06StrictGateGuard:
         )
 
     def test_advisory_connectivity_pinned(self, strict_gate_result: dict) -> None:
-        """Advisory ``connectivity`` count pinned at 4 (3 blocking-incomplete
-        signal nets + 1 partial GND plane).
+        """Advisory ``connectivity`` count pinned at 2 (GND + +1V2).
 
-        The 3 blocking incompletes are ``USB3_TX1+`` / ``USB3_TX1-`` (the
-        BGA-49 inner-ring residual tracked under closed #3270) and
-        ``MIPI_RST`` (FFC connector single-ended trace).  A drift in this
-        count usually signals the router has either gained OR lost a net
-        in the residual cohort -- both deserve scrutiny because the
-        cohort is the "Wave 9 unfinished business" set.
+        Issue #3413 phases 4-6: all 21 signal nets are routed (the
+        historical USB3_TX1+/USB3_TX1-/MIPI_RST incompletes are gone)
+        and every pour net is GENUINELY one copper component per the
+        copper-union audit (``TestPourCopperUnionAudit``).  The 2
+        remaining advisory entries are ``NetStatusAnalyzer`` false
+        positives: its per-net model cannot follow the
+        pad -> stub -> via -> plane-fill chain the phase-4 stitching
+        uses (the inverse face of the #3482 analyzer gap).  A drift in
+        this count means the stitch/repair pipeline gained or lost
+        coverage -- investigate with the copper-union audit before
+        updating the pin.
         """
         violations = strict_gate_result.get("violations", [])
         connectivity = sum(
@@ -905,8 +931,59 @@ class TestBoard06StrictGateGuard:
         assert connectivity == self.EXPECTED_ADVISORY_CONNECTIVITY, (
             f"Advisory connectivity count on the committed routed PCB is "
             f"{connectivity}; expected {self.EXPECTED_ADVISORY_CONNECTIVITY} "
-            f"(3 blocking-incomplete signal nets USB3_TX1+/USB3_TX1-/MIPI_RST "
-            f"+ 1 partial GND plane).  A change here indicates the router "
-            f"gained or lost a net in the residual cohort -- investigate "
-            f"before updating the pin."
+            f"(GND + +1V2 analyzer false positives; see #3482).  A change "
+            f"here indicates the stitch/repair pipeline gained or lost "
+            f"coverage -- investigate before updating the pin."
+        )
+
+
+# =============================================================================
+# Issue #3413 phase 4: copper-union pour-connectivity audit on the artifact
+# =============================================================================
+
+
+class TestPourCopperUnionAudit:
+    """The committed artifact's pour nets must be GEOMETRICALLY connected.
+
+    Issue #3413 phase 4 / issue #3482: ``NetStatusAnalyzer`` counts a pad
+    as zone-connected when it falls inside the zone's *boundary* polygon
+    even if the zone produced zero (or islanded) filled polygons -- the
+    false-positive mode that masked board 06's dead +1V8/+1V2 pours and
+    softstart's dead AC_NEUTRAL pour (PR #3481).  This test runs the
+    recipe's shapely copper-union audit (``_audit_pour_nets``) on the
+    committed routed PCB, so a future artifact refresh that ships
+    boundary-only "planes" fails here even while the analyzer-based
+    connectivity rule stays green.
+    """
+
+    def test_committed_artifact_pour_nets_connected(self, generate_design_mod):
+        pytest.importorskip("shapely")
+        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
+        assert routed.exists(), f"Routed PCB artifact missing: {routed}"
+
+        pour_nets = list(generate_design_mod.POUR_NETS)
+        audit = generate_design_mod._audit_pour_nets(routed, pour_nets)
+
+        failures: list[str] = []
+        for net in pour_nets:
+            info = audit[net]
+            if not info["connected"]:
+                stranded = [
+                    [p for p, _ in group] for group in info["pad_groups"][1:]
+                ]
+                failures.append(
+                    f"{net}: {len(info['pad_groups'])} disjoint copper "
+                    f"components; stranded pads: {stranded}"
+                )
+            if info["zero_fill_zones"]:
+                failures.append(
+                    f"{net}: {info['zero_fill_zones']} fill-enabled zone(s) "
+                    f"with ZERO filled polygons (dead pour)"
+                )
+        assert not failures, (
+            "Copper-union pour audit failed on the committed artifact "
+            "(plane nets are not genuinely connected):\n  "
+            + "\n  ".join(failures)
+            + "\nRe-run: PYTHONHASHSEED=42 python "
+            "boards/06-diffpair-test/generate_design.py --step route --seed 42"
         )
