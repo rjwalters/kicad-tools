@@ -11,7 +11,7 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 507 segments / 24 vias /
+- **Deterministic output**: 22 routes / 387 segments / 24 vias /
   328.16mm total length identical across seeds 42/43/44 -- this small
   2-layer board has fully converged.  (193 segments / 325.08mm before
   the #3532 45-degree pad-tail doglegs; 299/325.55 before the #3436
@@ -438,10 +438,14 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # committed artifacts).  Re-measured 2026-06-11 after rebasing onto
     # the #3436 burn-down pin of (22, 193, 24, 325.08) -- which carried
     # the #3203 per-pad channel-budget fix and #3510 grid-re-marking
-    # straightening -- all 3 cpp seeds (42/43/44) still produce
-    # bit-perfect (22, 507, 24, 328.16): the dogleg splits plus the
+    # straightening -- all 3 cpp seeds (42/43/44) produce bit-perfect
+    # (22, 387, 24, 328.16): the dogleg splits plus the
     # quantization-gated pull-tight account for the segment/length
-    # delta vs the straightened pin.  Prior pins: (22, 193, 24, 325.08)
+    # delta vs the straightened pin.  NOTE: measure in a venv synced to
+    # uv.lock (`uv sync --extra dev`, what CI uses) -- a stale local
+    # venv reproducibly reported 507 segments at the SAME 328.16mm
+    # total length (identical geometry, different collinear-segment
+    # splitting).  Prior pins: (22, 193, 24, 325.08)
     # re-baselined 2026-06-11 for Issue #3436; (22, 299, 24, 325.55)
     # re-baselined 2026-06-10 for Issue #3438; (22, 206, 24, 324.92)
     # for Issue #3433; (22, 155, 24, 324.66) re-verified 2026-06-07.
@@ -449,7 +453,7 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
-    EXPECTED = (22, 507, 24, 328.16)
+    EXPECTED = (22, 387, 24, 328.16)
     assert ref == EXPECTED, (
         f"Board 02 routing baseline drifted: got {ref}, expected "
         f"{EXPECTED}. This is consistent across seeds (so no determinism "
