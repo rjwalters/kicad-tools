@@ -341,6 +341,24 @@ class PlacementFeedbackLoop:
         best_routed_count = -1
         best_iteration = -1
 
+        # Issue #3474 (chorus R2): seed the best-known state with the
+        # PRE-LOOP routes.  The #2840 snapshot only made the loop
+        # monotonic across its own iterations -- iteration 0 still calls
+        # ``_clear_routes()`` and discards whatever the caller routed
+        # before engaging feedback.  On the auto-layers escalation path
+        # that input is the best escalation attempt (measured on
+        # chorus-test-revA: a 20/51 escalation best was replaced by a
+        # 15/51 iteration-0 re-route that moved zero components).
+        # Seeding the snapshot makes the whole loop monotonic with
+        # respect to its input: it can only ever return a state at
+        # least as good as the routes it was handed.  ``-1`` marks "the
+        # pre-feedback input state" in the restore log.
+        if self.router.routes:
+            pre_loop_failed = self.router.get_failed_nets()
+            best_routed_count = len(self.router.nets) - 1 - len(pre_loop_failed)
+            best_routes_snapshot = copy.deepcopy(list(self.router.routes))
+            best_iteration = -1
+
         if self.verbose:
             print("\n=== Placement-Routing Feedback Loop ===")
             print(f"  Max adjustments: {max_adjustments}")
@@ -541,8 +559,13 @@ class PlacementFeedbackLoop:
         current_routed_count = len(self.router.nets) - 1 - len(self.router.get_failed_nets())
         if best_routed_count > current_routed_count:
             if self.verbose:
+                best_label = (
+                    "the pre-feedback input state (#3474)"
+                    if best_iteration == -1
+                    else f"iter {best_iteration}"
+                )
                 print(
-                    f"  Restoring best snapshot from iter {best_iteration} "
+                    f"  Restoring best snapshot from {best_label} "
                     f"(routed={best_routed_count}) "
                     f"instead of final iter (routed={current_routed_count})"
                 )
