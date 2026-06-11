@@ -415,17 +415,21 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
             "before relaxing the assertion."
         )
 
-    # Exact baseline numbers (re-baselined 2026-06-09 for Issue #3433:
-    # the collision-checker overflow-tolerance scoping stops the trace
-    # optimizer from compressing staircases across clean foreign-net
-    # traces, retaining 51 more segments; routes/vias/reach unchanged,
-    # +0.26mm length.  Prior pin: (22, 155, 24, 324.66), re-verified
-    # 2026-06-07).
+    # Exact baseline numbers (re-baselined 2026-06-10 for Issue #3438:
+    # the C++-grid rip-up unmark-mirror parity fix + iteration-scoped
+    # corridor reservation change which cells the negotiated reroute
+    # iterations see as free, shifting reroute path SHAPES.  Routes,
+    # vias and reach are UNCHANGED (22 routes, 24 vias, full reach);
+    # +93 segments / +0.63mm length is staircase-shape drift on the
+    # rerouted paths, deterministic across seeds and 0-DRC (the
+    # manufacturable-baseline tests in this file still pass).  Prior
+    # pin: (22, 206, 24, 324.92), re-baselined 2026-06-09 for Issue
+    # #3433; before that (22, 155, 24, 324.66), re-verified 2026-06-07.)
     # Pinning these catches "all-seeds drift identically" regressions
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
-    EXPECTED = (22, 206, 24, 324.92)
+    EXPECTED = (22, 299, 24, 325.55)
     assert ref == EXPECTED, (
         f"Board 02 routing baseline drifted: got {ref}, expected "
         f"{EXPECTED}. This is consistent across seeds (so no determinism "

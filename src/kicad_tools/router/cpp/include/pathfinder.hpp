@@ -202,6 +202,29 @@ public:
     bool is_foreign_pad_metal_within_radius(int x, int y, int layer, int net,
                                             int radius) const;
 
+    // Issue #3438: Relief-probe mode for zero-overflow hard failures.
+    //
+    // In negotiated (sharing) mode, foreign-net cells with
+    // ``usage_count == 0`` -- escape stubs, committed-route clearance
+    // halos, via halo rings -- are HARD obstacles.  On dense pad-array
+    // bundles (board 07's full-bus-reversal DDR byte) sibling stubs and
+    // vias can seal a pin's only exit corridor, producing an instant
+    // empty-frontier A* abort with ZERO overflow: PathFinder gets no
+    // congestion signal to negotiate, and the failed net is permanently
+    // stranded.
+    //
+    // When relief mode is enabled, those foreign usage-0 non-obstacle
+    // cells become passable at a finite penalty
+    // (``relief_conflict_penalty_`` per conflicted step) instead of
+    // hard-blocking.  The negotiated outer loop runs a one-shot relief
+    // PROBE for each zero-overflow hard failure, extracts the owner nets
+    // of the conflicted cells along the probe path, and feeds them to the
+    // transactional targeted rip-up.  The probe route itself is never
+    // committed.  Foreign ``is_obstacle`` cells (pads, keepouts) and
+    // net-0 static blockage remain hard in relief mode.
+    void set_relief_mode(bool enabled) { relief_mode_ = enabled; }
+    bool relief_mode() const { return relief_mode_; }
+
 private:
     // Check if trace placement is blocked (accounts for trace width)
     // radius_override: if > 0, use this instead of trace_half_width_cells_
@@ -263,6 +286,19 @@ private:
     Grid3D& grid_;
     DesignRules rules_;
     bool diagonal_routing_;
+
+    // Issue #3438: relief-probe mode (see set_relief_mode above).  When
+    // true, the sharing-mode hard clause for foreign usage-0 non-obstacle
+    // cells is downgraded to a finite per-step penalty so the A* search
+    // can produce a min-conflict probe path through sealed escape
+    // corridors instead of an instant empty-frontier abort.
+    bool relief_mode_ = false;
+    float relief_conflict_penalty_ = 20.0f;
+
+    // Issue #3438: per-step relief penalty helper.  Returns
+    // ``relief_conflict_penalty_`` when (x, y, layer) holds a foreign-net
+    // usage-0 non-obstacle blocked cell and relief mode is on; 0 otherwise.
+    float relief_conflict_cost(int x, int y, int layer, int net) const;
 
     // Pre-computed neighbor offsets
     std::vector<Neighbor> neighbors_2d_;

@@ -186,6 +186,16 @@ class Router:
         self.heuristic = heuristic or DEFAULT_HEURISTIC
         self.diagonal_routing = diagonal_routing
 
+        # Issue #3438: relief-probe mode.  When True (set via
+        # ``set_relief_mode``) AND routing in negotiated mode, foreign-net
+        # usage-0 non-obstacle cells (escape stubs, route clearance halos,
+        # via halo rings) become passable at ``_RELIEF_CONFLICT_PENALTY``
+        # per conflicted step instead of hard-blocking.  Used by the
+        # negotiated outer loop's zero-overflow relief pass to extract a
+        # min-conflict blocker set for targeted rip-up; never enabled for
+        # committed routing.
+        self.relief_mode = False
+
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
         # Same layer moves - orthogonal directions
         self.neighbors_2d = [
@@ -1713,7 +1723,10 @@ class Router:
                         return True  # Static no-net obstacle
                 elif cell_net != net:
                     # Different net - only allow if cell was used by routes
-                    if usage == 0:
+                    # Issue #3438: in relief-probe mode foreign usage-0
+                    # cells are passable (penalised per step) so the probe
+                    # can place vias inside sealed escape corridors.
+                    if usage == 0 and not self.relief_mode:
                         return True  # Static obstacle (pad)
                 # else: same net or routed cell - allow with cost
         else:
@@ -1724,6 +1737,20 @@ class Router:
                 return True
 
         return False
+
+    # Issue #3438: per-conflicted-step penalty charged by the relief
+    # probe when crossing a foreign usage-0 non-obstacle cell.  Must stay
+    # in lock-step with ``Pathfinder::relief_conflict_penalty_`` in
+    # ``cpp/include/pathfinder.hpp`` so probe paths agree across backends.
+    _RELIEF_CONFLICT_PENALTY = 20.0
+
+    def set_relief_mode(self, enabled: bool) -> None:
+        """Enable/disable the relief-probe mode (Issue #3438).
+
+        Mirrors ``CppPathfinder.set_relief_mode``.  See the ``relief_mode``
+        attribute docstring in ``__init__`` for semantics.
+        """
+        self.relief_mode = bool(enabled)
 
     def _get_negotiated_cell_cost(
         self,
@@ -1738,8 +1765,22 @@ class Router:
         Issue #2963: ``net`` plumbs the routing-net context to the
         cost function so own-net ``is_obstacle`` cells (destination
         pad metal marked by PR #2928's first-touch) are reachable.
+
+        Issue #3438: in relief-probe mode, foreign usage-0 non-obstacle
+        cells (passable only in relief mode) charge an additional
+        ``_RELIEF_CONFLICT_PENALTY`` so the probe is a min-conflict
+        search.  Note: ``_batch_negotiated_costs`` does NOT apply the
+        relief penalty -- the relief probe always runs through the
+        scalar ``route()`` path, which uses this method.
         """
-        return self.grid.get_negotiated_cost(gx, gy, layer, present_factor, net=net)
+        cost = self.grid.get_negotiated_cost(gx, gy, layer, present_factor, net=net)
+        if self.relief_mode and net is not None:
+            g = self.grid
+            if g._blocked[layer, gy, gx] and not g._is_obstacle[layer, gy, gx]:
+                cell_net = g._net[layer, gy, gx]
+                if cell_net != 0 and cell_net != net and g._usage_count[layer, gy, gx] == 0:
+                    cost += self._RELIEF_CONFLICT_PENALTY
+        return cost
 
     def _get_layer_priority(self) -> list[int]:
         """Get layer indices sorted by congestion (most congested first).
@@ -2423,6 +2464,9 @@ class Router:
             partner_net=partner_net_id,
             partner_radius=net_partner_half_width_cells,
             partner_active=partner_active_flag,
+            # Issue #3438: relief-probe mode -- foreign usage-0 cells are
+            # excluded from the hard bitmap (penalised per step instead).
+            relief_mode=self.relief_mode and allow_sharing,
         )
 
         # Issue #2430: Build crossing grid index if routed segments exist.
@@ -3697,7 +3741,10 @@ class Router:
             exclude_refs.add(start_pad.ref)
         if end_pad.ref:
             exclude_refs.add(end_pad.ref)
-        if not self._validate_route_clearance(
+        # Issue #3438: relief PROBES deliberately cross foreign copper/
+        # halos -- geometric validation would reject every probe path.
+        # Probe routes are never committed, so skip validation.
+        if not self.relief_mode and not self._validate_route_clearance(
             route,
             start_pad.net,
             component_pitches=self.component_pitches,

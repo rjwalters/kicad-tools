@@ -250,7 +250,11 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 if (cell.net == 0 && cell.usage_count == 0) {
                     return true;
                 }
-                if (cell.net != net && cell.usage_count == 0) {
+                if (cell.net != net && cell.usage_count == 0 &&
+                    !relief_mode_) {
+                    // Issue #3438: in relief-probe mode this foreign
+                    // usage-0 cell is passable at a finite penalty
+                    // (see relief_conflict_cost) instead of hard.
                     return true;
                 }
             } else {
@@ -293,7 +297,11 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 if (cell.net == 0 && cell.usage_count == 0) {
                     return true;
                 }
-                if (cell.net != net && cell.usage_count == 0) {
+                if (cell.net != net && cell.usage_count == 0 &&
+                    !relief_mode_) {
+                    // Issue #3438: in relief-probe mode this foreign
+                    // usage-0 cell is passable at a finite penalty
+                    // (see relief_conflict_cost) instead of hard.
                     return true;
                 }
             } else {
@@ -396,7 +404,11 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
                 if (cell.net == 0 && cell.usage_count == 0) {
                     return true;
                 }
-                if (cell.net != net && cell.usage_count == 0) {
+                if (cell.net != net && cell.usage_count == 0 &&
+                    !relief_mode_) {
+                    // Issue #3438: in relief-probe mode this foreign
+                    // usage-0 cell is passable at a finite penalty
+                    // (see relief_conflict_cost) instead of hard.
                     return true;
                 }
             } else {
@@ -407,6 +419,27 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
         }
     }
     return false;
+}
+
+// Issue #3438: per-step relief penalty.  Returns the configured penalty
+// when (x, y, layer) holds a foreign-net usage-0 non-obstacle blocked
+// cell AND relief mode is on; 0.0f otherwise.  The penalty makes the
+// relief probe a MIN-CONFLICT search: the A* prefers paths that cross as
+// few sealed foreign cells as possible, so the owner nets extracted from
+// the probe path form a small, targeted rip-up set.
+float Pathfinder::relief_conflict_cost(int x, int y, int layer, int net) const {
+    if (!relief_mode_) {
+        return 0.0f;
+    }
+    if (!grid_.is_valid(x, y, layer)) {
+        return 0.0f;
+    }
+    const auto& cell = grid_.at(x, y, layer);
+    if (cell.blocked && !cell.is_obstacle && cell.net != 0 &&
+        cell.net != net && cell.usage_count == 0) {
+        return relief_conflict_penalty_;
+    }
+    return 0.0f;
 }
 
 bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,
@@ -470,7 +503,9 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     if (cell.net == 0 && cell.usage_count == 0) {
                         return true;
                     }
-                    if (cell.net != net && cell.usage_count == 0) {
+                    if (cell.net != net && cell.usage_count == 0 &&
+                        !relief_mode_) {
+                        // Issue #3438: relief-probe mode (see above).
                         return true;
                     }
                     // Allow with cost for routed cells / own-net obstacle.
@@ -508,7 +543,9 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                         if (cell.net == 0 && cell.usage_count == 0) {
                             return true;
                         }
-                        if (cell.net != net && cell.usage_count == 0) {
+                        if (cell.net != net && cell.usage_count == 0 &&
+                            !relief_mode_) {
+                            // Issue #3438: relief-probe mode (see above).
                             return true;
                         }
                     } else {
@@ -946,6 +983,13 @@ RouteResult Pathfinder::route(
                         }
                         continue;
                     }
+                } else if (relief_mode_ && !cell.is_obstacle &&
+                           !cell.pad_blocked) {
+                    // Issue #3438: relief probe may step ON foreign
+                    // non-obstacle non-pad cells (escape stubs, route
+                    // halos) -- the per-step relief penalty in the cost
+                    // function keeps the probe min-conflict.  Foreign
+                    // obstacles and pad metal stay hard.
                 } else {
                     bool is_clearance_only = !cell.pad_blocked;
                     bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
@@ -1034,6 +1078,9 @@ RouteResult Pathfinder::route(
                 // reachable with finite cost.
                 negotiated_cost = grid_.get_negotiated_cost(
                     nx, ny, nlayer, present_cost_factor, net);
+                // Issue #3438: relief-probe penalty for foreign usage-0
+                // non-obstacle cells (passable only in relief mode).
+                negotiated_cost += relief_conflict_cost(nx, ny, nlayer, net);
             }
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
@@ -1094,6 +1141,9 @@ RouteResult Pathfinder::route(
                 // destination pad).
                 negotiated_cost = grid_.get_negotiated_cost(
                     current.x, current.y, new_layer, present_cost_factor, net);
+                // Issue #3438: relief-probe penalty (via expansion).
+                negotiated_cost +=
+                    relief_conflict_cost(current.x, current.y, new_layer, net);
             }
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;
@@ -1481,6 +1531,13 @@ RouteResult Pathfinder::run_astar_loop() {
                         }
                         continue;
                     }
+                } else if (relief_mode_ && !cell.is_obstacle &&
+                           !cell.pad_blocked) {
+                    // Issue #3438: relief probe may step ON foreign
+                    // non-obstacle non-pad cells (escape stubs, route
+                    // halos) -- the per-step relief penalty in the cost
+                    // function keeps the probe min-conflict.  Foreign
+                    // obstacles and pad metal stay hard.
                 } else {
                     bool is_clearance_only = !cell.pad_blocked;
                     bool is_pad_exit = is_exiting_start_pad || is_exiting_end_pad;
@@ -1568,6 +1625,10 @@ RouteResult Pathfinder::run_astar_loop() {
                 // cells (destination pad metal) stay reachable.
                 negotiated_cost = grid_.get_negotiated_cost(
                     nx, ny, nlayer, search_present_cost_factor_, search_net_);
+                // Issue #3438: relief-probe penalty for foreign usage-0
+                // non-obstacle cells (passable only in relief mode).
+                negotiated_cost +=
+                    relief_conflict_cost(nx, ny, nlayer, search_net_);
             }
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
@@ -1633,6 +1694,9 @@ RouteResult Pathfinder::run_astar_loop() {
                 negotiated_cost = grid_.get_negotiated_cost(
                     current.x, current.y, new_layer, search_present_cost_factor_,
                     search_net_);
+                // Issue #3438: relief-probe penalty (via expansion).
+                negotiated_cost += relief_conflict_cost(
+                    current.x, current.y, new_layer, search_net_);
             }
 
             float avoidance = grid_.at(current.x, current.y, new_layer).avoidance_cost;

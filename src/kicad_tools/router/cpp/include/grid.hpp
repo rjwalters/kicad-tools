@@ -101,6 +101,12 @@ public:
     // Negotiated routing support
     void reset_usage();
     void increment_usage(int x, int y, int layer);
+    // Issue #3438: rip-up parity.  Mirrors RoutingGrid.unmark_route_usage
+    // so the Python negotiated loop can keep the C++ usage counts in
+    // lock-step with the Python grid (previously usage was never synced,
+    // so the C++ sharing-mode clauses saw usage_count == 0 everywhere and
+    // treated ALL foreign copper as hard).  Clamps at zero.
+    void decrement_usage(int x, int y, int layer);
     // Issue #2963: optional ``net`` parameter — when nonzero AND the
     // cell's net matches, the ``is_obstacle`` hard-reject is skipped
     // (the destination pad's own metal stays reachable for its own

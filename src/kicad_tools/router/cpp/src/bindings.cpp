@@ -191,6 +191,10 @@ NB_MODULE(router_cpp, m) {
         // Negotiated routing
         .def("reset_usage", &Grid3D::reset_usage)
         .def("increment_usage", &Grid3D::increment_usage, "x"_a, "y"_a, "layer"_a)
+        .def("decrement_usage", &Grid3D::decrement_usage, "x"_a, "y"_a, "layer"_a,
+             "Issue #3438: rip-up parity -- mirrors "
+             "RoutingGrid.unmark_route_usage so the C++ sharing-mode "
+             "clauses see the same usage counts as the Python grid.")
         .def("get_negotiated_cost", &Grid3D::get_negotiated_cost,
              "x"_a, "y"_a, "layer"_a, "present_factor"_a, "net"_a = 0)
         .def("update_history_costs", &Grid3D::update_history_costs, "increment"_a)
@@ -307,6 +311,14 @@ NB_MODULE(router_cpp, m) {
              "has pad_blocked=True and a foreign net.  Used by the pad-exit "
              "clearance guard (Issue #3226) to refuse a relaxation step into the "
              "inner part of an adjacent foreign pad's halo.")
+        .def("set_relief_mode", &Pathfinder::set_relief_mode, "enabled"_a,
+             "Issue #3438: enable/disable the relief-probe mode.  When "
+             "enabled, sharing-mode foreign usage-0 non-obstacle cells "
+             "(escape stubs, route clearance halos, via halo rings) become "
+             "passable at a finite per-step penalty instead of hard, so a "
+             "zero-overflow hard failure can produce a min-conflict probe "
+             "path whose crossed owner nets feed the targeted rip-up.")
+        .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
 

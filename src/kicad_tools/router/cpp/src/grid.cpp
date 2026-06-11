@@ -266,6 +266,16 @@ void Grid3D::increment_usage(int x, int y, int layer) {
     }
 }
 
+void Grid3D::decrement_usage(int x, int y, int layer) {
+    // Issue #3438: rip-up parity with RoutingGrid.unmark_route_usage.
+    if (is_valid(x, y, layer)) {
+        auto& cell = at(x, y, layer);
+        if (cell.usage_count > 0) {
+            cell.usage_count--;
+        }
+    }
+}
+
 float Grid3D::get_negotiated_cost(int x, int y, int layer, float present_factor,
                                   int net) const {
     if (!is_valid(x, y, layer)) {
