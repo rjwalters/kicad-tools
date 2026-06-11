@@ -1580,3 +1580,99 @@ class TestPlacementFeedbackLoopRollback:
         # The exit_reason is pf_max_iter (we ran all 3 iterations without
         # success), confirming no early break.
         assert result.exit_reason == "pf_max_iter"
+
+    def test_pre_loop_routes_seed_best_snapshot(self):
+        """Issue #3474: the loop must never return worse than its input.
+
+        The caller hands the loop a router that already has 3/4 nets
+        routed (the auto-layers escalation best).  Every feedback
+        iteration routes WORSE (1-2 nets).  Without the pre-loop seed,
+        iteration 0's 1-net result becomes "best" (#2840 only compared
+        across the loop's own iterations) and the escalation result is
+        silently discarded -- measured on chorus-test-revA as a 20/51
+        escalation best replaced by a 15/51 zero-move re-route.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        pre_loop_routes = [_make_test_route(i) for i in (1, 2, 3)]
+        pre_loop_signatures = sorted((r.net, r.net_name) for r in pre_loop_routes)
+        iter0_routes = [_make_test_route(1)]
+        iter1_routes = [_make_test_route(1), _make_test_route(2)]
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes],
+        )
+        # Simulate the escalation result already present on the router.
+        router.routes = list(pre_loop_routes)
+
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+        )
+        self._strategy_always_applies(loop)
+        result = loop.run(max_adjustments=1)
+
+        # The pre-loop input state (3 routed) must be restored.
+        assert sorted((r.net, r.net_name) for r in result.routes) == pre_loop_signatures, (
+            "Issue #3474: placement feedback returned a worse state than "
+            "its input -- the pre-loop escalation routes must seed the "
+            "best-known snapshot"
+        )
+        assert sorted(result.failed_nets) == [4]
+        # The router's live state must reflect the restored input too.
+        assert sorted(r.net for r in router.routes) == [1, 2, 3]
+        # Deep-copy semantics: restoration must not alias the originals.
+        pre_loop_ids = {id(r) for r in pre_loop_routes}
+        for r in router.routes:
+            assert id(r) not in pre_loop_ids
+
+    def test_pre_loop_seed_verbose_restore_log(self, capsys):
+        """Verbose restore log names the pre-feedback input state."""
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[[_make_test_route(1)]],
+        )
+        router.routes = [_make_test_route(i) for i in (1, 2, 3)]
+
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=True,
+            stagnation_patience=0,
+        )
+        self._strategy_always_applies(loop)
+        loop.run(max_adjustments=0)
+
+        captured = capsys.readouterr().out
+        assert "Restoring best snapshot from the pre-feedback input state" in captured
+
+    def test_pre_loop_seed_does_not_block_improvement(self):
+        """An iteration that beats the input still wins."""
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[[_make_test_route(i) for i in (1, 2, 3)]],
+        )
+        # Input state: only 1 net routed.
+        router.routes = [_make_test_route(1)]
+
+        pcb = MockPCB()
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+        )
+        self._strategy_always_applies(loop)
+        result = loop.run(max_adjustments=0)
+
+        # Iteration 0 (3 routed) beats the seeded input (1 routed).
+        assert sorted(r.net for r in result.routes) == [1, 2, 3]
+        assert sorted(result.failed_nets) == [4]
