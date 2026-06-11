@@ -89,10 +89,16 @@ def _regenerate_softstart_pcb(output_dir: Path) -> Path:
     return pcb_path
 
 
-# Mirrors the recipe's ``ROUTE_SKIP_NETS`` (generate_design.py).  Issue
-# #3343 P-R1 (architect S1): VGATE / SRC_POS / SRC_NEG / BUS_LINE are
-# power/heavy-current nets that get zone-pour copper, not 0.3 mm traces —
-# the signal-net denominator is 26, not 30.
+# Pins the issue-#3343 P-R1-era 15-net skip set so this escape-routing
+# harness keeps its 26-signal-net denominator and the measured floors
+# below stay run-to-run comparable.  NOTE: this is deliberately NOT a
+# live mirror of the recipe's ``ROUTE_SKIP_NETS`` anymore — the PR #3481
+# review fix shrank the recipe's skip set to the 4 pour nets
+# (GND / +3.3V / SCAP_*_GND) and routes the other 11 power nets as
+# 0.4 mm skeleton traces (+ reinforcement pours) via a
+# ``--net-class-map`` sidecar.  This harness exists to regression-pin
+# the SOT-23 escape fixes, not the recipe's power-copper strategy, so
+# it keeps the historical denominator.
 _SKIP_NETS = [
     "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
     "+3.3V", "VRECT",

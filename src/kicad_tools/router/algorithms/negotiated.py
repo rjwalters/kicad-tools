@@ -875,8 +875,16 @@ class NegotiatedRouter:
                     demand = est.get_tile_demand(row, col)
                     return manhattan + scaled_weight * demand
 
+            # PR #3481 fix: snap synthetic Steiner branch points onto
+            # the routing grid — off-grid virtual pads have no sub-grid
+            # rescue (no ``ref``) and fail ``pin_access`` with
+            # ``PADS_OFF_GRID: steiner@(...)``.
+            def _snap_to_grid(x: float, y: float) -> tuple[float, float]:
+                gx, gy = self.grid.world_to_grid(x, y)
+                return self.grid.grid_to_world(gx, gy)
+
             pad_objs, rsmt_edges = build_rsmt(
-                pad_objs, congestion_fn=congestion_fn
+                pad_objs, congestion_fn=congestion_fn, snap_fn=_snap_to_grid
             )
 
             # Issue #2306: Incremental Steiner target-set expansion.

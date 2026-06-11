@@ -680,7 +680,7 @@ class TestNegotiatedRouterCongestionEstimator:
 
         captured_fn = {}
 
-        def fake_build_rsmt(pad_objs, congestion_fn=None):
+        def fake_build_rsmt(pad_objs, congestion_fn=None, snap_fn=None):
             captured_fn["fn"] = congestion_fn
             # Return minimal valid result: all pads, edges forming a chain
             return list(pad_objs), [(0, 1), (1, 2)]
@@ -734,7 +734,7 @@ class TestNegotiatedRouterCongestionEstimator:
 
         captured_fn = {}
 
-        def fake_build_rsmt(pad_objs, congestion_fn=None):
+        def fake_build_rsmt(pad_objs, congestion_fn=None, snap_fn=None):
             captured_fn["fn"] = congestion_fn
             return list(pad_objs), [(0, 1), (1, 2)]
 
@@ -779,7 +779,7 @@ class TestNegotiatedRouterCongestionEstimator:
 
         captured_fn = {}
 
-        def fake_build_rsmt(pad_objs, congestion_fn=None):
+        def fake_build_rsmt(pad_objs, congestion_fn=None, snap_fn=None):
             captured_fn["fn"] = congestion_fn
             return list(pad_objs), [(0, 1), (1, 2)]
 

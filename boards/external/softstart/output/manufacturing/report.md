@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 78 (0 SMD, 0 THT, 78 other) |
 | Nets | 41 |
-| Traces | 1004 segments |
-| Vias | 104 |
+| Traces | 4516 segments |
+| Vias | 158 |
 | Board Size | 150.0 x 100.0 mm |
 
 ## Design Overview
@@ -110,19 +110,17 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 
 | Metric | Count |
 |--------|-------|
-| Errors | 7 |
-| Warnings | 10 |
-| Blocking | 7 |
+| Errors | 15 |
+| Warnings | 8 |
+| Blocking | 15 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
+| via_in_pad | 14 |
 | pad_grid | 8 |
-| via_in_pad | 6 |
-| connectivity | 2 |
-| zone_unfilled | 2 |
 | clearance_pad_segment | 1 |
 
 
@@ -134,10 +132,9 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 
 ### Action Items
 
-- **[CRITICAL]** Fix 7 blocking DRC violations (via_in_pad (6), clearance_pad_segment (1))
-- **[OPTIONAL]** Verify zone fill in KiCad: 2 nets appear incomplete but may be connected via zone fills
-- **[OPTIONAL]** Verify zone fill in KiCad for 13 zone-connected nets
-- **[OPTIONAL]** Review 10 DRC warnings
+- **[CRITICAL]** Fix 15 blocking DRC violations (via_in_pad (14), clearance_pad_segment (1))
+- **[OPTIONAL]** Verify zone fill in KiCad for 12 zone-connected nets
+- **[OPTIONAL]** Review 8 DRC warnings
 - **[OPTIONAL]** Analog-sensitive: U3 (INA180A3) — instrumentation amplifier (TI INA); manual layout review recommended
 - **[OPTIONAL]** Analog net: AC_LINE — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: BUS_LINE — audio signal; keep short, away from digital/switching nets
@@ -165,13 +162,13 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 92.3% (24/26) |
-| Overall Completion | 95.1% |
-| Complete Nets | 39 / 41 |
-| Zone-Connected Nets | 15 |
+| Signal Net Completion | 100.0% (27/27) |
+| Overall Completion | 100.0% |
+| Complete Nets | 41 / 41 |
+| Zone-Connected Nets | 14 |
 | Single-Pad Nets | 2 (no routing needed) |
-| Incomplete Nets | 2 |
-| Unconnected Pads | 8 |
+| Incomplete Nets | 0 |
+| Unconnected Pads | 0 |
 
 ### Zone-Connected Nets
 
@@ -181,7 +178,6 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 - BUS_LINE
 - FUSED_LINE
 - GND
-- ISENSE_POS
 - SCAP_NEG+
 - SCAP_NEG_GND
 - SCAP_POS+
@@ -194,16 +190,6 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 ### Single-Pad Nets
 
 2 single-pad nets (no routing needed) -- not listed individually.
-
-### Unrouted Signal Nets
-
-- NRST
-- V_BANK_POS_SENSE
-
-### Unrouted Signal Nets
-
-- NRST
-- V_BANK_POS_SENSE
 
 
 ## Cost Estimate
