@@ -27,6 +27,57 @@ if TYPE_CHECKING:
     from ..primitives import Pad
 
 
+def relocate_blocked_point(
+    gx: int,
+    gy: int,
+    is_blocked_fn: Callable[[int, int], bool],
+    max_radius: int = 20,
+) -> tuple[int, int]:
+    """Relocate a grid cell to the nearest unblocked cell (Issue #3471).
+
+    Synthetic Steiner branch points are virtual pads with no footprint
+    ``ref``, so none of the off-grid / sub-grid pad rescues apply to
+    them.  When :func:`build_rsmt` synthesises a branch point that lands
+    on copper-blocked cells (board 05's ISENSE_A+ Steiner point landed
+    on a MOSFET through-hole leg at (136.9, 176.0)), every A* edge
+    incident to that point deterministically fails and the whole
+    multi-terminal net is reported ``blocked_path`` -- even on an
+    otherwise empty board.
+
+    This helper performs a deterministic ring scan (increasing Chebyshev
+    radius, then row-major within each ring) and returns the first cell
+    for which ``is_blocked_fn`` is False.  If no free cell is found
+    within ``max_radius`` cells the original coordinates are returned
+    unchanged (legacy behaviour: the incident edges fail and the failure
+    surfaces through the existing failure-callback path).
+
+    Args:
+        gx: Grid x of the candidate point.
+        gy: Grid y of the candidate point.
+        is_blocked_fn: Callable ``(gx, gy) -> bool`` returning True when
+            the cell cannot host a routable Steiner point (e.g. blocked
+            by foreign-net copper on every routable layer).
+        max_radius: Maximum Chebyshev search radius in cells.
+
+    Returns:
+        ``(gx, gy)`` of the nearest free cell, or the input coordinates
+        when none is found within the search radius.
+    """
+    if not is_blocked_fn(gx, gy):
+        return gx, gy
+    for radius in range(1, max_radius + 1):
+        # Ring at Chebyshev distance ``radius``, scanned in deterministic
+        # row-major order (dy outer, dx inner).
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) != radius:
+                    continue  # interior cells were checked at smaller radii
+                cx, cy = gx + dx, gy + dy
+                if not is_blocked_fn(cx, cy):
+                    return cx, cy
+    return gx, gy
+
+
 def _manhattan(x1: float, y1: float, x2: float, y2: float) -> float:
     """Compute Manhattan distance between two points."""
     return abs(x1 - x2) + abs(y1 - y2)

@@ -19,6 +19,7 @@ from kicad_tools.router.algorithms.steiner import (
     _mst_cost,
     _solve_3_terminal,
     build_rsmt,
+    relocate_blocked_point,
 )
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
@@ -496,3 +497,71 @@ class TestSteinerGridSnap:
         ext2, edges2 = build_rsmt(pads, snap_fn=None)
         assert [(p.x, p.y) for p in ext1] == [(p.x, p.y) for p in ext2]
         assert edges1 == edges2
+
+
+class TestRelocateBlockedPoint:
+    """Issue #3471: Steiner branch points must not sit on blocked cells.
+
+    Board 05's ISENSE_A+ produced a Steiner point at (136.9, 176.0) --
+    on a MOSFET through-hole leg -- so every incident A* edge failed and
+    the net was classified ``blocked_path`` even on an empty board.
+    ``relocate_blocked_point`` ring-scans for the nearest free cell.
+    """
+
+    def test_free_cell_unchanged(self):
+        assert relocate_blocked_point(5, 5, lambda x, y: False) == (5, 5)
+
+    def test_relocates_to_adjacent_free_cell(self):
+        blocked = {(5, 5)}
+        gx, gy = relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked)
+        assert (gx, gy) != (5, 5)
+        assert max(abs(gx - 5), abs(gy - 5)) == 1
+
+    def test_relocation_is_deterministic(self):
+        blocked = {(5, 5)}
+        results = {
+            relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked)
+            for _ in range(10)
+        }
+        assert len(results) == 1
+
+    def test_ring_scan_finds_nearest_ring(self):
+        """A 3x3 blocked block forces relocation to Chebyshev radius 2."""
+        blocked = {(x, y) for x in range(4, 7) for y in range(4, 7)}
+        gx, gy = relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked)
+        assert (gx, gy) not in blocked
+        assert max(abs(gx - 5), abs(gy - 5)) == 2
+
+    def test_all_blocked_returns_original(self):
+        gx, gy = relocate_blocked_point(
+            5, 5, lambda x, y: True, max_radius=3
+        )
+        assert (gx, gy) == (5, 5)
+
+    def test_build_rsmt_snap_fn_can_relocate(self):
+        """End-to-end: a snap_fn embedding the relocation moves the
+        synthetic branch point off a blocked cell while terminals keep
+        their exact coordinates."""
+        # Cross topology forces a branch point near (50, 50).
+        pads = [
+            _make_pad(40.0, 50.0),
+            _make_pad(60.0, 50.0),
+            _make_pad(50.0, 40.0),
+            _make_pad(50.0, 60.0),
+        ]
+        blocked_cell = (50, 50)
+
+        def snap(x: float, y: float) -> tuple[float, float]:
+            gx, gy = round(x), round(y)  # 1mm grid for the test
+            gx, gy = relocate_blocked_point(
+                gx, gy, lambda cx, cy: (cx, cy) == blocked_cell
+            )
+            return float(gx), float(gy)
+
+        extended, _edges = build_rsmt(pads, snap_fn=snap)
+        steiner = [p for p in extended if p.steiner_point]
+        assert steiner, "cross topology must produce a Steiner point"
+        for p in steiner:
+            assert (round(p.x), round(p.y)) != blocked_cell
+        for pad, original in zip(extended[:4], pads, strict=False):
+            assert (pad.x, pad.y) == (original.x, original.y)

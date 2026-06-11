@@ -706,6 +706,24 @@ class CppGrid:
             return self._impl.at(x, y, layer).blocked
         return True
 
+    def is_blocked_for_net(self, x: int, y: int, layer: int, net: int) -> bool:
+        """Check if a cell is blocked for routing a specific net.
+
+        Mirrors the Python ``RoutingGrid.is_blocked(gx, gy, layer, net)``
+        semantics: a cell occupied by the SAME net's copper is not
+        considered blocked (A* may legally terminate or pass there),
+        while net-0 obstacles (component bodies, pad keepouts) and
+        foreign-net copper block.  Issue #3471: used by the Steiner
+        branch-point relocation in ``route_net_negotiated`` so synthetic
+        branch points are not parked on obstacle cells.
+        """
+        if not self._impl.is_valid(x, y, layer):
+            return True
+        cell = self._impl.at(x, y, layer)
+        if not cell.blocked:
+            return False
+        return cell.net == 0 or cell.net != net
+
     def mark_segment(
         self, x1: int, y1: int, x2: int, y2: int, layer: int, net: int, clearance_cells: int
     ) -> None:
@@ -1128,6 +1146,23 @@ class CppPathfinder:
         gy1 = max(0, math.ceil((metal_y1 - origin_y) / resolution))
         gx2 = min(self._grid.cols - 1, math.floor((metal_x2 - origin_x) / resolution))
         gy2 = min(self._grid.rows - 1, math.floor((metal_y2 - origin_y) / resolution))
+
+        # Issue #3471: degenerate (zero-area) pads -- Steiner branch
+        # points are virtual pads with width == height == 0 -- produce
+        # EMPTY metal bounds whenever ``(pad.x - origin) / resolution``
+        # is not exactly integral in floating point: ceil(v) > floor(v)
+        # leaves ``gx1 > gx2`` and the C++ A* seeds ZERO start nodes,
+        # failing the edge with FAILURE_NO_PATH at 0 iterations.  Board
+        # 05's ISENSE cluster (4-pad nets whose RSMT always synthesises
+        # branch points) lost every Steiner-incident edge this way, on
+        # every route of the board.  Clamp empty spans to the nearest
+        # grid cell so a degenerate pad always seeds exactly one cell.
+        if gx1 > gx2:
+            gc = int(round((pad.x - origin_x) / resolution))
+            gx1 = gx2 = max(0, min(self._grid.cols - 1, gc))
+        if gy1 > gy2:
+            gc = int(round((pad.y - origin_y) / resolution))
+            gy1 = gy2 = max(0, min(self._grid.rows - 1, gc))
 
         # Approach zone: metal area + 2-cell escape margin (Issue #1618)
         pad_escape_margin = 2
