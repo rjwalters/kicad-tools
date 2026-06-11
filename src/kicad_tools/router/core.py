@@ -1624,8 +1624,26 @@ class Autorouter:
     def _create_intra_ic_routes(
         self, net: int, pads: list[tuple[str, str]]
     ) -> tuple[list[Route], set[int]]:
-        """Create direct routes for same-IC pins on the same net."""
-        return create_intra_ic_routes(net, pads, self.pads, self.rules, self.net_class_map)
+        """Create direct routes for same-IC pins on the same net.
+
+        Issue #3480: previously routed segments of OTHER nets are passed
+        as obstacles so the perimeter-wrap fallback cannot collide with
+        existing copper.
+        """
+        obstacle_segments = [
+            seg
+            for route in self.routes
+            if route.net != net
+            for seg in route.segments
+        ]
+        return create_intra_ic_routes(
+            net,
+            pads,
+            self.pads,
+            self.rules,
+            self.net_class_map,
+            obstacle_segments=obstacle_segments,
+        )
 
     def _get_unrouted_pads(self, exclude_net: int | None = None) -> list[Pad]:
         """Get list of pads that haven't been routed yet.
