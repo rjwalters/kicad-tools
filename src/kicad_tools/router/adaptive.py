@@ -13,11 +13,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .core import Autorouter, RoutingFailure
 
-from .grid import RoutingGrid
 from .layers import Layer, LayerStack
-from .pathfinder import Router
 from .primitives import Route
-from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
+from .rules import DesignRules
 
 
 @dataclass
@@ -123,47 +121,23 @@ class AdaptiveAutorouter:
         # Import here to avoid circular dependency
         from .core import Autorouter
 
-        # Create grid with layer stack
-        grid = RoutingGrid(
-            self.width,
-            self.height,
-            self.rules,
-            self.origin_x,
-            self.origin_y,
+        # Construct via the real __init__ (which has accepted
+        # ``layer_stack`` since #972-era refactors).  This used to be an
+        # ``Autorouter.__new__`` bypass with a hand-maintained attribute
+        # list that silently rotted every time __init__ gained a new
+        # attribute -- e.g. ``_use_waypoint_injection`` (#2330/#3441) and
+        # ``_matrix_conflict_nets``, whose absence crashed
+        # ``route_all_negotiated`` with AttributeError once the CI Test
+        # job started gating (issue #3436).
+        autorouter = Autorouter(
+            width=self.width,
+            height=self.height,
+            origin_x=self.origin_x,
+            origin_y=self.origin_y,
+            rules=self.rules,
             layer_stack=layer_stack,
+            physics_enabled=False,
         )
-
-        # Create autorouter with custom grid
-        # Uses __new__ to bypass __init__ for custom grid injection.
-        # Must manually initialize all attributes that __init__ sets.
-        autorouter = Autorouter.__new__(Autorouter)
-        autorouter.rules = self.rules
-        autorouter.net_class_map = DEFAULT_NET_CLASS_MAP
-        autorouter.layer_stack = layer_stack
-        autorouter.grid = grid
-        autorouter.router = Router(grid, self.rules, autorouter.net_class_map)
-        autorouter.pads = {}
-        autorouter.nets = {}
-        autorouter.net_names = {}
-        autorouter.routes = []
-        autorouter.routing_failures = []
-        autorouter.record_decisions = False
-        autorouter._decision_store = None
-        autorouter._component_pitches = None
-        autorouter._force_python = False
-        autorouter._stackup = None
-        autorouter._physics_enabled = False
-        autorouter._transmission_line = None
-
-        # Initialize length tracker
-        from .length import LengthTracker
-
-        autorouter._length_tracker = LengthTracker()
-
-        # Initialize zone manager
-        from .zones import ZoneManager
-
-        autorouter.zone_manager = ZoneManager(grid, self.rules)
 
         # Add components
         for comp in self.components:
