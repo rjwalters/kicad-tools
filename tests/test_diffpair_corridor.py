@@ -28,7 +28,6 @@ to a near-1D tube, which the pure-Python search completes in seconds.
 from __future__ import annotations
 
 import logging
-import time
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
