@@ -1472,15 +1472,26 @@ class TestStandaloneAddWire:
         assert result == 0
         assert sch_path.read_text() == original_content
 
-    def test_add_wire_zero_length_rejected(self, tmp_path: Path):
+    def test_add_wire_zero_length_is_warned_noop(self, tmp_path: Path):
+        """Zero-length wires are skipped with a warning and exit 0.
+
+        This has been add-wire's contract since it was introduced
+        (#1883): zero-length segments are dropped after snapping, the
+        command warns on stderr, and a no-op is not an error.  The
+        original assertion (exit 1) never matched the shipped behavior
+        (stale-test update, issue #3436 burn-down).
+        """
         sch_path = _write_sch(tmp_path)
+        original_content = sch_path.read_text()
 
         result = add_wire_main([
             str(sch_path),
             "--from", "100", "80",
             "--to", "100", "80",
         ])
-        assert result == 1
+        assert result == 0
+        # Nothing was written
+        assert sch_path.read_text() == original_content
 
     def test_add_wire_schematic_not_found(self, tmp_path: Path):
         result = add_wire_main([

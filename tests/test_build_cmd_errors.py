@@ -390,8 +390,14 @@ class TestBuildRouteExitCode2:
 
         assert result.success is False
 
-    def test_route_exit_code_3_is_failure(self, tmp_path: Path) -> None:
-        """Route exit code 3 (DRC failure) remains failure."""
+    def test_route_exit_code_3_is_nonfatal_warning(self, tmp_path: Path) -> None:
+        """Route exit code 3 (DRC violations remain) is non-fatal.
+
+        Exit codes 2-5 all produce usable output files; build_cmd treats
+        them as success-with-warning so the pipeline continues to the
+        verification step, which is responsible for surfacing remaining
+        DRC violations (stale-test update, issue #3436 burn-down).
+        """
         from unittest.mock import MagicMock, patch
 
         from rich.console import Console
@@ -420,4 +426,5 @@ class TestBuildRouteExitCode2:
             )
             result = _run_step_route(ctx, console)
 
-        assert result.success is False
+        assert result.success is True
+        assert "DRC violations remain" in result.message

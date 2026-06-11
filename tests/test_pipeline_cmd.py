@@ -2390,7 +2390,9 @@ class TestReportStep:
         assert routed_pcb.name in result.message
         assert "--mfr jlcpcb" in result.message
         assert "--no-figures" in result.message
-        assert "-o reports/" in result.message
+        # REPORT writes into manufacturing/ (shared with EXPORT) so the
+        # pipeline produces a single output directory.
+        assert "-o manufacturing/" in result.message
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_report_step_invokes_subprocess(self, mock_run, routed_pcb: Path):
@@ -2424,7 +2426,7 @@ class TestReportStep:
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_report_step_output_dir(self, mock_run, routed_pcb: Path):
-        """Report step passes -o with reports/ directory path."""
+        """Report step passes -o with the manufacturing/ directory path."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
         ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb")
@@ -2432,7 +2434,7 @@ class TestReportStep:
 
         cmd_args = mock_run.call_args[0][0]
         o_idx = cmd_args.index("-o")
-        assert cmd_args[o_idx + 1] == str(routed_pcb.parent / "reports")
+        assert cmd_args[o_idx + 1] == str(routed_pcb.parent / "manufacturing")
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_step_report_accepted_by_argparse(self, mock_run, routed_pcb: Path):
@@ -2488,7 +2490,7 @@ class TestReportStep:
 
     @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
     def test_commit_stages_reports_dir(self, mock_step, tmp_path: Path):
-        """When --commit is used and reports/ exists, git add includes reports/."""
+        """When --commit is used and manufacturing/ exists, git add includes it."""
         # Initialize a git repo
         subprocess.run(
             ["git", "init", str(tmp_path)],
@@ -2507,8 +2509,9 @@ class TestReportStep:
         )
         pcb_file = tmp_path / "board.kicad_pcb"
         pcb_file.write_text(ROUTED_PCB)
-        # Create reports/ directory with a file
-        reports_dir = tmp_path / "reports"
+        # Create manufacturing/ directory with a file (REPORT/EXPORT both
+        # write here; --commit stages this directory)
+        reports_dir = tmp_path / "manufacturing"
         reports_dir.mkdir()
         (reports_dir / "report.md").write_text("# Test report")
         # Initial commit
@@ -2532,7 +2535,7 @@ class TestReportStep:
         result = main(["--step", "fix-vias", "--commit", "--quiet", str(pcb_file)])
         assert result == 0
 
-        # Verify the commit included reports/ in the staged files
+        # Verify the commit included manufacturing/ in the staged files
         log = subprocess.run(
             ["git", "-C", str(tmp_path), "log", "--oneline", "-1"],
             capture_output=True,
@@ -2547,7 +2550,7 @@ class TestReportStep:
             text=True,
         )
         assert "board.kicad_pcb" in show.stdout
-        assert "reports/report.md" in show.stdout
+        assert "manufacturing/report.md" in show.stdout
 
 
 # =========================================================================

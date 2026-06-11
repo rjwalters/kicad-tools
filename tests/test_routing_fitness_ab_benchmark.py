@@ -58,6 +58,12 @@ from kicad_tools.router.evaluators import (
 )
 from kicad_tools.schema.pcb import PCB
 
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  The
+# budget-limited GA A/B run beats 60s alone, but under full-suite xdist
+# CPU contention the wall-clock reaper killed it spuriously.  The marker
+# overrides the CLI default; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(300)
+
 # ---------------------------------------------------------------------------
 # Test budget — keep small so the gated benchmark still completes quickly.
 # Increase locally to validate against the epic's "50-100 configs in <5s" bar.

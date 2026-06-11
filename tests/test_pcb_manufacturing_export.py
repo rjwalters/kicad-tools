@@ -107,9 +107,18 @@ class TestExportGerbers:
             try:
                 result = pcb.export_gerbers(output_dir, manufacturer="jlcpcb")
                 assert result.exists()
-                # Check some gerber files exist
-                gerber_files = list(result.glob("*.g*")) + list(result.glob("*.G*"))
-                assert len(gerber_files) > 0
+                # export_gerbers now returns a ready-to-upload zip rather
+                # than a directory of loose .gbr files (stale-test update,
+                # issue #3436 burn-down).  Verify it contains gerber layers.
+                import zipfile
+
+                with zipfile.ZipFile(result) as zf:
+                    names = zf.namelist()
+                gerber_files = [
+                    n for n in names if n.lower().endswith((".gbr", ".gtl", ".gbl", ".gko"))
+                    or ".g" in n.lower()
+                ]
+                assert len(gerber_files) > 0, f"no gerber layers in {result}: {names}"
             except ExportError as e:
                 # kicad-cli may fail for various reasons (version mismatch, etc.)
                 pytest.skip(f"kicad-cli export failed: {e}")

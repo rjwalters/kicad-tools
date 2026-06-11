@@ -17,6 +17,22 @@ from kicad_tools.cli.report_cmd import (
 )
 from kicad_tools.report.figures import FigureEntry
 
+
+@pytest.fixture(autouse=True)
+def _board_files(tmp_path, monkeypatch):
+    """Run every test chdir'd into tmp_path with minimal board files.
+
+    The CLI wiring tests in this module predate report auto-collection
+    (issue #3436 burn-down): they pass a relative ``board.kicad_pcb``
+    that never existed on disk. Auto-collection and schematic inference
+    (``find_schematic``) now require both files to actually exist, so
+    create empty stand-ins and isolate the cwd per test.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "board.kicad_pcb").write_text("(kicad_pcb)")
+    (tmp_path / "board.kicad_sch").write_text("(kicad_sch)")
+
+
 # ---------------------------------------------------------------------------
 # Helper functions for FigureEntry conversion
 # ---------------------------------------------------------------------------
@@ -132,7 +148,7 @@ class TestFigureGenerationWiring:
 
         output_dir = tmp_path / "reports"
         result = report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir)]
+            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
         )
         assert result == 0
 
@@ -174,6 +190,7 @@ class TestFigureGenerationWiring:
                 str(output_dir),
                 "--sch",
                 "custom/root.kicad_sch",
+                "--skip-collect",
             ]
         )
         assert result == 0
@@ -194,6 +211,7 @@ class TestFigureGenerationWiring:
                 "-o",
                 str(output_dir),
                 "--no-figures",
+                "--skip-collect",
             ]
         )
         assert result == 0
@@ -285,6 +303,7 @@ class TestGracefulDegradation:
                 "jlcpcb",
                 "-o",
                 str(output_dir),
+                "--skip-collect",
             ]
         )
 
@@ -315,6 +334,7 @@ class TestGracefulDegradation:
                 "jlcpcb",
                 "-o",
                 str(output_dir),
+                "--skip-collect",
             ]
         )
 
@@ -403,7 +423,9 @@ class TestFiguresInVersionDir:
         mock_instance.generate_all.return_value = _mock_figure_entries()
 
         output_dir = tmp_path / "reports"
-        report_main(["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir)])
+        report_main(
+            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+        )
 
         # Both report.md and figures/ should be under v1/
         report_path = output_dir / "v1" / "report.md"
@@ -423,11 +445,15 @@ class TestFiguresInVersionDir:
         output_dir = tmp_path / "reports"
 
         # First report -> v1
-        report_main(["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir)])
+        report_main(
+            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+        )
         assert (output_dir / "v1" / "report.md").exists()
 
         # Second report -> v2
-        report_main(["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir)])
+        report_main(
+            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+        )
         assert (output_dir / "v2" / "report.md").exists()
 
         # Verify the second call used v2/figures/
@@ -446,12 +472,16 @@ class TestReportContentWithFigures:
         mock_instance.generate_all.return_value = _mock_figure_entries()
 
         output_dir = tmp_path / "reports"
-        report_main(["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir)])
+        report_main(
+            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+        )
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
         assert "## PCB Layout" in content
-        assert "### Front" in content
-        assert "### Back" in content
+        # Front/back render as bare images (no ### headings) in the
+        # current template; copper/assembly keep their headings.
+        assert "![PCB Front](figures/pcb_front.png)" in content
+        assert "![PCB Back](figures/pcb_back.png)" in content
         assert "### Copper" in content
         assert "### Assembly" in content
 
@@ -462,7 +492,9 @@ class TestReportContentWithFigures:
         mock_instance.generate_all.return_value = _mock_figure_entries()
 
         output_dir = tmp_path / "reports"
-        report_main(["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir)])
+        report_main(
+            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+        )
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
         assert "## Schematic Overview" in content
@@ -475,7 +507,9 @@ class TestReportContentWithFigures:
         mock_instance.generate_all.return_value = []
 
         output_dir = tmp_path / "reports"
-        report_main(["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir)])
+        report_main(
+            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+        )
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
         assert "## PCB Layout" not in content

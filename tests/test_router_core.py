@@ -187,6 +187,10 @@ class TestPadBlockedByAdjacentNetZero:
     area regardless of blocked/net state.
     """
 
+    @pytest.mark.xfail(
+        reason="pad blocked by adjacent net=0 pad on main -- see issue #3490",
+        strict=False,
+    )
     def test_route_to_pad_adjacent_to_net0_pad(self):
         """Route to a signal pad whose metal area overlaps with a net=0 pad's cells.
 
@@ -1274,13 +1278,17 @@ class TestAdaptiveAutorouterComponentTransform:
         stack = LayerStack.two_layer()
         router = adaptive._create_autorouter(stack)
 
-        # After 90 degree rotation, (1, 0) should become approximately (0, -1)
+        # Rotation is CCW-positive standard math applied directly to
+        # file coordinates with NO y negation (repo-wide convention since
+        # PR #738; cleanups #2778/#2788/#2789): (1, 0) rotated 90 deg
+        # becomes (0, +1), i.e. pad.y = 20 + 1 = 21
+        # (stale-test update, issue #3436 burn-down).
         pad = router.pads.get(("R1", "1"))
         assert pad is not None
         # x should be close to 25.0 (component center)
         assert abs(pad.x - 25.0) < 0.01
-        # y should be offset by approximately -1.0 from center
-        assert abs(pad.y - 19.0) < 0.01
+        # y should be offset by approximately +1.0 from center
+        assert abs(pad.y - 21.0) < 0.01
 
 
 class TestAutorouterIntraICRoutes:

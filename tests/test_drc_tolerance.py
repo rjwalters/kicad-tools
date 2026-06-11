@@ -89,6 +89,11 @@ class MockPCB:
         self._nets = {n.number: n for n in (nets or [])}
         self.copper_layers = [MockLayer("F.Cu")]
 
+    @property
+    def nets(self):
+        """Net definitions (mirrors schema.pcb.PCB.nets)."""
+        return self._nets
+
     def segments_on_layer(self, layer_name):
         return [s for s in self.segments if s.layer == layer_name]
 

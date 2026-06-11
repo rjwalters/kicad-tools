@@ -1287,9 +1287,15 @@ class TestReportCLI:
         assert args.report_input == "test.kicad_pro"
         assert args.report_mfr == "jlcpcb"
 
-    def test_generate_skeleton(self, tmp_path: Path) -> None:
+    def test_generate_skeleton(self, tmp_path: Path, monkeypatch) -> None:
         """Calling generate with --skip-collect should produce a skeleton report."""
         from kicad_tools.cli.report_cmd import main as report_main
+
+        # .kicad_pro inputs are resolved to a sibling .kicad_pcb that must
+        # exist on disk (stale-test fix, issue #3436 burn-down).
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "test.kicad_pro").write_text("{}")
+        (tmp_path / "test.kicad_pcb").write_text("(kicad_pcb)")
 
         output_dir = tmp_path / "reports"
         result = report_main(
@@ -1309,8 +1315,9 @@ class TestReportCLI:
         assert report_path.exists()
 
         content = report_path.read_text(encoding="utf-8")
-        assert "# test" in content
-        assert "cover-block" in content
+        # The current template emits pandoc YAML front-matter (title:)
+        # rather than a "# <name>" heading / cover-block div.
+        assert 'title: "test"' in content
         assert "testmfr" in content
 
     def test_generate_with_data_dir(self, tmp_path: Path) -> None:

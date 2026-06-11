@@ -89,6 +89,22 @@ class FakeNegotiatedRouter:
         # Always reroute all nets that have routes
         return list(net_routes.keys())
 
+    # Clearance-matrix violation finders (issues #3002/#3020/#3433): the
+    # two-phase loop's best-state comparator queries these after every
+    # iteration. The fake reports a clean board so the overflow sequence
+    # alone drives best-state selection (issue #3436 stale-fake fix).
+    def find_nets_with_segment_via_violations(self, net_routes, trace_clearance, cache_key=None, extra_routes=None):
+        return []
+
+    def find_nets_with_via_segment_violations(self, net_routes, trace_clearance, cache_key=None, extra_routes=None):
+        return []
+
+    def find_nets_with_segment_segment_violations(self, net_routes, trace_clearance, cache_key=None, extra_routes=None):
+        return []
+
+    def find_segment_segment_violation_pairs(self, net_routes, trace_clearance, extra_routes=None, copper_overlap_only=False):
+        return []
+
     def rip_up_nets(self, nets, net_routes, routes_list):
         for net in nets:
             for route in net_routes.get(net, []):

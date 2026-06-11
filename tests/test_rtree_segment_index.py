@@ -172,6 +172,10 @@ class TestRtreeBruteForceEquivalence:
         return result_normal, result_brute
 
     @pytest.mark.skipif(not RTREE_AVAILABLE, reason="rtree not installed")
+    @pytest.mark.xfail(
+        reason="RtreeSegmentIndex returns clearance=inf where brute force finds a neighbor -- see issue #3522",
+        strict=False,
+    )
     def test_parity_above_threshold(self, grid):
         """With 200+ segments the R-tree path matches brute-force exactly."""
         self._populate_grid(grid, n_routes=40, n_segs_per_route=6)

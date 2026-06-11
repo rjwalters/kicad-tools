@@ -174,18 +174,15 @@ class TestBoard03Integration:
         bom = extract_bom(str(BOARD_03_SCH))
         items = bom.items
 
-        # Sanity: schematic-source items should have blank footprints
-        # (this is the bug we are fixing).
-        assert any(not (it.footprint or "").strip() for it in items), (
-            "Expected at least one blank footprint on board 03 schematic-source BOM"
-        )
-
-        # Spec-overlay refs per project.kct (per the issue body).
+        # Board 03's schematic has since been repaired upstream (the
+        # spec-overlay refs now carry footprints), so synthesize the
+        # original defect in-memory to keep exercising the back-fill
+        # path against the real PCB (issue #3436 burn-down).
         target_refs = {"U1", "J1", "J2", "Y1", "SW1"}
         target_items = [it for it in items if it.reference in target_refs]
         assert target_items, "None of the spec-overlay refs found in BOM"
-        # Before back-fill, every spec-overlay ref should have a blank
-        # footprint (root cause).
+        for it in target_items:
+            it.footprint = ""
         assert all(not (it.footprint or "").strip() for it in target_items)
 
         filled = backfill_footprints_from_pcb(items, str(BOARD_03_PCB))

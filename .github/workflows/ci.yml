@@ -27,6 +27,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # continue-on-error on both steps below is tracked by issue #3464
+      # (lint rot is invisible: ~860 ruff errors / ~510 unformatted files
+      # on main as of 2026-06-11). Removing it requires a repo-wide
+      # format/lint burn-down that is out of scope for #3436 (which
+      # un-masked the Test job).
       - name: Check formatting
         run: uv run ruff format . --check
         continue-on-error: true
@@ -48,6 +53,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # continue-on-error is tracked by issue #3512 (1472 mypy errors in
+      # 264 files on main as of 2026-06-11). Removing it requires a
+      # baseline/burn-down that is out of scope for #3436 (which un-masked
+      # the Test job).
       - name: Run mypy
         run: uv run mypy src/
         continue-on-error: true
@@ -56,19 +65,73 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Issue #3436: run inside the official KiCad 10 container (same image
+    # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
+    # are NOT used). The container provides what dozens of tests need and
+    # the bare runner lacks:
+    # - /usr/share/kicad/symbols + /usr/share/kicad/footprints at KiCad 10
+    #   (ubuntu noble's kicad-symbols/kicad-footprints universe packages
+    #   are KiCad-7-era: no Device:Q_NMOS, different LM393 unit structure,
+    #   stale footprint pad definitions -- ~40 test failures/errors)
+    # - kicad-cli 10 for the DRC/ERC-backed tests (board-02 baseline's
+    #   "DRC PASSED" parsing, pipeline ERC/zones steps)
+    # All of these failures were previously invisible because the Test
+    # step had continue-on-error.
+    container:
+      image: kicad/kicad:10.0
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the smoke job).
+        shell: bash
     steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
+      - name: Install uv
+        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # coupling inside the container (mirrors the smoke job).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        # Pin the interpreter via uv (parity with the other jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        # Issue #3436: `uv sync` does NOT build the native extension (see
+        # repo CLAUDE.md "Routing performance: build the C++ backend
+        # first"). Without it, router tests fall back to pure Python
+        # (10-100x slower) and the --timeout=60 reaper kills tests that
+        # pass comfortably with the C++ backend -- another failure class
+        # that continue-on-error used to hide. Mirrors the equivalent
+        # step in the routing-regression jobs below.
+        run: uv run kct build-native
 
       - name: Run tests
+        # Issue #3436: continue-on-error was removed from this step. It
+        # made the job green regardless of pytest's exit code, hiding 162
+        # failures + 30 errors on main (run 27235563106) and rendering CI,
+        # Judges, and the merge queue blind to test regressions. This step
+        # now gates: if it is red, fix the tests -- do NOT re-add
+        # continue-on-error. Known-broken tests must be xfail'd with a
+        # tracking issue instead.
         run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow"
-        continue-on-error: true
 
   cpp-build-check:
     # Issue #2501: catch source/.so drift by rebuilding the C++ extension

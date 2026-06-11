@@ -107,6 +107,25 @@ def _patches_for_relaxation(tiers, fake_load_pcb):
             return_value=([], []),
         )
     )
+    # Issue #3436 stale-mock fix: _stage_input_for_auto_pour (issue #2548)
+    # shutil.copy2's the input PCB to the output path before routing. The
+    # tests pass MagicMock paths, which makes the real copy explode with
+    # SameFileError; restore the pre-#2548 in-place behavior for the fake.
+    stack.enter_context(
+        patch(
+            "kicad_tools.cli.route_cmd._stage_input_for_auto_pour",
+            side_effect=lambda pcb_path, output_path: pcb_path,
+        )
+    )
+    # auto_pour_if_missing reads the PCB from disk; with MagicMock paths
+    # that raises FileNotFoundError. Patch at the source module (lazy
+    # import inside route_with_rule_relaxation).
+    stack.enter_context(
+        patch(
+            "kicad_tools.router.auto_pour.auto_pour_if_missing",
+            return_value=(0, []),
+        )
+    )
     stack.enter_context(
         patch(
             "kicad_tools.cli.route_cmd._resolve_escape_routing_flag",

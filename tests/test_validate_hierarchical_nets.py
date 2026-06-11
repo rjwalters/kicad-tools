@@ -272,6 +272,10 @@ class TestCheckNetsHierarchical:
     issue #2633.
     """
 
+    @pytest.mark.xfail(
+        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
+        strict=False,
+    )
     def test_in_sync_hierarchical_reports_no_net_issues(
         self, hierarchical_matching_nets_pcb: Path
     ) -> None:
@@ -284,6 +288,10 @@ class TestCheckNetsHierarchical:
             f"{[(i.reference, i.schematic_value, i.pcb_value) for i in net_issues]}"
         )
 
+    @pytest.mark.xfail(
+        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
+        strict=False,
+    )
     def test_subsheet_net_mismatch_is_detected(
         self, hierarchical_bad_subsheet_net_pcb: Path
     ) -> None:

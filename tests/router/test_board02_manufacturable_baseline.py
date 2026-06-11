@@ -124,6 +124,14 @@ from pathlib import Path
 
 import pytest
 
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  These
+# tests route real boards (often via subprocess) and comfortably beat
+# 60s alone, but under full-suite xdist CPU contention the wall-clock
+# reaper killed them spuriously.  The marker overrides the CLI default
+# with a contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(900)
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOARD_DIR = REPO_ROOT / "boards" / "02-charlieplex-led"
 UNROUTED_PCB = BOARD_DIR / "output" / "charlieplex_3x3.kicad_pcb"
@@ -415,21 +423,21 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
             "before relaxing the assertion."
         )
 
-    # Exact baseline numbers (re-baselined 2026-06-10 for Issue #3438:
-    # the C++-grid rip-up unmark-mirror parity fix + iteration-scoped
-    # corridor reservation change which cells the negotiated reroute
-    # iterations see as free, shifting reroute path SHAPES.  Routes,
-    # vias and reach are UNCHANGED (22 routes, 24 vias, full reach);
-    # +93 segments / +0.63mm length is staircase-shape drift on the
-    # rerouted paths, deterministic across seeds and 0-DRC (the
-    # manufacturable-baseline tests in this file still pass).  Prior
-    # pin: (22, 206, 24, 324.92), re-baselined 2026-06-09 for Issue
-    # #3433; before that (22, 155, 24, 324.66), re-verified 2026-06-07.)
+    # Exact baseline numbers (re-baselined 2026-06-11 during the #3436
+    # CI-gate burn-down: routes, vias and reach are UNCHANGED (22
+    # routes, 24 vias, full reach); -106 segments / -0.47mm is
+    # staircase-straightening from the router PRs landed 2026-06-10/11
+    # (#3203 per-pad channel budget edge-classification fix and #3510
+    # grid re-marking after mutating optimizer passes), deterministic
+    # across seeds and 0-DRC (the manufacturable-baseline tests in this
+    # file still pass).  Prior pins: (22, 299, 24, 325.55) re-baselined
+    # 2026-06-10 for Issue #3438; (22, 206, 24, 324.92) 2026-06-09 for
+    # Issue #3433; (22, 155, 24, 324.66) re-verified 2026-06-07.)
     # Pinning these catches "all-seeds drift identically" regressions
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
-    EXPECTED = (22, 299, 24, 325.55)
+    EXPECTED = (22, 193, 24, 325.08)
     assert ref == EXPECTED, (
         f"Board 02 routing baseline drifted: got {ref}, expected "
         f"{EXPECTED}. This is consistent across seeds (so no determinism "

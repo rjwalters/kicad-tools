@@ -141,12 +141,13 @@ class PipelineContext:
         """Extract numeric layer count from the layers string.
 
         Qualified layer strings like '4-sig', '4-all' return 4.
-        'auto' or None falls back to 2.
+        'auto' or None falls back to 2.  Programmatic callers (and many
+        tests) pass a bare int; coerce via str() so both work.
         """
         if self.layers is None or self.layers == "auto":
             return 2
         # Strip qualifier suffix (e.g. '4-sig' -> '4', '4-all' -> '4')
-        base = self.layers.split("-")[0]
+        base = str(self.layers).split("-")[0]
         try:
             return int(base)
         except ValueError:
@@ -661,48 +662,6 @@ def _run_step_fix_silkscreen(ctx: PipelineContext, console: Console) -> Pipeline
         step=PipelineStep.FIX_SILKSCREEN,
         success=success,
         message=f"fix-silkscreen: {message}",
-    )
-
-
-def _run_step_fix_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
-    """Run ERC auto-fix step on the schematic.
-
-    Inserts PWR_FLAG and no-connect markers to resolve common ERC violations.
-    Skips gracefully when no schematic is found.
-    """
-    # Skip if no schematic file available
-    if ctx.schematic_file is None:
-        return PipelineResult(
-            step=PipelineStep.FIX_ERC,
-            success=True,
-            message="fix-erc: no .kicad_sch found alongside PCB -- skipped",
-            skipped=True,
-        )
-
-    if ctx.dry_run:
-        return PipelineResult(
-            step=PipelineStep.FIX_ERC,
-            success=True,
-            message=f"[dry-run] Would run: kct fix-erc {ctx.schematic_file.name}",
-        )
-
-    if not ctx.quiet:
-        console.print(f"  Running ERC auto-fix on {ctx.schematic_file.name}...")
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "kicad_tools.cli",
-        "fix-erc",
-        str(ctx.schematic_file),
-    ]
-
-    success, message = _run_subprocess_step(cmd, ctx.schematic_file.parent, ctx.verbose)
-
-    return PipelineResult(
-        step=PipelineStep.FIX_ERC,
-        success=success,
-        message=f"fix-erc: {message}",
     )
 
 

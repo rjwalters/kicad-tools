@@ -50,6 +50,14 @@ from pathlib import Path
 
 import pytest
 
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  These
+# tests route real boards (often via subprocess) and comfortably beat
+# 60s alone, but under full-suite xdist CPU contention the wall-clock
+# reaper killed them spuriously.  The marker overrides the CLI default
+# with a contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(900)
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "02-charlieplex-led"
 ROUTE_DEMO_SCRIPT = BOARD_DIR / "route_demo.py"

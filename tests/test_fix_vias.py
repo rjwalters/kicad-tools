@@ -1196,8 +1196,10 @@ class TestLayerAutoDetection:
 
         # Without --layers, should auto-detect 4 layers from PCB.
         # For 4-layer JLCPCB: min_via_drill=0.2, min_via_diameter=0.45,
-        # annular ring requires 0.2 + 2*0.15 = 0.50.
-        # The via at 0.45mm diameter should be flagged for resize to 0.50.
+        # annular ring 0.10 (corrected in #1414) requires only
+        # 0.2 + 2*0.10 = 0.40, so the 0.45mm via is already compliant
+        # and no fixes are emitted -- but the 4-layer targets prove the
+        # auto-detection picked the right rule set.
         result = main([
             str(pcb_file),
             "--mfr", "jlcpcb",
@@ -1209,11 +1211,10 @@ class TestLayerAutoDetection:
         import json
         captured = capsys.readouterr()
         data = json.loads(captured.out)
-        assert len(data["fixes"]) == 1
-        # 4-layer rules: target_diameter should be 0.5 (annular ring constrained)
-        assert data["target_diameter_mm"] == 0.5
+        assert len(data["fixes"]) == 0
+        # 4-layer rules: mfr min diameter 0.45 dominates 0.40 annular floor
+        assert data["target_diameter_mm"] == 0.45
         assert data["target_drill_mm"] == 0.2
-        assert data["fixes"][0]["new_diameter_mm"] == 0.5
 
     def test_2layer_pcb_auto_detects(self, tmp_path: Path, capsys):
         """A 2-layer PCB file should auto-detect 2 layers and use 2-layer rules."""
@@ -1291,9 +1292,10 @@ class TestLayerAutoDetection:
         """--layers 4 should select 4layer_1oz rules from JLCPCB."""
         drill, diameter, annular, clearance = get_design_rules("jlcpcb", 4, 1.0, None, None)
         assert drill == 0.2
-        # min_via_diameter is 0.45, but annular ring requires 0.2 + 2*0.15 = 0.50
-        assert diameter == 0.5
-        assert annular == 0.15
+        # JLCPCB 4-layer annular ring is 0.10mm (corrected in #1414):
+        # annular floor 0.2 + 2*0.10 = 0.40 < mfr min diameter 0.45.
+        assert diameter == 0.45
+        assert annular == 0.10
         assert clearance == 0.1016
 
     def test_layers_2_still_enlarges_to_0_6mm(self):
