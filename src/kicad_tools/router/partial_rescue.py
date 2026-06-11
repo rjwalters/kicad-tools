@@ -48,6 +48,7 @@ __all__ = [
     "RescueConfig",
     "all_net_names",
     "build_rescue_command",
+    "complete_unfinished_nets",
     "partially_connected_signal_nets",
     "strip_net_copper",
     "rescue_partial_nets",
@@ -230,6 +231,140 @@ def build_rescue_command(
     )
     cmd.extend(config.extra_args)
     return cmd
+
+
+def complete_unfinished_nets(
+    routed_path: Path,
+    config: RescueConfig,
+    *,
+    max_passes: int = 3,
+    pass_timeout_s: int = 600,
+    quiet: bool = False,
+) -> list[tuple[int, int]]:
+    """Batch completion passes: route ALL unfinished nets together.
+
+    The single-net rescue loop (:func:`rescue_partial_nets`) fails on
+    dense boards (measured on chorus-test-revA, issue #3474 R2: 0/6
+    rescues) because a net routed alone cannot negotiate with the
+    PRESERVED copper of the strictly-routed nets -- the relief machinery
+    correctly reports "blocked only by non-rippable copper" and rolls
+    back.  Routing every unfinished net *together* in one
+    ``--preserve-existing`` pass keeps negotiation alive among the
+    unfinished cohort while still protecting the finished nets' copper.
+
+    This also fixes the budget shape of the escalation ladder: each
+    ladder attempt re-routes the whole board from scratch and times out
+    mid-queue, re-spending its stage budget on the same head-of-queue
+    nets five times over.  A completion pass starts from the committed
+    copper, so its entire budget goes to nets that still need work.
+
+    Each pass:
+
+    1. Detects unfinished signal nets (checker-based, partial AND
+       unrouted, pour nets excluded).
+    2. Strips their stranded copper (the #3470 overlap-stub lesson).
+    3. Routes them together against the preserved copper of everything
+       else (fresh ``kct route`` subprocess, same recipe knobs).
+    4. Keeps the result only if the unfinished count went DOWN;
+       otherwise restores the pre-pass board byte-for-byte and stops.
+
+    Args:
+        routed_path: Routed PCB, repaired in place.
+        config: Board-specific knobs (the per-stage ``stage_timeout_s``
+            is ignored here in favour of *pass_timeout_s*).
+        max_passes: Upper bound on completion passes.  Loop exits early
+            on convergence (no unfinished nets) or no progress.
+        pass_timeout_s: Wall budget per completion pass.
+        quiet: Suppress progress prints.
+
+    Returns:
+        List of ``(unfinished_before, unfinished_after)`` tuples, one
+        per executed pass.
+    """
+    import shutil
+
+    def _log(msg: str) -> None:
+        if not quiet:
+            print(msg, flush=True)
+
+    _log("\n" + "=" * 60)
+    _log("Completion passes for unfinished nets (Issue #3474 R2)...")
+    _log("=" * 60)
+
+    history: list[tuple[int, int]] = []
+    for pass_index in range(max_passes):
+        targets = partially_connected_signal_nets(
+            routed_path,
+            manufacturer=config.manufacturer,
+            excluded_nets=config.excluded_nets,
+            include_unrouted=True,
+        )
+        if not targets:
+            _log(f"\n   Pass {pass_index + 1}: all signal nets connected -- done.")
+            break
+
+        _log(f"\n   Pass {pass_index + 1}: {len(targets)} unfinished net(s): {', '.join(targets)}")
+
+        # Byte-for-byte backup so a no-progress pass can be discarded
+        # entirely (including its freshly-stranded stubs).
+        backup = routed_path.with_name(routed_path.stem + "_prepass.kicad_pcb")
+        shutil.copyfile(routed_path, backup)
+
+        stripped = strip_net_copper(routed_path, targets)
+        _log(f"   Stripped {stripped} stale copper block(s)")
+
+        skip = [n for n in all_net_names(routed_path) if n not in set(targets)]
+        tmp_out = routed_path.with_name(routed_path.stem + "_completion.kicad_pcb")
+        pass_config = RescueConfig(
+            manufacturer=config.manufacturer,
+            backend=config.backend,
+            seed=config.seed,
+            stage_timeout_s=pass_timeout_s,
+            per_net_timeout_s=config.per_net_timeout_s,
+            starting_layers=config.starting_layers,
+            max_layers=config.max_layers,
+            excluded_nets=config.excluded_nets,
+            micro_via_in_pad_fallback=config.micro_via_in_pad_fallback,
+            extra_args=config.extra_args,
+        )
+        cmd = build_rescue_command(routed_path, tmp_out, skip, pass_config)
+        subprocess.run(cmd, capture_output=True, text=True)
+
+        if not tmp_out.exists():
+            _log("   Pass produced no output; restoring pre-pass board.")
+            shutil.copyfile(backup, routed_path)
+            backup.unlink(missing_ok=True)
+            break
+
+        tmp_out.replace(routed_path)
+        for stray in (
+            tmp_out.with_suffix(".kicad_prl"),
+            tmp_out.with_name(tmp_out.stem + "_partial.kicad_pcb"),
+        ):
+            stray.unlink(missing_ok=True)
+
+        remaining = partially_connected_signal_nets(
+            routed_path,
+            manufacturer=config.manufacturer,
+            excluded_nets=config.excluded_nets,
+            include_unrouted=True,
+        )
+        history.append((len(targets), len(remaining)))
+        _log(
+            f"   Pass {pass_index + 1} result: {len(targets)} -> {len(remaining)} unfinished net(s)"
+        )
+
+        if len(remaining) >= len(targets):
+            _log("   No progress; restoring pre-pass board and stopping.")
+            shutil.copyfile(backup, routed_path)
+            backup.unlink(missing_ok=True)
+            break
+
+        backup.unlink(missing_ok=True)
+        if not remaining:
+            break
+
+    return history
 
 
 def rescue_partial_nets(

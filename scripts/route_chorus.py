@@ -2,18 +2,23 @@
 """Route chorus-test-revA with the pinned recipe + partial-net rescue (Issue #3474).
 
 This is the canonical chorus-test-revA routing recipe runner for Phase
-R2 of issue #3474.  It is two stages:
+R2 of issue #3474.  It is three stages:
 
 1. **Main pass** -- the pinned recipe, byte-identical to the one in
    ``tests/test_chorus_reach_floor_3237.py`` and the issue body
    (jlcpcb-tier1, cpp backend, seed 42, ``--timeout 1200``,
    auto-layers, auto-fix, placement feedback, ``PYTHONHASHSEED=0``).
-2. **Rescue loop** (``kicad_tools.router.partial_rescue``) -- each net
+2. **Completion passes** (``complete_unfinished_nets``) -- every net
    left partially routed (1/N-pad stranding, the #3470-class signature)
-   or unrouted (budget-starved tail) is re-routed ALONE against the
-   committed copper of every other net.  Stranded stubs are stripped
-   first so they neither poison the rescue A* nor remain as
-   overlapping-copper DRC liabilities.
+   or unrouted (budget-starved tail) is stripped of stranded stubs and
+   re-routed TOGETHER against the strict nets' preserved copper, so the
+   unfinished cohort can still negotiate among itself.  Repeats while
+   the unfinished count drops (max 3 passes).
+3. **Per-net rescue** (``rescue_partial_nets``) -- only when <= 10
+   residual nets remain; each is routed alone against all committed
+   copper.  Measured 2026-06-11: running this stage on a large cohort
+   is ineffective on chorus (0/6 -- a solo net cannot negotiate with
+   non-rippable preserved copper), hence the completion passes first.
 
 The chorus fixture lives in the external chorus repo, surfaced through
 the ``boards/external/chorus-test-revA`` symlink.  NOTE: that symlink
@@ -44,6 +49,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kicad_tools.router.partial_rescue import (  # noqa: E402
     RescueConfig,
+    complete_unfinished_nets,
     partially_connected_signal_nets,
     rescue_partial_nets,
 )
@@ -202,13 +208,25 @@ def main() -> int:
         excluded_nets=CHORUS_POUR_NETS,
         micro_via_in_pad_fallback=True,
     )
-    targets = partially_connected_signal_nets(
+
+    # Stage 2: batch completion passes.  All unfinished nets route
+    # TOGETHER against the strict nets' preserved copper, so they can
+    # still negotiate among themselves.  Measured (2026-06-11): the
+    # single-net rescue loop alone lands 0/6 on chorus because a solo
+    # net cannot negotiate with non-rippable preserved copper.
+    complete_unfinished_nets(args.output, config, max_passes=3)
+
+    # Stage 3: per-net rescue for a small residual only.  Worth one
+    # 300s stage per net when few remain; pointless (and slow) for a
+    # large cohort -- the completion pass is the bulk mechanism.
+    residual = partially_connected_signal_nets(
         args.output,
         manufacturer=config.manufacturer,
         excluded_nets=CHORUS_POUR_NETS,
         include_unrouted=args.rescue_unrouted,
     )
-    rescue_partial_nets(args.output, config, nets=targets)
+    if 0 < len(residual) <= 10:
+        rescue_partial_nets(args.output, config, nets=residual)
 
     unfinished, drc_errors = report(args.output)
     print(

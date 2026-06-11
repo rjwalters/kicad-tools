@@ -15,6 +15,7 @@ from kicad_tools.router.partial_rescue import (
     RescueConfig,
     all_net_names,
     build_rescue_command,
+    complete_unfinished_nets,
     partially_connected_signal_nets,
     rescue_partial_nets,
     strip_net_copper,
@@ -263,3 +264,100 @@ def test_rescue_successful_stage_promotes_output(tmp_path: Path, monkeypatch) ->
     results = rescue_partial_nets(pcb, RescueConfig(), nets=["SDA"], quiet=True)
     assert results == {"SDA": True}
     assert "(start 9 9)" in pcb.read_text()
+
+
+# ---------------------------------------------------------------------------
+# complete_unfinished_nets (batch completion passes, issue #3474 R2)
+# ---------------------------------------------------------------------------
+
+
+def test_completion_no_unfinished_nets_is_noop(tmp_path: Path, monkeypatch) -> None:
+    pcb = _write_pcb(tmp_path)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.subprocess.run",
+        lambda cmd, **k: calls.append(cmd),
+    )
+
+    history = complete_unfinished_nets(pcb, RescueConfig(), quiet=True)
+    assert history == []
+    assert calls == []  # no route subprocess launched
+
+
+def test_completion_progress_promotes_and_iterates(tmp_path: Path, monkeypatch) -> None:
+    """Targets shrink 2 -> 1 -> 0 across two passes; both kept."""
+    pcb = _write_pcb(tmp_path)
+
+    # Scripted unfinished-net detection: before pass 1 -> [SCL, SDA];
+    # after pass 1 -> [SDA]; after pass 2 -> [].
+    detections = iter([["SCL", "SDA"], ["SDA"], ["SDA"], []])
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: next(detections),
+    )
+
+    # Pass 1 lands SCL's copper (net 2) -- SCL leaves the target set, so
+    # its marker must survive pass 2's strip.  Pass 2 lands SDA (net 1).
+    marker_iter = iter(["(start 7 7)\n\t\t(net 2)", "(start 8 8)\n\t\t(net 1)"])
+
+    def _fake_run(cmd, **kwargs):
+        class _Result:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+
+        src = Path(cmd[4]).read_text()
+        out = Path(cmd[cmd.index("--output") + 1])
+        marker = f"\t(segment\n\t\t{next(marker_iter)}\n\t)\n"
+        out.write_text(src.replace("(kicad_pcb\n", "(kicad_pcb\n" + marker, 1))
+        return _Result()
+
+    monkeypatch.setattr("kicad_tools.router.partial_rescue.subprocess.run", _fake_run)
+
+    history = complete_unfinished_nets(pcb, RescueConfig(), max_passes=3, quiet=True)
+    assert history == [(2, 1), (1, 0)]
+    text = pcb.read_text()
+    # Both passes' output survived.
+    assert "(start 7 7)" in text and "(start 8 8)" in text
+    # No side files left behind.
+    assert not list(tmp_path.glob("*_completion*"))
+    assert not list(tmp_path.glob("*_prepass*"))
+
+
+def test_completion_no_progress_restores_backup(tmp_path: Path, monkeypatch) -> None:
+    """A pass that does not reduce the unfinished count is discarded."""
+    pcb = _write_pcb(tmp_path)
+    original = pcb.read_text()
+
+    detections = iter([["SCL", "SDA"], ["SCL", "SDA"]])
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: next(detections),
+    )
+
+    def _fake_run(cmd, **kwargs):
+        class _Result:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+
+        src = Path(cmd[4]).read_text()
+        out = Path(cmd[cmd.index("--output") + 1])
+        # Output adds junk stub copper but completes nothing.
+        marker = "\t(segment\n\t\t(start 6 6)\n\t\t(net 2)\n\t)\n"
+        out.write_text(src.replace("(kicad_pcb\n", "(kicad_pcb\n" + marker, 1))
+        return _Result()
+
+    monkeypatch.setattr("kicad_tools.router.partial_rescue.subprocess.run", _fake_run)
+
+    history = complete_unfinished_nets(pcb, RescueConfig(), max_passes=3, quiet=True)
+    assert history == [(2, 2)]
+    # Pre-pass board restored byte-for-byte (junk stub gone, stripped
+    # copper back).
+    assert pcb.read_text() == original
+    assert not list(tmp_path.glob("*_prepass*"))
