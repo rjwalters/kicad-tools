@@ -1,6 +1,6 @@
 Comment,Designator,Footprint,LCSC Part #
 100nF,"C1,C2,C3,C4",Capacitor_SMD:C_0402_1005Metric,C1525
-10k,"R10,R11,R12",Resistor_SMD:R_0402_1005Metric,
+10k,"R10,R11,R12",Resistor_SMD:R_0402_1005Metric,C25744
 16MHz,Y1,Crystal:Crystal_HC49-U_Vertical,C13738
 16nF,"C10,C11",Capacitor_SMD:C_0402_1005Metric,
 22pF,"C5,C6",Capacitor_SMD:C_0402_1005Metric,
