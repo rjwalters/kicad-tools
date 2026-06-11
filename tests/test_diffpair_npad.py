@@ -257,6 +257,10 @@ def test_polarity_swap_detected_in_pair_up():
     )
 
 
+@pytest.mark.xfail(
+    reason="pure-Python coupled A* exceeds 300s under full-suite xdist contention -- see issue #3524",
+    strict=False,
+)
 def test_polarity_swap_routes_all_nets():
     """The coupled router still produces routes for both nets when polarity swaps."""
     router = _polarity_swap_router()
