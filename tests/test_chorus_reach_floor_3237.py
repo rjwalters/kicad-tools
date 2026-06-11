@@ -433,8 +433,58 @@ CHORUS_V21_R1_MEASURED_STRICT = 18  # run B, cpp seed 42, 2026-06-10
 CHORUS_V21_R1_MEASURED_STRICT_RUN_A = 14
 CHORUS_V21_PARTIAL_CPP_SEED42 = 7  # run B
 CHORUS_V21_UNROUTED_CPP_SEED42 = 26  # run B
-CHORUS_V21_FLOOR = 10  # regression tripwire: below min(14, 18) with headroom
 CHORUS_V21_AUTOFIX_ROLLED_BACK = True  # connectivity protection, not budget
+
+# --------------------------------------------------------------------------
+# Phase R2 re-pin (Issue #3474 R2, 2026-06-11, branch feature/issue-3474-r2).
+# --------------------------------------------------------------------------
+#
+# R2 measurements at the PINNED recipe (cpp seed 42, PYTHONHASHSEED=0):
+#
+#   - Pre-R2 re-baseline (HEAD cb7c2b8e): escalation ladder best was
+#     20/51 (attempt 2) but the placement-feedback loop DISCARDED it --
+#     iteration 0 cleared the routes, re-routed 15/51 with its leftover
+#     12.9s budget, moved 0 components, and that worse state was saved.
+#     Fixed in this branch: ``PlacementFeedbackLoop`` now seeds its
+#     #2840 best-known snapshot with the pre-loop routes, so the loop
+#     is monotonic with respect to its input ("Restoring best snapshot
+#     from the pre-feedback input state").
+#   - Post-fix pinned-recipe run: 17/51 saved (CPU-contended; the
+#     restore message confirmed the pre-feedback state was kept).
+#
+# The dominant R2 finding is the BUDGET SHAPE, not the per-net cost:
+# the auto-layers escalation ladder runs 5-6 rungs of ~180-200s each,
+# so every rung re-routes the same head-of-queue clock nets from
+# scratch and dies around net 12-25 of 51.  Replacing the ladder with
+# ONE pinned-layers attempt holding the full budget walks the entire
+# queue:
+#
+#   recipe (t=1200, cpp, seed 42)            | strict reach
+#   -----------------------------------------+-------------
+#   pinned recipe (5-6 rung ladder)          | 14-20/51
+#   --auto-layers --starting/max-layers 4    | 22/51 (2 rungs)
+#   --layers 4 --no-auto-layers --pnt 60     | 33/51 (65%)
+#
+# 33/51 is checker-verified (kct check connectivity, not the router's
+# own tally) and is the May-10-parity class (30/48 = 62%).  The R2
+# recipe lives in ``scripts/route_chorus.py`` (R2_RECIPE_FLAGS) along
+# with completion-pass + stub-prune stages; see that module.
+#
+# Per-net rescue / completion passes measured 0 additional nets on this
+# board (every blocker is the preserved copper of already-routed nets:
+# "blocked only by non-rippable copper" relief rollback), so the
+# residual ~18 nets are escape/placement work (J2 "0/8 pads escaped, no
+# grid point reachable" + the BLOCKED_PATH placement cluster), tracked
+# as R2 follow-ups in #3474.
+#
+# The floor below guards the PINNED recipe (the slow test still runs
+# it for apples-to-apples history).  Re-pinned 10 -> 12: post-fix
+# pinned-recipe measurements are 14/15/17/18/20; 12 sits below the
+# weakest with headroom for load modulation.
+CHORUS_V21_R2_PINNED_RECIPE_STRICT = 17  # post-PF-fix, contended, 2026-06-11
+CHORUS_V21_R2_LADDER_BEST_DISCARDED = 20  # pre-fix: best rung PF threw away
+CHORUS_V21_R2_RECIPE_STRICT = 33  # --layers 4 single attempt, checker-verified
+CHORUS_V21_FLOOR = 12  # regression tripwire: below min(14..20) with headroom
 
 # The vendored chorus-test-revA fixture, surfaced via the
 # ``boards/external/chorus-test-revA`` symlink that points at the
@@ -802,6 +852,47 @@ def test_v21_rebaseline_documented() -> None:
     assert CHORUS_V21_AUTOFIX_ROLLED_BACK is True
 
 
+def test_r2_remeasurement_documented() -> None:
+    """The R2 measurement record (Issue #3474 R2, 2026-06-11) is honest.
+
+    R2's two findings:
+
+    1. **Placement feedback discarded the escalation best** -- the
+       pre-fix pinned-recipe run produced a 20/51 ladder best that the
+       feedback loop replaced with a 15/51 zero-move re-route.  The fix
+       (seed the #2840 snapshot with the pre-loop routes) makes the
+       loop monotonic with respect to its input; the post-fix run kept
+       its input state ("Restoring best snapshot from the pre-feedback
+       input state").
+    2. **The escalation ladder is the budget defect** -- one
+       pinned-layers attempt holding the full 1200s budget walks the
+       entire 51-net queue and lands 33/51 (checker-verified), vs
+       14-20/51 for the 5-6 rung ladder.  The R2 recipe is pinned in
+       ``scripts/route_chorus.py``.
+
+    Failure of this test means the R2 constants were edited without
+    updating the comment block above them -- update both together.
+    """
+    # The feedback-discard pre-fix fingerprint: ladder best strictly
+    # above what was saved.
+    assert CHORUS_V21_R2_LADDER_BEST_DISCARDED > CHORUS_V21_R1_MEASURED_STRICT_RUN_A
+    assert CHORUS_V21_R2_PINNED_RECIPE_STRICT >= CHORUS_V21_R1_MEASURED_STRICT_RUN_A
+
+    # The single-attempt recipe is the May-10-parity class: materially
+    # above every ladder measurement and at/above the May-10 target
+    # ratio (33/51 = 65% vs 30/48 = 62%).
+    assert CHORUS_V21_R2_RECIPE_STRICT > CHORUS_V21_R2_LADDER_BEST_DISCARDED
+    assert CHORUS_V21_R2_RECIPE_STRICT / CHORUS_V21_NETS_TOTAL >= 30 / 48
+
+    # Floor discipline: re-pinned BELOW the weakest post-fix pinned-
+    # recipe measurement (14), with the manufacturable bar still far
+    # above (feedback_manufacturable_means_100pct).
+    assert CHORUS_V21_FLOOR == 12
+    assert CHORUS_V21_FLOOR < CHORUS_V21_R1_MEASURED_STRICT_RUN_A
+    assert CHORUS_V21_FLOOR < CHORUS_V21_R2_PINNED_RECIPE_STRICT
+    assert CHORUS_V21_R2_RECIPE_STRICT < CHORUS_V21_NETS_TOTAL  # not done yet
+
+
 # --------------------------------------------------------------------------
 # Slow integration test: end-to-end reach floor.
 # --------------------------------------------------------------------------
@@ -847,14 +938,15 @@ def test_chorus_reach_v21_floor(tmp_path: Path) -> None:
     is double-guarded by ``@pytest.mark.slow`` AND the
     ``KCT_RUN_CHORUS_REACH_FLOOR`` env var so it never runs by accident.
 
-    The assertion intentionally uses the pinned FLOOR (10, re-pinned by
-    #3474 Phase R1 from the Phase-0 value of 2 after the budget-integrity
-    fixes measured 14/51 and 18/51) rather than any target: the floor is
-    a regression tripwire, not a goal.  Phases R2/P1 of #3474 are
-    expected to raise reach further; bump ``CHORUS_V21_FLOOR`` (with
-    multi-seed confirmation) as they land, and at Phase F flip this
-    assertion to the 100%-routed target per
-    ``feedback_manufacturable_means_100pct``.
+    The assertion intentionally uses the pinned FLOOR (12, re-pinned by
+    #3474 Phase R2 from R1's 10 after the placement-feedback
+    monotonicity fix; post-fix pinned-recipe measurements are 14-20/51)
+    rather than any target: the floor is a regression tripwire, not a
+    goal.  NOTE: this test still runs the PINNED (ladder) recipe for
+    apples-to-apples history; the R2 recipe in
+    ``scripts/route_chorus.py`` (pinned 4L, single attempt) measures
+    33/51 on the same fixture.  At Phase F flip this assertion to the
+    100%-routed target per ``feedback_manufacturable_means_100pct``.
     """
     output_pcb = tmp_path / "chorus_routed.kicad_pcb"
 

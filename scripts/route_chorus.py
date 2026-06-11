@@ -4,10 +4,12 @@
 This is the canonical chorus-test-revA routing recipe runner for Phase
 R2 of issue #3474.  It is three stages:
 
-1. **Main pass** -- the pinned recipe, byte-identical to the one in
-   ``tests/test_chorus_reach_floor_3237.py`` and the issue body
-   (jlcpcb-tier1, cpp backend, seed 42, ``--timeout 1200``,
-   auto-layers, auto-fix, placement feedback, ``PYTHONHASHSEED=0``).
+1. **Main pass** -- the R2 recipe (``R2_RECIPE_FLAGS``): pinned 4
+   layers (NO escalation ladder -- one attempt with the full 1200s
+   budget; the load-bearing change, 14-20/51 -> 33/51 measured),
+   ``--per-net-timeout 60`` (board-05 #3425 finding), jlcpcb-tier1,
+   cpp backend, seed 42, auto-fix, placement feedback,
+   ``PYTHONHASHSEED=0``.
 2. **Completion passes** (``complete_unfinished_nets``) -- every net
    left partially routed (1/N-pad stranding, the #3470-class signature)
    or unrouted (budget-starved tail) is stripped of stranded stubs and
@@ -72,6 +74,8 @@ CHORUS_POUR_NETS = frozenset({"+3.3V", "+3.3VA", "+5V", "GNDA", "GNDD"})
 #: The issue #3474 pinned recipe (apples-to-apples with Wave-9/10 and
 #: the R1 re-measurement).  Keep in sync with
 #: tests/test_chorus_reach_floor_3237.py::test_chorus_reach_v21_floor.
+#: Retained for reference/re-measurement; the R2 recipe below routes
+#: measurably better and is what this script runs.
 PINNED_RECIPE_FLAGS = [
     "--manufacturer",
     "jlcpcb-tier1",
@@ -90,9 +94,49 @@ PINNED_RECIPE_FLAGS = [
     "1200",
 ]
 
+#: The R2 recipe (issue #3474, measured 2026-06-11).  Two changes vs
+#: the pinned recipe, both budget-shape:
+#:
+#: 1. ``--layers 4 --no-auto-layers`` -- ONE routing attempt with the
+#:    full wall budget.  The auto-layers escalation ladder ran 5-6
+#:    rungs of ~180-200s each, so every rung re-routed the same
+#:    head-of-queue clock nets from scratch and died around net 12-25
+#:    of 51.  The single pinned-layers attempt walks the entire 51-net
+#:    queue (detailed routing reached 100% of nets for the first time
+#:    on this board).
+#: 2. ``--per-net-timeout 60`` -- the board-05 #3425 finding (rip-up
+#:    convergence needs more than the 30s default on dense boards).
+#:
+#: Measured strict reach (cpp, seed 42, PYTHONHASHSEED=0, t=1200):
+#:   pinned recipe (5-rung ladder):     14-20/51 across runs
+#:   auto-layers --starting/max 4:      22/51 (2 rungs)
+#:   THIS RECIPE (--layers 4, 1 rung):  33/51 (65%, May-10 parity)
+R2_RECIPE_FLAGS = [
+    "--manufacturer",
+    "jlcpcb-tier1",
+    "--backend",
+    "cpp",
+    "--layers",
+    "4",
+    "--no-auto-layers",
+    "--micro-via-in-pad-fallback",
+    "--per-net-timeout",
+    "60",
+    "--placement-feedback",
+    "--placement-feedback-budget",
+    "5",
+    "--iterations",
+    "50",
+    "--auto-fix",
+    "--auto-fix-passes",
+    "2",
+    "--timeout",
+    "1200",
+]
+
 
 def run_main_pass(pcb: Path, output: Path, seed: int) -> int:
-    """Run the pinned recipe; returns the subprocess exit code."""
+    """Run the R2 recipe; returns the subprocess exit code."""
     cmd = [
         sys.executable,
         "-m",
@@ -101,7 +145,7 @@ def run_main_pass(pcb: Path, output: Path, seed: int) -> int:
         str(pcb),
         "--output",
         str(output),
-        *PINNED_RECIPE_FLAGS,
+        *R2_RECIPE_FLAGS,
         "--seed",
         str(seed),
     ]
@@ -189,6 +233,14 @@ def main() -> int:
         default=True,
         help="Also rescue nets with no copper at all (default on).",
     )
+    parser.add_argument(
+        "--keep-stubs",
+        action="store_true",
+        help=(
+            "Keep stranded partial copper in the output instead of "
+            "pruning it (useful for debugging where partial routes end)."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.skip_main_pass:
@@ -227,6 +279,29 @@ def main() -> int:
     )
     if 0 < len(residual) <= 10:
         rescue_partial_nets(args.output, config, nets=residual)
+
+    # Stage 4: prune stranded stubs.  Whatever is still unfinished
+    # contributes zero to strict reach but its stranded copper is a DRC
+    # liability (#3470 defect 2: overlapping stub copper).  Stripping is
+    # loss-free for the reach metric and measurably reduces blocking
+    # DRC (2026-06-11: 47 -> 24 non-connectivity errors on the 22/51
+    # board).  Issue #3474 R2 AC: "zero overlapping stranded-stub
+    # copper in partial outputs".
+    if not args.keep_stubs:
+        unfinished = partially_connected_signal_nets(
+            args.output,
+            manufacturer=config.manufacturer,
+            excluded_nets=CHORUS_POUR_NETS,
+            include_unrouted=True,
+        )
+        if unfinished:
+            from kicad_tools.router.partial_rescue import strip_net_copper
+
+            removed = strip_net_copper(args.output, unfinished)
+            print(
+                f"\nPruned {removed} stranded copper block(s) from "
+                f"{len(unfinished)} unfinished net(s) (issue #3470 stub hygiene)"
+            )
 
     unfinished, drc_errors = report(args.output)
     print(
