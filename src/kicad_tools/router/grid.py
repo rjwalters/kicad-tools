@@ -3783,6 +3783,16 @@ class RoutingGrid:
         already-ripped-up via positions and reject legitimate placements,
         and the post-route validator would compare against stale data.
 
+        Issue #3438: Cell-level rip-up parity with the paired C++ grid.
+        ``RoutingCore._mark_route`` mirrors every committed route's cells
+        onto the C++ grid (``_mark_route_on_cpp_grid``), but until #3438
+        NOTHING ever unmarked them: ripped-up routes stayed permanently
+        blocked on the C++ side, so the C++ negotiated A* accreted
+        phantom blockage across iterations (the "iteration 0 is the
+        high-water mark" pattern, Issue #3101).  This method now mirrors
+        the unmark to ``self._cpp_grid`` using the same radius math as
+        ``_mark_route_on_cpp_grid``.
+
         Args:
             route: The route to unmark.
             max_trace_width: Must match the value used in ``mark_route()``
@@ -3798,6 +3808,17 @@ class RoutingGrid:
                 self._unmark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
                 self._unmark_via(via, max_trace_width=max_trace_width)
+            # Issue #3438: mirror the rip-up onto the paired C++ grid so
+            # the C++ A* sees freed cells (parity with the Python grid).
+            # During a cohort-reroute deferral window (corridor
+            # reservation -- see ``begin_cpp_unmark_deferral``) the mirror
+            # is queued instead, so the ripped cohort's old copper stays
+            # phantom-blocked on the C++ side while the cohort re-lands
+            # serially.
+            if getattr(self, "_cpp_unmark_deferred", False):
+                self._deferred_cpp_unmarks.append((route, max_trace_width))
+            else:
+                self._unmark_route_on_cpp_cells(route, max_trace_width=max_trace_width)
 
             if route in self.routes:
                 # Remove from R-tree index before removing from list (Issue #1249)
@@ -3896,6 +3917,173 @@ class RoutingGrid:
                             cell.blocked = False
                             cell.net = 0
 
+    def find_relief_conflict_nets(self, route: Route, net: int) -> set[int]:
+        """Owner nets of foreign static cells conflicting with ``route``.
+
+        Issue #3438: After a relief PROBE finds a path (foreign usage-0
+        non-obstacle cells passable at a penalty -- see
+        ``compute_expanded_blocked(relief_mode=True)``), this method
+        identifies which nets own the conflicted cells the probe crossed:
+        cells within the route's clearance envelope that are blocked,
+        non-obstacle, and owned by a DIFFERENT (non-zero) net.  These are
+        the nets sealing the failed net's corridor (sibling via halo
+        rings, route clearance halos, escape stubs, committed channel
+        copper); the rippable subset feeds the transactional targeted
+        rip-up.
+
+        No usage-count filter: the C++ probe runs against a grid whose
+        usage counts are uniformly zero (usage is tracked Python-side
+        only -- see ``reset_usage``), so the probe may cross ANY foreign
+        non-obstacle copper; every crossed owner must be reported or the
+        rescue would mislabel a conflicted probe as conflict-free.
+
+        Args:
+            route: The relief probe route (never committed).
+            net: The probing net's id (its own cells are not conflicts).
+
+        Returns:
+            Set of owner net ids (never contains 0 or ``net``).
+        """
+        owners: set[int] = set()
+
+        def _scan_window(gx: int, gy: int, layer_idx: int, radius: int) -> None:
+            x1 = max(0, gx - radius)
+            x2 = min(self.cols, gx + radius + 1)
+            y1 = max(0, gy - radius)
+            y2 = min(self.rows, gy + radius + 1)
+            if x1 >= x2 or y1 >= y2:
+                return
+            blk = self._blocked[layer_idx, y1:y2, x1:x2]
+            if not blk.any():
+                return
+            mask = blk & ~self._is_obstacle[layer_idx, y1:y2, x1:x2]
+            if not mask.any():
+                return
+            nets = self._net[layer_idx, y1:y2, x1:x2][mask]
+            for v in np.unique(nets):
+                owners.add(int(v))
+
+        for seg in route.segments:
+            # Same radius math as mark_route() so the conflict set matches
+            # the cells the committed route would actually contest.
+            total_clearance = seg.width / 2 + self.rules.trace_clearance
+            radius = int(total_clearance / self.resolution) + 2
+            for gx, gy, layer_idx in self._get_segment_cells(seg):
+                _scan_window(gx, gy, layer_idx, radius)
+
+        for via in route.vias:
+            radius = (
+                int(
+                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+                    / self.resolution
+                )
+                + 1
+            )
+            gx, gy = self.world_to_grid(via.x, via.y)
+            for layer_idx in range(self.num_layers):
+                _scan_window(gx, gy, layer_idx, radius)
+
+        owners.discard(0)
+        owners.discard(net)
+        return owners
+
+    def begin_cpp_unmark_deferral(self) -> None:
+        """Start a corridor-reservation window (Issue #3438).
+
+        While the window is open, ``unmark_route`` QUEUES the C++-grid
+        unmark mirror instead of applying it: the ripped routes' old
+        copper stays phantom-blocked (foreign-hard / own-soft) on the C++
+        side.  During a serial cohort reroute this reserves each cohort
+        member's previous corridor -- an early-rerouted net cannot steal
+        a not-yet-rerouted sibling's only corridor, which is exactly the
+        order-chaos failure mode of facing-column bus reversals (board
+        07's DDR byte).
+
+        Historical note: before #3438's unmark-mirror parity fix this
+        behavior existed ACCIDENTALLY (the C++ grid was never unmarked at
+        all), which is why pre-#3438 cohort reroutes out-performed the
+        naively-parity-fixed ones -- but the accidental version never
+        flushed, accreting phantom blockage across iterations (the
+        "iteration 0 is the high-water mark" pattern, Issue #3101).  The
+        deliberate version is scoped: the caller MUST flush at the end of
+        the cohort loop via ``flush_cpp_unmark_deferral``.
+
+        The Python grid is unaffected (it is unmarked immediately, as
+        always); only the C++ mirror is deferred.
+
+        Idempotent: re-opening an already-open window keeps the queued
+        unmarks (the window is scoped per negotiated ITERATION; several
+        rip-up sites within one iteration share it).
+        """
+        if getattr(self, "_cpp_unmark_deferred", False):
+            return
+        self._deferred_cpp_unmarks: list[tuple[Route, float | None]] = []
+        self._cpp_unmark_deferred = True
+
+    def flush_cpp_unmark_deferral(self) -> list[Route]:
+        """Close the corridor-reservation window (Issue #3438).
+
+        Applies every queued C++ unmark (restoring Python/C++ parity) and
+        returns the unmarked routes so the caller can RE-MARK any
+        same-net copper that was committed during the window (a re-landed
+        route can overlap its own old corridor; the queued unmark clears
+        same-net cells indiscriminately).
+
+        Safe to call when no window is open (no-op, returns []).
+        """
+        queued = getattr(self, "_deferred_cpp_unmarks", [])
+        for route, mtw in queued:
+            self._unmark_route_on_cpp_cells(route, max_trace_width=mtw)
+        routes = [route for route, _ in queued]
+        self._deferred_cpp_unmarks = []
+        self._cpp_unmark_deferred = False
+        return routes
+
+    def _unmark_route_on_cpp_cells(
+        self, route: Route, max_trace_width: float | None = None
+    ) -> None:
+        """Mirror a route rip-up onto the paired C++ grid (Issue #3438).
+
+        Inverse of ``RoutingCore._mark_route_on_cpp_grid`` using the SAME
+        radius math, so the C++ cell state returns to its pre-mark state
+        for this route's net.  ``Grid3D::unmark_segment`` / ``unmark_via``
+        only clear cells whose ``net`` matches the route's net (restoring
+        ``original_net`` on pad cells), mirroring the Python
+        ``_unmark_segment`` / ``_unmark_via`` semantics.
+
+        No-op when no C++ grid is paired (pure-Python backend).
+        """
+        cpp_grid = self._cpp_grid
+        if cpp_grid is None:
+            return
+        impl = getattr(cpp_grid, "_impl", None)
+        if impl is None:
+            return
+
+        for seg in route.segments:
+            # Must match RoutingCore._mark_route_on_cpp_grid (segments).
+            total_clearance = seg.width / 2 + self.rules.trace_clearance
+            clearance_cells = int(total_clearance / self.resolution) + 1
+            gx1, gy1 = self.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.layer_to_index(seg.layer.value)
+            impl.unmark_segment(gx1, gy1, gx2, gy2, layer_idx, seg.net, clearance_cells)
+
+        del max_trace_width  # cpp mark path always uses rules.trace_width
+        for via in route.vias:
+            # Must match RoutingCore._mark_route_on_cpp_grid (vias), which
+            # always uses the global ``rules.trace_width`` (NOT the
+            # per-call ``max_trace_width`` the Python ``_mark_via`` takes).
+            gx, gy = self.world_to_grid(via.x, via.y)
+            radius_cells = (
+                math.ceil(
+                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+                    / self.resolution
+                )
+                + 1
+            )
+            impl.unmark_via(gx, gy, via.net, radius_cells)
+
     # =========================================================================
     # NEGOTIATED CONGESTION ROUTING SUPPORT
     # =========================================================================
@@ -3904,6 +4092,21 @@ class RoutingGrid:
         """Reset all usage counts (start of new negotiation iteration).
 
         Thread-safe when thread_safe=True.
+
+        Issue #3438 note: usage counts are deliberately NOT mirrored onto
+        the paired C++ grid.  Mirroring was prototyped (it would let the
+        C++ sharing clauses route THROUGH committed foreign copper at
+        negotiated cost, true PathFinder semantics) but measured a net
+        reach REGRESSION on board 07 (26/31 vs 30/31): every board's
+        current behavior is calibrated against the C++ backend's
+        foreign-copper-hard semantics, and the negotiated loop's wall
+        budget cannot absorb the overlap-resolution churn that sharing
+        introduces.  The relief-probe machinery does not need the mirror:
+        on the C++ grid usage is uniformly 0, so the relief clauses
+        (``!relief_mode_`` guards in ``Pathfinder``) make ALL foreign
+        non-obstacle copper penalty-passable during a probe, and
+        ``find_relief_conflict_nets`` extracts victims from the Python
+        grid without a usage filter.
         """
         with self._acquire_lock():
             self._usage_count.fill(0)
@@ -3914,6 +4117,9 @@ class RoutingGrid:
         """Mark cells used by a route, incrementing usage count.
 
         Thread-safe when thread_safe=True.
+
+        Issue #3438 note: NOT mirrored onto the paired C++ grid -- see
+        ``reset_usage`` for the measured rationale.
         """
         with self._acquire_lock():
             cells_used: set[tuple[int, int, int]] = set()
@@ -3941,6 +4147,9 @@ class RoutingGrid:
         """Remove a route's usage (rip-up), decrementing usage count.
 
         Thread-safe when thread_safe=True.
+
+        Issue #3438 note: NOT mirrored onto the paired C++ grid -- see
+        ``reset_usage`` for the measured rationale.
         """
         with self._acquire_lock():
             cells_used: set[tuple[int, int, int]] = set()
@@ -4263,6 +4472,7 @@ class RoutingGrid:
         partner_net: int | None = None,
         partner_radius: int | None = None,
         partner_active: bool | None = None,
+        relief_mode: bool = False,
     ) -> np.ndarray:
         """Pre-compute an expanded blocked bitmap for trace-width clearance.
 
@@ -4302,6 +4512,14 @@ class RoutingGrid:
                             skipped.  When ``None`` (legacy callers), the
                             boolean is derived from ``partner_net``/
                             ``partner_radius`` for backward compatibility.
+            relief_mode: Issue #3438 -- relief-probe mode.  Only meaningful
+                         with ``allow_sharing=True``.  Foreign-net usage-0
+                         non-obstacle cells (escape stubs, route halos, via
+                         halo rings) are EXCLUDED from the blocked bitmap so
+                         the probe search can cross them at a per-step
+                         penalty; net-0 statics and foreign obstacles stay
+                         hard.  Mirrors ``Pathfinder::relief_mode_`` in the
+                         C++ backend.
 
         Returns:
             Boolean NumPy array of shape ``(num_layers, rows, cols)`` where
@@ -4312,9 +4530,22 @@ class RoutingGrid:
             # Negotiated mode: block only static obstacles with different net
             different_net = self._net != net
             obstacle_blocks = self._blocked & self._is_obstacle & different_net
-            static_blocks = (
-                self._blocked & ~self._is_obstacle & different_net & (self._usage_count == 0)
-            )
+            if relief_mode:
+                # Issue #3438: relief-probe mode.  Foreign-net usage-0
+                # non-obstacle cells (escape stubs, route clearance halos,
+                # via halo rings) become passable -- the pathfinder charges
+                # a per-step penalty instead (min-conflict probe).  Net-0
+                # static blockage (keepouts, board obstacles) stays hard.
+                static_blocks = (
+                    self._blocked
+                    & ~self._is_obstacle
+                    & (self._net == 0)
+                    & (self._usage_count == 0)
+                )
+            else:
+                static_blocks = (
+                    self._blocked & ~self._is_obstacle & different_net & (self._usage_count == 0)
+                )
             base_blocked = obstacle_blocks | static_blocks
         else:
             # Standard mode: block cells that are blocked AND different net

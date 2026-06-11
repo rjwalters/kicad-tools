@@ -820,6 +820,11 @@ class CppPathfinder:
         self._fallback_count: int = 0
         self._fallback_nets: list[str] = []
 
+        # Issue #3438: relief-probe mode flag (mirrored into the C++
+        # Pathfinder AND the lazy Python fallback router so both backends
+        # apply identical relief semantics during a probe).
+        self._relief_mode: bool = False
+
         # Issue #2476: Capture structured failure diagnostics from the most
         # recent failed route() call so the negotiated strategy can
         # dispatch targeted retry/rip-up.  Reset at the start of every
@@ -1458,6 +1463,14 @@ class CppPathfinder:
             for attempt in range(max_resume_attempts + 1):
                 route = self._convert_result_to_route(result, start, net_class)
 
+                # Issue #3438: relief PROBES deliberately cross foreign
+                # copper/halos -- post-route clearance validation would
+                # reject every probe path (and pollute the avoidance-cost
+                # state via _boost_avoidance_at).  Probe routes are never
+                # committed, so skip validation entirely in relief mode.
+                if self._relief_mode:
+                    return route
+
                 # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
                 # clearance validation via C++ validate_route().  Issue #2587
                 # threads the partner net id + intra-pair clearance so the
@@ -1876,6 +1889,10 @@ class CppPathfinder:
                 diagonal_routing=self._diagonal_routing,
             )
 
+        # Issue #3438: keep the fallback router's relief-probe mode in
+        # lock-step with the C++ side (set via ``set_relief_mode``).
+        self._py_router.set_relief_mode(self._relief_mode)
+
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
         # it derives layer information internally from pad attributes.
@@ -1908,6 +1925,25 @@ class CppPathfinder:
             )
 
         return route
+
+    def set_relief_mode(self, enabled: bool) -> None:
+        """Enable/disable the relief-probe mode (Issue #3438).
+
+        In relief mode, sharing-mode foreign usage-0 non-obstacle cells
+        (escape stubs, route clearance halos, via halo rings) become
+        passable at a finite per-step penalty instead of hard-blocking,
+        so a zero-overflow hard failure can produce a min-conflict probe
+        path.  Applied to BOTH the C++ pathfinder and the lazy Python
+        fallback router so probe semantics are backend-independent.
+
+        Probe-only: the negotiated outer loop never commits a route found
+        in relief mode -- it extracts the conflicted owner nets along the
+        probe path and feeds them to the transactional targeted rip-up.
+        """
+        self._relief_mode = bool(enabled)
+        self._impl.set_relief_mode(self._relief_mode)
+        if self._py_router is not None:
+            self._py_router.set_relief_mode(self._relief_mode)
 
     @property
     def fallback_stats(self) -> dict:

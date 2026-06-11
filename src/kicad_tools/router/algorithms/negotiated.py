@@ -978,6 +978,15 @@ class NegotiatedRouter:
                 mark_route_callback(route)
                 routes.append(route)
             else:
+                import os as _os
+                if _os.environ.get("KCT_RELIEF_DEBUG"):
+                    print(
+                        f"    [relief-debug] 2-pin route fail net={pad_objs[0].net}: "
+                        f"route={'None' if route is None else 'EMPTY'} "
+                        f"start=({pad_objs[0].x:.2f},{pad_objs[0].y:.2f}) "
+                        f"end=({pad_objs[1].x:.2f},{pad_objs[1].y:.2f})",
+                        flush=True,
+                    )
                 # Issue #2476: Capture cpp-side via-blocked diagnostic.
                 self._record_via_blocked_failure(pad_objs[0].net)
                 if failure_callback is not None:

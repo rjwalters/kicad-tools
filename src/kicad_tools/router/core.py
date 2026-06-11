@@ -4088,7 +4088,7 @@ class Autorouter:
 
         preferences: dict[int, list[int]] = {}
         for group in conflict_groups:
-            sorted_nets = sorted(group)  # Deterministic ordering
+            sorted_nets = self._sort_group_nets_by_geometry(group)
             for idx, net_id in enumerate(sorted_nets):
                 if idx % 2 == 0:
                     preferences[net_id] = [layer_a]
@@ -4096,6 +4096,57 @@ class Autorouter:
                     preferences[net_id] = [layer_b]
 
         return preferences
+
+    def _sort_group_nets_by_geometry(self, group: set[int]) -> list[int]:
+        """Order a conflict group's nets by pad position (Issue #3438).
+
+        The pre-#3438 ordering was ``sorted(group)`` -- sorted-net-id
+        parity.  That made the F.Cu/B.Cu alternation GEOMETRY-BLIND:
+        removing or adding one net flipped every other member's layer
+        preference, which is why board 07's DDR-bundle outcomes were
+        chaotically sensitive to the exact net set (10/11 vs 10/10 when
+        dropping a single net), and physically adjacent nets routinely
+        landed on the SAME layer.
+
+        This orders the group by each net's mean pad position projected
+        on the group's dominant axis (the axis with the larger centroid
+        spread), so:
+
+        - physically ADJACENT nets alternate layers (the river-routing
+          stagger a facing-column bus reversal needs), and
+        - the assignment is stable under net-set changes (positions do
+          not move when an unrelated net joins or leaves the group).
+
+        Nets without pads keep a (0.0, 0.0) centroid, so groups built
+        without pad data (synthetic unit-test groups) fall back to net-id
+        ordering -- preserving the legacy behavior.
+        """
+        centroids: dict[int, tuple[float, float]] = {}
+        for net_id in group:
+            # ``self.nets`` holds pad KEYS; resolve through ``self.pads``
+            # (same pattern as ``_route_net_negotiated``).
+            pad_objs = [
+                self.pads[k] for k in self.nets.get(net_id, []) if k in self.pads
+            ]
+            if pad_objs:
+                cx = sum(p.x for p in pad_objs) / len(pad_objs)
+                cy = sum(p.y for p in pad_objs) / len(pad_objs)
+                centroids[net_id] = (cx, cy)
+            else:
+                centroids[net_id] = (0.0, 0.0)
+
+        xs = [c[0] for c in centroids.values()]
+        ys = [c[1] for c in centroids.values()]
+        spread_x = (max(xs) - min(xs)) if xs else 0.0
+        spread_y = (max(ys) - min(ys)) if ys else 0.0
+
+        if spread_y > spread_x:
+            def key(n: int) -> tuple[float, float, int]:
+                return (centroids[n][1], centroids[n][0], n)
+        else:
+            def key(n: int) -> tuple[float, float, int]:
+                return (centroids[n][0], centroids[n][1], n)
+        return sorted(group, key=key)
 
     def _inject_matrix_layer_preferences(
         self, net_layer_prefs: dict[int, list[int]]
@@ -4163,6 +4214,9 @@ class Autorouter:
             net_order: Filtered net ordering (pour nets removed).
         """
         groups = self._detect_matrix_conflicts(net_order)
+        # Issue #3438: keep the per-group structure so the relief restart
+        # can rip exactly the failed net's conflict group.
+        self._matrix_conflict_groups = groups
         if not groups:
             self._matrix_conflict_nets = set()
             return
@@ -6556,6 +6610,16 @@ class Autorouter:
         # (Issue #762: escape strategies need this even when use_targeted_ripup=False)
         pads_by_net: dict[int, list[Pad]] = {}
         ripup_history: dict[int, int] = {}
+        # Issue #3438: per-net relief-probe attempt budget.  Each probe
+        # costs up to one per-net A* (and a targeted rip-up on success);
+        # cap attempts so a geometrically-infeasible net cannot burn the
+        # wall budget re-probing the same sealed corridor every iteration.
+        relief_probe_attempts: dict[int, int] = {}
+        # ``KCT_DISABLE_RELIEF=1`` turns the #3438 relief machinery off
+        # entirely (zero-overflow probe gating + last-resort rescues) --
+        # a diagnostic / emergency escape hatch.
+        relief_disabled = bool(os.environ.get("KCT_DISABLE_RELIEF"))
+        max_relief_probes_per_net = 0 if relief_disabled else 3
         # Issue #2295: Per-net rip-up stall tracking.  For each net that
         # passes through overused cells, count consecutive rip-up iterations
         # where the net's overflow contribution did not improve.  Nets that
@@ -7301,6 +7365,13 @@ class Autorouter:
 
                 flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
 
+                # Issue #3438: close the PREVIOUS iteration's
+                # corridor-reservation window (if any) so this iteration
+                # starts from exact Python/C++ grid parity -- the fix for
+                # the historical cross-iteration phantom accretion
+                # (Issue #3101).
+                self._flush_corridor_reservation(net_routes)
+
                 # Calculate adaptive parameters (Issue #633)
                 if adaptive:
                     # Calculate congestion ratio for adaptive present cost
@@ -7723,6 +7794,18 @@ class Autorouter:
                     recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
                     recovered = 0
                     attempted = 0
+                    # Issue #3438 design note: a probe-based gate ("skip
+                    # the elevated-cost attempt when a relief probe shows
+                    # the corridor is hard-sealed") was prototyped here to
+                    # save the measured 134s-for-0/5 this recovery burns
+                    # on board 07.  It was REMOVED after A/B measurement:
+                    # the probes' mark/unmark cycles ahead of the cohort
+                    # reroute perturb the subsequent searches enough to
+                    # drop the iteration-1 cohort from 5/8 to 4/8 and the
+                    # final reach from 30/31 to 28/31.  Relief probes now
+                    # run only inside the LAST-RESORT rescue (stall
+                    # branch), after the iteration's best state is
+                    # already banked.
                     for fn in list(failed_net_ids):
                         # Issue #3448: ``net_routes.get(fn)`` (not bare
                         # membership) so a ripped-then-failed net with an
@@ -8193,6 +8276,23 @@ class Autorouter:
                         f"  Ripping up {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
                     )
 
+                    # Issue #3438: corridor reservation.  Keep the ripped
+                    # cohort's OLD copper phantom-blocked on the C++ grid
+                    # (foreign-hard / own-soft) for the REST OF THIS
+                    # ITERATION -- the serial cohort reroute AND the
+                    # stall fallbacks below -- so an early-rerouted member
+                    # cannot steal a not-yet-rerouted sibling's only
+                    # corridor (the bus-reversal order-chaos mode), and
+                    # the targeted fallback negotiates against the same
+                    # reserved-corridor world the cohort re-landed in.
+                    # The window is flushed at the TOP of the next
+                    # iteration (and after the loop), which is what fixes
+                    # the historical phantom ACCRETION across iterations
+                    # (Issue #3101) while preserving the intra-iteration
+                    # reservation the pre-#3438 behavior provided
+                    # accidentally.
+                    self.grid.begin_cpp_unmark_deferral()
+
                     neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
                     # Use region-based parallelism if enabled (Issue #965)
@@ -8440,6 +8540,66 @@ class Autorouter:
                         flush_print(
                             f"  Targeted fallback resolved {targeted_fallback_count}/{len(still_failed)} nets ({elapsed_str()})"
                         )
+
+                        # Issue #3438: Relief RESCUE -- LAST resort.  A
+                        # zero-overflow hard failure that survived every
+                        # fallback above usually means the net's pin
+                        # corridor is sealed by foreign usage-0 cells the
+                        # sharing clauses treat as HARD (escape stubs,
+                        # route clearance halos, via halo rings): the
+                        # failed A* emits no overflow, so PathFinder has
+                        # no negotiation signal, and the Bresenham-based
+                        # blocker scan above misses clearance-halo seals.
+                        # The rescue iterates a relief PROBE (foreign
+                        # non-obstacle copper passable at a per-step
+                        # penalty => MIN-CONFLICT path), rips exactly the
+                        # owner nets the probe crossed, and commits only
+                        # when the failed net routes in NORMAL mode AND
+                        # every displaced victim re-lands (strict
+                        # no-net-loss transaction; otherwise verbatim
+                        # rollback).  Attempt-capped per net so hopeless
+                        # geometry cannot burn the wall budget every
+                        # iteration.
+                        still_failed = [
+                            n for n in net_order
+                            if not net_routes.get(n) and n in pads_by_net
+                            and n not in off_grid_nets
+                        ]
+                        relief_resolved = 0
+                        relief_attempted = 0
+                        for failed_net in list(still_failed):
+                            if check_timeout():
+                                timed_out = True
+                                break
+                            if len(pads_by_net.get(failed_net, [])) < 2:
+                                continue
+                            if (
+                                relief_probe_attempts.get(failed_net, 0)
+                                >= max_relief_probes_per_net
+                            ):
+                                continue
+                            relief_probe_attempts[failed_net] = (
+                                relief_probe_attempts.get(failed_net, 0) + 1
+                            )
+                            relief_attempted += 1
+                            if self._relief_rescue(
+                                failed_net,
+                                neg_router,
+                                net_routes,
+                                pads_by_net,
+                                present_factor,
+                                per_net_timeout,
+                                flush_print,
+                                elapsed_str,
+                            ):
+                                relief_resolved += 1
+                        if relief_attempted > 0:
+                            flush_print(
+                                f"  Relief rescue resolved {relief_resolved}/"
+                                f"{relief_attempted} net(s) ({elapsed_str()})"
+                            )
+                            overflow = self.grid.get_total_overflow()
+                            overused = self.grid.find_overused_cells()
 
                     # Issue #2297: Neighborhood rip-up for standard path when
                     # targeted fallback was insufficient and nets remain stalled.
@@ -8710,6 +8870,11 @@ class Autorouter:
             # restored value, not the worse pre-restore value.
             overflow = best_metrics.overflow
 
+        # Issue #3438: close any corridor-reservation window left open by
+        # the final iteration so post-loop passes (match-group tuning,
+        # DRC-nudge re-routes) see a parity-consistent C++ grid.
+        self._flush_corridor_reservation(net_routes)
+
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         total_elapsed = time.time() - start_time
         print("\n=== Negotiated Routing Complete ===")
@@ -8802,6 +8967,404 @@ class Autorouter:
         self._finalize_routing()
 
         return list(self.routes)
+
+    def _flush_corridor_reservation(
+        self, net_routes: dict[int, list[Route]]
+    ) -> None:
+        """Close the iteration-scoped corridor-reservation window (#3438).
+
+        Flushes the deferred C++ unmarks queued by every rip-up that ran
+        during the iteration (cohort rip, targeted/transactional rip-ups,
+        relief rescues), restoring Python/C++ grid parity, then re-marks
+        the CURRENT routes of every affected net -- a re-landed route can
+        overlap its own old corridor, and the flush clears same-net cells
+        indiscriminately.
+
+        No-op when no window is open.
+        """
+        flushed = self.grid.flush_cpp_unmark_deferral()
+        if not flushed:
+            return
+        for net in {r.net for r in flushed}:
+            for route in net_routes.get(net) or []:
+                self._mark_route_on_cpp_grid(route)
+
+    def _relief_debug_dump(self, net: int, probe_routes: list) -> None:
+        """Debug-only (KCT_RELIEF_DEBUG=1): dump probe outcome + grid maps.
+
+        Prints the A* failure info and a 13x13 neighborhood map around
+        each pad of ``net`` (escape overrides applied) on BOTH grids.
+        Legend: ``.`` free, ``O`` foreign obstacle (hard in relief),
+        ``o`` own obstacle, ``Z`` net-0 static (hard in relief), ``s``
+        own non-obstacle, ``u`` foreign shared (usage>0), ``x`` foreign
+        usage-0 (soft in relief), ``#`` out of bounds.
+        """
+
+        def flush_print(msg: str) -> None:
+            print(msg, flush=True)
+
+        if probe_routes:
+            flush_print(
+                f"    [relief-debug] probe for net {net}: "
+                f"{sum(len(r.segments) for r in probe_routes)} segs, "
+                f"{sum(len(r.vias) for r in probe_routes)} vias"
+            )
+        info = None
+        getter = getattr(self.router, "get_last_failure_info", None)
+        if getter is not None:
+            info = getter()
+        flush_print(
+            f"    [relief-debug] probe for net {net} returned no routes; "
+            f"failure_info={info}"
+        )
+        g = self.grid
+        for p_ in self.nets.get(net, []):
+            pad = self._escape_pad_overrides.get(p_, self.pads[p_])
+            gx, gy = g.world_to_grid(pad.x, pad.y)
+            li = (
+                g.layer_to_index(pad.layer.value)
+                if hasattr(pad.layer, "value")
+                else 0
+            )
+            flush_print(
+                f"    [relief-debug] pad {pad.ref} at ({pad.x:.2f},{pad.y:.2f}) "
+                f"grid ({gx},{gy},L{li})"
+            )
+
+            def cell_char_py(x: int, y: int) -> str:
+                if not (0 <= x < g.cols and 0 <= y < g.rows):
+                    return "#"
+                if not g._blocked[li, y, x]:
+                    return "."
+                if g._is_obstacle[li, y, x]:
+                    return "O" if g._net[li, y, x] != net else "o"
+                n = g._net[li, y, x]
+                if n == 0:
+                    return "Z"
+                if n == net:
+                    return "s"
+                if g._usage_count[li, y, x] > 0:
+                    return "u"
+                return "x"
+
+            for dy in range(-8, 9):
+                flush_print(
+                    "    [relief-debug] "
+                    + "".join(cell_char_py(gx + dx, gy + dy) for dx in range(-8, 9))
+                )
+            cpp = self._cpp_grid
+            if cpp is not None:
+                flush_print("    [relief-debug] cpp:")
+                for dy in range(-8, 9):
+                    row = []
+                    for dx in range(-8, 9):
+                        x, y = gx + dx, gy + dy
+                        if not (0 <= x < g.cols and 0 <= y < g.rows):
+                            row.append("#")
+                            continue
+                        c = cpp._impl.at(x, y, li)
+                        if not c.blocked:
+                            row.append(".")
+                        elif c.is_obstacle:
+                            row.append("O" if c.net != net else "o")
+                        elif c.net == 0:
+                            row.append("Z")
+                        elif c.net == net:
+                            row.append("s")
+                        elif c.usage_count > 0:
+                            row.append("u")
+                        else:
+                            row.append("x")
+                    flush_print("    [relief-debug] " + "".join(row))
+
+    def _relief_probe(
+        self,
+        net: int,
+        present_cost_factor: float,
+        per_net_timeout: float | None = None,
+    ) -> tuple[list[Route], set[int]]:
+        """Run a relief PROBE for a zero-overflow hard failure (Issue #3438).
+
+        When a net hard-fails in sharing mode (instant empty A* frontier:
+        its pin corridor is sealed by foreign escape stubs, route halos,
+        and via halo rings -- all usage-0 cells the sharing clauses treat
+        as HARD), it produces zero overflow and PathFinder has nothing to
+        negotiate.  This probe re-runs the net's A* in relief mode
+        (foreign usage-0 non-obstacle cells passable at a per-step
+        penalty), producing a MIN-CONFLICT path through the sealed
+        corridor.  The owner nets of the conflicted cells along that path
+        are the precise blockers to displace.
+
+        The probe routes are returned still MARKED on the grids; the
+        caller must either commit them (a conflict-free probe is a
+        legitimate route) or roll them back via ``grid.unmark_route``.
+
+        Returns:
+            ``(probe_routes, conflict_nets)`` -- empty list when no
+            relief path exists (genuine geometric infeasibility) or when
+            the backend lacks relief support.
+        """
+        setter = getattr(self.router, "set_relief_mode", None)
+        if setter is None:
+            return [], set()
+
+        setter(True)
+        try:
+            probe_routes = self._route_net_negotiated(
+                net, present_cost_factor, per_net_timeout=per_net_timeout
+            )
+        finally:
+            setter(False)
+
+        import os as _os
+        if _os.environ.get("KCT_RELIEF_DEBUG"):
+            self._relief_debug_dump(net, probe_routes)
+        if not probe_routes:
+            return [], set()
+
+        victims: set[int] = set()
+        for route in probe_routes:
+            victims |= self.grid.find_relief_conflict_nets(route, net)
+        return probe_routes, victims
+
+    def _relief_rescue(
+        self,
+        failed_net: int,
+        neg_router: NegotiatedRouter,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        present_factor: float,
+        per_net_timeout: float | None,
+        flush_print_fn,
+        elapsed_fn,
+        depth: int = 0,
+    ) -> bool:
+        """Transactional relief rescue for a zero-overflow hard failure.
+
+        Issue #3438.  Iteratively: probe (min-conflict relief A*) ->
+        rip the rippable owner nets the probe crossed -> re-probe, until
+        the probe path is CONFLICT-FREE (at which point it is a
+        legitimate negotiated route and is committed) or no progress is
+        possible.  Displaced victims are rerouted afterwards with a
+        reduced per-net budget.
+
+        The whole operation is a TRANSACTION: it commits only when the
+        failed net routes AND every displaced victim re-lands (no net
+        loss); otherwise the exact original Route objects are restored
+        verbatim and ``False`` is returned -- a failed rescue never
+        leaves the board worse than it found it.
+
+        Returns:
+            True when the failed net is now routed and no sibling was
+            lost; False after a verbatim rollback.
+        """
+        max_rounds = 4
+        snapshot_nets: set[int] = {failed_net}
+        original_routes: dict[int, list[Route]] = {
+            failed_net: list(net_routes.get(failed_net, []))
+        }
+        ripped: list[int] = []
+        failed_name = self.net_names.get(failed_net, f"Net_{failed_net}")
+
+        def _rollback() -> None:
+            for net in snapshot_nets:
+                for route in list(net_routes.get(net, [])):
+                    self.grid.unmark_route_usage(route)
+                    self.grid.unmark_route(route)
+                    if route in self.routes:
+                        self.routes.remove(route)
+                net_routes[net] = []
+            for net in snapshot_nets:
+                restored = list(original_routes.get(net, []))
+                net_routes[net] = restored
+                for route in restored:
+                    self._mark_route(route)
+                    self.grid.mark_route_usage(route)
+                    if route not in self.routes:
+                        self.routes.append(route)
+
+        # Clear any stale partial copper the failed net is holding so the
+        # probe starts from a clean slate (mirrors targeted_ripup #3470).
+        if original_routes.get(failed_net):
+            neg_router.rip_up_nets([failed_net], net_routes, self.routes)
+
+        # Probes that succeed do so in well under a second (the relief
+        # graph always has SOME path unless foreign pad metal seals the
+        # pin); a probe that needs tens of seconds is exploring a
+        # genuinely infeasible graph -- cap it well below the per-net
+        # budget so a hopeless rescue fails fast.
+        probe_timeout = min(10.0, per_net_timeout) if per_net_timeout else 10.0
+        committed_routes: list[Route] | None = None
+        for round_idx in range(max_rounds):
+            probe_routes, victims = self._relief_probe(
+                failed_net, present_factor, per_net_timeout=probe_timeout
+            )
+            if not probe_routes:
+                flush_print_fn(
+                    f"  Relief rescue: {failed_name} has NO relief path "
+                    f"(round {round_idx + 1}) -- rolling back ({elapsed_fn()})"
+                )
+                _rollback()
+                return False
+
+            if not victims:
+                # Conflict-free probe: a normal-mode path exists (the
+                # probe crossed nothing the sharing clauses forbid).
+                # Re-route in NORMAL mode so the committed copper goes
+                # through the standard post-route geometric clearance
+                # validation -- relief probes skip validation entirely
+                # (they deliberately cross foreign halos, so validation
+                # would reject every probe; see CppPathfinder.route).
+                for route in probe_routes:
+                    self.grid.unmark_route(route)
+                normal_routes = self._route_net_negotiated(
+                    failed_net, present_factor, per_net_timeout=per_net_timeout
+                )
+                if normal_routes:
+                    committed_routes = normal_routes
+                else:
+                    # Normal-mode re-route failed (timeout / cost-shape
+                    # divergence).  Fall back to the probe path -- it is
+                    # conflict-free by construction, which is strictly
+                    # better than losing the rescue.
+                    for route in probe_routes:
+                        self._mark_route(route)
+                    committed_routes = probe_routes
+                break
+
+            rippable = {
+                v for v in victims if v not in snapshot_nets and net_routes.get(v)
+            }
+            # Roll back the probe copper before deciding.
+            for route in probe_routes:
+                self.grid.unmark_route(route)
+
+            if not rippable:
+                blocker_names = sorted(
+                    self.net_names.get(v, f"Net_{v}") for v in victims
+                )
+                flush_print_fn(
+                    f"  Relief rescue: {failed_name} blocked only by "
+                    f"non-rippable copper of {', '.join(blocker_names)} "
+                    f"-- rolling back ({elapsed_fn()})"
+                )
+                _rollback()
+                return False
+
+            for v in rippable:
+                snapshot_nets.add(v)
+                original_routes[v] = list(net_routes.get(v, []))
+                ripped.append(v)
+            neg_router.rip_up_nets(list(rippable), net_routes, self.routes)
+            rippable_names = sorted(
+                self.net_names.get(v, f"Net_{v}") for v in rippable
+            )
+            flush_print_fn(
+                f"  Relief rescue: {failed_name} round {round_idx + 1} -- "
+                f"ripped {len(rippable)} blocker(s): "
+                f"{', '.join(rippable_names)} ({elapsed_fn()})"
+            )
+
+        if committed_routes is None:
+            flush_print_fn(
+                f"  Relief rescue: {failed_name} still conflicted after "
+                f"{max_rounds} rounds -- rolling back ({elapsed_fn()})"
+            )
+            _rollback()
+            return False
+
+        # Commit the failed net's conflict-free probe route.
+        net_routes[failed_net] = committed_routes
+        for route in committed_routes:
+            self.grid.mark_route_usage(route)
+            if route not in self.routes:
+                self.routes.append(route)
+
+        # Re-land the displaced victims.  Reduced per-net budget: any
+        # member that fails here is retried by the normal recovery flow
+        # with the full budget on the next iteration (if we commit).
+        restart_timeout = (
+            min(10.0, per_net_timeout) if per_net_timeout else 10.0
+        )
+        # Multi-pass re-land: a victim that fails while its displaced
+        # siblings are still unplaced often lands cleanly once they have
+        # settled (the run-5 measurements: rescues failed at exactly
+        # 8/10, 1/2 and 2/3 single-pass re-lands).  Re-attempt only the
+        # failures, while progress is being made, up to 3 passes.
+        relanded = 0
+        pending = sorted(ripped, key=self._get_net_priority)
+        for _reland_pass in range(3):
+            if not pending:
+                break
+            still_pending: list[int] = []
+            progress = False
+            for rn in pending:
+                rn_routes = self._route_net_negotiated(
+                    rn, present_factor, per_net_timeout=restart_timeout
+                )
+                if rn_routes:
+                    net_routes[rn] = rn_routes
+                    for route in rn_routes:
+                        self.grid.mark_route_usage(route)
+                        self.routes.append(route)
+                    relanded += 1
+                    progress = True
+                else:
+                    still_pending.append(rn)
+            pending = still_pending
+            if not progress:
+                break
+
+        # Depth-1 NESTED rescues for the last hold-outs: a victim whose
+        # corridor the just-committed rescue route sealed cannot land
+        # with plain A* at any budget, but its own relief rescue can
+        # displace the new blockage (including re-arranging the outer
+        # rescued net itself).  Strict transactions COMPOSE: a nested
+        # rescue either improves reach or restores its own snapshot
+        # verbatim, so the outer no-net-loss guarantee is preserved.
+        if pending and depth == 0:
+            still_pending = []
+            for rn in pending:
+                if self._relief_rescue(
+                    rn,
+                    neg_router,
+                    net_routes,
+                    pads_by_net,
+                    present_factor,
+                    per_net_timeout,
+                    flush_print_fn,
+                    elapsed_fn,
+                    depth=depth + 1,
+                ):
+                    relanded += 1
+                else:
+                    still_pending.append(rn)
+            pending = still_pending
+
+        # STRICT transactionality: the rescue commits only when the failed
+        # net routed AND every displaced victim re-landed -- a rescue may
+        # only ever IMPROVE net reach.  The earlier "PathFinder
+        # philosophy" variant (commit even when victims stay stranded, let
+        # the next iteration recover them) was measured on board 07's
+        # full-bus-reversal DDR byte: re-landing serially just re-runs the
+        # same greedy order with a different loser, so each rescue swapped
+        # one stranded net for another (zero-sum) while burning the wall
+        # budget the later iterations needed.
+        if relanded < len(ripped):
+            flush_print_fn(
+                f"  Relief rescue: {failed_name} routed but only "
+                f"{relanded}/{len(ripped)} displaced victim(s) re-landed "
+                f"-- rolling back (no-net-loss guarantee) ({elapsed_fn()})"
+            )
+            _rollback()
+            return False
+
+        flush_print_fn(
+            f"  Relief rescue: {failed_name} ROUTED via conflict-free "
+            f"relief path; {relanded}/{len(ripped)} displaced victim(s) "
+            f"re-landed ({elapsed_fn()})"
+        )
+        return True
 
     def _route_net_negotiated(
         self,
