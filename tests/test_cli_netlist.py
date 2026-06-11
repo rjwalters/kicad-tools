@@ -869,6 +869,10 @@ class TestBuildNetlistFromSchematic:
         with pytest.raises(FileNotFoundError, match="Schematic not found"):
             build_netlist_from_schematic(sch_file)
 
+    @pytest.mark.xfail(
+        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
+        strict=False,
+    )
     def test_build_netlist_extracts_connectivity(self, tmp_path):
         """Test that connectivity is extracted correctly."""
         from kicad_tools.operations.netlist import build_netlist_from_schematic

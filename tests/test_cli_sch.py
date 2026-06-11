@@ -736,11 +736,14 @@ class TestSchSummary:
         summary = gather_summary(str(hierarchical_schematic))
         conn = summary["connectivity"]
 
-        # Root sheet: 5 wires, 2 junctions, 1 global_label
-        # Child sheets have hierarchical_labels but no wires
+        # Root sheet: 5 wires, 2 junctions, 1 global_label; the child
+        # sheets carry 2 + 1 more global labels.  gather_summary
+        # aggregates connectivity across the whole sheet tree (same as
+        # the hierarchical_labels count below), so the total is 4
+        # (stale-test update, issue #3436 burn-down).
         assert conn["wires"] == 5
         assert conn["junctions"] == 2
-        assert conn["global_labels"] == 1
+        assert conn["global_labels"] == 4
         # hierarchical_labels: logic_subsheet has 3, output_subsheet has 1
         assert conn["hierarchical_labels"] == 4
 

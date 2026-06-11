@@ -148,10 +148,24 @@ class TestIsDensePackage:
         pads = make_ssop_pads(pin_count=20, pitch=0.5)
         assert is_dense_package(pads)
 
-    def test_soic_not_dense_by_default(self):
-        """Standard SOIC with 1.27mm pitch may not be dense with loose rules."""
+    def test_soic_8plus_dense_since_3398(self):
+        """SOIC-8-class dual-row SMD at 1.27mm pitch is dense (issue #3398).
+
+        Pre-#3398 a SOIC-8 could route between pins at loose rules and
+        was NOT dense; the SOP in-pad rescue work deliberately added the
+        (0.75, 1.5] mm dual-row band so these packages enter the escape
+        pre-pass (stale-test update, issue #3436 burn-down).
+        """
         pads = make_ssop_pads(pin_count=8, pitch=1.27)
-        # With typical trace width and clearance, SOIC can route between pins
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.15)
+
+    def test_small_dual_row_below_8_pins_not_dense(self):
+        """Sub-8-pin dual-row parts keep the dynamic-threshold behavior.
+
+        The #3398 SOIC band requires >= 8 pads, so a 6-pin part at
+        1.27 mm pitch still routes between pins at loose rules.
+        """
+        pads = make_ssop_pads(pin_count=6, pitch=1.27)
         assert not is_dense_package(pads, trace_width=0.2, clearance=0.15)
 
 

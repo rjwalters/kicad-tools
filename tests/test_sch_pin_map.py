@@ -961,9 +961,14 @@ class TestResolvePinMap:
     def test_rotated_symbol_positions(self, tmp_path):
         """Symbol rotated 90 degrees: pin offsets rotate accordingly.
 
-        KiCad library coordinates use Y-up; schematic coordinates use Y-down.
-        After negating Y, pin 1 (0, 3.81) becomes (0, -3.81), which rotated
-        90 degrees yields (3.81, 0), giving absolute (103.81, 50).
+        Rotation is applied in library coordinates (Y-up, CCW-positive)
+        FIRST, then Y is negated to reach sheet coordinates (#2129; the
+        repo-wide CCW-positive convention from PR #738).  Pin 1 of a
+        resistor (library (0, 3.81), the top pin) rotated 90 degrees CCW
+        lands on the LEFT of the body: (0, 3.81) -> (-3.81, 0) -> negate
+        Y -> (-3.81, 0), absolute (96.19, 50).  The previous expectation
+        encoded the pre-#738 negate-then-rotate convention and was
+        masked by the non-gating CI Test job (issue #3436 burn-down).
         """
         sch = Schematic.load(_write_sch(tmp_path, ROTATED_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
@@ -971,11 +976,11 @@ class TestResolvePinMap:
         assert "R1" in pin_map
         pos1 = pin_map["R1"]["pins"]["1"]["position"]
         pos2 = pin_map["R1"]["pins"]["2"]["position"]
-        # Pin 1: (0, 3.81) negate Y -> (0, -3.81) rotated 90 -> (3.81, 0) + (100, 50)
-        assert abs(pos1[0] - 103.81) < 0.01
+        # Pin 1: (0, 3.81) rotated 90 CCW -> (-3.81, 0), negate Y -> (-3.81, 0) + (100, 50)
+        assert abs(pos1[0] - 96.19) < 0.01
         assert abs(pos1[1] - 50.0) < 0.01
-        # Pin 2: (0, -3.81) negate Y -> (0, 3.81) rotated 90 -> (-3.81, 0) + (100, 50)
-        assert abs(pos2[0] - 96.19) < 0.01
+        # Pin 2: (0, -3.81) rotated 90 CCW -> (3.81, 0), negate Y -> (3.81, 0) + (100, 50)
+        assert abs(pos2[0] - 103.81) < 0.01
         assert abs(pos2[1] - 50.0) < 0.01
 
     def test_mirrored_symbol_positions(self, tmp_path):

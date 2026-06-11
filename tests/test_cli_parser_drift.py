@@ -333,7 +333,7 @@ def test_max_search_iterations_is_on_both_parsers():
     )
 
 
-def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env():
+def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env(tmp_path):
     """Direct regression test for #3033 / #3062.
 
     ``--strict-in-pad-clearance`` is declared on BOTH the outer and
@@ -372,6 +372,12 @@ def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env():
     import os
     from unittest.mock import patch
 
+    # route_cmd.main validates the PCB path exists before it reaches
+    # _set_wall_clock_deadline, so give it a real (minimal) file
+    # (stale-test fix, issue #3436 burn-down).
+    dummy_pcb = tmp_path / "dummy.kicad_pcb"
+    dummy_pcb.write_text("(kicad_pcb)")
+
     # Stage 1: flag set -> env var becomes "1".
     saved = os.environ.pop("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE", None)
     try:
@@ -389,7 +395,7 @@ def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env():
             side_effect=SystemExit(0),
         ):
             with pytest.raises(SystemExit):
-                route_cmd.main(["dummy.kicad_pcb", "--strict-in-pad-clearance"])
+                route_cmd.main([str(dummy_pcb), "--strict-in-pad-clearance"])
         assert os.environ.get("KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE") == "1", (
             "Inner route_cmd.main must stamp "
             "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE=1 when "
@@ -406,7 +412,7 @@ def test_strict_in_pad_clearance_is_on_both_parsers_and_stamps_env():
             side_effect=SystemExit(0),
         ):
             with pytest.raises(SystemExit):
-                route_cmd.main(["dummy.kicad_pcb"])
+                route_cmd.main([str(dummy_pcb)])
         assert "KICAD_TOOLS_STRICT_IN_PAD_CLEARANCE" not in os.environ, (
             "Inner route_cmd.main must NOT stamp the env var when the "
             "flag is absent; legacy bit-for-bit behaviour requires the "

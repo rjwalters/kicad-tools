@@ -31,10 +31,18 @@ from kicad_tools.router import (
 
 # Skip all tests in this module if kicad-cli is not available
 # Skip all tests in this module if kicad-cli is not available
-pytestmark = pytest.mark.skipif(
-    find_kicad_cli() is None,
-    reason="kicad-cli not found - install KiCad 8 from https://www.kicad.org/download/",
-)
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  These
+# tests route real boards and comfortably beat 60s alone, but under
+# full-suite xdist CPU contention the wall-clock reaper killed them
+# spuriously.  The timeout marker overrides the CLI default with a
+# contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = [
+    pytest.mark.timeout(300),
+    pytest.mark.skipif(
+        find_kicad_cli() is None,
+        reason="kicad-cli not found - install KiCad 8 from https://www.kicad.org/download/",
+    ),
+]
 
 
 @pytest.fixture

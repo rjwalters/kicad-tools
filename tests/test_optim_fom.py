@@ -490,8 +490,10 @@ def test_compute_fom_real_pcb_legacy_weights_score_in_range(voltage_divider_pcb_
     pcb = PCB.load(voltage_divider_pcb_path)
     # Legacy weights: only trace_length_excess contributes -> soft_score
     # should be exp(-x) for small x.  Expect a usable, non-trivial score.
+    # A board with zero length excess scores exactly 1.0, so the upper
+    # bound is inclusive (stale-test fix, issue #3436 burn-down).
     result = compute_fom(pcb, weights=legacy_weights())
-    assert 0.3 < result.score < 1.0
+    assert 0.3 < result.score <= 1.0
 
 
 def test_compute_fom_canonical_term_count():
