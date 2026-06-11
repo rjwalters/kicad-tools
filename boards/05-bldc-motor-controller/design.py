@@ -2783,9 +2783,46 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     PWM_CL, sometimes GATE_CL) is congestion in the U3 / R10-R12 sense
     band -- the per-edge A* searches burn the full per-net budget;
     tracked in #3471.
+
+    Issue #3471 (2026-06-10) -- Steiner virtual-pad fixes + per-net
+    rescue loop.  The "congestion-bound" diagnosis above was WRONG for
+    the 4-pad nets.  Two router defects made every Steiner-incident
+    RSMT edge structurally unroutable on this board:
+
+    1. ``CppPathfinder._compute_pad_bounds``: zero-area Steiner virtual
+       pads produced EMPTY metal bounds whenever ``(x - origin) / res``
+       was not exactly integral in floating point (ceil > floor), so
+       the C++ A* seeded ZERO start nodes and failed the edge with
+       FAILURE_NO_PATH at 0 iterations.  Each 4-pad ISENSE net's RSMT
+       synthesises branch points, so the U3-side edges failed on EVERY
+       route and every rip-up reroute ("did not converge" in seconds
+       with all 25 siblings displaced -- the failure was never
+       congestion).  Fixed: empty spans clamp to the nearest cell.
+    2. RSMT branch points could land on copper-blocked cells (e.g.
+       ISENSE_A+'s Steiner point at (136.9, 176.0) sat on a MOSFET TH
+       leg keepout): even solo on an empty board the net was
+       ``blocked_path``.  Fixed: ``route_net_negotiated`` relocates
+       blocked branch points to the nearest cell free (with trace
+       radius + clearance margin) on at least one routable layer.
+
+    Measured effect (fixed code + #3488 relief machinery, same flags):
+    fresh route 28/35 -> 29/35 with 0 blocking, SW_OUT (5 pads, buck
+    switch node spanning U1/L1/D2 + U3 pins 50/51) fully connected for
+    the first time.  Negative results re-measured for the record:
+    ``--per-net-timeout 120`` lands 27/35 (budget is NOT the lever; the
+    #3485 budget leak is real but not binding), ``--grid 0.075`` (the
+    auto-grid warning's recommendation) multiplies the #3485 leak and
+    cannot finish inside the wall budget.
+
+    The remaining residuals are rescued by the step-6b per-net rescue
+    loop (``rescue_partial_nets``): the negotiated valid-state
+    extraction cannot land the whole sense-band cluster simultaneously,
+    but re-routing each residual net ALONE against the committed copper
+    of everything else lands a subset.  See that function's docstring
+    for the mechanism and bounds.
     """
     print("\n" + "=" * 60)
-    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111, #3425, #3470)...")
+    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111, #3425, #3470, #3471)...")
     print("=" * 60)
 
     # Skip power and high-current nets (route manually or use copper pour zones)
@@ -2883,6 +2920,243 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         )
 
     return success
+
+
+# =============================================================================
+# Partial-net rescue loop (Issue #3471)
+# =============================================================================
+#
+# Pour/skip nets carried by copper zones -- excluded from the rescue loop
+# and from the partial-net detection (their connectivity is by zone fill,
+# which the trace-connectivity checker does not credit).
+_RESCUE_EXCLUDED_NETS = frozenset(
+    ["+24V", "+5V", "+3V3", "GND", "PHASE_A", "PHASE_B", "PHASE_C", "VIN"]
+)
+
+# Per-rescue-stage budgets.  Each stage routes exactly ONE net against
+# the committed copper of every other net, so the per-stage wall budget
+# is small.  60 s per-net matches the main recipe; 300 s wall bounds the
+# #3485 budget-leak overshoot inside escape/rip-up phases.
+_RESCUE_STAGE_TIMEOUT_S = 300
+_RESCUE_PER_NET_TIMEOUT_S = 60
+
+
+def _all_net_names(pcb_path: Path) -> list[str]:
+    """Parse all named nets from the PCB's ``(net N \"NAME\")`` declarations."""
+    import re
+
+    text = pcb_path.read_text()
+    names = {m.group(2) for m in re.finditer(r'\(net (\d+) "([^"]+)"\)', text)}
+    return sorted(n for n in names if n)
+
+
+def _partially_connected_signal_nets(pcb_path: Path) -> list[str]:
+    """Return signal nets whose pads are not all trace-connected.
+
+    Runs ``kct check`` (connectivity is an advisory rule, so this never
+    interferes with the blocking-DRC gate) and parses the
+    "Net 'X' is partially routed" messages, excluding the pour/skip nets.
+    """
+    import json
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "check",
+            str(pcb_path),
+            "--mfr",
+            "jlcpcb-tier1",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    partial: list[str] = []
+    for v in data.get("violations", data.get("errors", [])):
+        if v.get("rule", v.get("type")) != "connectivity":
+            continue
+        msg = v.get("message", "")
+        if "'" not in msg or "partially routed" not in msg:
+            continue
+        net = msg.split("'")[1]
+        if net not in _RESCUE_EXCLUDED_NETS:
+            partial.append(net)
+    return sorted(set(partial))
+
+
+def _strip_net_copper(pcb_path: Path, net_names: list[str]) -> int:
+    """Remove all top-level ``(segment ...)``/``(via ...)`` copper for *net_names*.
+
+    Zones, pads, and footprints are untouched.  Returns the number of
+    copper blocks removed.  Used by the rescue loop so a stranded
+    partial route does not poison the rescue A* (and so a FAILED rescue
+    leaves no stub copper behind -- the #3470 overlap-stub lesson).
+    """
+    import re
+
+    text = pcb_path.read_text()
+    net_ids = {
+        m.group(1)
+        for m in re.finditer(r'\(net (\d+) "([^"]+)"\)', text)
+        if m.group(2) in set(net_names)
+    }
+    if not net_ids:
+        return 0
+
+    spans: list[tuple[int, int]] = []
+    for m in re.finditer(r"^\t\((?:segment|via)\b", text, re.MULTILINE):
+        start = m.start()
+        depth = 0
+        i = start
+        while i < len(text):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        end = i + 1
+        if end < len(text) and text[end] == "\n":
+            end += 1
+        block = text[start:end]
+        net_match = re.search(r"\(net (\d+)\)", block)
+        if net_match and net_match.group(1) in net_ids:
+            spans.append((start, end))
+
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + text[end:]
+    pcb_path.write_text(text)
+    return len(spans)
+
+
+def rescue_partial_nets(routed_path: Path) -> dict[str, bool]:
+    """Rescue partially-routed signal nets one at a time (Issue #3471).
+
+    Mechanism (measured on this board, 2026-06-10):
+
+    The negotiated initial pass + rip-up settles at a valid state that
+    leaves a residual cluster (historically the ISENSE Kelvin-sense nets
+    + PWM_CL + SW_OUT) partially routed: paths exist, but the nets lose
+    the multi-net congestion negotiation in the U3 (DRV8301) south
+    escape band.  Re-routing each residual net ALONE -- with every other
+    net's copper preserved as immutable obstacles -- sidesteps the
+    negotiation entirely and lands a subset of the cluster that the
+    global pass cannot extract:
+
+      * ``--preserve-existing`` keeps all other nets' copper (#3155),
+      * ``--skip-nets`` everything except the rescue target,
+      * ALL partial nets' stranded copper is stripped upfront so the
+        rescue A* starts from a clean slate (a stale partial stub of a
+        later rescue target is an immutable obstacle for the current
+        one),
+      * a FAILED rescue strips the target's copper again -- a rescue
+        never leaves stranded stubs (the #3470 overlap-stub lesson) and
+        never makes the board worse (reach counts fully-connected nets
+        only).
+
+    Each stage is a fresh ``kct route`` invocation with the same
+    manufacturer/layer/backend flags as the main recipe.  Measured
+    effect at the 2026-06-10 recipe (post Steiner-virtual-pad fixes,
+    seed 7): main pass lands 29/35 + 0 blocking; the rescue loop lifts
+    PWM_CL (and, run-dependently, additional ISENSE nets) without
+    introducing blocking violations.
+
+    Returns a dict mapping rescued net name -> True (fully connected
+    after rescue) / False (rescue failed; net left with no copper).
+    """
+    print("\n" + "=" * 60)
+    print("Rescuing partially-routed nets (Issue #3471)...")
+    print("=" * 60)
+
+    partial = _partially_connected_signal_nets(routed_path)
+    if not partial:
+        print("\n   No partially-routed signal nets -- nothing to rescue.")
+        return {}
+
+    print(f"\n   Partial nets: {', '.join(partial)}")
+    all_nets = _all_net_names(routed_path)
+    results: dict[str, bool] = {}
+
+    # Strip ALL partial nets' stranded copper upfront: a stale partial
+    # stub of net B is a preserved (immutable) obstacle during net A's
+    # rescue and measurably blocks rescues that succeed on the stripped
+    # board.  Stripping is loss-free for the reach metric -- partially
+    # connected nets count as unrouted either way -- and removes the
+    # stranded-stub DRC liability (#3470).
+    stripped_total = _strip_net_copper(routed_path, partial)
+    print(f"   Stripped {stripped_total} stale copper block(s) for {len(partial)} net(s)")
+
+    for net in partial:
+        skip = [n for n in all_nets if n != net]
+        tmp_out = routed_path.with_name(routed_path.stem + "_rescue.kicad_pcb")
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "route",
+            str(routed_path),
+            "--output",
+            str(tmp_out),
+            "--preserve-existing",
+            "--auto-layers",
+            "--starting-layers",
+            "4",
+            "--max-layers",
+            "4",
+            "--manufacturer",
+            "jlcpcb-tier1",
+            "--micro-via-in-pad-fallback",
+            "--backend",
+            "cpp",
+            "--seed",
+            "7",
+            "--timeout",
+            str(_RESCUE_STAGE_TIMEOUT_S),
+            "--per-net-timeout",
+            str(_RESCUE_PER_NET_TIMEOUT_S),
+            "--skip-nets",
+            ",".join(skip),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if not tmp_out.exists():
+            print(f"   Rescue {net}: FAILED (no output produced)")
+            results[net] = False
+            continue
+
+        # Promote the rescue output; on failure strip the net's copper so
+        # no stranded stubs remain.
+        tmp_out.replace(routed_path)
+        if result.returncode == 0:
+            print(f"   Rescue {net}: SUCCESS (fully connected)")
+            results[net] = True
+        else:
+            removed = _strip_net_copper(routed_path, [net])
+            print(
+                f"   Rescue {net}: failed (exit {result.returncode}); "
+                f"stripped {removed} stub block(s)"
+            )
+            results[net] = False
+
+        # Clean up per-stage side files (``kct route`` writes a .kicad_prl
+        # next to its output, and a *_partial.kicad_pcb on partial exits).
+        for stray in (
+            tmp_out.with_suffix(".kicad_prl"),
+            tmp_out.with_name(tmp_out.stem + "_partial.kicad_pcb"),
+        ):
+            stray.unlink(missing_ok=True)
+
+    rescued = sum(1 for ok in results.values() if ok)
+    print(f"\n   Rescue summary: {rescued}/{len(results)} net(s) rescued")
+    return results
 
 
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:
@@ -3114,6 +3388,18 @@ def main() -> int:
         # Step 6: Route PCB
         routed_path = output_dir / "bldc_controller_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+
+        # Step 6b: Rescue partially-routed nets one at a time (Issue
+        # #3471).  The negotiated pass leaves a residual cluster in the
+        # U3 south sense band partially routed; per-net solo reroutes
+        # against the committed copper rescue a subset the global
+        # negotiation cannot extract.  See rescue_partial_nets().
+        if routed_path.exists():
+            rescue_results = rescue_partial_nets(routed_path)
+            if rescue_results and all(rescue_results.values()):
+                # Every residual net rescued -- the board is fully routed
+                # even though step 6's exit code reported partial.
+                route_success = True
 
         # Step 7: Repair DRC clearance violations introduced by routing.
         # Issue #3096: tried calling fix-drc as a separate subprocess
