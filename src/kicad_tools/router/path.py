@@ -406,7 +406,24 @@ def create_intra_ic_routes(
             direct = [(pad1.x, pad1.y), (pad2.x, pad2.y)]
             path: list[tuple[float, float]] | None = None
             kind = "route"
-            if not _path_violates(direct, trace_width, layer, clearance, same_pkg_foreign):
+            # Issue #3413: validate the DIRECT path against previously
+            # routed copper of other nets too, not only same-package
+            # foreign pads.  The USB-C reversible pinout makes this
+            # concrete (board 06 J1): USB2_D- ties B7->A7 first, then
+            # USB2_D+'s direct A6->B6 tie crosses that committed copper
+            # at the row midpoint -- a physical same-layer overlap that
+            # the #3433 safety net later demotes to unrouted.  With the
+            # obstacle check the crossing tie falls through to the
+            # perimeter wrap, and failing that defers to the main A*
+            # (which can resolve the crossover with a layer swap).
+            if not _path_violates(
+                direct,
+                trace_width,
+                layer,
+                clearance,
+                same_pkg_foreign,
+                obstacle_segments=obstacle_segments,
+            ):
                 path = direct
             else:
                 # Issue #3480: direct path violates same-package pad
@@ -428,9 +445,27 @@ def create_intra_ic_routes(
                     and p.y + p.height / 2.0 >= wminy - margin
                     and p.y - p.height / 2.0 <= wmaxy + margin
                 ]
+                # Issue #3413: cap the acceptable wrap detour.  The wrap
+                # primitive was built for small packages (SOT-23 scale)
+                # where the perimeter detour is 2-3x the direct distance.
+                # On a large pad field (board 06 J1 USB-C) the shortest
+                # legal wrap measured 21.8mm for a 2.24mm tie (9.7x) --
+                # electrically a long stub and, worse, it consumed the
+                # connector's fan-out fabric and collapsed neighbouring
+                # nets.  Past 4x the main A* (layer swap via a via pair)
+                # is strictly better, so defer instead.
+                max_wrap_length = 4.0 * dist
                 for candidate in _perimeter_wrap_candidates(
                     pad1, pad2, component_pads, trace_width, clearance
                 ):
+                    candidate_length = sum(
+                        math.hypot(b[0] - a[0], b[1] - a[1])
+                        for a, b in zip(candidate, candidate[1:], strict=False)
+                    )
+                    if candidate_length > max_wrap_length:
+                        # Candidates are sorted shortest-first: nothing
+                        # acceptable remains.
+                        break
                     if not _path_violates(
                         candidate,
                         trace_width,

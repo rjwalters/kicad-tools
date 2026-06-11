@@ -377,7 +377,14 @@ jobs:
     # build + ~9-10 min Python coupled routing exceeds the prior 10-min
     # ceiling.  If the typical run creeps above 5 minutes, move to a
     # nightly schedule per the epic's runtime guidance.
-    timeout-minutes: 15
+    #
+    # Issue #3413 (phase 3): 15 -> 20 min.  The board 06 recipe's
+    # negotiated budget grew 240 -> 360s (so the iteration-3 stagnation
+    # recovery completes instead of being killed mid-surgery) and the
+    # timed-out exit now pays a bounded (<= 90s) post-route correction
+    # pass.  Local M-series wall is ~17 min; the 2-core ubuntu runner
+    # needs the extra headroom.
+    timeout-minutes: 20
     # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
     #
     #   * LATENCY: #3089 landed a per-pair wall-clock budget plumbed
