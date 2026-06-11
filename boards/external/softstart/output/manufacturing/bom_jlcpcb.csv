@@ -2,19 +2,19 @@ Comment,Designator,Footprint,LCSC Part #
 100R,"R20,R21",Resistor_THT:R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal,
 100nF,"C1,C2,C3,C30,C31,C33,C34,C8",Capacitor_SMD:C_0402_1005Metric,
 100nF,"C20,C22,C23,C25,C5",Capacitor_SMD:C_0805_2012Metric,
-10k,"R10,R11,R2,R23,R24,R26,R28,R29,R5,R_GB1,R_GB2,R_GB3,R_GB4",Resistor_SMD:R_0805_2012Metric,
+10k,"R10,R11,R2,R23,R24,R26,R28,R29,R5,R_GB1,R_GB2,R_GB3,R_GB4",Resistor_SMD:R_0805_2012Metric,C17414
 10uF,"C21,C24,C32,C6,C7",Capacitor_SMD:C_0805_2012Metric,
 150R 5W,R6,Resistor_THT:R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal,
-15A,F1,Fuse:Fuseholder_Cylinder-5x20mm_Schurter_0031.8201_Horizontal_Open,
+15A,F1,Fuse:Fuseholder_Cylinder-5x20mm_Schurter_0031.8201_Horizontal_Open,C310991
 1k,"R12,R22",Resistor_SMD:R_0805_2012Metric,
 275VAC,RV1,Varistor:RV_Disc_D12mm_W4.2mm_P7.5mm,
 290.0k,"R25,R27",Resistor_SMD:R_0805_2012Metric,
 2N7002,"Q7,Q8",Package_TO_SOT_SMD:SOT-23,
 33k,"R3,R4",Resistor_SMD:R_0805_2012Metric,
-4.7uF,C4,Capacitor_SMD:C_0805_2012Metric,
+4.7uF,C4,Capacitor_SMD:C_0805_2012Metric,C1779
 5mR,R9,Resistor_SMD:R_2512_6332Metric,
 990.0k,R1,Resistor_SMD:R_0805_2012Metric,
-AC_INPUT,J1,TerminalBlock:TerminalBlock_bornier-2_P5.08mm,
+AC_INPUT,J1,TerminalBlock:TerminalBlock_bornier-2_P5.08mm,C6961
 AC_OUTPUT,J2,TerminalBlock:TerminalBlock_bornier-2_P5.08mm,
 AO3400,"Q5,Q6",Package_TO_SOT_SMD:SOT-23,
 H11AA1,U2,Package_DIP:DIP-6_W7.62mm,
