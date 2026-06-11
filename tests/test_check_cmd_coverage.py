@@ -253,11 +253,18 @@ class TestEntryPointRegistryParity:
         )
 
     def test_audit_resolves_via_check_all(self) -> None:
-        """``ManufacturingAudit._check_drc`` must use ``check_all``."""
+        """``ManufacturingAudit._check_drc`` must use ``check_all``.
+
+        The audit opts into the ``kct check`` CLI's pad_grid auto-derive
+        tolerance policy (issues #3061 / #3497), so the call carries the
+        ``pad_grid_auto_derive=True`` argument.
+        """
         src = self._read_source("kicad_tools.audit.auditor")
-        assert "checker.check_all()" in src, (
-            "ManufacturingAudit._check_drc must invoke checker.check_all() "
-            "so it inherits the unified rule registry.  See Issue #3044."
+        assert "checker.check_all(pad_grid_auto_derive=True)" in src, (
+            "ManufacturingAudit._check_drc must invoke checker.check_all("
+            "pad_grid_auto_derive=True) so it inherits the unified rule "
+            "registry (Issue #3044) AND matches the kct-check pad_grid "
+            "tolerance policy (Issues #3061 / #3497)."
         )
 
     def test_audit_uses_advisory_classifier_not_literal(self) -> None:

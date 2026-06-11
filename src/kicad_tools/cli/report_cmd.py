@@ -276,6 +276,7 @@ def _generate_figures(
         print("Generating figures...")
         entries = fig_gen.generate_all(input_path, sch_path, figures_dir)
         data.pcb_figures = _entries_to_pcb_figures(entries)
+        data.pcb_layer_figures = _entries_to_layer_figures(entries)
         data.schematic_sheets = _entries_to_schematic_sheets(entries)
     except (RuntimeError, OSError) as exc:
         hint = ""
@@ -309,6 +310,24 @@ def _entries_to_pcb_figures(entries: list[FigureEntry]) -> dict | None:
         if key is not None:
             result[key] = f"figures/{entry.filename}"
     return result or None
+
+
+def _entries_to_layer_figures(entries: list[FigureEntry]) -> list[dict] | None:
+    """Convert :class:`FigureEntry` items of type ``pcb_layer`` to the list
+    shape expected by :attr:`ReportData.pcb_layer_figures`.
+
+    Returns ``None`` when no per-layer entries are present.
+    """
+    layers = [
+        {
+            # Caption is "Copper Layer F.Cu" -- strip the prefix for the name.
+            "name": entry.caption.removeprefix("Copper Layer "),
+            "figure_path": f"figures/{entry.filename}",
+        }
+        for entry in entries
+        if entry.figure_type == "pcb_layer"
+    ]
+    return layers or None
 
 
 def _entries_to_schematic_sheets(entries: list[FigureEntry]) -> list[dict] | None:
@@ -377,6 +396,7 @@ def _load_data_dir(data_dir_str: str) -> dict:
         "cost.json": "cost",
         "schematic_sheets.json": "schematic_sheets",
         "pcb_figures.json": "pcb_figures",
+        "pcb_layer_figures.json": "pcb_layer_figures",
         "analog_components.json": "analog_components",
         "narrative.json": "_narrative",
         "stackup.json": "stackup",

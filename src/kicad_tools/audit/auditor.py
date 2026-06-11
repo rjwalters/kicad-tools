@@ -735,7 +735,12 @@ class ManufacturingAudit:
                 net_class_map=net_class_map,
             )
 
-            results = checker.check_all()
+            # Match the ``kct check`` CLI's pad_grid tolerance policy
+            # (auto-derive per-board, issue #3061) so the audit -- and the
+            # manufacturing report's DRC section built from it -- cannot
+            # disagree with the documented ``kct check --mfr <profile>``
+            # gate (issue #3497).
+            results = checker.check_all(pad_grid_auto_derive=True)
 
             # Some rules (e.g. ``connectivity`` from Issue #3041) report
             # at error severity for the standalone ``kct check`` CLI but

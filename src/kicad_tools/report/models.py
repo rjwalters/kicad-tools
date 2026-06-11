@@ -63,7 +63,11 @@ class ReportData:
     """List of dicts: {name, figure_path}."""
 
     pcb_figures: dict | None = None
-    """PCB renders: {front: path, back: path, copper: path}."""
+    """PCB renders: {front: path, back: path, copper: path, assembly: path}."""
+
+    pcb_layer_figures: list[dict] | None = None
+    """Per-copper-layer renders: [{name, figure_path}] in stackup order
+    (e.g. F.Cu, In1.Cu, In2.Cu, B.Cu for a 4-layer board).  Issue #3497."""
 
     analog_components: list[dict] | None = None
     """Analog-sensitive components: [{reference, value, footprint, reason}]."""

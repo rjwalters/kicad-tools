@@ -50,7 +50,8 @@ Manufacturable routing recipe (issue #3343 P-R1..P-R4):
   zero-fill-zone check via ``_audit_pour_nets`` — not the
   boundary-based analyzer, whose false-positive mode is tracked in
   issue #3482), then ``kct check --mfr jlcpcb-tier1`` and
-  ``kct export --mfr jlcpcb``.
+  ``kct export --mfr jlcpcb-tier1`` (same profile as the DRC gate so
+  the bundle report's DRC section matches ``kct check`` — issue #3497).
 
 Measured state of the committed artifact (2026-06-10 PR #3481 review
 fix, ``PYTHONHASHSEED=0``, seed 42):
@@ -4460,7 +4461,13 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         "--output",
         str(mfg_dir),
         "--mfr",
-        "jlcpcb",
+        # Same profile as the step-12 DRC gate (jlcpcb-tier1) so the
+        # bundle report's DRC section agrees with `kct check` — the
+        # tier1 profile allows via-in-pad, which this board uses for
+        # stranded-pour rescue (issue #3497).  Export formats (BOM/CPL
+        # CSV, Gerber naming, LCSC enrichment) resolve to the parent
+        # JLCPCB fab family automatically.
+        "jlcpcb-tier1",
         "--skip-preflight",
     ]
     print(f"\n   Command: {' '.join(cmd)}")
