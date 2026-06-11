@@ -76,6 +76,14 @@ from kicad_tools.router import (
     load_pcb_for_routing,
 )
 
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  Board
+# generation / real-library scans beat 60s alone, but on the 4-core CI
+# runner under full-suite xdist contention the wall-clock reaper killed
+# them spuriously.  The marker overrides the CLI default with a
+# contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(600)
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "03-usb-joystick"
 GEN_PCB_SCRIPT = BOARD_DIR / "generate_pcb.py"

@@ -65,31 +65,53 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Issue #3436: run inside the official KiCad 10 container (same image
+    # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
+    # are NOT used). The container provides what dozens of tests need and
+    # the bare runner lacks:
+    # - /usr/share/kicad/symbols + /usr/share/kicad/footprints at KiCad 10
+    #   (ubuntu noble's kicad-symbols/kicad-footprints universe packages
+    #   are KiCad-7-era: no Device:Q_NMOS, different LM393 unit structure,
+    #   stale footprint pad definitions -- ~40 test failures/errors)
+    # - kicad-cli 10 for the DRC/ERC-backed tests (board-02 baseline's
+    #   "DRC PASSED" parsing, pipeline ERC/zones steps)
+    # All of these failures were previously invisible because the Test
+    # step had continue-on-error.
+    container:
+      image: kicad/kicad:10.0
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the smoke job).
+        shell: bash
     steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
-      - name: Install KiCad symbol & footprint libraries
-        # Issue #3436: many schematic/block tests resolve symbols and
-        # footprints from the system KiCad library paths
-        # (/usr/share/kicad/symbols, /usr/share/kicad/footprints -- see
-        # kicad_tools.schematic.registry and
-        # kicad_tools.footprints.library_path). Those paths were absent on
-        # the runner, so dozens of tests failed with "Library not found:
-        # Device.kicad_sym / Comparator.kicad_sym" -- invisibly, because
-        # the Test step had continue-on-error. Install the data-only
-        # library packages (no KiCad application needed; plain archive
-        # packages from universe, immune to the Launchpad PPA flakiness
-        # documented in the kicad-cli-smoke job).
+      - name: Install uv
+        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # coupling inside the container (mirrors the smoke job).
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends kicad-symbols kicad-footprints
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        # Pin the interpreter via uv (parity with the other jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --extra dev --python 3.12
 
       - name: Build C++ router backend
         # Issue #3436: `uv sync` does NOT build the native extension (see

@@ -26,6 +26,14 @@ from kicad_tools.schematic.blocks.interface.analog_input import (
     create_analog_joystick,
 )
 
+# Issue #3436: CI runs the suite with `-n auto --timeout=60`.  Board
+# generation / real-library scans beat 60s alone, but on the 4-core CI
+# runner under full-suite xdist contention the wall-clock reaper killed
+# them spuriously.  The marker overrides the CLI default with a
+# contention-tolerant budget; it does NOT slow the happy path.
+pytestmark = pytest.mark.timeout(600)
+
+
 
 def _make_mock_schematic() -> Mock:
     """Build a mock Schematic that returns mock symbols with deterministic pins.
