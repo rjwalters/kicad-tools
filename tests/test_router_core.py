@@ -1370,6 +1370,179 @@ class TestAutorouterIntraICRoutes:
         assert ("J1", "B7") not in legacy
 
 
+class TestIntraICClearanceValidation:
+    """Issue #3480: intra-IC routes must respect same-package pad clearance.
+
+    Models softstart's U8 (MCP6001, SOT-23-5): pins 1/4 share V_AC_SENSE
+    and sit diagonally across the package.  The legacy direct segment
+    passed 0.027 mm from the GND pad (pin 2) corner where 0.20 mm routing
+    clearance (0.102 mm DRC minimum) is required.  The primitive must
+    detect the violation and wrap around the package perimeter instead --
+    or defer to the main A* router when no legal wrap exists.
+    """
+
+    CLEARANCE = 0.2
+
+    @staticmethod
+    def _mk_pad(ref, pin, x, y, net, net_name, width=1.06, height=0.65):
+        from kicad_tools.router.primitives import Layer, Pad
+
+        return Pad(
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            net=net,
+            net_name=net_name,
+            layer=Layer.F_CU,
+            ref=ref,
+            pin=pin,
+        )
+
+    def _u8_lookup(self):
+        """U8 SOT-23-5 pad field from the softstart rev B artifact."""
+        geometry = {
+            "1": (223.9, 158.95, 15, "V_AC_SENSE"),
+            "2": (223.9, 158.00, 3, "GND"),
+            "3": (223.9, 157.05, 40, "V_AC_SENSE_RAW"),
+            "4": (226.1, 157.05, 15, "V_AC_SENSE"),
+            "5": (226.1, 158.95, 4, "+3.3V"),
+        }
+        return {
+            ("U8", pin): self._mk_pad("U8", pin, x, y, net, name)
+            for pin, (x, y, net, name) in geometry.items()
+        }
+
+    def _min_clearance_to_foreign(self, routes, pad_lookup, net):
+        """Smallest edge-to-edge clearance from emitted copper to foreign pads."""
+        from kicad_tools.router.path import _segment_rect_distance
+
+        worst = float("inf")
+        for route in routes:
+            for seg in route.segments:
+                for pad in pad_lookup.values():
+                    if pad.net == net:
+                        continue
+                    dist = _segment_rect_distance(
+                        seg.x1,
+                        seg.y1,
+                        seg.x2,
+                        seg.y2,
+                        pad.x - pad.width / 2,
+                        pad.y - pad.height / 2,
+                        pad.x + pad.width / 2,
+                        pad.y + pad.height / 2,
+                    )
+                    worst = min(worst, dist - seg.width / 2)
+        return worst
+
+    def test_sot23_5_diagonal_wraps_package(self):
+        """The U8 pin1->pin4 tie must wrap, not cut past the GND pad."""
+        from kicad_tools.router.path import create_intra_ic_routes
+        from kicad_tools.router.rules import DesignRules
+
+        lookup = self._u8_lookup()
+        rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
+        routes, connected = create_intra_ic_routes(15, [("U8", "1"), ("U8", "4")], lookup, rules)
+
+        assert connected == {0, 1}, "Pins 1 and 4 must still be tied intra-IC"
+        assert len(routes) == 1
+        assert len(routes[0].segments) > 1, (
+            "Direct diagonal violates GND pad clearance; expected a multi-segment perimeter wrap"
+        )
+        worst = self._min_clearance_to_foreign(routes, lookup, 15)
+        assert worst >= self.CLEARANCE - 1e-6, (
+            f"Wrap copper clears foreign pads by only {worst:.3f}mm (need {self.CLEARANCE}mm)"
+        )
+
+    def test_direct_route_kept_when_clear(self):
+        """Adjacent same-net pins with no foreign pad between stay direct."""
+        from kicad_tools.router.path import create_intra_ic_routes
+        from kicad_tools.router.rules import DesignRules
+
+        lookup = {
+            ("U2", "1"): self._mk_pad("U2", "1", 10.0, 10.0, 7, "SYNC"),
+            ("U2", "2"): self._mk_pad("U2", "2", 10.0, 11.0, 7, "SYNC"),
+            ("U2", "3"): self._mk_pad("U2", "3", 13.0, 10.5, 8, "OTHER"),
+        }
+        rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
+        routes, connected = create_intra_ic_routes(7, [("U2", "1"), ("U2", "2")], lookup, rules)
+
+        assert connected == {0, 1}
+        assert len(routes) == 1
+        assert len(routes[0].segments) == 1, "Clean direct path must stay direct"
+        seg = routes[0].segments[0]
+        assert (seg.x1, seg.y1, seg.x2, seg.y2) == (10.0, 10.0, 10.0, 11.0)
+
+    def test_defers_to_astar_when_no_legal_wrap(self):
+        """When foreign pads box the package in, the pair defers to A*."""
+        from kicad_tools.router.path import create_intra_ic_routes
+        from kicad_tools.router.rules import DesignRules
+
+        lookup = self._u8_lookup()
+        # Ring of foreign pads tight around U8 so every perimeter wrap
+        # violates as well (big plates north/south/east/west).
+        for i, (x, y) in enumerate(
+            [(225.0, 155.9), (225.0, 160.1), (222.2, 158.0), (227.8, 158.0)]
+        ):
+            lookup[("R9", str(i + 1))] = self._mk_pad(
+                "R9", str(i + 1), x, y, 99, "BLOCK", width=6.0, height=1.0
+            )
+        rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
+        routes, connected = create_intra_ic_routes(15, [("U8", "1"), ("U8", "4")], lookup, rules)
+
+        assert routes == [], "No legal path: nothing may be emitted"
+        assert connected == set(), "Deferred pads must stay in the A* pad list"
+
+    def test_wrap_avoids_existing_routed_copper(self):
+        """Perimeter wrap validates against previously routed segments."""
+        from kicad_tools.router.path import (
+            _segment_segment_distance,
+            create_intra_ic_routes,
+        )
+        from kicad_tools.router.primitives import Layer, Segment
+        from kicad_tools.router.rules import DesignRules
+
+        lookup = self._u8_lookup()
+        rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
+
+        # Foreign trace running down the east flank of U8 -- the shortest
+        # wrap (SE corner) would collide with it.
+        blocker = Segment(
+            x1=227.0,
+            y1=150.0,
+            x2=227.0,
+            y2=165.0,
+            width=0.3,
+            layer=Layer.F_CU,
+            net=42,
+            net_name="BLOCKER",
+        )
+        routes, connected = create_intra_ic_routes(
+            15,
+            [("U8", "1"), ("U8", "4")],
+            lookup,
+            rules,
+            obstacle_segments=[blocker],
+        )
+
+        assert connected == {0, 1}
+        assert len(routes) == 1
+        # Every emitted segment must clear the blocker edge-to-edge.
+        for seg in routes[0].segments:
+            dist = _segment_segment_distance(
+                seg.x1,
+                seg.y1,
+                seg.x2,
+                seg.y2,
+                blocker.x1,
+                blocker.y1,
+                blocker.x2,
+                blocker.y2,
+            )
+            assert dist - seg.width / 2 - blocker.width / 2 >= self.CLEARANCE - 1e-6
+
+
 class TestAutorouterRouteAll:
     """Tests for route_all methods."""
 

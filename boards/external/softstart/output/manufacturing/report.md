@@ -2,7 +2,7 @@
 title: "softstart_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-10 | jlcpcb"
+date: "Rev 1 | 2026-06-11 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 78 (0 SMD, 0 THT, 78 other) |
 | Nets | 41 |
-| Traces | 4516 segments |
+| Traces | 4519 segments |
 | Vias | 158 |
 | Board Size | 150.0 x 100.0 mm |
 
@@ -110,9 +110,9 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 
 | Metric | Count |
 |--------|-------|
-| Errors | 15 |
+| Errors | 14 |
 | Warnings | 8 |
-| Blocking | 15 |
+| Blocking | 14 |
 
 **Status**: FAIL
 ### Violations by Type
@@ -121,7 +121,6 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 |----------------|-------|
 | via_in_pad | 14 |
 | pad_grid | 8 |
-| clearance_pad_segment | 1 |
 
 
 \newpage
@@ -132,7 +131,7 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 
 ### Action Items
 
-- **[CRITICAL]** Fix 15 blocking DRC violations (via_in_pad (14), clearance_pad_segment (1))
+- **[CRITICAL]** Fix 14 blocking DRC violations (via_in_pad (14))
 - **[OPTIONAL]** Verify zone fill in KiCad for 12 zone-connected nets
 - **[OPTIONAL]** Review 8 DRC warnings
 - **[OPTIONAL]** Analog-sensitive: U3 (INA180A3) — instrumentation amplifier (TI INA); manual layout review recommended
