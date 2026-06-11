@@ -11,6 +11,7 @@ This module provides:
 - Obstacle: Area to avoid during routing
 """
 
+import dataclasses
 import random
 import uuid
 from dataclasses import dataclass, field
@@ -262,6 +263,26 @@ class Route:
         for via in self.vias:
             parts.append(via.to_sexp())
         return "\n\t".join(parts)
+
+    def copy_geometry(self) -> "Route":
+        """Return a geometric snapshot of this route (Issue #3507).
+
+        Produces a new :class:`Route` whose :class:`Segment` and
+        :class:`Via` objects are field-level copies of this route's, so
+        the snapshot's geometry survives in-place mutation of the
+        original (the ``drc_verify_and_nudge`` pass nudges segment
+        coordinates and merges vias directly on the live objects).
+        Used by :meth:`RoutingGrid.resync_route_occupancy` to unmark the
+        PRE-mutation copper from the routing grid after a post-route
+        pass mutates route geometry.
+        """
+        return Route(
+            net=self.net,
+            net_name=self.net_name,
+            segments=[dataclasses.replace(seg) for seg in self.segments],
+            vias=[dataclasses.replace(via) for via in self.vias],
+            is_escape=self.is_escape,
+        )
 
     def validate_layer_transitions(
         self,

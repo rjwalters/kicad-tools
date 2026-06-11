@@ -4103,6 +4103,197 @@ class RoutingGrid:
             )
             impl.unmark_via(gx, gy, via.net, radius_cells)
 
+    def _mark_route_on_cpp_cells(self, route: Route, max_trace_width: float | None = None) -> None:
+        """Mirror a route's cell marking onto the paired C++ grid.
+
+        Issue #3507: grid-level inverse of ``_unmark_route_on_cpp_cells``
+        using the SAME radius math as the canonical
+        ``RoutingCore._mark_route_on_cpp_grid`` (``router/core.py``), so
+        ``resync_route_occupancy`` can restore C++ cell parity without a
+        back-reference to the router.  Keep the three sites' radius math
+        in lock-step.
+
+        No-op when no C++ grid is paired (pure-Python backend).
+        """
+        cpp_grid = self._cpp_grid
+        if cpp_grid is None:
+            return
+
+        for seg in route.segments:
+            # Must match RoutingCore._mark_route_on_cpp_grid (segments).
+            total_clearance = seg.width / 2 + self.rules.trace_clearance
+            clearance_cells = int(total_clearance / self.resolution) + 1
+            gx1, gy1 = self.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.layer_to_index(seg.layer.value)
+            cpp_grid.mark_segment(gx1, gy1, gx2, gy2, layer_idx, seg.net, clearance_cells)
+
+        del max_trace_width  # cpp mark path always uses rules.trace_width
+        for via in route.vias:
+            # Must match RoutingCore._mark_route_on_cpp_grid (vias).
+            gx, gy = self.world_to_grid(via.x, via.y)
+            radius_cells = (
+                math.ceil(
+                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+                    / self.resolution
+                )
+                + 1
+            )
+            cpp_grid.mark_via(gx, gy, via.net, radius_cells)
+
+    def _rebuild_segment_index(self) -> None:
+        """Rebuild the segment R-tree from scratch from ``self.routes``.
+
+        Issue #3507: post-route passes (``drc_verify_and_nudge``) mutate
+        :class:`Segment` coordinates IN PLACE.  The R-tree stores entries
+        keyed by ``id(seg)`` with envelopes computed from the coordinates
+        at insert time, so after an in-place mutation an incremental
+        ``_rtree_remove_segment`` would recompute a DIFFERENT envelope and
+        fail to delete the stale entry.  Wholesale rebuild from the
+        current route geometry is the only safe resync.  Idempotent;
+        sibling of :meth:`rebuild_via_index`.
+        """
+        if not self._rtree_available:
+            return
+        self._seg_rtree.clear()
+        self._seg_rtree_items.clear()
+        self._seg_rtree_count = 0
+        for route in self.routes:
+            self._rtree_insert_route(route)
+
+    def resync_route_occupancy(
+        self,
+        replacements: list[tuple[Route | None, Route | None]],
+        max_trace_width: float | None = None,
+    ) -> int:
+        """Re-derive grid occupancy after a pass mutated route geometry.
+
+        Issue #3507: the post-route optimizer/nudge family mutates route
+        geometry WITHOUT re-marking the grid, so (a) the passes' own
+        collision checking runs against pre-mutation copper, and (b) any
+        downstream consumer of the grid (targeted repair re-routes,
+        future nets in multi-pass flows) operates on a stale occupancy
+        picture -- board 06's transactional solo-re-route repair detected
+        the optimizer-introduced USB3_RX1+/RX1- overlap but had to roll
+        back because its A* ran against the stale grid.
+
+        Each ``(stale, current)`` pair describes one route mutation:
+
+        * ``(old_route, new_route)`` -- a route REPLACED by a pass that
+          builds new Route objects (``TraceOptimizer.optimize_route``).
+        * ``(geometry_snapshot, live_route)`` -- a route mutated IN
+          PLACE (``drc_verify_and_nudge``); the snapshot is a
+          :meth:`Route.copy_geometry` copy taken BEFORE the pass.
+        * ``(removed_route, None)`` / ``(None, restored_route)`` -- pure
+          removal / insertion (connectivity-invariant reverts).
+
+        Pairs whose stale and current geometry compare equal are
+        skipped, so callers may pass one pair per route and let this
+        method do the incremental filtering (the perf shape requested by
+        #3507: unmark-old/mark-new per MUTATED route, not a full-board
+        re-mark per pass).
+
+        What happens for each mutated pair:
+
+        1. The stale geometry's cells are unmarked (Python grid + the
+           paired C++ grid, honoring an active
+           ``begin_cpp_unmark_deferral`` window like
+           :meth:`unmark_route` does).
+        2. ``self.routes`` membership is swapped (stale object out,
+           current object in).
+        3. Both R-trees are rebuilt wholesale (in-place mutation
+           invalidates the id/envelope-keyed entries -- see
+           :meth:`_rebuild_segment_index`).
+        4. Cells are re-marked for EVERY route of every affected net
+           (not just the mutated routes: step 1's net-guarded unmark may
+           have cleared cells under an unchanged sibling route of the
+           same net), on both grids.
+        5. The C++ stored-route validation snapshot is invalidated so it
+           lazily rebuilds from the refreshed ``self.routes``.
+
+        Args:
+            replacements: ``(stale, current)`` pairs as described above.
+            max_trace_width: Passed through to via mark/unmark so the
+                blocking envelopes match the original ``mark_route`` call
+                (Issue #1692).
+
+        Returns:
+            Number of pairs whose geometry actually changed (0 means the
+            grid was already consistent and nothing was touched).
+        """
+
+        def _geometry_changed(stale: Route | None, current: Route | None) -> bool:
+            if stale is None or current is None:
+                return True
+            return stale.segments != current.segments or stale.vias != current.vias
+
+        changed = [(s, c) for s, c in replacements if _geometry_changed(s, c)]
+        if not changed:
+            return 0
+
+        with self._acquire_lock():
+            # 1. Unmark stale geometry at the cell level (both grids).
+            for stale, _current in changed:
+                if stale is None:
+                    continue
+                for seg in stale.segments:
+                    total_clearance = seg.width / 2 + self.rules.trace_clearance
+                    clearance_cells = int(total_clearance / self.resolution) + 1
+                    # Issue #1666: must match mark_route() safety margin.
+                    clearance_cells += 1
+                    self._unmark_segment(seg, clearance_cells=clearance_cells)
+                for via in stale.vias:
+                    self._unmark_via(via, max_trace_width=max_trace_width)
+                if getattr(self, "_cpp_unmark_deferred", False):
+                    self._deferred_cpp_unmarks.append((stale, max_trace_width))
+                else:
+                    self._unmark_route_on_cpp_cells(stale, max_trace_width=max_trace_width)
+
+            # 2. Swap ``self.routes`` membership.  Identity-based: the
+            #    stale side is the pre-mutation object for replaced
+            #    routes (present in ``self.routes``) or a geometry
+            #    snapshot (never in ``self.routes`` -- the live, mutated
+            #    object already is).
+            stale_ids = {id(s) for s, _c in changed if s is not None}
+            kept = [r for r in self.routes if id(r) not in stale_ids]
+            kept_ids = {id(r) for r in kept}
+            for _stale, current in changed:
+                if current is not None and id(current) not in kept_ids:
+                    kept.append(current)
+                    kept_ids.add(id(current))
+            self.routes = kept
+
+            # 3. Wholesale R-tree rebuild from the refreshed routes.
+            self._rebuild_segment_index()
+            self.rebuild_via_index()
+
+            # 4. Re-mark cells for every route of every affected net.
+            affected_nets = {s.net for s, _c in changed if s is not None} | {
+                c.net for _s, c in changed if c is not None
+            }
+            for route in self.routes:
+                if route.net not in affected_nets:
+                    continue
+                for seg in route.segments:
+                    total_clearance = seg.width / 2 + self.rules.trace_clearance
+                    clearance_cells = int(total_clearance / self.resolution) + 1
+                    # Issue #1666: must match mark_route() safety margin.
+                    clearance_cells += 1
+                    self._mark_segment(seg, clearance_cells=clearance_cells)
+                for via in route.vias:
+                    self._mark_via(via, max_trace_width=max_trace_width)
+                self._mark_route_on_cpp_cells(route, max_trace_width=max_trace_width)
+
+        # 5. Invalidate the C++ stored-route snapshot (Issue #2481) so
+        #    validation lazily rebuilds from the refreshed self.routes.
+        cpp_grid = self._cpp_grid
+        if cpp_grid is not None:
+            invalidate = getattr(cpp_grid, "invalidate_stored_routes", None)
+            if invalidate is not None:
+                invalidate()
+
+        return len(changed)
+
     # =========================================================================
     # NEGOTIATED CONGESTION ROUTING SUPPORT
     # =========================================================================

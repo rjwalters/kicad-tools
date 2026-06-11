@@ -734,22 +734,23 @@ class TestBoard06StrictGateGuard:
         pour nets are GENUINELY one copper component, so these 2 are
         analyzer false positives, tracked with the #3482 analyzer gap)
 
-    Blocking composition (vs the pre-refresh 17 = 8 skew + 8 continuity
-    + 1 intra at 18/21 reach): 8 ``diffpair_length_skew`` + 8
+    Blocking composition (Issue #3507 refresh -- the optimizer/nudge
+    grid re-marking fix): 9 ``diffpair_length_skew`` + 9
     ``diffpair_routing_continuity`` (single-ended fallback measurements
     -- the coupled phase still converges 0/9, the board's remaining
-    quality phase) + 7 ``diffpair_clearance_intra`` + 10
-    ``clearance_segment_via`` (one optimizer/nudge-introduced
-    USB3_RX1+/RX1- overlap cluster at the J1 fan-out -- diagnosed in
-    the #3413 phase 4-6 PR; the recipe's transactional solo-re-route
-    repair detects it but rolls back because the post-optimizer grid
-    state is stale).  The count GREW with reach: unrouted nets cannot
-    contribute skew/continuity/clearance errors, so 18/21 -> 21/21
-    engagement surfaces previously-unmeasured violations -- the same
-    engagement-over-silence story as the #3145 floor bump.
+    quality phase; 8+8 -> 9+9 because the refreshed route engages one
+    more measurable pair) + 2 ``clearance_segment_via`` (USB_CC2 vs
+    USB2_D+ grid-quantization grazes at the J1 fan-out).  The previous
+    17-error USB3_RX1+/RX1- overlap cluster (7 intra + 10 seg-via) is
+    RETIRED: the grid-transactional optimize/nudge passes
+    (``optimize_routes_grid_synced`` + the resync inside
+    ``drc_verify_and_nudge``) collision-check against the TRUE copper
+    state and never introduce the overlap (the recipe's 6b solo
+    re-route repair reports "No physically-overlapping pair sides
+    detected").  33 -> 20.
     """
 
-    EXPECTED_STRICT_GATE_ERRORS = 33
+    EXPECTED_STRICT_GATE_ERRORS = 20
     EXPECTED_ADVISORY_CONNECTIVITY = 2
 
     @pytest.fixture(scope="class")

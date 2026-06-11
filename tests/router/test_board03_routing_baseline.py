@@ -15,11 +15,17 @@ June 9 2026 RE-BASELINE (issue #3410):
     connectors skip the escape via-fanout; and auto-pour no longer
     deletes hand-tuned zones (double origin-subtraction bug).  The
     production recipe is ``kct route --seed 42 --manufacturer
-    jlcpcb-tier1 --backend cpp --timeout 600 --raw`` (see
-    ``generate_design.py:route_pcb`` for why ``--raw`` is
-    load-bearing) and measures **13/13 nets, 0 DRC errors** at
-    jlcpcb-tier1.  The historical notes below document the pre-#3410
-    state for archaeology.
+    jlcpcb-tier1 --backend cpp --timeout 600`` and measures
+    **13/13 nets, 0 DRC errors** at jlcpcb-tier1.  The historical
+    notes below document the pre-#3410 state for archaeology.
+
+June 11 2026 (issues #3507/#3454): ``--raw`` dropped from the recipe.
+    The optimizer's grid-staleness defect (collision checking against
+    pre-optimization copper) was fixed by the grid-transactional
+    optimize pass (``optimize_routes_grid_synced``), which retires the
+    deterministic XTAL1/XTAL2 ``clearance_segment_via`` merge
+    violation that made ``--raw`` load-bearing.  13/13 + 0 DRC holds
+    with the TraceOptimizer ON.
 
 Baseline measurement at pre-#3410 HEAD (with ``kct route --backend cpp
 --seed 42 --auto-fix --auto-fix-passes 2 --manufacturer jlcpcb-tier1``):
@@ -359,12 +365,11 @@ def _run_kct_route(unrouted: Path, seed: int) -> str:
             "cpp",
             "--timeout",
             "600",
-            # Issue #3410: ``--raw`` matches the production recipe in
-            # ``generate_design.py:route_pcb()`` EXACTLY -- the
-            # TraceOptimizer pass otherwise re-introduces a
-            # deterministic clearance_segment_via violation (see the
-            # recipe comment).  Keep these flag lists in sync.
-            "--raw",
+            # Issues #3507/#3454: ``--raw`` removed in lock-step with the
+            # production recipe in ``generate_design.py:route_pcb()`` --
+            # the grid-transactional optimize pass retired the
+            # deterministic clearance_segment_via merge violation that
+            # made it load-bearing.  Keep these flag lists in sync.
         ]
         proc = subprocess.run(
             cmd,

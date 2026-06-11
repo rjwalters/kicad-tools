@@ -851,7 +851,31 @@ tolerances:
   # 8+8 skew/continuity block; (b) an optimizer/nudge grid-state fix
   # retires the 17-error RX1 overlap cluster; after both, the floor
   # tightens toward ~2.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 33
+  #
+  # Issue #3507 (optimizer/nudge grid re-marking): exit clause (b)
+  # FIRED.  The post-route passes are now grid-transactional
+  # (``optimize_routes_grid_synced`` + the resync inside
+  # ``drc_verify_and_nudge``), so the optimizer's collision checking
+  # runs against the TRUE copper state and never introduces the
+  # USB3_RX1+/RX1- overlap in the first place (the recipe's 6b solo
+  # re-route repair now reports "No physically-overlapping pair sides
+  # detected").  Refreshed committed-artifact sidecar composition
+  # (seed 42, PYTHONHASHSEED=0):
+  #   9 diffpair_length_skew + 9 diffpair_routing_continuity
+  #     (single-ended fallback measurements at 21/21 reach; coupled
+  #     convergence is still 0/9 -- exit clause (a), the #3413
+  #     phase-6-quality successor; 8+8 -> 9+9 because the refreshed
+  #     route engages one more measurable pair, not a regression)
+  #   + 2 clearance_segment_via (USB_CC2 vs USB2_D+ at the J1
+  #     fan-out, ~0.01mm grid-quantization grazes -- unrelated to the
+  #     retired RX1 cluster: 0 diffpair_clearance_intra remain)
+  #   = 20 blocking.  (Plus 2 advisory ``connectivity`` excluded from
+  #   the gate -- the #3482 analyzer false positives; the copper-union
+  #   audit again proves all 5 pour nets are one component.)
+  # Floor tightened 33 -> 20.  Exit clause: (a) above retires the 9+9
+  # block; the 2 seg-via grazes are general fine-grid quantization
+  # targets; after both, the floor tightens toward ~0.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure

@@ -45,7 +45,7 @@ from .serpentine import (
     add_serpentine,
     tune_match_group,
 )
-from .trace import TraceOptimizer
+from .trace import TraceOptimizer, optimize_routes_grid_synced
 from .via_optimizer import (
     LayerConnectivityError,
     ViaOptimizationConfig,
@@ -72,5 +72,6 @@ __all__ = [
     "ViaOptimizer",
     "add_serpentine",
     "optimize_route_vias",
+    "optimize_routes_grid_synced",
     "tune_match_group",
 ]

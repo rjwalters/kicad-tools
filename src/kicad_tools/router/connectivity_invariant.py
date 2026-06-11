@@ -300,11 +300,28 @@ def enforce_connectivity_invariant(
 
     # Default: revert regressed nets to pre-phase routes.
     reverted_nets = result.regressed_nets
+    removed_routes = [r for r in router.routes if r.net in reverted_nets]
+    restored_routes: list[Route] = []
     new_routes = [r for r in router.routes if r.net not in reverted_nets]
     for nid in reverted_nets:
-        new_routes.extend(snapshot.pre_routes_by_net.get(nid, []))
+        restored = snapshot.pre_routes_by_net.get(nid, [])
+        new_routes.extend(restored)
+        restored_routes.extend(restored)
     router.routes = new_routes
     result.reverted = True
+
+    # Issue #3507: the revert just mutated ``router.routes`` -- re-mark
+    # the grid so its occupancy reflects the restored pre-phase copper
+    # instead of the regressed post-phase geometry.  Expressed as pure
+    # removals + insertions because the per-net route counts may differ
+    # between the two states.  Defensive getattr: unit tests drive this
+    # with stub routers that carry routes but no grid.
+    grid = getattr(router, "grid", None)
+    if grid is not None:
+        replacements: list[tuple[Route | None, Route | None]] = [
+            (r, None) for r in removed_routes
+        ] + [(None, r) for r in restored_routes]
+        grid.resync_route_occupancy(replacements)
 
     # Always log a warning so the regression surfaces in CI even when
     # --verbose is not set.

@@ -3534,6 +3534,7 @@ def route_with_layer_escalation(
             OptimizationConfig,
             TraceOptimizer,
             make_collision_checker,
+            optimize_routes_grid_synced,
         )
 
         if not quiet:
@@ -3561,11 +3562,10 @@ def route_with_layer_escalation(
         _ci_snapshot = _connectivity_snapshot(final_result.router)
 
         with spinner("Optimizing traces...", quiet=quiet):
-            optimized_routes = []
-            for route in final_result.router.routes:
-                optimized_route = optimizer.optimize_route(route)
-                optimized_routes.append(optimized_route)
-            final_result.router.routes = optimized_routes
+            # Issue #3507: grid-transactional optimize -- each mutated
+            # route's old copper is unmarked and the new copper marked so
+            # the grid never goes stale across the pass.
+            optimize_routes_grid_synced(final_result.router, optimizer)
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -4160,6 +4160,7 @@ def route_with_rule_relaxation(
             OptimizationConfig,
             TraceOptimizer,
             make_collision_checker,
+            optimize_routes_grid_synced,
         )
 
         if not quiet:
@@ -4185,11 +4186,9 @@ def route_with_rule_relaxation(
         _ci_snapshot = _connectivity_snapshot(final_result.router)
 
         with spinner("Optimizing traces...", quiet=quiet):
-            optimized_routes = []
-            for route in final_result.router.routes:
-                optimized_route = optimizer.optimize_route(route)
-                optimized_routes.append(optimized_route)
-            final_result.router.routes = optimized_routes
+            # Issue #3507: grid-transactional optimize (see
+            # optimize_routes_grid_synced).
+            optimize_routes_grid_synced(final_result.router, optimizer)
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -6277,6 +6276,7 @@ def route_with_combined_escalation(
             OptimizationConfig,
             TraceOptimizer,
             make_collision_checker,
+            optimize_routes_grid_synced,
         )
 
         if not quiet:
@@ -6302,11 +6302,9 @@ def route_with_combined_escalation(
         _ci_snapshot = _connectivity_snapshot(final_result.router)
 
         with spinner("Optimizing traces...", quiet=quiet):
-            optimized_routes = []
-            for route in final_result.router.routes:
-                optimized_route = optimizer.optimize_route(route)
-                optimized_routes.append(optimized_route)
-            final_result.router.routes = optimized_routes
+            # Issue #3507: grid-transactional optimize (see
+            # optimize_routes_grid_synced).
+            optimize_routes_grid_synced(final_result.router, optimizer)
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -9066,6 +9064,7 @@ def main(argv: list[str] | None = None) -> int:
             OptimizationConfig,
             TraceOptimizer,
             make_collision_checker,
+            optimize_routes_grid_synced,
         )
 
         if not quiet:
@@ -9091,11 +9090,9 @@ def main(argv: list[str] | None = None) -> int:
         _ci_snapshot = _connectivity_snapshot(router)
 
         with spinner("Optimizing traces...", quiet=quiet):
-            optimized_routes = []
-            for route in router.routes:
-                optimized_route = optimizer.optimize_route(route)
-                optimized_routes.append(optimized_route)
-            router.routes = optimized_routes
+            # Issue #3507: grid-transactional optimize (see
+            # optimize_routes_grid_synced).
+            optimize_routes_grid_synced(router, optimizer)
 
         _enforce_connectivity_invariant_or_exit(
             router,
