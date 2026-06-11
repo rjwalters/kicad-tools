@@ -91,17 +91,29 @@ def _net_ids_by_name(pcb_path: Path, names: frozenset[str]) -> set[int]:
 
 def _committed_routed_artifacts() -> list[Path]:
     """Every ``*_routed.kicad_pcb`` tracked by git under ``boards/``."""
-    result = subprocess.run(
-        ["git", "ls-files", "boards"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "boards"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        names = result.stdout.splitlines()
+    except (subprocess.CalledProcessError, OSError):
+        # The CI Test job runs inside the kicad/kicad:10.0 container
+        # (PR #3525) where the checked-out workspace is owned by a
+        # different uid, so git refuses with "detected dubious
+        # ownership" (exit 128).  Fall back to a filesystem walk -- on
+        # a clean CI checkout the on-disk tree IS the committed tree.
+        # Local developer runs keep the git path so stray untracked
+        # artifacts cannot widen (or accidentally gate) the census.
+        names = [
+            str(p.relative_to(REPO_ROOT))
+            for p in REPO_ROOT.glob("boards/**/*_routed.kicad_pcb")
+        ]
     return sorted(
-        REPO_ROOT / line
-        for line in result.stdout.splitlines()
-        if line.endswith("_routed.kicad_pcb")
+        REPO_ROOT / line for line in names if line.endswith("_routed.kicad_pcb")
     )
 
 
