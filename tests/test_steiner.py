@@ -9,7 +9,6 @@ This module tests the RSMT implementation in steiner.py, covering:
 - Integration with Pad objects via build_rsmt()
 """
 
-import pytest
 
 from kicad_tools.router.algorithms.steiner import (
     _build_mst_edges,
@@ -19,6 +18,8 @@ from kicad_tools.router.algorithms.steiner import (
     _mst_cost,
     _solve_3_terminal,
     build_rsmt,
+    make_blocked_cell_predicate,
+    relocate_blocked_point,
 )
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
@@ -496,3 +497,204 @@ class TestSteinerGridSnap:
         ext2, edges2 = build_rsmt(pads, snap_fn=None)
         assert [(p.x, p.y) for p in ext1] == [(p.x, p.y) for p in ext2]
         assert edges1 == edges2
+
+
+class TestRelocateBlockedPoint:
+    """Issue #3471: Steiner branch points must not sit on blocked cells.
+
+    Board 05's ISENSE_A+ produced a Steiner point at (136.9, 176.0) --
+    on a MOSFET through-hole leg -- so every incident A* edge failed and
+    the net was classified ``blocked_path`` even on an empty board.
+    ``relocate_blocked_point`` ring-scans for the nearest free cell.
+    """
+
+    def test_free_cell_unchanged(self):
+        assert relocate_blocked_point(5, 5, lambda x, y: False) == (5, 5)
+
+    def test_relocates_to_adjacent_free_cell(self):
+        blocked = {(5, 5)}
+        gx, gy = relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked)
+        assert (gx, gy) != (5, 5)
+        assert max(abs(gx - 5), abs(gy - 5)) == 1
+
+    def test_relocation_is_deterministic(self):
+        blocked = {(5, 5)}
+        results = {
+            relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked)
+            for _ in range(10)
+        }
+        assert len(results) == 1
+
+    def test_ring_scan_finds_nearest_ring(self):
+        """A 3x3 blocked block forces relocation to Chebyshev radius 2."""
+        blocked = {(x, y) for x in range(4, 7) for y in range(4, 7)}
+        gx, gy = relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked)
+        assert (gx, gy) not in blocked
+        assert max(abs(gx - 5), abs(gy - 5)) == 2
+
+    def test_all_blocked_returns_original(self):
+        gx, gy = relocate_blocked_point(
+            5, 5, lambda x, y: True, max_radius=3
+        )
+        assert (gx, gy) == (5, 5)
+
+    def test_build_rsmt_snap_fn_can_relocate(self):
+        """End-to-end: a snap_fn embedding the relocation moves the
+        synthetic branch point off a blocked cell while terminals keep
+        their exact coordinates."""
+        # Cross topology forces a branch point near (50, 50).
+        pads = [
+            _make_pad(40.0, 50.0),
+            _make_pad(60.0, 50.0),
+            _make_pad(50.0, 40.0),
+            _make_pad(50.0, 60.0),
+        ]
+        blocked_cell = (50, 50)
+
+        def snap(x: float, y: float) -> tuple[float, float]:
+            gx, gy = round(x), round(y)  # 1mm grid for the test
+            gx, gy = relocate_blocked_point(
+                gx, gy, lambda cx, cy: (cx, cy) == blocked_cell
+            )
+            return float(gx), float(gy)
+
+        extended, _edges = build_rsmt(pads, snap_fn=snap)
+        steiner = [p for p in extended if p.steiner_point]
+        assert steiner, "cross topology must produce a Steiner point"
+        for p in steiner:
+            assert (round(p.x), round(p.y)) != blocked_cell
+        for pad, original in zip(extended[:4], pads, strict=False):
+            assert (pad.x, pad.y) == (original.x, original.y)
+
+
+class _FakeOccupancyGrid:
+    """Minimal grid exposing the occupancy APIs the predicate needs."""
+
+    def __init__(self, blocked: set[tuple[int, int]], resolution: float = 1.0):
+        self._blocked = blocked
+        self.resolution = resolution
+
+    def get_routable_indices(self) -> list[int]:
+        return [0]
+
+    def is_blocked_for_net(self, gx: int, gy: int, layer: int, net: int) -> bool:
+        return (gx, gy) in self._blocked
+
+    def world_to_grid(self, x: float, y: float) -> tuple[int, int]:
+        return round(x), round(y)
+
+    def grid_to_world(self, gx: int, gy: int) -> tuple[float, float]:
+        return float(gx), float(gy)
+
+
+class _FakeRules:
+    trace_width = 0.5
+    trace_clearance = 0.25
+
+
+class TestMakeBlockedCellPredicate:
+    """Tests for the shared blocked-cell predicate factory (Issue #3471)."""
+
+    def test_free_grid_is_unblocked(self):
+        fn = make_blocked_cell_predicate(_FakeOccupancyGrid(set()), _FakeRules(), 1)
+        assert fn is not None
+        assert fn(5, 5) is False
+
+    def test_margin_window_blocks_neighbours(self):
+        """With a 1-cell margin, a point ADJACENT to blocked copper is
+        unusable too (a trace cannot be centered there)."""
+        fn = make_blocked_cell_predicate(
+            _FakeOccupancyGrid({(5, 5)}), _FakeRules(), 1
+        )
+        assert fn is not None
+        assert fn(5, 5) is True
+        assert fn(6, 6) is True  # margin window includes (5, 5)
+        assert fn(7, 7) is False  # window [6..8]^2 is clear
+
+    def test_margin_scales_with_resolution(self):
+        """trace_width/2 + clearance = 0.5mm -> 5 cells at 0.1mm grid."""
+        fn = make_blocked_cell_predicate(
+            _FakeOccupancyGrid({(50, 50)}, resolution=0.1), _FakeRules(), 1
+        )
+        assert fn is not None
+        assert fn(54, 54) is True  # within the 5-cell margin window
+        assert fn(56, 56) is False
+
+    def test_grid_without_apis_returns_none(self):
+        assert make_blocked_cell_predicate(object(), _FakeRules(), 1) is None
+
+    def test_none_rules_keeps_one_cell_margin(self):
+        fn = make_blocked_cell_predicate(_FakeOccupancyGrid({(5, 5)}), None, 1)
+        assert fn is not None
+        assert fn(6, 6) is True
+        assert fn(7, 7) is False
+
+
+class TestMSTRouterSteinerRelocation:
+    """Issue #3471: the MSTRouter path (executed by the auto-layers
+    two-phase flow) must relocate blocked Steiner branch points exactly
+    like the negotiated path does -- board 05's ISENSE cluster failed
+    ``blocked_path`` because only the negotiated path had the fix."""
+
+    def test_blocked_branch_point_relocated_in_route_net(self):
+        from kicad_tools.router.algorithms.mst import MSTRouter
+
+        # Cross topology forces a branch point near (50, 50); block a
+        # 3x3 region so the margin-aware predicate must move it at
+        # least 2 cells away.
+        blocked = {(x, y) for x in range(49, 52) for y in range(49, 52)}
+        grid = _FakeOccupancyGrid(blocked)
+
+        seen_pads: list[Pad] = []
+
+        class _StubRouter:
+            def route(self, source_pad, target_pad):
+                seen_pads.extend([source_pad, target_pad])
+                return None  # failure is fine; we only inspect endpoints
+
+        mst = MSTRouter(grid, _StubRouter(), _FakeRules(), {})
+        pads = [
+            _make_pad(40.0, 50.0),
+            _make_pad(60.0, 50.0),
+            _make_pad(50.0, 40.0),
+            _make_pad(50.0, 60.0),
+        ]
+        mst.route_net(pads, mark_route_callback=lambda r: None)
+
+        steiner = [p for p in seen_pads if getattr(p, "steiner_point", False)]
+        assert steiner, "cross topology must produce a Steiner point"
+        for p in steiner:
+            cell = (round(p.x), round(p.y))
+            assert cell not in blocked, (
+                f"Steiner point {cell} left on blocked copper"
+            )
+
+    def test_terminals_keep_exact_coordinates(self):
+        from kicad_tools.router.algorithms.mst import MSTRouter
+
+        blocked = {(50, 50)}
+        grid = _FakeOccupancyGrid(blocked)
+
+        seen_pads: list[Pad] = []
+
+        class _StubRouter:
+            def route(self, source_pad, target_pad):
+                seen_pads.extend([source_pad, target_pad])
+                return None
+
+        mst = MSTRouter(grid, _StubRouter(), _FakeRules(), {})
+        pads = [
+            _make_pad(40.0, 50.0),
+            _make_pad(60.0, 50.0),
+            _make_pad(50.0, 40.0),
+            _make_pad(50.0, 60.0),
+        ]
+        mst.route_net(pads, mark_route_callback=lambda r: None)
+
+        originals = {(40.0, 50.0), (60.0, 50.0), (50.0, 40.0), (50.0, 60.0)}
+        terminal_coords = {
+            (p.x, p.y)
+            for p in seen_pads
+            if not getattr(p, "steiner_point", False)
+        }
+        assert originals <= terminal_coords

@@ -850,7 +850,11 @@ class NegotiatedRouter:
 
         if len(pad_objs) > 2:
             # RSMT-based routing with negotiated mode
-            from .steiner import build_rsmt
+            from .steiner import (
+                build_rsmt,
+                make_blocked_cell_predicate,
+                relocate_blocked_point,
+            )
 
             # Build congestion-aware cost function for Steiner tree
             # construction when a RUDY estimator is available.
@@ -879,8 +883,30 @@ class NegotiatedRouter:
             # the routing grid — off-grid virtual pads have no sub-grid
             # rescue (no ``ref``) and fail ``pin_access`` with
             # ``PADS_OFF_GRID: steiner@(...)``.
+            #
+            # Issue #3471: additionally relocate branch points that land
+            # on cells blocked on EVERY routable layer (net-0 obstacles /
+            # foreign-net copper).  A blocked virtual pad has no rescue
+            # path: every incident A* edge fails and the whole net is
+            # classified ``blocked_path`` even on an empty board (board
+            # 05's ISENSE_A+ Steiner point landed on a MOSFET TH leg).
+            # ``relocate_blocked_point`` ring-scans for the nearest free
+            # cell; on any grid-API mismatch the cell is treated as free
+            # so legacy behaviour is preserved byte-for-byte.
+            # The blocked-cell predicate (margin math + per-layer
+            # occupancy scan) is shared with the MSTRouter path via
+            # ``make_blocked_cell_predicate`` -- see its docstring for
+            # the margin rationale.  ``None`` (fixture/mock grids
+            # without occupancy APIs) preserves legacy snapping
+            # behaviour byte-for-byte.
+            _point_blocked = make_blocked_cell_predicate(
+                self.grid, self.rules, pad_objs[0].net
+            )
+
             def _snap_to_grid(x: float, y: float) -> tuple[float, float]:
                 gx, gy = self.grid.world_to_grid(x, y)
+                if _point_blocked is not None:
+                    gx, gy = relocate_blocked_point(gx, gy, _point_blocked)
                 return self.grid.grid_to_world(gx, gy)
 
             pad_objs, rsmt_edges = build_rsmt(

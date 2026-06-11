@@ -2589,6 +2589,25 @@ class RoutingGrid:
             return cell.net == 0 or cell.net != net
         return False
 
+    def is_blocked_for_net(self, gx: int, gy: int, layer: int, net: int) -> bool:
+        """Check if a cell is blocked for a specific net, by GRID INDEX.
+
+        Uniform-API twin of :meth:`CppGrid.is_blocked_for_net` (Issue
+        #3471): ``layer`` here is the grid layer INDEX (0..num_layers-1),
+        not a :class:`Layer` enum.  Same semantics as :meth:`is_blocked`:
+        same-net copper does not block; net-0 obstacles and foreign-net
+        copper do.  Used by the Steiner branch-point relocation in
+        ``route_net_negotiated``.
+        """
+        if not (0 <= gx < self.cols and 0 <= gy < self.rows):
+            return True
+        if not (0 <= layer < self.num_layers):
+            return True
+        cell = self.grid[layer][gy][gx]
+        if cell.blocked:
+            return cell.net == 0 or cell.net != net
+        return False
+
     def validate_segment_clearance(
         self,
         seg: Segment,

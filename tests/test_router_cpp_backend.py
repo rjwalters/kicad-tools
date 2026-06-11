@@ -338,6 +338,69 @@ class TestCppPathfinderPadBounds:
         assert bounds.metal_gx2 - bounds.metal_gx1 >= 1
         assert bounds.metal_gy2 - bounds.metal_gy1 >= 1
 
+    def test_compute_pad_bounds_zero_width_steiner_pad_never_empty(self):
+        """Issue #3471: zero-area virtual pads must yield non-empty bounds.
+
+        Steiner branch points are virtual pads with width == height == 0.
+        ``ceil(v) > floor(v)`` whenever ``(pad.x - origin) / resolution``
+        is not exactly integral in floating point, which left
+        ``metal_gx1 > metal_gx2`` (EMPTY bounds): the C++ A* seeded zero
+        start nodes and failed every Steiner-incident edge with
+        FAILURE_NO_PATH at 0 iterations.  Board 05's ISENSE cluster
+        (4-pad nets whose RSMT synthesises branch points) lost every
+        Steiner edge this way, on every route of the board.  The fix
+        clamps empty spans to the nearest grid cell.
+        """
+        if not is_cpp_available():
+            import pytest
+
+            pytest.skip("C++ backend not available")
+
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        rules.grid_resolution = 0.1
+        grid = RoutingGrid(
+            width=100.0,
+            height=100.0,
+            rules=rules,
+            layer_stack=LayerStack.two_layer(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pf = CppPathfinder(cpp_grid, rules)
+
+        # Sweep a band of grid-snapped coordinates; the float error that
+        # empties the bounds depends on the exact mantissa pattern, so
+        # exercising many positions guarantees the regression triggers
+        # without the clamp (35.8/0.1 = 357.99999999999994 is one
+        # measured board-05 case).
+        for k in range(200, 800, 7):
+            wx, wy = cpp_grid.grid_to_world(k, k // 2)
+            pad = Pad(
+                x=wx,
+                y=wy,
+                width=0.0,
+                height=0.0,
+                net=1,
+                net_name="NET1",
+                layer=Layer.F_CU,
+                steiner_point=True,
+            )
+            bounds = pf._compute_pad_bounds(pad)
+            assert bounds.metal_gx1 <= bounds.metal_gx2, (
+                f"empty x-span for steiner pad at ({wx}, {wy})"
+            )
+            assert bounds.metal_gy1 <= bounds.metal_gy2, (
+                f"empty y-span for steiner pad at ({wx}, {wy})"
+            )
+            # The clamped cell must be the nearest cell to the pad center
+            assert abs(bounds.metal_gx1 - k) <= 1
+            assert abs(bounds.metal_gy1 - (k // 2)) <= 1
+
     def test_cpp_routes_off_grid_pad(self):
         """Test that C++ backend routes successfully when pad is off-grid.
 
