@@ -367,6 +367,36 @@ def is_dense_package(
     if len(pads) >= 32 and min_pitch <= 0.8 + 1e-3 and _looks_like_quad_layout(pads):
         return True
 
+    # Issue #3343: SOT-23-class small packages (3-7 pads forming exactly
+    # two short rows/columns) are NOT dense regardless of the dynamic
+    # threshold.  Escape fan-out exists for pin FIELDS where perimeter
+    # routing blocks inner pads; a SOT-23-5/6 has at most 3 perimeter
+    # pads per side and its perpendicular stub direction is exactly the
+    # first move A* makes anyway -- the staggered stub + via geometry
+    # only consumes the pocket around the package.  Empirically on
+    # softstart rev B (L=4 @ jlcpcb-tier1, 0.30/0.20), classifying the
+    # two SOT-23-5s (U3 INA180A3, U8 MCP6001) as dense cost 3 nets of
+    # reach (19/26 with stubs vs 22/26 without), and before the column-
+    # orientation fix above their broken stubs made two nets statically
+    # unroutable.  Plain A* routes these pads natively.
+    if 2 < len(pads) < 8 and not any(
+        getattr(p, "through_hole", False) for p in pads
+    ):
+        xs = sorted(p.x for p in pads)
+        ys = sorted(p.y for p in pads)
+
+        def _axis_clusters(vals: list[float], tol: float = 0.2) -> int:
+            count = 0
+            prev: float | None = None
+            for v in vals:
+                if prev is None or v - prev > tol:
+                    count += 1
+                prev = v
+            return count
+
+        if _axis_clusters(xs) == 2 or _axis_clusters(ys) == 2:
+            return False
+
     # Dynamic threshold based on design rules
     # A trace needs: trace_width + clearance on each side from adjacent pins
     # So minimum pitch to route between pins is: 2 * (trace_width/2 + clearance) + trace_width
@@ -4661,13 +4691,49 @@ class EscapeRouter:
         left_col: list[Pad] = []
         right_col: list[Pad] = []
 
-        # Determine orientation by checking Y vs X spread
+        # Determine orientation.  Issue #3343: the raw bounding-box
+        # spread comparison misclassifies packages whose BODY is wider
+        # than tall but whose pads form two vertical COLUMNS — e.g. a
+        # SOT-23-5 (two columns at dx=2.2 mm, three pads per column at
+        # 0.95 mm pitch, y-spread 1.9 mm).  Spread says "horizontal",
+        # the pads get split into y-"rows" that each contain stacked
+        # same-x pads, and the perpendicular launch from one pad runs
+        # straight THROUGH its column neighbour (observed on softstart
+        # rev B: the U3/U8 pin-2 escape stubs overlapped pin 3, leaving
+        # ISENSE_NEG / V_AC_SENSE_RAW statically unroutable).
+        #
+        # A dual-row package has exactly TWO coordinate clusters on its
+        # cross axis and >2 on the row axis.  Cluster the coordinates
+        # and use that signature; fall back to the legacy spread
+        # comparison only when the cluster counts are ambiguous (e.g.
+        # 2x2 four-pad packages, where either split is geometrically
+        # safe).
         xs = [p.x for p in package.pads]
         ys = [p.y for p in package.pads]
         x_spread = max(xs) - min(xs)
         y_spread = max(ys) - min(ys)
 
-        is_horizontal = x_spread > y_spread  # pins arranged horizontally (typical SOP)
+        def _cluster_count(vals: list[float], tol: float = 0.2) -> int:
+            count = 0
+            prev: float | None = None
+            for v in sorted(vals):
+                if prev is None or v - prev > tol:
+                    count += 1
+                prev = v
+            return count
+
+        x_clusters = _cluster_count(xs)
+        y_clusters = _cluster_count(ys)
+
+        if x_clusters == 2 and y_clusters > 2:
+            # Two vertical columns (SOT-23-5/6, vertical SOP)
+            is_horizontal = False
+        elif y_clusters == 2 and x_clusters > 2:
+            # Two horizontal rows (typical SOP/SOIC/TSSOP)
+            is_horizontal = True
+        else:
+            # Ambiguous — preserve the legacy spread heuristic.
+            is_horizontal = x_spread > y_spread  # pins arranged horizontally
 
         if is_horizontal:
             # Split by Y position

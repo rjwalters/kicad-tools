@@ -438,3 +438,61 @@ class TestBuildRsmtCongestionFn:
 
         assert len(ext1) == len(ext2)
         assert edges1 == edges2
+
+
+class TestSteinerGridSnap:
+    """PR #3481 fix: synthetic Steiner points must be snappable to the
+    routing grid.
+
+    Hanan-grid candidates inherit raw terminal coordinates, which
+    generally do NOT align to the routing grid.  Real pads get off-grid
+    rescue via sub-grid / waypoint injection, but virtual Steiner pads
+    have no ``ref`` so no rescue applies — an off-grid Steiner point
+    fails ``pin_access`` with ``PADS_OFF_GRID: steiner@(...)`` (the
+    softstart SRC_POS / BUS_LINE / SCAP_POS+ / VRECT signature).
+    """
+
+    @staticmethod
+    def _snap_0075(x: float, y: float) -> tuple[float, float]:
+        """Snap to a 0.075 mm grid (the softstart production grid)."""
+        res = 0.075
+        return (round(x / res) * res, round(y / res) * res)
+
+    def test_steiner_points_snapped(self):
+        """All synthetic points land exactly on the snap grid."""
+        # Integer-mm terminals are off-grid on the 0.075 grid
+        # (46.0 / 0.075 = 613.33), reproducing the softstart failure.
+        # Cross topology forces a synthetic branch point near (50, 50).
+        pads = [
+            _make_pad(40.0, 50.0),
+            _make_pad(60.0, 50.0),
+            _make_pad(50.0, 40.0),
+            _make_pad(50.0, 60.0),
+        ]
+        extended, _edges = build_rsmt(pads, snap_fn=self._snap_0075)
+
+        steiner = [p for p in extended if p.steiner_point]
+        assert steiner, "3-terminal L-shaped net must produce a Steiner point"
+        for p in steiner:
+            sx, sy = self._snap_0075(p.x, p.y)
+            assert abs(p.x - sx) < 1e-9 and abs(p.y - sy) < 1e-9, (
+                f"Steiner point ({p.x}, {p.y}) is off the 0.075 mm grid"
+            )
+
+    def test_terminals_never_snapped(self):
+        """Terminal pads keep their exact coordinates (only synthetic
+        points are snapped — pads have their own off-grid rescue)."""
+        coords = [(46.01, 42.02), (72.03, 42.04), (46.05, 58.06)]
+        pads = [_make_pad(x, y) for x, y in coords]
+        extended, _edges = build_rsmt(pads, snap_fn=self._snap_0075)
+
+        for pad, (x, y) in zip(extended[: len(coords)], coords, strict=False):
+            assert pad.x == x and pad.y == y
+
+    def test_no_snap_fn_preserves_legacy_behavior(self):
+        """Without snap_fn the output is unchanged (backward compat)."""
+        pads = [_make_pad(0, 0), _make_pad(8, 0), _make_pad(4, 6)]
+        ext1, edges1 = build_rsmt(pads)
+        ext2, edges2 = build_rsmt(pads, snap_fn=None)
+        assert [(p.x, p.y) for p in ext1] == [(p.x, p.y) for p in ext2]
+        assert edges1 == edges2

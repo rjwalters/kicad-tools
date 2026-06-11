@@ -2806,3 +2806,165 @@ class TestSegmentToPadClearance:
         # edge-to-edge gap = 0.79 - 0.05 = 0.74
         gap = EscapeRouter._segment_to_pad_edge_gap(seg, pad)
         assert abs(gap - 0.74) < 0.01, f"Expected gap ~0.74, got {gap}"
+
+
+# ==============================================================================
+# Issue #3343: SOT-23-5 column-orientation escape regression
+# ==============================================================================
+
+
+def create_sot23_5_pads(cx: float = 25.0, cy: float = 25.0, ref: str = "U3") -> list[Pad]:
+    """Create SOT-23-5 pads (two vertical columns: 3 west, 2 east).
+
+    Mirrors the softstart rev B U3/U8 footprint geometry: columns at
+    x = cx -/+ 1.1, west column pads at y = cy - 0.95 / cy / cy + 0.95,
+    east column pads at y = cy -/+ 0.95.  Pad pitch 0.95 mm < the
+    1.0 mm dynamic dense threshold at trace=0.3 / clearance=0.2, so the
+    package enters the SOP staggered escape path.
+    """
+    coords = [
+        (cx - 1.1, cy + 0.95, 1),  # pin 1 (west bottom)
+        (cx - 1.1, cy, 2),         # pin 2 (west middle)
+        (cx - 1.1, cy - 0.95, 3),  # pin 3 (west top)
+        (cx + 1.1, cy - 0.95, 4),  # pin 4 (east top)
+        (cx + 1.1, cy + 0.95, 5),  # pin 5 (east bottom)
+    ]
+    return [
+        Pad(
+            x=x, y=y, width=1.06, height=0.65,
+            net=net, net_name=f"NET_{net}", layer=Layer.F_CU,
+            ref=ref, through_hole=False,
+        )
+        for x, y, net in coords
+    ]
+
+
+class TestSot235ColumnOrientation:
+    """Issue #3343: SOT-23-5 escape stubs must not cross column neighbours.
+
+    The SOP staggered escape path previously determined package
+    orientation from the raw bounding-box spread.  A SOT-23-5 is WIDER
+    (2.2 mm between columns) than TALL (1.9 mm pad-row span), so the
+    two-column package was misclassified as "horizontal" and split into
+    y-"rows" containing stacked same-x pads — the perpendicular launch
+    from pin 2 then ran straight through pin 3's pad.  On softstart
+    rev B this left ISENSE_NEG (U3.3) and V_AC_SENSE_RAW (U8.3)
+    statically unroutable (instant blocked_path on an empty grid).
+    """
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        rules = DesignRules(
+            trace_width=0.3,
+            trace_clearance=0.2,
+            via_drill=0.3,
+            via_diameter=0.6,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
+        return grid, rules
+
+    def test_sot23_5_not_dense_at_production_rules(self, grid_and_rules):
+        """SOT-23-class small packages are excluded from dense detection.
+
+        0.95 mm pitch IS below the 2*(0.3+0.2) = 1.0 mm dynamic
+        threshold, but issue #3343 measured that escape stubs on
+        SOT-23-5 packages only consume the pocket around the package
+        (softstart rev B: 19/26 reach with stubs vs 22/26 without) --
+        plain A* routes 3-pads-per-column perimeter pads natively, so
+        the dense classifier now excludes sub-8-pad two-row/two-column
+        SMD packages.
+        """
+        _, rules = grid_and_rules
+        pads = create_sot23_5_pads()
+        assert not is_dense_package(
+            pads, trace_width=rules.trace_width, clearance=rules.trace_clearance
+        )
+
+    def test_fine_pitch_small_dual_row_still_dense(self):
+        """True fine-pitch small packages (<= 0.75 mm pitch) stay dense.
+
+        The #3343 SOT-23-class exclusion must not affect the earlier
+        fine-pitch SSOP/TSSOP rule: a 6-pad dual-row package at 0.65 mm
+        pitch is still dense (between-pin routing is impossible at any
+        common recipe).
+        """
+        pads = []
+        for i in range(3):
+            for col, x in ((1, -1.1), (2, 1.1)):
+                pads.append(Pad(
+                    x=x, y=(i - 1) * 0.65, width=1.0, height=0.4,
+                    net=i * 2 + col, net_name=f"N{i}{col}", layer=Layer.F_CU,
+                    ref="U9", through_hole=False,
+                ))
+        assert is_dense_package(pads, trace_width=0.3, clearance=0.2)
+
+    def test_sot23_5_escape_stubs_do_not_cross_column_neighbours(
+        self, grid_and_rules
+    ):
+        """No escape stub may pass over another pad of the same package."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_sot23_5_pads()
+        info = router.analyze_package(pads)
+        # Call the SOP staggered path directly: production no longer
+        # classifies SOT-23-5 as dense (see
+        # ``test_sot23_5_not_dense_at_production_rules``), but the
+        # orientation fix must hold for any two-column package that
+        # does enter this path.
+        escapes = router._escape_sop_staggered(info)
+
+        pad_by_pos = {(p.x, p.y): p for p in pads}
+
+        def crosses_pad(x1, y1, x2, y2, pad) -> bool:
+            # Stubs are axis-aligned; check overlap with the pad's
+            # copper rectangle (segment treated as a thin line).
+            lo_x, hi_x = sorted((x1, x2))
+            lo_y, hi_y = sorted((y1, y2))
+            px_lo = pad.x - pad.width / 2
+            px_hi = pad.x + pad.width / 2
+            py_lo = pad.y - pad.height / 2
+            py_hi = pad.y + pad.height / 2
+            return not (
+                hi_x < px_lo or lo_x > px_hi or hi_y < py_lo or lo_y > py_hi
+            )
+
+        for route in escapes:
+            for seg in route.segments:
+                # Identify the stub's own launch pad (start point).
+                own = pad_by_pos.get((seg.x1, seg.y1))
+                for pad in pads:
+                    if pad is own:
+                        continue
+                    # The launch pad of this route may legitimately
+                    # be touched by its own follow-up segments.
+                    if (seg.x1, seg.y1) == (pad.x, pad.y):
+                        continue
+                    assert not crosses_pad(
+                        seg.x1, seg.y1, seg.x2, seg.y2, pad
+                    ), (
+                        f"Escape stub ({seg.x1},{seg.y1})->({seg.x2},{seg.y2}) "
+                        f"crosses same-package pad net={pad.net_name} at "
+                        f"({pad.x},{pad.y}) — SOT-23-5 column orientation "
+                        f"regression (issue #3343)"
+                    )
+
+    def test_sot23_5_orientation_splits_into_columns(self, grid_and_rules):
+        """Escape directions for a two-column package are EAST/WEST."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_sot23_5_pads()
+        info = router.analyze_package(pads)
+        escapes = router._escape_sop_staggered(info)
+
+        for route in escapes:
+            for seg in route.segments:
+                dx = abs(seg.x2 - seg.x1)
+                dy = abs(seg.y2 - seg.y1)
+                assert dx >= dy or dy == 0, (
+                    f"Expected horizontal (column-perpendicular) escape "
+                    f"stubs for SOT-23-5; got ({seg.x1},{seg.y1})->"
+                    f"({seg.x2},{seg.y2})"
+                )

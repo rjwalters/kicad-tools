@@ -89,11 +89,22 @@ def _regenerate_softstart_pcb(output_dir: Path) -> Path:
     return pcb_path
 
 
+# Pins the issue-#3343 P-R1-era 15-net skip set so this escape-routing
+# harness keeps its 26-signal-net denominator and the measured floors
+# below stay run-to-run comparable.  NOTE: this is deliberately NOT a
+# live mirror of the recipe's ``ROUTE_SKIP_NETS`` anymore — the PR #3481
+# review fix shrank the recipe's skip set to the 4 pour nets
+# (GND / +3.3V / SCAP_*_GND) and routes the other 11 power nets as
+# 0.4 mm skeleton traces (+ reinforcement pours) via a
+# ``--net-class-map`` sidecar.  This harness exists to regression-pin
+# the SOT-23 escape fixes, not the recipe's power-copper strategy, so
+# it keeps the historical denominator.
 _SKIP_NETS = [
     "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
     "+3.3V", "VRECT",
     "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
     "ISENSE_POS",
+    "VGATE", "SRC_POS", "SRC_NEG", "BUS_LINE",
 ]
 
 
@@ -300,6 +311,26 @@ def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
     (the L=4 measurement took ~492 s wall on a baseline laptop
     with the C++ backend; the floor still holds even when the
     budget cuts in slightly earlier).
+
+    Issue #3343 P-R1..P-R4 update (Jun 2026): the signal-net
+    denominator is now **26** (VGATE / SRC_POS / SRC_NEG / BUS_LINE
+    moved to the skip-list — they are power/heavy-current nets that
+    get zone-pour copper, see ``ROUTE_SKIP_NETS`` in the recipe).
+    Measured progression at this harness (same-session A/B runs,
+    ``PYTHONHASHSEED=0``):
+
+    - baseline (pre-#3343):       19/30  (== 17/26 at the new denominator)
+    - P-R1 skip-list alignment:   18/26
+    - P-R2 north-face pin moves:  20/26
+    - P-R3 placement micro-moves: 21/26
+    - P-R4 escape fixes (SOT-23-5 column-orientation + SOT-23-class
+      dense exclusion):           22/26
+
+    The residual nets (NRST 8-pad span, V_BANK_POS_SENSE,
+    V_BUS_DVDT, SWCLK in the worst run) all route fully in isolation
+    and fail only through end-of-budget rip-up non-convergence —
+    the #3470 rip-up-rollback signature.  Re-tighten the floor when
+    #3470 lands.
     """
     pcb_path = _regenerate_softstart_pcb(tmp_path / "softstart_reach")
 
@@ -318,16 +349,16 @@ def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
     )
     print(f"\nSoftstart rev B reach: {routed_count}/{total} @ L=4")
 
-    # Issue #3401: floor empirically measured at 20/30 at L=4
-    # single-attempt + per-net=30 s + plane-aware stack with all
-    # P_FP infrastructure landed.  Conservative floor of 19 leaves
-    # 1 net of headroom for run-to-run variance while still
-    # surfacing infrastructure regressions.  Tighten this floor once
-    # #3398 (rescue <-> main-router coupling) lands.
-    floor = 19
+    # Issue #3343: measured 22/26 at this harness with the P-R1..P-R4
+    # changes (multiple same-session runs).  Run-to-run spread on this
+    # board is ±2-3, so a floor of 20 leaves 2 nets of headroom while
+    # still surfacing infrastructure regressions (the pre-#3343 state
+    # measured 17/26 at this denominator).  Tighten the floor once
+    # #3470 (rip-up rollback) lands.
+    floor = 20
     assert routed_count >= floor, (
         f"Softstart rev B reach {routed_count}/{total} below floor {floor}/{total} "
-        f"(L=4 measurement, Issue #3401)."
+        f"(L=4 measurement, Issues #3401/#3343)."
     )
 
 

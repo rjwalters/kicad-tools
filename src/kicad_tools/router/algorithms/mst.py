@@ -109,7 +109,16 @@ class MSTRouter:
             if use_steiner:
                 from .steiner import build_rsmt
 
-                pad_objs, edges = build_rsmt(pad_objs)
+                # PR #3481 fix: snap synthetic Steiner branch points
+                # onto the routing grid (off-grid virtual pads have no
+                # sub-grid rescue and fail ``pin_access``).
+                grid = self.grid
+
+                def snap_fn(x: float, y: float) -> tuple[float, float]:
+                    gx, gy = grid.world_to_grid(x, y)
+                    return grid.grid_to_world(gx, gy)
+
+                pad_objs, edges = build_rsmt(pad_objs, snap_fn=snap_fn)
             else:
                 # Build and sort MST edges by length
                 edges = self.build_mst(pad_objs)

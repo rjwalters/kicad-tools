@@ -222,6 +222,7 @@ def _solve_3_terminal(
 def build_rsmt(
     pad_objs: list[Pad],
     congestion_fn: Callable[[float, float, float, float], float] | None = None,
+    snap_fn: Callable[[float, float], tuple[float, float]] | None = None,
 ) -> tuple[list[Pad], list[tuple[int, int]]]:
     """Build Rectilinear Steiner Minimum Tree.
 
@@ -239,6 +240,17 @@ def build_rsmt(
         pad_objs: Terminal pads to connect.
         congestion_fn: Optional function(x1, y1, x2, y2) -> cost.
             If None, uses Manhattan distance.
+        snap_fn: Optional function(x, y) -> (x, y) used to snap the
+            SYNTHESISED Steiner branch points onto the routing grid
+            (PR #3481 fix).  Hanan-grid candidates inherit raw terminal
+            coordinates, which generally do NOT align to the routing
+            grid; real pads get off-grid rescue via sub-grid / waypoint
+            injection, but virtual Steiner pads have no ``ref`` so no
+            rescue applies.  Without snapping, a multi-terminal net
+            whose Steiner point lands off-grid fails ``pin_access``
+            with ``PADS_OFF_GRID: steiner@(...)`` — the softstart
+            SRC_POS / BUS_LINE / SCAP_POS+ / VRECT signature.  Terminal
+            pads are never snapped, only synthetic points.
 
     Returns:
         (extended_pads, edges) where extended_pads includes original
@@ -276,6 +288,10 @@ def build_rsmt(
 
     for idx in range(num_terminals, len(all_points)):
         sx, sy = all_points[idx]
+        # PR #3481 fix: snap synthetic branch points onto the routing
+        # grid so the A* endpoints are reachable (see ``snap_fn`` doc).
+        if snap_fn is not None:
+            sx, sy = snap_fn(sx, sy)
         # Create virtual Steiner point pad using the net info from the
         # first terminal pad. Use minimal size for a virtual pad.
         ref_pad = pad_objs[0]

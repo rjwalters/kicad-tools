@@ -102,19 +102,10 @@ def _route_softstart_unaided() -> int:
         via_drill=0.3,
         via_diameter=0.6,
     )
-    skip_nets = [
-        "AC_LINE",
-        "AC_NEUTRAL",
-        "FUSED_LINE",
-        "GND",
-        "+3.3V",
-        "VRECT",
-        "SCAP_POS+",
-        "SCAP_POS_GND",
-        "SCAP_NEG+",
-        "SCAP_NEG_GND",
-        "ISENSE_POS",
-    ]
+    # Single source of truth: the recipe's skip list (issue #3343 P-R1
+    # added VGATE/SRC_POS/SRC_NEG/BUS_LINE — power nets that get
+    # zone-pour copper, not autorouted 0.3 mm traces).
+    skip_nets = list(generate_design.ROUTE_SKIP_NETS)
     router, _net_map = load_pcb_for_routing(
         str(pcb_path),
         skip_nets=skip_nets,

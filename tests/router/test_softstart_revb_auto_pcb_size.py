@@ -142,6 +142,8 @@ def _route_with_auto_pcb_size(
         "+3.3V", "VRECT",
         "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
         "ISENSE_POS",
+        # Issue #3343 P-R1 skip-list alignment (architect S1)
+        "VGATE", "SRC_POS", "SRC_NEG", "BUS_LINE",
     ])
     cmd = [
         sys.executable, "-m", "kicad_tools.cli", "route",
