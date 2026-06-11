@@ -380,15 +380,61 @@ CHORUS_MAY10_TARGET = 30  # 30/48 = 62.5%
 # router's behavior class; the three restored-connectivity nets land in
 # the unrouted bucket because the budget still dies at net 3.
 #
-# The floor below is the honest measured baseline, NOT a target.  Per
-# feedback_manufacturable_means_100pct.md the bar is 100% + 0 DRC; this
-# constant only catches further regressions while Phases R1/R2/P1 of
-# #3474 are in flight.  Move it UP as those phases land.
+# The constants below record the measurement exactly; the regression
+# floor is pinned separately with documented headroom.  Per
+# feedback_manufacturable_means_100pct.md the bar is 100% + 0 DRC; the
+# floor only catches further regressions while Phases R2/P1 of #3474
+# are in flight.  Move it UP as those phases land.
 CHORUS_V21_NETS_TOTAL = 51
-CHORUS_V21_FLOOR = 2  # measured strict reach, cpp seed 42 (do not inflate)
-CHORUS_V21_PARTIAL_CPP_SEED42 = 30
-CHORUS_V21_UNROUTED_CPP_SEED42 = 19
-CHORUS_V21_AUTOFIX_ROLLED_BACK = True
+
+# --------------------------------------------------------------------------
+# Phase R1 re-pin (Issue #3474 R1, 2026-06-10, branch feature/issue-3474-r1).
+# --------------------------------------------------------------------------
+#
+# R1 fixed three wall-clock leaks below the per-net cap (the cap itself --
+# CLI default --per-net-timeout 30 -- was already in force but was being
+# blown by un-budgeted code around the A* search):
+#
+#   1. Per-edge failure diagnostics ran RootCauseAnalyzer with a
+#      full-board CongestionMap scan + unbounded corridor scans:
+#      ~100-120s of pure Python PER FAILED EDGE on this 1240x1240x4
+#      grid.  SPI_SCK "routing" measured 247s of which 10s was A*.
+#      Fixed: corridor-scoped + stride-subsampled scans, per-net
+#      analysis cache, 20s cumulative analysis budget
+#      (core._analyze_failure_budgeted).
+#   2. cpp->python fallback double-spend: a fresh per-net budget for
+#      the 10-100x-slower Python A* after C++ consumed its own.
+#      Fixed: shared route_deadline clamps the fallback budget.
+#   3. Grace-pass burn: one 0.3s-capped attempt ate 101-136s inside
+#      leak (1) -- entire #3452 budget, 0 routed, 44-47 skipped.
+#      Fixed by (1) + overrun-abort + no-progress tier exit +
+#      overrun-funded grace budget (run_initial_pass_grace).
+#
+# Measured at the pinned recipe with the fixes (2026-06-10):
+#   - Pre-fix re-baseline (HEAD 05541c7d): 2/51 strict, 30 partial,
+#     19 unrouted; all three attempts died at net 3/51 (SPI_SCK ~290s);
+#     grace 0/1 in ~130s x3; attempt 4+ deadline-stopped; placement
+#     feedback AND auto-fix skipped (AUTOFIX_SKIPPED_BUDGET_EXHAUSTED
+#     PRESENT).
+#   - Post-fix run A: 14/51 strict, 26 partial, 11 unrouted; 6
+#     escalation attempts ran; auto-fix RAN; token ABSENT; DRC 90 err.
+#   - Post-fix run B (re-pin record below): 18/51 strict, 7 partial,
+#     26 unrouted; 4 attempts + placement feedback RAN (1 iteration,
+#     first time ever on this recipe) + auto-fix RAN (rolled back on
+#     connectivity protection); token ABSENT; DRC 53 err / 56 warn;
+#     every grace pass attempted ALL starved nets (0 skipped).
+#
+# Strict reach is wall-clock-modulated (14 vs 18 across two identical
+# seed-42 runs: the budget line lands between different nets).  The
+# floor is therefore pinned BELOW the weaker measurement with headroom
+# for load modulation, while still catching any regression toward the
+# 2/51 starvation class.
+CHORUS_V21_R1_MEASURED_STRICT = 18  # run B, cpp seed 42, 2026-06-10
+CHORUS_V21_R1_MEASURED_STRICT_RUN_A = 14
+CHORUS_V21_PARTIAL_CPP_SEED42 = 7  # run B
+CHORUS_V21_UNROUTED_CPP_SEED42 = 26  # run B
+CHORUS_V21_FLOOR = 10  # regression tripwire: below min(14, 18) with headroom
+CHORUS_V21_AUTOFIX_ROLLED_BACK = True  # connectivity protection, not budget
 
 # The vendored chorus-test-revA fixture, surfaced via the
 # ``boards/external/chorus-test-revA`` symlink that points at the
@@ -695,15 +741,16 @@ def test_post_wave1_floor_matches_nets_total() -> None:
 
 
 def test_v21_rebaseline_documented() -> None:
-    """The v21 fixture re-baseline (Issue #3474 Phase 0) is recorded honestly.
+    """The v21 measurement record (Issue #3474 Phase 0 + R1) is honest.
 
-    The fixture migrated from v19_stripped (48 nets, stale netlist) to
-    v21_stripped (51 nets, post-repair).  The first measurement on the
-    new fixture (2026-06-10, HEAD d45ded4d, cpp seed 42, pinned 1200s
-    recipe) is 2/51 strict-connected -- the same behavior class as the
-    v19 re-baseline in the issue body (2/48): per-net A* blowup at the
-    head of the queue (SPI_SCK) starves the budget at net 3, attempt 3 /
-    placement feedback never run (#2802), and auto-fix rolls back.
+    Phase 0 migrated the fixture from v19_stripped (48 nets, stale
+    netlist) to v21_stripped (51 nets, post-repair) and measured 2/51
+    strict (budget starved at net 3/51 by the SPI_SCK blowup).  Phase R1
+    fixed the three wall-clock leaks below the per-net cap (un-budgeted
+    failure diagnostics, cpp->python fallback double-spend, grace-pass
+    burn) and re-measured 14/51 and 18/51 across two identical seed-42
+    runs (wall-clock-modulated); the regression floor is pinned at 10
+    with headroom below the weaker run.
 
     Failure of this test means either:
 
@@ -711,33 +758,47 @@ def test_v21_rebaseline_documented() -> None:
        above them -- update both together.
     2. A future PR moved chorus reach on the v21 fixture (good news!) --
        bump ``CHORUS_V21_FLOOR`` to the new multi-seed-confirmed value
-       and document the responsible PR.  Phases R1/R2/P1 of #3474 are
+       and document the responsible PR.  Phases R2/P1 of #3474 are
        expected to do exactly this.
     """
     # The denominator grew 48 -> 51 with the restored connectivity.
     assert CHORUS_V21_NETS_TOTAL == 51
     assert CHORUS_V21_NETS_TOTAL > CHORUS_NETS_TOTAL
 
-    # The measured floor is honest and low; it must sit strictly below
-    # the May-10-parity class of targets.  Do NOT inflate it -- the bar
+    # The floor is honest and conservative: strictly below BOTH R1
+    # measurements (load-modulation headroom) and strictly below the
+    # May-10-parity class of targets.  Do NOT inflate it -- the bar
     # for "done" is 100% + 0 DRC (feedback_manufacturable_means_100pct),
-    # and this floor only exists to catch FURTHER regressions.
+    # and this floor only exists to catch regressions toward the 2/51
+    # budget-starvation class.
     assert 1 <= CHORUS_V21_FLOOR < CHORUS_MAY10_TARGET
+    assert CHORUS_V21_FLOOR < CHORUS_V21_R1_MEASURED_STRICT_RUN_A
+    assert CHORUS_V21_FLOOR < CHORUS_V21_R1_MEASURED_STRICT
 
-    # strict + partial + unrouted must total the v21 signal-net count.
+    # The R1 fixes must show material recovery over the Phase 0 floor
+    # of 2 (both measured runs were >= 7x the starved baseline).
+    assert CHORUS_V21_R1_MEASURED_STRICT_RUN_A > 2
+    assert CHORUS_V21_R1_MEASURED_STRICT > 2
+
+    # strict + partial + unrouted of the re-pin record (run B) must
+    # total the v21 signal-net count.
     assert (
-        CHORUS_V21_FLOOR + CHORUS_V21_PARTIAL_CPP_SEED42 + CHORUS_V21_UNROUTED_CPP_SEED42
+        CHORUS_V21_R1_MEASURED_STRICT
+        + CHORUS_V21_PARTIAL_CPP_SEED42
+        + CHORUS_V21_UNROUTED_CPP_SEED42
         == CHORUS_V21_NETS_TOTAL
     ), (
         "strict + partial + unrouted must total all v21 chorus signal "
-        f"nets; got {CHORUS_V21_FLOOR} + {CHORUS_V21_PARTIAL_CPP_SEED42} "
+        f"nets; got {CHORUS_V21_R1_MEASURED_STRICT} + "
+        f"{CHORUS_V21_PARTIAL_CPP_SEED42} "
         f"+ {CHORUS_V21_UNROUTED_CPP_SEED42} != {CHORUS_V21_NETS_TOTAL}."
     )
 
-    # Auto-fix rolled back on the v21 measurement (Wave-10 had it keeping
-    # a partial repair on v19; the rollback is fixture-shape-dependent,
-    # not a code regression -- both runs RAN auto-fix and the
-    # AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token was absent).
+    # Auto-fix rolled back on the R1 re-pin run (connectivity
+    # protection: the nudges would have broken at least one routed
+    # net).  The budget-integrity claim is that auto-fix RAN -- the
+    # AUTOFIX_SKIPPED_BUDGET_EXHAUSTED token was absent on both R1
+    # measurement runs (it was PRESENT on the pre-R1 re-baseline).
     assert CHORUS_V21_AUTOFIX_ROLLED_BACK is True
 
 
@@ -786,11 +847,13 @@ def test_chorus_reach_v21_floor(tmp_path: Path) -> None:
     is double-guarded by ``@pytest.mark.slow`` AND the
     ``KCT_RUN_CHORUS_REACH_FLOOR`` env var so it never runs by accident.
 
-    The assertion intentionally uses the measured FLOOR (2) rather than
-    any target: the floor is a regression tripwire, not a goal.  Phases
-    R1/R2/P1 of #3474 are expected to raise reach substantially; bump
-    ``CHORUS_V21_FLOOR`` (with multi-seed confirmation) as they land,
-    and at Phase F flip this assertion to the 100%-routed target per
+    The assertion intentionally uses the pinned FLOOR (10, re-pinned by
+    #3474 Phase R1 from the Phase-0 value of 2 after the budget-integrity
+    fixes measured 14/51 and 18/51) rather than any target: the floor is
+    a regression tripwire, not a goal.  Phases R2/P1 of #3474 are
+    expected to raise reach further; bump ``CHORUS_V21_FLOOR`` (with
+    multi-seed confirmation) as they land, and at Phase F flip this
+    assertion to the 100%-routed target per
     ``feedback_manufacturable_means_100pct``.
     """
     output_pcb = tmp_path / "chorus_routed.kicad_pcb"

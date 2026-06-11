@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -875,6 +876,15 @@ class CppPathfinder:
         # toggled via :meth:`enable_per_call_timing` and drained via
         # :meth:`get_and_clear_per_call_timings`.
         self._per_call_timing_enabled: bool = False
+        # Issue #3474 R1: ``KCT_DEBUG_PNT=1`` enables the #2929 per-call
+        # timing instrumentation (previously unreachable from the CLI)
+        # and prints any route() call whose wall time grossly exceeds its
+        # per-net budget.  This is the diagnostic that located the
+        # chorus-test deadline leak (per-net cap honored by A* but blown
+        # by un-budgeted failure analysis); keep it available for future
+        # budget-integrity triage.
+        if os.environ.get("KCT_DEBUG_PNT"):
+            self._per_call_timing_enabled = True
         self._per_call_timings: list[dict] = []
 
         # Issue #3002 (PR #3006 follow-up): Foreign-net via context for the
@@ -1270,6 +1280,13 @@ class CppPathfinder:
                     "succeeded": succeeded,
                 }
             )
+            # Issue #3474 R1: live slow-call tracing under KCT_DEBUG_PNT.
+            if os.environ.get("KCT_DEBUG_PNT") and (deadline_violated or elapsed > 5.0):
+                print(
+                    f"    [PNT-DEBUG] route() net={start.net_name} elapsed={elapsed:.1f}s "
+                    f"budget={per_net_timeout} violated={deadline_violated} ok={succeeded}",
+                    flush=True,
+                )
 
     def _route_impl(
         self,
@@ -1425,6 +1442,16 @@ class CppPathfinder:
         # per-net budget covers the whole retry sequence.
         timeout_seconds = float(per_net_timeout) if per_net_timeout else 0.0
 
+        # Issue #3474 R1: the SAME deadline also bounds the Python
+        # fallback.  Previously the fallback received a fresh
+        # ``per_net_timeout`` budget after the C++ search had already
+        # consumed its own, so one ``route()`` call could legally spend
+        # 2x the cap (and the 10-100x-slower Python A* is exactly where
+        # capped searches go to die).  ``None`` => unbudgeted (legacy).
+        route_deadline = (
+            time.monotonic() + float(per_net_timeout) if per_net_timeout else None
+        )
+
         try:
             result = self._impl.route_resumable(
                 start.x,
@@ -1493,6 +1520,7 @@ class CppPathfinder:
                     weight=weight,
                     per_net_timeout=per_net_timeout,
                     extra_goal_cells=extra_goal_cells,
+                    deadline=route_deadline,
                 )
 
             for attempt in range(max_resume_attempts + 1):
@@ -1542,6 +1570,7 @@ class CppPathfinder:
                         weight=weight,
                         per_net_timeout=per_net_timeout,
                         extra_goal_cells=extra_goal_cells,
+                        deadline=route_deadline,
                     )
 
                 # Find the goal cell of the failed path and reject it.
@@ -1575,6 +1604,7 @@ class CppPathfinder:
                         weight=weight,
                         per_net_timeout=per_net_timeout,
                         extra_goal_cells=extra_goal_cells,
+                        deadline=route_deadline,
                     )
 
             return None
@@ -1884,6 +1914,7 @@ class CppPathfinder:
         weight: float = 1.0,
         per_net_timeout: float | None = None,
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
+        deadline: float | None = None,
     ) -> Route | None:
         """Attempt to route using the Python pathfinder as a fallback.
 
@@ -1905,13 +1936,37 @@ class CppPathfinder:
             weight: A* weight
             per_net_timeout: Optional per-net timeout in seconds
             extra_goal_cells: Additional goal cells for early termination
+            deadline: Optional ``time.monotonic()`` deadline shared with
+                the C++ search that preceded this fallback (issue #3474
+                R1).  The fallback only receives whatever budget the C++
+                search left unspent; when none remains it is skipped so a
+                single ``route()`` call can never double-spend its per-net
+                cap inside the 10-100x-slower Python A*.
 
         Returns:
-            Route object if fallback succeeds, None if also fails.
+            Route object if fallback succeeds, None if also fails (or the
+            shared per-net deadline is already exhausted).
         """
         py_grid = self._grid._py_grid
         if py_grid is None:
             return None
+
+        # Issue #3474 R1: clamp the fallback budget to the unspent
+        # remainder of the shared per-net deadline.
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.05:
+                logger.debug(
+                    "Net %s: per-net budget exhausted by C++ search; "
+                    "skipping Python fallback (issue #3474)",
+                    getattr(start, "net_name", "?"),
+                )
+                return None
+            per_net_timeout = (
+                min(per_net_timeout, remaining)
+                if per_net_timeout is not None
+                else remaining
+            )
 
         # Lazy-construct the Python Router on first fallback
         if self._py_router is None:

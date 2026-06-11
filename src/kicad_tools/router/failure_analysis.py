@@ -475,6 +475,8 @@ class CongestionMap:
         component_weight: float = 1.0,
         trace_weight: float = 0.5,
         via_weight: float = 0.3,
+        region: "Rectangle | None" = None,
+        stride: int = 1,
     ):
         """Initialize congestion map.
 
@@ -484,12 +486,28 @@ class CongestionMap:
             component_weight: Weight for component footprints
             trace_weight: Weight for routed traces
             via_weight: Weight for vias
+            region: Optional world-coordinate window to scan (issue #3474
+                R1).  When provided, only routing-grid cells inside this
+                rectangle are visited by :meth:`_build_grid`.  On fine
+                grids the full-board scan is millions of pure-Python cell
+                visits (~100 s on a 1240x1240x4 board) -- corridor-scoped
+                failure analysis only ever queries the corridor, so
+                scanning the rest of the board is pure overhead.  ``None``
+                (default) preserves the full-board scan for callers like
+                placement analysis / hotspot detection.
+            stride: Sample every Nth routing-grid cell in each axis
+                (issue #3474 R1).  Congestion values are normalized, so
+                uniform subsampling preserves the relative heat map while
+                cutting the scan cost by ``stride**2``.  Default 1 (every
+                cell, legacy behaviour).
         """
         self.grid = grid
         self.cell_size = cell_size
         self.component_weight = component_weight
         self.trace_weight = trace_weight
         self.via_weight = via_weight
+        self.region = region
+        self.stride = max(1, int(stride))
 
         # Calculate grid dimensions
         self.origin_x = grid.origin_x
@@ -503,14 +521,44 @@ class CongestionMap:
         # Build the congestion grid
         self._grid: np.ndarray = self._build_grid()
 
+    def _scan_window(self) -> tuple[int, int, int, int]:
+        """Return the (min_gx, min_gy, max_gx, max_gy) routing-grid window.
+
+        Issue #3474 R1: when ``self.region`` is set, clamp the scan to the
+        requested world-coordinate rectangle; otherwise scan the full grid
+        (legacy behaviour).
+        """
+        if self.region is None:
+            return 0, 0, self.grid.cols - 1, self.grid.rows - 1
+        try:
+            min_gx, min_gy = self.grid.world_to_grid(self.region.min_x, self.region.min_y)
+            max_gx, max_gy = self.grid.world_to_grid(self.region.max_x, self.region.max_y)
+        except Exception:
+            # Fixture/mock grids without world_to_grid: full scan.
+            return 0, 0, self.grid.cols - 1, self.grid.rows - 1
+        if min_gx > max_gx:
+            min_gx, max_gx = max_gx, min_gx
+        if min_gy > max_gy:
+            min_gy, max_gy = max_gy, min_gy
+        return (
+            max(0, min_gx),
+            max(0, min_gy),
+            min(self.grid.cols - 1, max_gx),
+            min(self.grid.rows - 1, max_gy),
+        )
+
     def _build_grid(self) -> np.ndarray:
         """Build congestion grid from routing grid."""
         congestion = np.zeros((self.rows, self.cols), dtype=np.float32)
 
-        # Iterate through all layers and cells
+        min_gx, min_gy, max_gx, max_gy = self._scan_window()
+
+        # Iterate through all layers and cells (window-clamped and
+        # stride-subsampled, #3474 R1)
+        step = self.stride
         for layer_idx in range(self.grid.num_layers):
-            for gy in range(self.grid.rows):
-                for gx in range(self.grid.cols):
+            for gy in range(min_gy, max_gy + 1, step):
+                for gx in range(min_gx, max_gx + 1, step):
                     cell = self.grid.grid[layer_idx][gy][gx]
 
                     if not cell.blocked and cell.usage_count == 0:
@@ -679,6 +727,15 @@ class RootCauseAnalyzer:
     HIGH_CONGESTION_THRESHOLD = 0.9  # Above this = severely congested
     CLEARANCE_MARGIN_THRESHOLD = 0.05  # Below this mm = clearance issue
 
+    # Issue #3474 R1: upper bound on routing-grid cells any single corridor
+    # scan may visit.  On fine grids (chorus-test: 0.0508mm, 1240x1240x4) a
+    # diagonal net's corridor alone is ~775k cells x several scans x a
+    # 25-neighbor clearance check -- ~90s of pure Python per analyzed
+    # failure, which starved the routing stage budget (#3474/#3485).  Scans
+    # larger than this are uniformly subsampled (stride); diagnostics
+    # degrade in resolution, never in wall-clock integrity.
+    MAX_SCAN_CELLS = 150_000
+
     def __init__(
         self,
         congestion_threshold: float = 0.7,
@@ -725,14 +782,25 @@ class RootCauseAnalyzer:
         """
         attempts = attempts or []
 
-        # Build congestion map
-        cmap = CongestionMap(grid)
-
         # Compute routing corridor
         corridor = self._compute_corridor(start, end, margin=2.0)
 
+        # Issue #3474 R1: stride so each corridor scan visits at most
+        # ``MAX_SCAN_CELLS`` routing-grid cells.  On fine grids the
+        # corridor of a long diagonal net alone is ~775k cells; the
+        # legacy every-cell scans cost ~90-100s of pure Python per
+        # analyzed failure, which dominated the routing stage budget
+        # whenever a hard net failed (#3485 fingerprint).
+        stride = self._scan_stride(grid, corridor)
+
+        # Build congestion map scoped to the corridor (issue #3474 R1).
+        # This method only queries congestion inside ``corridor``; a
+        # small extra margin keeps the normalization neighborhood
+        # representative of the corridor's surroundings.
+        cmap = CongestionMap(grid, region=corridor.expand(3.0), stride=stride)
+
         # Find blocking elements
-        blocking = self._find_blocking_elements(grid, corridor, net, layer)
+        blocking = self._find_blocking_elements(grid, corridor, net, layer, stride=stride)
 
         # Analyze congestion in corridor
         congestion_score = cmap.get_congestion(corridor)
@@ -744,7 +812,7 @@ class RootCauseAnalyzer:
         failure_location = self._find_failure_point(start, end, attempts)
 
         # Compute clearance margin
-        clearance_margin = self._compute_clearance_margin(grid, corridor, layer)
+        clearance_margin = self._compute_clearance_margin(grid, corridor, layer, stride=stride)
 
         # Find the primary blocking net (for ROUTING_ORDER cause)
         blocking_net_name = None
@@ -902,6 +970,28 @@ class RootCauseAnalyzer:
             suggestions=suggestions,
         )
 
+    def _scan_stride(self, grid: RoutingGrid, corridor: Rectangle) -> int:
+        """Return the subsampling stride for corridor scans (issue #3474 R1).
+
+        Chosen so that ``corridor_cells * num_layers / stride**2`` stays
+        below :attr:`MAX_SCAN_CELLS`.  Returns 1 (every cell, legacy
+        behaviour) for small corridors / coarse grids.
+        """
+        try:
+            res = float(grid.resolution)
+            if res <= 0:
+                return 1
+            cells_x = max(1.0, corridor.width / res)
+            cells_y = max(1.0, corridor.height / res)
+            layers = max(1, int(getattr(grid, "num_layers", 1)))
+            total = cells_x * cells_y * layers
+            if total <= self.MAX_SCAN_CELLS:
+                return 1
+            return max(1, math.ceil(math.sqrt(total / self.MAX_SCAN_CELLS)))
+        except Exception:
+            # Fixture/mock grids without resolution metadata: legacy scan.
+            return 1
+
     def _compute_corridor(
         self,
         start: tuple[float, float],
@@ -950,12 +1040,21 @@ class RootCauseAnalyzer:
         except Exception:
             return None
 
+    # Issue #3474 R1: caps for the blocking-element corridor scan.  Each
+    # component-blocked cell triggers an O(num_pads) spatial ref lookup;
+    # without a cap a corridor crossing a dense package performs tens of
+    # millions of pad-envelope tests.  Diagnostics need the FIRST few
+    # blockers, not an exhaustive census.
+    MAX_BLOCKING_ELEMENTS = 200
+    MAX_REF_LOOKUPS = 500
+
     def _find_blocking_elements(
         self,
         grid: RoutingGrid,
         corridor: Rectangle,
         net: str,
         layer: int,
+        stride: int = 1,
     ) -> list[BlockingElement]:
         """Find elements blocking the routing corridor.
 
@@ -964,12 +1063,15 @@ class RootCauseAnalyzer:
             corridor: Area to check
             net: Net being routed (to exclude from blockers)
             layer: Layer index
+            stride: Sample every Nth cell in each axis (issue #3474 R1).
 
         Returns:
-            List of BlockingElement objects
+            List of BlockingElement objects (bounded by
+            ``MAX_BLOCKING_ELEMENTS``, issue #3474 R1).
         """
         blocking: list[BlockingElement] = []
         seen_refs: set[str] = set()
+        ref_lookups = 0
 
         # Convert corridor to grid coordinates
         min_gx, min_gy = grid.world_to_grid(corridor.min_x, corridor.min_y)
@@ -981,8 +1083,13 @@ class RootCauseAnalyzer:
         max_gx = min(grid.cols - 1, max_gx)
         max_gy = min(grid.rows - 1, max_gy)
 
-        for gy in range(min_gy, max_gy + 1):
-            for gx in range(min_gx, max_gx + 1):
+        step = max(1, int(stride))
+        for gy in range(min_gy, max_gy + 1, step):
+            if len(blocking) >= self.MAX_BLOCKING_ELEMENTS:
+                break
+            for gx in range(min_gx, max_gx + 1, step):
+                if len(blocking) >= self.MAX_BLOCKING_ELEMENTS:
+                    break
                 cell = grid.grid[layer][gy][gx]
 
                 if not cell.blocked:
@@ -1012,6 +1119,18 @@ class RootCauseAnalyzer:
                     # ~16-32B per cell across millions of cells).  Recover
                     # the owning component via spatial lookup against the
                     # grid's pad list.  See ``RoutingGrid.find_pad_ref_at``.
+                    # Issue #3474 R1: each lookup is O(num_pads); cap the
+                    # total so a corridor through a dense package cannot
+                    # spend minutes attributing every blocked cell.  Once
+                    # the cap is hit, skip further component cells rather
+                    # than emitting unattributed (ref=None) blockers --
+                    # component blockers are deduped by ref, so cells we
+                    # cannot attribute add no diagnostic value and would
+                    # violate the #2604 "component blockers carry refs"
+                    # contract.
+                    if ref_lookups >= self.MAX_REF_LOOKUPS:
+                        continue
+                    ref_lookups += 1
                     ref = self._lookup_blocking_ref(grid, wx, wy, layer)
                     movable = True
 
@@ -1161,6 +1280,7 @@ class RootCauseAnalyzer:
         grid: RoutingGrid,
         corridor: Rectangle,
         layer: int,
+        stride: int = 1,
     ) -> float:
         """Compute minimum clearance margin in the corridor.
 
@@ -1168,6 +1288,7 @@ class RootCauseAnalyzer:
             grid: Routing grid
             corridor: Area to check
             layer: Layer index
+            stride: Sample every Nth cell in each axis (issue #3474 R1).
 
         Returns:
             Minimum clearance margin found (mm)
@@ -1183,8 +1304,9 @@ class RootCauseAnalyzer:
         max_gx = min(grid.cols - 1, max_gx)
         max_gy = min(grid.rows - 1, max_gy)
 
-        for gy in range(min_gy, max_gy + 1):
-            for gx in range(min_gx, max_gx + 1):
+        step = max(1, int(stride))
+        for gy in range(min_gy, max_gy + 1, step):
+            for gx in range(min_gx, max_gx + 1, step):
                 cell = grid.grid[layer][gy][gx]
                 if not cell.blocked:
                     # Check distance to nearest blocked cell

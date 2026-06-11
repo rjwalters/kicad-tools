@@ -59,12 +59,68 @@ GRACE_PASS_BUDGET_S = 60.0
 # that reason about the upper bound of any single grace attempt.
 GRACE_PASS_PER_NET_S = GRACE_PASS_TIER_CAPS_S[-1]
 
+# Issue #3474 R1: abort threshold for a single grace attempt that grossly
+# overruns its cap.  ``route_fn`` legally spends a small multiple of the
+# per-call cap (see the ~15x note above), but a 100x+ overrun means a
+# layer below the cap is not honoring deadlines at all (the measured
+# chorus-test case: ONE 0.3s-capped attempt burned 101.7s inside
+# un-budgeted failure diagnostics, eating the entire grace budget for 0
+# routed nets).  When an attempt exceeds ``max(mult * cap, floor)`` the
+# sweep aborts immediately -- the leak will eat every subsequent attempt
+# too, so continuing is pure overhead.
+GRACE_CALL_OVERRUN_ABORT_MULT = 20.0
+GRACE_CALL_OVERRUN_ABORT_FLOOR_S = 10.0
+
+
+# Issue #3474 R1: default per-net A* budget derivation.  The pinned
+# board recipes set ``--timeout`` (stage budget) but rarely
+# ``--per-net-timeout``; with no per-net cap a single pathological
+# search (chorus-test SPI_SCK, softstart VGATE per #3485) can consume
+# the WHOLE stage budget before the stage-level check -- which only
+# runs between nets -- ever fires.  When the caller has a stage budget
+# but no explicit per-net cap, derive one as a fraction of the stage
+# budget so no single net can starve the rest of the queue.  Explicit
+# ``--per-net-timeout`` values are always respected unchanged; runs
+# without ANY budget remain unbounded (legacy behaviour).
+PER_NET_CAP_STAGE_FRACTION = 0.10
+PER_NET_CAP_FLOOR_S = 5.0
+
+
+def derive_per_net_cap(
+    per_net_timeout: float | None,
+    stage_timeout: float | None,
+) -> float | None:
+    """Return the effective per-net A* budget for a routing stage.
+
+    Issue #3474 R1 (budget integrity): bounds head-of-queue blowups so
+    no single net consumes more than ~``PER_NET_CAP_STAGE_FRACTION`` of
+    the stage budget (with a small floor so tiny stage budgets don't
+    produce useless sub-second caps).
+
+    Args:
+        per_net_timeout: Explicit per-net budget (``--per-net-timeout``).
+            Returned unchanged when set.
+        stage_timeout: The stage's wall-clock budget (``timeout`` given to
+            the routing loop).  ``None``/non-positive => no derivation.
+
+    Returns:
+        The effective per-net budget in seconds, or ``None`` when neither
+        an explicit cap nor a stage budget is configured (legacy
+        unbounded behaviour).
+    """
+    if per_net_timeout is not None:
+        return per_net_timeout
+    if stage_timeout is None or stage_timeout <= 0:
+        return None
+    return max(PER_NET_CAP_FLOOR_S, PER_NET_CAP_STAGE_FRACTION * float(stage_timeout))
+
 
 def run_initial_pass_grace(
     grace_nets: list[int],
     route_fn: Callable[[int, float], list],
     commit_fn: Callable[[int, list], None],
     per_net_timeout: float | None,
+    budget_s: float = GRACE_PASS_BUDGET_S,
 ) -> tuple[int, int, int]:
     """Bounded best-effort sweep over nets starved by an initial-pass timeout.
 
@@ -89,35 +145,76 @@ def run_initial_pass_grace(
         per_net_timeout: The caller's own per-net budget; tier caps are
             clamped to it so a grace attempt never receives MORE time
             per call than the caller's normal pass would grant.
+        budget_s: Total sweep budget in seconds (issue #3474 R1).
+            Defaults to ``GRACE_PASS_BUDGET_S``; callers that have
+            already overrun their stage deadline pass the REMAINING
+            grace fund so the sweep never extends the stage overrun
+            past the historical bound.
 
     Returns:
         ``(routed, attempted, skipped)``: nets successfully routed,
         distinct nets given at least one attempt, and nets never
         attempted because the grace budget ran out.
+
+    Notes:
+        Issue #3474 R1 adds two productivity guards:
+
+        - **Single-call overrun abort**: an attempt that exceeds
+          ``max(GRACE_CALL_OVERRUN_ABORT_MULT * cap,
+          GRACE_CALL_OVERRUN_ABORT_FLOOR_S)`` indicates a deadline leak
+          below the cap; the whole sweep aborts (every later attempt
+          would leak the same way).
+        - **No-progress tier exit**: when tier 1 attempts several nets
+          and routes none, later (more expensive) tiers are skipped --
+          the board state, not the cap size, is what's blocking.
     """
     start = time.monotonic()
     remaining = list(grace_nets)
     attempted: set[int] = set()
     routed = 0
     out_of_budget = False
-    for tier_cap in GRACE_PASS_TIER_CAPS_S:
-        if out_of_budget or not remaining:
+    aborted = False
+    for tier_idx, tier_cap in enumerate(GRACE_PASS_TIER_CAPS_S):
+        if out_of_budget or aborted or not remaining:
             break
         cap = min(tier_cap, per_net_timeout) if per_net_timeout else tier_cap
+        abort_threshold = max(GRACE_CALL_OVERRUN_ABORT_MULT * cap, GRACE_CALL_OVERRUN_ABORT_FLOOR_S)
+        tier_routed_before = routed
+        tier_attempts = 0
         still_failing: list[int] = []
         for idx, net in enumerate(remaining):
-            if time.monotonic() - start > GRACE_PASS_BUDGET_S:
+            if time.monotonic() - start > budget_s:
                 out_of_budget = True
                 still_failing.extend(remaining[idx:])
                 break
             attempted.add(net)
+            tier_attempts += 1
+            call_start = time.monotonic()
             routes = route_fn(net, cap)
+            call_elapsed = time.monotonic() - call_start
             if routes:
                 routed += 1
                 commit_fn(net, routes)
             else:
                 still_failing.append(net)
+            if call_elapsed > abort_threshold:
+                # Deadline leak below the cap (issue #3474 R1): abort the
+                # sweep before the leak eats the rest of the budget.
+                print(
+                    f"  Grace pass aborted: single attempt took {call_elapsed:.1f}s "
+                    f"under a {cap:.1f}s cap (deadline leak below the router; "
+                    f"issue #3474)",
+                    flush=True,
+                )
+                aborted = True
+                still_failing.extend(remaining[idx + 1:])
+                break
         remaining = still_failing
+        # No-progress tier exit (issue #3474 R1): if this tier attempted
+        # at least 3 nets and routed none of them, escalating the cap is
+        # unlikely to help -- skip the more expensive tiers.
+        if tier_idx == 0 and tier_attempts >= 3 and routed == tier_routed_before:
+            break
     skipped = sum(1 for n in grace_nets if n not in attempted)
     return routed, len(attempted), skipped
 

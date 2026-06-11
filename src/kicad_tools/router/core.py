@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .algorithms import (
+    GRACE_PASS_BUDGET_S,
+    GRACE_PASS_TIER_CAPS_S,
+    PER_NET_CAP_STAGE_FRACTION,
     HierarchicalRouter,
     MonteCarloRouter,
     MSTRouter,
@@ -36,6 +40,7 @@ from .algorithms import (
     calculate_congestion_tuned_params,
     calculate_history_increment,
     calculate_present_cost,
+    derive_per_net_cap,
     detect_oscillation,
     run_initial_pass_grace,
     select_seg_seg_demotion_nets,
@@ -1986,16 +1991,14 @@ class Autorouter:
                         blocking_components.append(ref)
                         break  # One component per net is enough
 
-            # Run root cause analysis for detailed diagnostics
-            analyzer = RootCauseAnalyzer()
+            # Run root cause analysis for detailed diagnostics (budgeted +
+            # per-net cached, issue #3474 R1 -- see
+            # ``_analyze_failure_budgeted``).
             net_name = self.net_names.get(net, f"Net_{net}")
-            analysis = analyzer.analyze_routing_failure(
-                grid=self.grid,
-                start=source_coords,
-                end=target_coords,
-                net=net_name,
+            analysis = self._analyze_failure_budgeted(
+                net, net_name, source_coords, target_coords
             )
-            failure_cause = analysis.root_cause
+            failure_cause = analysis.root_cause if analysis else FailureCause.UNKNOWN
 
             # Check for pad accessibility issues (pad not on grid)
             # Use tight threshold (resolution/10) to detect even slightly off-grid pads
@@ -2032,7 +2035,10 @@ class Autorouter:
             if off_grid_pads:
                 failure_cause = FailureCause.PIN_ACCESS
 
-                # Analyze which nets' clearance zones are blocking pad access
+                # Analyze which nets' clearance zones are blocking pad access.
+                # The pad-access scan is pad-local (cheap); only the deep
+                # corridor analysis above is budgeted (#3474 R1).
+                analyzer = RootCauseAnalyzer()
                 pad_blockers = []
                 src_layer = self.grid.layer_to_index(source_pad.layer.value)
                 tgt_layer = self.grid.layer_to_index(target_pad.layer.value)
@@ -2062,7 +2068,11 @@ class Autorouter:
                     pad_blockers.extend(tgt_blockers)
 
                 # Store blockers in analysis for detailed reporting
-                analysis.pad_access_blockers = pad_blockers
+                # (analysis may be None when the #3474 R1 analysis budget
+                # is exhausted; the reason string below still carries the
+                # blocker details).
+                if analysis is not None:
+                    analysis.pad_access_blockers = pad_blockers
 
                 # Build detailed reason with blocking net information
                 if pad_blockers:
@@ -2079,7 +2089,7 @@ class Autorouter:
 
                     # Add suggestion for minimum clearance
                     min_clearance = min(b.suggested_clearance for b in pad_blockers)
-                    if min_clearance < self.grid.rules.trace_clearance:
+                    if min_clearance < self.grid.rules.trace_clearance and analysis is not None:
                         analysis.suggestions.insert(
                             0,
                             f"Reduce clearance to {min_clearance:.2f}mm to allow pad access",
@@ -5912,10 +5922,28 @@ class Autorouter:
 
         return routes
 
+    # Issue #3474 R1: cumulative wall-clock budget for deep failure
+    # analysis (RootCauseAnalyzer) across one Autorouter lifetime.  The
+    # analyzer scans grid cells in pure Python; on fine grids a single
+    # call measured ~100 s (chorus-test 1240x1240x4, ~120 s per failed
+    # edge including the pre-#3474 full-board CongestionMap).  Failed
+    # edges are common in the negotiated loop, so unbounded per-edge
+    # analysis can silently consume the entire routing stage budget --
+    # the #3485 "per-net-timeout not enforced" fingerprint was mostly
+    # THIS, not A* itself.  Diagnostics must never out-spend the search
+    # they are diagnosing: cap the total spend and reuse one analysis
+    # per net (repeat failures of the same net carry the same root
+    # cause for reporting purposes).
+    _FAILURE_ANALYSIS_BUDGET_S = 20.0
+
     def _record_routing_failure(self, net: int, source_pad: Pad, target_pad: Pad):
         """Record a routing failure with diagnostic information.
 
         Helper method to record failures when routing with pre-computed MST edges.
+
+        Issue #3474 R1: the deep root-cause analysis is budgeted (see
+        ``_FAILURE_ANALYSIS_BUDGET_S``) and cached per net.  The cheap
+        blocking-net Bresenham scan (used by targeted rip-up) always runs.
 
         Args:
             net: Net ID
@@ -5936,14 +5964,10 @@ class Autorouter:
                     blocking_components.append(ref)
                     break
 
-        # Run root cause analysis
-        analyzer = RootCauseAnalyzer()
+        # Run root cause analysis (budgeted + per-net cached, #3474 R1).
         net_name = self.net_names.get(net, f"Net_{net}")
-        analysis = analyzer.analyze_routing_failure(
-            grid=self.grid,
-            start=source_coords,
-            end=target_coords,
-            net=net_name,
+        analysis = self._analyze_failure_budgeted(
+            net, net_name, source_coords, target_coords
         )
 
         failure = RoutingFailure(
@@ -5966,6 +5990,67 @@ class Autorouter:
             analysis=analysis,
         )
         self.routing_failures.append(failure)
+
+    def _analyze_failure_budgeted(
+        self,
+        net: int,
+        net_name: str,
+        source_coords: tuple[float, float],
+        target_coords: tuple[float, float],
+    ):
+        """Run RootCauseAnalyzer under a cumulative budget with per-net reuse.
+
+        Issue #3474 R1 (budget integrity): on fine grids one
+        ``analyze_routing_failure`` call costs seconds-to-minutes of
+        pure-Python grid scanning.  Multi-edge nets fail several edges and
+        the rip-up loop re-fails the same nets across iterations, so the
+        un-budgeted analyzer dominated the routing stage budget on
+        chorus-test (measured ~237 s of a 247 s SPI_SCK "routing" step;
+        the grace pass burned its entire #3452 budget inside ONE analyzer
+        call).  Strategy:
+
+        - First failure of a net runs the (corridor-scoped) analyzer and
+          caches the result by net id.
+        - Later failures of the SAME net reuse the cached analysis.
+        - A cumulative wall-clock budget (``_FAILURE_ANALYSIS_BUDGET_S``)
+          bounds total analyzer spend per Autorouter; once exhausted,
+          failures record ``analysis=None`` (the pre-existing legacy
+          degradation path -- reason "No path found").
+
+        Returns:
+            ``FailureAnalysis`` or ``None`` (budget exhausted / analyzer
+            error).
+        """
+        cache: dict[int, object] | None = getattr(self, "_failure_analysis_cache", None)
+        if cache is None:
+            cache = {}
+            self._failure_analysis_cache = cache
+            self._failure_analysis_spent = 0.0
+
+        if net in cache:
+            return cache[net]
+
+        if self._failure_analysis_spent >= self._FAILURE_ANALYSIS_BUDGET_S:
+            return None
+
+        t0 = time.monotonic()
+        try:
+            analyzer = RootCauseAnalyzer()
+            analysis = analyzer.analyze_routing_failure(
+                grid=self.grid,
+                start=source_coords,
+                end=target_coords,
+                net=net_name,
+            )
+        except Exception:
+            # Diagnostics must never break routing: degrade to the legacy
+            # "No path found" record.
+            analysis = None
+        finally:
+            self._failure_analysis_spent += time.monotonic() - t0
+
+        cache[net] = analysis
+        return analysis
 
     def route_all_parallel(
         self,
@@ -6352,6 +6437,20 @@ class Autorouter:
                 progress_callback=progress_callback,
                 timeout=timeout,
             )
+
+        # Issue #3474 R1 (budget integrity): when a stage budget exists but
+        # no explicit per-net cap was given, derive one so a single
+        # pathological search cannot starve the whole queue (the stage
+        # timeout check only runs BETWEEN nets).  Explicit
+        # ``--per-net-timeout`` values pass through unchanged.
+        derived_cap = derive_per_net_cap(per_net_timeout, timeout)
+        if derived_cap is not None and per_net_timeout is None:
+            flush_print(
+                f"  Per-net A* cap: {derived_cap:.1f}s "
+                f"(= {PER_NET_CAP_STAGE_FRACTION:.0%} of {float(timeout):.0f}s stage "
+                f"budget; set --per-net-timeout to override; issue #3474)"
+            )
+        per_net_timeout = derived_cap
 
         # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
         # threading before negotiated routing begins.  This is the default
@@ -6776,6 +6875,30 @@ class Autorouter:
             # 12/32 -> 3/32 collapse is that cliff, load-modulated).
             # See :func:`run_initial_pass_grace` for the tiered-cap
             # design and measured rationale.
+            # Issue #3474 R1: the grace pass extends the stage past its
+            # deadline by up to GRACE_PASS_BUDGET_S.  Any overrun the
+            # last net already incurred (only checkable between nets)
+            # comes out of the grace fund -- pre-#3474 a single leaking
+            # net could burn 100+s past the deadline and the grace pass
+            # would STILL add its full budget on top.  Skip entirely
+            # when the remaining fund cannot pay for even one tier-1
+            # attempt.  (The fund is deliberately NOT clamped by the
+            # stage budget itself: #3452's contract is that even a
+            # zero-budget stage gives every starved net one bounded
+            # attempt.)
+            grace_fund = GRACE_PASS_BUDGET_S
+            if grace_nets and timeout is not None:
+                stage_overrun = (time.time() - start_time) - float(timeout)
+                grace_fund = GRACE_PASS_BUDGET_S - max(0.0, stage_overrun)
+                if grace_fund < GRACE_PASS_TIER_CAPS_S[0]:
+                    flush_print(
+                        f"  Grace pass skipped: stage overran its deadline by "
+                        f"{max(0.0, stage_overrun):.1f}s, exhausting the "
+                        f"{GRACE_PASS_BUDGET_S:.0f}s grace budget -- cannot fund "
+                        f"any starved net ({len(grace_nets)} skipped) (issue #3474)"
+                    )
+                    grace_nets = []
+
             if grace_nets:
                 grace_start = time.time()
 
@@ -6791,7 +6914,8 @@ class Autorouter:
                         self.routes.append(route)
 
                 graced, attempted, skipped = run_initial_pass_grace(
-                    grace_nets, _grace_route, _grace_commit, per_net_timeout
+                    grace_nets, _grace_route, _grace_commit, per_net_timeout,
+                    budget_s=grace_fund,
                 )
                 flush_print(
                     f"  Grace pass: {graced}/{attempted} starved net(s) routed in "
@@ -9806,6 +9930,9 @@ class Autorouter:
         if len(pads) < 2:
             return []
 
+        _dbg = bool(os.environ.get("KCT_DEBUG_PNT"))
+        _t0 = time.monotonic() if _dbg else 0.0
+
         # Issue #2953: push foreign-net pad / track context so corridor-
         # aware A* honors the world-coord via clearance predicate the
         # negotiated / route_net paths already invoke (PR #2952).
@@ -9813,6 +9940,14 @@ class Autorouter:
         # Issue #3002: Corridor-aware A* also needs segment-vs-foreign-
         # via gating.
         self._update_router_segment_foreign_context(net)
+
+        if _dbg:
+            print(
+                f"    [PNT-DEBUG] ctx-updates net={self.net_names.get(net, net)} "
+                f"took {time.monotonic() - _t0:.1f}s",
+                flush=True,
+            )
+            _t0 = time.monotonic()
 
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
@@ -9826,6 +9961,14 @@ class Autorouter:
             self._mark_route(route)
             routes.append(route)
         connected_indices |= block_connected
+
+        if _dbg:
+            print(
+                f"    [PNT-DEBUG] intra-ic/block net={self.net_names.get(net, net)} "
+                f"took {time.monotonic() - _t0:.1f}s",
+                flush=True,
+            )
+            _t0 = time.monotonic()
 
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
         if len(pads_for_routing) < 2:
@@ -9855,6 +9998,13 @@ class Autorouter:
             per_net_timeout=per_net_timeout,
             failure_callback=record_failure,
         )
+        if _dbg:
+            print(
+                f"    [PNT-DEBUG] route_net_negotiated net={self.net_names.get(net, net)} "
+                f"pads={len(pad_objs)} budget={per_net_timeout} "
+                f"took {time.monotonic() - _t0:.1f}s",
+                flush=True,
+            )
         routes.extend(new_routes)
         return routes
 

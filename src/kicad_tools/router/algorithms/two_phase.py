@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from kicad_tools.cli.progress import flush_print
 
-from .negotiated import run_initial_pass_grace
+from .negotiated import (
+    GRACE_PASS_BUDGET_S,
+    GRACE_PASS_TIER_CAPS_S,
+    PER_NET_CAP_STAGE_FRACTION,
+    derive_per_net_cap,
+    run_initial_pass_grace,
+)
 
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
@@ -186,6 +192,22 @@ class TwoPhaseRouter:
         start_time = time.time()
 
         print("\n=== Two-Phase Routing (Global + Detailed) ===")
+
+        # Issue #3474 R1 (budget integrity): when a stage budget exists
+        # but no explicit per-net cap was given, derive one so a single
+        # pathological search cannot starve the whole queue -- the stage
+        # timeout check in the detailed loop only runs BETWEEN nets, so
+        # an uncapped head-of-queue blowup (chorus-test SPI_SCK) eats the
+        # entire stage before the check ever fires.  Explicit
+        # ``--per-net-timeout`` values pass through unchanged.
+        derived_cap = derive_per_net_cap(per_net_timeout, timeout)
+        if derived_cap is not None and per_net_timeout is None:
+            flush_print(
+                f"  Per-net A* cap: {derived_cap:.1f}s "
+                f"(= {PER_NET_CAP_STAGE_FRACTION:.0%} of {float(timeout):.0f}s stage "
+                f"budget; set --per-net-timeout to override; issue #3474)"
+            )
+        per_net_timeout = derived_cap
 
         # Get nets to route in priority order
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
@@ -541,6 +563,29 @@ class TwoPhaseRouter:
         # tiered-cap design.  The overrun past ``--timeout`` is bounded
         # by ``GRACE_PASS_BUDGET_S`` (well inside the slack the recipe
         # already tolerates from the stall-recovery path).
+        # Issue #3474 R1: the grace pass extends the stage past its
+        # deadline by up to GRACE_PASS_BUDGET_S.  Any overrun the last
+        # net already incurred (only checkable between nets) comes out
+        # of the grace fund -- pre-#3474 a single leaking net could
+        # burn 100+s past the deadline and the grace pass would STILL
+        # add its full budget on top.  Skip entirely when the remaining
+        # fund cannot pay for even one tier-1 attempt.  (The fund is
+        # deliberately NOT clamped by the stage budget itself: #3452's
+        # contract is that even a zero-budget stage gives every starved
+        # net one bounded attempt.)
+        grace_fund = GRACE_PASS_BUDGET_S
+        if grace_nets and timeout is not None:
+            stage_overrun = (time.time() - start_time) - float(timeout)
+            grace_fund = GRACE_PASS_BUDGET_S - max(0.0, stage_overrun)
+            if grace_fund < GRACE_PASS_TIER_CAPS_S[0]:
+                flush_print(
+                    f"  Grace pass skipped: stage overran its deadline by "
+                    f"{max(0.0, stage_overrun):.1f}s, exhausting the "
+                    f"{GRACE_PASS_BUDGET_S:.0f}s grace budget -- cannot fund "
+                    f"any starved net ({len(grace_nets)} skipped) (issue #3474)"
+                )
+                grace_nets = []
+
         if grace_nets:
             grace_start = time.monotonic()
 
@@ -556,7 +601,8 @@ class TwoPhaseRouter:
                     self.routes.append(route)
 
             graced, attempted, skipped = run_initial_pass_grace(
-                grace_nets, _grace_route, _grace_commit, per_net_timeout
+                grace_nets, _grace_route, _grace_commit, per_net_timeout,
+                budget_s=grace_fund,
             )
             flush_print(
                 f"  Grace pass: {graced}/{attempted} starved net(s) routed in "
