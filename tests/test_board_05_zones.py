@@ -51,10 +51,17 @@ UNROUTED_PCB = BOARD_DIR / "output" / "bldc_controller.kicad_pcb"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
 
 # Issue #2899 acceptance criterion 1: at least 4 zones in the committed
-# routed PCB.  Five nets currently get zones (+24V, +5V, +3V3, GND,
-# PWR_LED); a stricter assertion would over-fit to today's placement.
+# routed PCB.  Five nets currently get zones in the routed artifact
+# (VIN, +24V, +5V, +3V3, GND); a stricter assertion would over-fit to
+# today's placement.
 # Note: rails renamed VMOTOR -> +24V and +3.3V -> +3V3 in PR #3393
 # (closes #3384) to match stock ``power:+24V`` / ``power:+3V3`` symbols.
+# Note: the PWR_LED zone was removed from the routed artifact in issue
+# #3513 -- its 0.65mm-wide strip was geometrically incapable of filling
+# (narrower than its own pads plus min_thickness/clearance shrink, so
+# KiCad produced zero filled_polygons -> R3.1 was an open circuit).
+# PWR_LED is now connected by an F.Cu trace instead; the unrouted PCB
+# still carries the zone definition.
 MIN_REQUIRED_ZONES = 4
 
 # Issue #2899 acceptance criterion 2 (subset): +24V, +5V, +3V3, and
