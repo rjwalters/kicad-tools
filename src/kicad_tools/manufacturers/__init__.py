@@ -51,6 +51,7 @@ __all__ = [
     "FileNamingConvention",
     # Functions
     "get_profile",
+    "get_fab_family",
     "list_manufacturers",
     "get_manufacturer_ids",
     "get_all_manufacturer_names",
@@ -127,6 +128,42 @@ def get_profile(manufacturer_id: str) -> ManufacturerProfile:
         raise ValueError(f"Unknown manufacturer: {manufacturer_id!r}. Available: {available}")
 
     return _PROFILES[normalized]
+
+
+# Capability-tier profiles map to a parent *fab family* for export-format
+# purposes.  A tier profile (e.g. ``jlcpcb-tier1``) changes DRC limits but
+# the physical fab -- and therefore the BOM/CPL CSV format, Gerber naming
+# preset, LCSC parts library, and output filenames -- is the parent fab.
+_FAB_FAMILY: dict[str, str] = {
+    "jlcpcb-tier1": "jlcpcb",
+}
+
+
+def get_fab_family(manufacturer_id: str) -> str:
+    """Resolve a manufacturer ID to its fab *family* for export formats.
+
+    Capability tiers of the same physical fab (e.g. ``jlcpcb-tier1``)
+    share the parent fab's BOM/CPL CSV formats, Gerber filename preset,
+    parts library (LCSC), and output file naming.  Export-format code
+    should select formatters by family while DRC/audit/report code keeps
+    the full profile ID so capability differences (via-in-pad, finer
+    trace classes) are honored.  See issue #3497: exporting at
+    ``--mfr jlcpcb-tier1`` must produce JLCPCB-format outputs while the
+    report's DRC section runs against the tier1 rules.
+
+    Args:
+        manufacturer_id: Manufacturer identifier or alias
+            (e.g. ``"jlcpcb-tier1"``, ``"jlcpcb_tier1"``, ``"jlc"``).
+
+    Returns:
+        Canonical family ID (e.g. ``"jlcpcb"``).  Unrecognized IDs are
+        returned normalized (lowercased/stripped) so callers like the
+        ``generic`` export path keep working.
+    """
+    normalized = manufacturer_id.lower().strip()
+    if normalized in _ALIASES:
+        normalized = _ALIASES[normalized]
+    return _FAB_FAMILY.get(normalized, normalized)
 
 
 def list_manufacturers() -> list[ManufacturerProfile]:

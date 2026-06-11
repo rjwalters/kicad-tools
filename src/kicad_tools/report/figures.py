@@ -46,6 +46,37 @@ _PCB_PRESETS: list[tuple[str, str, str]] = [
 ]
 
 
+def _layer_figure_filename(layer_name: str) -> str:
+    """Return the PNG filename for a single-copper-layer figure.
+
+    ``F.Cu`` -> ``layer_F_Cu.png``, ``In1.Cu`` -> ``layer_In1_Cu.png``.
+    """
+    return f"layer_{layer_name.replace('.', '_')}.png"
+
+
+def _copper_layer_names(pcb_path: Path) -> list[str]:
+    """Return the board's copper layer names in stackup order.
+
+    Falls back to a standard 2-layer stackup (``F.Cu``, ``B.Cu``) when
+    the PCB cannot be parsed, so per-layer figure generation degrades
+    gracefully rather than aborting the whole figure pass.
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(pcb_path)
+        names = [layer.name for layer in pcb.copper_layers]
+        if names:
+            return names
+    except Exception:
+        logger.warning(
+            "Could not determine copper layers for %s; falling back to F.Cu/B.Cu",
+            pcb_path,
+            exc_info=True,
+        )
+    return ["F.Cu", "B.Cu"]
+
+
 @dataclass
 class FigureEntry:
     """Manifest entry describing a single generated report figure."""
@@ -57,7 +88,8 @@ class FigureEntry:
     """Human-readable label (e.g. ``"PCB Front"``)."""
 
     figure_type: str
-    """One of ``pcb_front``, ``pcb_back``, ``pcb_copper``, ``assembly``, or ``schematic``."""
+    """One of ``pcb_front``, ``pcb_back``, ``pcb_copper``, ``pcb_layer``,
+    ``assembly``, or ``schematic``."""
 
 
 class ReportFigureGenerator:
@@ -149,7 +181,7 @@ class ReportFigureGenerator:
         pcb_path: Path,
         output_dir: Path,
     ) -> list[FigureEntry]:
-        """Render the four PCB layer presets."""
+        """Render the four PCB layer presets plus one figure per copper layer."""
         entries: list[FigureEntry] = []
         for preset, filename, caption in _PCB_PRESETS:
             out_path = output_dir / filename
@@ -182,6 +214,53 @@ class ReportFigureGenerator:
                 logger.warning(
                     "Exception while rendering PCB preset '%s'",
                     preset,
+                    exc_info=True,
+                )
+
+        entries.extend(self._generate_per_layer_figures(pcb_path, output_dir))
+        return entries
+
+    def _generate_per_layer_figures(
+        self,
+        pcb_path: Path,
+        output_dir: Path,
+    ) -> list[FigureEntry]:
+        """Render one figure per copper layer (issue #3497).
+
+        Each copper layer is rendered together with ``Edge.Cuts`` so the
+        board outline gives spatial context.  Works for any layer count
+        (2-layer boards get F.Cu/B.Cu; a 4-layer board adds In1.Cu and
+        In2.Cu, etc.).
+        """
+        entries: list[FigureEntry] = []
+        for layer_name in _copper_layer_names(pcb_path):
+            filename = _layer_figure_filename(layer_name)
+            out_path = output_dir / filename
+            try:
+                result = screenshot_board(
+                    pcb_path=str(pcb_path),
+                    layers=f"{layer_name},Edge.Cuts",
+                    max_size_px=self.max_size_px,
+                    output_path=str(out_path),
+                )
+                if result.get("success"):
+                    entries.append(
+                        FigureEntry(
+                            filename=filename,
+                            caption=f"Copper Layer {layer_name}",
+                            figure_type="pcb_layer",
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "Failed to render copper layer '%s': %s",
+                        layer_name,
+                        result.get("error_message", "unknown error"),
+                    )
+            except Exception:
+                logger.warning(
+                    "Exception while rendering copper layer '%s'",
+                    layer_name,
                     exc_info=True,
                 )
         return entries

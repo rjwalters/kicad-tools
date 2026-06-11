@@ -2,7 +2,7 @@
 title: "softstart_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-11 | jlcpcb"
+date: "Rev 1 | 2026-06-11 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -62,6 +62,53 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 
 \newpage
 
+## Schematic Overview
+
+### Schematic: softstart
+
+![Schematic: softstart](images/schematic_softstart.png)
+
+
+\newpage
+
+## PCB Layout
+
+![PCB Front](images/pcb_front.png)
+
+![PCB Back](images/pcb_back.png)
+
+### Copper
+
+![PCB Copper](images/pcb_copper.png)
+
+### Assembly
+
+![Assembly](images/assembly.png)
+
+
+\newpage
+
+## Copper Layers
+
+### F.Cu
+
+![F.Cu](images/layer_F_Cu.png)
+
+### In1.Cu
+
+![In1.Cu](images/layer_In1_Cu.png)
+
+### In2.Cu
+
+![In2.Cu](images/layer_In2_Cu.png)
+
+### B.Cu
+
+![B.Cu](images/layer_B_Cu.png)
+
+
+\newpage
+
 ## Bill of Materials
 
 | Value | Package | Qty | References |
@@ -110,30 +157,22 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 
 | Metric | Count |
 |--------|-------|
-| Errors | 14 |
-| Warnings | 8 |
-| Blocking | 14 |
+| Errors | 0 |
+| Warnings | 0 |
+| Blocking | 0 |
 
-**Status**: FAIL
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| via_in_pad | 14 |
-| pad_grid | 8 |
+**Status**: PASS
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: READY
 
 ### Action Items
 
-- **[CRITICAL]** Fix 14 blocking DRC violations (via_in_pad (14))
 - **[OPTIONAL]** Verify zone fill in KiCad for 12 zone-connected nets
-- **[OPTIONAL]** Review 8 DRC warnings
 - **[OPTIONAL]** Analog-sensitive: U3 (INA180A3) — instrumentation amplifier (TI INA); manual layout review recommended
 - **[OPTIONAL]** Analog net: AC_LINE — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: BUS_LINE — audio signal; keep short, away from digital/switching nets
@@ -196,9 +235,9 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~5.0 USD |
-| Components (estimated) | ~5.74 USD |
+| Components (estimated) | ~5.72 USD |
 | Assembly (estimated) | ~2.52 USD |
-| **Total (estimated)** | **~13.26 USD** |
+| **Total (estimated)** | **~13.24 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~66.29 USD |
+| Batch Total (estimated) | ~66.21 USD |
 

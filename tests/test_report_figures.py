@@ -138,17 +138,30 @@ class TestGenerateAll:
         gen = ReportFigureGenerator()
         entries = gen.generate_all(pcb, sch, out_dir)
 
-        # 4 PCB + 2 schematic = 6
-        assert len(entries) == 6
+        # 4 PCB presets + 2 per-layer (F.Cu/B.Cu fallback) + 2 schematic = 8
+        assert len(entries) == 8
 
-        # Check PCB entries
-        pcb_entries = [e for e in entries if e.figure_type != "schematic"]
+        # Check PCB preset entries
+        pcb_entries = [
+            e for e in entries if e.figure_type not in ("schematic", "pcb_layer")
+        ]
         assert len(pcb_entries) == 4
         pcb_types = {e.figure_type for e in pcb_entries}
         assert pcb_types == {"pcb_front", "pcb_back", "pcb_copper", "assembly"}
 
         pcb_filenames = {e.filename for e in pcb_entries}
         assert pcb_filenames == {"pcb_front.png", "pcb_back.png", "pcb_copper.png", "assembly.png"}
+
+        # Check per-copper-layer entries (issue #3497)
+        layer_entries = [e for e in entries if e.figure_type == "pcb_layer"]
+        assert [e.filename for e in layer_entries] == [
+            "layer_F_Cu.png",
+            "layer_B_Cu.png",
+        ]
+        assert [e.caption for e in layer_entries] == [
+            "Copper Layer F.Cu",
+            "Copper Layer B.Cu",
+        ]
 
         # Check schematic entries
         sch_entries = [e for e in entries if e.figure_type == "schematic"]
@@ -160,8 +173,8 @@ class TestGenerateAll:
         for e in sch_entries:
             assert e.caption.startswith("Schematic: ")
 
-        # Verify screenshot_board was called with correct presets
-        assert mock_board.call_count == 4
+        # Verify screenshot_board was called for 4 presets + 2 layers
+        assert mock_board.call_count == 6
 
     @patch("kicad_tools.report.figures._check_cairosvg", return_value=True)
     @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
@@ -185,9 +198,11 @@ class TestGenerateAll:
         sch.touch()
         out_dir = tmp_path / "figures"
 
-        # First call (front) fails, rest succeed
+        # First call (front) fails, rest succeed (3 presets + 2 layers)
         mock_board.side_effect = [
             _make_failure_result("front render failed"),
+            _make_success_result(),
+            _make_success_result(),
             _make_success_result(),
             _make_success_result(),
             _make_success_result(),
@@ -200,8 +215,8 @@ class TestGenerateAll:
         with caplog.at_level(logging.WARNING):
             entries = gen.generate_all(pcb, sch, out_dir)
 
-        # 3 PCB (one failed) + 0 schematic
-        assert len(entries) == 3
+        # 3 presets (one failed) + 2 per-layer (F.Cu/B.Cu fallback) + 0 schematic
+        assert len(entries) == 5
         assert all(e.figure_type != "pcb_front" for e in entries)
 
         # Warning should be logged
@@ -714,9 +729,9 @@ class TestBlankSchematicDetection:
 
         sch_entries = [e for e in entries if e.figure_type == "schematic"]
         assert len(sch_entries) == 0
-        # PCB entries still present
+        # PCB entries still present (4 presets + 2 per-layer fallback)
         pcb_entries = [e for e in entries if e.figure_type != "schematic"]
-        assert len(pcb_entries) == 4
+        assert len(pcb_entries) == 6
         # Warnings for both sheets
         assert "sheet_a" in caplog.text
         assert "sheet_b" in caplog.text

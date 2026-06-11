@@ -166,6 +166,7 @@ class DRCChecker:
     def check_all(
         self,
         filters: list[ViolationFilter] | None = None,
+        pad_grid_auto_derive: bool = False,
     ) -> DRCResults:
         """Run all DRC checks.
 
@@ -173,6 +174,14 @@ class DRCChecker:
             filters: Optional list of :class:`ViolationFilter` rules.  When
                 provided, matching violations are suppressed or reclassified
                 and the ``suppressed_count`` field is populated.
+            pad_grid_auto_derive: When ``True``, the ``pad_grid`` check
+                derives its tolerance from the board's pad-offset
+                histogram instead of the fixed 0.05 mm default -- the
+                same policy ``kct check`` applies by default (issue
+                #3061).  Defaults to ``False`` to preserve the existing
+                Python-API behaviour; gating consumers that must agree
+                with ``kct check`` (e.g. ``ManufacturingAudit``) opt in
+                so report and CLI verdicts cannot drift (issue #3497).
 
         Returns:
             DRCResults containing all violations found (after filtering,
@@ -183,7 +192,10 @@ class DRCChecker:
         # Run each category of checks (order matches CHECK_ALL_METHODS).
         for method_name in self.CHECK_ALL_METHODS:
             method = getattr(self, method_name)
-            results.merge(method())
+            if method_name == "check_pad_grid_alignment":
+                results.merge(method(auto_derive_threshold=pad_grid_auto_derive))
+            else:
+                results.merge(method())
 
         # Apply filters if provided
         if filters:

@@ -83,6 +83,7 @@ class ManufacturingResult:
     project_zip_path: Path | None = None
     manifest_path: Path | None = None
     readme_path: Path | None = None
+    image_paths: list[Path] = field(default_factory=list)
     preflight_results: list[PreflightResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -107,6 +108,7 @@ class ManufacturingResult:
             files.append(self.report_path)
         if self.report_md_path:
             files.append(self.report_md_path)
+        files.extend(self.image_paths)
         if self.project_zip_path:
             files.append(self.project_zip_path)
         if self.readme_path:
@@ -126,6 +128,8 @@ class ManufacturingResult:
                 lines.append(f"  Gerbers: {self.assembly_result.gerber_path.name}")
         if self.report_path:
             lines.append(f"  Report: {self.report_path.name}")
+        if self.image_paths:
+            lines.append(f"  Images: {len(self.image_paths)} file(s)")
         if self.project_zip_path:
             lines.append(f"  Project ZIP: {self.project_zip_path.name}")
         if self.readme_path:
@@ -566,6 +570,19 @@ class ManufacturingPackage:
         if pcb_figs:
             result["pcb_figures"] = pcb_figs
 
+        # Per-copper-layer renders (issue #3497): one image per copper
+        # layer, in stackup order.
+        layer_figs = [
+            {
+                "name": entry.caption.removeprefix("Copper Layer "),
+                "figure_path": f"figures/{entry.filename}",
+            }
+            for entry in entries
+            if entry.figure_type == "pcb_layer"
+        ]
+        if layer_figs:
+            result["pcb_layer_figures"] = layer_figs
+
         sch_sheets = [
             {"name": entry.caption, "figure_path": f"figures/{entry.filename}"}
             for entry in entries
@@ -575,7 +592,8 @@ class ManufacturingPackage:
             result["schematic_sheets"] = sch_sheets
 
         logger.info(
-            f"Generated {len(entries)} figure(s): {len(pcb_figs)} PCB, {len(sch_sheets)} schematic"
+            f"Generated {len(entries)} figure(s): {len(pcb_figs)} PCB, "
+            f"{len(layer_figs)} per-layer, {len(sch_sheets)} schematic"
         )
         return result or None
 
@@ -705,6 +723,12 @@ class ManufacturingPackage:
         promotes ``report.pdf`` (or ``report.md`` if PDF is unavailable) to
         the package root, and removes all ``vN/`` directories.
 
+        Report figures (per-layer renders, assembly view, schematic
+        sheets) are promoted to an ``images/`` subdirectory so the
+        package ships the visuals alongside ``report.md`` (issue #3497),
+        and the markdown's relative ``figures/`` references are rewritten
+        to ``images/`` so they resolve inside the package.
+
         If ``config.keep_build_artifacts`` is ``True``, intermediate files
         (markdown source, figures, data, metadata) are preserved in a
         ``.build/report/`` subdirectory.  Otherwise they are discarded.
@@ -748,6 +772,10 @@ class ManufacturingPackage:
             shutil.copy2(staged_md, promoted)
             result.report_path = promoted
 
+        # Promote report figures to images/ at the package root so the
+        # bundle ships per-layer + assembly renders (issue #3497).
+        self._promote_report_images(out_dir, report_staging, result)
+
         # Handle build artifacts
         if self.config.keep_build_artifacts:
             build_dir = out_dir / ".build" / "report"
@@ -760,6 +788,54 @@ class ManufacturingPackage:
             shutil.rmtree(report_staging)
 
         logger.info(f"Promoted report to {result.report_path}")
+
+    @staticmethod
+    def _promote_report_images(
+        out_dir: Path,
+        report_staging: Path,
+        result: ManufacturingResult,
+    ) -> None:
+        """Copy staged report figures into ``<out_dir>/images/``.
+
+        The report generator writes figures (per-copper-layer renders,
+        front/back/assembly views, schematic sheets) into the versioned
+        report's ``figures/`` subdirectory.  This step promotes those PNGs
+        to a package-root ``images/`` directory, rewrites the promoted
+        ``report.md``'s relative ``figures/`` image references to
+        ``images/``, and records the image paths on *result* so the
+        manifest includes their checksums (issue #3497).
+
+        No-op when the staged report has no figures (e.g. figure
+        generation was skipped because kicad-cli/cairosvg are missing).
+        """
+        staged_figures = report_staging / "figures"
+        if not staged_figures.is_dir():
+            return
+
+        pngs = sorted(p for p in staged_figures.iterdir() if p.suffix.lower() == ".png")
+        if not pngs:
+            return
+
+        images_dir = out_dir / "images"
+        if images_dir.exists():
+            shutil.rmtree(images_dir)
+        images_dir.mkdir(parents=True)
+
+        for png in pngs:
+            dest = images_dir / png.name
+            shutil.copy2(png, dest)
+            result.image_paths.append(dest)
+
+        # Rewrite relative figure references in the promoted markdown so
+        # they resolve against the package layout (figures/ -> images/).
+        promoted_md = out_dir / "report.md"
+        if promoted_md.exists():
+            text = promoted_md.read_text(encoding="utf-8")
+            rewritten = text.replace("](figures/", "](images/")
+            if rewritten != text:
+                promoted_md.write_text(rewritten, encoding="utf-8")
+
+        logger.info(f"Promoted {len(pngs)} report image(s) to {images_dir}")
 
     def _generate_readme(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Generate a README.txt describing the manufacturing package contents."""
@@ -786,6 +862,10 @@ class ManufacturingPackage:
                 "PCB fabrication data (copper layers, silkscreen, solder mask, drill)",
             ),
             "report": ("Design report", "Manufacturing readiness report with DRC/ERC results"),
+            "images": (
+                "Report images",
+                "Board renders: per-copper-layer, front/back, assembly view, schematic sheets",
+            ),
             "project_zip": (
                 "KiCad project archive",
                 "Source KiCad project files (.kicad_pcb, .kicad_sch, .kicad_pro)",
@@ -813,6 +893,12 @@ class ManufacturingPackage:
         if result.report_path:
             desc = file_descriptions["report"]
             lines.append(f"  {result.report_path.name}")
+            lines.append(f"    {desc[0]}: {desc[1]}")
+            lines.append("")
+
+        if result.image_paths:
+            desc = file_descriptions["images"]
+            lines.append(f"  images/ ({len(result.image_paths)} files)")
             lines.append(f"    {desc[0]}: {desc[1]}")
             lines.append("")
 

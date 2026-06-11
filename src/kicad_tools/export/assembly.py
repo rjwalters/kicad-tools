@@ -160,6 +160,13 @@ class AssemblyPackage:
             )
 
         self.manufacturer = manufacturer.lower()
+        # Resolve the fab *family* for export-format concerns (BOM/CPL CSV
+        # format, Gerber preset, LCSC enrichment, output filenames).
+        # Capability tiers like ``jlcpcb-tier1`` share the parent fab's
+        # formats while keeping their own DRC profile (issue #3497).
+        from kicad_tools.manufacturers import get_fab_family
+
+        self.fab_family = get_fab_family(self.manufacturer)
         self.config = config or AssemblyConfig()
 
         # Find schematic
@@ -391,7 +398,7 @@ class AssemblyPackage:
         # overwritten.
         csv_merge_refs: set[str] = set()
         if self.config.merge_lcsc:
-            filename = self.config.bom_filename.format(manufacturer=self.manufacturer)
+            filename = self.config.bom_filename.format(manufacturer=self.fab_family)
             existing_csv = output_dir / filename
             if existing_csv.is_file():
                 existing = read_existing_lcsc_assignments(existing_csv)
@@ -413,7 +420,7 @@ class AssemblyPackage:
                         )
 
         # LCSC auto-matching for JLCPCB exports
-        if self.config.auto_lcsc and self.manufacturer == "jlcpcb":
+        if self.config.auto_lcsc and self.fab_family == "jlcpcb":
             try:
                 enrichment = enrich_bom_lcsc(
                     items,
@@ -430,10 +437,10 @@ class AssemblyPackage:
 
         # Generate BOM
         bom_config = self.config.bom_config or BOMExportConfig()
-        bom_csv = export_bom(items, self.manufacturer, bom_config)
+        bom_csv = export_bom(items, self.fab_family, bom_config)
 
         # Write to file
-        filename = self.config.bom_filename.format(manufacturer=self.manufacturer)
+        filename = self.config.bom_filename.format(manufacturer=self.fab_family)
         bom_path = output_dir / filename
         bom_path.write_text(bom_csv)
 
@@ -459,13 +466,13 @@ class AssemblyPackage:
         # formatter can apply its own defaults (e.g. JLCPCB exclude_tht=True).
         pnp_csv = export_pnp(
             footprints,
-            self.manufacturer,
+            self.fab_family,
             self.config.pnp_config,
             rotation_corrections=rotation_corrections,
         )
 
         # Write to file
-        filename = self.config.pnp_filename.format(manufacturer=self.manufacturer)
+        filename = self.config.pnp_filename.format(manufacturer=self.fab_family)
         pnp_path = output_dir / filename
         pnp_path.write_text(pnp_csv)
 
@@ -495,8 +502,8 @@ class AssemblyPackage:
 
         exporter = GerberExporter(self.pcb_path)
 
-        if self.manufacturer in MANUFACTURER_PRESETS:
-            return exporter.export_for_manufacturer(self.manufacturer, gerber_dir)
+        if self.fab_family in MANUFACTURER_PRESETS:
+            return exporter.export_for_manufacturer(self.fab_family, gerber_dir)
         else:
             config = self.config.gerber_config or GerberConfig()
             return exporter.export(config, gerber_dir)

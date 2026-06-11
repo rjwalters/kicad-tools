@@ -163,6 +163,7 @@ class ReportGenerator:
             "cost": data.cost,
             "schematic_sheets": data.schematic_sheets,
             "pcb_figures": data.pcb_figures,
+            "pcb_layer_figures": data.pcb_layer_figures,
             "analog_components": data.analog_components,
             "design_narrative": data.design_narrative,
             "functional_blocks": data.functional_blocks,

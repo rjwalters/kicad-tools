@@ -165,6 +165,19 @@ header-includes:
 
 {% endif %}
 {% endif %}
+{% if pcb_layer_figures %}
+
+\newpage
+
+## Copper Layers
+
+{% for layer in pcb_layer_figures %}
+### {{ layer.name }}
+
+![{{ layer.name }}]({{ layer.figure_path }})
+
+{% endfor %}
+{% endif %}
 {% if bom_groups %}
 
 \newpage
