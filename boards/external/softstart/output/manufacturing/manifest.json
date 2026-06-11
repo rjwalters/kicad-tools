@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-11T19:22:21.451040+00:00",
+  "generated_at": "2026-06-11T20:43:27.736930+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "bom_jlcpcb.csv": {
@@ -9,20 +9,20 @@
       "size": 1935
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "7e072a9920db0df58bfdac3af17243498e1de5efbbef373c49c1bec26a4a3cb3",
-      "size": 5428
+      "sha256": "012ae7530431aa72aa096bdf9e8bf0ad664a52c1e3ed0bd9bd876b51a14cda03",
+      "size": 3907
     },
     "gerbers.zip": {
-      "sha256": "eee54b60e0eced8d592a8c57b9f5890e63b38a5279e29a107ff423b09d0c96d0",
-      "size": 256898
+      "sha256": "e3a82ba17b4624e51605ec1448b95a4fb82a994b191c749ae11f30a7935246ef",
+      "size": 256899
     },
     "report.pdf": {
-      "sha256": "9defeefc44776a99a5ae1c48b1ba6a69f7985fcfeb9253a40cb3924f01b87911",
-      "size": 3051178
+      "sha256": "108126a486d672e0fdbeef763d03d8c7b7f9a5413ebc47587807a305dca835ca",
+      "size": 3047556
     },
     "report.md": {
-      "sha256": "3f49a51668888158fafafcb626225608816f82105ff7d6db68e93c644364c3b1",
-      "size": 5972
+      "sha256": "5893375cd8e9c0dc201c4b3c2ae26066a84c1582bcc5ce1bf6f445e1beb1a95d",
+      "size": 7484
     },
     "assembly.png": {
       "sha256": "1b880715ab718d6ee1c495378caa53179bc6ebc18f3313da6098000477047756",
@@ -57,15 +57,15 @@
       "size": 397470
     },
     "schematic_softstart.png": {
-      "sha256": "f6e0b505f73551002bb8493bb2ad3870400e0f060f110be435c2d00004edc891",
-      "size": 293256
+      "sha256": "ce86a7e31cf19861e2cc13b0e174d18dbdcf10a27a999baa961e53332b26418c",
+      "size": 278668
     },
     "kicad_project.zip": {
-      "sha256": "ad723019b7ca6cdd7a7e453d1cad85f8d81b756085c5e30eada76b3318869bf9",
-      "size": 528372
+      "sha256": "bb464b0def9b3ad7e376c6a363080db2b6cd1b14fb16abdc7322dd1143790cd1",
+      "size": 528394
     },
     "README.txt": {
-      "sha256": "7b1da5ca5e3475bf7804581446ed21db9eab8e8b7d56d8f16311850e739282b2",
+      "sha256": "a5d4c52631904a47f70f1104e32ffdee983b93e876ae2003fc739f7a66530695",
       "size": 881
     }
   },

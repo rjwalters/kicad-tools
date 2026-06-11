@@ -18,7 +18,7 @@ from kicad_tools.sexp.builders import (
     uuid_node,
 )
 
-from ..logging import _log_info
+from ..logging import _log_info, _log_warning
 from .elements import GlobalLabel, HierarchicalLabel, Junction, Label, NoConnect, PowerSymbol, Wire
 from .symbol import SymbolInstance
 
@@ -322,9 +322,144 @@ class SchematicIOMixin:
         """Generate complete schematic S-expression string."""
         return self.to_sexp_node().to_string()
 
-    def write(self, path: str | Path):
-        """Write schematic to file."""
+    def content_bounds(self) -> tuple[float, float, float, float] | None:
+        """Compute the absolute extent of all placed content in mm.
+
+        Covers symbol bounding boxes, power symbols, wires, junctions,
+        no-connects, all label kinds, and text notes.  Returns
+        ``(min_x, min_y, max_x, max_y)``, or ``None`` when the schematic
+        has no placed content.
+        """
+        xs: list[float] = []
+        ys: list[float] = []
+
+        for sym in self.symbols:
+            try:
+                bx1, by1, bx2, by2 = sym.bounding_box(padding=0.0)
+                xs.extend((bx1, bx2))
+                ys.extend((by1, by2))
+            except Exception:
+                # Fall back to the placement origin when pin geometry is
+                # unavailable (e.g. partially-constructed symbol defs).
+                xs.append(sym.x)
+                ys.append(sym.y)
+
+        for pwr in self.power_symbols:
+            xs.append(pwr.x)
+            ys.append(pwr.y)
+
+        for wire in self.wires:
+            xs.extend((wire.x1, wire.x2))
+            ys.extend((wire.y1, wire.y2))
+
+        for junc in self.junctions:
+            xs.append(junc.x)
+            ys.append(junc.y)
+
+        for nc in self.no_connects:
+            xs.append(nc.x)
+            ys.append(nc.y)
+
+        for label in (*self.labels, *self.hier_labels, *self.global_labels):
+            xs.append(label.x)
+            ys.append(label.y)
+
+        for _text, tx, ty in self.text_notes:
+            xs.append(tx)
+            ys.append(ty)
+
+        if not xs:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def auto_size_paper(self, margin: float | None = None) -> str:
+        """Escalate ``self.paper`` until the content extent fits the sheet.
+
+        Walks the standard ladder (A4 -> A3 -> A2 -> A1 -> A0) starting at
+        the currently declared size — the sheet is never shrunk.  KiCad
+        clips content placed beyond the declared paper bounds in every
+        faithful render, so a generator that placed content past the sheet
+        edge previously produced schematics whose renders were silently
+        truncated (issue #3530).
+
+        Args:
+            margin: Clearance in mm kept between the content extent and
+                the sheet edge (default:
+                :data:`~kicad_tools.schematic.models.paper.DEFAULT_PAPER_MARGIN_MM`).
+
+        Returns:
+            The (possibly updated) paper name.
+        """
+        from .paper import (
+            DEFAULT_PAPER_MARGIN_MM,
+            paper_dimensions,
+            select_paper_for_extent,
+        )
+
+        if margin is None:
+            margin = DEFAULT_PAPER_MARGIN_MM
+
+        bounds = self.content_bounds()
+        if bounds is None:
+            return self.paper
+
+        min_x, min_y, max_x, max_y = bounds
+
+        if min_x < 0 or min_y < 0:
+            _log_warning(
+                f"Schematic content extends to negative coordinates "
+                f"(min x={min_x:.1f}, min y={min_y:.1f} mm); KiCad clips "
+                f"content above/left of the sheet origin regardless of "
+                f"paper size. Shift the affected elements into positive "
+                f"coordinate space."
+            )
+
+        declared = paper_dimensions(self.paper)
+        if declared is None:
+            # Custom/unmodeled paper string ("User ...", ANSI sizes):
+            # don't second-guess an explicit declaration we can't parse.
+            return self.paper
+
+        decl_w, decl_h = declared
+        if max_x + margin <= decl_w and max_y + margin <= decl_h:
+            return self.paper  # content already fits the declared sheet
+
+        base = self.paper.split()[0]
+        chosen = select_paper_for_extent(max_x, max_y, margin=margin, minimum=base)
+        if chosen is None:
+            _log_warning(
+                f"Schematic content extent ({max_x:.0f} x {max_y:.0f} mm) "
+                f"exceeds even A0 (1189 x 841 mm); declaring A0 but KiCad "
+                f"will clip. Split the design into hierarchical sheets."
+            )
+            chosen = "A0"
+
+        if chosen != self.paper:
+            _log_warning(
+                f"Schematic content extent ({max_x:.0f} x {max_y:.0f} mm) "
+                f"overflows the declared {self.paper} sheet "
+                f"({decl_w:.0f} x {decl_h:.0f} mm); auto-sizing paper to "
+                f"{chosen} so renders are not clipped (issue #3530)."
+            )
+            self.paper = chosen
+        return self.paper
+
+    def write(self, path: str | Path, auto_size_paper: bool = True):
+        """Write schematic to file.
+
+        Args:
+            path: Destination ``.kicad_sch`` path.
+            auto_size_paper: When ``True`` (default), escalate the declared
+                paper size along the A4->A0 ladder if the placed content
+                overflows the current sheet (issue #3530).  The sheet is
+                never shrunk.  Pass ``False`` to write the declared paper
+                verbatim (a warning is still logged on overflow).
+        """
         path = Path(path)
+        if auto_size_paper:
+            self.auto_size_paper()
+        else:
+            self._warn_if_content_overflows()
         content = self.to_sexp()
         path.write_text(content)
         # Store the path for later use (e.g., run_erc)
@@ -332,6 +467,24 @@ class SchematicIOMixin:
         _log_info(
             f"Wrote schematic to {path} ({len(self.symbols)} symbols, {len(self.wires)} wires)"
         )
+
+    def _warn_if_content_overflows(self) -> None:
+        """Log a warning when content exceeds the declared sheet bounds."""
+        from .paper import paper_dimensions
+
+        bounds = self.content_bounds()
+        declared = paper_dimensions(self.paper)
+        if bounds is None or declared is None:
+            return
+        _min_x, _min_y, max_x, max_y = bounds
+        decl_w, decl_h = declared
+        if max_x > decl_w or max_y > decl_h:
+            _log_warning(
+                f"Schematic content extent ({max_x:.0f} x {max_y:.0f} mm) "
+                f"overflows the declared {self.paper} sheet "
+                f"({decl_w:.0f} x {decl_h:.0f} mm); renders will be "
+                f"clipped (auto-sizing disabled)."
+            )
 
     def run_erc(self, output_path: str | Path | None = None) -> ERCReport:
         """Run KiCad ERC on this schematic.

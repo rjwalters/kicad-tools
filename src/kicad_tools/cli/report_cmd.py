@@ -400,6 +400,7 @@ def _load_data_dir(data_dir_str: str) -> dict:
         "analog_components.json": "analog_components",
         "narrative.json": "_narrative",
         "stackup.json": "stackup",
+        "off_board.json": "off_board",
     }
 
     for filename, field_name in mappings.items():

@@ -2224,6 +2224,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "TB" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole rect (at -2.54 0) (size 2.5 2.5) (drill 1.3) (layers "*.Cu" "*.Mask") (net {n1} "{net1}"))
     (pad "2" thru_hole oval (at 2.54 0) (size 2.5 2.5) (drill 1.3) (layers "*.Cu" "*.Mask") (net {n2} "{net2}"))
   )"""
@@ -2243,6 +2244,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole rect (at -2.54 0) (size 1.8 1.8) (drill 1.0) (layers "*.Cu" "*.Mask") (net {g} "{gate_net}"))
     (pad "2" thru_hole oval (at 0 0) (size 1.8 1.8) (drill 1.0) (layers "*.Cu" "*.Mask") (net {d} "{drain_net}"))
     (pad "3" thru_hole oval (at 2.54 0) (size 1.8 1.8) (drill 1.0) (layers "*.Cu" "*.Mask") (net {s} "{source_net}"))
@@ -2262,6 +2264,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd roundrect (at -1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {n1} "{net1}"))
     (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {n2} "{net2}"))
   )"""
@@ -2280,6 +2283,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd roundrect (at -1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {n1} "{net1}"))
     (pad "2" smd roundrect (at 1 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {n2} "{net2}"))
   )"""
@@ -2298,6 +2302,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 2) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd roundrect (at -3.1 0) (size 1.6 2.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {n1} "{net1}"))
     (pad "2" smd roundrect (at 3.1 0) (size 1.6 2.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {n2} "{net2}"))
   )"""
@@ -2317,6 +2322,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd rect (at -3.15 2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {n1} "{pin1_net}"))
     (pad "2" smd rect (at -3.15 0) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {n2} "{pin2_net}"))
     (pad "3" smd rect (at -3.15 -2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {n3} "{pin3_net}"))
@@ -2411,6 +2417,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
 {pads}
   )"""
 
@@ -2426,6 +2433,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd rect (at -1.1 0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["ISENSE_POS"]} "ISENSE_POS"))
     (pad "2" smd rect (at -1.1 0) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
     (pad "3" smd rect (at -1.1 -0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["ISENSE_NEG"]} "ISENSE_NEG"))
@@ -2445,6 +2453,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole rect (at -3.81 -2.54) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["AC_LINE"]} "AC_LINE"))
     (pad "2" thru_hole oval (at -3.81 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["AC_NEUTRAL"]} "AC_NEUTRAL"))
     (pad "3" thru_hole oval (at -3.81 2.54) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net 0 ""))
@@ -2465,6 +2474,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole rect (at -12.5 0) (size 2.5 2.5) (drill 1.5) (layers "*.Cu" "*.Mask") (net {NETS["AC_LINE"]} "AC_LINE"))
     (pad "2" thru_hole oval (at 12.5 0) (size 2.5 2.5) (drill 1.5) (layers "*.Cu" "*.Mask") (net {NETS["FUSED_LINE"]} "FUSED_LINE"))
   )"""
@@ -2481,6 +2491,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole circle (at -3.75 0) (size 2 2) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["FUSED_LINE"]} "FUSED_LINE"))
     (pad "2" thru_hole circle (at 3.75 0) (size 2 2) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["AC_NEUTRAL"]} "AC_NEUTRAL"))
   )"""
@@ -2497,6 +2508,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole rect (at -2.54 -2.54) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {NETS["FUSED_LINE"]} "FUSED_LINE"))
     (pad "2" thru_hole oval (at 2.54 -2.54) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {NETS["VRECT"]} "VRECT"))
     (pad "3" thru_hole oval (at 2.54 2.54) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {NETS["AC_NEUTRAL"]} "AC_NEUTRAL"))
@@ -2521,6 +2533,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 12.7 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole circle (at 0 0) (size 2 2) (drill 1.0) (layers "*.Cu" "*.Mask") (net {n1} "{net1}"))
     (pad "2" thru_hole circle (at 25.4 0) (size 2 2) (drill 1.0) (layers "*.Cu" "*.Mask") (net {n2} "{net2}"))
   )"""
@@ -2539,6 +2552,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "LED" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {na} "{net_a}"))
     (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {nk} "{net_k}"))
   )"""
@@ -2569,6 +2583,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 {(pins / 2.0) * pitch + 1:.1f}) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
 {pads}
   )"""
 
@@ -2584,6 +2599,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "RESET" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole circle (at -3.25 -2.25) (size 2 2) (drill 1.2) (layers "*.Cu" "*.Mask") (net {NETS["NRST"]} "NRST"))
     (pad "2" thru_hole circle (at 3.25 -2.25) (size 2 2) (drill 1.2) (layers "*.Cu" "*.Mask") (net {NETS["NRST"]} "NRST"))
     (pad "3" thru_hole circle (at -3.25 2.25) (size 2 2) (drill 1.2) (layers "*.Cu" "*.Mask") (net {NETS["GND"]} "GND"))
@@ -2637,6 +2653,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
 {pads}
   )"""
 
@@ -2666,6 +2683,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd rect (at -0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {n1} "{pin1_net}"))
     (pad "2" smd rect (at 0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {n2} "{pin2_net}"))
     (pad "3" smd rect (at 0 -1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {n3} "{pin3_net}"))
@@ -2689,6 +2707,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd rect (at -2.15 0) (size 1.7 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {nc} "{cathode_net}"))
     (pad "2" smd rect (at 2.15 0) (size 1.7 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {na} "{anode_net}"))
   )"""
@@ -2709,6 +2728,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "LM7812" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr through_hole)
     (pad "1" thru_hole rect (at -2.54 0) (size 2.0 2.0) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["VRECT"]} "VRECT"))
     (pad "2" thru_hole oval (at 0 0) (size 2.0 2.0) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["GND"]} "GND"))
     (pad "3" thru_hole oval (at 2.54 0) (size 2.0 2.0) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["VGATE"]} "VGATE"))
@@ -2873,6 +2893,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
 {pads}
   )"""
 
@@ -2889,6 +2910,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "XC6206-3.3V" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd rect (at -0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["VRECT"]} "VRECT"))
     (pad "2" smd rect (at 0.95 1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
     (pad "3" smd rect (at 0 -1.1) (size 1.0 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
@@ -3010,6 +3032,7 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (fp_text value "MCP6001" (at 0 2.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (attr smd)
     (pad "1" smd rect (at -1.1 0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["V_AC_SENSE"]} "V_AC_SENSE"))
     (pad "2" smd rect (at -1.1 0) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
     (pad "3" smd rect (at -1.1 -0.95) (size 1.06 0.65) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["V_AC_SENSE_RAW"]} "V_AC_SENSE_RAW"))

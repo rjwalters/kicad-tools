@@ -92,6 +92,11 @@ class ReportData:
     """Layer stackup: [{name, type, thickness_mm, material}].
     Filtered to copper, dielectric, and mask layers."""
 
+    off_board: dict | None = None
+    """Off-board assemblies from the project spec (issue #3531b):
+    {assemblies: [{name, description, connector, part, qty, voltage,
+    capacitance, assembly, wiring}]}."""
+
     pcb_geometry: dict | None = None
     """PCB geometry data for interactive reports: {board_outline, bounds,
     footprints, segments, vias, layers}.  Populated by

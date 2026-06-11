@@ -171,6 +171,7 @@ class ReportGenerator:
             "power_architecture": data.power_architecture,
             "assembly_notes": data.assembly_notes,
             "stackup": data.stackup,
+            "off_board": data.off_board,
             "notes": data.notes,
             "tool_version": data.tool_version or __version__,
             "git_hash": data.git_hash,

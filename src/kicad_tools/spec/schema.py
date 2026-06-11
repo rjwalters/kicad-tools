@@ -115,6 +115,38 @@ class Interface(BaseModel):
     current_max: str | None = Field(default=None, description="Maximum current")
     pins: list[str] | None = Field(default=None, description="Pin assignments")
     protocol: str | None = Field(default=None, description="Communication protocol")
+    # Off-board assembly fields (issue #3531b): subsystems that connect
+    # through a board connector but are not placed on the PCB (e.g.
+    # supercap banks wired through terminal blocks).  Reports use these
+    # to document where the parts went and to add hand-solder BOM rows.
+    off_board: bool = Field(
+        default=False,
+        description="True when the assembly is not placed on the PCB",
+    )
+    connector: str | None = Field(
+        default=None,
+        description="Board connector reference the assembly wires to (e.g. 'J3')",
+    )
+    part: str | None = Field(
+        default=None, description="Part number for the off-board assembly cells"
+    )
+    qty: int | None = Field(
+        default=None, description="Quantity of cells/parts in the assembly"
+    )
+    capacitance: str | None = Field(
+        default=None, description="Capacitance for energy-storage interfaces"
+    )
+    assembly: str | None = Field(
+        default=None,
+        description=(
+            "Assembly method (e.g. 'hand_solder'); off-board parts are "
+            "DNP for fab assembly"
+        ),
+    )
+    wiring: str | None = Field(
+        default=None,
+        description="Human-readable wiring description (connector pin -> assembly terminal)",
+    )
 
 
 class DesignIntent(BaseModel):
