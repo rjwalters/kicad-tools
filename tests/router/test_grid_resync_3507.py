@@ -338,3 +338,74 @@ class TestNudgePassGridConsistency:
         _assert_marked(router.grid, a)
         _assert_marked(router.grid, b)
         assert len(router.grid.routes) == 2
+
+
+class TestSkipNetsProtection:
+    """Issue #3508: diff-pair nets are excluded from the mutating
+    post-route passes (optimizer + nudge) because their geometry is
+    intentional -- length-matching serpentines are exactly the
+    "zigzags" the optimizer removes, and the nudge helpers are not
+    partner-aware at the pairs' sub-displacement intra gap."""
+
+    def test_optimizer_skip_nets_passes_route_through_untouched(self):
+        router = _make_router()
+        # Serpentine-ish zigzag the optimizer WOULD simplify.
+        protected = _make_route(
+            7,
+            "USB_D+",
+            [(5.0, 10.0), (10.0, 10.0), (10.0, 12.0), (15.0, 12.0), (15.0, 10.0), (20.0, 10.0)],
+        )
+        plain = _make_route(8, "SIG", [(5.0, 30.0), (12.0, 30.0), (20.0, 30.0)])
+        _commit(router, protected)
+        _commit(router, plain)
+        protected_geometry = [
+            (s.x1, s.y1, s.x2, s.y2) for s in protected.segments
+        ]
+
+        optimizer = TraceOptimizer(
+            config=OptimizationConfig(merge_collinear=True, eliminate_zigzags=True)
+        )
+        optimize_routes_grid_synced(router, optimizer, skip_nets={7})
+
+        by_net = {r.net: r for r in router.routes}
+        # The protected route is the SAME object with unchanged geometry.
+        assert by_net[7] is protected
+        assert [
+            (s.x1, s.y1, s.x2, s.y2) for s in by_net[7].segments
+        ] == protected_geometry
+        # The unprotected collinear pair was still merged.
+        assert len(by_net[8].segments) == 1
+        _assert_marked(router.grid, protected)
+
+    def test_nudge_skip_nets_filters_protected_violations(self):
+        """Violations on protected nets are recorded as skips, not nudged."""
+        from kicad_tools.router.drc_nudge import _drc_verify_and_nudge_impl
+
+        router = _make_router()
+        # Two parallel same-layer traces well inside clearance of each
+        # other -> seg-seg violations in both directions.
+        a = _make_route(1, "USB_D+", [(5.0, 10.0), (20.0, 10.0)])
+        b = _make_route(2, "USB_D-", [(5.0, 10.2), (20.0, 10.2)])
+        _commit(router, a)
+        _commit(router, b)
+        a_geo = a.copy_geometry()
+        b_geo = b.copy_geometry()
+
+        result = _drc_verify_and_nudge_impl(
+            router,
+            max_displacement=0.2,
+            max_passes=1,
+            skip_nets={1, 2},
+        )
+
+        # Both nets protected: nothing actionable, nothing nudged, and
+        # the geometry is bit-identical.
+        assert result.initial_violations == 0
+        assert result.segments_nudged == 0
+        assert [
+            (s.x1, s.y1, s.x2, s.y2) for s in router.routes[0].segments
+        ] == [(s.x1, s.y1, s.x2, s.y2) for s in a_geo.segments]
+        assert [
+            (s.x1, s.y1, s.x2, s.y2) for s in router.routes[1].segments
+        ] == [(s.x1, s.y1, s.x2, s.y2) for s in b_geo.segments]
+        assert result.skipped.get("diffpair_protected_net", 0) >= 1

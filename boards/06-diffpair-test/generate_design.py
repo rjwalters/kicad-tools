@@ -1655,7 +1655,20 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # collision checking and every downstream grid consumer (the nudge
     # pass, step 6b's transactional solo re-route repair) see the TRUE
     # copper state instead of the pre-optimization snapshot.
-    optimize_routes_grid_synced(router, optimizer)
+    #
+    # Issue #3508: diff-pair nets are EXCLUDED from optimization.  The
+    # coupled pre-phase's geometry is intentional: length-matching
+    # serpentines are exactly the "zigzags" ``eliminate_zigzags``
+    # removes (measured: PCIE_RX skew 0.097mm post-serpentine ->
+    # 1.652mm in the optimized artifact), and straightening one side
+    # of a coupled pair breaks the constant-gap geometry the
+    # skew/continuity rules measure.
+    diffpair_net_ids = {
+        r.net
+        for r in router.routes
+        if r.net_name and (r.net_name.endswith("+") or r.net_name.endswith("-"))
+    }
+    optimize_routes_grid_synced(router, optimizer, skip_nets=diffpair_net_ids)
 
     # Issue #2757: Run the DRC verify-and-nudge pass after trace optimisation.
     # The optimiser can produce chamfered diagonals that graze BGA / QFN /
@@ -1669,7 +1682,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
     print("\n6. DRC verify-and-nudge pass...")
-    nudge_result = drc_verify_and_nudge(router)
+    # Issue #3508: diff-pair nets are protected from the nudge pass for
+    # the same reason they skip the optimizer above -- the nudge helpers
+    # are not partner-aware, and a 0.2mm displacement at the pairs'
+    # 0.075-0.1mm intra gap lands copper ON the partner (measured:
+    # USB3_RX1/RX2 sides physically overlapping post-nudge, forcing the
+    # 6b solo rip which then destroys the coupled geometry).
+    nudge_result = drc_verify_and_nudge(router, skip_nets=diffpair_net_ids)
     if nudge_result.initial_violations:
         print(f"   {nudge_result.summary()}")
     else:

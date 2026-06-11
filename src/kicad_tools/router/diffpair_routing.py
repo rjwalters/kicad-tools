@@ -713,11 +713,33 @@ class CoupledPathfinder:
         ``_via_extra_cells`` captures.  The previous full-envelope
         sweep (+/-8 cells on every layer on board 06) double-counted
         the marked halo exactly like the trace check did.
+
+        Issue #3508 (second pass): a via must additionally never land
+        on PAD METAL -- even its OWN net's pad.  Own-net passability
+        (see ``_is_cell_blocked``) made pad cells legal for the via
+        predicate too, and the crossing-tail synthesizer promptly
+        placed vias exactly on its own goal pads (measured: 2
+        ``via_in_pad`` errors at J3-9 / J4-2 on the first #3508
+        re-route; the jlcpcb standard tier does not support
+        via-in-pad).  ``cell.pad_blocked`` marks cells whose extent
+        overlaps continuous pad metal (#3233), so reject the via when
+        any cell under its DRILL footprint is pad metal on any layer.
         """
+        drill_cells = max(
+            0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution))
+        )
         for layer in range(self.grid.num_layers):
             for dy in range(-self._via_extra_cells, self._via_extra_cells + 1):
                 for dx in range(-self._via_extra_cells, self._via_extra_cells + 1):
                     if self._is_cell_blocked(gx + dx, gy + dy, layer, net):
+                        return True
+            # Issue #3508: no via-in-pad regardless of net ownership.
+            for dy in range(-drill_cells, drill_cells + 1):
+                for dx in range(-drill_cells, drill_cells + 1):
+                    cgx, cgy = gx + dx, gy + dy
+                    if not (0 <= cgx < self.grid.cols and 0 <= cgy < self.grid.rows):
+                        return True
+                    if self.grid.grid[layer][cgy][cgx].pad_blocked:
                         return True
         return False
 
@@ -1924,6 +1946,7 @@ def create_serpentine(
     min_segment_length: float = 1.0,
     partner_route: Route | None = None,
     intra_pair_clearance_mm: float | None = None,
+    grid: RoutingGrid | None = None,
 ) -> bool:
     """Add serpentine meander to a route to increase its length.
 
@@ -1951,6 +1974,17 @@ def create_serpentine(
         intra_pair_clearance_mm: Optional edge-to-edge clearance floor
             in mm.  Required for the clearance-aware path; ignored when
             ``partner_route`` is ``None``.
+        grid: Issue #3508: optional routing grid.  When provided, every
+            proposed serpentine segment is rasterised against the grid's
+            clearance envelope and the serpentine is REJECTED if any
+            covered cell is blocked for a foreign net.  The partner
+            self-check below only protects against the partner's
+            SEGMENTS; the grid check additionally protects against the
+            partner's vias, other nets' committed copper, and pad
+            clearance halos -- the measured failure mode on board 06 was
+            one-sided serpentine combs landing on the partner's shadow
+            vias (8 ``clearance_segment_via`` at -0.038 mm) and grazing
+            neighbour pads (Issue #3508 first re-route attempt).
 
     Returns:
         True if serpentine was added, False if no suitable segment
@@ -2152,6 +2186,31 @@ def create_serpentine(
                 if clearance + 1e-9 < intra_pair_clearance_mm:
                     return False
 
+    # Issue #3508: grid self-check.  Rasterise every proposed segment
+    # against the grid's clearance envelope (the same convention as
+    # ``CoupledPathfinder._is_trace_blocked``: the grid already encodes
+    # the full centerline clearance envelope at marking time, so a cell
+    # is legal exactly when a trace centerline there satisfies
+    # clearance).  Own-net cells are passable; anything else (partner
+    # copper INCLUDING vias, other nets, pad halos, keepouts) rejects
+    # the serpentine -- leaving the pair with a length-mismatch warning
+    # is strictly better than committing clearance violations.
+    if grid is not None:
+        for new_seg in new_segments:
+            li = grid.layer_to_index(new_seg.layer.value)
+            sgx1, sgy1 = grid.world_to_grid(new_seg.x1, new_seg.y1)
+            sgx2, sgy2 = grid.world_to_grid(new_seg.x2, new_seg.y2)
+            steps = max(abs(sgx2 - sgx1), abs(sgy2 - sgy1))
+            for i in range(steps + 1):
+                t = i / steps if steps else 0.0
+                gx = int(round(sgx1 + (sgx2 - sgx1) * t))
+                gy = int(round(sgy1 + (sgy2 - sgy1) * t))
+                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
+                    return False
+                cell = grid.grid[li][gy][gx]
+                if cell.blocked and cell.net != route.net:
+                    return False
+
     # Replace the original segment with serpentine segments
     route.segments = (
         route.segments[:best_segment_idx] + new_segments + route.segments[best_segment_idx + 1 :]
@@ -2166,6 +2225,7 @@ def match_pair_lengths(
     max_delta: float,
     add_serpentines: bool = True,
     intra_pair_clearance_mm: float | None = None,
+    grid: RoutingGrid | None = None,
 ) -> bool:
     """Match lengths of differential pair traces.
 
@@ -2211,6 +2271,7 @@ def match_pair_lengths(
             length_to_add,
             partner_route=n_route if intra_pair_clearance_mm is not None else None,
             intra_pair_clearance_mm=intra_pair_clearance_mm,
+            grid=grid,
         )
     else:
         return create_serpentine(
@@ -2218,6 +2279,7 @@ def match_pair_lengths(
             length_to_add,
             partner_route=p_route if intra_pair_clearance_mm is not None else None,
             intra_pair_clearance_mm=intra_pair_clearance_mm,
+            grid=grid,
         )
 
 
@@ -2664,6 +2726,44 @@ class DiffPairRouter:
                 route = None
 
             if route is None:
+                # Issue #3508: synthesized-tail fallback.  The per-net
+                # ``route()`` machinery declines sub-millimetre hops
+                # whose endpoints sit inside pad clearance halos (e.g.
+                # USB-C A6 -> B6 within a coupled pair's net) -- but
+                # when the pre-phase claims the net as routed, the
+                # negotiated main strategy SKIPS it (#2464) and the
+                # stub is never completed (measured: USB2_D+ incomplete
+                # at 18/21 reach on the first #3508 re-route).  The
+                # geometric tail constructor validates straight /
+                # dogleg / U-shaped candidates cell-by-cell against the
+                # grid, which handles exactly this pad-halo geometry.
+                try:
+                    grid = self.autorouter.grid
+                    pf = CoupledPathfinder(grid, self.autorouter.rules, 1)
+                    layer_idx = grid.layer_to_index(stub.start.layer.value)
+                    route = self._synthesize_tail(pf, stub.start, stub.end, layer_idx)
+                    if route is None:
+                        # Planar candidates exhausted (USB-C A6 -> B6 is
+                        # fully fenced by the neighbouring pin halos on
+                        # the surface layer): try the two-via
+                        # layer-change tail.  ``partner_segments=[]``
+                        # because a stub has no coupled partner to keep
+                        # clear of -- the grid validation still applies.
+                        route = self._synthesize_crossing_tail(
+                            pf, stub.start, stub.end, layer_idx, []
+                        )
+                except Exception as exc:  # pragma: no cover — defensive
+                    print(f"    WARNING: stub tail synthesis raised: {exc}")
+                    route = None
+                if route is not None:
+                    print(
+                        f"    Stub edge {stub.start.net_name} "
+                        f"{stub.start.ref}.{stub.start.pin} -> "
+                        f"{stub.end.ref}.{stub.end.pin} completed via "
+                        f"synthesized tail (issue #3508)"
+                    )
+
+            if route is None:
                 print(
                     f"    WARNING: stub edge {stub.start.net_name} "
                     f"{stub.start.ref}.{stub.start.pin} -> "
@@ -2677,6 +2777,33 @@ class DiffPairRouter:
             self.autorouter.routes.append(route)
             results.append(route)
         return results
+
+    def _remark_route_cells(self, route: Route) -> None:
+        """Re-mark an ALREADY-COMMITTED route's cell envelope (issue #3508).
+
+        Used after an in-place geometry mutation (the inline serpentine
+        shim) on a route that ``autorouter._mark_route`` has already
+        committed.  Cell marking is idempotent, so re-rasterising every
+        segment simply adds the NEW copper's envelope; the
+        non-idempotent bookkeeping (``grid.routes`` append, R-tree
+        insertion) is intentionally NOT repeated because the route
+        object is already registered.  The replaced straight chord's
+        cells stay marked -- conservative (own-net) and harmless.
+
+        Note the R-tree keeps the pre-mutation segment set; the grid
+        CELLS are the collision source of truth for the negotiated
+        router and ``GridCollisionChecker``, which is what the
+        downstream passes use.
+        """
+        grid = self.autorouter.grid
+        for seg in route.segments:
+            total_clearance = seg.width / 2 + grid.rules.trace_clearance
+            clearance_cells = int(total_clearance / grid.resolution) + 1
+            # Mirror the #1666 grid-quantization safety margin used by
+            # ``RoutingGrid.mark_route``.
+            clearance_cells += 1
+            grid._mark_segment(seg, clearance_cells=clearance_cells)
+        self.autorouter._mark_route_on_cpp_grid(route)
 
     def _virtual_pad_at(
         self, template: Pad, wx: float, wy: float, layer_idx: int
@@ -2763,7 +2890,11 @@ class DiffPairRouter:
         # between the shadow head and its goal pad on a connector pin
         # row); a small perpendicular excursion around the blocker is
         # routinely legal.
-        for off in (0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6):
+        # Issue #3508 (second pass): offsets extended to +/-3.2 mm so
+        # intra-connector stubs (USB-C A6 -> B6) can wrap around the
+        # full pin-row halo band; every candidate is still validated
+        # cell-by-cell so larger detours are safe.
+        for off in (0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6, 2.4, -2.4, 3.2, -3.2):
             wy = head.y + off
             candidates.append(
                 [
@@ -4282,9 +4413,26 @@ class DiffPairRouter:
                         pair.rules.max_length_delta,
                         add_serpentines=True,
                         intra_pair_clearance_mm=intra_clearance,
+                        # Issue #3508: grid-validate the bulges (foreign
+                        # copper, partner vias, pad halos) -- see
+                        # ``create_serpentine``.
+                        grid=self.autorouter.grid,
                     )
 
                     if matched:
+                        # Issue #3508: the serpentine mutated a route
+                        # AFTER it was marked on the grid (the commit at
+                        # the top of this method), so the grid does not
+                        # know about the bulge copper -- the negotiated
+                        # main strategy then routes other nets straight
+                        # through it (measured: 106 seg-seg violations
+                        # across 10 nets on the first #3508 re-route).
+                        # Re-mark the cells (idempotent; bookkeeping
+                        # like ``grid.routes``/R-tree insertion is NOT
+                        # repeated -- the route object is already
+                        # registered, only its cell envelope changed).
+                        self._remark_route_cells(p_routes[0])
+                        self._remark_route_cells(n_routes[0])
                         # Recalculate lengths
                         p_length = calculate_route_length(p_routes)
                         n_length = calculate_route_length(n_routes)

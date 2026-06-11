@@ -36,7 +36,9 @@ from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
 
-def optimize_routes_grid_synced(router, optimizer: TraceOptimizer) -> list[Route]:
+def optimize_routes_grid_synced(
+    router, optimizer: TraceOptimizer, skip_nets: set[int] | None = None
+) -> list[Route]:
     """Optimize every route on ``router`` keeping the grid in sync.
 
     Issue #3507: the historical call-site pattern::
@@ -63,6 +65,14 @@ def optimize_routes_grid_synced(router, optimizer: TraceOptimizer) -> list[Route
         router: ``Autorouter`` whose ``routes`` will be optimized and
             replaced in place.
         optimizer: Configured :class:`TraceOptimizer`.
+        skip_nets: Issue #3508: optional set of net IDs whose routes are
+            passed through UNTOUCHED.  Coupled diff-pair routes carry
+            intentional geometry the optimizer's simplification passes
+            destroy: length-matching serpentines are exactly the
+            "zigzags" ``eliminate_zigzags`` removes (measured on board
+            06: PCIE_RX skew 0.097 mm after serpentine -> 1.652 mm in
+            the final artifact), and straightening one side of a
+            coupled pair breaks the constant-gap geometry.
 
     Returns:
         The new ``router.routes`` list (also assigned on the router).
@@ -70,6 +80,9 @@ def optimize_routes_grid_synced(router, optimizer: TraceOptimizer) -> list[Route
     grid = router.grid
     optimized_routes: list[Route] = []
     for route in router.routes:
+        if skip_nets is not None and route.net in skip_nets:
+            optimized_routes.append(route)
+            continue
         optimized = optimizer.optimize_route(route)
         if optimized is not route and (
             optimized.segments == route.segments and optimized.vias == route.vias

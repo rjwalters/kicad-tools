@@ -1515,6 +1515,7 @@ def drc_verify_and_nudge(
     *,
     max_displacement: float = 0.2,
     max_passes: int = 3,
+    skip_nets: set[int] | None = None,
 ) -> DRCNudgeResult:
     """Run post-optimization DRC verification and repair.
 
@@ -1528,6 +1529,15 @@ def drc_verify_and_nudge(
             recommended by the existing ClearanceRepairer precedent).
         max_passes: Maximum iterative passes. Stops early when no
             violations remain or no progress is made.
+        skip_nets: Issue #3508: optional set of net IDs whose violations
+            are never nudged.  Coupled diff-pair copper runs at an
+            intentional intra-pair gap far below ``max_displacement``
+            (0.075-0.1 mm edge-to-edge vs the 0.2 mm budget), and the
+            nudge helpers are not partner-aware -- a nudge that fixes a
+            pad graze on one side routinely lands ON the partner trace
+            (measured on board 06: shadow-routed USB3_RX1/RX2 sides
+            physically overlapping after the nudge pass, forcing the
+            recipe's 6b solo re-route rip).
 
     Returns:
         :class:`DRCNudgeResult` with statistics.
@@ -1551,7 +1561,10 @@ def drc_verify_and_nudge(
     )
     try:
         return _drc_verify_and_nudge_impl(
-            router, max_displacement=max_displacement, max_passes=max_passes
+            router,
+            max_displacement=max_displacement,
+            max_passes=max_passes,
+            skip_nets=skip_nets,
         )
     finally:
         if _grid is not None:
@@ -1563,6 +1576,7 @@ def _drc_verify_and_nudge_impl(
     *,
     max_displacement: float,
     max_passes: int,
+    skip_nets: set[int] | None = None,
 ) -> DRCNudgeResult:
     """Body of :func:`drc_verify_and_nudge` (wrapped for the #3507 grid resync)."""
     result = DRCNudgeResult()
@@ -1583,6 +1597,14 @@ def _drc_verify_and_nudge_impl(
     violations = validate_routes(router)
     # Only consider actionable (non-component-inherent) violations.
     actionable = [v for v in violations if not v.component_inherent]
+    # Issue #3508: never nudge protected (diff-pair) nets -- see the
+    # ``skip_nets`` rationale in :func:`drc_verify_and_nudge`.
+    if skip_nets:
+        protected = [v for v in actionable if v.net in skip_nets]
+        if protected:
+            for _ in protected:
+                result._bump_skipped("diffpair_protected_net")
+            actionable = [v for v in actionable if v.net not in skip_nets]
     result.initial_violations = len(actionable)
 
     if not actionable:
@@ -1642,6 +1664,9 @@ def _drc_verify_and_nudge_impl(
         # Re-validate after nudges.
         violations = validate_routes(router)
         actionable = [v for v in violations if not v.component_inherent]
+        # Issue #3508: re-apply the protected-net filter on re-detection.
+        if skip_nets:
+            actionable = [v for v in actionable if v.net not in skip_nets]
         current_count = len(actionable)
 
         if current_count == 0:

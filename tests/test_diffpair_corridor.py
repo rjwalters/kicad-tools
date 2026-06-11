@@ -192,12 +192,29 @@ def test_route_coupled_corridor_prunes_outside_states():
             for dy in range(-2, 3):
                 start_only.add((cx + dx, cy + dy))
 
-    t0 = time.monotonic()
-    result = pf.route_coupled(p_start, p_end, n_start, n_end, corridor=frozenset(start_only))
-    elapsed = time.monotonic() - t0
+    # Issue #3508: the fail-fast assertion is iteration-based, not
+    # wall-clock.  Mid-route asymmetric moves enlarge the joint state
+    # space inside the corridor (positions x direction tags), so FULL
+    # frontier exhaustion under coverage instrumentation can exceed a
+    # small wall-clock bound while still being a tiny fraction of an
+    # open-grid search.  Production callers always pass an iteration
+    # budget; mirror that here and assert the search failed by corridor
+    # pruning (frontier exhausted) rather than by burning the budget.
+    budget = 200_000
+    result = pf.route_coupled(
+        p_start,
+        p_end,
+        n_start,
+        n_end,
+        corridor=frozenset(start_only),
+        max_iterations_budget=budget,
+    )
 
     assert result is None, "search must fail when the corridor has no path to the goal"
-    assert elapsed < 10.0, f"pruned search must exit fast; took {elapsed:.2f}s"
+    assert pf.last_iterations < budget, (
+        "pruned search must exhaust the corridor-bounded frontier instead of "
+        f"burning the full budget; used {pf.last_iterations} iterations"
+    )
 
 
 def test_route_coupled_corridor_none_preserves_legacy_behaviour():
