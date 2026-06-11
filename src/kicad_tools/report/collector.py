@@ -209,6 +209,14 @@ class ReportDataCollector:
             lambda: self.collect_stackup(pcb),
         )
 
+        # Off-board assemblies from the project spec (issue #3531b)
+        self._safe_collect(
+            "off_board",
+            output_dir,
+            files,
+            self.collect_off_board,
+        )
+
         return files
 
     # ------------------------------------------------------------------
@@ -228,10 +236,15 @@ class ReportDataCollector:
         copper_layers = pcb.copper_layers
         layer_names = [layer.name for layer in copper_layers]
 
-        # Footprint breakdown
+        # Footprint breakdown.  Mount type comes from the (attr ...) token
+        # when present, falling back to pad-type classification for
+        # footprints whose generator never emitted an attr (issue #3531a:
+        # hand-written recipe emitters historically omitted it, which made
+        # every census read "0 smd / 0 tht / N other").
         total_fp = len(pcb.footprints)
-        smd_count = sum(1 for fp in pcb.footprints if fp.attr == "smd")
-        tht_count = sum(1 for fp in pcb.footprints if fp.attr == "through_hole")
+        mount_types = [self._footprint_mount_type(fp) for fp in pcb.footprints]
+        smd_count = sum(1 for mt in mount_types if mt == "smd")
+        tht_count = sum(1 for mt in mount_types if mt == "through_hole")
         other_count = total_fp - smd_count - tht_count
 
         # Board dimensions via Edge.Cuts parsing (same pattern as ManufacturingAudit)
@@ -266,6 +279,129 @@ class ReportDataCollector:
             "board_width_mm": round(board_width, 2),
             "board_height_mm": round(board_height, 2),
         }
+
+    @staticmethod
+    def _footprint_mount_type(fp: Any) -> str:
+        """Classify a footprint as ``smd``, ``through_hole``, or ``other``.
+
+        Prefers the explicit ``(attr ...)`` token.  When absent, derives
+        the mount type from pad types the way KiCad's footprint editor
+        does: any plated through-hole pad makes the part THT; otherwise
+        any SMD pad makes it SMD.  Footprints with neither (e.g. mounting
+        holes with only ``np_thru_hole`` pads, or pad-less graphics)
+        remain ``other``.
+        """
+        attr = getattr(fp, "attr", "") or ""
+        if attr in ("smd", "through_hole"):
+            return attr
+        pad_types = {getattr(pad, "type", "") for pad in getattr(fp, "pads", [])}
+        if "thru_hole" in pad_types:
+            return "through_hole"
+        if "smd" in pad_types:
+            return "smd"
+        return "other"
+
+    # ------------------------------------------------------------------
+    # Off-board assemblies (issue #3531b)
+    # ------------------------------------------------------------------
+
+    def _find_project_spec(self) -> Any | None:
+        """Locate and load the project ``.kct`` spec near the PCB.
+
+        Searches the PCB's directory and its ancestors (stopping at a
+        ``.git`` boundary).  Returns the parsed ``ProjectSpec`` or ``None``
+        when no spec is found or the spec module's optional dependencies
+        (pydantic, pyyaml) are unavailable.
+        """
+        try:
+            from kicad_tools.export.bom_spec_overlay import find_spec_file
+            from kicad_tools.spec import load_spec
+        except ImportError:
+            logger.debug("Spec module unavailable; skipping off-board collection")
+            return None
+
+        spec_path = find_spec_file(self.pcb_path.parent)
+        if spec_path is None:
+            return None
+        try:
+            return load_spec(spec_path)
+        except Exception:
+            logger.warning("Failed to parse spec file %s", spec_path, exc_info=True)
+            return None
+
+    def collect_off_board(self) -> dict[str, Any] | None:
+        """Collect off-board assemblies declared in the project spec.
+
+        Off-board assemblies are spec ``intent.interfaces`` entries with
+        ``off_board: true`` — subsystems that connect through a board
+        connector but are not placed on the PCB (e.g. the softstart
+        supercap banks wired through the J3/J4 terminal blocks).  Without
+        this section a reader of the report cannot tell where those parts
+        went (issue #3531b).
+
+        Returns ``{"assemblies": [...]}`` or ``None`` when the spec has
+        no off-board interfaces.
+        """
+        spec = self._find_project_spec()
+        if spec is None:
+            return None
+
+        interfaces = getattr(getattr(spec, "intent", None), "interfaces", None) or []
+        assemblies: list[dict[str, Any]] = []
+        for iface in interfaces:
+            if not getattr(iface, "off_board", False):
+                continue
+            assemblies.append(
+                {
+                    "name": iface.name,
+                    "description": iface.description,
+                    "connector": getattr(iface, "connector", None),
+                    "part": getattr(iface, "part", None),
+                    "qty": getattr(iface, "qty", None),
+                    "voltage": iface.voltage,
+                    "capacitance": getattr(iface, "capacitance", None),
+                    "assembly": getattr(iface, "assembly", None),
+                    "wiring": getattr(iface, "wiring", None),
+                }
+            )
+
+        if not assemblies:
+            return None
+        return {"assemblies": assemblies}
+
+    def _off_board_bom_groups(self) -> list[dict[str, Any]]:
+        """Build BOM group rows for off-board assemblies.
+
+        These rows are appended to the schematic-extracted BOM so the
+        report's Bill of Materials lists hand-solder/off-board parts the
+        fab will NOT assemble (marked DNP-for-assembly), per the #3343
+        acceptance criteria revisited in issue #3531b.
+        """
+        off_board = self.collect_off_board()
+        if not off_board:
+            return []
+
+        groups: list[dict[str, Any]] = []
+        for asm in off_board["assemblies"]:
+            connector = asm.get("connector")
+            where = f"Off-board via {connector}" if connector else "Off-board"
+            assembly = asm.get("assembly") or "hand_solder"
+            marker = (
+                "hand solder, DNP for fab assembly"
+                if assembly == "hand_solder"
+                else f"{assembly}, DNP for fab assembly"
+            )
+            groups.append(
+                {
+                    "value": asm.get("part") or asm.get("name"),
+                    "footprint": f"{where} ({marker})",
+                    "qty": asm.get("qty") or "",
+                    "refs": asm.get("name"),
+                    "mpn": asm.get("part") or "",
+                    "off_board": True,
+                }
+            )
+        return groups
 
     def collect_drc(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
         """Extract DRC sub-section from a pre-run AuditResult.
@@ -307,13 +443,20 @@ class ReportDataCollector:
         from kicad_tools.schema.bom import extract_bom
 
         bom = extract_bom(str(sch_path))
-        groups = bom.grouped()
+        groups = [g.to_dict() for g in bom.grouped()]
+
+        # Append off-board assemblies (e.g. supercap banks wired through
+        # terminal blocks) so hand-solder parts the fab will not assemble
+        # still appear as BOM line items (issue #3531b).
+        off_board_groups = self._off_board_bom_groups()
+        groups.extend(off_board_groups)
 
         return {
             "total_components": bom.total_components,
             "unique_parts": bom.unique_parts,
             "dnp_count": bom.dnp_count,
-            "groups": [g.to_dict() for g in groups],
+            "off_board_count": len(off_board_groups),
+            "groups": groups,
         }
 
     def collect_audit(self, audit_result: AuditResult | None) -> dict[str, Any] | None:

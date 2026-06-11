@@ -111,6 +111,47 @@ header-includes:
 {% endif %}
 
 {% endif %}
+{% if off_board and off_board.assemblies %}
+## Off-board Assemblies
+
+The following subsystems are part of the design but are **not placed on
+the PCB** -- they connect through board connectors and are assembled by
+hand (DNP for fab assembly).
+
+{% for asm in off_board.assemblies %}
+### {{ asm.name }}
+
+{% if asm.description %}
+{{ asm.description }}
+
+{% endif %}
+| Property | Value |
+|----------|-------|
+{% if asm.connector %}
+| Board connector | {{ asm.connector }} |
+{% endif %}
+{% if asm.part %}
+| Part | {{ asm.part }} |
+{% endif %}
+{% if asm.qty %}
+| Quantity | {{ asm.qty }} |
+{% endif %}
+{% if asm.voltage %}
+| Voltage | {{ asm.voltage }} |
+{% endif %}
+{% if asm.capacitance %}
+| Capacitance | {{ asm.capacitance }} |
+{% endif %}
+{% if asm.assembly %}
+| Assembly | {{ asm.assembly | replace("_", " ") }} (DNP for fab assembly) |
+{% endif %}
+
+{% if asm.wiring %}
+**Wiring**: {{ asm.wiring }}
+
+{% endif %}
+{% endfor %}
+{% endif %}
 {% if erc %}
 ## ERC Status
 

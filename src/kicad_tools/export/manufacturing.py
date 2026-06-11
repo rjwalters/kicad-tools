@@ -672,6 +672,7 @@ class ManufacturingPackage:
             "analog_components.json": "analog_components",
             "narrative.json": "_narrative",
             "stackup.json": "stackup",
+            "off_board.json": "off_board",
         }
 
         result: dict = {}
