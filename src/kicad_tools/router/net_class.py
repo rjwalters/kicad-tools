@@ -116,7 +116,12 @@ SYMBOL_INDICATORS: dict[str, NetClass] = {
 # Comprehensive patterns for net name classification
 NET_CLASS_PATTERNS: dict[NetClass, list[str]] = {
     NetClass.POWER: [
-        r"^(VCC|VDD|VBUS|VIN|VOUT|PWR|POWER|AVDD|DVDD)",
+        # Issue #3513: PWR(?!_?LED) / POWER(?!_?LED) -- indicator nets
+        # like PWR_LED are 2-pad signals (LED cathode -> resistor), not
+        # rails.  Classifying them POWER made auto-pour emit a thin,
+        # geometrically-unfillable zone and auto-skip routing the net,
+        # shipping an open circuit on board 05.
+        r"^(VCC|VDD|VBUS|VIN|VOUT|PWR(?!_?LED)|POWER(?!_?LED)|AVDD|DVDD)",
         r"^[+-]?\d+\.?\d*V[ADPS]?$",  # +3.3V, -5V, 1.8VA, 3.3VD
         r"^[+-]?\d+V\d+[ADPS]?$",  # +3V3, +5V0, +1V8, +12V0, -5V0 (no-decimal)
         r"^(PVDD|PVCC|VBAT|VCORE|VCAP|VIO)$",

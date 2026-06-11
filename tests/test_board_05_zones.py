@@ -51,10 +51,18 @@ UNROUTED_PCB = BOARD_DIR / "output" / "bldc_controller.kicad_pcb"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
 
 # Issue #2899 acceptance criterion 1: at least 4 zones in the committed
-# routed PCB.  Five nets currently get zones (+24V, +5V, +3V3, GND,
-# PWR_LED); a stricter assertion would over-fit to today's placement.
+# routed PCB.  Five nets currently get zones in the routed artifact
+# (VIN, +24V, +5V, +3V3, GND); a stricter assertion would over-fit to
+# today's placement.
 # Note: rails renamed VMOTOR -> +24V and +3.3V -> +3V3 in PR #3393
 # (closes #3384) to match stock ``power:+24V`` / ``power:+3V3`` symbols.
+# Note: the PWR_LED zone was removed from BOTH artifacts in issue
+# #3513 -- its 0.65mm-wide strip was geometrically incapable of filling
+# (narrower than its own pads plus min_thickness/clearance shrink, so
+# KiCad produced zero filled_polygons -> R3.1 was an open circuit).
+# PWR_LED is now connected by an F.Cu trace instead, and the net-name
+# classifier no longer treats PWR_LED as POWER, so auto-pour will not
+# recreate the dead zone on regen (see TestBoard05PwrLedShortRegression).
 MIN_REQUIRED_ZONES = 4
 
 # Issue #2899 acceptance criterion 2 (subset): +24V, +5V, +3V3, and
@@ -232,4 +240,128 @@ class TestBoard05ZonePreservation:
             f"Expected both F.Cu and B.Cu (issue #2771 invariant: zones "
             f"must distribute across copper layers, not stack on F.Cu).  "
             f"GND should land on B.Cu; VMOTOR / +5V / +3.3V on F.Cu."
+        )
+
+
+class TestBoard05PwrLedShortRegression:
+    """Issue #3513 follow-up: PWR_LED trace must not short into zone fills.
+
+    The first fix for #3513 added a D3.1->R3.1 trace but left the +3V3
+    F.Cu zone's stale ``filled_polygon`` in place -- the fill predated
+    the trace and poured straight through the corridor, shorting
+    PWR_LED to +3V3 for ~3.1mm.  The standard DRC gate cannot see
+    segment-vs-foreign-zone-fill overlap (tracked in #3527), so this
+    test pins the geometric invariant directly:
+
+    * no PWR_LED segment centerline point may fall inside a foreign-net
+      ``filled_polygon`` on the same layer, and
+    * the PWR_LED net must not be POWER-classified (otherwise auto-pour
+      recreates the geometrically-unfillable zone on the next regen and
+      the router auto-skips the net, reintroducing the original open).
+    """
+
+    def test_pwr_led_not_classified_as_power(self) -> None:
+        """The net-name classifier must not treat PWR_LED as a rail.
+
+        ``PWR_LED`` previously matched the ``^(...|PWR|POWER|...)``
+        prefix pattern, so ``auto_pour_if_missing`` (called by both
+        design.py and ``kct route``) emitted a pour zone for a 2-pad
+        indicator-signal net and the router auto-skipped it.
+        """
+        from kicad_tools.router.net_class import NetClass, classify_net
+
+        for name in ("PWR_LED", "POWER_LED", "PWRLED"):
+            assert classify_net(name).net_class is not NetClass.POWER, (
+                f"{name} must not classify as POWER -- indicator-LED nets are "
+                f"2-pad signals; POWER classification makes auto-pour emit an "
+                f"unfillable zone and skip routing (issue #3513)."
+            )
+
+    def test_unrouted_pcb_has_no_pwr_led_zone(self, unrouted_pcb_path: Path) -> None:
+        """The committed unrouted PCB must not carry the dead PWR_LED zone."""
+        assert "PWR_LED" not in _zone_net_names(unrouted_pcb_path), (
+            "Board 05 unrouted PCB carries a PWR_LED zone again.  Its "
+            "0.65mm strip is geometrically unfillable and its presence makes "
+            "the router auto-skip the net, shipping an open circuit "
+            "(issue #3513)."
+        )
+
+    def test_pwr_led_trace_clear_of_foreign_fills(self, routed_pcb_path: Path) -> None:
+        """No PWR_LED segment centerline may lie inside a foreign zone fill.
+
+        This is the check that caught the +3V3 short: sample points along
+        every PWR_LED segment and assert none falls inside a same-layer
+        ``filled_polygon`` belonging to a different net.  See
+        ``scripts/check_trace_vs_zone_fills.py`` for the full-board,
+        clearance-aware version of this check.
+        """
+        from kicad_tools.sexp import parse_file
+
+        doc = parse_file(str(routed_pcb_path))
+
+        net_names: dict[int, str] = {}
+        for net in doc.find_all("net"):
+            atoms = net.get_atoms()
+            if len(atoms) > 1 and str(atoms[1]):
+                net_names[int(atoms[0])] = str(atoms[1])
+        pwr_led_id = next((k for k, v in net_names.items() if v == "PWR_LED"), None)
+        assert pwr_led_id is not None, "PWR_LED net missing from routed PCB"
+
+        # Collect foreign-net fills per layer.
+        fills: list[tuple[str, str, list[tuple[float, float]]]] = []
+        for zone in doc.find_all("zone"):
+            znet_node = zone.find("net")
+            if znet_node is None:
+                continue
+            zatom = znet_node.get_atoms()[0]
+            zname = net_names.get(zatom, str(zatom)) if isinstance(zatom, int) else str(zatom)
+            if zname == "PWR_LED":
+                continue
+            for fp in zone.find_all("filled_polygon"):
+                layer_node = fp.find("layer")
+                pts_node = fp.find("pts")
+                if layer_node is None or pts_node is None:
+                    continue
+                layer = str(layer_node.get_atoms()[0])
+                poly = [
+                    (float(xy.get_atoms()[0]), float(xy.get_atoms()[1]))
+                    for xy in pts_node.find_all("xy")
+                ]
+                if len(poly) >= 3:
+                    fills.append((zname, layer, poly))
+        assert fills, "Routed PCB has no zone fills -- zones were not filled"
+
+        def _inside(x: float, y: float, poly: list[tuple[float, float]]) -> bool:
+            inside = False
+            for i in range(len(poly)):
+                x1, y1 = poly[i]
+                x2, y2 = poly[(i + 1) % len(poly)]
+                if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+                    inside = not inside
+            return inside
+
+        segments_checked = 0
+        for seg in doc.find_all("segment"):
+            net_node = seg.find("net")
+            if net_node is None or int(net_node.get_atoms()[0]) != pwr_led_id:
+                continue
+            layer = str(seg.find("layer").get_atoms()[0])
+            x1, y1 = (float(a) for a in seg.find("start").get_atoms()[:2])
+            x2, y2 = (float(a) for a in seg.find("end").get_atoms()[:2])
+            segments_checked += 1
+            for i in range(101):
+                t = i / 100
+                px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+                for zname, zlayer, poly in fills:
+                    if zlayer != layer:
+                        continue
+                    assert not _inside(px, py, poly), (
+                        f"PWR_LED segment point ({px:.3f}, {py:.3f}) on {layer} "
+                        f"lies INSIDE the '{zname}' zone fill -- inter-net short "
+                        f"(issue #3513 / checker gap #3527).  Re-fill zones with "
+                        f"`kct zones fill` so fills knock out around the trace."
+                    )
+        assert segments_checked >= 1, (
+            "PWR_LED has no segments in the routed PCB -- the net is an open "
+            "circuit again (original #3513 defect)."
         )
