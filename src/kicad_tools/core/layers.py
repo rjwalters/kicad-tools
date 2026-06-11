@@ -48,9 +48,7 @@ def via_spans_layer(via_layers: list[str] | tuple[str, ...], target_layer: str) 
         return True
 
     # Determine the span of the via in the copper stack.
-    indices = [
-        _COPPER_LAYER_INDEX[layer] for layer in via_layers if layer in _COPPER_LAYER_INDEX
-    ]
+    indices = [_COPPER_LAYER_INDEX[layer] for layer in via_layers if layer in _COPPER_LAYER_INDEX]
     if len(indices) < 2:
         return False
 

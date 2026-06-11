@@ -122,9 +122,9 @@ class TestRoutedPcbArtifact:
         are valid KiCad 10.
         """
         for layer_name in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
-            assert re.search(
-                rf'\(\d+ "{re.escape(layer_name)}" signal\)', routed_pcb_text
-            ), f"Copper layer {layer_name} missing from the routed PCB stackup"
+            assert re.search(rf'\(\d+ "{re.escape(layer_name)}" signal\)', routed_pcb_text), (
+                f"Copper layer {layer_name} missing from the routed PCB stackup"
+            )
 
     @pytest.mark.parametrize(
         "net_name",
@@ -648,6 +648,7 @@ class TestManufacturabilityFloor:
 
         # Convert to floats and count.
         from collections import Counter
+
         width_counts = Counter(float(w) for w in seg_widths)
         if not width_counts:
             pytest.fail(
@@ -827,8 +828,7 @@ class TestBoard06StrictGateGuard:
                 timeout=180,
             )
             assert proc.returncode in (0, 2), (
-                f"kct check exited {proc.returncode} on {routed_pcb}.\n"
-                f"stderr:\n{proc.stderr}"
+                f"kct check exited {proc.returncode} on {routed_pcb}.\nstderr:\n{proc.stderr}"
             )
             return json.loads(proc.stdout)
 
@@ -936,9 +936,7 @@ class TestBoard06StrictGateGuard:
         """
         violations = strict_gate_result.get("violations", [])
         connectivity = sum(
-            1
-            for v in violations
-            if isinstance(v, dict) and v.get("rule_id") == "connectivity"
+            1 for v in violations if isinstance(v, dict) and v.get("rule_id") == "connectivity"
         )
         assert connectivity == self.EXPECTED_ADVISORY_CONNECTIVITY, (
             f"Advisory connectivity count on the committed routed PCB is "
@@ -980,9 +978,7 @@ class TestPourCopperUnionAudit:
         for net in pour_nets:
             info = audit[net]
             if not info["connected"]:
-                stranded = [
-                    [p for p, _ in group] for group in info["pad_groups"][1:]
-                ]
+                stranded = [[p for p, _ in group] for group in info["pad_groups"][1:]]
                 failures.append(
                     f"{net}: {len(info['pad_groups'])} disjoint copper "
                     f"components; stranded pads: {stranded}"

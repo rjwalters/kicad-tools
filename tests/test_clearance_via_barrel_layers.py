@@ -64,13 +64,13 @@ def _pcb_via_vs_segment(layer: str, seg_x: float, via_sexp: str | None = None) -
     100.3 gives -0.1 mm (hard overlap), seg_x = 101 gives +0.6 mm (clean).
     """
     via = via_sexp or (
-        '(via (at 100 100) (size 0.6) (drill 0.3)'
+        "(via (at 100 100) (size 0.6) (drill 0.3)"
         ' (layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))'
     )
     return (
         _HEADER_4L
         + f"  {via}\n"
-        + f'  (segment (start {seg_x} 99) (end {seg_x} 101) (width 0.2)'
+        + f"  (segment (start {seg_x} 99) (end {seg_x} 101) (width 0.2)"
         + f' (layer "{layer}") (net 2 "SIG2") (uuid "seg-1"))\n'
         + ")\n"
     )
@@ -157,7 +157,7 @@ class TestViaSpansLayerHelper:
         """The NetStatusAnalyzer class attribute mirrors the shared order."""
         from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
-        assert NetStatusAnalyzer._COPPER_LAYER_ORDER == list(COPPER_LAYER_ORDER)
+        assert list(COPPER_LAYER_ORDER) == NetStatusAnalyzer._COPPER_LAYER_ORDER
 
 
 # ---------------------------------------------------------------------------
@@ -207,10 +207,9 @@ class TestThroughViaInnerLayerSegments:
     def test_same_net_inner_segment_not_flagged(self, tmp_path: Path):
         """Same-net copper may touch -- including on inner layers."""
         pcb = (
-            _HEADER_4L
-            + '  (via (at 100 100) (size 0.6) (drill 0.3)'
+            _HEADER_4L + "  (via (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))\n'
-            '  (segment (start 100.3 99) (end 100.3 101) (width 0.2)'
+            "  (segment (start 100.3 99) (end 100.3 101) (width 0.2)"
             ' (layer "In1.Cu") (net 1 "SIG1") (uuid "seg-1"))\n'
             ")\n"
         )
@@ -225,10 +224,9 @@ class TestThroughViaInnerLayerSegments:
         suppression must keep working now that inner layers are scanned.
         """
         pcb = (
-            _HEADER_4L
-            + '  (via (at 100 100) (size 0.6) (drill 0.3)'
+            _HEADER_4L + "  (via (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))\n'
-            '  (segment (start 100 100) (end 101 100) (width 0.2)'
+            "  (segment (start 100 100) (end 101 100) (width 0.2)"
             ' (layer "In1.Cu") (net 2 "SIG2") (uuid "seg-1"))\n'
             ")\n"
         )
@@ -246,12 +244,10 @@ class TestPartialSpanVias:
 
     def test_micro_via_does_not_reach_in2(self, tmp_path: Path):
         via = (
-            '(via micro (at 100 100) (size 0.6) (drill 0.3)'
+            "(via micro (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "F.Cu" "In1.Cu") (net 1 "SIG1") (uuid "via-1"))'
         )
-        results = _check_clearances(
-            _pcb_via_vs_segment("In2.Cu", 100.3, via_sexp=via), tmp_path
-        )
+        results = _check_clearances(_pcb_via_vs_segment("In2.Cu", 100.3, via_sexp=via), tmp_path)
         assert len(_segment_via_violations(results)) == 0, (
             "A micro via F.Cu->In1.Cu has no barrel copper on In2.Cu; "
             "flagging it would be a false positive."
@@ -259,43 +255,35 @@ class TestPartialSpanVias:
 
     def test_micro_via_does_not_reach_bottom(self, tmp_path: Path):
         via = (
-            '(via micro (at 100 100) (size 0.6) (drill 0.3)'
+            "(via micro (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "F.Cu" "In1.Cu") (net 1 "SIG1") (uuid "via-1"))'
         )
-        results = _check_clearances(
-            _pcb_via_vs_segment("B.Cu", 100.3, via_sexp=via), tmp_path
-        )
+        results = _check_clearances(_pcb_via_vs_segment("B.Cu", 100.3, via_sexp=via), tmp_path)
         assert len(_segment_via_violations(results)) == 0
 
     def test_micro_via_fires_inside_span(self, tmp_path: Path):
         via = (
-            '(via micro (at 100 100) (size 0.6) (drill 0.3)'
+            "(via micro (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "F.Cu" "In1.Cu") (net 1 "SIG1") (uuid "via-1"))'
         )
-        results = _check_clearances(
-            _pcb_via_vs_segment("In1.Cu", 100.3, via_sexp=via), tmp_path
-        )
+        results = _check_clearances(_pcb_via_vs_segment("In1.Cu", 100.3, via_sexp=via), tmp_path)
         assert len(_segment_via_violations(results)) == 1
 
     def test_buried_via_fires_on_intermediate_layer(self, tmp_path: Path):
         """A buried In1->B.Cu via spans In2.Cu even though not listed."""
         via = (
-            '(via buried (at 100 100) (size 0.6) (drill 0.3)'
+            "(via buried (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "In1.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))'
         )
-        results = _check_clearances(
-            _pcb_via_vs_segment("In2.Cu", 100.3, via_sexp=via), tmp_path
-        )
+        results = _check_clearances(_pcb_via_vs_segment("In2.Cu", 100.3, via_sexp=via), tmp_path)
         assert len(_segment_via_violations(results)) == 1
 
     def test_buried_via_does_not_reach_front(self, tmp_path: Path):
         via = (
-            '(via buried (at 100 100) (size 0.6) (drill 0.3)'
+            "(via buried (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "In1.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))'
         )
-        results = _check_clearances(
-            _pcb_via_vs_segment("F.Cu", 100.3, via_sexp=via), tmp_path
-        )
+        results = _check_clearances(_pcb_via_vs_segment("F.Cu", 100.3, via_sexp=via), tmp_path)
         assert len(_segment_via_violations(results)) == 0
 
 
@@ -316,10 +304,9 @@ class TestNonSegmentPairCountsUnchanged:
 
     def test_via_via_overlap_reported_twice_not_four_times(self, tmp_path: Path):
         pcb = (
-            _HEADER_4L
-            + '  (via (at 100 100) (size 0.6) (drill 0.3)'
+            _HEADER_4L + "  (via (at 100 100) (size 0.6) (drill 0.3)"
             ' (layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "via-1"))\n'
-            '  (via (at 100.5 100) (size 0.6) (drill 0.3)'
+            "  (via (at 100.5 100) (size 0.6) (drill 0.3)"
             ' (layers "F.Cu" "B.Cu") (net 2 "SIG2") (uuid "via-2"))\n'
             ")\n"
         )
