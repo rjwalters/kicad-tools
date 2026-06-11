@@ -107,15 +107,36 @@ class MSTRouter:
 
         if len(pad_objs) > 2:
             if use_steiner:
-                from .steiner import build_rsmt
+                from .steiner import (
+                    build_rsmt,
+                    make_blocked_cell_predicate,
+                    relocate_blocked_point,
+                )
 
                 # PR #3481 fix: snap synthetic Steiner branch points
                 # onto the routing grid (off-grid virtual pads have no
                 # sub-grid rescue and fail ``pin_access``).
+                #
+                # Issue #3471: additionally relocate branch points that
+                # land on cells blocked on EVERY routable layer (net-0
+                # obstacles / foreign-net copper).  A blocked virtual
+                # pad has no rescue path: every incident A* edge
+                # exhaustively fails, burning the per-net budget AND
+                # classifying the whole net ``blocked_path`` (board
+                # 05's ISENSE cluster: 6 nets x ~80 s of guaranteed
+                # failure per route).  Same fix as
+                # ``NegotiatedRouter.route_net_negotiated``; MSTRouter
+                # is the path the auto-layers two-phase flow actually
+                # executes, so it needs the relocation too.
                 grid = self.grid
+                blocked_fn = make_blocked_cell_predicate(
+                    grid, self.rules, pad_objs[0].net
+                )
 
                 def snap_fn(x: float, y: float) -> tuple[float, float]:
                     gx, gy = grid.world_to_grid(x, y)
+                    if blocked_fn is not None:
+                        gx, gy = relocate_blocked_point(gx, gy, blocked_fn)
                     return grid.grid_to_world(gx, gy)
 
                 pad_objs, edges = build_rsmt(pad_objs, snap_fn=snap_fn)

@@ -21,7 +21,8 @@ approximation with bounded runtime.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+import math
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from ..primitives import Pad
@@ -76,6 +77,87 @@ def relocate_blocked_point(
                 if not is_blocked_fn(cx, cy):
                     return cx, cy
     return gx, gy
+
+
+def make_blocked_cell_predicate(
+    grid: Any,
+    rules: Any,
+    net: int,
+) -> Callable[[int, int], bool] | None:
+    """Build the blocked-cell predicate used by Steiner-point relocation.
+
+    Shared between the negotiated RSMT path
+    (``NegotiatedRouter.route_net_negotiated``) and the MST/RSMT path
+    (``MSTRouter.route_net`` -- the path the auto-layers two-phase flow
+    executes, Issue #3471 board 05).  A branch point is only usable when
+    a trace can actually be CENTERED there: the cell plus a
+    trace-radius+clearance margin must be free on at least one routable
+    layer.  A bare single-cell check relocates the point to the first
+    free cell hugging the obstacle wall, where the A* start still fails
+    the clearance expansion (measured on board 05: the point moved
+    0.1 mm off the Q5 leg keepout and both incident edges kept failing).
+
+    Failure-safe by construction: returns ``None`` when the grid lacks
+    the required APIs (fixture/mock grids), and the returned predicate
+    treats any per-cell exception as "free", so legacy snapping
+    behaviour is preserved byte-for-byte on grids that cannot answer
+    occupancy queries.
+
+    Args:
+        grid: ``RoutingGrid`` / ``CppGrid``-compatible object exposing
+            ``get_routable_indices()``, ``is_blocked_for_net(gx, gy,
+            layer_idx, net)`` and ``resolution``.
+        rules: ``DesignRules``-compatible object exposing
+            ``trace_width`` and ``trace_clearance`` (may be ``None``).
+        net: Net id the Steiner points belong to (same-net copper does
+            not block).
+
+    Returns:
+        ``(gx, gy) -> bool`` predicate, or ``None`` when the grid does
+        not expose the required occupancy APIs.
+    """
+    try:
+        routable_indices: list[int] = list(grid.get_routable_indices())
+    except Exception:
+        return None
+    if not routable_indices or not hasattr(grid, "is_blocked_for_net"):
+        return None
+
+    margin_cells = 1
+    try:
+        res = float(getattr(grid, "resolution", 0.0) or 0.0)
+        if res > 0 and rules is not None:
+            margin_cells = max(
+                1,
+                math.ceil(
+                    (rules.trace_width / 2.0 + rules.trace_clearance) / res
+                ),
+            )
+    except Exception:
+        # Fixture/mock rules without these attributes: keep the 1-cell
+        # margin.
+        margin_cells = 1
+
+    def _point_blocked(gx: int, gy: int) -> bool:
+        try:
+            for layer_idx in routable_indices:
+                layer_ok = True
+                for dy in range(-margin_cells, margin_cells + 1):
+                    for dx in range(-margin_cells, margin_cells + 1):
+                        if grid.is_blocked_for_net(
+                            gx + dx, gy + dy, layer_idx, net
+                        ):
+                            layer_ok = False
+                            break
+                    if not layer_ok:
+                        break
+                if layer_ok:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    return _point_blocked
 
 
 def _manhattan(x1: float, y1: float, x2: float, y2: float) -> float:

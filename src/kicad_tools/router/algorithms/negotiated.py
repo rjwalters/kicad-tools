@@ -12,7 +12,6 @@ Adaptive parameter tuning (Issue #633) improves convergence by:
 
 from __future__ import annotations
 
-import math
 import random
 import time
 from typing import TYPE_CHECKING, Callable
@@ -851,7 +850,11 @@ class NegotiatedRouter:
 
         if len(pad_objs) > 2:
             # RSMT-based routing with negotiated mode
-            from .steiner import build_rsmt, relocate_blocked_point
+            from .steiner import (
+                build_rsmt,
+                make_blocked_cell_predicate,
+                relocate_blocked_point,
+            )
 
             # Build congestion-aware cost function for Steiner tree
             # construction when a RUDY estimator is available.
@@ -890,67 +893,20 @@ class NegotiatedRouter:
             # ``relocate_blocked_point`` ring-scans for the nearest free
             # cell; on any grid-API mismatch the cell is treated as free
             # so legacy behaviour is preserved byte-for-byte.
-            steiner_net = pad_objs[0].net
-            try:
-                routable_indices: list[int] = list(
-                    self.grid.get_routable_indices()
-                )
-            except Exception:
-                routable_indices = []
-
-            # A branch point is only usable when a trace can actually be
-            # CENTERED there: the cell plus a trace-radius+clearance
-            # margin must be free on at least one routable layer.  A
-            # bare single-cell check relocates the point to the first
-            # free cell hugging the obstacle wall, where the A* start
-            # still fails the clearance expansion (measured on board 05:
-            # the point moved 0.1 mm off the Q5 leg keepout and both
-            # incident edges kept failing).
-            _margin_cells = 1
-            try:
-                _res = float(getattr(self.grid, "resolution", 0.0) or 0.0)
-                if _res > 0 and self.rules is not None:
-                    _margin_cells = max(
-                        1,
-                        math.ceil(
-                            (
-                                self.rules.trace_width / 2.0
-                                + self.rules.trace_clearance
-                            )
-                            / _res
-                        ),
-                    )
-            except Exception:
-                # Fixture/mock rules or grids without these attributes:
-                # keep the 1-cell margin.  Such grids also do not expose
-                # ``is_blocked_for_net``, so ``_point_blocked`` returns
-                # False and legacy snapping behaviour is preserved.
-                _margin_cells = 1
-
-            def _point_blocked(gx: int, gy: int) -> bool:
-                if not routable_indices:
-                    return False
-                try:
-                    for layer_idx in routable_indices:
-                        layer_ok = True
-                        for dy in range(-_margin_cells, _margin_cells + 1):
-                            for dx in range(-_margin_cells, _margin_cells + 1):
-                                if self.grid.is_blocked_for_net(
-                                    gx + dx, gy + dy, layer_idx, steiner_net
-                                ):
-                                    layer_ok = False
-                                    break
-                            if not layer_ok:
-                                break
-                        if layer_ok:
-                            return False
-                    return True
-                except Exception:
-                    return False
+            # The blocked-cell predicate (margin math + per-layer
+            # occupancy scan) is shared with the MSTRouter path via
+            # ``make_blocked_cell_predicate`` -- see its docstring for
+            # the margin rationale.  ``None`` (fixture/mock grids
+            # without occupancy APIs) preserves legacy snapping
+            # behaviour byte-for-byte.
+            _point_blocked = make_blocked_cell_predicate(
+                self.grid, self.rules, pad_objs[0].net
+            )
 
             def _snap_to_grid(x: float, y: float) -> tuple[float, float]:
                 gx, gy = self.grid.world_to_grid(x, y)
-                gx, gy = relocate_blocked_point(gx, gy, _point_blocked)
+                if _point_blocked is not None:
+                    gx, gy = relocate_blocked_point(gx, gy, _point_blocked)
                 return self.grid.grid_to_world(gx, gy)
 
             pad_objs, rsmt_edges = build_rsmt(
