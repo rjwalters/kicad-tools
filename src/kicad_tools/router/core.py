@@ -9728,6 +9728,13 @@ class Autorouter:
             # (``--max-ripups-per-net``).  None preserves the historical
             # default of 3.
             stall_ripup_budget=self.stall_ripup_budget,
+            # Issue #3471: share the #3438 relief rescue with the
+            # two-phase initial-pass stall recovery so nets the
+            # BLOCKED_BY_COMPONENT rip-up fast-fails on ("geometric
+            # blocker": non-rippable foreign escape copper, the board-05
+            # ISENSE-cluster mechanism) get the same last-resort
+            # transactional escalation ``route_all_negotiated`` has.
+            relief_rescue=self._relief_rescue,
         )
 
     def route_all_two_phase(
