@@ -907,15 +907,25 @@ class NegotiatedRouter:
             # the point moved 0.1 mm off the Q5 leg keepout and both
             # incident edges kept failing).
             _margin_cells = 1
-            _res = float(getattr(self.grid, "resolution", 0.0) or 0.0)
-            if _res > 0:
-                _margin_cells = max(
-                    1,
-                    math.ceil(
-                        (self.rules.trace_width / 2.0 + self.rules.trace_clearance)
-                        / _res
-                    ),
-                )
+            try:
+                _res = float(getattr(self.grid, "resolution", 0.0) or 0.0)
+                if _res > 0 and self.rules is not None:
+                    _margin_cells = max(
+                        1,
+                        math.ceil(
+                            (
+                                self.rules.trace_width / 2.0
+                                + self.rules.trace_clearance
+                            )
+                            / _res
+                        ),
+                    )
+            except Exception:
+                # Fixture/mock rules or grids without these attributes:
+                # keep the 1-cell margin.  Such grids also do not expose
+                # ``is_blocked_for_net``, so ``_point_blocked`` returns
+                # False and legacy snapping behaviour is preserved.
+                _margin_cells = 1
 
             def _point_blocked(gx: int, gy: int) -> bool:
                 if not routable_indices:
