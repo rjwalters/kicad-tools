@@ -1219,7 +1219,58 @@ tolerances:
   # 27289126468) + 1 slack, same convention as the 21 floor (CI 20).
   # The diff-pair skew/continuity work on the now-engaged pairs is
   # #3471-adjacent follow-up scope; tighten when it lands.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 28
+  #
+  # Raised 28 -> 34 (Issue #3533, 2026-06-11): floor now reflects the
+  # full EMPIRICAL VARIANCE BAND of the seed-42 re-route, not a single
+  # CI data point + 1.  The "+1 slack over one CI observation"
+  # convention (used for both the 21 and 28 floors) was repeatedly
+  # outrun by the load-variance band the #3466 / PR #3452 commentary
+  # has documented since June 10: the router's wall-clock-budgeted
+  # passes do load-dependent amounts of work, so the SAME code at the
+  # SAME seed lands different DRC profiles depending on runner load
+  # and platform.  Floor 28 went red on main with ZERO board-07 or
+  # router changes (#3528 is report-image work; run 27373868262
+  # measured 29) and blocked unrelated PRs.
+  #
+  # Measured band, 2026-06-11, at main 9b16ea65 (all data points are
+  # the exact gate recipe: check_matchgroup_coverage.py --seed 42,
+  # PYTHONHASHSEED=42, C++ backend built):
+  #
+  #   * CI ubuntu-latest 2c, last 8 main runs (newest first):
+  #     29, 28, 28, 28, 27, 27, 28, 25  (runs 27373868262,
+  #     27371084972, 27350511934, 27344614957, 27341166410,
+  #     27330851929, 27326769560, 27326243340)
+  #   * CI ubuntu-latest 2c, recent PR-branch runs on changes that do
+  #     not touch board 07 or the router: 29, 29, 28, 28 (PR #3526 /
+  #     #3522-family runs 27373657546, 27371638170, 27372007363,
+  #     27370703479) and 31 (PR #3517 run 27367515165 -- CAVEAT: that
+  #     PR widens clearance_segment_via to all barrel-spanned layers,
+  #     a counting-semantics change, so its +2 over the 29 tail may be
+  #     real rule engagement rather than pure load variance; if #3517
+  #     merges, main's distribution shifts toward this point).
+  #   * Local macOS arm64 8c idle, 3 consecutive solo runs: 33, 33, 33
+  #     (deterministic locally; composition: 12 clearance_segment_via
+  #     + 7 diffpair_length_skew + 7 diffpair_routing_continuity
+  #     + 3 connectivity + 1 each clearance_pad_segment /
+  #     clearance_pad_via / diffpair_clearance_intra /
+  #     match_group_length_skew = 33).  Same rule families as the CI
+  #     profile -- the fast machine does MORE work per budgeted pass,
+  #     landing more copper and more honest-accounting diff-pair
+  #     measurements, the same mechanism as the CI 25..29 spread.
+  #
+  # Band = [25, 33] across environments; floor = band-max 33 + 1 = 34.
+  # This also makes the gate locally reproducible (floors 21/28 were
+  # CI-only measurements that local idle machines could not pass).
+  # A regression signal remains loud: the pre-#3478 failure modes this
+  # gate caught were +5..+20 jumps, well above the 34 ceiling.
+  #
+  # Tighten when: (a) the load-variance cliff is fixed at the router
+  # level (budget-invariant pass structure -- the #3466 follow-up
+  # scope), or (b) the diff-pair skew/continuity work on the engaged
+  # pairs lands (#3471-adjacent: 7+7 of the local 33 are that family),
+  # at which point re-measure the band with the same recipe and set
+  # floor = new-band-max + 1.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 34
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874

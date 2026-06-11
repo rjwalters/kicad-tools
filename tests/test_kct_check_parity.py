@@ -77,9 +77,11 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 # (rules_checked_by_rule >= 1) -- the matchgroup CI gate pins engagement
 # independently of the error count.  These pins measure the COMMITTED
 # artifact and are deterministic; the allowlist floor in
-# .github/routed-drc-tolerance.yml is 21 because the Match-Group gate
-# RE-ROUTES from source and the re-route DRC profile varies with machine
-# load (the #3466 wall-clock-budget cliff).
+# .github/routed-drc-tolerance.yml is 34 (Issue #3533) because the
+# Match-Group gate RE-ROUTES from source and the re-route DRC profile
+# varies with machine load and platform (the #3466 wall-clock-budget
+# cliff; measured band 25..33 across CI ubuntu-latest and local
+# macOS arm64 at the same seed/code).
 #
 # Previous re-baselines: 2026-06-09 (issue #3458 inventory, PR #3462:
 # 5+5+2=12 delta, blocking 16); 2026-06-06 (Issue #3263: 5+5+1=11 delta,
