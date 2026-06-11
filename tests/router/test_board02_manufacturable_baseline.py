@@ -11,11 +11,13 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 206 segments / 24 vias /
-  324.92mm total length identical across seeds 42/43/44 -- this small
-  2-layer board has fully converged.  (155 segments / 324.66mm before
-  the #3433 collision-checker scoping; see the 2026-06-09 re-baseline
-  note below.)
+- **Deterministic output**: 22 routes / 507 segments / 24 vias /
+  328.16mm total length identical across seeds 42/43/44 -- this small
+  2-layer board has fully converged.  (193 segments / 325.08mm before
+  the #3532 45-degree pad-tail doglegs; 299/325.55 before the #3436
+  burn-down straightening (#3203/#3510); 206/324.92 before the #3438
+  rip-up parity fix; 155/324.66 before the #3433 collision-checker
+  scoping; see the re-baseline notes below.)
 
 **Re-verified 2026-06-07** on current main (issue #3292):
 - Includes Wave 6/7 PRs #3286 (board-04 NRST refresh), #3288 (plane-net
@@ -423,21 +425,31 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
             "before relaxing the assertion."
         )
 
-    # Exact baseline numbers (re-baselined 2026-06-11 during the #3436
-    # CI-gate burn-down: routes, vias and reach are UNCHANGED (22
-    # routes, 24 vias, full reach); -106 segments / -0.47mm is
-    # staircase-straightening from the router PRs landed 2026-06-10/11
-    # (#3203 per-pad channel budget edge-classification fix and #3510
-    # grid re-marking after mutating optimizer passes), deterministic
-    # across seeds and 0-DRC (the manufacturable-baseline tests in this
-    # file still pass).  Prior pins: (22, 299, 24, 325.55) re-baselined
-    # 2026-06-10 for Issue #3438; (22, 206, 24, 324.92) 2026-06-09 for
-    # Issue #3433; (22, 155, 24, 324.66) re-verified 2026-06-07.)
+    # Exact baseline numbers (re-baselined 2026-06-11 for Issue #3532:
+    # 45-degree quantization of the pad-tail emitters.  Off-grid pad
+    # tails are now emitted as exact two-leg doglegs instead of a single
+    # skewed segment (+1 segment per off-grid tail), and the pull-tight
+    # pass declines moves that would skew chain neighbours off the
+    # 45-degree set (fewer post-merge eliminations).  Routes, vias and
+    # reach are UNCHANGED (22 routes, 24 vias, full reach);
+    # deterministic across seeds and 0-DRC (the manufacturable-baseline
+    # tests in this file still pass, and the new
+    # tests/test_fleet_45_census.py enforces 0 off-angle segments on
+    # committed artifacts).  Re-measured 2026-06-11 after rebasing onto
+    # the #3436 burn-down pin of (22, 193, 24, 325.08) -- which carried
+    # the #3203 per-pad channel-budget fix and #3510 grid-re-marking
+    # straightening -- all 3 cpp seeds (42/43/44) still produce
+    # bit-perfect (22, 507, 24, 328.16): the dogleg splits plus the
+    # quantization-gated pull-tight account for the segment/length
+    # delta vs the straightened pin.  Prior pins: (22, 193, 24, 325.08)
+    # re-baselined 2026-06-11 for Issue #3436; (22, 299, 24, 325.55)
+    # re-baselined 2026-06-10 for Issue #3438; (22, 206, 24, 324.92)
+    # for Issue #3433; (22, 155, 24, 324.66) re-verified 2026-06-07.
     # Pinning these catches "all-seeds drift identically" regressions
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
-    EXPECTED = (22, 193, 24, 325.08)
+    EXPECTED = (22, 507, 24, 328.16)
     assert ref == EXPECTED, (
         f"Board 02 routing baseline drifted: got {ref}, expected "
         f"{EXPECTED}. This is consistent across seeds (so no determinism "

@@ -208,6 +208,41 @@ def _nudge_segment_with_chain(
     old_x1, old_y1 = seg.x1, seg.y1
     old_x2, old_y2 = seg.x2, seg.y2
 
+    # Issue #3532: 45-degree quantization guard.  The chain snap below
+    # drags ONE endpoint of every abutting same-net segment by the
+    # translation vector; a dragged neighbour stays on the 0/45/90/135
+    # angle set only when it runs PARALLEL to the translation direction
+    # (the drag then extends/shortens it in place).  Any other dragged
+    # neighbour would be skewed to an arbitrary angle -- decline the
+    # nudge so the pass never emits off-grid copper.
+    routes = getattr(router, "routes", None) or []
+    for route in routes:
+        if route.net != seg.net:
+            continue
+        for other in route.segments:
+            if other is seg or other.layer != seg.layer:
+                continue
+            tol = chain_tol
+            dragged = any(
+                abs(px - ox) < tol and abs(py - oy) < tol
+                for (px, py) in ((other.x1, other.y1), (other.x2, other.y2))
+                for (ox, oy) in ((old_x1, old_y1), (old_x2, old_y2))
+            )
+            if not dragged:
+                continue
+            odx = other.x2 - other.x1
+            ody = other.y2 - other.y1
+            norm = math.sqrt(odx * odx + ody * ody)
+            if norm > 1e-9 and abs(odx * ny - ody * nx) / norm > 1e-4:
+                if result is not None:
+                    result._bump_skipped("quantization_blocked")
+                logger.debug(
+                    "Declining nudge for net %s: chain snap would skew a "
+                    "neighbour segment off the 45-degree set",
+                    seg.net,
+                )
+                return False
+
     # Apply the translation to seg itself.
     _nudge_segment(seg, nx, ny, amount)
 
@@ -872,12 +907,47 @@ def _nudge_via_with_chain(
         return False
 
     old_x, old_y = via.x, via.y
+
+    # Issue #3532: 45-degree quantization guard.  Snapping a same-net
+    # segment endpoint to the via's new centre drags that endpoint by
+    # the move vector; the segment stays on the 0/45/90/135 angle set
+    # only when it runs PARALLEL to the move direction.  Decline moves
+    # that would skew a connected segment to an arbitrary angle.
+    move_dx = new_x - old_x
+    move_dy = new_y - old_y
+    move_norm = math.sqrt(move_dx * move_dx + move_dy * move_dy)
+    routes = getattr(router, "routes", None) or []
+    if move_norm > 1e-9:
+        for route in routes:
+            if route.net != via.net:
+                continue
+            for seg in route.segments:
+                touches = (
+                    abs(seg.x1 - old_x) < chain_tol and abs(seg.y1 - old_y) < chain_tol
+                ) or (
+                    abs(seg.x2 - old_x) < chain_tol and abs(seg.y2 - old_y) < chain_tol
+                )
+                if not touches:
+                    continue
+                sdx = seg.x2 - seg.x1
+                sdy = seg.y2 - seg.y1
+                snorm = math.sqrt(sdx * sdx + sdy * sdy)
+                if (
+                    snorm > 1e-9
+                    and abs(sdx * move_dy - sdy * move_dx) / (snorm * move_norm) > 1e-4
+                ):
+                    logger.debug(
+                        "Skipping via nudge for net %s: chain snap would "
+                        "skew a connected segment off the 45-degree set",
+                        via.net,
+                    )
+                    return False
+
     via.x = new_x
     via.y = new_y
 
     # Snap any same-net segment endpoint that previously coincided with
     # this via's centre to the new position.
-    routes = getattr(router, "routes", None) or []
     for route in routes:
         if route.net != via.net:
             continue

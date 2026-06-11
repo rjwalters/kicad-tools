@@ -33,6 +33,7 @@ from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
+from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 
@@ -3422,21 +3423,32 @@ class Router:
             return min_width
 
         def _emit_segment(x1: float, y1: float, x2: float, y2: float, layer_idx: int) -> None:
-            """Create and add a segment if there's meaningful distance."""
+            """Create and add a segment if there's meaningful distance.
+
+            Issue #3532: pad tails (exact off-grid pad centre <-> grid
+            cell) may be off the 0/45/90/135 angle set -- emit an exact
+            two-leg dogleg instead of a single skewed segment.  Grid-to-
+            grid emissions are naturally 45-aligned and pass through as
+            one segment.
+            """
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
                 # Issue #1018: Calculate width with neck-down support
                 width = _calculate_segment_width(x1, y1, x2, y2)
-                seg = Segment(
-                    x1=x1,
-                    y1=y1,
-                    x2=x2,
-                    y2=y2,
-                    width=width,
-                    layer=Layer(self.grid.index_to_layer(layer_idx)),
-                    net=start_pad.net,
-                    net_name=start_pad.net_name,
-                )
-                route.segments.append(seg)
+                points = dogleg_points(x1, y1, x2, y2)
+                for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+                    if sx == ex and sy == ey:
+                        continue
+                    seg = Segment(
+                        x1=sx,
+                        y1=sy,
+                        x2=ex,
+                        y2=ey,
+                        width=width,
+                        layer=Layer(self.grid.index_to_layer(layer_idx)),
+                        net=start_pad.net,
+                        net_name=start_pad.net_name,
+                    )
+                    route.segments.append(seg)
 
         for _i, (wx, wy, layer_idx, is_via) in enumerate(path):
             if is_via:
@@ -3495,8 +3507,14 @@ class Router:
                 last_dir = _normalize_direction(last_dx, last_dy)
                 end_dir = _normalize_direction(dx, dy)
 
-                if _same_direction(last_dir, end_dir):
-                    # Extend last segment to end pad
+                if _same_direction(last_dir, end_dir) and is_45_aligned(
+                    end_pad.x - last_seg.x1, end_pad.y - last_seg.y1
+                ):
+                    # Extend last segment to end pad.  Issue #3532: only
+                    # when the EXTENDED segment stays on the 45-degree
+                    # set -- ``_same_direction``'s 0.01 component
+                    # tolerance (~0.6 deg) would otherwise let a slightly
+                    # skewed tail absorb the whole last segment.
                     # Issue #1018: Recalculate width for the extended segment
                     extended_width = _calculate_segment_width(
                         last_seg.x1, last_seg.y1, end_pad.x, end_pad.y

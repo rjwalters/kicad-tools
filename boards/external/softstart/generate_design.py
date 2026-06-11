@@ -3561,10 +3561,19 @@ def _repair_drill_drill_vias(pcb_path: Path, min_clearance: float = 0.1016) -> i
             required = v_rad + p_rad + min_clearance
             if dist < 1e-6 or dist >= required:
                 continue
-            # Radial slide away from the pad drill (+0.05 mm margin).
-            scale = (required + 0.05) / dist
-            nx = round(px + (vx - px) * scale, 4)
-            ny = round(py + (vy - py) * scale, 4)
+            # Slide away from the pad drill (+0.05 mm margin) along the
+            # nearest of the 8 routing directions (issue #3532: a raw
+            # radial slide drags connected segment endpoints to
+            # arbitrary angles; an 8-direction slide keeps a dragged
+            # neighbour on the 45-degree set whenever it runs along the
+            # slide axis -- the step-10e quantization pass doglegs any
+            # residual skew).
+            from kicad_tools.router.quantize import snap_direction_8
+
+            ux, uy = snap_direction_8(vx - px, vy - py)
+            slide = required + 0.05
+            nx = round(px + ux * slide, 4)
+            ny = round(py + uy * slide, 4)
             new_via = via.replace(at.group(0), f"(at {nx} {ny})", 1)
             text = text.replace(via, new_via, 1)
             # Drag connected segment endpoints along.
@@ -4245,6 +4254,25 @@ def route_pcb(
             print("   No cross-net segment/via clearance conflicts")
     except Exception as exc:
         print(f"   WARNING: segment/via clearance repair failed: {exc}")
+
+    # Issue #3532: 45-degree quantization pass.  The 10a-10d repairs
+    # (and historical router emitters) drag segment endpoints to raw
+    # coordinates, leaving arbitrary-angle copper (acute-angle junctions
+    # can etch poorly).  Replace every off-angle segment with an exact
+    # two-leg dogleg (45-degree leg + axis leg) sharing the original
+    # endpoints; the step-12 DRC gate re-verifies clearances on the
+    # quantized geometry.
+    print("\n10e. Quantizing segments to the 45-degree set...")
+    try:
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        quantized = quantize_pcb_file(output_path)
+        if quantized:
+            print(f"   Quantized {len(quantized)} off-angle segment(s)")
+        else:
+            print("   All segments already 45-degree aligned")
+    except Exception as exc:
+        print(f"   WARNING: 45-degree quantization failed: {exc}")
 
     # Re-fill after stitching/repair: the new via barrels pass through
     # the In1/In2 planes of the OTHER net, so the fills must be
