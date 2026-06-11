@@ -11,6 +11,7 @@ GlobalRouter supporting per-layer capacity and negotiated congestion.
 from __future__ import annotations
 
 import copy
+import os
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -63,6 +64,7 @@ class TwoPhaseRouter:
         interleave_match_groups: Callable[[list[int]], list[int]] | None = None,
         apply_byte_lane_inner_priority: Callable[[list[int]], list[int]] | None = None,
         stall_ripup_budget: int | None = None,
+        relief_rescue: Callable[..., bool] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -107,6 +109,20 @@ class TwoPhaseRouter:
         # initial-pass stall recovery in ``_detailed_negotiated``.  None
         # preserves the historical hardcoded default of 3 (Issue #2527).
         self._stall_ripup_budget = stall_ripup_budget
+        # Issue #3471: Optional hook to ``Autorouter._relief_rescue``
+        # (#3438 machinery).  The initial-pass stall path's
+        # BLOCKED_BY_COMPONENT rip-up fast-fails ("geometric blocker")
+        # when the failed net cannot route even with its destination-
+        # component siblings ripped -- on board 05's ISENSE cluster the
+        # actual blockage is non-rippable foreign ESCAPE copper in the
+        # U3 sense band, which sibling rip-up by construction cannot
+        # clear.  The relief rescue makes that copper passable at a
+        # penalty, displaces the crossed owner nets, and commits only
+        # when every victim re-lands (strict transaction), so it is the
+        # correct escalation for exactly the nets the rip-up returns
+        # False for.  ``None`` (e.g. unit tests constructing
+        # TwoPhaseRouter directly) preserves legacy behaviour.
+        self._relief_rescue = relief_rescue
 
         # Issue #2597: Communicates the reason the negotiated outer loop in
         # ``_detailed_negotiated()`` exited.  Read by the progress-callback
@@ -633,6 +649,8 @@ class TwoPhaseRouter:
                     if self._stall_ripup_budget is not None
                     else 3
                 )
+                relief_attempted = 0
+                relief_resolved = 0
                 for failed_net in list(stall_failed):
                     if check_timeout():
                         timed_out = True
@@ -647,8 +665,49 @@ class TwoPhaseRouter:
                         max_ripups_per_net=stall_budget,
                         per_net_timeout=per_net_timeout,
                     )
+                    # Issue #3471: escalate a rip-up "geometric blocker"
+                    # fast-fail to the #3438 relief rescue IMMEDIATELY
+                    # (interleaved, not in a deferred second pass).
+                    # These nets failed to route even with their
+                    # destination-component siblings ripped, which means
+                    # the blockage is NON-RIPPABLE copper (escape-phase
+                    # stubs / halos in the board-05 U3 sense band) that
+                    # only the relief probe can negotiate through.
+                    # Strictly transactional (commits only when the net
+                    # routes AND every displaced victim re-lands), one
+                    # attempt per net, honours the ``KCT_DISABLE_RELIEF=1``
+                    # escape hatch.  Interleaving matters: a single
+                    # sibling rip-up can burn 200+ s re-routing its
+                    # 24-net cohort before failing (board 05 ISENSE_A-),
+                    # so a deferred relief pass routinely found the
+                    # phase budget already exhausted.
+                    if (
+                        not rescued
+                        and self._relief_rescue is not None
+                        and not os.environ.get("KCT_DISABLE_RELIEF")
+                        and not check_timeout()
+                    ):
+                        relief_attempted += 1
+                        rescued = self._relief_rescue(
+                            failed_net,
+                            neg_router,
+                            net_routes,
+                            pads_by_net_local,
+                            present_factor,
+                            per_net_timeout,
+                            flush_print,
+                            elapsed_str,
+                        )
+                        if rescued:
+                            relief_resolved += 1
                     if rescued:
                         rescued_count += 1
+                if relief_attempted > 0:
+                    flush_print(
+                        f"  Stall relief rescue resolved "
+                        f"{relief_resolved}/{relief_attempted} net(s) "
+                        f"({elapsed_str()})"
+                    )
                 if rescued_count > 0:
                     flush_print(
                         f"  BLOCKED_BY_COMPONENT rip-up resolved "
