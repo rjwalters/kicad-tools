@@ -1579,3 +1579,198 @@ class TestNonZeroBoardOriginRegression:
         assert status["signal_complete_count"] == 1
         assert status["signal_completion_percent"] == pytest.approx(100.0)
         assert status["incomplete_count"] == 0
+
+
+# ---- PCB fixtures for zero-fill zone connectivity tests (Issue #3482) ----
+
+# Shared body: two GND pads inside the zone outline, no traces, no vias.
+# The zone definition is parameterized so each case differs only in its
+# fill / filled_polygon content.
+_ZONE_FILL_PCB_TEMPLATE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 15 15)
+    (property "Reference" "C1")
+    (pad "1" smd rect (at 0 -0.25) (size 0.4 0.4) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "C2")
+    (pad "1" smd rect (at 0 -0.25) (size 0.4 0.4) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    {fill_clause}
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+{filled_polygons}  )
+)
+"""
+
+# Zone with fill ENABLED but zero filled polygons (e.g. fully shadowed by a
+# higher-priority overlapping zone or carved away entirely by clearances).
+# This is the exact softstart AC_NEUTRAL/ISENSE_POS failure mode from
+# Issue #3482: both pads sit inside the zone BOUNDARY but there is no copper.
+ZERO_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="",
+)
+
+# Zone with fill DISABLED (boundary-only zone, board 06 style).
+BOUNDARY_ONLY_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="",
+)
+
+# Zone whose fill produced copper over only PART of the outline: filled
+# polygon covers x in [10, 22] while the boundary extends to x = 30.
+# C1 (15, 15) lands inside filled copper; C2 (25, 15) is inside the
+# boundary only.  The Issue #479 thermal-relief heuristic applies because
+# the zone genuinely has filled copper.
+PARTIAL_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="""    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 10 10)
+        (xy 22 10)
+        (xy 22 20)
+        (xy 10 20)
+      )
+    )
+""",
+)
+
+
+class TestZeroFillZoneConnectivity:
+    """Regression tests for Issue #3482.
+
+    A zone with zero filled polygons produces NO copper on the manufactured
+    board, so its boundary polygon must not mark pads or vias as connected.
+    Before the fix, the Issue #479 boundary heuristic (intended only for
+    thermal-relief cutouts INSIDE filled copper) marked every pad inside a
+    zero-fill zone outline as zone-connected, reporting electrically open
+    pour nets (softstart AC_NEUTRAL / ISENSE_POS) as ``complete``.
+    """
+
+    @pytest.fixture
+    def zero_fill_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "zero_fill.kicad_pcb"
+        pcb_file.write_text(ZERO_FILL_ZONE_PCB)
+        return pcb_file
+
+    @pytest.fixture
+    def boundary_only_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "boundary_only.kicad_pcb"
+        pcb_file.write_text(BOUNDARY_ONLY_ZONE_PCB)
+        return pcb_file
+
+    @pytest.fixture
+    def partial_fill_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "partial_fill.kicad_pcb"
+        pcb_file.write_text(PARTIAL_FILL_ZONE_PCB)
+        return pcb_file
+
+    def test_zero_fill_zone_is_not_connectivity(self, zero_fill_pcb: Path):
+        """Pads inside a zero-fill zone boundary must NOT report complete.
+
+        This is the softstart PR #3481 failure mode: fill enabled, zero
+        filled polygons, no segments, no vias -> open circuit on the
+        manufactured board.
+        """
+        analyzer = NetStatusAnalyzer(zero_fill_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status != "complete", (
+            f"Zero-fill zone must not provide connectivity; got status={gnd.status}"
+        )
+        # Both pads are electrically isolated; only the trivial largest
+        # island (one pad) counts as connected.
+        assert gnd.unconnected_count == 1
+        assert gnd.connected_count == 1
+
+    def test_boundary_only_zone_is_not_connectivity(self, boundary_only_pcb: Path):
+        """A boundary-only zone (no fill) must not provide connectivity."""
+        analyzer = NetStatusAnalyzer(boundary_only_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status != "complete", (
+            f"Boundary-only zone must not provide connectivity; got status={gnd.status}"
+        )
+        assert gnd.unconnected_count == 1
+
+    def test_zero_fill_zone_still_reported_as_plane_net(self, zero_fill_pcb: Path):
+        """Zero-fill zones still classify the net as a plane net.
+
+        The plane-net metadata drives the 'kct stitch' suggested fix, which
+        is exactly the right remediation for an unfilled pour.
+        """
+        analyzer = NetStatusAnalyzer(zero_fill_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.is_plane_net is True
+        assert gnd.plane_layer == "F.Cu"
+
+    def test_partial_fill_zone_provides_connectivity(self, partial_fill_pcb: Path):
+        """A zone with at least one filled polygon retains the Issue #479
+        boundary heuristic: pads inside the outline (including thermal-relief
+        cutouts) are zone-connected.
+        """
+        analyzer = NetStatusAnalyzer(partial_fill_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "complete", (
+            f"Partially filled zone should connect pads inside its boundary; "
+            f"got status={gnd.status}, "
+            f"unconnected: {[p.full_name for p in gnd.unconnected_pads]}"
+        )
+
+    def test_fully_filled_zone_regression(self, tmp_path: Path):
+        """Fully filled zone behavior (Issue #479) must not regress."""
+        pcb_file = tmp_path / "full_fill.kicad_pcb"
+        pcb_file.write_text(PLANE_NET_PCB)
+
+        analyzer = NetStatusAnalyzer(pcb_file)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "complete", (
+            f"Fully filled zone should connect both pads; got {gnd.status}"
+        )

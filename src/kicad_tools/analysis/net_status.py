@@ -603,25 +603,36 @@ class NetStatusAnalyzer:
         # We track both filled_polygons (actual copper) AND boundary polygon (zone outline)
         # because vias at pad positions may be in thermal clearance cutouts of filled
         # polygons but still within the zone boundary (and thus connected to the zone).
+        #
+        # IMPORTANT (Issue #3482): the boundary polygon only implies connectivity
+        # when the zone actually produced filled copper. A zone with fill enabled
+        # but zero filled polygons (e.g. fully shadowed by a higher-priority zone,
+        # or carved away entirely by clearances) contributes NO copper, so its
+        # boundary must not mark pads/vias as connected. The boundary heuristic
+        # (Issue #479) exists solely for thermal-relief cutouts INSIDE filled
+        # copper, which presupposes the zone has at least one filled polygon.
         net_zones: list[tuple[str, list[list[tuple[float, float]]]]] = []
         zone_boundaries: list[tuple[str, list[tuple[float, float]]]] = []
         for zone in self.pcb.zones:
             if zone.net_number == net_number:
+                # Zero-fill zones provide no electrical connectivity at all
+                # (Issue #3482): skip both boundary and copper collection.
+                if not zone.filled_polygons:
+                    continue
                 # Collect boundary polygon (zone outline) for via-in-zone checking.
                 # If no boundary polygon exists, use the convex hull of filled
                 # polygons as a fallback boundary so that pad-in-zone checks
                 # still work when kicad-cli omits the outline for filled zones.
                 if zone.polygon:
                     zone_boundaries.append((zone.layer, zone.polygon))
-                elif zone.filled_polygons:
+                else:
                     # Use the bounding box of all filled polygon vertices as a
                     # conservative fallback boundary.
                     fallback = self._bounding_box_polygon(zone.filled_polygons)
                     if fallback:
                         zone_boundaries.append((zone.layer, fallback))
                 # Collect filled polygons for copper overlap checks
-                if zone.filled_polygons:
-                    net_zones.append((zone.layer, zone.filled_polygons))
+                net_zones.append((zone.layer, zone.filled_polygons))
 
         # Build segment components for reuse
         segment_components = self._build_segment_components(segments)
