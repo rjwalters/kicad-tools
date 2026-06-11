@@ -6,6 +6,7 @@ import math
 from typing import Callable
 
 from ..primitives import Segment
+from ..quantize import dogleg_points
 from .config import OptimizationConfig
 from .geometry import (
     is_90_degree_corner,
@@ -533,6 +534,36 @@ def _restore_terminal_endpoints(
     # that are close but not exact due to coordinate rounding.
     pad_match_tolerance = 0.05
 
+    def _make_legs(
+        template: Segment,
+        sx: float,
+        sy: float,
+        ex: float,
+        ey: float,
+    ) -> list[Segment]:
+        """Build 45-quantized segment(s) from (sx, sy) to (ex, ey).
+
+        Issue #3532: restoring a terminal endpoint to the (off-grid) pad
+        centre used to skew the terminal segment off the 0/45/90/135
+        angle set.  Emit an exact dogleg (45-degree leg + axis leg)
+        instead of a single skewed segment.
+        """
+        points = dogleg_points(sx, sy, ex, ey)
+        return [
+            Segment(
+                x1=ax,
+                y1=ay,
+                x2=bx,
+                y2=by,
+                width=template.width,
+                layer=template.layer,
+                net=template.net,
+                net_name=template.net_name,
+            )
+            for (ax, ay), (bx, by) in zip(points, points[1:], strict=False)
+            if (ax, ay) != (bx, by)
+        ]
+
     # --- Restore start of first segment ---
     first = segments[0]
     start_displaced = (
@@ -543,15 +574,8 @@ def _restore_terminal_endpoints(
             orig_start, pad_positions, pad_match_tolerance
         )
         if should_restore_start:
-            segments[0] = Segment(
-                x1=orig_start[0],
-                y1=orig_start[1],
-                x2=first.x2,
-                y2=first.y2,
-                width=first.width,
-                layer=first.layer,
-                net=first.net,
-                net_name=first.net_name,
+            segments[0:1] = _make_legs(
+                first, orig_start[0], orig_start[1], first.x2, first.y2
             )
 
     # --- Restore end of last segment ---
@@ -562,15 +586,8 @@ def _restore_terminal_endpoints(
             orig_end, pad_positions, pad_match_tolerance
         )
         if should_restore_end:
-            segments[-1] = Segment(
-                x1=last.x1,
-                y1=last.y1,
-                x2=orig_end[0],
-                y2=orig_end[1],
-                width=last.width,
-                layer=last.layer,
-                net=last.net,
-                net_name=last.net_name,
+            segments[-1:] = _make_legs(
+                last, last.x1, last.y1, orig_end[0], orig_end[1]
             )
 
     return segments
@@ -579,6 +596,21 @@ def _restore_terminal_endpoints(
 # ---------------------------------------------------------------------------
 # PullTight post-processing
 # ---------------------------------------------------------------------------
+
+
+def _segment_parallel_to(seg: Segment, ux: float, uy: float) -> bool:
+    """True if *seg* runs parallel to direction ``(ux, uy)``.
+
+    A (near-)zero-length segment counts as parallel: re-aiming it along
+    the translation direction cannot skew it off the 45-degree set.
+    """
+    dx = seg.x2 - seg.x1
+    dy = seg.y2 - seg.y1
+    norm = math.hypot(dx, dy)
+    if norm < 1e-9:
+        return True
+    # |sin(angle between)| -- (ux, uy) is a unit vector.
+    return abs(dx * uy - dy * ux) / norm < 1e-4
 
 
 def pull_tight_pass(
@@ -628,6 +660,20 @@ def pull_tight_pass(
             # Perpendicular direction of the current segment
             perp_x, perp_y = perpendicular_direction(curr, tol)
             if perp_x == 0.0 and perp_y == 0.0:
+                i += 1
+                continue
+
+            # Issue #3532: translating curr along perp re-aims prev and
+            # nxt at the moved endpoints.  Unless both neighbours run
+            # PARALLEL to the translation direction (the classic
+            # rectilinear jog window, e.g. H-V-H translated
+            # horizontally), any non-zero displacement skews them off
+            # the 0/45/90/135 angle set -- skip those windows so the
+            # pass never emits arbitrary-angle copper.
+            if not (
+                _segment_parallel_to(prev, perp_x, perp_y)
+                and _segment_parallel_to(nxt, perp_x, perp_y)
+            ):
                 i += 1
                 continue
 

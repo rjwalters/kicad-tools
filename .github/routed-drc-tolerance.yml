@@ -1544,3 +1544,13 @@ manufacturers:
   # tier-split as boards 03/04: route+check at tier-1, export at
   # jlcpcb).
   boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: jlcpcb-tier1
+  # Softstart's recipe routes, gates (step 12/13) and exports its
+  # manufacturing bundle at jlcpcb-tier1, whose Capability-Plus process
+  # permits the via-in-pad anchors used for stranded-pour rescue
+  # (issues #3343/#3481/#3497 -- same mechanism as boards 03/04/05).
+  # Under the base jlcpcb tier the committed artifact reports 14
+  # `via_in_pad` family errors that are legal at the tier the board
+  # actually ships against.  Override added by issue #3532 (the first
+  # PR to modify this artifact since the board landed).  No
+  # `tolerances:` entry -- strict 0-error gate at tier-1.
+  boards/external/softstart/output/softstart_routed.kicad_pcb: jlcpcb-tier1

@@ -1693,6 +1693,7 @@ class CppPathfinder:
         """
         from .layers import Layer
         from .primitives import Route, Segment, Via
+        from .quantize import dogleg_points
 
         route = Route(net=start.net, net_name=start.net_name)
 
@@ -1705,17 +1706,33 @@ class CppPathfinder:
 
         for cpp_seg in result.segments:
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
-            seg = Segment(
-                x1=cpp_seg.x1,
-                y1=cpp_seg.y1,
-                x2=cpp_seg.x2,
-                y2=cpp_seg.y2,
-                width=trace_width if trace_width is not None else cpp_seg.width,
-                layer=Layer(layer_enum_value),
-                net=cpp_seg.net,
-                net_name=start.net_name,
+            # Issue #3532: the C++ ``reconstruct_path`` connects the
+            # exact (off-grid) pad centres to the first/last grid cell
+            # with a single straight tail, which is off the 0/45/90/135
+            # angle set in general.  Split such segments into an exact
+            # two-leg dogleg HERE, in float64 -- the C++ side stores
+            # float32 coordinates whose ulp at board scale (~1.5e-5 mm)
+            # is too coarse to construct exactly-aligned legs.
+            points = dogleg_points(
+                float(cpp_seg.x1),
+                float(cpp_seg.y1),
+                float(cpp_seg.x2),
+                float(cpp_seg.y2),
             )
-            route.segments.append(seg)
+            for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+                if sx == ex and sy == ey:
+                    continue
+                seg = Segment(
+                    x1=sx,
+                    y1=sy,
+                    x2=ex,
+                    y2=ey,
+                    width=trace_width if trace_width is not None else cpp_seg.width,
+                    layer=Layer(layer_enum_value),
+                    net=cpp_seg.net,
+                    net_name=start.net_name,
+                )
+                route.segments.append(seg)
 
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``

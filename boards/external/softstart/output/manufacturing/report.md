@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 78 (56 SMD, 18 THT, 4 other) |
 | Nets | 41 |
-| Traces | 4519 segments |
+| Traces | 4723 segments |
 | Vias | 158 |
 | Board Size | 150.0 x 100.0 mm |
 
@@ -94,53 +94,6 @@ Negative half-cycle supercapacitor bank (off-board, 30S string)
 | Warnings | 0 |
 
 **Status**: SKIPPED -- ERC skipped by user request
-
-
-\newpage
-
-## Schematic Overview
-
-### Schematic: softstart
-
-![Schematic: softstart](images/schematic_softstart.png)
-
-
-\newpage
-
-## PCB Layout
-
-![PCB Front](images/pcb_front.png)
-
-![PCB Back](images/pcb_back.png)
-
-### Copper
-
-![PCB Copper](images/pcb_copper.png)
-
-### Assembly
-
-![Assembly](images/assembly.png)
-
-
-\newpage
-
-## Copper Layers
-
-### F.Cu
-
-![F.Cu](images/layer_F_Cu.png)
-
-### In1.Cu
-
-![In1.Cu](images/layer_In1_Cu.png)
-
-### In2.Cu
-
-![In2.Cu](images/layer_In2_Cu.png)
-
-### B.Cu
-
-![B.Cu](images/layer_B_Cu.png)
 
 
 \newpage
