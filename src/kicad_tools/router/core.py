@@ -6737,6 +6737,13 @@ class Autorouter:
         # a diagnostic / emergency escape hatch.
         relief_disabled = bool(os.environ.get("KCT_DISABLE_RELIEF"))
         max_relief_probes_per_net = 0 if relief_disabled else 3
+        # Issue #3413: hard wall-clock deadline for relief rescues.  A
+        # rescue is a composite of stages that are each bounded but whose
+        # product is not (board 06 measurement: one rescue ran 342s past
+        # a 240s loop budget).  Bound every rescue by the loop's own
+        # wall budget; the rescue transaction rolls back verbatim when
+        # the deadline strikes mid-flight.
+        relief_deadline = (start_time + timeout) if timeout is not None else None
         # Issue #2295: Per-net rip-up stall tracking.  For each net that
         # passes through overused cells, count consecutive rip-up iterations
         # where the net's overflow contribution did not improve.  Nets that
@@ -6775,6 +6782,20 @@ class Autorouter:
         cohort_history: list[frozenset[int]] = []
         stagnation_recovery_count = 0
         max_stagnation_recoveries = 2
+        # Issue #3413: per-net consecutive hard-failure counter.  A net
+        # whose A* fails on pin access (start/target corridor sealed by
+        # committed foreign copper) emits NO overflow, so PathFinder
+        # negotiation never rips its blockers.  When unrelated congestion
+        # holds ``overflow > 0`` (board 06: the J1 USB3 cluster), the
+        # ``overflow == 0`` stall gate below never opens and such nets
+        # stay unrouted forever (board 06 MIPI_RST: 0 segments across all
+        # iterations while earlier-routed MIPI_CLK/D0 copper seals the U4
+        # corridor for its wide impedance-resolved trace).  Nets that fail
+        # ``hard_fail_rescue_threshold`` consecutive iterations engage the
+        # overflow-silent rescue block (targeted rip-up + relief rescue)
+        # even while overflow > 0.
+        hard_fail_iterations: dict[int, int] = {}
+        hard_fail_rescue_threshold = 2
         for net in net_order:
             if net in self.nets:
                 pads_for_routing = self.nets[net]
@@ -7866,6 +7887,18 @@ class Autorouter:
                         ripup_targets = [
                             n for n in recovery_cohort if n in net_routes and net_routes[n]
                         ]
+                        # Issue #3413: snapshot the ripped cohort so members
+                        # whose elevated-cost reroute fails are restored
+                        # verbatim.  Measured on board 06 (seed 42): the
+                        # recovery ripped 11 nets, re-landed 7, and left the
+                        # iteration with connected 19 -> 15 -- a strictly
+                        # worse state that also burned the wall budget the
+                        # later iterations needed.  Restoring failures keeps
+                        # the recovery monotone in reach: it can only swap
+                        # geometry, never lose a routed net.
+                        recovery_original_routes: dict[int, list[Route]] = {
+                            n: list(net_routes.get(n, [])) for n in ripup_targets
+                        }
                         if ripup_targets:
                             neg_router.rip_up_nets(ripup_targets, net_routes, self.routes)
                         # Re-route each cohort member fresh with elevated cost
@@ -7886,6 +7919,25 @@ class Autorouter:
                                     self.grid.mark_route_usage(route)
                                     self.routes.append(route)
                                 recovered_count += 1
+                        # Issue #3413: no-net-loss restore for cohort members
+                        # that were ripped but did not re-land (reroute failed
+                        # or the timeout broke the loop mid-cohort).
+                        recovery_restored = 0
+                        for rn in ripup_targets:
+                            if not net_routes.get(rn) and recovery_original_routes.get(rn):
+                                restored = recovery_original_routes[rn]
+                                net_routes[rn] = restored
+                                for route in restored:
+                                    self._mark_route(route)
+                                    self.grid.mark_route_usage(route)
+                                    if route not in self.routes:
+                                        self.routes.append(route)
+                                recovery_restored += 1
+                        if recovery_restored:
+                            flush_print(
+                                f"  Stagnation recovery restored {recovery_restored} "
+                                f"net(s) whose reroute failed (no-net-loss)"
+                            )
                         # Recompute overflow & cohort tracking after recovery
                         current_overflow = self.grid.get_total_overflow()
                         overused = self.grid.find_overused_cells()
@@ -7949,6 +8001,15 @@ class Autorouter:
                     # branch), after the iteration's best state is
                     # already banked.
                     for fn in list(failed_net_ids):
+                        # Issue #3413: per-net wall-clock check.  This
+                        # recovery previously had NO timeout discipline:
+                        # measured on board 06 it ran 380s past a 360s
+                        # budget (21 elevated-cost attempts at up to 30s
+                        # each), and the loop then "discovered" the
+                        # exhausted budget only at the next reroute.
+                        if check_timeout():
+                            timed_out = True
+                            break
                         # Issue #3448: ``net_routes.get(fn)`` (not bare
                         # membership) so a ripped-then-failed net with an
                         # empty-list entry still receives the elevated-cost
@@ -8523,6 +8584,17 @@ class Autorouter:
                             and n not in off_grid_nets
                         )
                     ]
+                    # Issue #3413: update the consecutive hard-failure
+                    # counters (fully unrouted nets only -- partials still
+                    # have copper down and negotiate normally).
+                    for _hf_net in still_failed:
+                        if not net_routes.get(_hf_net):
+                            hard_fail_iterations[_hf_net] = (
+                                hard_fail_iterations.get(_hf_net, 0) + 1
+                            )
+                    for _hf_net in list(hard_fail_iterations):
+                        if net_routes.get(_hf_net):
+                            hard_fail_iterations.pop(_hf_net)
                     if overflow == 0 and still_failed and not timed_out and not hotset_only:
                         flush_print(
                             f"  Stall detected: {len(still_failed)} net(s) unrouted with 0 overflow"
@@ -8733,6 +8805,7 @@ class Autorouter:
                                 per_net_timeout,
                                 flush_print,
                                 elapsed_str,
+                                deadline=relief_deadline,
                             ):
                                 relief_resolved += 1
                         if relief_attempted > 0:
@@ -8742,6 +8815,108 @@ class Autorouter:
                             )
                             overflow = self.grid.get_total_overflow()
                             overused = self.grid.find_overused_cells()
+
+                    # Issue #3413: Overflow-silent hard-failure rescue.
+                    # The targeted-fallback chain above only opens when
+                    # overflow == 0, but a pin-access hard failure emits NO
+                    # overflow signal -- when UNRELATED congestion keeps
+                    # overflow > 0 the failed net's blockers are never in
+                    # the rip-up cohort and the net stays at 0 segments
+                    # forever (board 06 MIPI_RST: sealed U4 escape corridor
+                    # while the J1 USB3 cluster holds overflow at 3).  For
+                    # nets that have been fully unrouted for
+                    # ``hard_fail_rescue_threshold`` consecutive iterations,
+                    # run the same targeted rip-up + relief-rescue sequence
+                    # the overflow==0 chain uses.  Both helpers are
+                    # transactional (verbatim rollback on failure) and
+                    # attempt-capped per net (``ripup_history`` /
+                    # ``relief_probe_attempts``), so hopeless geometry
+                    # cannot burn the wall budget every iteration.
+                    if overflow > 0 and still_failed and not timed_out and not hotset_only:
+                        silent_failed = [
+                            n for n in still_failed
+                            if not net_routes.get(n)
+                            and hard_fail_iterations.get(n, 0) >= hard_fail_rescue_threshold
+                            and len(pads_by_net.get(n, [])) >= 2
+                        ]
+                        if silent_failed:
+                            silent_names = sorted(
+                                self.net_names.get(n, f"Net_{n}") for n in silent_failed
+                            )
+                            flush_print(
+                                f"  Overflow-silent hard failure: {len(silent_failed)} net(s) "
+                                f"unrouted >= {hard_fail_rescue_threshold} iteration(s) with "
+                                f"overflow={overflow} elsewhere - engaging targeted rescue "
+                                f"({elapsed_str()}): {', '.join(silent_names)}"
+                            )
+                            silent_resolved = 0
+                            for failed_net in silent_failed:
+                                if check_timeout():
+                                    timed_out = True
+                                    break
+
+                                # 1) Targeted rip-up of direct-line blockers
+                                # (same Bresenham scan as the overflow==0
+                                # chain; transactional inside targeted_ripup).
+                                pads_for_net = pads_by_net.get(failed_net, [])
+                                blocking_nets: set[int] = set()
+                                for j in range(len(pads_for_net) - 1):
+                                    blockers = neg_router.find_blocking_nets_for_connection(
+                                        pads_for_net[j], pads_for_net[j + 1]
+                                    )
+                                    blocking_nets.update(blockers)
+                                if blocking_nets:
+
+                                    def _mark_route_silent(route: Route) -> None:
+                                        self._mark_route(route)
+
+                                    if neg_router.targeted_ripup(
+                                        failed_net=failed_net,
+                                        blocking_nets=blocking_nets,
+                                        net_routes=net_routes,
+                                        routes_list=self.routes,
+                                        pads_by_net=pads_by_net,
+                                        present_cost_factor=present_factor,
+                                        mark_route_callback=_mark_route_silent,
+                                        ripup_history=ripup_history,
+                                        max_ripups_per_net=max_ripups_per_net,
+                                        per_net_timeout=per_net_timeout,
+                                    ):
+                                        silent_resolved += 1
+                                        continue
+
+                                # 2) Relief rescue (clearance-halo seals the
+                                # Bresenham scan cannot see).
+                                if (
+                                    relief_probe_attempts.get(failed_net, 0)
+                                    >= max_relief_probes_per_net
+                                ):
+                                    continue
+                                relief_probe_attempts[failed_net] = (
+                                    relief_probe_attempts.get(failed_net, 0) + 1
+                                )
+                                if self._relief_rescue(
+                                    failed_net,
+                                    neg_router,
+                                    net_routes,
+                                    pads_by_net,
+                                    present_factor,
+                                    per_net_timeout,
+                                    flush_print,
+                                    elapsed_str,
+                                    deadline=relief_deadline,
+                                ):
+                                    silent_resolved += 1
+                            if silent_resolved > 0:
+                                for n in list(hard_fail_iterations):
+                                    if net_routes.get(n):
+                                        hard_fail_iterations.pop(n)
+                                overflow = self.grid.get_total_overflow()
+                                overused = self.grid.find_overused_cells()
+                            flush_print(
+                                f"  Overflow-silent rescue resolved {silent_resolved}/"
+                                f"{len(silent_failed)} net(s) ({elapsed_str()})"
+                            )
 
                     # Issue #2297: Neighborhood rip-up for standard path when
                     # targeted fallback was insufficient and nets remain stalled.
@@ -9040,12 +9215,40 @@ class Autorouter:
         # rip up both offending nets and reroute them with the current
         # (tightened) blocking radius so they settle into violation-free
         # positions.
-        if not timed_out and successful_nets > 0:
+        #
+        # Issue #3413: also run on the ``timed_out`` path, bounded to a
+        # single pass.  Previously the timeout exit skipped correction
+        # entirely, so the #3433 demotion below was the FIRST thing to
+        # see a repairable overlap and stripped the net instead of
+        # letting the correction pass reroute it (board 06 USB2_D+:
+        # routed every sweep, demoted every sweep).  One bounded pass
+        # (each reroute capped by ``per_net_timeout``) is the repair
+        # opportunity the demotion safety net was always meant to run
+        # after.
+        if successful_nets > 0:
+            # On the timed-out exit the loop's budget is already spent, so
+            # the bounded pass gets a hard wall allowance (90s or 25% of
+            # the loop budget, whichever is smaller) and a clamped per-net
+            # budget.  When the allowance expires mid-pass the pass's
+            # all-or-nothing transaction rolls back verbatim, so a
+            # truncated pass can never leave the board worse.  Without
+            # this cap the softstart `kct route` path (multi-rung layer
+            # escalation, each rung able to time out) paid the full
+            # correction cost per rung and blew CI harness timeouts.
+            correction_deadline = None
+            correction_per_net_timeout = per_net_timeout
+            if timed_out:
+                allowance = 90.0 if timeout is None else min(90.0, 0.25 * timeout)
+                correction_deadline = time.time() + allowance
+                if per_net_timeout is not None:
+                    correction_per_net_timeout = min(10.0, per_net_timeout)
             corrected = self._post_route_clearance_correction(
                 net_routes=net_routes,
                 pads_by_net=pads_by_net,
                 present_factor=present_factor,
-                per_net_timeout=per_net_timeout,
+                per_net_timeout=correction_per_net_timeout,
+                max_correction_passes=1 if timed_out else 3,
+                deadline=correction_deadline,
             )
             if corrected > 0:
                 total_elapsed = time.time() - start_time
@@ -9062,8 +9265,9 @@ class Autorouter:
         # are unmanufacturable hard-gate failures, whereas an unrouted
         # net is an advisory connectivity finding -- the trade is
         # strictly better.  Runs AFTER the correction pass (which gets
-        # first chance to actually fix the geometry) and ALSO on the
-        # ``timed_out`` path that skips the correction pass entirely.
+        # first chance to actually fix the geometry; since issue #3413
+        # the correction pass also runs -- single-pass bounded -- on the
+        # ``timed_out`` exit).
         demoted = self._demote_seg_seg_overlap_nets(net_routes, neg_router)
         if demoted:
             successful_nets = sum(1 for routes in net_routes.values() if routes)
@@ -9280,6 +9484,7 @@ class Autorouter:
         flush_print_fn,
         elapsed_fn,
         depth: int = 0,
+        deadline: float | None = None,
     ) -> bool:
         """Transactional relief rescue for a zero-overflow hard failure.
 
@@ -9296,10 +9501,28 @@ class Autorouter:
         verbatim and ``False`` is returned -- a failed rescue never
         leaves the board worse than it found it.
 
+        Args (selected):
+            deadline: Issue #3413: optional absolute ``time.time()``
+                deadline (typically ``start_time + timeout`` of the
+                calling negotiated loop).  A rescue is a multi-stage
+                composite (probe rounds x victim re-land passes x
+                depth-1 nested rescues), each stage individually
+                bounded by ``per_net_timeout`` -- but their PRODUCT ran
+                to 342s on board 06 (measured during the #3413 work)
+                and blew the loop's whole wall budget on one hopeless
+                rescue.  When the deadline passes mid-rescue the
+                transaction rolls back verbatim and returns False, so
+                the bound costs nothing in correctness.
+
         Returns:
             True when the failed net is now routed and no sibling was
             lost; False after a verbatim rollback.
         """
+        import time as _time
+
+        def _past_deadline() -> bool:
+            return deadline is not None and _time.time() >= deadline
+
         max_rounds = 4
         snapshot_nets: set[int] = {failed_net}
         original_routes: dict[int, list[Route]] = {
@@ -9338,6 +9561,13 @@ class Autorouter:
         probe_timeout = min(10.0, per_net_timeout) if per_net_timeout else 10.0
         committed_routes: list[Route] | None = None
         for round_idx in range(max_rounds):
+            if _past_deadline():
+                flush_print_fn(
+                    f"  Relief rescue: {failed_name} deadline exceeded "
+                    f"(round {round_idx + 1}) -- rolling back ({elapsed_fn()})"
+                )
+                _rollback()
+                return False
             probe_routes, victims = self._relief_probe(
                 failed_net, present_factor, per_net_timeout=probe_timeout
             )
@@ -9441,6 +9671,9 @@ class Autorouter:
             still_pending: list[int] = []
             progress = False
             for rn in pending:
+                if _past_deadline():
+                    still_pending.append(rn)
+                    continue
                 rn_routes = self._route_net_negotiated(
                     rn, present_factor, per_net_timeout=restart_timeout
                 )
@@ -9467,6 +9700,9 @@ class Autorouter:
         if pending and depth == 0:
             still_pending = []
             for rn in pending:
+                if _past_deadline():
+                    still_pending.append(rn)
+                    continue
                 if self._relief_rescue(
                     rn,
                     neg_router,
@@ -9477,6 +9713,7 @@ class Autorouter:
                     flush_print_fn,
                     elapsed_fn,
                     depth=depth + 1,
+                    deadline=deadline,
                 ):
                     relanded += 1
                 else:
@@ -9645,6 +9882,7 @@ class Autorouter:
         present_factor: float = 0.5,
         per_net_timeout: float | None = None,
         max_correction_passes: int = 3,
+        deadline: float | None = None,
     ) -> int:
         """Rip-up and reroute nets involved in seg-seg clearance violations.
 
@@ -9666,10 +9904,20 @@ class Autorouter:
             present_factor: Congestion cost factor for rerouting.
             per_net_timeout: Optional per-net A* timeout.
             max_correction_passes: Maximum correction iterations (default 3).
+            deadline: Issue #3413: optional absolute ``time.time()``
+                deadline.  Checked before each per-net reroute; when it
+                strikes mid-pass the remaining nets count as
+                failed-to-re-land, which triggers the pass's
+                all-or-nothing rollback (pre-pass state restored
+                verbatim).  Used by the ``timed_out`` exit of
+                ``route_all_negotiated`` so a budget-exhausted run pays
+                a bounded, contained surcharge for the repair attempt.
 
         Returns:
             Total number of nets that were rerouted across all passes.
         """
+        import time as _time
+
         from .io import validate_routes
 
         total_corrected = 0
@@ -9726,12 +9974,34 @@ class Autorouter:
 
             # Rip up all violating nets
             nets_to_reroute = [n for n in violating_nets if n in net_routes]
+            # Issue #3413: snapshot original routes so a net whose
+            # reroute FAILS can be restored verbatim.  Measured on
+            # board 06: the pass ripped USB2_D+/USB2_D-, re-landed
+            # USB2_D+ in a better position, then USB2_D-'s A* failed
+            # inside ``per_net_timeout`` -- and the pass silently
+            # dropped the net (19/21 where the loop had committed
+            # 20/21).  A restored original may still hold its
+            # clearance violation, but a violation is repairable by
+            # the later passes (or strippable by the #3433 demotion)
+            # whereas a silently-lost net is strictly worse.
+            original_correction_routes: dict[int, list[Route]] = {
+                n: list(net_routes.get(n, [])) for n in nets_to_reroute
+            }
             neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
             # Reroute them one at a time, re-validating after each net to
             # catch violations introduced by sequential placement (Issue #1783).
             rerouted_count = 0
             for net_idx, net in enumerate(nets_to_reroute):
+                # Issue #3413: bounded-surcharge deadline.  Unprocessed
+                # nets stay unrouted here and are swept into the
+                # all-or-nothing rollback below.
+                if deadline is not None and _time.time() >= deadline:
+                    flush_print(
+                        f"  Correction pass deadline reached at net "
+                        f"{net_idx}/{len(nets_to_reroute)}"
+                    )
+                    break
                 # Issue #1798: Use a higher present_factor for nets that had
                 # inner-layer violations, encouraging wider spacing.
                 net_pf = present_factor * 2.0 if net in inner_violating_nets else present_factor
@@ -9778,6 +10048,54 @@ class Autorouter:
                                 for route in retry_routes:
                                     self.grid.mark_route(route)
                                     self.routes.append(route)
+
+            # Issue #3413: ALL-OR-NOTHING transaction.  If any ripped net
+            # failed to re-land, roll the ENTIRE pass back to the
+            # pre-pass state.  Two measured failure shapes motivated
+            # this (board 06 USB2_D+/USB2_D- X-crossover):
+            #
+            #   * no restore at all: the pass silently DROPPED the
+            #     failed net (19/21 where the loop committed 20/21);
+            #   * partial restore (keep the successful reroutes, restore
+            #     only the failures): the restored original geometry
+            #     physically OVERLAPPED its partner's NEW position, and
+            #     the #3433 demotion then stripped the partner -- same
+            #     net loss, plus extra DRC noise.
+            #
+            # The pre-pass state is only ever a positive-clearance
+            # near-miss (overlaps never reach this pass on the loop's
+            # best snapshot), which the DRC nudge pass can still repair
+            # -- strictly better than either failure shape.
+            failed_to_reland = [
+                n for n in nets_to_reroute if not net_routes.get(n)
+            ]
+            if failed_to_reland:
+                for net in nets_to_reroute:
+                    # Unwind any copper this pass placed (committed via
+                    # ``mark_route`` above).
+                    for route in list(net_routes.get(net, [])):
+                        self.grid.unmark_route(route)
+                        self.grid.unmark_route_usage(route)
+                        if route in self.routes:
+                            self.routes.remove(route)
+                    net_routes[net] = []
+                for net in nets_to_reroute:
+                    restored = list(original_correction_routes.get(net, []))
+                    net_routes[net] = restored
+                    for route in restored:
+                        self.grid.mark_route(route)
+                        self.grid.mark_route_usage(route)
+                        if route not in self.routes:
+                            self.routes.append(route)
+                failed_names = sorted(
+                    self.net_names.get(n, f"Net_{n}") for n in failed_to_reland
+                )
+                flush_print(
+                    f"  Correction pass rolled back: {len(failed_to_reland)} "
+                    f"net(s) failed to re-land ({', '.join(failed_names)}) "
+                    f"-- pre-pass state restored verbatim (no-net-loss)"
+                )
+                break
 
             total_corrected += rerouted_count
             flush_print(

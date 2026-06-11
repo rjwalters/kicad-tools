@@ -436,3 +436,143 @@ class TestDemoteSegSegOverlapNets:
 
         assert ar._demote_seg_seg_overlap_nets(net_routes, neg) == []
         assert net_routes[1] == [r1] and net_routes[2] == [r2]
+
+
+# ---------------------------------------------------------------------------
+# Issue #3413: correction pass must run BEFORE demotion on the timeout exit
+# ---------------------------------------------------------------------------
+
+
+class TestCorrectionBeforeDemotionOnTimeout:
+    """``route_all_negotiated``'s timeout exit must give the post-route
+    clearance-correction pass a (bounded) chance to repair geometry
+    BEFORE the #3433 overlap demotion strips nets.
+
+    Board 06's USB2_D+ made the gap concrete: the negotiated loop exits
+    via timeout, the old ``not timed_out`` gate skipped
+    ``_post_route_clearance_correction`` entirely, and the demotion
+    safety net was the FIRST consumer of a repairable overlap -- so the
+    net was stripped every sweep instead of rerouted.
+    """
+
+    def _make_autorouter(self) -> Autorouter:
+        ar = Autorouter(
+            width=20.0,
+            height=20.0,
+            origin_x=0.0,
+            origin_y=0.0,
+            rules=_make_rules(),
+            layer_stack=LayerStack.two_layer(),
+        )
+        pads1 = [
+            {"number": "1", "x": 2.0, "y": 5.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 12.0, "y": 5.0, "net": 1, "net_name": "NET1"},
+        ]
+        pads2 = [
+            {"number": "1", "x": 2.0, "y": 10.0, "net": 2, "net_name": "NET2"},
+            {"number": "2", "x": 12.0, "y": 10.0, "net": 2, "net_name": "NET2"},
+        ]
+        ar.add_component("R1", pads1)
+        ar.add_component("R2", pads2)
+        return ar
+
+    @staticmethod
+    def _instrument(monkeypatch, calls):
+        """Replace the correction + demotion passes with order recorders."""
+
+        def _fake_correction(self, **kwargs):
+            calls.append(("correction", kwargs.get("max_correction_passes")))
+            return 0
+
+        def _fake_demotion(self, net_routes, neg_router):
+            calls.append(("demotion", None))
+            return []
+
+        monkeypatch.setattr(
+            Autorouter, "_post_route_clearance_correction", _fake_correction
+        )
+        monkeypatch.setattr(
+            Autorouter, "_demote_seg_seg_overlap_nets", _fake_demotion
+        )
+
+    def test_correction_runs_bounded_before_demotion_on_timeout(self, monkeypatch):
+        ar = self._make_autorouter()
+
+        # Fake clock: every _route_net_negotiated call costs 10 fake
+        # seconds, so with timeout=10 the iteration-0 loop trips the
+        # wall-clock check after the first net (elapsed 10 >= 10) and
+        # exits via the ``timed_out`` path with successful_nets >= 1.
+        # ``route_all_negotiated`` imports ``time`` function-locally, so
+        # patch the global ``time.time``; monkeypatch restores it on
+        # teardown and nothing in this test depends on real wall-clock.
+        class _FakeClock:
+            t = 1000.0
+
+        import time as _time_mod
+
+        monkeypatch.setattr(_time_mod, "time", lambda: _FakeClock.t)
+
+        real_route = Autorouter._route_net_negotiated
+
+        def _slow_route(self, net, present_factor, per_net_timeout=None):
+            _FakeClock.t += 10.0
+            return real_route(
+                self, net, present_factor, per_net_timeout=per_net_timeout
+            )
+
+        monkeypatch.setattr(Autorouter, "_route_net_negotiated", _slow_route)
+
+        calls: list[tuple[str, object]] = []
+        self._instrument(monkeypatch, calls)
+
+        ar.route_all_negotiated(timeout=10.0, per_net_timeout=5.0)
+
+        names = [name for name, _ in calls]
+        assert "correction" in names, (
+            "Timeout exit must still run the bounded correction pass "
+            "(successful_nets > 0)"
+        )
+        assert "demotion" in names, "The #3433 safety net must always run"
+        assert names.index("correction") < names.index("demotion"), (
+            "Correction must get first chance at the geometry before demotion"
+        )
+        correction_passes = dict(calls)["correction"]
+        assert correction_passes == 1, (
+            f"Timed-out exit must bound the correction to a single pass, "
+            f"got max_correction_passes={correction_passes}"
+        )
+
+    def test_correction_unbounded_on_clean_exit(self, monkeypatch):
+        """Non-timeout exits keep the historical 3-pass budget.
+
+        The iteration loop must actually run (the zero-overflow
+        early-return after iteration 0 skips the tail entirely), so
+        force a phantom overflow reading: the loop spins without a
+        cohort, exits without ``timed_out``, and the tail must call the
+        correction pass with the historical 3-pass budget.
+        """
+        ar = self._make_autorouter()
+
+        real_overflow = type(ar.grid).get_total_overflow
+        overflow_calls = {"n": 0}
+
+        def _phantom_overflow(self):
+            overflow_calls["n"] += 1
+            # First reading (post-iteration-0) reports phantom overflow so
+            # the early "No conflicts" return is skipped; later readings
+            # are truthful so the loop winds down naturally.
+            if overflow_calls["n"] == 1:
+                return 1
+            return real_overflow(self)
+
+        monkeypatch.setattr(type(ar.grid), "get_total_overflow", _phantom_overflow)
+
+        calls: list[tuple[str, object]] = []
+        self._instrument(monkeypatch, calls)
+
+        ar.route_all_negotiated(timeout=600.0, per_net_timeout=5.0)
+
+        assert calls, "Clean exit with routed nets must run the correction pass"
+        assert calls[0] == ("correction", 3)
+        names = [name for name, _ in calls]
+        assert names.index("correction") < names.index("demotion")

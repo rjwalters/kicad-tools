@@ -1542,6 +1542,95 @@ class TestIntraICClearanceValidation:
             )
             assert dist - seg.width / 2 - blocker.width / 2 >= self.CLEARANCE - 1e-6
 
+    def test_direct_route_rejects_crossing_routed_copper(self):
+        """Issue #3413: the DIRECT tie must also validate against copper.
+
+        Models board 06's USB-C X-crossover at J1: USB2_D- ties B7->A7
+        first; USB2_D+'s direct A6->B6 tie then crosses that committed
+        copper at the row midpoint.  Before the fix only perimeter-wrap
+        candidates checked ``obstacle_segments``, so the direct tie was
+        emitted as a physical same-layer overlap (later demoted to
+        unrouted by the #3433 safety net).  With the blocker spanning
+        the full wrap envelope no legal wrap exists either, so the pair
+        must defer to the main A* router.
+        """
+        from kicad_tools.router.path import create_intra_ic_routes
+        from kicad_tools.router.primitives import Layer, Segment
+        from kicad_tools.router.rules import DesignRules
+
+        lookup = {
+            ("J1", "A6"): self._mk_pad(
+                "J1", "A6", 10.0, 10.0, 6, "USB2_D+", width=0.3, height=0.3
+            ),
+            ("J1", "B6"): self._mk_pad(
+                "J1", "B6", 10.0, 12.0, 6, "USB2_D+", width=0.3, height=0.3
+            ),
+        }
+        rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
+
+        # Committed USB2_D- copper crossing the direct A6->B6 centerline,
+        # wide enough to also intercept every perimeter-wrap candidate.
+        blocker = Segment(
+            x1=5.0,
+            y1=11.0,
+            x2=15.0,
+            y2=11.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=5,
+            net_name="USB2_D-",
+        )
+        routes, connected = create_intra_ic_routes(
+            6,
+            [("J1", "A6"), ("J1", "B6")],
+            lookup,
+            rules,
+            obstacle_segments=[blocker],
+        )
+
+        assert routes == [], (
+            "Direct tie crosses committed foreign copper and no legal wrap "
+            "exists: nothing may be emitted (defer to the main A* router)"
+        )
+        assert connected == set(), "Deferred pads must stay in the A* pad list"
+
+    def test_direct_route_kept_when_routed_copper_clear(self):
+        """Obstacle copper far from the direct tie must not disturb it."""
+        from kicad_tools.router.path import create_intra_ic_routes
+        from kicad_tools.router.primitives import Layer, Segment
+        from kicad_tools.router.rules import DesignRules
+
+        lookup = {
+            ("J1", "A6"): self._mk_pad(
+                "J1", "A6", 10.0, 10.0, 6, "USB2_D+", width=0.3, height=0.3
+            ),
+            ("J1", "B6"): self._mk_pad(
+                "J1", "B6", 10.0, 12.0, 6, "USB2_D+", width=0.3, height=0.3
+            ),
+        }
+        rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
+        far_blocker = Segment(
+            x1=20.0,
+            y1=5.0,
+            x2=20.0,
+            y2=15.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=5,
+            net_name="USB2_D-",
+        )
+        routes, connected = create_intra_ic_routes(
+            6,
+            [("J1", "A6"), ("J1", "B6")],
+            lookup,
+            rules,
+            obstacle_segments=[far_blocker],
+        )
+
+        assert connected == {0, 1}
+        assert len(routes) == 1
+        assert len(routes[0].segments) == 1, "Clear direct path must stay direct"
+
 
 class TestAutorouterRouteAll:
     """Tests for route_all methods."""

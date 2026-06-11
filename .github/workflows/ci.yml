@@ -377,7 +377,17 @@ jobs:
     # build + ~9-10 min Python coupled routing exceeds the prior 10-min
     # ceiling.  If the typical run creeps above 5 minutes, move to a
     # nightly schedule per the epic's runtime guidance.
-    timeout-minutes: 15
+    #
+    # Issue #3413 (phase 3): 15 -> 20 min.  The board 06 recipe KEEPS
+    # its 240s negotiated budget (a 360s A/B was measured and REJECTED;
+    # see boards/06-diffpair-test/generate_design.py), but the run now
+    # pays for the overflow-silent rescue work inside the loop plus a
+    # bounded (<= 90s) post-route correction pass on the timed-out
+    # exit.  Local M-series wall is ~17 min; the 2-core ubuntu runner
+    # needs the extra headroom.  Also closes #3477 (sub-minute margin
+    # under the prior 15-min ceiling; option 1 -- ceiling bump -- was
+    # its preferred fix).
+    timeout-minutes: 20
     # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
     #
     #   * LATENCY: #3089 landed a per-pair wall-clock budget plumbed

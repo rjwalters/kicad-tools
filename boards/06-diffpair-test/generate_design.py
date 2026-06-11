@@ -589,6 +589,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # is the strategy ``route_all`` recommends for dense boards and
     # it composes with the diff-pair pre-pass via the
     # ``non_diffpair_strategy`` callable hook (Issue #2464).
+    # Issue #3413 (phase 3): the 240s budget was A/B-measured against
+    # 360s and KEPT.  At 360s the loop reaches iterations 3-4, where it
+    # banks a routed=21/connected=20 snapshot whose extra copper is a
+    # PARTIAL USB3_RX1- route carrying a heavy post-optimizer violation
+    # load (measured: DRC 36 vs the 9-13 band at 240s) -- the lex tuple
+    # prefers the higher routed count when connected ties.  At 240s the
+    # #3413 overflow-silent rescue still fires inside iteration 2
+    # (MIPI_RST rescued at ~110-215s), the stagnation recovery's
+    # no-net-loss restore bounds the mid-surgery timeout, and the
+    # bounded post-timeout correction pass repairs the USB2_D+
+    # crossover -- yielding the stable 20/21 @ 9-13 error trajectory.
+    # USB3_RX1- does not fully connect at either budget (J1 fan-out
+    # geometry; see #3413 phase-3 residual notes).
     def _negotiated_non_diffpair_strategy() -> list:
         return router.route_all_negotiated(
             per_net_timeout=30.0,
