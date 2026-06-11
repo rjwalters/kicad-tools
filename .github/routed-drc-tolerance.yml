@@ -875,6 +875,19 @@ tolerances:
   # Floor tightened 33 -> 20.  Exit clause: (a) above retires the 9+9
   # block; the 2 seg-via grazes are general fine-grid quantization
   # targets; after both, the floor tightens toward ~0.
+  #
+  # Issue #3508 status (exit clause (a), 2026-06-11): the coupled
+  # convergence attempt was MEASURED and DECOMPOSED, not retired.  The
+  # geometric shadow constructor nominally converts 6/9 pairs, but its
+  # committed geometry is not artifact-quality (run-4 seed-42
+  # integration measurement: 16/21 reach, strict gate 49 blocking --
+  # stranded shadow tails, shadow-via/partner intersections, corridor
+  # competition stranding MIPI_D0-/USB_CC1).  The constructor ships
+  # OPT-IN (``DifferentialPairConfig.enable_shadow_construction``,
+  # default False; board 06's recipe keeps it off), the committed
+  # artifact and this floor are UNCHANGED at 20, and the quality gaps
+  # are tracked in #3540-#3544 (#3542, coupled upgrade-in-place, is
+  # the reach-safe architecture that re-opens exit clause (a)).
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).

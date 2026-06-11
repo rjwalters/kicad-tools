@@ -618,6 +618,24 @@ class DifferentialPairConfig:
     per_pair_timeout: float | None = None
     per_pair_max_iterations: int | None = None
     aggregate_timeout: float | None = None
+    # Issue #3508: opt-in gate for the geometric shadow constructor
+    # (``DiffPairRouter._shadow_route_pair``: single-ended guide route
+    # + validated parallel offset, tried before the joint-state
+    # coupled A*).  The constructor converges pairs the joint search
+    # cannot (6/9 nominal on board 06's seed-42 recipe vs 0/9), but
+    # the 2026-06-11 board 06 integration measurement shows its
+    # committed geometry is not yet artifact-quality: shadow tails can
+    # leave goal pads stranded while still claiming the net
+    # (USB3_RX1+/RX2+ "1 of 2 pads stranded"), staggered shadow vias
+    # physically intersect the partner trace at tightly-coupled gaps
+    # (0.3 mm via radius > 0.15 mm edge gap + 0.1125 mm half-width),
+    # and the pre-phase's greedily-claimed corridors strand later
+    # single-ended nets that the negotiated loop cannot rip
+    # (MIPI_D0-, USB_CC1 -> 16/21 reach vs board 06's asserted
+    # 21/21).  Default False keeps recipes on their pre-#3508
+    # budget-exit behaviour; flip on per-board once the #3508
+    # decomposition follow-ups land.
+    enable_shadow_construction: bool = False
 
     def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get rules with any config overrides applied."""
