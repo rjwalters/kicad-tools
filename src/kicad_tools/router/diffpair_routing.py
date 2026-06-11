@@ -4057,18 +4057,29 @@ class DiffPairRouter:
             # open search instead of burning it before either coupled
             # attempt runs.
             # Issue #3508: floor the probe budget at 45s (clamped to half
-            # the per-pair budget).  The #3473 eighth-of-budget bound
+            # the per-pair budget) -- but ONLY when the shadow
+            # constructor is enabled.  The #3473 eighth-of-budget bound
             # starved board 06's USB3 probes: their single-ended guide
             # routes need 30-37s (the C++ validation falls back to the
             # Python pathfinder on the J1 fan-out geometry), so at the
             # 60s per-pair budget the probe deadline (7.5s) always
             # fired, no corridor existed, and the USB3 pairs ran the
-            # intractable open search only.
-            probe_timeout = (
-                min(max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5)
-                if per_pair_timeout is not None
-                else None
-            )
+            # intractable open search only.  The expensive probe exists
+            # to feed the shadow guide; with the shadow gated off
+            # (default -- see ``enable_shadow_construction``) keep the
+            # legacy eighth-of-budget bound so deferring pairs exit
+            # quickly and the per-pair wall-clock matches the
+            # pre-#3508 budget-exit behaviour (matters on slow 2-core
+            # CI runners: 9 pairs x 45s probes is most of the re-route
+            # gate's wall-clock budget).
+            if per_pair_timeout is None:
+                probe_timeout = None
+            elif self.enable_shadow_construction:
+                probe_timeout = min(
+                    max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5
+                )
+            else:
+                probe_timeout = per_pair_timeout * 0.125
             probe_t0 = time.monotonic()
             guide_route = self._single_ended_guide_route(
                 spec.p_start, spec.p_end, per_net_timeout=probe_timeout
