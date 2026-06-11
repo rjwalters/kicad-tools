@@ -315,3 +315,87 @@ class TestTwoPhaseStallRecoveryInvocation:
         # thrash on charlieplex-style boards.
         for call in tp_router._attempt_blocked_component_ripup.call_args_list:
             assert call.kwargs["max_ripups_per_net"] >= 3
+
+
+class TestTwoPhaseStallReliefRescue:
+    """Issue #3471: the stall path escalates rip-up fast-fails to the
+    #3438 relief rescue.
+
+    Board 05's ISENSE cluster fails the BLOCKED_BY_COMPONENT rip-up at
+    0.0s even with all 24 destination-component siblings displaced: the
+    actual blockage is NON-RIPPABLE foreign escape copper in the U3
+    sense band, which sibling rip-up by construction cannot clear.  The
+    relief rescue (strictly transactional, foreign copper passable at a
+    penalty) is the correct escalation for exactly the nets the rip-up
+    returns False for.
+    """
+
+    def _make_tp_router(self, ar, ripup_result: bool, relief_result: bool = False):
+        tp_router = ar._create_two_phase_router()
+        tp_router._attempt_blocked_component_ripup = MagicMock(return_value=ripup_result)
+        tp_router._relief_rescue = MagicMock(return_value=relief_result)
+        # Force every net to fail the initial pass.
+        tp_router._route_net_with_corridor = MagicMock(return_value=[])
+        tp_router.grid.get_total_overflow = MagicMock(return_value=0)
+        return tp_router
+
+    def _run_detailed(self, tp_router):
+        from unittest.mock import patch as _patch
+
+        with _patch("kicad_tools.router.algorithms.NegotiatedRouter") as _NegMock:
+            _NegMock.return_value.find_nets_through_overused_cells = MagicMock(return_value=[])
+            _NegMock.return_value.rip_up_nets = MagicMock()
+            tp_router._detailed_negotiated(
+                net_order=[1, 2],
+                corridor_penalty=0.0,
+                corridors={},
+                progress_callback=None,
+                timeout=None,
+                start_time=0.0,
+                per_net_timeout=None,
+                initial_routes=None,
+                max_iterations=1,
+                patience=2,
+            )
+
+    def test_create_two_phase_router_threads_relief_rescue(self, autorouter_with_two_phase):
+        """``_create_two_phase_router`` must thread ``_relief_rescue``."""
+        ar = autorouter_with_two_phase
+        tp_router = ar._create_two_phase_router()
+        assert tp_router._relief_rescue is not None
+        assert tp_router._relief_rescue.__func__ is type(ar)._relief_rescue
+
+    def test_relief_invoked_for_ripup_fast_fails(self, autorouter_with_two_phase):
+        """Nets the rip-up could not rescue must each get one relief
+        rescue attempt."""
+        ar = autorouter_with_two_phase
+        tp_router = self._make_tp_router(ar, ripup_result=False)
+        self._run_detailed(tp_router)
+        # Both nets unrescued by the rip-up -> two relief attempts.
+        assert tp_router._relief_rescue.call_count == 2
+        attempted_nets = {c.args[0] for c in tp_router._relief_rescue.call_args_list}
+        assert attempted_nets == {1, 2}
+
+    def test_relief_not_invoked_when_ripup_rescues(self, autorouter_with_two_phase):
+        """A net the rip-up successfully rescued must NOT be escalated."""
+        ar = autorouter_with_two_phase
+        tp_router = self._make_tp_router(ar, ripup_result=True)
+        self._run_detailed(tp_router)
+        assert tp_router._relief_rescue.call_count == 0
+
+    def test_relief_honours_disable_env(self, autorouter_with_two_phase, monkeypatch):
+        """``KCT_DISABLE_RELIEF=1`` must keep the escalation off (the
+        #3438 emergency escape hatch covers this call site too)."""
+        monkeypatch.setenv("KCT_DISABLE_RELIEF", "1")
+        ar = autorouter_with_two_phase
+        tp_router = self._make_tp_router(ar, ripup_result=False)
+        self._run_detailed(tp_router)
+        assert tp_router._relief_rescue.call_count == 0
+
+    def test_relief_none_hook_preserves_legacy(self, autorouter_with_two_phase):
+        """A TwoPhaseRouter constructed without the hook (unit-test
+        construction path) must not raise in the stall path."""
+        ar = autorouter_with_two_phase
+        tp_router = self._make_tp_router(ar, ripup_result=False)
+        tp_router._relief_rescue = None
+        self._run_detailed(tp_router)  # must not raise
