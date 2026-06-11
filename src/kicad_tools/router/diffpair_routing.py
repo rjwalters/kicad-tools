@@ -2313,6 +2313,14 @@ class DiffPairRouter:
         # strategy) from a genuine no-path-found exit (where the
         # caller's existing handling is unchanged).
         self._last_pair_budget_exit: bool = False
+        # Issue #3508: opt-in gate for the geometric shadow
+        # constructor (see
+        # ``DifferentialPairConfig.enable_shadow_construction`` for
+        # the full rationale and the board 06 run-4 integration
+        # measurements that keep this defaulted OFF).  Set from the
+        # config by ``route_all_with_diffpairs``; tests may set it
+        # directly.
+        self.enable_shadow_construction: bool = False
 
     def _resolve_detection_inputs(
         self,
@@ -2422,6 +2430,15 @@ class DiffPairRouter:
         Returns:
             ``(engaged, reason)`` from :func:`should_engage_coupled`.
         """
+        # Issue #3508: refuse coupled routing when either net already
+        # carries committed copper (e.g. the recipe pre-routed a
+        # chronically-stranded single before the pre-phase).  Coupled
+        # routing would lay a SECOND copy of the pre-routed side; the
+        # main strategy is the right tool for whatever remains.
+        p_id, n_id = pair.get_net_ids()
+        existing_nets = {r.net for r in self.autorouter.routes}
+        if p_id in existing_nets or n_id in existing_nets:
+            return False, "pre-routed copper present on a pair net"
         net_class_routing, net_to_class, _ = self._resolve_detection_inputs()
         return should_engage_coupled(pair, net_class_routing, net_to_class)
 
@@ -3001,6 +3018,47 @@ class DiffPairRouter:
                     best = d
         return best
 
+    def _pair_has_physical_overlap(self, p_route: Route, n_route: Route) -> bool:
+        """True when P/N copper PHYSICALLY intersects (issue #3508).
+
+        Mirrors the recipe-side shapely detector
+        (``_repair_pair_overlap_solo``'s ``_sides_overlap``) that rips
+        pairs in board 06's 6b repair: same-layer seg/seg overlap,
+        via-barrel vs any-layer segments, and via-vs-via.  The #3320
+        gate only sees same-layer SEGMENT pairs, so a crossing tail or
+        shadow via overlapping the partner sailed through it and was
+        ripped (de-coupled) downstream.  Running the full check at
+        construction time keeps the committed pre-phase output
+        rip-proof.
+        """
+        for a, b in ((p_route, n_route), (n_route, p_route)):
+            for via in a.vias:
+                bound_any = via.diameter / 2
+                for seg in b.segments:
+                    if (
+                        self._point_segment_distance(via.x, via.y, seg)
+                        < bound_any + seg.width / 2
+                    ):
+                        return True
+                for w in b.vias:
+                    if (
+                        math.hypot(via.x - w.x, via.y - w.y)
+                        < bound_any + w.diameter / 2
+                    ):
+                        return True
+        for ps in p_route.segments:
+            for ns in n_route.segments:
+                if ps.layer != ns.layer:
+                    continue
+                if (
+                    self._min_distance_to_partner(
+                        ps.x1, ps.y1, ps.x2, ps.y2, [ns], ps.layer
+                    )
+                    < (ps.width + ns.width) / 2
+                ):
+                    return True
+        return False
+
     def _synthesize_crossing_tail(
         self,
         pathfinder: CoupledPathfinder,
@@ -3118,6 +3176,21 @@ class DiffPairRouter:
                     ):
                         continue
                     alt_layer = Layer(grid.index_to_layer(alt))
+                    # Issue #3508 (second pass): the partner guide is
+                    # NOT in the grid, so the alt-layer crossover must
+                    # also be checked geometrically against partner
+                    # copper ON THAT LAYER -- a via-bearing partner
+                    # guide has inner-layer segments the cell check
+                    # cannot see (measured: USB3_RX1/RX2 "physically
+                    # overlapping copper" rips in the recipe's 6b
+                    # repair even with nudge protection).
+                    if (
+                        self._min_distance_to_partner(
+                            v1[0], v1[1], v2[0], v2[1], partner_segments, alt_layer
+                        )
+                        < seg_clear
+                    ):
+                        continue
                     route = Route(net=head.net, net_name=head.net_name)
                     if math.hypot(v1[0] - head.x, v1[1] - head.y) > 0.01:
                         route.segments.append(
@@ -3313,20 +3386,39 @@ class DiffPairRouter:
                             pnx, pny = -puy * side, pux * side
                             gv = (seg.x1, seg.y1)  # guide via position
                             placed = False
-                            for stag_mult in (1.0, 1.6, -1.0, -1.6):
-                                vx = gv[0] + via_lateral * pnx - stagger * stag_mult * pux
-                                vy = gv[1] + via_lateral * pny - stagger * stag_mult * puy
-                                gvx, gvy = grid.world_to_grid(vx, vy)
-                                if pathfinder._is_via_blocked(gvx, gvy, s_net):
-                                    continue
-                                elements.append(
-                                    ("seg", prev_pt[0], prev_pt[1], vx, vy, prev_layer)
-                                )
-                                elements.append(("via", vx, vy, prev_layer, sec_layer))
-                                elements.append(("seg", vx, vy, a[0], a[1], sec_layer))
-                                prev_pt = a
-                                placed = True
-                                break
+                            # Issue #3508 (second pass): widened site
+                            # lattice -- lateral multipliers beyond 1.0
+                            # rescue guide-via neighbourhoods where every
+                            # minimum-lateral site is inside a pad halo
+                            # (the FFC/J1 "no legal shadow-via site"
+                            # failures).  Sites are still validated by
+                            # the via predicate, and larger laterals only
+                            # ADD clearance to the guide copper.
+                            for lat_mult in (1.0, 1.5, 2.2):
+                                for stag_mult in (1.0, 1.6, -1.0, -1.6, 2.4, -2.4):
+                                    vx = (
+                                        gv[0]
+                                        + via_lateral * lat_mult * pnx
+                                        - stagger * stag_mult * pux
+                                    )
+                                    vy = (
+                                        gv[1]
+                                        + via_lateral * lat_mult * pny
+                                        - stagger * stag_mult * puy
+                                    )
+                                    gvx, gvy = grid.world_to_grid(vx, vy)
+                                    if pathfinder._is_via_blocked(gvx, gvy, s_net):
+                                        continue
+                                    elements.append(
+                                        ("seg", prev_pt[0], prev_pt[1], vx, vy, prev_layer)
+                                    )
+                                    elements.append(("via", vx, vy, prev_layer, sec_layer))
+                                    elements.append(("seg", vx, vy, a[0], a[1], sec_layer))
+                                    prev_pt = a
+                                    placed = True
+                                    break
+                                if placed:
+                                    break
                             if not placed:
                                 ok = False
                                 break
@@ -3601,6 +3693,17 @@ class DiffPairRouter:
                     f"    [coupled-shadow] side={side:+.0f} self-check overlap "
                     f"for {pair.name} "
                     f"(worst={violation.actual_clearance_mm:+.3f}mm); trying "
+                    f"other side"
+                )
+                continue
+            # Issue #3508 (second pass): full physical-overlap check
+            # (via-vs-seg / via-vs-via / seg-vs-seg) mirroring the
+            # recipe's 6b rip detector -- the segments-only check above
+            # cannot see a crossing-tail via overlapping the partner.
+            if self._pair_has_physical_overlap(p_route, n_route):
+                print(
+                    f"    [coupled-shadow] side={side:+.0f} physical "
+                    f"P/N overlap (via-aware) for {pair.name}; trying "
                     f"other side"
                 )
                 continue
@@ -3983,7 +4086,19 @@ class DiffPairRouter:
             # joint-state search below is the fallback for guides the
             # shadow cannot legally parallel (e.g., via-bearing guides
             # or one-sided obstacle walls).
-            if guide_route is not None and guide_route.segments:
+            #
+            # OPT-IN (``self.enable_shadow_construction``, default
+            # False): the constructor's committed geometry is not yet
+            # artifact-quality -- see the field rationale on
+            # ``DifferentialPairConfig.enable_shadow_construction``
+            # for the board 06 run-4 measurements (stranded shadow
+            # tails, via-on-partner intersections, corridor
+            # competition stranding later single-ended nets).
+            if (
+                self.enable_shadow_construction
+                and guide_route is not None
+                and guide_route.segments
+            ):
                 shadow = self._shadow_route_pair(
                     pair, spec, pathfinder, guide_route, spacing_cells
                 )
@@ -3992,7 +4107,12 @@ class DiffPairRouter:
                     coupled_phase = "shadow"
                     print("    [coupled-shadow] pair constructed as guide + parallel shadow")
 
-            if result is None and guide_route is not None and guide_route.segments:
+            if (
+                result is None
+                and self.enable_shadow_construction
+                and guide_route is not None
+                and guide_route.segments
+            ):
                 # Issue #3508: role-swapped shadow retry.  P's guide may
                 # carry vias or hug a one-sided obstacle wall; the N
                 # side's single-ended route can be shadowable when P's
@@ -4247,26 +4367,50 @@ class DiffPairRouter:
                 violation is not None
                 and violation.actual_clearance_mm < 0.0
             )
+            # Issue #3508 (second pass): the segments-only check above
+            # cannot see via-vs-segment / via-vs-via physical overlap
+            # (e.g. a crossing-tail via on the partner's inner-layer
+            # copper).  Treat those as severe too -- the recipe's 6b
+            # repair would otherwise rip one side and de-couple the
+            # pair downstream.
+            if not severe_violation and self._pair_has_physical_overlap(
+                p_route, n_route
+            ):
+                print(
+                    "    WARNING: Coupled route has via-aware physical "
+                    "P/N overlap; rejecting coupled route."
+                )
+                severe_violation = True
+                if violation is None:
+                    # Synthesize nothing -- the handler below only needs
+                    # the flag; guard its violation-specific logging.
+                    pass
             if severe_violation:
-                assert violation is not None  # for type-checkers
+                # Issue #3508: ``violation`` may be ``None`` when the
+                # rejection came from the via-aware physical-overlap
+                # check (no same-layer segment pair under threshold).
+                worst = (
+                    violation.actual_clearance_mm if violation is not None else float("nan")
+                )
                 print(
                     f"    WARNING: Coupled route produced centerline overlap "
-                    f"(worst={violation.actual_clearance_mm:+.3f}mm < 0); "
+                    f"(worst={worst:+.3f}mm < 0); "
                     "rejecting coupled route and falling back to independent "
                     "routing."
                 )
-                logger.warning(
-                    "diffpair coupled-route REJECTED due to centerline overlap: "
-                    "pair=%r p_net=%r n_net=%r worst_clearance=%.4fmm "
-                    "threshold=%.4fmm offending_segments=%d",
-                    violation.pair_name,
-                    violation.positive_net_name,
-                    violation.negative_net_name,
-                    violation.actual_clearance_mm,
-                    violation.expected_clearance_mm,
-                    len(violation.segment_violations),
-                )
-                if _COUPLED_TRACE:
+                if violation is not None:
+                    logger.warning(
+                        "diffpair coupled-route REJECTED due to centerline overlap: "
+                        "pair=%r p_net=%r n_net=%r worst_clearance=%.4fmm "
+                        "threshold=%.4fmm offending_segments=%d",
+                        violation.pair_name,
+                        violation.positive_net_name,
+                        violation.negative_net_name,
+                        violation.actual_clearance_mm,
+                        violation.expected_clearance_mm,
+                        len(violation.segment_violations),
+                    )
+                if _COUPLED_TRACE and violation is not None:
                     print(
                         f"      [overlap-debug] layer={violation.layer} "
                         f"p_seg=({violation.p_segment.x1:.2f},"
@@ -4347,8 +4491,25 @@ class DiffPairRouter:
         # cluster, e.g., USB-C A6 -> B6) using the independent router.
         # These are short, no coupling required, and the autorouter has
         # better access to obstacle-aware A* than the coupled pathfinder.
+        #
+        # Issue #3508: failed stub edges are recorded in
+        # ``self._last_stub_failed_nets`` so the pre-pass aggregator can
+        # leave the affected NET in the main strategy's routable set.
+        # Previously the "deferred to main strategy" warning was a lie:
+        # the net was still claimed as coupled-routed (#2464 reserve),
+        # the negotiated loop skipped it, and the stub hop was never
+        # routed (measured: USB2_D+ incomplete -> 18/21 reach; the
+        # committed-artifact solution for A6->B6 is a ~12mm
+        # under-connector wrap on In1.Cu that only the main strategy's
+        # full A* can produce).
+        self._last_stub_failed_nets: set[int] = set()
         if stub_specs:
             stub_routes = self._route_stub_edges(stub_specs)
+            expected_per_net = collections.Counter(s.start.net for s in stub_specs)
+            routed_per_net = collections.Counter(r.net for r in stub_routes)
+            for stub_net, expected_count in expected_per_net.items():
+                if routed_per_net.get(stub_net, 0) < expected_count:
+                    self._last_stub_failed_nets.add(stub_net)
             for r in stub_routes:
                 if r.net == pair.positive.net_id:
                     p_routes.append(r)
@@ -5263,6 +5424,13 @@ class DiffPairRouter:
                 if routed_for_net.get(p_id, 0) > 0 and routed_for_net.get(n_id, 0) > 0:
                     routed_net_ids.add(p_id)
                     routed_net_ids.add(n_id)
+                    # Issue #3508: see route_all_with_diffpairs -- a net
+                    # with a failed stub edge stays routable for the
+                    # main strategy.
+                    for incomplete in (
+                        getattr(self, "_last_stub_failed_nets", set()) & {p_id, n_id}
+                    ):
+                        routed_net_ids.discard(incomplete)
 
             all_routes.extend(pair_routes)
             if warning:
@@ -5357,6 +5525,13 @@ class DiffPairRouter:
         effective_aggregate_timeout = aggregate_timeout
         if effective_aggregate_timeout is None and diffpair_config is not None:
             effective_aggregate_timeout = getattr(diffpair_config, "aggregate_timeout", None)
+        # Issue #3508: thread the shadow-constructor opt-in through to
+        # ``route_differential_pair_coupled`` (instance attribute --
+        # the coupled entry point has no config handle).
+        if diffpair_config is not None:
+            self.enable_shadow_construction = bool(
+                getattr(diffpair_config, "enable_shadow_construction", False)
+            )
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
 
@@ -5483,6 +5658,19 @@ class DiffPairRouter:
                 if routed_for_net.get(p_id, 0) > 0 and routed_for_net.get(n_id, 0) > 0:
                     coupled_routed_nets.add(p_id)
                     coupled_routed_nets.add(n_id)
+                    # Issue #3508: a net whose intra-cluster stub edge
+                    # failed is INCOMPLETE -- leave it routable so the
+                    # main strategy can finish it (its committed coupled
+                    # copper stays on the grid; the negotiated router
+                    # connects the remaining pad through/around it).
+                    stub_failed = getattr(self, "_last_stub_failed_nets", set())
+                    for incomplete in stub_failed & {p_id, n_id}:
+                        coupled_routed_nets.discard(incomplete)
+                        print(
+                            f"    [diffpair-stub] net {incomplete} has an "
+                            f"unrouted stub edge; returning it to the main "
+                            f"strategy (issue #3508)"
+                        )
             all_routes.extend(pair_routes)
             if warning:
                 warnings.append(warning)

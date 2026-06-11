@@ -336,3 +336,48 @@ def test_proximity_guard_allows_exact_min_spacing():
         "P's forward symmetric step at exactly min_spacing distance from "
         "the partner trail must be admitted"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. Issue #3508 decomposition: shadow-constructor opt-in gate
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_construction_flag_defaults_off():
+    """The geometric shadow constructor is opt-in (default False).
+
+    The 2026-06-11 board 06 seed-42 integration run showed the
+    constructor's committed geometry is not yet artifact-quality
+    (stranded shadow tails, shadow-via/partner intersections, corridor
+    competition stranding single-ended nets -> 16/21 reach).  Recipes
+    must explicitly opt in once the follow-up issues land.
+    """
+    from kicad_tools.router.diffpair import DifferentialPairConfig
+
+    assert DifferentialPairConfig().enable_shadow_construction is False
+    assert DifferentialPairConfig(enabled=True).enable_shadow_construction is False
+
+
+def test_shadow_construction_flag_plumbed_from_config():
+    """``route_all_with_diffpairs`` copies the config flag onto the router."""
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.diffpair import DifferentialPairConfig
+
+    rules = DesignRules()
+    router = Autorouter(width=12.7, height=12.7, rules=rules)
+    dpr = router._diffpair
+    assert dpr.enable_shadow_construction is False
+
+    # No pairs detected -> the call returns immediately, but the flag
+    # must already have been copied from the config.
+    router.route_all_with_diffpairs(
+        diffpair_config=DifferentialPairConfig(
+            enabled=True, enable_shadow_construction=True
+        )
+    )
+    assert dpr.enable_shadow_construction is True
+
+    router.route_all_with_diffpairs(
+        diffpair_config=DifferentialPairConfig(enabled=True)
+    )
+    assert dpr.enable_shadow_construction is False

@@ -1591,10 +1591,24 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # needs up to ~45s for the USB3 J1 fan-out (the C++ validation falls
     # back to the Python pathfinder there) and the budget must cover
     # probe + shadow + swapped-probe + bounded fallback searches.
+    # Issue #3508 (decomposition): the geometric shadow constructor is
+    # kept OFF for this recipe.  The 2026-06-11 seed-42 integration
+    # measurement (run-4) showed it converts 6/9 pairs nominally but
+    # the committed geometry is not yet artifact-quality: stranded
+    # shadow tails (USB3_RX1+/RX2+ goal pads), shadow vias physically
+    # intersecting the partner trace at the tightly-coupled gap, and
+    # greedily-claimed pre-phase corridors stranding MIPI_D0-/USB_CC1
+    # (16/21 reach vs the asserted 21/21; strict-gate 49 blocking vs
+    # the committed floor 20).  Flip BOTH this constant and the
+    # optimizer/nudge diff-pair protections below together once the
+    # #3508 follow-up issues land.
+    ENABLE_COUPLED_SHADOW = False
+
     diffpair_config = DifferentialPairConfig(
         enabled=True,
         per_pair_timeout=120.0,
         per_pair_max_iterations=2000,
+        enable_shadow_construction=ENABLE_COUPLED_SHADOW,
     )
 
     # Issue #3089: route the non-diff-pair tail (including any
@@ -1629,6 +1643,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             seed=42,
         )
 
+    # Issue #3508: an A/B run that PRE-ROUTED the two chronically-
+    # stranded singles (USB_CC1, MIPI_D0-) before the coupled pre-phase
+    # was measured and REJECTED: their single-ended A* claims the prime
+    # J1/FFC corridors and coupled convergence collapses 6/9 -> 2/9
+    # (the shadow constructor needs those corridors).  The coupled
+    # phase must claim corridors first; stranded-single residuals are
+    # handled by the stub-edge deferral and the post-routing repair
+    # passes instead.
     router.route_all_with_diffpairs(
         diffpair_config=diffpair_config,
         non_diffpair_strategy=_negotiated_non_diffpair_strategy,
@@ -1656,19 +1678,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # pass, step 6b's transactional solo re-route repair) see the TRUE
     # copper state instead of the pre-optimization snapshot.
     #
-    # Issue #3508: diff-pair nets are EXCLUDED from optimization.  The
-    # coupled pre-phase's geometry is intentional: length-matching
-    # serpentines are exactly the "zigzags" ``eliminate_zigzags``
-    # removes (measured: PCIE_RX skew 0.097mm post-serpentine ->
-    # 1.652mm in the optimized artifact), and straightening one side
-    # of a coupled pair breaks the constant-gap geometry the
-    # skew/continuity rules measure.
-    diffpair_net_ids = {
-        r.net
-        for r in router.routes
-        if r.net_name and (r.net_name.endswith("+") or r.net_name.endswith("-"))
-    }
-    optimize_routes_grid_synced(router, optimizer, skip_nets=diffpair_net_ids)
+    # Issue #3508: when the coupled shadow constructor is ON, diff-pair
+    # nets are EXCLUDED from optimization.  The coupled pre-phase's
+    # geometry is intentional: length-matching serpentines are exactly
+    # the "zigzags" ``eliminate_zigzags`` removes (measured: PCIE_RX
+    # skew 0.097mm post-serpentine -> 1.652mm in the optimized
+    # artifact), and straightening one side of a coupled pair breaks
+    # the constant-gap geometry the skew/continuity rules measure.
+    # With the shadow OFF (current state, see ENABLE_COUPLED_SHADOW)
+    # all pairs are single-ended fallback routes with no intentional
+    # coupled geometry, so they stay in the optimizer/nudge scope and
+    # the committed artifact is unchanged.
+    diffpair_net_ids: set[int] = (
+        {
+            r.net
+            for r in router.routes
+            if r.net_name and (r.net_name.endswith("+") or r.net_name.endswith("-"))
+        }
+        if ENABLE_COUPLED_SHADOW
+        else set()
+    )
+    optimize_routes_grid_synced(
+        router, optimizer, skip_nets=diffpair_net_ids if diffpair_net_ids else None
+    )
 
     # Issue #2757: Run the DRC verify-and-nudge pass after trace optimisation.
     # The optimiser can produce chamfered diagonals that graze BGA / QFN /
@@ -1682,13 +1714,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
     print("\n6. DRC verify-and-nudge pass...")
-    # Issue #3508: diff-pair nets are protected from the nudge pass for
-    # the same reason they skip the optimizer above -- the nudge helpers
-    # are not partner-aware, and a 0.2mm displacement at the pairs'
+    # Issue #3508: when the coupled shadow constructor is ON, diff-pair
+    # nets are protected from the nudge pass for the same reason they
+    # skip the optimizer above -- the nudge helpers are not
+    # partner-aware, and a 0.2mm displacement at the pairs'
     # 0.075-0.1mm intra gap lands copper ON the partner (measured:
     # USB3_RX1/RX2 sides physically overlapping post-nudge, forcing the
-    # 6b solo rip which then destroys the coupled geometry).
-    nudge_result = drc_verify_and_nudge(router, skip_nets=diffpair_net_ids)
+    # 6b solo rip which then destroys the coupled geometry).  With the
+    # shadow OFF, ``diffpair_net_ids`` is empty (see above) and the
+    # nudge pass keeps its full scope.
+    nudge_result = drc_verify_and_nudge(
+        router, skip_nets=diffpair_net_ids if diffpair_net_ids else None
+    )
     if nudge_result.initial_violations:
         print(f"   {nudge_result.summary()}")
     else:
