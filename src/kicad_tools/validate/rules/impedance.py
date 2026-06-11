@@ -102,6 +102,27 @@ class ImpedanceRule(DRCRule):
     name = "Impedance Control"
     description = "Verify trace widths match target impedance requirements"
 
+    # Issue #3413 (artifact-refresh prerequisite): neck-down taper exemption.
+    #
+    # The autorouter's neck-down mechanic (``DesignRules.min_trace_width``
+    # + ``neck_down_distance`` / ``neck_down_threshold``) deliberately
+    # tapers a controlled-impedance trace below its impedance-resolved
+    # width for the last <= ``neck_down_distance`` (typically 1.0 mm)
+    # approaching a fine-pitch pad: the resolved width physically does
+    # not fit through the pad field (see Issue #3313).  Those short taper
+    # segments are *electrically insignificant* discontinuities -- a 1 mm
+    # mismatched section is far below the lambda/10 critical length for
+    # the 50-100 ohm digital-signalling targets this rule checks -- so
+    # flagging them is a false positive.  Measured: 3 spurious errors on
+    # board 06's MIPI_RST at J4/U4 (segments 0.32-0.78 mm long at
+    # 0.10-0.19 mm width; PR #3500 artifact-refresh notes).
+    #
+    # ``check()`` skips segments shorter than this threshold.  The trunk
+    # of any real controlled-impedance net is orders of magnitude longer
+    # than 1 mm, so a genuinely mis-sized net still fails on its long
+    # segments.
+    NECK_DOWN_EXEMPT_LENGTH_MM: float = 1.0
+
     # Single-ended heuristic name patterns (Issue #3157).  These regexes
     # encode the *assumption* "a net whose name ends in CLK / MCLK / ETH
     # is a high-speed 50Ω single-ended signal".  That assumption is
@@ -383,11 +404,34 @@ class ImpedanceRule(DRCRule):
                 continue
 
             for trace in traces:
+                # Neck-down taper exemption (Issue #3413): skip segments
+                # shorter than NECK_DOWN_EXEMPT_LENGTH_MM -- they are the
+                # router's deliberate fine-pitch taper product and are
+                # electrically insignificant (see class attribute docs).
+                if self._segment_length_mm(trace) < self.NECK_DOWN_EXEMPT_LENGTH_MM:
+                    continue
                 check_result = self._check_trace_impedance(trace, spec)
                 if not check_result.compliant:
                     results.add(self._create_violation(check_result, spec))
 
         return results
+
+    @staticmethod
+    def _segment_length_mm(trace: dict) -> float:
+        """Geometric length of a collected trace segment in mm.
+
+        ``_collect_traces`` records ``start`` / ``end`` tuples for every
+        segment; absent coordinates (defensive: a caller-synthesised
+        trace dict) yield 0.0/0.0 endpoints and a 0.0 length, which the
+        neck-down exemption would skip -- so callers that synthesise
+        trace dicts for testing should include real endpoints (or set
+        them further apart than ``NECK_DOWN_EXEMPT_LENGTH_MM``).
+        """
+        import math
+
+        x1, y1 = trace.get("start", (0.0, 0.0))
+        x2, y2 = trace.get("end", (0.0, 0.0))
+        return math.hypot(x2 - x1, y2 - y1)
 
     def _collect_traces(
         self,
@@ -412,13 +456,18 @@ class ImpedanceRule(DRCRule):
             if net_name not in trace_data:
                 trace_data[net_name] = []
 
+            # ``schema.pcb.Segment`` carries ``start`` / ``end`` tuples
+            # (NOT ``x1``/``y1`` attributes -- the historical getattr
+            # defaults silently recorded (0, 0) for every endpoint,
+            # which would make the Issue #3413 neck-down length
+            # exemption skip everything).
             trace_data[net_name].append(
                 {
                     "net_name": net_name,
                     "width_mm": getattr(segment, "width", 0.2),
                     "layer": getattr(segment, "layer", "F.Cu"),
-                    "start": (getattr(segment, "x1", 0), getattr(segment, "y1", 0)),
-                    "end": (getattr(segment, "x2", 0), getattr(segment, "y2", 0)),
+                    "start": tuple(getattr(segment, "start", (0.0, 0.0))),
+                    "end": tuple(getattr(segment, "end", (0.0, 0.0))),
                 }
             )
 

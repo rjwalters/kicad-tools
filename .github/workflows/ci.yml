@@ -378,16 +378,45 @@ jobs:
     # ceiling.  If the typical run creeps above 5 minutes, move to a
     # nightly schedule per the epic's runtime guidance.
     #
-    # Issue #3413 (phase 3): 15 -> 20 min.  The board 06 recipe KEEPS
-    # its 240s negotiated budget (a 360s A/B was measured and REJECTED;
-    # see boards/06-diffpair-test/generate_design.py), but the run now
-    # pays for the overflow-silent rescue work inside the loop plus a
+    # Issue #3413 (phase 3): 15 -> 20 min.  The run pays for the
+    # overflow-silent rescue work inside the negotiated loop plus a
     # bounded (<= 90s) post-route correction pass on the timed-out
     # exit.  Local M-series wall is ~17 min; the 2-core ubuntu runner
     # needs the extra headroom.  Also closes #3477 (sub-minute margin
     # under the prior 15-min ceiling; option 1 -- ceiling bump -- was
     # its preferred fix).
-    timeout-minutes: 20
+    #
+    # Issue #3413 (phases 4-6): the recipe's negotiated budget is now
+    # 360s (the phase-3 A/B that rejected 360s pre-dates the
+    # tightly-coupled width re-solve; see the budget rationale in
+    # boards/06-diffpair-test/generate_design.py).
+    #
+    # Issue #3413 (phases 4-6, ceiling re-calibration): 20 -> 30 min.
+    # The phases-4-6 prediction that "total wall does not grow" was
+    # falsified by the first CI run on the new recipe (PR #3506, run
+    # 27341578234, killed at the 20-min ceiling).  CI-empirical
+    # arithmetic on the 2-core ubuntu runner:
+    #
+    #   setup + board generation            ~0:45
+    #   coupled diff-pair pre-phase          6:00  (9 pairs x 60s
+    #                                              per-pair budget,
+    #                                              all deferred)
+    #   negotiated loop                      6:05  (360s budget; banked
+    #                                              21/21 overflow=2 and
+    #                                              restored it)
+    #   post-route pipeline                 >7:15 when killed
+    #     (optimize + nudge + solo pair repair + zone gen + first fill
+    #      + stitch + up to 3 rounds of pour repair / re-fill /
+    #      copper-union audit + DRC + mfg export + gate-side checks)
+    #
+    # The pre-#3413-phase-4 recipe's post-route tail took ~3.7 min on
+    # CI (main runs 27341166410 / 27330851929: 14m22s / 14m29s total);
+    # the new fill/repair/audit rounds roughly double-to-triple it, so
+    # the typical run lands ~22-25 min.  All in-loop work is internally
+    # budgeted (per-pair 60s, negotiated 360s, repair loop capped at 3
+    # rounds), so 30 min gives ~20-30% headroom over the worst expected
+    # wall without masking a genuine hang.
+    timeout-minutes: 30
     # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
     #
     #   * LATENCY: #3089 landed a per-pair wall-clock budget plumbed
@@ -470,8 +499,18 @@ jobs:
         # in the per-pair router itself, but pinning the seed is a
         # cheap, broadly applicable belt-and-braces measure.  ``42``
         # matches the ``--seed`` argument for consistency.
+        #
+        # PYTHONUNBUFFERED: stdout to the Actions log pipe is
+        # block-buffered (8 KiB) by default, so when run 27341578234
+        # hit the job ceiling mid-post-route the log went silent for
+        # 7+ minutes after "Restoring iteration N state" -- every
+        # post-route step's output was sitting in the buffer (or in a
+        # ``capture_output=True`` child) when the runner killed the
+        # process.  Unbuffered output makes the next timeout
+        # attributable to a specific pipeline step.
         env:
           PYTHONHASHSEED: "42"
+          PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_diffpair_coverage.py \

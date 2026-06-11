@@ -208,6 +208,10 @@ dev = [
     "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
+    # Issue #3413 phase 4: the board 06 recipe's copper-union pour audit
+    # (and its committed-artifact regression test) require shapely.  The
+    # diffpair CI job and the test jobs install via --extra dev.
+    "shapely>=2.0",
 ]
 
 [tool.hatch.build.targets.wheel]

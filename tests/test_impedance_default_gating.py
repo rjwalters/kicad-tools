@@ -871,3 +871,101 @@ class TestDeriveSingleEndedImpedanceSpecs:
         assert len(specs) == 1
         assert specs[0].matches("CLK+")
         assert not specs[0].matches("CLKK")  # '+' is literal, not quantifier
+
+
+# Neck-down taper exemption fixture (Issue #3413).  2-layer board with an
+# explicit-spec target so the rule evaluates regardless of stackup gating.
+# Net 1 carries one LONG (30 mm) mis-sized segment and two SHORT (< 1 mm)
+# mis-sized "neck-down taper" segments like the router emits at fine-pitch
+# pads (board 06 MIPI_RST at J4/U4: 0.32-0.78 mm at 0.10-0.19 mm width).
+NECK_DOWN_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "MIPI_RST")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (segment (start 110 120) (end 140 120) (width 0.2) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000030"))
+  (segment (start 110 120) (end 110 119.3) (width 0.1) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000031"))
+  (segment (start 140 120) (end 140 120.5) (width 0.12) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000032"))
+)
+"""
+
+
+class TestNeckDownTaperExemption:
+    """Issue #3413: sub-1mm neck-down taper segments are impedance-exempt.
+
+    The router deliberately tapers controlled-impedance traces below
+    their resolved width for the last <= 1 mm approaching fine-pitch
+    pads (Issue #3313 neck-down mechanic).  Those taper segments are
+    electrically insignificant (far below lambda/10 for 50-100 ohm
+    digital targets) and must not fire the impedance rule; the net's
+    long trunk segments still carry the check.
+    """
+
+    @pytest.fixture
+    def neck_down_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "neck_down.kicad_pcb"
+        pcb_file.write_text(NECK_DOWN_PCB)
+        return pcb_file
+
+    def _violations(self, pcb_path: Path):
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.impedance import ImpedanceRule, NetImpedanceSpec
+
+        pcb = PCB.load(str(pcb_path))
+        design_rules = get_profile("jlcpcb").get_design_rules(2, 1.0)
+        specs = [NetImpedanceSpec(r"MIPI_RST", target_z0=50.0)]
+        rule = ImpedanceRule(specs=specs)
+        results = rule.check(pcb, design_rules)
+        return list(results.errors) + list(results.warnings)
+
+    def test_short_tapers_exempt_long_trunk_still_fires(self, neck_down_pcb: Path):
+        """Only the 30 mm trunk fires; the 0.7/0.5 mm tapers are skipped.
+
+        Pre-#3413 behaviour would have produced 3 violations (one per
+        segment) -- the two extra ones are exactly the false-positive
+        shape PR #3500 measured on board 06's MIPI_RST.
+        """
+        violations = self._violations(neck_down_pcb)
+        assert len(violations) == 1, (
+            f"Expected exactly 1 violation (the 30 mm trunk), got "
+            f"{len(violations)}: {[v.message for v in violations]}"
+        )
+        # The surviving violation must be the 0.2 mm trunk, not a taper.
+        assert "0.200mm" in violations[0].message
+
+    def test_segment_endpoints_are_collected(self, neck_down_pcb: Path):
+        """Regression: ``_collect_traces`` must record real endpoints.
+
+        The historical implementation read ``segment.x1`` (nonexistent on
+        ``schema.pcb.Segment``, which has ``start``/``end`` tuples) so all
+        endpoints collected as (0, 0) -- which would make the neck-down
+        exemption skip EVERY segment.
+        """
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.impedance import ImpedanceRule
+
+        pcb = PCB.load(str(neck_down_pcb))
+        rule = ImpedanceRule()
+        traces = rule._collect_traces(pcb)
+        lengths = sorted(
+            ImpedanceRule._segment_length_mm(t) for t in traces["MIPI_RST"]
+        )
+        assert lengths == pytest.approx([0.5, 0.7, 30.0])
