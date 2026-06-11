@@ -492,14 +492,31 @@ def test_guide_route_probe_receives_deadline(monkeypatch):
     )
 
     assert probe_timeouts, "guide-route probe was never invoked"
-    # Issue #3508: the probe budget is now
-    # ``min(max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5)``
-    # -- the #3473 eighth-of-budget bound starved board 06's USB3
-    # probes (30-37s single-ended guide routes) at the 60s per-pair
-    # budget, so the floor was raised with a half-budget clamp.
+    # Issue #3508 (decomposition): with the shadow constructor OFF
+    # (default), the probe keeps the legacy #3473 eighth-of-budget
+    # bound -- the expensive 45s probe floor exists to feed the shadow
+    # guide and would otherwise burn most of a 2-core CI runner's
+    # re-route wall-clock before a deterministic budget-exit defer.
+    assert probe_timeouts[0] == 60.0 * 0.125, (
+        "with shadow construction off the probe must get the legacy "
+        f"eighth-of-budget deadline, got {probe_timeouts[0]}"
+    )
+
+    # With the shadow constructor ON, the budget is floored at 45s and
+    # clamped to half the per-pair budget -- the eighth-of-budget bound
+    # starved board 06's USB3 probes (30-37s single-ended guide routes)
+    # at the 60s per-pair budget.
+    probe_timeouts.clear()
+    router._diffpair.enable_shadow_construction = True
+    router._diffpair.route_differential_pair_coupled(
+        pairs[0],
+        coupled_only=True,
+        per_pair_timeout=60.0,
+    )
+    assert probe_timeouts, "guide-route probe was never invoked (shadow on)"
     assert probe_timeouts[0] == min(max(60.0 * 0.125, 45.0), 60.0 * 0.5), (
-        "probe must get the floored-and-clamped probe budget as its "
-        f"deadline, got {probe_timeouts[0]}"
+        "with shadow construction on the probe must get the "
+        f"floored-and-clamped budget, got {probe_timeouts[0]}"
     )
 
 
