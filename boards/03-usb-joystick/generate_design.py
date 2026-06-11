@@ -666,17 +666,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "cpp",
         "--timeout",
         "600",
-        # ``--raw`` (skip TraceOptimizer) is LOAD-BEARING for the 0-DRC
-        # acceptance: with optimization enabled, the segment-merge pass
-        # re-introduces exactly one deterministic
+        # Issues #3507/#3454: ``--raw`` (skip TraceOptimizer) was
+        # LOAD-BEARING for the 0-DRC acceptance until the grid-staleness
+        # fix.  The optimize pass used to replace Route objects without
+        # re-marking the routing grid, so the optimizer's collision
+        # checking ran against pre-optimization copper and the
+        # segment-merge pass deterministically re-introduced one
         # ``clearance_segment_via`` violation (XTAL1's merged B.Cu run
-        # at y=+29.51 vs XTAL2's via at (+32.75, +29.10), 0.006mm gap,
-        # reproducible across seeds 42/43) because the optimizer's
-        # collision checker is grid-quantized while the DRC check is
-        # world-coordinate exact.  Raw grid-step segments follow the
-        # A*-validated path bit-for-bit: 13/13 nets, 0 DRC errors at
-        # jlcpcb-tier1.  Optimizer follow-up tracked in the #3410 PR.
-        "--raw",
+        # vs XTAL2's via, 0.006mm gap, seeds 42/43).  With the
+        # grid-transactional optimize (``optimize_routes_grid_synced``)
+        # the optimizer is safe here: 13/13 nets, 0 DRC errors at
+        # jlcpcb-tier1 WITH optimization ON (verified seed 42 against
+        # the sidecar-aware ``kct check``).
     ]
     print(f"   $ {' '.join(cmd[1:])}")
     proc = _sp.run(cmd, capture_output=True, text=True, timeout=1800, check=False)

@@ -36,6 +36,62 @@ from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
 
+def optimize_routes_grid_synced(router, optimizer: TraceOptimizer) -> list[Route]:
+    """Optimize every route on ``router`` keeping the grid in sync.
+
+    Issue #3507: the historical call-site pattern::
+
+        optimized_routes = [optimizer.optimize_route(r) for r in router.routes]
+        router.routes = optimized_routes
+
+    replaces every Route object WITHOUT re-marking the routing grid, so
+
+    * the optimizer's own collision checking for route *i* runs against
+      the PRE-optimization copper of routes ``0..i-1``, and
+    * every downstream grid consumer (the DRC nudge pass, targeted
+      repair re-routes such as board 06's transactional solo re-route,
+      future nets in multi-pass flows) operates on a stale grid.
+
+    This helper is the grid-transactional replacement: after each route
+    is optimized, its old geometry is unmarked and the new geometry is
+    marked (cells, R-trees, ``grid.routes`` bookkeeping, and the paired
+    C++ grid mirror) before the next route is optimized.  Routes whose
+    optimized geometry is unchanged are skipped (the incremental
+    unmark-old/mark-new perf shape).
+
+    Args:
+        router: ``Autorouter`` whose ``routes`` will be optimized and
+            replaced in place.
+        optimizer: Configured :class:`TraceOptimizer`.
+
+    Returns:
+        The new ``router.routes`` list (also assigned on the router).
+    """
+    grid = router.grid
+    optimized_routes: list[Route] = []
+    for route in router.routes:
+        optimized = optimizer.optimize_route(route)
+        if optimized is not route and (
+            optimized.segments == route.segments and optimized.vias == route.vias
+        ):
+            # Geometry unchanged: keep the ORIGINAL object so identity
+            # stays aligned with ``grid.routes`` (mark_route bookkeeping)
+            # -- a fresh-but-equal object would leave the grid holding a
+            # stale twin that later resyncs would re-mark.
+            optimized = route
+        optimized_routes.append(optimized)
+        if optimized is route:
+            continue
+        # Incremental grid transaction: rip the old copper (cells +
+        # R-trees + grid.routes + C++ mirror + stored-route snapshot
+        # invalidation), then commit the new copper on both grids.
+        grid.unmark_route(route)
+        grid.mark_route(optimized)
+        grid._mark_route_on_cpp_cells(optimized)
+    router.routes = optimized_routes
+    return optimized_routes
+
+
 class TraceOptimizer:
     """Optimizer for PCB trace cleanup and simplification.
 

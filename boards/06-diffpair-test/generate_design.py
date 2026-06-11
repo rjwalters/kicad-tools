@@ -1120,11 +1120,13 @@ def _repair_pair_overlap_solo(router, net_map: dict[str, int]) -> list[str]:
             )
             _rollback()
             continue
-        # The optimizer/nudge passes mutate ``router.routes`` geometry
-        # WITHOUT re-marking the grid, so the solo A* may have routed
-        # against stale cells.  Validate the new copper against every
-        # OTHER net's CURRENT route geometry (not the grid) and roll
-        # back on any cross-net contact.
+        # Issue #3507: the optimizer/nudge passes are now grid-
+        # transactional (``optimize_routes_grid_synced`` + the resync
+        # inside ``drc_verify_and_nudge``), so the solo A* above ran
+        # against the TRUE post-mutation copper.  Keep this geometric
+        # cross-check as defense-in-depth: validate the new copper
+        # against every OTHER net's CURRENT route geometry (not the
+        # grid) and roll back on any cross-net contact.
         cross = False
         new_by_layer: dict = {}
         new_vias = []
@@ -1223,6 +1225,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         GridCollisionChecker,
         OptimizationConfig,
         TraceOptimizer,
+        optimize_routes_grid_synced,
     )
 
     print("\n" + "=" * 60)
@@ -1636,10 +1639,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     collision_checker = GridCollisionChecker(router.grid)
     optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
-    optimized_routes = []
-    for route in router.routes:
-        optimized_routes.append(optimizer.optimize_route(route))
-    router.routes = optimized_routes
+    # Issue #3507: grid-transactional optimize -- each mutated route's old
+    # copper is unmarked and the new copper marked, so the optimizer's own
+    # collision checking and every downstream grid consumer (the nudge
+    # pass, step 6b's transactional solo re-route repair) see the TRUE
+    # copper state instead of the pre-optimization snapshot.
+    optimize_routes_grid_synced(router, optimizer)
 
     # Issue #2757: Run the DRC verify-and-nudge pass after trace optimisation.
     # The optimiser can produce chamfered diagonals that graze BGA / QFN /

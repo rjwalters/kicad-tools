@@ -1531,7 +1531,40 @@ def drc_verify_and_nudge(
 
     Returns:
         :class:`DRCNudgeResult` with statistics.
+
+    Issue #3507: this pass mutates segment/via geometry IN PLACE on the
+    live Route objects without re-marking the routing grid.  A geometry
+    snapshot of every route is taken at entry and, on every exit path,
+    :meth:`RoutingGrid.resync_route_occupancy` re-derives the grid
+    occupancy from the post-nudge geometry so downstream grid consumers
+    (targeted repair re-routes, future nets in multi-pass flows) see the
+    true copper state.  The pass's OWN checks (``validate_routes`` and
+    the nudge gating helpers) are world-coordinate geometric and do not
+    consult the grid, so a single resync at exit is sufficient.
     """
+    # Issue #3507: snapshot pre-mutation geometry for the exit resync.
+    # Defensive getattr: unit tests drive this pass with stub routers
+    # that carry routes but no grid -- the resync is then a no-op.
+    _grid = getattr(router, "grid", None)
+    _grid_snapshot = (
+        [(r.copy_geometry(), r) for r in router.routes] if _grid is not None else []
+    )
+    try:
+        return _drc_verify_and_nudge_impl(
+            router, max_displacement=max_displacement, max_passes=max_passes
+        )
+    finally:
+        if _grid is not None:
+            _grid.resync_route_occupancy(_grid_snapshot)
+
+
+def _drc_verify_and_nudge_impl(
+    router: Autorouter,
+    *,
+    max_displacement: float,
+    max_passes: int,
+) -> DRCNudgeResult:
+    """Body of :func:`drc_verify_and_nudge` (wrapped for the #3507 grid resync)."""
     result = DRCNudgeResult()
 
     # Phase 0: Merge coincident same-net vias (cheap, reduces noise).
