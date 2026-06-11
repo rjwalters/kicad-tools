@@ -1580,10 +1580,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # timing-dependent classification we are eliminating.  When the
     # iteration budget fires (the deterministic path), wall-clock is
     # always well under 60s so this is a safety net only.
+    # Issue #3508: per_pair_timeout 60 -> 120 and per_pair_max_iterations
+    # 4000 -> 2000.  The coupled pre-phase is no longer search-dominated:
+    # the geometric shadow constructor (guide + validated parallel offset,
+    # see diffpair_routing._shadow_route_pair) converges 6-7/9 pairs in
+    # 0.3-75s each, and the joint-state A* is only a last-resort fallback
+    # -- so its iteration budget SHRINKS (it essentially never converges
+    # on this board; 2000+2000 iterations bound the fallback at ~10-30s).
+    # The wall-clock budget GROWS because the corridor/shadow guide probe
+    # needs up to ~45s for the USB3 J1 fan-out (the C++ validation falls
+    # back to the Python pathfinder there) and the budget must cover
+    # probe + shadow + swapped-probe + bounded fallback searches.
     diffpair_config = DifferentialPairConfig(
         enabled=True,
-        per_pair_timeout=60.0,
-        per_pair_max_iterations=4000,
+        per_pair_timeout=120.0,
+        per_pair_max_iterations=2000,
     )
 
     # Issue #3089: route the non-diff-pair tail (including any

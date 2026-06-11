@@ -34,6 +34,7 @@ from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
 from kicad_tools.router.diffpair_routing import (
     CoupledPathfinder,
+    DiffPairRouter,
     build_corridor_mask,
 )
 from kicad_tools.router.grid import RoutingGrid
@@ -282,12 +283,21 @@ def _two_pad_diffpair_router(diffpair_spacing: float = 0.8) -> Autorouter:
     return router
 
 
-def test_coupled_routing_uses_corridor_phase(caplog):
+def test_coupled_routing_uses_corridor_phase(caplog, monkeypatch):
     """On a clean fixture the corridor attempt should succeed (the
     structured timing log reports ``phase=corridor``) and the pair
-    should be fully routed."""
+    should be fully routed.
+
+    Issue #3508: the geometric shadow constructor now runs FIRST and
+    satisfies this clean fixture, so the corridor mechanism is
+    exercised here by disabling the shadow (it has its own coverage in
+    ``tests/test_diffpair_shadow.py``).
+    """
     router = _two_pad_diffpair_router()
     config = DifferentialPairConfig(enabled=True, spacing=0.8)
+    monkeypatch.setattr(
+        DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None
+    )
 
     with caplog.at_level(logging.INFO, logger="kicad_tools.router.diffpair_routing"):
         routes, warnings, routed_net_ids = router.route_diffpair_prepass(config)
@@ -336,6 +346,14 @@ def test_iteration_budget_is_split_between_corridor_and_fallback(monkeypatch):
     The corridor attempt gets at most half; the open fallback gets the
     remainder of the SHARED budget.
     """
+    # Issue #3508: bypass the shadow constructor so the corridor/
+    # fallback budget split is what this test exercises.
+    monkeypatch.setattr(
+        DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None
+    )
+    monkeypatch.setattr(
+        DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None
+    )
     router = _two_pad_diffpair_router()
     pairs = router._diffpair.detect_differential_pairs()
     assert len(pairs) == 1
@@ -385,6 +403,14 @@ def test_fallback_gets_full_remainder_when_corridor_exits_early(monkeypatch):
     """If the corridor attempt fails after only a few iterations, the
     open fallback inherits nearly the whole shared budget (mirrors the
     wall-clock remaining-budget arithmetic)."""
+    # Issue #3508: bypass the shadow constructor so the corridor/
+    # fallback budget split is what this test exercises.
+    monkeypatch.setattr(
+        DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None
+    )
+    monkeypatch.setattr(
+        DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None
+    )
     router = _two_pad_diffpair_router()
     pairs = router._diffpair.detect_differential_pairs()
 
@@ -450,9 +476,14 @@ def test_guide_route_probe_receives_deadline(monkeypatch):
     )
 
     assert probe_timeouts, "guide-route probe was never invoked"
-    assert probe_timeouts[0] == 60.0 * 0.125, (
-        "probe must get an eighth of the per-pair budget as its deadline, "
-        f"got {probe_timeouts[0]}"
+    # Issue #3508: the probe budget is now
+    # ``min(max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5)``
+    # -- the #3473 eighth-of-budget bound starved board 06's USB3
+    # probes (30-37s single-ended guide routes) at the 60s per-pair
+    # budget, so the floor was raised with a half-budget clamp.
+    assert probe_timeouts[0] == min(max(60.0 * 0.125, 45.0), 60.0 * 0.5), (
+        "probe must get the floored-and-clamped probe budget as its "
+        f"deadline, got {probe_timeouts[0]}"
     )
 
 

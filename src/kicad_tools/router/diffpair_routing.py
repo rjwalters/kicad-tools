@@ -11,10 +11,12 @@ Key features:
 
 from __future__ import annotations
 
+import collections
 import heapq
 import itertools
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -40,6 +42,35 @@ from .path import calculate_route_length
 from .primitives import Pad, Route, Segment, Via
 
 logger = logging.getLogger(__name__)
+
+# Issue #3508: dev-only periodic A* pop trace (KCT_COUPLED_TRACE=1).
+_COUPLED_TRACE = bool(os.environ.get("KCT_COUPLED_TRACE"))
+
+# Issue #3508: weighted-A* factor used by ``route_differential_pair_coupled``
+# when constructing the per-pair :class:`CoupledPathfinder`.  See the
+# ``heuristic_weight`` rationale in ``CoupledPathfinder.__init__``.
+# Env-overridable for experimentation (KCT_COUPLED_HEURISTIC_WEIGHT).
+COUPLED_HEURISTIC_WEIGHT: float = float(
+    os.environ.get("KCT_COUPLED_HEURISTIC_WEIGHT", "1.5")
+)
+
+# Issue #3508: max joint remaining Manhattan distance (grid cells, max
+# over the two heads) at which a budget-exited coupled search qualifies
+# for the near-miss rescue (commit the coupled body, finish each side
+# single-ended).  60 cells = 3 mm on a 0.05 mm grid -- generous against
+# the measured 5-21-cell stalls, small against the 30-50 mm pair routes
+# so the coupled-length fraction stays >> every continuity threshold.
+NEAR_MISS_RESCUE_CELLS: int = int(os.environ.get("KCT_COUPLED_RESCUE_CELLS", "60"))
+
+# Issue #3508: maximum length (mm) the shadow constructor may trim from
+# EACH end of the offset polyline before tail-connecting to the pads.
+# Endpoint zones are always contested by neighbour-pad clearance halos
+# (connector pin rows, QFN/QFP rings), so some trim is expected; a trim
+# beyond this bound means a mid-route obstacle wall and the shadow is
+# declined for that side.  5 mm against board 06's 18-45 mm pair runs
+# keeps the coupled-length fraction comfortably above the 0.7-0.9
+# continuity thresholds.
+_SHADOW_MAX_TRIM_MM: float = float(os.environ.get("KCT_SHADOW_MAX_TRIM_MM", "5.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +473,7 @@ class CoupledPathfinder:
         min_spacing_cells: int = 0,
         heuristic_mode: Literal["manhattan_sum", "partner_aware"] = "partner_aware",
         spacing_penalty_factor: float = 0.25,
+        heuristic_weight: float = 1.0,
     ):
         """Initialize coupled pathfinder.
 
@@ -524,6 +556,21 @@ class CoupledPathfinder:
             )
         self.heuristic_mode: Literal["manhattan_sum", "partner_aware"] = heuristic_mode
         self.spacing_penalty_factor = max(0.0, min(1.0, float(spacing_penalty_factor)))
+
+        # Issue #3508: weighted-A* factor applied to the heuristic when
+        # computing ``f = g + weight * h``.  ``1.0`` is classic optimal
+        # A*.  Values > 1 trade path-cost optimality for search effort:
+        # the coupled joint-state space has DEEP f-plateaus (a single
+        # ``cost_turn`` = 5 shell can hold ~90k states on board 06's
+        # 0.05 mm grid -- measured: MIPI_CLK needed ~95k iterations to
+        # flood ONE such basin before escaping, then cruised 350 cells
+        # in <17k).  Weighting the heuristic makes goal-ward gradient
+        # dominate shell-flooding so converging pairs land within a
+        # CI-affordable iteration budget.  Slightly longer paths are an
+        # acceptable trade: pair length-matching is enforced post-route
+        # (serpentine / Phase 3I tuner), and the corridor mask already
+        # bounds how far from the guide path the route can wander.
+        self.heuristic_weight = max(1.0, float(heuristic_weight))
         # Issue #3089: set when the most-recent ``route_coupled`` call
         # exited early due to ``timeout_seconds`` being exceeded.
         # Callers (``route_differential_pair_coupled``) read this to
@@ -543,6 +590,24 @@ class CoupledPathfinder:
         # 4000+4000 on board 06, doubling the diff-pair phase).
         self.last_iterations: int = 0
 
+        # Issue #3508: progress diagnostics for the most recent
+        # ``route_coupled`` call (smallest joint remaining Manhattan
+        # distance any popped state achieved, and the state/node
+        # achieving it).  Lets budget-exit handlers distinguish
+        # "almost converged" from "structurally stuck", and gives the
+        # near-miss rescue (``_rescue_near_miss_coupled``) a parent
+        # chain to reconstruct the partial coupled route from.
+        self.last_best_progress: float = float("inf")
+        self.last_best_state: CoupledState | None = None
+        self.last_best_node: CoupledNode | None = None
+
+        # Issue #3508: per-search move-rejection counters keyed by
+        # rejection reason (sym/asym x blocked/spacing/floor/trail,
+        # plus corridor pruning).  Reset by ``route_coupled``;
+        # surfaced by the caller's budget-exit diagnostics so a
+        # stalled search reports WHAT is pruning its frontier.
+        self.last_rejections: dict[str, int] = collections.defaultdict(int)
+
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
             1,
@@ -559,6 +624,20 @@ class CoupledPathfinder:
             ),
         )
 
+        # Issue #3508: extra radial slack a via needs BEYOND the trace
+        # envelope the grid cells already encode (see _is_via_blocked).
+        self._via_extra_cells = max(
+            1,
+            math.ceil(
+                max(
+                    0.0,
+                    (self.rules.via_diameter / 2 + self.rules.via_clearance)
+                    - (self.rules.trace_width / 2 + self.rules.trace_clearance),
+                )
+                / self.grid.resolution
+            ),
+        )
+
         # Orthogonal moves only for differential pairs (diagonal moves
         # would complicate spacing maintenance)
         self.directions = [
@@ -569,31 +648,75 @@ class CoupledPathfinder:
         ]
 
     def _is_cell_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
-        """Check if a cell is blocked for this net."""
+        """Check if a cell is blocked for this net.
+
+        Issue #3508: own-net cells are passable, matching the per-net
+        pathfinder's ``different_net = cell.net != routing_net``
+        convention.  The previous implementation additionally rejected
+        any ``is_obstacle`` cell -- but ``RoutingGrid._add_pad_unsafe``
+        sets ``is_obstacle = True`` on a pad's OWN clearance-halo and
+        metal cells (it exists to defeat the negotiated-mode
+        ``static_blocks`` release loophole, #2915/#2940, with own-net
+        passability explicitly preserved via the ``cell.net`` check in
+        the main pathfinder).  ORing ``is_obstacle`` here made every
+        pad unreachable for its own coupled route: the joint search
+        stalled at exactly the halo boundary (5-7 cells out) on all 9
+        board 06 pairs, which is why coupled convergence was 0/9 at
+        ANY budget.  True obstacles (board edge, keepouts,
+        ``add_obstacle`` regions) carry ``cell.net == 0`` and remain
+        blocked for every signal net.
+        """
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
             return True
         if layer < 0 or layer >= self.grid.num_layers:
             return True
 
         cell = self.grid.grid[layer][gy][gx]
-        if cell.blocked:
-            if cell.is_obstacle or cell.net != net:
-                return True
+        if cell.blocked and cell.net != net:
+            return True
         return False
 
     def _is_trace_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
-        """Check if placing a trace at this position would conflict."""
-        for dy in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
-            for dx in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
-                if self._is_cell_blocked(gx + dx, gy + dy, layer, net):
-                    return True
-        return False
+        """Check if placing a trace centerline at this cell would conflict.
+
+        Issue #3508: this checks ONLY the head cell, matching the per-net
+        pathfinder's convention.  The grid already encodes the full
+        centerline clearance envelope at obstacle-marking time: pads are
+        dilated by ``trace_clearance + trace_width / 2``
+        (``RoutingGrid._clearance_for_pin_pitch``) and committed routes
+        by the equivalent trace halo, so a cell is unblocked exactly
+        when a trace centerline there satisfies clearance.  The previous
+        implementation swept an ADDITIONAL ``(2 * half_width + 1)^2``
+        square (+/- ``ceil((trace_width/2 + clearance)/resolution)`` =
+        5 cells on board 06) around the head -- double-counting the
+        clearance envelope to an effective ~0.45 mm.  In open field that
+        was merely conservative; entering any fine-pitch pad
+        neighbourhood (QFN-32/QFN-24/BGA-49/USB-C/FFC -- BOTH endpoints
+        of every board 06 pair) it formed an impassable wall ~1-2.5 mm
+        short of the pads, which is why every coupled search stalled at
+        an identical frontier regardless of iteration budget or
+        tie-break order (best_progress 34-49 on PCIE/USB2 across
+        FIFO/LIFO and 10k/90k-iteration runs).
+        """
+        return self._is_cell_blocked(gx, gy, layer, net)
 
     def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
-        """Check if placing a via at this position would conflict on any layer."""
+        """Check if placing a via at this position would conflict on any layer.
+
+        Issue #3508: the swept radius is now the DIFFERENCE between the
+        via envelope and the trace envelope the grid cells already
+        carry (see ``_is_trace_blocked``), not the full via envelope.
+        A grid cell is unblocked when a TRACE centerline is legal
+        there; a via additionally needs
+        ``(via_diameter/2 + via_clearance) - (trace_width/2 +
+        trace_clearance)`` of extra radial slack, which is what
+        ``_via_extra_cells`` captures.  The previous full-envelope
+        sweep (+/-8 cells on every layer on board 06) double-counted
+        the marked halo exactly like the trace check did.
+        """
         for layer in range(self.grid.num_layers):
-            for dy in range(-self._via_half_cells, self._via_half_cells + 1):
-                for dx in range(-self._via_half_cells, self._via_half_cells + 1):
+            for dy in range(-self._via_extra_cells, self._via_extra_cells + 1):
+                for dx in range(-self._via_extra_cells, self._via_extra_cells + 1):
                     if self._is_cell_blocked(gx + dx, gy + dy, layer, net):
                         return True
         return False
@@ -615,8 +738,11 @@ class CoupledPathfinder:
         n_start: GridPos | None = None,
         target_spacing_cells: int | None = None,
         approach_radius_override: int | None = None,
+        departure_radius_override: int | None = None,
         p_visited: frozenset[tuple[int, int, int]] | None = None,
         n_visited: frozenset[tuple[int, int, int]] | None = None,
+        p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
+        n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -644,6 +770,15 @@ class CoupledPathfinder:
                 differ so the search has room to converge from the
                 wider start spacing to the narrower goal spacing
                 (USB-C vs MCU).
+            departure_radius_override: Issue #3508: mirror of
+                ``approach_radius_override`` for the START side.
+                Within this Manhattan radius of the start pads the
+                spacing tolerance is widened the same way, so the
+                pair can transition from the physical start pad
+                pitch to the configured coupled spacing (the
+                mid-route target no longer inherits the start
+                pitch).  When ``None``, falls back to
+                ``max(target_spacing_cells, 6)``.
             p_visited: Issue #3078: optional set of grid cells the
                 positive trace has already occupied along the current
                 A* parent chain.  Cells are encoded as
@@ -672,6 +807,42 @@ class CoupledPathfinder:
         p_visited_set = p_visited if p_visited else frozenset()
         n_visited_set = n_visited if n_visited else frozenset()
 
+        # Issue #3508: trail PROXIMITY guard.  The exact-cell guard
+        # below only rejects landing ON the partner's trail; a landing
+        # ONE cell away from it (0.05 mm centerline distance on board
+        # 06) is copper overlap that the #3320 gate later rejects
+        # wholesale (measured: MIPI_CLK converged but committed copper
+        # had P passing 1-2 cells from N's earlier fan-out trail --
+        # worst -0.175 mm with 5802 offending segment pairs).  The
+        # spacing floor cannot catch this because it constrains the
+        # SIMULTANEOUS head positions, not head-vs-historical-trail
+        # distance.  Reject any advancing landing within
+        # ``min_spacing_cells`` (Euclidean, same layer) of the
+        # PARTNER's accumulated trail, using the spatial buckets the
+        # caller built during its parent-chain walk.
+        prox_r = self.min_spacing_cells
+        prox_bucket = max(1, prox_r)
+        prox_r_sq = float(prox_r * prox_r)
+
+        def _too_close_to_trail(
+            cell: tuple[int, int, int],
+            buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None,
+        ) -> bool:
+            if not buckets or prox_r <= 1:
+                return False
+            cx, cy, clayer = cell
+            bx, by = cx // prox_bucket, cy // prox_bucket
+            for dbx in (-1, 0, 1):
+                for dby in (-1, 0, 1):
+                    for tx, ty, tlayer in buckets.get((bx + dbx, by + dby), ()):
+                        if tlayer != clayer:
+                            continue
+                        dx = tx - cx
+                        dy = ty - cy
+                        if float(dx * dx + dy * dy) < prox_r_sq - 1e-9:
+                            return True
+            return False
+
         def _self_intersects(
             new_p_pos: GridPos,
             new_n_pos: GridPos,
@@ -699,6 +870,15 @@ class CoupledPathfinder:
             if p_advances and not p_is_endpoint_cell and p_key in n_visited_set:
                 return True
             if n_advances and not n_is_endpoint_cell and n_key in p_visited_set:
+                return True
+            # Issue #3508: proximity variant of the cross-trail check.
+            if p_advances and not p_is_endpoint_cell and _too_close_to_trail(
+                p_key, n_trail_buckets
+            ):
+                return True
+            if n_advances and not n_is_endpoint_cell and _too_close_to_trail(
+                n_key, p_trail_buckets
+            ):
                 return True
             # Self-loop: the advancing trace re-enters a cell it has
             # already occupied on its own trail.  This is the
@@ -739,6 +919,41 @@ class CoupledPathfinder:
             if p_dist_to_goal <= approach_radius and n_dist_to_goal <= approach_radius:
                 approach_relaxed = True
 
+        # Issue #3508: departure-phase relaxation -- the mirror of the
+        # approach phase, anchored on the START pads.  The mid-route
+        # spacing target is now the configured coupled spacing (it no
+        # longer inherits the start pad pitch), so a pair leaving
+        # wide-pitch connector pads needs the same widened tolerance
+        # near the start that the approach phase grants near the goal,
+        # or the very first symmetric step away from the pads would be
+        # rejected for |pitch - target| > 1.
+        departure_relaxed = False
+        if p_start is not None and n_start is not None:
+            p_dist_from_start = abs(state.p_pos.x - p_start.x) + abs(state.p_pos.y - p_start.y)
+            n_dist_from_start = abs(state.n_pos.x - n_start.x) + abs(state.n_pos.y - n_start.y)
+            if departure_radius_override is not None:
+                departure_radius = departure_radius_override
+            else:
+                departure_radius = max(target_spacing_cells, 6)
+            if p_dist_from_start <= departure_radius and n_dist_from_start <= departure_radius:
+                departure_relaxed = True
+
+        spacing_relaxed = approach_relaxed or departure_relaxed
+
+        # Issue #3508: the relaxed tolerance must cover the FULL pitch
+        # transition of whichever phase is active.  The legacy
+        # ``max(1, target)`` only worked because the target itself had
+        # been widened to the start pitch; with the configured coupled
+        # target restored, a 20-cell USB-C pitch against a 7-cell
+        # target needs tolerance >= 13 inside the endpoint zones.  The
+        # phase radii are already sized as ``delta * 2 + 4`` so they
+        # dominate the pitch delta by construction.
+        relaxed_tolerance = max(1, target_spacing_cells)
+        if approach_relaxed:
+            relaxed_tolerance = max(relaxed_tolerance, approach_radius)
+        if departure_relaxed:
+            relaxed_tolerance = max(relaxed_tolerance, departure_radius)
+
         # Try moving both traces in the same direction
         for dx, dy in self.directions:
             new_p = GridPos(
@@ -761,8 +976,10 @@ class CoupledPathfinder:
             p_is_endpoint = self._is_at_goal(new_p, p_goal) or self._is_at_goal(new_p, p_start)
             n_is_endpoint = self._is_at_goal(new_n, n_goal) or self._is_at_goal(new_n, n_start)
             if not p_is_endpoint and self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
+                self.last_rejections["sym_blocked_p"] += 1
                 continue
             if not n_is_endpoint and self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
+                self.last_rejections["sym_blocked_n"] += 1
                 continue
 
             # Calculate spacing between new positions
@@ -772,10 +989,13 @@ class CoupledPathfinder:
 
             # Only accept moves that maintain target spacing (within tolerance).
             # Issue #2473: When the search is in the "approach" phase
-            # near the goal pads, allow wider spacing variation so
-            # mismatched source/sink pad pitches can converge.
-            tolerance = 1 if not approach_relaxed else max(1, target_spacing_cells)
+            # near the goal pads (or, issue #3508, the "departure"
+            # phase near the start pads), allow wider spacing variation
+            # so mismatched pad pitches can converge to / diverge from
+            # the coupled target.
+            tolerance = relaxed_tolerance if spacing_relaxed else 1
             if abs(new_spacing - target_spacing_cells) > tolerance:
+                self.last_rejections["sym_spacing"] += 1
                 continue
 
             # Issue #3012: Hard floor on within-pair spacing.  Independent
@@ -791,6 +1011,7 @@ class CoupledPathfinder:
                 # Use a small epsilon so a Euclidean spacing of exactly
                 # min_spacing_cells (axis-aligned) is accepted.
                 if new_spacing + 1e-9 < self.min_spacing_cells:
+                    self.last_rejections["sym_floor"] += 1
                     continue
 
             # Issue #3078: path-history self-intersection guard.  Both
@@ -803,6 +1024,7 @@ class CoupledPathfinder:
                 p_is_endpoint_cell=p_is_endpoint,
                 n_is_endpoint_cell=n_is_endpoint,
             ):
+                self.last_rejections["sym_trail"] += 1
                 continue
 
             # Calculate cost
@@ -816,18 +1038,39 @@ class CoupledPathfinder:
             new_state = CoupledState(new_p, new_n, new_direction)
             neighbors.append((new_state, cost, False))
 
-        # Issue #2490: Asymmetric "converge" moves during approach
-        # phase only.  When start and goal pad pitches differ
-        # (e.g., USB device-side: MCU 0.8mm pitch -> USB-C 0.5mm
-        # pitch), the symmetric step moves above preserve spacing
-        # exactly, so the search can never land both traces on
-        # endpoint cells whose pitch is narrower than the start
-        # pitch.  Within the approach radius, allow one trace to
-        # advance toward its goal while the other holds, which
-        # closes the spacing one cell at a time.  Restricted to
-        # the approach phase so the bulk of the run still
-        # maintains constant spacing.
-        if approach_relaxed and p_goal is not None and n_goal is not None:
+        # Issue #2490: Asymmetric "converge" moves.  When start and
+        # goal pad pitches differ (e.g., USB device-side: MCU 0.8mm
+        # pitch -> USB-C 0.5mm pitch), the symmetric step moves above
+        # preserve spacing exactly, so the search can never land both
+        # traces on endpoint cells whose pitch is narrower than the
+        # start pitch.  Allowing one trace to advance while the other
+        # holds closes the spacing one cell at a time.
+        #
+        # Issue #3508: asymmetric moves are now allowed MID-ROUTE too
+        # (originally #2490 restricted them to the approach phase).
+        # Symmetric moves translate both heads by the same vector, so
+        # the P->N offset vector is FROZEN for the whole mid-route --
+        # the pair physically cannot turn a corner whose leg runs
+        # parallel to that offset: the trailing trace must ride the
+        # leading trace's trail and the #3078 path-history guard
+        # (correctly) rejects it.  On board 06 this made 9/9 pairs
+        # structurally infeasible for the coupled search (MIPI_CLK
+        # burned 90k corridor-bounded iterations without converging;
+        # the L-shaped FFC->IC route needs a leg parallel to the pad
+        # offset).  Concentric corners need the offset vector to
+        # ROTATE, which only asymmetric moves can do (the outer trace
+        # walks a discrete arc around the holding inner trace).
+        #
+        # The #2490 restriction predates the guards that make
+        # mid-route asymmetry safe: the ``min_spacing_cells`` hard
+        # floor (#3012) prevents the spacing collapse, the
+        # path-history guard (#3078) prevents the loop-around
+        # pathology, and the mid-route tolerance here stays TIGHT
+        # (+/-1 cell, same as the symmetric branch) -- the wide
+        # ``max(1, target)`` tolerance still applies only inside the
+        # approach radius.
+        if p_goal is not None and n_goal is not None:
+            asym_tolerance = relaxed_tolerance if spacing_relaxed else 1
             for dx, dy in self.directions:
                 # P advances, N holds.
                 cand_p = GridPos(state.p_pos.x + dx, state.p_pos.y + dy, state.p_pos.layer)
@@ -835,14 +1078,17 @@ class CoupledPathfinder:
                 p_is_endpoint = self._is_at_goal(cand_p, p_goal) or self._is_at_goal(
                     cand_p, p_start
                 )
-                if p_is_endpoint or not self._is_trace_blocked(
+                if not (p_is_endpoint or not self._is_trace_blocked(
                     cand_p.x, cand_p.y, cand_p.layer, p_net
-                ):
+                )):
+                    self.last_rejections["asym_blocked_p"] += 1
+                else:
                     spacing_dx = cand_p.x - cand_n.x
                     spacing_dy = cand_p.y - cand_n.y
                     new_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
-                    tolerance = max(1, target_spacing_cells)
-                    if abs(new_spacing - target_spacing_cells) <= tolerance:
+                    if abs(new_spacing - target_spacing_cells) > asym_tolerance:
+                        self.last_rejections["asym_spacing_p"] += 1
+                    else:
                         # Issue #3012: enforce the within-pair spacing
                         # floor in the asymmetric P-advance move.  The
                         # asymmetric moves only fire in the approach
@@ -861,7 +1107,7 @@ class CoupledPathfinder:
                             and not bypass_floor
                             and new_spacing + 1e-9 < self.min_spacing_cells
                         ):
-                            pass  # reject this candidate
+                            self.last_rejections["asym_floor_p"] += 1
                         elif _self_intersects(
                             cand_p,
                             cand_n,
@@ -878,7 +1124,7 @@ class CoupledPathfinder:
                             # producing the centerline-coincident
                             # routes that DRC reports as -0.2mm
                             # intra-pair clearance.
-                            pass  # reject this candidate
+                            self.last_rejections["asym_trail_p"] += 1
                         else:
                             # Direction tracking only reflects P's motion;
                             # tag with the new direction so the cost-of-turn
@@ -898,12 +1144,13 @@ class CoupledPathfinder:
                 if not n_is_endpoint and self._is_trace_blocked(
                     cand_n2.x, cand_n2.y, cand_n2.layer, n_net
                 ):
+                    self.last_rejections["asym_blocked_n"] += 1
                     continue
                 spacing_dx = cand_p2.x - cand_n2.x
                 spacing_dy = cand_p2.y - cand_n2.y
                 new_spacing = math.sqrt(spacing_dx * spacing_dx + spacing_dy * spacing_dy)
-                tolerance = max(1, target_spacing_cells)
-                if abs(new_spacing - target_spacing_cells) > tolerance:
+                if abs(new_spacing - target_spacing_cells) > asym_tolerance:
+                    self.last_rejections["asym_spacing_n"] += 1
                     continue
                 # Issue #3012: same within-pair spacing floor as the
                 # P-advance branch.  P holds at its current position
@@ -919,6 +1166,7 @@ class CoupledPathfinder:
                     and not bypass_floor
                     and new_spacing + 1e-9 < self.min_spacing_cells
                 ):
+                    self.last_rejections["asym_floor_n"] += 1
                     continue
                 # Issue #3078: N-advance must not land on P's
                 # accumulated trail or on its own accumulated trail.
@@ -933,6 +1181,7 @@ class CoupledPathfinder:
                     p_is_endpoint_cell=p_is_endpoint_held,
                     n_is_endpoint_cell=n_is_endpoint,
                 ):
+                    self.last_rejections["asym_trail_n"] += 1
                     continue
                 cost = self.rules.cost_straight
                 if state.direction != (0, 0) and state.direction != (dx, dy):
@@ -1171,6 +1420,16 @@ class CoupledPathfinder:
         self.last_timeout_exceeded = False
         # Issue #3473: reset the iteration counter for this call.
         self.last_iterations = 0
+        # Issue #3508: best progress-toward-goal (joint Manhattan
+        # remaining distance, max over the two heads) any popped state
+        # achieved, plus the state that achieved it.  Consumed by the
+        # caller's budget-exit diagnostics to distinguish "almost
+        # converged, budget-starved" from "structurally stuck".
+        self.last_best_progress: float = float("inf")
+        self.last_best_state: CoupledState | None = None
+        self.last_best_node: CoupledNode | None = None
+        # Issue #3508: reset the per-search rejection counters.
+        self.last_rejections = collections.defaultdict(int)
 
         # Convert to grid coordinates
         p_start_gx, p_start_gy = self.grid.world_to_grid(p_start.x, p_start.y)
@@ -1208,23 +1467,44 @@ class CoupledPathfinder:
             (p_start_gx - n_start_gx) ** 2 + (p_start_gy - n_start_gy) ** 2
         )
         actual_end_spacing = math.sqrt((p_end_gx - n_end_gx) ** 2 + (p_end_gy - n_end_gy) ** 2)
+
+        # Issue #3508: the mid-route spacing target is the CONFIGURED
+        # coupled spacing, NOT the start pad pitch.  The legacy code
+        # (#2473) widened ``effective_target_spacing`` to the start-pad
+        # distance, which forced the pair to fly the ENTIRE route at
+        # connector pitch (0.75-1.0 mm on board 06's FFC / USB-C
+        # sources -- not electrically coupled at all) and then made the
+        # endgame infeasible: a 16-20-cell-wide pair cannot thread the
+        # dense pad field around the destination IC, and the
+        # ``_heuristic`` spacing penalty (which uses the configured
+        # ``self.target_spacing_cells``) actively fought the move
+        # filter the whole way.  Instead, keep the configured target
+        # and let the DEPARTURE phase below absorb the start-pitch
+        # mismatch, exactly mirroring how the approach phase absorbs
+        # the goal-pitch mismatch.
         effective_target_spacing = self.target_spacing_cells
-        if actual_start_spacing > effective_target_spacing:
-            effective_target_spacing = int(round(actual_start_spacing))
 
         # Issue #2490: Size the approach radius to accommodate the
-        # full pitch transition between start and goal pads.  When
-        # start and end pad pitches differ (USB device-side: MCU
-        # 0.8mm pitch vs USB-C 0.5mm pitch), the legacy
-        # ``max(target, 6)`` radius can be smaller than the
-        # number of single-cell spacing reductions required to
-        # converge, leaving the search no room to relax spacing
-        # without exceeding the per-step tolerance.  Scale the
+        # full pitch transition between the coupled target and the
+        # goal pads.  The legacy ``max(target, 6)`` radius can be
+        # smaller than the number of single-cell spacing reductions
+        # required to converge, leaving the search no room to relax
+        # spacing without exceeding the per-step tolerance.  Scale the
         # radius with the absolute spacing difference plus a small
-        # buffer so each cell of the approach can drop spacing by
+        # buffer so each cell of the approach can change spacing by
         # at most one cell.
-        spacing_delta = int(round(abs(actual_start_spacing - actual_end_spacing)))
-        effective_approach_radius = max(effective_target_spacing, 6, spacing_delta * 2 + 4)
+        end_spacing_delta = int(round(abs(actual_end_spacing - effective_target_spacing)))
+        effective_approach_radius = max(effective_target_spacing, 6, end_spacing_delta * 2 + 4)
+
+        # Issue #3508: departure radius -- the mirror of the approach
+        # radius, sized by the start-pitch transition.  Within this
+        # radius of the start pads the spacing tolerance is widened so
+        # the pair can converge from the physical pad pitch down to
+        # the coupled target one cell per step.
+        start_spacing_delta = int(round(abs(actual_start_spacing - effective_target_spacing)))
+        effective_departure_radius = max(
+            effective_target_spacing, 6, start_spacing_delta * 2 + 4
+        )
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
@@ -1253,8 +1533,25 @@ class CoupledPathfinder:
         # ``CoupledNode`` constructor reads ``next(seq_counter)`` once.
         seq_counter = itertools.count()
 
-        start_h = self._heuristic(start_state, p_goal_pos, n_goal_pos)
-        start_node = CoupledNode(start_h, 0.0, start_state, seq=next(seq_counter))
+        start_h = self.heuristic_weight * self._heuristic(start_state, p_goal_pos, n_goal_pos)
+        # Issue #3508: LIFO tie-break (note the NEGATED counter).  The
+        # #3144 fix introduced the monotonic counter for determinism
+        # with FIFO semantics (oldest equal-f node pops first).  FIFO
+        # explores f-score plateaus breadth-first: on a corridor-
+        # bounded coupled search the plateau is the whole tube
+        # cross-section x direction-history product, so the frontier
+        # saturates laterally and the search burns its entire
+        # iteration budget mid-tube (board 06: every pair, including
+        # 90k-iteration corridor runs, exhausted budgets without
+        # converging).  Popping the NEWEST equal-f node instead dives
+        # depth-first along the most recently extended path -- on a
+        # plateau this beelines toward the goal and only falls back
+        # to sibling states when the dive hits an obstacle.  Equally
+        # deterministic (the counter is still search-local and
+        # monotonic); A* optimality is unaffected (tie-break order
+        # among equal-f nodes never changes the returned path cost
+        # with an admissible heuristic).
+        start_node = CoupledNode(start_h, 0.0, start_state, seq=-next(seq_counter))
         heapq.heappush(open_set, start_node)
         g_scores[(p_start_pos, n_start_pos)] = 0.0
 
@@ -1333,6 +1630,16 @@ class CoupledPathfinder:
                 continue
             closed_set.add(current_key)
 
+            if _COUPLED_TRACE and iterations % 1000 == 0:
+                print(
+                    f"      [trace] it={iterations} f={current.f_score:.1f} "
+                    f"g={current.g_score:.1f} open={len(open_set)} "
+                    f"closed={len(closed_set)} p=({current.state.p_pos.x},"
+                    f"{current.state.p_pos.y},{current.state.p_pos.layer}) "
+                    f"n=({current.state.n_pos.x},{current.state.n_pos.y},"
+                    f"{current.state.n_pos.layer})"
+                )
+
             # Goal check - both traces must reach their goals
             p_at_goal = (
                 current.state.p_pos.x == p_goal_pos.x and current.state.p_pos.y == p_goal_pos.y
@@ -1344,6 +1651,24 @@ class CoupledPathfinder:
             if p_at_goal and n_at_goal:
                 return self._reconstruct_coupled_routes(current, p_start, p_end, n_start, n_end)
 
+            # Issue #3508: progress tracking for budget-exit diagnostics.
+            # ``last_best_progress`` is the smallest joint remaining
+            # distance any popped state achieved; a budget exit at high
+            # remaining distance means the search is structurally stuck
+            # (pinch point / frozen-offset corner), while a near-zero
+            # value means it almost converged and a budget bump would
+            # likely land it.
+            _progress = max(
+                abs(current.state.p_pos.x - p_goal_pos.x)
+                + abs(current.state.p_pos.y - p_goal_pos.y),
+                abs(current.state.n_pos.x - n_goal_pos.x)
+                + abs(current.state.n_pos.y - n_goal_pos.y),
+            )
+            if _progress < self.last_best_progress:
+                self.last_best_progress = _progress
+                self.last_best_state = current.state
+                self.last_best_node = current
+
             # Issue #3078: build path-history sets for the current
             # node by walking its parent chain.  These let
             # ``_get_coupled_neighbors`` reject moves that would put
@@ -1353,14 +1678,28 @@ class CoupledPathfinder:
             # moves let one trace loop around its partner.
             p_visited_cells: set[tuple[int, int, int]] = set()
             n_visited_cells: set[tuple[int, int, int]] = set()
+            # Issue #3508: spatial buckets over the SAME trail cells for
+            # the proximity guard (see ``_too_close_to_trail``).  Bucket
+            # size = the proximity radius so any cell within the radius
+            # of a candidate lives in one of the 3x3 neighbouring
+            # buckets.
+            prox_radius = self.min_spacing_cells
+            p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+            n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+            bucket = max(1, prox_radius)
             walker: CoupledNode | None = current
             while walker is not None:
-                p_visited_cells.add(
-                    (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
-                )
-                n_visited_cells.add(
-                    (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
-                )
+                p_cell = (walker.state.p_pos.x, walker.state.p_pos.y, walker.state.p_pos.layer)
+                n_cell = (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
+                p_visited_cells.add(p_cell)
+                n_visited_cells.add(n_cell)
+                if prox_radius > 1:
+                    p_trail_buckets.setdefault(
+                        (p_cell[0] // bucket, p_cell[1] // bucket), []
+                    ).append(p_cell)
+                    n_trail_buckets.setdefault(
+                        (n_cell[0] // bucket, n_cell[1] // bucket), []
+                    ).append(n_cell)
                 walker = walker.parent
             # Endpoint pads are legitimate landing cells regardless of
             # history -- strip them so the check doesn't disqualify a
@@ -1392,8 +1731,11 @@ class CoupledPathfinder:
                 n_start_pos,
                 target_spacing_cells=effective_target_spacing,
                 approach_radius_override=effective_approach_radius,
+                departure_radius_override=effective_departure_radius,
                 p_visited=p_visited_frozen,
                 n_visited=n_visited_frozen,
+                p_trail_buckets=p_trail_buckets,
+                n_trail_buckets=n_trail_buckets,
             ):
                 # Issue #3439: corridor-bounded search.  Prune any
                 # state whose P or N head leaves the corridor mask
@@ -1406,6 +1748,7 @@ class CoupledPathfinder:
                     if (p_xy not in corridor and p_xy not in corridor_exempt) or (
                         n_xy not in corridor and n_xy not in corridor_exempt
                     ):
+                        self.last_rejections["corridor"] += 1
                         continue
 
                 neighbor_key = (new_state.p_pos, new_state.n_pos)
@@ -1417,10 +1760,13 @@ class CoupledPathfinder:
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
                     g_scores[neighbor_key] = new_g
                     h = self._heuristic(new_state, p_goal_pos, n_goal_pos)
-                    f = new_g + h
+                    # Issue #3508: weighted A* (see ``heuristic_weight``).
+                    f = new_g + self.heuristic_weight * h
 
+                    # Issue #3508: negated counter = LIFO tie-break on
+                    # equal f -- see the start-node comment.
                     neighbor_node = CoupledNode(
-                        f, new_g, new_state, current, is_via, seq=next(seq_counter)
+                        f, new_g, new_state, current, is_via, seq=-next(seq_counter)
                     )
                     heapq.heappush(open_set, neighbor_node)
 
@@ -1639,13 +1985,33 @@ def create_serpentine(
     if best_segment is None:
         return False
 
-    # Calculate serpentine parameters
-    # Serpentine adds length = 2 * num_bends * amplitude
-    # We want to add length_to_add, so:
-    # amplitude = length_to_add / (2 * num_bends)
-    # Use 4 bends as default
-    num_bends = 4
-    amplitude = max(min_amplitude, length_to_add / (2 * num_bends))
+    # Calculate serpentine parameters.
+    #
+    # Issue #3508: the bulges this function emits are TRIANGULAR (two
+    # diagonal segments out to the bulge apex and back), so the length
+    # a bend ADDS over the straight step it replaces is
+    #
+    #     added_per_bend = 2 * hypot(step/2, amplitude) - step
+    #
+    # The legacy ``amplitude = length_to_add / (2 * num_bends)``
+    # assumed SQUARE bulges (added = 2 * amplitude per bend) and
+    # under-delivered by up to an order of magnitude on long steps
+    # (e.g. step 4 mm, amplitude 0.5 mm adds 0.124 mm/bend, not
+    # 1.0 mm/bend) -- the shim then "succeeded" while leaving the pair
+    # skewed.  Invert the triangular formula instead, and scale the
+    # bend count with the available segment so amplitudes stay small.
+    seg_len_initial = math.hypot(
+        best_segment.x2 - best_segment.x1, best_segment.y2 - best_segment.y1
+    )
+    num_bends = max(2, min(12, int(seg_len_initial / 1.0)))
+    step_est = seg_len_initial / (num_bends + 1)
+    added_per_bend = length_to_add / num_bends
+    amplitude = max(
+        min_amplitude,
+        math.sqrt(
+            max(0.0, ((added_per_bend + step_est) / 2.0) ** 2 - (step_est / 2.0) ** 2)
+        ),
+    )
 
     # Determine serpentine direction (perpendicular to segment)
     seg_dx = best_segment.x2 - best_segment.x1
@@ -1727,7 +2093,18 @@ def create_serpentine(
                 )
             )
 
-            current_side *= -1  # Flip side for next bend
+            # Issue #3508: keep ALL bulges on the outward side when a
+            # partner constraint is in play.  The legacy alternating
+            # serpentine sends every other bulge TOWARD the partner;
+            # for a coupled pair at the intentionally-tight intra gap
+            # (0.075-0.1 mm edge-to-edge) any inward bulge violates the
+            # clearance self-check below, so the shim always failed on
+            # exactly the pairs that need it most (board 06 shadow
+            # pairs, 2.5-4.5 mm trim/tail skew).  A one-sided comb adds
+            # the same length per bend without ever approaching the
+            # partner.
+            if partner_route is None or intra_pair_clearance_mm is None:
+                current_side *= -1  # Flip side for next bend
         else:
             # Final segment to end point
             new_segments.append(
@@ -2301,6 +2678,859 @@ class DiffPairRouter:
             results.append(route)
         return results
 
+    def _virtual_pad_at(
+        self, template: Pad, wx: float, wy: float, layer_idx: int
+    ) -> Pad:
+        """Virtual pad at an arbitrary board position (issue #3508).
+
+        Used as the start/end anchor for synthesized tail routes and as
+        the reconstruction end pad (so ``_build_route_from_path`` does
+        not force a straight final jump onto the real pad).
+        """
+        grid = self.autorouter.grid
+        return Pad(
+            x=wx,
+            y=wy,
+            width=template.width,
+            height=template.height,
+            net=template.net,
+            net_name=template.net_name,
+            layer=Layer(grid.index_to_layer(layer_idx)),
+            ref=template.ref,
+            pin=template.pin,
+        )
+
+    def _segment_cells_clear(
+        self,
+        pathfinder: CoupledPathfinder,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+    ) -> bool:
+        """True when every grid cell under the segment is legal for ``net``.
+
+        Issue #3508: the grid encodes the full centerline clearance
+        envelope at obstacle-marking time (see ``_is_trace_blocked``),
+        so a clear rasterisation implies a clearance-clear segment.
+        """
+        grid = self.autorouter.grid
+        gx1, gy1 = grid.world_to_grid(x1, y1)
+        gx2, gy2 = grid.world_to_grid(x2, y2)
+        steps = max(abs(gx2 - gx1), abs(gy2 - gy1))
+        for i in range(steps + 1):
+            t = i / steps if steps else 0.0
+            gx = int(round(gx1 + (gx2 - gx1) * t))
+            gy = int(round(gy1 + (gy2 - gy1) * t))
+            if pathfinder._is_cell_blocked(gx, gy, layer_idx, net):
+                return False
+        return True
+
+    def _synthesize_tail(
+        self, pathfinder: CoupledPathfinder, head: Pad, goal: Pad, layer_idx: int
+    ) -> Route | None:
+        """Geometric head->pad tail on the head's layer (issue #3508).
+
+        The per-net ``route()`` machinery declines sub-millimetre hops
+        whose endpoints sit inside pad clearance halos (measured: every
+        board 06 rescue tail it was offered), so we draw the tail
+        directly -- a straight segment, or an axis-aligned dogleg --
+        and validate every covered grid cell with
+        :meth:`_segment_cells_clear`.
+        """
+        grid = self.autorouter.grid
+        goal_layer_idx = grid.layer_to_index(goal.layer.value)
+        if goal_layer_idx != layer_idx:
+            return None  # layer mismatch: leave to the A* fallback
+        width = pathfinder._get_trace_width_for_net(head.net_name)
+        layer = Layer(grid.index_to_layer(layer_idx))
+
+        candidates: list[list[tuple[float, float, float, float]]] = [
+            [(head.x, head.y, goal.x, goal.y)],  # direct
+            [  # dogleg via (goal.x, head.y)
+                (head.x, head.y, goal.x, head.y),
+                (goal.x, head.y, goal.x, goal.y),
+            ],
+            [  # dogleg via (head.x, goal.y)
+                (head.x, head.y, head.x, goal.y),
+                (head.x, goal.y, goal.x, goal.y),
+            ],
+        ]
+        # Issue #3508: U-shaped detours.  Neighbour-pad halos often
+        # block both straight doglegs (e.g. a partner pad sitting
+        # between the shadow head and its goal pad on a connector pin
+        # row); a small perpendicular excursion around the blocker is
+        # routinely legal.
+        for off in (0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6):
+            wy = head.y + off
+            candidates.append(
+                [
+                    (head.x, head.y, head.x, wy),
+                    (head.x, wy, goal.x, wy),
+                    (goal.x, wy, goal.x, goal.y),
+                ]
+            )
+            wx = head.x + off
+            candidates.append(
+                [
+                    (head.x, head.y, wx, head.y),
+                    (wx, head.y, wx, goal.y),
+                    (wx, goal.y, goal.x, goal.y),
+                ]
+            )
+        for segs in candidates:
+            if all(
+                self._segment_cells_clear(pathfinder, x1, y1, x2, y2, layer_idx, head.net)
+                for x1, y1, x2, y2 in segs
+            ):
+                route = Route(net=head.net, net_name=head.net_name)
+                for x1, y1, x2, y2 in segs:
+                    if abs(x2 - x1) < 0.01 and abs(y2 - y1) < 0.01:
+                        continue
+                    route.segments.append(
+                        Segment(
+                            x1=x1,
+                            y1=y1,
+                            x2=x2,
+                            y2=y2,
+                            width=width,
+                            layer=layer,
+                            net=head.net,
+                            net_name=head.net_name,
+                        )
+                    )
+                if route.segments:
+                    return route
+        return None
+
+    def _pair_seg_clearance(self, pathfinder: CoupledPathfinder, net_name: str) -> float:
+        """Centerline distance bound between pair partners (issue #3508).
+
+        Same-layer P/N copper must keep ``width/2 + intra_pair_clearance
+        + width/2`` of centerline separation -- the intra-pair bound the
+        diffpair DRC family checks, NOT the inter-net manufacturer
+        clearance (using the latter rejects legitimately-coupled
+        geometry: the coupled gap is intentionally tighter).
+        """
+        net_class_map = getattr(self.autorouter, "net_class_map", None) or {}
+        nc = net_class_map.get(net_name)
+        intra = (
+            nc.effective_intra_pair_clearance()
+            if nc is not None
+            else self.autorouter.rules.trace_clearance
+        )
+        width = pathfinder._get_trace_width_for_net(net_name)
+        return width + float(intra)
+
+    @staticmethod
+    def _point_segment_distance(
+        px: float, py: float, seg: Segment
+    ) -> float:
+        """Euclidean distance from a point to a segment's centerline."""
+        vx = seg.x2 - seg.x1
+        vy = seg.y2 - seg.y1
+        wx = px - seg.x1
+        wy = py - seg.y1
+        denom = vx * vx + vy * vy
+        if denom < 1e-12:
+            return math.hypot(wx, wy)
+        t = max(0.0, min(1.0, (wx * vx + wy * vy) / denom))
+        return math.hypot(px - (seg.x1 + t * vx), py - (seg.y1 + t * vy))
+
+    def _min_distance_to_partner(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        partner_segments: list[Segment],
+        layer: Layer | None,
+        sample_step: float = 0.05,
+    ) -> float:
+        """Min centerline distance from a segment to partner copper.
+
+        ``layer`` of ``None`` compares against ALL partner segments
+        (used for via barrels, which span every layer); otherwise only
+        same-layer partner segments are considered.
+        """
+        best = float("inf")
+        seg_len = math.hypot(x2 - x1, y2 - y1)
+        n_steps = max(1, int(math.ceil(seg_len / sample_step)))
+        for ps in partner_segments:
+            if layer is not None and ps.layer != layer:
+                continue
+            for i in range(n_steps + 1):
+                t = i / n_steps
+                d = self._point_segment_distance(
+                    x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, ps
+                )
+                if d < best:
+                    best = d
+        return best
+
+    def _synthesize_crossing_tail(
+        self,
+        pathfinder: CoupledPathfinder,
+        head: Pad,
+        goal: Pad,
+        layer_idx: int,
+        partner_segments: list[Segment],
+    ) -> Route | None:
+        """Two-via layer-change tail that may cross the partner guide.
+
+        Issue #3508: polarity-swap pairs (and in-line connector exits)
+        require the tail to cross the partner's path.  A same-layer
+        crossing is a short, so the crossing portion dives to another
+        routable layer between two vias.  Each candidate is validated
+        cell-by-cell per layer, via positions are checked with the
+        pathfinder's via predicate, and -- because the partner guide is
+        NOT in the grid -- explicit geometric clearance against the
+        partner segments is enforced: same-layer segment portions and
+        via barrels keep ``via_diameter/2 + trace_clearance +
+        partner_width/2`` of centerline distance.
+        """
+        grid = self.autorouter.grid
+        rules = self.autorouter.rules
+        goal_layer_idx = grid.layer_to_index(goal.layer.value)
+        if goal_layer_idx != layer_idx:
+            return None
+        width = pathfinder._get_trace_width_for_net(head.net_name)
+        partner_width = max((ps.width for ps in partner_segments), default=width)
+        # Via barrel vs partner trace clearance bound (vias are not
+        # pair members; the standard manufacturer clearance applies).
+        via_clear = (
+            rules.via_diameter / 2 + rules.trace_clearance + partner_width / 2
+        )
+        # Same-layer trace vs partner trace: the intra-pair bound.
+        seg_clear = self._pair_seg_clearance(pathfinder, head.net_name)
+
+        surface = Layer(grid.index_to_layer(layer_idx))
+        routable = [
+            li for li in grid.get_routable_indices() if li != layer_idx
+        ]
+        if not routable:
+            return None
+
+        dx = goal.x - head.x
+        dy = goal.y - head.y
+        run = math.hypot(dx, dy)
+        if run < 1e-9:
+            return None
+        ux, uy = dx / run, dy / run
+        nxp, nyp = -uy, ux  # unit normal
+
+        # Candidate via sites around each endpoint.  Tails are short
+        # (sub-2 mm), so the two vias generally cannot sit ON the
+        # head->goal line; lateral offsets give the crossover room.
+        def _via_candidates(cx: float, cy: float, toward: float) -> list[tuple[float, float]]:
+            out = []
+            for a in (0.0, 0.5, 1.0):
+                for b in (0.0, 0.6, -0.6, 1.2, -1.2):
+                    out.append(
+                        (cx + toward * ux * a + nxp * b, cy + toward * uy * a + nyp * b)
+                    )
+            return out
+
+        for v1 in _via_candidates(head.x, head.y, 1.0):
+            for v2 in _via_candidates(goal.x, goal.y, -1.0):
+                if math.hypot(v2[0] - v1[0], v2[1] - v1[1]) < 0.6:
+                    continue  # via-to-via clearance
+                g1 = grid.world_to_grid(*v1)
+                g2 = grid.world_to_grid(*v2)
+                if pathfinder._is_via_blocked(g1[0], g1[1], head.net):
+                    continue
+                if pathfinder._is_via_blocked(g2[0], g2[1], head.net):
+                    continue
+                # Via barrels: distance to partner copper on ANY layer.
+                if (
+                    self._min_distance_to_partner(
+                        v1[0], v1[1], v1[0], v1[1], partner_segments, None
+                    )
+                    < via_clear
+                ):
+                    continue
+                if (
+                    self._min_distance_to_partner(
+                        v2[0], v2[1], v2[0], v2[1], partner_segments, None
+                    )
+                    < via_clear
+                ):
+                    continue
+                # Surface stubs must stay clear of same-layer partner copper.
+                if (
+                    self._min_distance_to_partner(
+                        head.x, head.y, v1[0], v1[1], partner_segments, surface
+                    )
+                    < seg_clear
+                ):
+                    continue
+                if (
+                    self._min_distance_to_partner(
+                        v2[0], v2[1], goal.x, goal.y, partner_segments, surface
+                    )
+                    < seg_clear
+                ):
+                    continue
+                if not self._segment_cells_clear(
+                    pathfinder, head.x, head.y, v1[0], v1[1], layer_idx, head.net
+                ):
+                    continue
+                if not self._segment_cells_clear(
+                    pathfinder, v2[0], v2[1], goal.x, goal.y, layer_idx, head.net
+                ):
+                    continue
+                for alt in routable:
+                    if not self._segment_cells_clear(
+                        pathfinder, v1[0], v1[1], v2[0], v2[1], alt, head.net
+                    ):
+                        continue
+                    alt_layer = Layer(grid.index_to_layer(alt))
+                    route = Route(net=head.net, net_name=head.net_name)
+                    if math.hypot(v1[0] - head.x, v1[1] - head.y) > 0.01:
+                        route.segments.append(
+                            Segment(
+                                x1=head.x, y1=head.y, x2=v1[0], y2=v1[1],
+                                width=width, layer=surface,
+                                net=head.net, net_name=head.net_name,
+                            )
+                        )
+                    route.vias.append(
+                        Via(
+                            x=v1[0], y=v1[1],
+                            drill=rules.via_drill, diameter=rules.via_diameter,
+                            layers=(surface, alt_layer),
+                            net=head.net, net_name=head.net_name,
+                        )
+                    )
+                    route.segments.append(
+                        Segment(
+                            x1=v1[0], y1=v1[1], x2=v2[0], y2=v2[1],
+                            width=width, layer=alt_layer,
+                            net=head.net, net_name=head.net_name,
+                        )
+                    )
+                    route.vias.append(
+                        Via(
+                            x=v2[0], y=v2[1],
+                            drill=rules.via_drill, diameter=rules.via_diameter,
+                            layers=(alt_layer, surface),
+                            net=head.net, net_name=head.net_name,
+                        )
+                    )
+                    if math.hypot(goal.x - v2[0], goal.y - v2[1]) > 0.01:
+                        route.segments.append(
+                            Segment(
+                                x1=v2[0], y1=v2[1], x2=goal.x, y2=goal.y,
+                                width=width, layer=surface,
+                                net=head.net, net_name=head.net_name,
+                            )
+                        )
+                    return route
+        return None
+
+    def _tail_route(
+        self,
+        pathfinder: CoupledPathfinder,
+        head: Pad,
+        goal: Pad,
+        layer_idx: int,
+        label: str,
+        pair_name: str,
+        partner_segments: list[Segment] | None = None,
+    ) -> Route | None:
+        """Head->pad completion: synthesized tail, then per-net A* fallback.
+
+        Issue #3508: when ``partner_segments`` is provided, planar
+        candidates whose copper would overlap the partner (which is NOT
+        in the grid) are rejected geometrically, and a two-via crossing
+        tail is attempted before giving up -- the polarity-swap pairs'
+        terminal crossover.
+        """
+        tail = self._synthesize_tail(pathfinder, head, goal, layer_idx)
+        if tail is not None and partner_segments:
+            seg_clear = self._pair_seg_clearance(pathfinder, head.net_name)
+            for seg in tail.segments:
+                if (
+                    self._min_distance_to_partner(
+                        seg.x1, seg.y1, seg.x2, seg.y2, partner_segments, seg.layer
+                    )
+                    < seg_clear
+                ):
+                    tail = None
+                    break
+        if tail is None and partner_segments:
+            tail = self._synthesize_crossing_tail(
+                pathfinder, head, goal, layer_idx, partner_segments
+            )
+        if tail is None:
+            tail = self._single_ended_guide_route(head, goal, per_net_timeout=10.0)
+            if tail is not None and not tail.segments:
+                tail = None
+        if tail is None:
+            print(
+                f"    [coupled-rescue] {label} tail unroutable for {pair_name} "
+                f"(head {head.x:.2f},{head.y:.2f} -> pad {goal.x:.2f},{goal.y:.2f})"
+            )
+        return tail
+
+    def _shadow_route_pair(
+        self,
+        pair: DifferentialPair,
+        spec: CoupledSegmentSpec,
+        pathfinder: CoupledPathfinder,
+        guide: Route,
+        spacing_cells: int,
+        swap_roles: bool = False,
+    ) -> tuple[Route, Route] | None:
+        """Construct the pair as guide + validated parallel shadow.
+
+        Issue #3508: the joint-state coupled A* cannot afford board
+        06's geometry even corridor-bounded and weighted (measured: a
+        clearance-clean MIPI_CLK search exceeds 80k iterations without
+        converging; the dirty 2.7k-iteration solution is rejected by
+        the #3320 gate).  This constructor sidesteps the search
+        entirely:
+
+        1. One side is the single-ended guide route (C++-accelerated
+           per-net A*; the P side by default, the N side when
+           ``swap_roles``).
+        2. The partner side is built GEOMETRICALLY: each single-layer
+           SECTION of the guide polyline is offset perpendicular by
+           the coupled center-to-center spacing (both lateral sides
+           tried).  Where the guide changes layers, the shadow places
+           its own via at a laterally-widened, longitudinally-staggered
+           site so both the via-to-via (0.6 mm) and via-to-partner-
+           trace (~0.49 mm) clearance bounds hold by construction.
+           Every shadow segment is rasterised against the grid's
+           clearance envelope; shadow via sites are checked with the
+           pathfinder's via predicate.
+        3. The body is TRIMMED at the two route ends (endpoint zones
+           are always contested by connector/IC neighbour-pad halos)
+           up to ``_SHADOW_MAX_TRIM_MM`` per end, and connects to the
+           real pads via the rescue tail machinery (partner-aware,
+           with a two-via crossing fallback for polarity-swap
+           terminations).
+
+        Returns ``(p_route, n_route)`` -- NOT committed; the caller
+        runs the #3320 severe-overlap gate and the normal commit path.
+        """
+        if not guide.segments:
+            return None
+        grid = self.autorouter.grid
+        rules = self.autorouter.rules
+        if swap_roles:
+            shadow_start, shadow_end = spec.p_start, spec.p_end
+        else:
+            shadow_start, shadow_end = spec.n_start, spec.n_end
+        s_net = shadow_start.net
+        s_net_name = shadow_start.net_name
+        s_width = pathfinder._get_trace_width_for_net(s_net_name)
+        d = spacing_cells * grid.resolution
+        # Shadow via lateral offset: the barrel must clear the guide
+        # trace (via_r + clearance + guide_width/2), independent of the
+        # tighter coupled gap d.
+        guide_width = max((g.width for g in guide.segments), default=s_width)
+        via_lateral = max(
+            d, rules.via_diameter / 2 + rules.trace_clearance + guide_width / 2 + 0.05
+        )
+        # Longitudinal stagger so shadow-via-to-guide-via >= via pitch.
+        via_pitch = rules.via_diameter + rules.via_clearance
+        stagger = max(0.0, math.sqrt(max(0.0, via_pitch**2 - via_lateral**2))) + 0.05
+
+        # ------------------------------------------------------------
+        # Parse the guide into ordered single-layer sections.  Route
+        # segments/vias are emitted in path order by both
+        # ``_build_route_from_path`` and the per-net pathfinder.
+        # ------------------------------------------------------------
+        sections: list[tuple[int, list[Segment]]] = []
+        for seg in guide.segments:
+            li = grid.layer_to_index(seg.layer.value)
+            if not sections or sections[-1][0] != li:
+                sections.append((li, []))
+            sections[-1][1].append(seg)
+        max_trim = _SHADOW_MAX_TRIM_MM
+
+        for side in (1.0, -1.0):
+            elements: list[tuple] = []  # ('seg', x1,y1,x2,y2,layer) | ('via', x,y,l0,l1)
+            ok = True
+            prev_pt: tuple[float, float] | None = None
+            prev_layer: int | None = None
+            prev_dir: tuple[float, float] | None = None
+            for sec_layer, segs in sections:
+                first_in_section = True
+                for seg in segs:
+                    ux = seg.x2 - seg.x1
+                    uy = seg.y2 - seg.y1
+                    length = math.hypot(ux, uy)
+                    if length < 1e-9:
+                        continue
+                    ux /= length
+                    uy /= length
+                    nx = -uy * side
+                    ny = ux * side
+                    a = (seg.x1 + d * nx, seg.y1 + d * ny)
+                    b = (seg.x2 + d * nx, seg.y2 + d * ny)
+                    if prev_pt is not None and prev_layer is not None:
+                        if first_in_section and prev_layer != sec_layer:
+                            # Guide layer change: place the shadow via.
+                            # Site: widen laterally to ``via_lateral``
+                            # and stagger back along the incoming
+                            # direction.
+                            pux, puy = prev_dir if prev_dir else (ux, uy)
+                            pnx, pny = -puy * side, pux * side
+                            gv = (seg.x1, seg.y1)  # guide via position
+                            placed = False
+                            for stag_mult in (1.0, 1.6, -1.0, -1.6):
+                                vx = gv[0] + via_lateral * pnx - stagger * stag_mult * pux
+                                vy = gv[1] + via_lateral * pny - stagger * stag_mult * puy
+                                gvx, gvy = grid.world_to_grid(vx, vy)
+                                if pathfinder._is_via_blocked(gvx, gvy, s_net):
+                                    continue
+                                elements.append(
+                                    ("seg", prev_pt[0], prev_pt[1], vx, vy, prev_layer)
+                                )
+                                elements.append(("via", vx, vy, prev_layer, sec_layer))
+                                elements.append(("seg", vx, vy, a[0], a[1], sec_layer))
+                                prev_pt = a
+                                placed = True
+                                break
+                            if not placed:
+                                ok = False
+                                break
+                        else:
+                            gap = math.hypot(a[0] - prev_pt[0], a[1] - prev_pt[1])
+                            if gap > grid.resolution / 2:
+                                # Issue #3508: MITER the corner join.  A
+                                # straight bevel chord between the two
+                                # offset endpoints passes INSIDE the
+                                # corner (d*cos(45deg) ~ 0.75*d at a 90
+                                # degree turn), shaving the coupled gap
+                                # below the intra-pair clearance -- the
+                                # measured one-mild-violation-per-pair
+                                # Phase B churn.  Extending both offset
+                                # segments to their line intersection
+                                # keeps the full offset everywhere.
+                                mx = None
+                                if elements and elements[-1][0] == "seg":
+                                    pseg = elements[-1]
+                                    d1x, d1y = pseg[3] - pseg[1], pseg[4] - pseg[2]
+                                    d2x, d2y = b[0] - a[0], b[1] - a[1]
+                                    denom = d1x * d2y - d1y * d2x
+                                    if abs(denom) > 1e-9:
+                                        t = (
+                                            (a[0] - pseg[3]) * d2y
+                                            - (a[1] - pseg[4]) * d2x
+                                        ) / denom
+                                        cand = (
+                                            pseg[3] + d1x * t,
+                                            pseg[4] + d1y * t,
+                                        )
+                                        # Bound the miter spike (sharp
+                                        # angles) to ~2 gaps.
+                                        if (
+                                            math.hypot(
+                                                cand[0] - prev_pt[0],
+                                                cand[1] - prev_pt[1],
+                                            )
+                                            <= 2.0 * d + gap
+                                        ):
+                                            mx = cand
+                                if mx is not None:
+                                    pseg = elements[-1]
+                                    elements[-1] = (
+                                        "seg", pseg[1], pseg[2], mx[0], mx[1], pseg[5]
+                                    )
+                                    a = mx
+                                else:
+                                    elements.append(
+                                        ("seg", prev_pt[0], prev_pt[1], a[0], a[1], sec_layer)
+                                    )
+                    elements.append(("seg", a[0], a[1], b[0], b[1], sec_layer))
+                    prev_pt = b
+                    prev_layer = sec_layer
+                    prev_dir = (ux, uy)
+                    first_in_section = False
+                if not ok:
+                    break
+            if not ok or prev_pt is None:
+                print(
+                    f"    [coupled-shadow] side={side:+.0f} no legal shadow-via "
+                    f"site for {pair.name}"
+                )
+                continue
+
+            # ------------------------------------------------------------
+            # Validate + trim.  Blocked cells are tolerated only within
+            # ``max_trim`` of either END of the whole shadow polyline;
+            # any blockage in the interior (including via jogs) fails
+            # this side.
+            # ------------------------------------------------------------
+            arc_total = sum(
+                math.hypot(e[3] - e[1], e[4] - e[2]) for e in elements if e[0] == "seg"
+            )
+            arc = 0.0
+            interior_block = False
+            step = grid.resolution
+            blocked_arcs: list[float] = []
+            for e in elements:
+                if e[0] == "via":
+                    continue
+                _, x1, y1, x2, y2, li = e
+                seg_len = math.hypot(x2 - x1, y2 - y1)
+                if seg_len < 1e-9:
+                    continue
+                n_steps = max(1, int(math.ceil(seg_len / step)))
+                for i in range(n_steps + 1):
+                    t = i / n_steps
+                    gx, gy = grid.world_to_grid(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+                    if pathfinder._is_cell_blocked(gx, gy, li, s_net):
+                        blocked_arcs.append(arc + seg_len * t)
+                arc += seg_len
+            trim_start = 0.0
+            trim_end = 0.0
+            for ba in blocked_arcs:
+                if ba <= max_trim and ba >= trim_start:
+                    if ba <= max_trim:
+                        trim_start = max(trim_start, ba)
+                if ba >= arc_total - max_trim:
+                    trim_end = max(trim_end, arc_total - ba)
+            for ba in blocked_arcs:
+                if ba > trim_start + 1e-9 and ba < arc_total - trim_end - 1e-9:
+                    interior_block = True
+                    print(
+                        f"    [coupled-shadow] side={side:+.0f} mid-route "
+                        f"blockage for {pair.name} at arc {ba:.2f}/"
+                        f"{arc_total:.2f}mm"
+                    )
+                    break
+            if interior_block:
+                continue
+            a0 = trim_start + 2 * step if trim_start > 0 else 0.0
+            a1 = arc_total - trim_end - (2 * step if trim_end > 0 else 0.0)
+            if a1 - a0 < 2.0:
+                print(
+                    f"    [coupled-shadow] side={side:+.0f} clear run too "
+                    f"short for {pair.name} ({a1 - a0:.2f}mm)"
+                )
+                continue
+
+            # Slice elements to [lo, hi] by arc length.  Vias are kept
+            # only if inside the kept interval (vias always are: the
+            # interior is blockage-free and trims are confined to the
+            # ends, which lie in the first/last sections).
+            def _slice_kept(lo_arc: float, hi_arc: float) -> list[tuple]:
+                kept_: list[tuple] = []
+                arc_ = 0.0
+                for e_ in elements:
+                    if e_[0] == "via":
+                        if lo_arc <= arc_ <= hi_arc:
+                            kept_.append(e_)
+                        continue
+                    _, ex1, ey1, ex2, ey2, eli = e_
+                    sl = math.hypot(ex2 - ex1, ey2 - ey1)
+                    if sl < 1e-9:
+                        continue
+                    lo_ = max(lo_arc, arc_)
+                    hi_ = min(hi_arc, arc_ + sl)
+                    if hi_ > lo_:
+                        t_lo = (lo_ - arc_) / sl
+                        t_hi = (hi_ - arc_) / sl
+                        kept_.append(
+                            (
+                                "seg",
+                                ex1 + (ex2 - ex1) * t_lo,
+                                ey1 + (ey2 - ey1) * t_lo,
+                                ex1 + (ex2 - ex1) * t_hi,
+                                ey1 + (ey2 - ey1) * t_hi,
+                                eli,
+                            )
+                        )
+                    arc_ += sl
+                return kept_
+
+            # Issue #3508: anchor-stepping.  When the tail from the
+            # body end to the pad is unroutable (the trimmed body end
+            # can sit flush against a halo wall, leaving the tail no
+            # legal first step), consume more of the body into the
+            # tail and retry from a deeper anchor.
+            partner_segs = list(guide.segments)
+            start_tail = None
+            a0_eff = a0
+            for extra0 in (0.0, 0.7, 1.5, 3.0):
+                if a0 + extra0 >= a1 - 2.0:
+                    break
+                kept_probe = _slice_kept(a0 + extra0, a1)
+                seg_probe = [e for e in kept_probe if e[0] == "seg"]
+                if not seg_probe:
+                    break
+                bh = (seg_probe[0][1], seg_probe[0][2], seg_probe[0][5])
+                anchor = self._virtual_pad_at(shadow_start, bh[0], bh[1], bh[2])
+                start_tail = self._tail_route(
+                    pathfinder, anchor, shadow_start, bh[2],
+                    "shadow-start", pair.name,
+                    partner_segments=partner_segs,
+                )
+                if start_tail is not None:
+                    a0_eff = a0 + extra0
+                    break
+            if start_tail is None:
+                continue
+            end_tail = None
+            a1_eff = a1
+            for extra1 in (0.0, 0.7, 1.5, 3.0):
+                if a0_eff >= a1 - extra1 - 2.0:
+                    break
+                kept_probe = _slice_kept(a0_eff, a1 - extra1)
+                seg_probe = [e for e in kept_probe if e[0] == "seg"]
+                if not seg_probe:
+                    break
+                bt = (seg_probe[-1][3], seg_probe[-1][4], seg_probe[-1][5])
+                anchor = self._virtual_pad_at(shadow_end, bt[0], bt[1], bt[2])
+                end_tail = self._tail_route(
+                    pathfinder, anchor, shadow_end, bt[2],
+                    "shadow-end", pair.name,
+                    partner_segments=partner_segs,
+                )
+                if end_tail is not None:
+                    a1_eff = a1 - extra1
+                    break
+            if end_tail is None:
+                continue
+            kept = _slice_kept(a0_eff, a1_eff)
+            seg_elements = [e for e in kept if e[0] == "seg"]
+            if not seg_elements:
+                continue
+
+            shadow_route = Route(net=s_net, net_name=s_net_name)
+            shadow_route.segments.extend(
+                Segment(
+                    x1=s.x2, y1=s.y2, x2=s.x1, y2=s.y1,
+                    width=s.width, layer=s.layer, net=s.net, net_name=s.net_name,
+                )
+                for s in reversed(start_tail.segments)
+            )
+            shadow_route.vias.extend(start_tail.vias)
+            for e in kept:
+                if e[0] == "via":
+                    _, vx, vy, l0, l1 = e
+                    shadow_route.vias.append(
+                        Via(
+                            x=vx, y=vy,
+                            drill=rules.via_drill, diameter=rules.via_diameter,
+                            layers=(
+                                Layer(grid.index_to_layer(l0)),
+                                Layer(grid.index_to_layer(l1)),
+                            ),
+                            net=s_net, net_name=s_net_name,
+                        )
+                    )
+                    continue
+                _, x1, y1, x2, y2, li = e
+                if math.hypot(x2 - x1, y2 - y1) < 1e-6:
+                    continue
+                shadow_route.segments.append(
+                    Segment(
+                        x1=x1, y1=y1, x2=x2, y2=y2,
+                        width=s_width, layer=Layer(grid.index_to_layer(li)),
+                        net=s_net, net_name=s_net_name,
+                    )
+                )
+            shadow_route.segments.extend(end_tail.segments)
+            shadow_route.vias.extend(end_tail.vias)
+
+            guide_net_pad = spec.n_start if swap_roles else spec.p_start
+            guide_route_obj = Route(net=guide_net_pad.net, net_name=guide_net_pad.net_name)
+            guide_route_obj.segments.extend(guide.segments)
+            guide_route_obj.vias.extend(guide.vias)
+
+            if swap_roles:
+                p_route, n_route = shadow_route, guide_route_obj
+            else:
+                p_route, n_route = guide_route_obj, shadow_route
+
+            # Issue #3508: in-loop severity self-check (the same metric
+            # as the caller's #3320 gate).  Tails are routed without
+            # partner awareness, so a wrong-side body forces the tail
+            # to cross the guide; instead of letting the caller's gate
+            # reject the whole pair, fail THIS side over to the other.
+            net_class_map = getattr(self.autorouter, "net_class_map", None) or {}
+            nc = net_class_map.get(spec.p_start.net_name)
+            threshold = (
+                nc.effective_intra_pair_clearance()
+                if nc is not None
+                else self.autorouter.rules.trace_clearance
+            )
+            violation = find_intra_pair_clearance_violations(
+                p_route, n_route, threshold_mm=threshold, pair_name=pair.name
+            )
+            if violation is not None and violation.actual_clearance_mm < 0.0:
+                print(
+                    f"    [coupled-shadow] side={side:+.0f} self-check overlap "
+                    f"for {pair.name} "
+                    f"(worst={violation.actual_clearance_mm:+.3f}mm); trying "
+                    f"other side"
+                )
+                continue
+            return p_route, n_route
+
+        return None
+
+    def _rescue_near_miss_coupled(
+        self,
+        pair: DifferentialPair,
+        spec: CoupledSegmentSpec,
+        pathfinder: CoupledPathfinder,
+    ) -> tuple[Route, Route] | None:
+        """Complete a budget-exited coupled search that stalled near goal.
+
+        Issue #3508: reconstructs the partial coupled route up to the
+        search's best state (``pathfinder.last_best_node``) and routes
+        the two remaining head->pad tails with the single-ended per-net
+        router.  Returns ``(p_route, n_route)`` with the tails merged
+        in, or ``None`` when either tail cannot be routed (callers then
+        fall through to the legacy budget-exit handling).
+
+        Nothing is committed to the grid here -- the caller runs the
+        returned routes through the same #3320 severe-overlap gate and
+        commit path as a normally-converged coupled result, so a rescue
+        that produced crossing tails is rejected transactionally.
+        """
+        best = pathfinder.last_best_node
+        if best is None:
+            return None
+
+        grid = self.autorouter.grid
+        p_pos = best.state.p_pos
+        n_pos = best.state.n_pos
+        p_wx, p_wy = grid.grid_to_world(p_pos.x, p_pos.y)
+        n_wx, n_wy = grid.grid_to_world(n_pos.x, n_pos.y)
+
+        p_head = self._virtual_pad_at(spec.p_end, p_wx, p_wy, p_pos.layer)
+        n_head = self._virtual_pad_at(spec.n_end, n_wx, n_wy, n_pos.layer)
+
+        try:
+            p_route, n_route = pathfinder._reconstruct_coupled_routes(
+                best, spec.p_start, p_head, spec.n_start, n_head
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"    [coupled-rescue] reconstruction failed for {pair.name}: {exc}")
+            return None
+
+        p_tail = self._tail_route(pathfinder, p_head, spec.p_end, p_pos.layer, "P", pair.name)
+        if p_tail is None:
+            return None
+        n_tail = self._tail_route(pathfinder, n_head, spec.n_end, n_pos.layer, "N", pair.name)
+        if n_tail is None:
+            return None
+
+        p_route.segments.extend(p_tail.segments)
+        p_route.vias.extend(p_tail.vias)
+        n_route.segments.extend(n_tail.segments)
+        n_route.vias.extend(n_tail.vias)
+        return p_route, n_route
+
     def _single_ended_guide_route(
         self,
         start_pad: Pad,
@@ -2515,16 +3745,40 @@ class DiffPairRouter:
             spacing_cells += extra_spacing_cells
 
         # If any segment requires polarity-swap, enable swap-via moves.
+        #
+        # Issue #3508: swap-via moves are DISABLED.  The swap move
+        # exchanges the two heads' exact grid positions onto one shared
+        # new layer, so reconstruction emits the SAME A->B segment for
+        # both nets (P: A->B, N: B->A) -- coincident copper, i.e. a
+        # short.  Every swap-containing result was therefore rejected
+        # by the #3320 severe-overlap gate at exactly
+        # ``-trace_width`` (board 06 PCIE/USB3, board 07 DQS -- the
+        # "swap-overlap gate" rejection documented in #3473).  With
+        # mid-route asymmetric moves now enabled (this issue), a
+        # polarity swap is achievable WITHOUT vias: the advancing
+        # trace walks a discrete arc around its holding partner
+        # (offset-vector rotation through 180 degrees), which the
+        # trail-proximity guard keeps clearance-legal.  Re-enable only
+        # after the swap reconstruction emits a genuine two-layer
+        # crossover (staggered vias, partner segments on different
+        # layers).
         any_polarity_swap = any(s.polarity_swap for s in coupled_specs)
+        del any_polarity_swap  # documented above; swap moves disabled
 
-        # Create coupled pathfinder
+        # Create coupled pathfinder.
+        # Issue #3508: heuristic_weight > 1 (weighted A*) -- without it
+        # the joint-state search floods cost_turn-deep f-plateaus
+        # (~90k iterations for ONE 5-point shell on board 06) and no
+        # CI-affordable iteration budget converges.  See the
+        # ``heuristic_weight`` rationale in ``CoupledPathfinder``.
         pathfinder = CoupledPathfinder(
             self.autorouter.grid,
             self.autorouter.rules,
             spacing_cells,
             net_class_map=self.autorouter.net_class_map,
-            allow_swap_via=any_polarity_swap,
+            allow_swap_via=False,  # Issue #3508: see rationale above
             min_spacing_cells=min_spacing_cells,
+            heuristic_weight=COUPLED_HEURISTIC_WEIGHT,
         )
 
         routes: list[Route] = []
@@ -2568,13 +3822,72 @@ class DiffPairRouter:
             # skip the corridor and hand the budget to the legacy
             # open search instead of burning it before either coupled
             # attempt runs.
+            # Issue #3508: floor the probe budget at 45s (clamped to half
+            # the per-pair budget).  The #3473 eighth-of-budget bound
+            # starved board 06's USB3 probes: their single-ended guide
+            # routes need 30-37s (the C++ validation falls back to the
+            # Python pathfinder on the J1 fan-out geometry), so at the
+            # 60s per-pair budget the probe deadline (7.5s) always
+            # fired, no corridor existed, and the USB3 pairs ran the
+            # intractable open search only.
             probe_timeout = (
-                per_pair_timeout * 0.125 if per_pair_timeout is not None else None
+                min(max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5)
+                if per_pair_timeout is not None
+                else None
             )
+            probe_t0 = time.monotonic()
             guide_route = self._single_ended_guide_route(
                 spec.p_start, spec.p_end, per_net_timeout=probe_timeout
             )
+            print(
+                f"    [corridor-probe] guide_route="
+                f"{'ok' if guide_route is not None and guide_route.segments else 'FAILED'} "
+                f"elapsed={time.monotonic() - probe_t0:.2f}s "
+                f"segments={len(guide_route.segments) if guide_route is not None else 0}"
+            )
+            # Issue #3508: geometric shadow construction FIRST.  When
+            # the guide exists, building N as a validated parallel
+            # offset of the guide is deterministic, takes milliseconds,
+            # and produces coupled geometry by construction -- the
+            # joint-state search below is the fallback for guides the
+            # shadow cannot legally parallel (e.g., via-bearing guides
+            # or one-sided obstacle walls).
             if guide_route is not None and guide_route.segments:
+                shadow = self._shadow_route_pair(
+                    pair, spec, pathfinder, guide_route, spacing_cells
+                )
+                if shadow is not None:
+                    result = shadow
+                    coupled_phase = "shadow"
+                    print("    [coupled-shadow] pair constructed as guide + parallel shadow")
+
+            if result is None and guide_route is not None and guide_route.segments:
+                # Issue #3508: role-swapped shadow retry.  P's guide may
+                # carry vias or hug a one-sided obstacle wall; the N
+                # side's single-ended route can be shadowable when P's
+                # is not (board 06 MIPI_D0 / USB2_D: the P guide takes a
+                # 2-via detour while the N guide is planar).  Gated on
+                # the P probe having SUCCEEDED: when the P side cannot
+                # be single-ended-routed within the probe budget at all,
+                # the N side (same endpoints geometry) will not be
+                # either, and the retry would just burn a second probe
+                # budget per deferred pair.
+                n_guide = self._single_ended_guide_route(
+                    spec.n_start, spec.n_end, per_net_timeout=probe_timeout
+                )
+                if n_guide is not None and n_guide.segments:
+                    shadow = self._shadow_route_pair(
+                        pair, spec, pathfinder, n_guide, spacing_cells, swap_roles=True
+                    )
+                    if shadow is not None:
+                        result = shadow
+                        coupled_phase = "shadow-swapped"
+                        print(
+                            "    [coupled-shadow] pair constructed as N guide "
+                            "+ parallel P shadow"
+                        )
+
+            if result is None and guide_route is not None and guide_route.segments:
                 grid = self.autorouter.grid
                 resolution = grid.resolution
                 start_spacing_cells = (
@@ -2676,6 +3989,53 @@ class DiffPairRouter:
                 spec_elapsed,
                 result is not None,
             )
+            # Issue #3508: stdout visibility for the per-pair outcome.
+            # The board recipes are print-based (INFO logging is not
+            # configured), so without this line the only stdout signal
+            # for a failing pair is the budget-exceeded warning -- the
+            # corridor/open phase split and the iteration cost (the two
+            # knobs recipe authors tune) were invisible in CI logs.
+            best_state = pathfinder.last_best_state
+            print(
+                f"    [coupled-timing] phase={coupled_phase} "
+                f"elapsed={spec_elapsed:.2f}s "
+                f"corridor_iters={corridor_iterations_used} "
+                f"last_iters={pathfinder.last_iterations} "
+                f"best_progress={pathfinder.last_best_progress} "
+                f"best_state={best_state} "
+                f"rejections={dict(pathfinder.last_rejections)} "
+                f"success={result is not None}"
+            )
+
+            # Issue #3508: near-miss rescue.  The weighted corridor-
+            # bounded coupled search reliably traverses the route body
+            # but stalls in the final pad-landing needle-eye: the heads
+            # arrive within a few-hundred-micron Manhattan distance of
+            # the goal pads, where interleaved foreign-pad clearance
+            # halos leave only one runway per pad, the pair must
+            # asymmetrically spread from the coupled spacing back to
+            # the goal pad pitch inside that lattice, and the #3078
+            # path-history guard turns every runway probe into a
+            # dead-end (backing out retraces the head's own trail).
+            # Measured on board 06: 8/9 pairs stall at best_progress
+            # 5-21 cells after covering 95%+ of the route.  Rather
+            # than make the joint search solve the landing, commit the
+            # coupled body to the best state and finish each side with
+            # the single-ended per-net router, which lands on pads
+            # routinely.  The resulting tail (<= ~2 mm of a 30-50 mm
+            # route) keeps the coupled-length fraction far above every
+            # ``coupled_continuity_threshold`` in use (0.7-0.9).
+            if result is None and pathfinder.last_best_node is not None:
+                if pathfinder.last_best_progress <= NEAR_MISS_RESCUE_CELLS:
+                    rescue = self._rescue_near_miss_coupled(pair, spec, pathfinder)
+                    if rescue is not None:
+                        result = rescue
+                        coupled_phase += "+rescue"
+                        print(
+                            f"    [coupled-rescue] completed pair via "
+                            f"near-miss rescue (progress="
+                            f"{pathfinder.last_best_progress} cells)"
+                        )
 
             if result is None:
                 # Issue #3089: ``None`` may indicate (a) no path found,
@@ -2775,6 +4135,16 @@ class DiffPairRouter:
                     violation.expected_clearance_mm,
                     len(violation.segment_violations),
                 )
+                if _COUPLED_TRACE:
+                    print(
+                        f"      [overlap-debug] layer={violation.layer} "
+                        f"p_seg=({violation.p_segment.x1:.2f},"
+                        f"{violation.p_segment.y1:.2f})->"
+                        f"({violation.p_segment.x2:.2f},{violation.p_segment.y2:.2f}) "
+                        f"n_seg=({violation.n_segment.x1:.2f},"
+                        f"{violation.n_segment.y1:.2f})->"
+                        f"({violation.n_segment.x2:.2f},{violation.n_segment.y2:.2f})"
+                    )
                 # Do NOT commit p_route/n_route to grid or
                 # ``autorouter.routes``.  Fall back to independent
                 # routing for the whole pair (single source of truth
@@ -3373,6 +4743,29 @@ class DiffPairRouter:
 
             p_id, n_id = pair.get_net_ids()
             n_net_name = pair_violations[0].negative_net_name
+
+            # Issue #3508: defensive pair-identity check.  The lookup
+            # above re-runs pair DETECTION, which can disagree with the
+            # pairing the violation was recorded against (observed on
+            # board 06: a violation recorded for USB3_RX1+/USB3_RX1-
+            # resolved to a DifferentialPair object whose negative side
+            # was USB3_TX1-).  Re-routing such a cross-pair would rip
+            # up and re-couple nets from two DIFFERENT pairs.  Skip and
+            # leave the violation for the validate_routes() safety net.
+            if {pair.positive.net_name, pair.negative.net_name} != {
+                p_net_name,
+                n_net_name,
+            }:
+                logger.warning(
+                    "Phase B repair: detection re-paired %r with %r but the "
+                    "violation was recorded against %r/%r; skipping repair "
+                    "for this pair.",
+                    pair.positive.net_name,
+                    pair.negative.net_name,
+                    p_net_name,
+                    n_net_name,
+                )
+                continue
 
             # Snapshot current routes for this pair so we can either
             # rip them up cleanly or restore them on failure.
