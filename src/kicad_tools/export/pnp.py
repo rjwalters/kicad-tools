@@ -10,7 +10,7 @@ import csv
 import io
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -547,33 +547,26 @@ def export_pnp(
     Returns:
         Formatted CPL as CSV string
     """
+    # Resolve the effective config through the formatter FIRST so
+    # manufacturer defaults (e.g., JLCPCB defaults to exclude_tht=True)
+    # apply regardless of which branch below runs.  The formatter is the
+    # single source of truth for the effective config; synthesizing a
+    # config here would silently drop those defaults (issue #3618).
+    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
+    config = formatter.config
+
     # Auto-apply auxiliary origin offset when a PCB path is provided
-    if config is not None and pcb_path is not None and config.use_aux_origin:
+    if pcb_path is not None and config.use_aux_origin:
         aux_x, aux_y = get_aux_origin(pcb_path)
         if aux_x != 0.0 or aux_y != 0.0:
-            config = PnPExportConfig(
+            # dataclasses.replace preserves every other field of the
+            # effective config (exclude_tht, include_dnp, ...).
+            config = replace(
+                config,
                 x_offset=config.x_offset - aux_x,
                 y_offset=config.y_offset - aux_y,
-                mirror_x=config.mirror_x,
-                mirror_y=config.mirror_y,
-                use_aux_origin=config.use_aux_origin,
-                include_dnp=config.include_dnp,
-                exclude_tht=config.exclude_tht,
-                top_only=config.top_only,
-                bottom_only=config.bottom_only,
-                rotation_offset=config.rotation_offset,
             )
-    elif config is None and pcb_path is not None:
-        # Check aux origin with default config settings
-        aux_x, aux_y = get_aux_origin(pcb_path)
-        if aux_x != 0.0 or aux_y != 0.0:
-            config = PnPExportConfig(
-                x_offset=-aux_x,
-                y_offset=-aux_y,
-            )
+            formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
 
-    # Let the formatter provide its own default config (e.g., JLCPCB
-    # defaults to exclude_tht=True) when the caller did not supply one.
-    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
     placements = extract_placements(footprints, formatter.config)
     return formatter.format(placements)
