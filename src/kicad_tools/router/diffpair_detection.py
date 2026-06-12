@@ -252,22 +252,47 @@ def _gather_explicit_pairs(
     Supports one-sided declarations: if only one of the two half-pairs
     has the field set, the partner is still found provided it exists
     in ``net_names``.
+
+    Lookup scoping (Issue #3455): ``net_class_routing`` may be keyed by
+    NET NAME (autorouter ``net_class_map`` convention), by CLASS NAME
+    (``validate/match_group_skew`` convention), or by both (the
+    ``synth_routing`` idiom in ``router/core.py``).  A net-name-keyed
+    entry is authoritative for THAT net only.  A class-name-keyed entry
+    fans out to every net of the class, which is a pollution hazard:
+    when a per-net annotation (e.g. ``USB_D+`` with partner ``USB_D-``)
+    is registered under its class name (``HighSpeed``), every other net
+    of that class (``USB_CC1``, ``USB_CC2``, ...) would otherwise
+    inherit the partner declaration.  Class-keyed declarations are
+    therefore honored only when unambiguous -- see
+    :func:`_declared_partner_for_net`.
     """
     if not net_class_routing or not net_to_class:
         return []
 
-    declared: dict[str, str] = {}  # net_name -> partner_name
+    # Class-membership view restricted to nets actually on the board,
+    # used to disambiguate class-name-keyed declarations.
+    class_members: dict[str, list[str]] = {}
     for net_name in net_names.values():
         class_name = net_to_class.get(net_name)
-        if class_name is None:
-            continue
-        nc = net_class_routing.get(class_name)
-        if nc is None or nc.diffpair_partner is None:
-            continue
-        declared[net_name] = nc.diffpair_partner
+        if class_name is not None:
+            members = class_members.setdefault(class_name, [])
+            if net_name not in members:
+                members.append(net_name)
+
+    declared: dict[str, str] = {}  # net_name -> partner_name
+    for net_name in net_names.values():
+        partner_name = _declared_partner_for_net(
+            net_name=net_name,
+            net_class_routing=net_class_routing,
+            net_to_class=net_to_class,
+            class_members=class_members,
+        )
+        if partner_name is not None:
+            declared[net_name] = partner_name
 
     pairs: list[DifferentialPair] = []
     seen: set[frozenset[str]] = set()  # canonical {p, n} pair sets
+    used: set[str] = set()  # nets already consumed by an emitted pair
 
     for net_name, partner_name in declared.items():
         # Canonicalise so we don't emit the same pair twice from a
@@ -279,6 +304,19 @@ def _gather_explicit_pairs(
             logger.warning(
                 "[diffpair] explicit declaration on %s names partner %s "
                 "which is not in the net list; skipping",
+                net_name,
+                partner_name,
+            )
+            continue
+        # A net belongs to AT MOST one pair.  Conflicting declarations
+        # (two nets both claiming the same partner) keep the first and
+        # warn on the rest (Issue #3455: previously USB_CC2 -> USB_D-
+        # was emitted alongside USB_D+ -> USB_D-, and the last writer
+        # clobbered USB_D-'s partner in the autorouter wiring loop).
+        if net_name in used or partner_name in used:
+            logger.warning(
+                "[diffpair] explicit declaration %s <-> %s conflicts with "
+                "an already-emitted pair; skipping",
                 net_name,
                 partner_name,
             )
@@ -297,8 +335,106 @@ def _gather_explicit_pairs(
         )
         if pair is not None:
             pairs.append(pair)
+            used.add(net_name)
+            used.add(partner_name)
 
     return pairs
+
+
+def _declared_partner_for_net(
+    *,
+    net_name: str,
+    net_class_routing: dict[str, NetClassRouting],
+    net_to_class: dict[str, str],
+    class_members: dict[str, list[str]],
+) -> str | None:
+    """Resolve the explicitly-declared partner for ``net_name``, if any.
+
+    Resolution order (Issue #3455 -- net-name-scoped gathering):
+
+    1. **Net-name-keyed entry** (``net_class_routing[net_name]``): the
+       key IS the net name, so a ``diffpair_partner`` here is
+       authoritative for this net.  Arbitrary partner names (including
+       single-ended ones like ``USB_CC2``) remain honored -- this is
+       the documented "designers can still pair CC1/CC2 explicitly"
+       escape hatch.
+    2. **Class-name-keyed entry** (``net_class_routing[class_name]``):
+       the declaration is shared by every net of the class, so it can
+       describe at most ONE pair.  It is honored only when:
+
+       * this net is the ONLY class member besides the partner itself
+         (single-member classes -- the pre-#3455 explicit-declaration
+         shape used by all earlier tests), or
+       * this net is the unique polarity counterpart of the declared
+         partner (matching base name with ``+``/``-``, ``_P``/``_N``,
+         etc. polarity: ``USB_D+`` for partner ``USB_D-``).
+
+       Any other class member (``USB_CC2`` for partner ``USB_D-``) gets
+       NO partner from the class-level declaration.
+    """
+    # 1. Net-name-keyed lookup: authoritative for this net only.
+    nc = net_class_routing.get(net_name)
+    if nc is not None and getattr(nc, "diffpair_partner", None):
+        partner = nc.diffpair_partner
+        return partner if partner != net_name else None
+
+    # 2. Class-name-keyed lookup with fan-out disambiguation.
+    class_name = net_to_class.get(net_name)
+    if class_name is None or class_name == net_name:
+        return None
+    cnc = net_class_routing.get(class_name)
+    if cnc is None or cnc is nc or not getattr(cnc, "diffpair_partner", None):
+        return None
+    partner = cnc.diffpair_partner
+    if partner == net_name:
+        # This net IS the declared partner; the other half of the pair
+        # resolves the declaration from its own side.
+        return None
+
+    candidates = [m for m in class_members.get(class_name, []) if m != partner]
+    if len(candidates) <= 1:
+        # Unambiguous: this net is the only class member that could be
+        # the partner's other half.
+        return partner
+
+    # Multiple class members compete for the declared partner -- only a
+    # true polarity counterpart may claim it.
+    if not _is_polarity_counterpart(net_name, partner):
+        logger.debug(
+            "[diffpair] class %s declares partner %s but member %s is not "
+            "its polarity counterpart; not pairing",
+            class_name,
+            partner,
+            net_name,
+        )
+        return None
+    rivals = [m for m in candidates if m != net_name and _is_polarity_counterpart(m, partner)]
+    if rivals:
+        logger.warning(
+            "[diffpair] class %s declares partner %s but multiple members "
+            "(%s, %s) are polarity counterparts; skipping ambiguous "
+            "declaration",
+            class_name,
+            partner,
+            net_name,
+            ", ".join(rivals),
+        )
+        return None
+    return partner
+
+
+def _is_polarity_counterpart(a: str, b: str) -> bool:
+    """True when ``a`` and ``b`` form a polarity pair: identical base
+    name with opposite polarity suffixes (``USB_D+``/``USB_D-``,
+    ``CLK_P``/``CLK_N``, ...).  Names without a recognisable polarity
+    suffix (``USB_CC2``, ``TX0``) are never counterparts."""
+    from .diffpair import parse_differential_signal
+
+    a_parsed = parse_differential_signal(a)
+    b_parsed = parse_differential_signal(b)
+    if a_parsed is None or b_parsed is None:
+        return False
+    return a_parsed[0] == b_parsed[0] and a_parsed[1] != b_parsed[1]
 
 
 def _order_explicit_pair(a: str, b: str) -> tuple[str, str]:

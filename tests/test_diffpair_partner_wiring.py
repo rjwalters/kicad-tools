@@ -42,7 +42,6 @@ from kicad_tools.router.rules import (
     NetClassRouting,
 )
 
-
 # =============================================================================
 # Python pathfinder set_net_name_to_id / _resolve_partner_net_id
 # =============================================================================
@@ -259,7 +258,6 @@ class TestAutorouterPrepareRouting:
         """Multiple calls to _prepare_routing leave net_class_map stable."""
         ar = self._build_autorouter_with_usb_pair()
         ar._prepare_routing()
-        first_plus = ar.net_class_map["USB_D+"]
         ar._prepare_routing()
         second_plus = ar.net_class_map["USB_D+"]
         # Either the same dataclass-replaced object is reused OR an
@@ -298,6 +296,35 @@ class TestAutorouterPrepareRouting:
         assert "" not in ar.router._net_name_to_id
         assert ar.router._net_name_to_id == {"REAL_NET": 1}
 
+    def test_prepare_routing_partner_annotation_does_not_pollute_class(self):
+        """Issue #3455 regression: a board-recipe partner annotation on
+        USB_D+ (net-name-keyed, shared class 'HighSpeed') must not fan
+        out to USB_CC1/USB_CC2 through the class-name-keyed synth lookup,
+        and must not clobber USB_D-'s true partner.
+        """
+        ar = Autorouter(width=20.0, height=20.0)
+        for nid, name in enumerate(["USB_D+", "USB_D-", "USB_CC1", "USB_CC2"], start=1):
+            ar.nets[nid] = [("J1", str(nid))]
+            ar.net_names[nid] = name
+            ar.net_class_map[name] = NET_CLASS_HIGH_SPEED
+
+        # Board-03-recipe style annotation: per-net copy for USB_D+.
+        ar.net_class_map["USB_D+"] = dataclasses.replace(
+            NET_CLASS_HIGH_SPEED, diffpair_partner="USB_D-"
+        )
+
+        ar._prepare_routing()
+
+        assert ar.net_class_map["USB_D+"].diffpair_partner == "USB_D-"
+        assert ar.net_class_map["USB_D-"].diffpair_partner == "USB_D+"
+        # CC nets are single-ended configuration channels -- no partner,
+        # and no relaxed intra-pair clearance applied between unrelated
+        # nets.
+        assert ar.net_class_map["USB_CC1"].diffpair_partner is None
+        assert ar.net_class_map["USB_CC2"].diffpair_partner is None
+        # Shared singleton untouched.
+        assert NET_CLASS_HIGH_SPEED.diffpair_partner is None
+
 
 # =============================================================================
 # find_blocking_nets partner exclusion
@@ -312,9 +339,7 @@ class TestFindBlockingNetsPartnerExclusion:
         rules = DesignRules()
         grid = RoutingGrid(10.0, 10.0, rules)
         x_class = NetClassRouting(name="Diff", diffpair_partner="Y")
-        router = Router(
-            grid=grid, rules=rules, net_class_map={"X": x_class}
-        )
+        router = Router(grid=grid, rules=rules, net_class_map={"X": x_class})
         router.set_net_name_to_id({"X": 1, "Y": 2})
         return router, grid
 
@@ -391,9 +416,7 @@ class TestFindBlockingNetsPartnerExclusion:
         end_pad = self._make_pad(9.0, 5.0, net=1, net_name="X")
 
         blocking = router.find_blocking_nets(start_pad, end_pad)
-        assert 2 in blocking, (
-            "without partner declaration, net 2 is a regular blocker"
-        )
+        assert 2 in blocking, "without partner declaration, net 2 is a regular blocker"
 
 
 # =============================================================================

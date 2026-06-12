@@ -269,6 +269,156 @@ class TestExplicitDeclaration:
 
 
 # =============================================================================
+# 5b. Class-name-keyed fan-out pollution (Issue #3455)
+# =============================================================================
+
+
+class TestClassKeyedFanOut:
+    """Issue #3455: a per-net partner annotation registered under its
+    CLASS name must not fan out to every net of the class.
+
+    Board-03 shape: ``USB_D+`` carries ``diffpair_partner='USB_D-'`` on
+    a per-net ``NetClassRouting`` copy.  The autorouter's synth_routing
+    idiom (``router/core.py``) registers that instance under the class
+    name ``HighSpeed`` via ``setdefault``, after which the old
+    class-keyed lookup paired EVERY HighSpeed net (USB_CC1, USB_CC2)
+    with USB_D-.
+    """
+
+    _USB_NETS = {1: "USB_D+", 2: "USB_D-", 3: "USB_CC1", 4: "USB_CC2"}
+
+    def _synth_routing_board03(self):
+        """Mirror core.py's synth_routing idiom: net-name keys for every
+        net plus a class-name key holding the FIRST net's instance
+        (here: the annotated USB_D+ copy -- the worst case)."""
+        plain = NetClassRouting(name="HighSpeed")
+        annotated = NetClassRouting(name="HighSpeed", diffpair_partner="USB_D-")
+        routing = {
+            "USB_D+": annotated,
+            "USB_D-": plain,
+            "USB_CC1": plain,
+            "USB_CC2": plain,
+            "HighSpeed": annotated,  # setdefault winner = first net's instance
+        }
+        net_to_class = dict.fromkeys(self._USB_NETS.values(), "HighSpeed")
+        return routing, net_to_class
+
+    def test_cc_nets_not_polluted_by_class_keyed_annotation(self):
+        routing, net_to_class = self._synth_routing_board03()
+        out = detect_diff_pairs(
+            self._USB_NETS,
+            net_class_routing=routing,
+            net_to_class=net_to_class,
+        )
+        assert len(out) == 1
+        names = {out[0].pair.positive.net_name, out[0].pair.negative.net_name}
+        assert names == {"USB_D+", "USB_D-"}
+        assert out[0].source == DetectionSource.EXPLICIT
+
+    def test_pure_class_keyed_map_selects_polarity_counterpart(self):
+        # validate/match_group_skew convention: ONLY class-name keys.
+        # The declaration can describe at most one pair; only the
+        # polarity counterpart of USB_D- (USB_D+) may claim it.
+        nc = NetClassRouting(name="HighSpeed", diffpair_partner="USB_D-")
+        net_to_class = dict.fromkeys(self._USB_NETS.values(), "HighSpeed")
+        out = detect_diff_pairs(
+            self._USB_NETS,
+            net_class_routing={"HighSpeed": nc},
+            net_to_class=net_to_class,
+        )
+        assert len(out) == 1
+        names = {out[0].pair.positive.net_name, out[0].pair.negative.net_name}
+        assert names == {"USB_D+", "USB_D-"}
+
+    def test_single_member_class_still_pairs_arbitrary_names(self):
+        # Documented escape hatch: designers can pair USB-C CC1/CC2
+        # explicitly.  A class with a single member net keeps working
+        # even though CC2 has no polarity suffix.
+        net_names = {1: "USB_CC1", 2: "USB_CC2"}
+        nc = NetClassRouting(name="USBCC", diffpair_partner="USB_CC2")
+        out = detect_diff_pairs(
+            net_names,
+            net_class_routing={"USBCC": nc},
+            net_to_class={"USB_CC1": "USBCC"},
+        )
+        assert len(out) == 1
+        names = {out[0].pair.positive.net_name, out[0].pair.negative.net_name}
+        assert names == {"USB_CC1", "USB_CC2"}
+
+    def test_multi_member_class_with_non_polarity_partner_refused(self):
+        # Two members compete for a partner that has no polarity suffix
+        # -- ambiguous, so nobody pairs.
+        net_names = {1: "USB_CC1", 2: "SIG_X", 3: "USB_CC2"}
+        nc = NetClassRouting(name="Misc", diffpair_partner="USB_CC2")
+        out = detect_diff_pairs(
+            net_names,
+            net_class_routing={"Misc": nc},
+            net_to_class={"USB_CC1": "Misc", "SIG_X": "Misc", "USB_CC2": "Misc"},
+        )
+        assert out == []
+
+    def test_bus_indices_not_paired_by_class_declaration(self):
+        # TX0/TX1 are bus indices, not polarity halves; a class-level
+        # partner declaration must not couple them.
+        net_names = {1: "TX0", 2: "TX1", 3: "USB_D-"}
+        nc = NetClassRouting(name="HighSpeed", diffpair_partner="USB_D-")
+        out = detect_diff_pairs(
+            net_names,
+            net_class_routing={"HighSpeed": nc},
+            net_to_class={"TX0": "HighSpeed", "TX1": "HighSpeed"},
+        )
+        assert out == []
+
+    def test_net_name_keyed_entry_remains_authoritative(self):
+        # net-name-keyed declarations (autorouter net_class_map style)
+        # are honored verbatim, including arbitrary partner names.
+        net_names = {1: "USB_CC1", 2: "USB_CC2"}
+        nc = NetClassRouting(name="USBCC", diffpair_partner="USB_CC2")
+        out = detect_diff_pairs(
+            net_names,
+            net_class_routing={"USB_CC1": nc},
+            net_to_class={"USB_CC1": "USBCC", "USB_CC2": "USBCC"},
+        )
+        assert len(out) == 1
+        names = {out[0].pair.positive.net_name, out[0].pair.negative.net_name}
+        assert names == {"USB_CC1", "USB_CC2"}
+
+    def test_conflicting_declarations_keep_first_and_warn(self, caplog):
+        # Two nets both name the same partner via net-name-keyed
+        # entries: only one pair is emitted (a net belongs to at most
+        # one pair) and the conflict is logged.
+        net_names = {1: "USB_D+", 2: "USB_D-", 3: "USB_CC2"}
+        nc_dp = NetClassRouting(name="A", diffpair_partner="USB_D-")
+        nc_cc = NetClassRouting(name="B", diffpair_partner="USB_D-")
+        with caplog.at_level(logging.WARNING):
+            out = detect_diff_pairs(
+                net_names,
+                net_class_routing={"USB_D+": nc_dp, "USB_CC2": nc_cc},
+                net_to_class={"USB_D+": "A", "USB_CC2": "B"},
+            )
+        assert len(out) == 1
+        names = {out[0].pair.positive.net_name, out[0].pair.negative.net_name}
+        assert names == {"USB_D+", "USB_D-"}
+        assert any("conflicts" in r.message for r in caplog.records)
+
+    def test_ambiguous_polarity_rivals_warn_and_skip(self, caplog):
+        # Two distinct nets both parse as the polarity counterpart of
+        # the declared partner -- the EXPLICIT declaration is ambiguous
+        # and is skipped with a warning.  Suffix inference may still
+        # pair USB_D+/USB_D- on its own merit afterwards.
+        net_names = {1: "USB_D+", 2: "USB_D_P", 3: "USB_D-"}
+        nc = NetClassRouting(name="HS", diffpair_partner="USB_D-")
+        with caplog.at_level(logging.WARNING):
+            out = detect_diff_pairs(
+                net_names,
+                net_class_routing={"HS": nc},
+                net_to_class={"USB_D+": "HS", "USB_D_P": "HS", "USB_D-": "HS"},
+            )
+        assert all(p.source != DetectionSource.EXPLICIT for p in out)
+        assert any("polarity counterparts" in r.message for r in caplog.records)
+
+
+# =============================================================================
 # 6. KiCad group
 # =============================================================================
 
