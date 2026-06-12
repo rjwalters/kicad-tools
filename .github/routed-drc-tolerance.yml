@@ -1533,15 +1533,6 @@ tolerances:
 
   # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
   # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
-  # shorts that were previously invisible to every gate) fired 4
-  # finding(s) on this committed artifact.  All 4 are shorts (VIN/VOUT vs GND F.Cu fill).
-  # Artifact fix tracked in #3549; remove/reduce this entry in the PR
-  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
-  # the rule.
-  boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb: 4
-
-  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
-  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
   # shorts that were previously invisible to every gate) fired 11
   # finding(s) on this committed artifact.  Shorts + grazes (NODE_B/NODE_C/LINE_A vs VCC F.Cu and GND B.Cu fills).
   # Artifact fix tracked in #3550; remove/reduce this entry in the PR
