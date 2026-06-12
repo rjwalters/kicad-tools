@@ -339,6 +339,10 @@ class ConnectivityValidator:
         through copper pours: if a pad position falls geometrically inside a
         zone boundary polygon on a matching copper layer, the pad is treated
         as electrically connected to every other pad within the same zone.
+        This heuristic only applies to zones with at least one filled
+        polygon — a zone that produced no filled copper (fill disabled, or
+        fill enabled but fully shadowed/carved away) provides no
+        connectivity (Issue #3514, mirroring Issue #3482).
 
         Args:
             net_number: Net number to analyze
@@ -441,9 +445,24 @@ class ConnectivityValidator:
         # For each zone on this net, check if pads fall inside the zone
         # boundary polygon on a matching copper layer.  Pads within the
         # same zone are electrically connected via the copper pour.
+        #
+        # IMPORTANT (Issue #3514, mirroring the Issue #3482 fix in
+        # NetStatusAnalyzer): the boundary polygon only implies connectivity
+        # when the zone actually produced filled copper. A zone with fill
+        # enabled but zero filled polygons (e.g. fully shadowed by a
+        # higher-priority zone, or carved away entirely by clearances) — or a
+        # boundary-only zone with fill disabled — contributes NO copper on
+        # the manufactured board, so its boundary must not mark pads/vias as
+        # connected. The boundary heuristic exists solely for thermal-relief
+        # cutouts INSIDE filled copper, which presupposes the zone has at
+        # least one filled polygon.
         zone_connected_pads: set[str] = set()
         for zone in self.pcb.zones:
             if zone.net_number != net_number:
+                continue
+            # Zero-fill zones provide no electrical connectivity at all
+            # (Issue #3514): skip the boundary-containment heuristic.
+            if not zone.filled_polygons:
                 continue
             if not zone.polygon or len(zone.polygon) < 3:
                 continue

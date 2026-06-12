@@ -558,8 +558,10 @@ class TestZoneConnectivity:
     layers are detected as electrically connected through the zone pour.
     """
 
-    # PCB with two pads on the same net connected only by a zone boundary
-    # polygon (no traces).  The zone polygon encloses both pads.
+    # PCB with two pads on the same net connected only by a filled zone
+    # (no traces).  The zone polygon and filled copper enclose both pads.
+    # NOTE (Issue #3514): zone fixtures include filled_polygon data because
+    # zones without filled copper provide no connectivity.
     ZONE_CONNECTED_SAME_LAYER_PCB = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -591,6 +593,15 @@ class TestZoneConnectivity:
     (uuid "zone-gnd")
     (fill yes)
     (polygon
+      (pts
+        (xy 95 95)
+        (xy 120 95)
+        (xy 120 105)
+        (xy 95 105)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
       (pts
         (xy 95 95)
         (xy 120 95)
@@ -642,6 +653,15 @@ class TestZoneConnectivity:
         (xy 95 105)
       )
     )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 95 95)
+        (xy 120 95)
+        (xy 120 105)
+        (xy 95 105)
+      )
+    )
   )
 )
 """
@@ -685,6 +705,15 @@ class TestZoneConnectivity:
         (xy 95 105)
       )
     )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 95 95)
+        (xy 105 95)
+        (xy 105 105)
+        (xy 95 105)
+      )
+    )
   )
 )
 """
@@ -721,6 +750,15 @@ class TestZoneConnectivity:
     (uuid "zone-gnd")
     (fill yes)
     (polygon
+      (pts
+        (xy 95 95)
+        (xy 120 95)
+        (xy 120 105)
+        (xy 95 105)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
       (pts
         (xy 95 95)
         (xy 120 95)
@@ -869,6 +907,176 @@ class TestZoneConnectivity:
         assert ConnectivityValidator._pad_layer_matches_zone(["*.Cu"], "F.Cu") is True
         assert ConnectivityValidator._pad_layer_matches_zone(["*.Cu"], "B.Cu") is True
         assert ConnectivityValidator._pad_layer_matches_zone(["*.Cu"], "In1.Cu") is True
+
+
+# ---- PCB fixtures for zero-fill zone connectivity tests (Issue #3514) ----
+
+# Shared body: two GND pads inside the zone outline, no traces, no vias.
+# The zone definition is parameterized so each case differs only in its
+# fill / filled_polygon content.  Mirrors the Issue #3482 fixtures used for
+# NetStatusAnalyzer in tests/test_analysis_net_status.py.
+_ZONE_FILL_PCB_TEMPLATE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r2"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone-gnd")
+    {fill_clause}
+    (polygon
+      (pts
+        (xy 95 95)
+        (xy 120 95)
+        (xy 120 105)
+        (xy 95 105)
+      )
+    )
+{filled_polygons}  )
+)
+"""
+
+# Zone with fill ENABLED but zero filled polygons (e.g. fully shadowed by a
+# higher-priority overlapping zone, or carved away entirely by clearances).
+# Both pads sit inside the zone BOUNDARY but there is no copper: the net is
+# physically open on the manufactured board.
+ZERO_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="",
+)
+
+# Zone with fill DISABLED (boundary-only zone).
+BOUNDARY_ONLY_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="",
+)
+
+# Zone whose fill produced copper over only PART of the outline: the filled
+# polygon covers x in [95, 105] while the boundary extends to x = 120.
+# R1.2 (100.5, 100) lands inside filled copper; R2.2 (110.5, 100) is inside
+# the boundary only (thermal-relief-cutout territory).  The Issue #479
+# boundary heuristic applies because the zone genuinely has filled copper.
+PARTIAL_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="""    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 95 95)
+        (xy 105 95)
+        (xy 105 105)
+        (xy 95 105)
+      )
+    )
+""",
+)
+
+
+class TestZeroFillZoneConnectivity:
+    """Regression tests for Issue #3514 (ConnectivityValidator twin of #3482).
+
+    A zone with zero filled polygons produces NO copper on the manufactured
+    board, so its boundary polygon must not mark pads or vias as connected.
+    Before the fix, the boundary-containment heuristic marked every pad
+    inside a zero-fill zone outline as zone-connected, so
+    ``kct validate --connectivity`` passed physically open pour nets
+    (false-positive connectivity).
+    """
+
+    @pytest.fixture
+    def zero_fill_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "zero_fill.kicad_pcb"
+        pcb_file.write_text(ZERO_FILL_ZONE_PCB)
+        return pcb_file
+
+    @pytest.fixture
+    def boundary_only_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "boundary_only.kicad_pcb"
+        pcb_file.write_text(BOUNDARY_ONLY_ZONE_PCB)
+        return pcb_file
+
+    @pytest.fixture
+    def partial_fill_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "partial_fill.kicad_pcb"
+        pcb_file.write_text(PARTIAL_FILL_ZONE_PCB)
+        return pcb_file
+
+    def test_zero_fill_zone_is_not_connectivity(self, zero_fill_pcb: Path):
+        """Two pads bridged only by a zero-fill zone must report an error.
+
+        Fill is enabled but the zone produced no filled polygons, so the
+        net is an open circuit -- the validator must NOT report it as
+        connected.
+        """
+        validator = ConnectivityValidator(zero_fill_pcb)
+        result = validator.validate()
+
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) > 0, (
+            "GND should be reported disconnected: zero-fill zone provides no copper"
+        )
+        # The zone must not count as zone-connectivity either.
+        assert result.zone_connected_nets == 0
+
+    def test_boundary_only_zone_is_not_connectivity(self, boundary_only_pcb: Path):
+        """A boundary-only zone (fill disabled) must not provide connectivity."""
+        validator = ConnectivityValidator(boundary_only_pcb)
+        result = validator.validate()
+
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) > 0, (
+            "GND should be reported disconnected: fill-disabled zone is not copper"
+        )
+        assert result.zone_connected_nets == 0
+
+    def test_partial_fill_zone_provides_connectivity(self, partial_fill_pcb: Path):
+        """A zone with at least one filled polygon retains the boundary
+        heuristic: pads inside the outline (including thermal-relief
+        cutouts) are zone-connected (Issue #479 behavior, no regression).
+        """
+        validator = ConnectivityValidator(partial_fill_pcb)
+        result = validator.validate()
+
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) == 0, (
+            f"Partially filled zone should connect pads inside its boundary, got: {gnd_errors}"
+        )
+        assert result.zone_connected_nets >= 1
+
+    def test_fully_filled_zone_regression(self, tmp_path: Path):
+        """Fully filled zone behavior must not regress: a zone with a
+        filled polygon covering both pads connects them."""
+        pcb_file = tmp_path / "full_fill.kicad_pcb"
+        pcb_file.write_text(TestZoneConnectivity.ZONE_CONNECTED_SAME_LAYER_PCB)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) == 0, (
+            f"Fully filled zone should connect both pads, got: {gnd_errors}"
+        )
+        assert result.zone_connected_nets >= 1
 
 
 class TestConnectivityCLI:
