@@ -2,6 +2,7 @@
 
 from kicad_tools.sexp import SExp, parse_file, parse_string, serialize_sexp
 
+from .layers import COPPER_LAYER_ORDER, via_spans_layer
 from .severity import SeverityMixin
 from .sexp_file import (
     load_pcb,
@@ -39,4 +40,7 @@ __all__ = [
     "Layer",
     "CopperLayer",
     "LayoutStyle",
+    # Stackup helpers
+    "COPPER_LAYER_ORDER",
+    "via_spans_layer",
 ]

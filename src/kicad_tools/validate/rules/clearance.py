@@ -19,6 +19,7 @@ from kicad_tools.core.geometry import (
 from kicad_tools.core.geometry import (
     segments_intersect as _segments_intersect,
 )
+from kicad_tools.core.layers import via_spans_layer as _via_spans_layer
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
@@ -64,6 +65,14 @@ class CopperElement:
     reference: str
     # Net name for violation output (empty string for unconnected/net 0)
     net_name: str = ""
+    # For vias: the layer names explicitly declared on the via (the
+    # endpoint pair, e.g. ("F.Cu", "B.Cu")).  A through-via barrel is
+    # physical copper on every layer it SPANS, so the element is
+    # collected on inner layers too (issue #3487) -- but via-via and
+    # pad-via pairs are only evaluated on explicitly-declared layers to
+    # avoid re-reporting the same geometric pair on every spanned layer
+    # (the endpoint-layer scan already covers them).
+    explicit_layers: tuple[str, ...] = ()
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -103,6 +112,7 @@ class CopperElement:
             geometry=(via.position[0], via.position[1], via.size, via.size),
             reference=f"Via-{via.uuid[:8]}" if via.uuid else "Via",
             net_name=via.net_name if via.net_number != 0 else "",
+            explicit_layers=tuple(via.layers),
         )
 
     def on_layer(self, layer: str) -> bool:
@@ -636,6 +646,26 @@ class ClearanceRule(DRCRule):
                 if elem1.net_number == 0 or elem2.net_number == 0:
                     continue
 
+                # Vias are collected on every copper layer their barrel
+                # spans (issue #3487) so SEGMENT-via conflicts on inner
+                # layers are caught.  Pairs of layer-spanning elements
+                # (via-via, pad-via) have layer-independent geometry and
+                # are already evaluated on the via's explicitly-declared
+                # endpoint layers -- re-running them on each spanned
+                # inner layer would only duplicate the same report, so
+                # restrict non-segment pairs to declared layers.
+                if elem1.element_type != "segment" and elem2.element_type != "segment":
+                    if (
+                        elem1.element_type == "via"
+                        and elem1.explicit_layers
+                        and layer_name not in elem1.explicit_layers
+                    ) or (
+                        elem2.element_type == "via"
+                        and elem2.explicit_layers
+                        and layer_name not in elem2.explicit_layers
+                    ):
+                        continue
+
                 # Skip same-pair segment-to-segment edges -- they are
                 # validated by DiffPairClearanceIntraRule against a
                 # tighter per-class threshold.  Pad/via combinations
@@ -702,9 +732,16 @@ class ClearanceRule(DRCRule):
                 if layer_name in pad.layers or "*.Cu" in pad.layers:
                     elements.append(CopperElement.from_pad(pad, fp))
 
-        # Add vias (they span layers, so include if layer is in via's layer list)
+        # Add vias whose barrel passes through this layer.  KiCad
+        # declares only the endpoint pair on the via (a through-via on a
+        # 4-layer board reads ``(layers "F.Cu" "B.Cu")``), but the barrel
+        # is physical copper on EVERY layer it spans -- including inner
+        # layers that never appear in ``via.layers``.  The previous
+        # ``layer_name in via.layers`` test silently skipped barrel-vs-
+        # inner-layer-segment conflicts (issue #3487: three real shorts
+        # on the softstart board were invisible to ``kct check``).
         for via in pcb.vias:
-            if layer_name in via.layers:
+            if _via_spans_layer(via.layers, layer_name):
                 elements.append(CopperElement.from_via(via))
 
         return elements

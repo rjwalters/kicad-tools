@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
+
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
@@ -901,41 +903,10 @@ class NetStatusAnalyzer:
         return (dx * dx + dy * dy) < (self.POSITION_TOLERANCE * self.POSITION_TOLERANCE)
 
     # Canonical copper layer ordering from top to bottom.
-    # Used to determine whether a through-via spans a given inner layer.
-    _COPPER_LAYER_ORDER: list[str] = [
-        "F.Cu",
-        "In1.Cu",
-        "In2.Cu",
-        "In3.Cu",
-        "In4.Cu",
-        "In5.Cu",
-        "In6.Cu",
-        "In7.Cu",
-        "In8.Cu",
-        "In9.Cu",
-        "In10.Cu",
-        "In11.Cu",
-        "In12.Cu",
-        "In13.Cu",
-        "In14.Cu",
-        "In15.Cu",
-        "In16.Cu",
-        "In17.Cu",
-        "In18.Cu",
-        "In19.Cu",
-        "In20.Cu",
-        "In21.Cu",
-        "In22.Cu",
-        "In23.Cu",
-        "In24.Cu",
-        "In25.Cu",
-        "In26.Cu",
-        "In27.Cu",
-        "In28.Cu",
-        "In29.Cu",
-        "In30.Cu",
-        "B.Cu",
-    ]
+    # Promoted to ``kicad_tools.core.layers`` in Issue #3487 so the DRC
+    # clearance rule shares the same via-span semantics; kept here as a
+    # class attribute for backwards compatibility with existing tests.
+    _COPPER_LAYER_ORDER: list[str] = list(COPPER_LAYER_ORDER)
 
     def _via_spans_layer(self, via_layers: list[str], target_layer: str) -> bool:
         """Check if a via spans (connects to) a target copper layer.
@@ -945,6 +916,10 @@ class NetStatusAnalyzer:
         just the two listed layers.  A blind/buried via ["F.Cu", "In1.Cu"]
         connects F.Cu and In1.Cu only (no intermediates beyond those two).
 
+        Delegates to :func:`kicad_tools.core.layers.via_spans_layer`
+        (single source of truth shared with the DRC clearance rule;
+        Issue #3487).
+
         Args:
             via_layers: List of layer names from the via (e.g., ["F.Cu", "B.Cu"])
             target_layer: Layer name to check (e.g., "In1.Cu")
@@ -952,30 +927,7 @@ class NetStatusAnalyzer:
         Returns:
             True if the via electrically connects the target layer
         """
-        # Direct match -- layer explicitly listed on the via
-        if target_layer in via_layers:
-            return True
-
-        # Determine the span of the via in the copper stack
-        indices = []
-        for layer in via_layers:
-            try:
-                indices.append(self._COPPER_LAYER_ORDER.index(layer))
-            except ValueError:
-                # Unknown layer name -- skip (non-copper or custom)
-                continue
-
-        if len(indices) < 2:
-            return False
-
-        # Target must also be a recognised copper layer
-        try:
-            target_idx = self._COPPER_LAYER_ORDER.index(target_layer)
-        except ValueError:
-            return False
-
-        # Via spans from min to max index; any layer in between is connected
-        return min(indices) <= target_idx <= max(indices)
+        return via_spans_layer(via_layers, target_layer)
 
     def _pad_layer_matches_zone(
         self,
