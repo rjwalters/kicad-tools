@@ -1540,14 +1540,13 @@ tolerances:
   # the rule.
   boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb: 11
 
-  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
-  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
-  # shorts that were previously invisible to every gate) fired 10
-  # finding(s) on this committed artifact.  6 shorts + 4 grazes (SW_OUT/PWM_AL/PWM_BH/GATE_CL/SWDIO vs +24V/+3V3/GND fills).  The #3526 PWR_LED-vs-+3V3 short is FIXED and does not appear.
-  # Artifact fix tracked in #3553; remove/reduce this entry in the PR
-  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
-  # the rule.
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 10
+  # Board 05's #3527 grandfather entry (10 ``clearance_segment_zone``
+  # findings: 6 shorts + 4 grazes, SW_OUT/PWM_AL/PWM_BH/GATE_CL/SWDIO vs
+  # +24V/+3V3/GND fills) was REMOVED by Issue #3553 (2026-06-11).  All 10
+  # were stale-fill defects: regenerating the zone fills against the final
+  # committed copper (``kct zones fill``, same recipe as board 06 / PR
+  # #3548 and softstart step 11c) cleared every finding with zero trace,
+  # via, or zone-outline changes.  Strict 0-error gate at jlcpcb-tier1.
 
 # Per-board manufacturer overrides for the CI gate (optional).
 #
