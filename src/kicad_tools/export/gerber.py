@@ -7,6 +7,7 @@ Wraps kicad-cli for generating Gerber files with manufacturer presets.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import tempfile
 import zipfile
@@ -17,12 +18,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.exceptions import (
     ConfigurationError,
     ExportError,
 )
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
-from kicad_tools.cli.runner import find_kicad_cli
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,69 @@ def _pcb_has_unfilled_zones(pcb_path: Path) -> bool:
     # If we have zones but no filled_polygon, the zones are unfilled and
     # the resulting Gerbers would lack G36..G37 polygon-fill regions.
     return "filled_polygon" not in text
+
+
+# Board-level copper layer definitions inside the top-level ``(layers ...)``
+# table look like ``(0 "F.Cu" signal)`` / ``(4 "In1.Cu" signal)`` -- an
+# integer ordinal, a quoted layer name, then a layer type token.  The integer
+# ordinal distinguishes these from per-pad/per-via ``(layers "F.Cu" ...)``
+# lists, and the type token guards against ``(net 4 "...")`` entries.
+_COPPER_LAYER_DEF_RE = re.compile(
+    r'\(\s*\d+\s+"((?:F|B|In\d+)\.Cu)"\s+(?:signal|power|mixed|jumper)\b'
+)
+
+
+def _inner_copper_index(name: str) -> int:
+    """Return the ``N`` from ``InN.Cu`` (e.g. 1 for ``In1.Cu``)."""
+    return int(name[2:].split(".")[0])
+
+
+def _pcb_copper_layers(pcb_path: Path) -> list[str]:
+    """Return the copper layers declared by the PCB's stackup, in plot order.
+
+    Parses the board-level ``(layers ...)`` table with a cheap text scan
+    (same approach as :func:`_pcb_has_unfilled_zones`) and returns the
+    copper layers ordered front-to-back: ``F.Cu``, ``In1.Cu`` .. ``InN.Cu``,
+    ``B.Cu``.  Ordering is derived from the layer *names* rather than the
+    file's numeric ordinals because KiCad changed copper-layer numbering
+    between versions (legacy: F.Cu=0 .. B.Cu=31; KiCad 9+: F.Cu=0, B.Cu=2,
+    In1.Cu=4, ...) while the canonical names are stable.
+
+    Falls back to ``["F.Cu", "B.Cu"]`` if the file cannot be read or no
+    copper layer definitions are found, preserving the previous 2-layer
+    behaviour (issue #3559: the old hardcode silently dropped inner copper
+    on 4-layer boards).
+    """
+    fallback = ["F.Cu", "B.Cu"]
+    try:
+        text = pcb_path.read_text()
+    except OSError:
+        logger.warning(
+            "Could not read %s to detect copper layers; assuming 2-layer (F.Cu, B.Cu)",
+            pcb_path,
+        )
+        return fallback
+
+    found = set(_COPPER_LAYER_DEF_RE.findall(text))
+    if not found:
+        logger.warning(
+            "No copper layer definitions found in %s; assuming 2-layer (F.Cu, B.Cu)",
+            pcb_path,
+        )
+        return fallback
+
+    inner = sorted(
+        (name for name in found if name.startswith("In")),
+        key=_inner_copper_index,
+    )
+
+    layers: list[str] = []
+    if "F.Cu" in found:
+        layers.append("F.Cu")
+    layers.extend(inner)
+    if "B.Cu" in found:
+        layers.append("B.Cu")
+    return layers
 
 
 @dataclass
@@ -108,6 +172,8 @@ JLCPCB_PRESET = GerberManufacturerPreset(
     layer_rename={
         # JLCPCB preferred naming
         "F.Cu": "F_Cu",
+        "In1.Cu": "In1_Cu",
+        "In2.Cu": "In2_Cu",
         "B.Cu": "B_Cu",
         "F.SilkS": "F_Silkscreen",
         "B.SilkS": "B_Silkscreen",
@@ -171,7 +237,6 @@ MANUFACTURER_PRESETS: dict[str, GerberManufacturerPreset] = {
     "oshpark": OSHPARK_PRESET,
     "seeed": SEEED_PRESET,
 }
-
 
 
 def get_kicad_cli_version(kicad_cli: Path) -> str | None:
@@ -534,11 +599,13 @@ class GerberExporter:
             )
 
     def _get_default_layers(self, config: GerberConfig) -> list[str]:
-        """Get default layers to export based on config."""
-        layers = ["F.Cu", "B.Cu"]  # Always include copper
+        """Get default layers to export based on config.
 
-        # Add inner copper layers if present (detected from PCB)
-        # For now, assume 2-layer. Could parse PCB to detect actual layers.
+        Copper layers are derived from the PCB's actual stackup (issue
+        #3559): a 4-layer board yields F.Cu, In1.Cu, In2.Cu, B.Cu so the
+        inner plane copper is never silently dropped from the Gerbers.
+        """
+        layers = _pcb_copper_layers(self.pcb_path)
 
         if config.include_silkscreen:
             layers.extend(["F.SilkS", "B.SilkS"])
