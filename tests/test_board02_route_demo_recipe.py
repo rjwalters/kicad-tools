@@ -47,6 +47,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -65,10 +66,11 @@ ROUTE_DEMO_SCRIPT = BOARD_DIR / "route_demo.py"
 GENERATE_DESIGN_SCRIPT = BOARD_DIR / "generate_design.py"
 OUTPUT_DIR = BOARD_DIR / "output"
 UNROUTED_PCB = OUTPUT_DIR / "charlieplex_3x3.kicad_pcb"
-# NOTE: the end-to-end tests below deliberately do NOT write to the
-# committed OUTPUT_DIR/charlieplex_3x3_routed.kicad_pcb -- they route
-# into tmp_path instead.  Rewriting the committed artifact in-place
-# races every parallel (xdist) reader of that file (issue #3594).
+# Committed routed artifact.  Issue #3580: tests in this module must
+# NEVER write to this path (or anywhere under OUTPUT_DIR) — parallel
+# xdist workers read it, and an in-place rewrite clobbers the committed
+# artifact.  The end-to-end demo run routes into a temp dir instead.
+ROUTED_PCB = OUTPUT_DIR / "charlieplex_3x3_routed.kicad_pcb"
 
 # Minimum number of signal nets ``route_demo.py`` must route on board 02.
 # Issue #3207 acceptance criterion #1: ">= 8/10 routed nets on board 02
@@ -256,18 +258,68 @@ def unrouted_pcb_present() -> Path:
     return UNROUTED_PCB
 
 
-def _stage_schematic(dest_dir: Path) -> None:
-    """Copy board 02's schematic next to the tmp routed output.
+@dataclass(frozen=True)
+class _RouteDemoRun:
+    """Captured artifacts of a single end-to-end ``route_demo.py`` run."""
 
-    ``kct export`` (invoked by route_demo.py after routing) resolves the
-    BOM schematic by searching the *output PCB's* directory for
-    ``charlieplex_3x3.kicad_sch``.  Since the e2e tests route into
-    ``tmp_path`` (issue #3594), the schematic must be staged there for
-    the manufacturing-bundle step to succeed.
+    proc: subprocess.CompletedProcess[str]
+    routed_pcb: Path
+    mfg_manifest: Path
+
+
+@pytest.fixture(scope="module")
+def route_demo_run(
+    unrouted_pcb_present: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> _RouteDemoRun:
+    """Run ``route_demo.py`` end-to-end ONCE, into a temp dir.
+
+    Issue #3580: the demo's default arguments rewrite the committed
+    artifacts in place (``output/charlieplex_3x3_routed.kicad_pcb`` +
+    the ``output/manufacturing/`` bundle).  Under ``pytest -n auto``
+    (xdist) parallel workers READ those committed files
+    (``tests/test_fleet_45_census.py``, ``tests/test_manifest_integrity.py``,
+    ``tests/router/test_board02_manufacturable_baseline.py``) and can
+    observe a truncated mid-write file — the PR #3575 CI failure
+    ("census matched no segments").  An in-place rewrite also silently
+    clobbers the committed artifact in the working tree.
+
+    Fix: copy the unrouted input into a per-module temp dir and pass
+    explicit ABSOLUTE input/output paths.  ``route_demo.py`` joins its
+    positional args onto the board dir, and pathlib's ``/`` operator
+    short-circuits on absolute right-hand sides, so the demo routes and
+    exports entirely inside the temp dir.  The committed artifacts are
+    never written.
+
+    Module-scoped so the (~30-60 s) routing run happens once and both
+    end-to-end tests below assert against the same run.
     """
-    sch = OUTPUT_DIR / "charlieplex_3x3.kicad_sch"
-    if sch.exists():
-        shutil.copy2(sch, dest_dir / sch.name)
+    tmp_dir = tmp_path_factory.mktemp("board02_route_demo")
+    input_copy = tmp_dir / UNROUTED_PCB.name
+    shutil.copy2(unrouted_pcb_present, input_copy)
+    # ``kct export`` resolves the schematic for BOM generation by
+    # searching next to the routed PCB (stripping the ``_routed``
+    # suffix), so the committed schematic must travel with the PCB copy.
+    committed_sch = OUTPUT_DIR / "charlieplex_3x3.kicad_sch"
+    if committed_sch.exists():
+        shutil.copy2(committed_sch, tmp_dir / committed_sch.name)
+    routed_pcb = tmp_dir / ROUTED_PCB.name
+
+    proc = subprocess.run(
+        [sys.executable, str(ROUTE_DEMO_SCRIPT), str(input_copy), str(routed_pcb)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        cwd=str(BOARD_DIR),
+    )
+    return _RouteDemoRun(
+        proc=proc,
+        routed_pcb=routed_pcb,
+        # route_demo.py exports the bundle next to the routed output
+        # (``output_path.parent / "manufacturing"``), i.e. into tmp_dir.
+        mfg_manifest=tmp_dir / "manufacturing" / "manifest.json",
+    )
 
 
 def test_route_demo_invokes_mfg_bundle_export() -> None:
@@ -304,7 +356,7 @@ def test_route_demo_invokes_mfg_bundle_export() -> None:
     )
 
 
-def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path, tmp_path: Path) -> None:
+def test_route_demo_refreshes_manifest_mtime(route_demo_run: _RouteDemoRun) -> None:
     """After ``route_demo.py`` runs, ``manifest.json`` mtime is newer
     than the routed PCB's mtime (Issue #3264).
 
@@ -315,43 +367,27 @@ def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path, tmp_pat
     manifest would be left older than the routed PCB and the board would
     drop to non-ship-ready immediately after running the demo.
 
-    The routed PCB (and the manufacturing bundle next to it) is written
-    to ``tmp_path``, NOT to the committed
-    ``output/charlieplex_3x3_routed.kicad_pcb``: rewriting the committed
-    artifact in the working tree races every parallel (xdist) test that
-    reads it -- ``tests/test_fleet_45_census.py`` reproducibly saw a
-    half-written file with zero ``(segment ...)`` entries (issue #3594).
-
-    A hard timeout of 300 s guards against router or export hangs.
+    Issue #3580: the demo run targets a temp dir (see ``route_demo_run``)
+    so this test asserts on the TEMP routed PCB + manifest — the
+    committed ``boards/02-charlieplex-led/output/`` artifacts are never
+    rewritten.  The mtime invariant is path-independent, so the
+    assertion is unchanged in substance.
     """
-    routed_out = tmp_path / "charlieplex_3x3_routed.kicad_pcb"
-    mfg_manifest = tmp_path / "manufacturing" / "manifest.json"
-    _stage_schematic(tmp_path)
+    proc = route_demo_run.proc
+    routed_pcb = route_demo_run.routed_pcb
+    mfg_manifest = route_demo_run.mfg_manifest
 
-    # Run the demo.  Exit code 0 (full success) or 1 (partial routing /
-    # DRC errors) are both acceptable here -- we pin freshness, not
-    # routing completion (the next test covers that).
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(ROUTE_DEMO_SCRIPT),
-            str(unrouted_pcb_present),
-            str(routed_out),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-        cwd=str(BOARD_DIR),
-    )
+    # Exit code 0 (full success) or 1 (partial routing / DRC errors)
+    # are both acceptable here -- we pin freshness, not routing
+    # completion (the next test covers that).
     assert proc.returncode in (0, 1), (
         f"route_demo.py returned unexpected exit code {proc.returncode}\n"
         f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}\n"
         f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
     )
 
-    assert routed_out.exists(), (
-        f"route_demo.py did not produce routed PCB at {routed_out}.\n"
+    assert routed_pcb.exists(), (
+        f"route_demo.py did not produce routed PCB at {routed_pcb}.\n"
         f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
     )
     assert mfg_manifest.exists(), (
@@ -361,7 +397,7 @@ def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path, tmp_pat
         f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
     )
 
-    routed_mtime = routed_out.stat().st_mtime
+    routed_mtime = routed_pcb.stat().st_mtime
     manifest_mtime = mfg_manifest.stat().st_mtime
     assert manifest_mtime >= routed_mtime, (
         f"Issue #3264 regression: manifest.json ({manifest_mtime}) is "
@@ -373,7 +409,25 @@ def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path, tmp_pat
     )
 
 
-def test_route_demo_achieves_minimum_completion(unrouted_pcb_present: Path, tmp_path: Path) -> None:
+def test_route_demo_does_not_touch_committed_artifacts(
+    route_demo_run: _RouteDemoRun,
+) -> None:
+    """The demo run leaves the committed board-02 artifacts byte-identical.
+
+    Issue #3580 regression guard at the file level: the end-to-end run
+    in ``route_demo_run`` must not have rewritten the committed routed
+    PCB (the session-wide conftest guard also covers this, but a local
+    assertion gives a precise failure right next to the offending run).
+    """
+    assert route_demo_run.routed_pcb != ROUTED_PCB
+    assert route_demo_run.routed_pcb.parent != OUTPUT_DIR, (
+        "route_demo_run fixture must route into a temp dir, not the "
+        "committed boards/02-charlieplex-led/output/ directory "
+        "(Issue #3580)."
+    )
+
+
+def test_route_demo_achieves_minimum_completion(route_demo_run: _RouteDemoRun) -> None:
     """``route_demo.py`` routes at least ``MIN_FULLY_ROUTED_NETS`` signal nets.
 
     Issue #3207 acceptance criterion #1: ">= 8/10 routed nets on board
@@ -381,29 +435,12 @@ def test_route_demo_achieves_minimum_completion(unrouted_pcb_present: Path, tmp_
     ``router.route_all()`` path completed 4/8.  Post-fix the orchestrator
     path consistently completes 8/8.
 
-    Routes into ``tmp_path`` so the committed routed artifact is never
-    mutated mid-suite (issue #3594, see
-    ``test_route_demo_refreshes_manifest_mtime``).
-
-    A hard timeout of 300 s guards against router hangs.  Board 02 is
-    small (~37 mm x ~22 mm) so the negotiated routing typically finishes
-    in 10-15 s; the timeout is conservative.
+    A hard timeout of 300 s (in the ``route_demo_run`` fixture) guards
+    against router hangs.  Board 02 is small (~37 mm x ~22 mm) so the
+    negotiated routing typically finishes in 10-15 s; the timeout is
+    conservative.
     """
-    routed_out = tmp_path / "charlieplex_3x3_routed.kicad_pcb"
-    _stage_schematic(tmp_path)
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(ROUTE_DEMO_SCRIPT),
-            str(unrouted_pcb_present),
-            str(routed_out),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-        cwd=str(BOARD_DIR),
-    )
+    proc = route_demo_run.proc
 
     # ``route_demo.py`` returns 0 on full success + DRC-clean, 1 on
     # partial routing or DRC errors.  Either exit code is acceptable
