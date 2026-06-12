@@ -101,11 +101,18 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
+| Errors | 14 |
 | Warnings | 0 |
-| Blocking | 0 |
+| Blocking | 14 |
 
-**Status**: PASS
+**Status**: FAIL
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| via_in_pad | 14 |
+| connectivity | 8 |
+| single_pad_net | 8 |
 
 
 \newpage
@@ -116,6 +123,7 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
+- **[CRITICAL]** Fix 14 blocking DRC violations (via_in_pad (14))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.200mm required
 - **[OPTIONAL]** Verify zone fill in KiCad: 7 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets

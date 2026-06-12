@@ -1,6 +1,6 @@
 Comment,Designator,Footprint,LCSC Part #
 100nF,"C12,C13,C14,C15,C2,C7,C8",Capacitor_SMD:C_0805_2012Metric,C1525
-10k,"R30,R31,R32",Resistor_SMD:R_0805_2012Metric,
+10k,"R30,R31,R32",Resistor_SMD:R_0805_2012Metric,C17414
 10nF,"C30,C31,C32",Capacitor_SMD:C_0805_2012Metric,
 10uF,C6,Capacitor_SMD:C_0805_2012Metric,C1525
 10uF,"C16,C5",Capacitor_SMD:C_0805_2012Metric,C15850
@@ -8,7 +8,7 @@ Comment,Designator,Footprint,LCSC Part #
 1k,"R3,R4",Resistor_SMD:R_0805_2012Metric,
 20pF,"C10,C11",Capacitor_SMD:C_0805_2012Metric,C1554
 22,"R20,R21,R22",Resistor_SMD:R_0805_2012Metric,
-220uF,"C3,C4",Capacitor_SMD:C_0805_2012Metric,
+220uF,"C3,C4",Capacitor_SMD:C_0805_2012Metric,C1015
 33uH,L1,Inductor_SMD:L_1210_3225Metric,
 4.7uF,C9,Capacitor_SMD:C_0805_2012Metric,C1779
 470uF,C1,Capacitor_SMD:C_0805_2012Metric,C134742
