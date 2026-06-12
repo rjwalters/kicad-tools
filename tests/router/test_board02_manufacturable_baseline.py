@@ -11,9 +11,13 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 387 segments / 24 vias /
-  328.16mm total length identical across seeds 42/43/44 -- this small
-  2-layer board has fully converged.  (193 segments / 325.08mm before
+- **Deterministic output**: 22 routes / 24 vias / 328.16mm total
+  length identical across seeds 42/43/44 -- this small 2-layer board
+  has fully converged.  Segment count is 397 on macOS-arm64 and 399
+  on Linux-x86_64 (platform-dependent collinear resplit at identical
+  geometry; see the #3545 PLATFORM NOTE in
+  ``test_routing_output_deterministic_across_seeds``).  (387 segments
+  before the #3545 static-halo rip-up survival; 193/325.08mm before
   the #3532 45-degree pad-tail doglegs; 299/325.55 before the #3436
   burn-down straightening (#3203/#3510); 206/324.92 before the #3438
   rip-up parity fix; 155/324.66 before the #3433 collision-checker
@@ -437,6 +441,22 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # documents.  All 3 cpp seeds (42/43/44) bit-perfect at
     # (22, 397, 24, 328.16), measured in a uv.lock-synced venv.
     #
+    # PLATFORM NOTE (#3545): the SEGMENT count -- and only the segment
+    # count -- diverges between macOS-arm64 (397) and CI Linux-x86_64
+    # (399) at identical routes/vias/length/reach and exact cross-seed
+    # equality on both platforms.  The collinear-merge pass gates each
+    # merge on a float collision probe of the merged candidate
+    # (optimizer/algorithms.py merge_collinear -> path_is_clear), and
+    # with #3545 those probes now graze static pad-halo boundaries where
+    # libm/FMA rounding differs across platforms, flipping two
+    # borderline merges.  Same harmless splitting mode as the stale-venv
+    # 507-segment NOTE below: identical geometry, different collinear
+    # segmentation.  We therefore pin routes/vias/length EXACTLY (these
+    # are the regression-sensitive metrics) and allow the segment count
+    # a narrow documented band.  The cross-seed equality assertion above
+    # remains exact, so within-platform determinism regressions are
+    # still caught; only the platform-dependent resplit is tolerated.
+    #
     # Prior pin (22, 387, 24, 328.16), re-baselined 2026-06-11 for
     # Issue #3532: 45-degree quantization of the pad-tail emitters.
     # Off-grid pad
@@ -466,12 +486,33 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
-    EXPECTED = (22, 397, 24, 328.16)
-    assert ref == EXPECTED, (
-        f"Board 02 routing baseline drifted: got {ref}, expected "
-        f"{EXPECTED}. This is consistent across seeds (so no determinism "
-        "regression), but a real router-output change.  Investigate the "
-        "router PRs landed since 2026-06-07 (see PR #3265 baseline log) "
-        "and decide whether the change is desired -- if yes, update "
-        "EXPECTED here AND the docstring baseline."
+    EXPECTED_ROUTES = 22
+    EXPECTED_VIAS = 24
+    EXPECTED_LENGTH = 328.16
+    # Measured: 397 on macOS-arm64, 399 on CI Linux-x86_64 (see
+    # PLATFORM NOTE above).  Band is deliberately tight (+/-3 around
+    # the two measured values) so a real collinear-handling regression
+    # still trips it.
+    EXPECTED_SEGMENTS_RANGE = (394, 402)
+    got_routes, got_segments, got_vias, got_length = ref
+    exact = (got_routes, got_vias, got_length)
+    expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)
+    assert exact == expected_exact, (
+        f"Board 02 routing baseline drifted: got "
+        f"(routes, vias, length)={exact}, expected {expected_exact} "
+        f"(full tuple {ref}). This is consistent across seeds (so no "
+        "determinism regression), but a real router-output change.  "
+        "Investigate the router PRs landed since 2026-06-07 (see PR "
+        "#3265 baseline log) and decide whether the change is desired "
+        "-- if yes, update the EXPECTED_* pins here AND the docstring "
+        "baseline."
+    )
+    lo, hi = EXPECTED_SEGMENTS_RANGE
+    assert lo <= got_segments <= hi, (
+        f"Board 02 segment count {got_segments} outside the documented "
+        f"platform band [{lo}, {hi}] (macOS-arm64: 397, Linux-x86_64: "
+        "399; see PLATFORM NOTE above).  Routes/vias/length matched the "
+        "exact pin, so this is a change in collinear segmentation -- "
+        "investigate merge_collinear/path_is_clear behaviour before "
+        "widening the band."
     )
