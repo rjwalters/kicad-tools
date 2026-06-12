@@ -95,17 +95,31 @@ def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
 def _parse_iter0_route_count(stdout: str) -> int | None:
     """Extract the iteration-0 routed-net count from kct route output.
 
-    Negotiated congestion routing emits a line of the form::
+    The legacy negotiated loop (``core.py::route_all_negotiated``) emits a
+    line of the form::
 
         Routed 23/35 nets, overflow: 14 (178.4s)
 
-    immediately after the initial-routing-with-sharing pass.  We
-    capture the FIRST such line (iteration 0) because subsequent
+    immediately after the initial-routing-with-sharing pass.  The two-phase
+    path (``two_phase.py`` / ``hierarchical.py``, default since #3452/#3499)
+    emits the equivalent tally as::
+
+        Initial pass: 23/39 nets, overflow: 14
+
+    Both report the same measure: the net count after the iteration-0
+    initial pass, before any rip-up-and-reroute iteration.  Note the
+    two-phase line is printed AFTER the bounded grace pass (#3452)
+    commits its routes, so it includes grace-routed starved nets; the
+    grace pass is part of the initial pass by design (one bounded
+    attempt per starved net within a fixed grace budget), so this line
+    remains the honest iteration-0 tally.
+
+    We capture the FIRST such line (iteration 0) because subsequent
     iterations may rip up and re-route a different subset.
 
     Returns the integer count or ``None`` if no such line was found.
     """
-    pattern = re.compile(r"Routed\s+(\d+)/\d+ nets,\s+overflow:\s+\d+")
+    pattern = re.compile(r"(?:Routed|Initial pass:)\s+(\d+)/\d+\s+nets,\s+overflow:\s+\d+")
     match = pattern.search(stdout)
     if match is None:
         return None
@@ -143,6 +157,13 @@ class TestBoard05RoutingThroughput:
             # loop from re-running on 4L/6L stacks (which would multiply
             # the wall-clock cost by 4x); this test only pins 2L throughput,
             # the regression dimension #2681 identified.
+            # ``--no-cache`` (issue #3502): a warm routing cache makes
+            # ``kct route`` skip the routing phase entirely ("Cache HIT ...
+            # Using cached routing result"), so no iteration-0 line is
+            # emitted at all and the completion metric reflects a stale
+            # cached route rather than current router throughput.  Both
+            # tests in this class pin THROUGHPUT, so the route must
+            # actually run.
             cmd = [
                 sys.executable,
                 "-m",
@@ -161,6 +182,7 @@ class TestBoard05RoutingThroughput:
                 "240",
                 "--backend",
                 "python",
+                "--no-cache",
             ]
             proc = subprocess.run(
                 cmd,
@@ -241,11 +263,12 @@ class TestBoard05RoutingThroughput:
         """
         actual_count = _parse_iter0_route_count(route_stdout)
         assert actual_count is not None, (
-            "Could not find 'Routed N/M nets' iteration-0 line in kct "
+            "Could not find the iteration-0 line ('Routed N/M nets, "
+            "overflow: K' or 'Initial pass: N/M nets, overflow: K') in kct "
             f"route output.  Last 2000 chars of stdout:\n{route_stdout[-2000:]}"
         )
         assert actual_count >= 15, (
-            f"Board 05 iteration-0 routed only {actual_count}/35 nets "
+            f"Board 05 iteration-0 routed only {actual_count} nets "
             "in the 240s budget; expected >= 15 (issue #2681 floor).  "
             "Lower counts indicate per-net A* slowdown -- check recent "
             "router changes for added per-call overhead in "
