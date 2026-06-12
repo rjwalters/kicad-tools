@@ -2,7 +2,7 @@
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-07 | jlcpcb"
+date: "Rev 1 | 2026-06-12 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,9 +18,9 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 14 (0 SMD, 0 THT, 14 other) |
+| Footprints | 14 (13 SMD, 1 THT, 0 other) |
 | Nets | 10 |
-| Traces | 155 segments |
+| Traces | 197 segments |
 | Vias | 24 |
 | Board Size | 50.0 x 55.0 mm |
 
