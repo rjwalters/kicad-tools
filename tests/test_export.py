@@ -21,9 +21,9 @@ from kicad_tools.export.pnp import (
     GenericPnPFormatter,
     JLCPCBPnPFormatter,
     PCBWayPnPFormatter,
-    SeeedPnPFormatter,
     PlacementData,
     PnPExportConfig,
+    SeeedPnPFormatter,
     export_pnp,
     extract_placements,
     extract_tht_exclusions,
@@ -524,6 +524,76 @@ class TestExportPnPWithAuxOrigin:
         ]
         output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
         # 10 + 5 = 15, 20 + (-3) = 17
+        assert "15.0000mm" in output
+        assert "17.0000mm" in output
+
+    def test_aux_origin_config_none_jlcpcb_excludes_tht(self, tmp_path):
+        """Aux-origin branch + config=None must honor JLCPCB's exclude_tht default.
+
+        Regression test for issue #3618: the aux-origin branch used to
+        synthesize a bare PnPExportConfig when config was None, silently
+        dropping the JLCPCB formatter's exclude_tht=True default.  The CPL
+        would then include THT rows while the hand-solder set (computed from
+        the formatter's effective config) listed the same parts as excluded —
+        a CPL/exclusion divergence.
+        """
+        # Build a PCB with a NONZERO aux origin so the branch actually fires.
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        pcb_text = fixture.read_text().replace("(aux_axis_origin 0 0)", "(aux_axis_origin 100 50)")
+        assert "(aux_axis_origin 100 50)" in pcb_text
+        pcb_path = tmp_path / "aux_origin.kicad_pcb"
+        pcb_path.write_text(pcb_text)
+        assert get_aux_origin(pcb_path) == (100.0, 50.0)
+
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (110.0, 70.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1",
+                "Conn_01x04",
+                "PinHeader_1x04",
+                (150.0, 60.0),
+                0.0,
+                "F.Cu",
+                attr="through_hole",
+            ),
+        ]
+
+        output = export_pnp(footprints, "jlcpcb", config=None, pcb_path=pcb_path)
+
+        # THT component excluded from the CPL (JLCPCB default)...
+        assert "J1" not in output
+        # ...while the SMD part remains, shifted by the aux origin:
+        # 110 - 100 = 10, 70 - 50 = 20.
+        assert "R1" in output
+        assert "10.0000mm" in output
+        assert "20.0000mm" in output
+
+        # The hand-solder set computed from the formatter's effective config
+        # (the assembly.py pattern) must AGREE with the CPL: J1 is listed.
+        effective = get_pnp_formatter("jlcpcb", None).config
+        excluded = extract_tht_exclusions(footprints, effective)
+        assert [p.reference for p in excluded] == ["J1"]
+
+    def test_aux_origin_explicit_config_fields_preserved(self, tmp_path):
+        """dataclasses.replace path keeps all caller-set fields intact."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        pcb_text = fixture.read_text().replace("(aux_axis_origin 0 0)", "(aux_axis_origin 100 50)")
+        pcb_path = tmp_path / "aux_origin.kicad_pcb"
+        pcb_path.write_text(pcb_text)
+
+        config = PnPExportConfig(x_offset=5.0, y_offset=-3.0, exclude_tht=False)
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (110.0, 70.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (150.0, 60.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+        ]
+        output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=pcb_path)
+
+        # Explicit exclude_tht=False overrides the JLCPCB default: J1 stays.
+        assert "J1" in output
+        # Manual offsets combine with aux origin: 110 + 5 - 100 = 15,
+        # 70 + (-3) - 50 = 17.
         assert "15.0000mm" in output
         assert "17.0000mm" in output
 
