@@ -10,10 +10,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kicad_tools.report.figures import (
+    _BLANK_SVG_THRESHOLD_BYTES,
     REPORT_MAX_SIZE_PX,
     FigureEntry,
     ReportFigureGenerator,
-    _BLANK_SVG_THRESHOLD_BYTES,
 )
 
 # ---------------------------------------------------------------------------
@@ -142,9 +142,7 @@ class TestGenerateAll:
         assert len(entries) == 8
 
         # Check PCB preset entries
-        pcb_entries = [
-            e for e in entries if e.figure_type not in ("schematic", "pcb_layer")
-        ]
+        pcb_entries = [e for e in entries if e.figure_type not in ("schematic", "pcb_layer")]
         assert len(pcb_entries) == 4
         pcb_types = {e.figure_type for e in pcb_entries}
         assert pcb_types == {"pcb_front", "pcb_back", "pcb_copper", "assembly"}
@@ -306,7 +304,15 @@ class TestCheckCairosvgProbe:
 
     def test_returns_false_when_svg2png_raises_os_error(self):
         """_check_cairosvg() returns False when cairosvg.svg2png raises OSError
-        (native cairo library missing)."""
+        (native cairo library missing).
+
+        The macOS Homebrew-preload retry is stubbed out: on a darwin dev
+        machine with a *working* cairosvg installed (the default since
+        issue #3583 added cairosvg to the dev dependency group), the retry
+        would evict our fake module, import the real cairosvg, and
+        legitimately return True -- correct runtime behavior, but it
+        defeats the broken-native-library simulation this test exists for.
+        """
         import types
 
         fake_cairosvg = types.ModuleType("cairosvg")
@@ -316,7 +322,13 @@ class TestCheckCairosvgProbe:
 
         fake_cairosvg.svg2png = _raise_os_error
 
-        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+                return_value=False,
+            ),
+        ):
             from kicad_tools.mcp.tools.screenshot import _check_cairosvg
 
             assert _check_cairosvg() is False
@@ -558,7 +570,9 @@ class TestBlankSchematicDetection:
         tmp_path,
         caplog,
     ):
-        """A schematic SVG below the size threshold is excluded with a warning."""
+        """A below-threshold sheet in a MULTI-sheet export is excluded with
+        a warning.  (Single-sheet exports always ship -- see
+        test_single_small_sheet_always_included, issue #3583.)"""
         pcb = tmp_path / "board.kicad_pcb"
         pcb.touch()
         sch = tmp_path / "main.kicad_sch"
@@ -570,8 +584,10 @@ class TestBlankSchematicDetection:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            # Write a small SVG (below threshold) to simulate a blank sheet
+            # One blank (below threshold) + one valid sheet so the blank
+            # heuristic applies (multi-sheet export).
             _write_svg_stub(svg_dir / "blank_sheet.svg", size_bytes=_BLANK_SVG_SIZE)
+            _write_svg_stub(svg_dir / "real_sheet.svg", size_bytes=_VALID_SVG_SIZE)
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run
@@ -581,15 +597,61 @@ class TestBlankSchematicDetection:
         with caplog.at_level(logging.WARNING):
             entries = gen.generate_all(pcb, sch, out_dir)
 
-        # Only PCB entries, no schematic
+        # The blank sheet is excluded; the real one ships.
         sch_entries = [e for e in entries if e.figure_type == "schematic"]
-        assert len(sch_entries) == 0
+        assert [e.filename for e in sch_entries] == ["schematic_real_sheet.png"]
         assert "Excluding blank schematic sheet" in caplog.text
         assert "blank_sheet" in caplog.text
         assert "SVG size" in caplog.text
 
         # PNG conversion should NOT have been called for the blank sheet
-        mock_svg_to_png.assert_not_called()
+        assert mock_svg_to_png.call_count == 1
+
+    @patch("kicad_tools.report.figures._check_cairosvg", return_value=True)
+    @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
+    @patch("kicad_tools.report.figures.subprocess.run")
+    @patch("kicad_tools.report.figures._svg_to_png")
+    @patch("kicad_tools.report.figures.screenshot_board")
+    def test_single_small_sheet_always_included(
+        self,
+        mock_board,
+        mock_svg_to_png,
+        mock_subprocess,
+        mock_find_cli,
+        mock_cairosvg,
+        tmp_path,
+    ):
+        """A single-sheet export ships even below the blank threshold.
+
+        Regression for issue #3583: board 01's real 4-component schematic
+        exports to ~131 KB of SVG -- under the 150 KB blank threshold --
+        and was silently dropped from its manufacturing bundle.  When the
+        export produces exactly one sheet, that sheet IS the design and
+        must always be included.
+        """
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.touch()
+        sch = tmp_path / "main.kicad_sch"
+        sch.touch()
+        out_dir = tmp_path / "figures"
+
+        mock_board.return_value = _make_success_result()
+
+        def fake_subprocess_run(cmd, **kwargs):
+            output_idx = cmd.index("--output") + 1
+            svg_dir = Path(cmd[output_idx])
+            _write_svg_stub(svg_dir / "tiny_design.svg", size_bytes=_BLANK_SVG_SIZE)
+            return MagicMock(returncode=0, stderr="")
+
+        mock_subprocess.side_effect = fake_subprocess_run
+        mock_svg_to_png.side_effect = _svg_to_png_side_effect()
+
+        gen = ReportFigureGenerator()
+        entries = gen.generate_all(pcb, sch, out_dir)
+
+        sch_entries = [e for e in entries if e.figure_type == "schematic"]
+        assert [e.filename for e in sch_entries] == ["schematic_tiny_design.png"]
+        assert mock_svg_to_png.call_count == 1
 
     @patch("kicad_tools.report.figures._check_cairosvg", return_value=True)
     @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
@@ -618,10 +680,10 @@ class TestBlankSchematicDetection:
         def fake_subprocess_run(cmd, **kwargs):
             output_idx = cmd.index("--output") + 1
             svg_dir = Path(cmd[output_idx])
-            _write_svg_stub(svg_dir / "dac.svg", size_bytes=_BLANK_SVG_SIZE)     # blank
-            _write_svg_stub(svg_dir / "power.svg", size_bytes=_VALID_SVG_SIZE)   # valid
-            _write_svg_stub(svg_dir / "mcu.svg", size_bytes=_BLANK_SVG_SIZE)     # blank
-            _write_svg_stub(svg_dir / "sync.svg", size_bytes=_VALID_SVG_SIZE)    # valid
+            _write_svg_stub(svg_dir / "dac.svg", size_bytes=_BLANK_SVG_SIZE)  # blank
+            _write_svg_stub(svg_dir / "power.svg", size_bytes=_VALID_SVG_SIZE)  # valid
+            _write_svg_stub(svg_dir / "mcu.svg", size_bytes=_BLANK_SVG_SIZE)  # blank
+            _write_svg_stub(svg_dir / "sync.svg", size_bytes=_VALID_SVG_SIZE)  # valid
             return MagicMock(returncode=0, stderr="")
 
         mock_subprocess.side_effect = fake_subprocess_run

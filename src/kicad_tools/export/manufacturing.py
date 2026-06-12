@@ -201,13 +201,9 @@ def verify_manifest(manifest_path: str | Path) -> list[str]:
         expected_sha = info.get("sha256")
         expected_size = info.get("size")
         if expected_sha is not None and actual_sha != expected_sha:
-            problems.append(
-                f"{name}: sha256 mismatch (manifest {expected_sha}, disk {actual_sha})"
-            )
+            problems.append(f"{name}: sha256 mismatch (manifest {expected_sha}, disk {actual_sha})")
         if expected_size is not None and actual_size != expected_size:
-            problems.append(
-                f"{name}: size mismatch (manifest {expected_size}, disk {actual_size})"
-            )
+            problems.append(f"{name}: size mismatch (manifest {expected_size}, disk {actual_size})")
 
     return problems
 
@@ -554,7 +550,7 @@ class ManufacturingPackage:
             data_kwargs = self._load_report_data_dir(data_dir)
 
             # Generate figures (PCB renders + schematic screenshots)
-            figures_data = self._generate_figures(version_dir)
+            figures_data = self._generate_figures(version_dir, result)
             if figures_data:
                 data_kwargs.update(figures_data)
 
@@ -581,25 +577,52 @@ class ManufacturingPackage:
             result.errors.append(f"Report generation failed: {e}")
             logger.error(f"Report generation failed: {e}")
 
-    def _generate_figures(self, version_dir: Path) -> dict | None:
+    @staticmethod
+    def _warn_figures_skipped(result: ManufacturingResult, reason: str) -> None:
+        """Record a *loud* warning that the bundle will ship without figures.
+
+        Figure generation degrading silently is how committed bundles ended
+        up without per-layer renders / assembly views (issue #3583): the
+        skip reason only went to the module logger, which `kct export`
+        does not surface.  Recording it on ``result.warnings`` makes the
+        CLI print it and JSON output include it.
+        """
+        msg = (
+            f"Report figures skipped: {reason}. "
+            "The bundle will NOT include images/ (per-copper-layer renders, "
+            "front/back assembly views, schematic sheets). "
+            "Figure generation needs kicad-cli (KiCad 8+) and cairosvg "
+            "(pip install 'kicad-tools[screenshot]', or `uv sync` in a dev checkout)."
+        )
+        result.warnings.append(msg)
+        logger.warning(msg)
+
+    def _generate_figures(self, version_dir: Path, result: ManufacturingResult) -> dict | None:
         """Generate PCB and schematic figures for the report.
 
         Returns a dict with ``pcb_figures`` and/or ``schematic_sheets``
         keys suitable for merging into ReportData kwargs, or ``None``
         if figure generation is unavailable or fails.
+
+        Every skip path records a warning on *result* (issue #3583) so
+        missing figures are visible in the export output instead of the
+        bundle silently shipping without its images/ directory.
         """
         try:
             from ..report.figures import ReportFigureGenerator
             from ..report.utils import find_schematic
-        except ImportError:
-            logger.info("Figure generation skipped: dependencies not available")
+        except ImportError as exc:
+            self._warn_figures_skipped(result, f"dependency not available ({exc})")
             return None
 
         sch_path = self.schematic_path
         if sch_path is None:
             sch_path = find_schematic(self.pcb_path)
         if sch_path is None:
-            logger.info("Figure generation skipped: no schematic found")
+            self._warn_figures_skipped(
+                result,
+                f"no schematic found next to {self.pcb_path.name} (use --sch to specify one)",
+            )
             return None
 
         figures_dir = version_dir / "figures"
@@ -607,10 +630,11 @@ class ManufacturingPackage:
             fig_gen = ReportFigureGenerator()
             entries = fig_gen.generate_all(self.pcb_path, sch_path, figures_dir)
         except (RuntimeError, OSError) as exc:
-            logger.warning(f"Figure generation skipped: {exc}")
+            self._warn_figures_skipped(result, str(exc))
             return None
 
         if not entries:
+            self._warn_figures_skipped(result, "figure generator produced no images")
             return None
 
         # Convert FigureEntry list to ReportData-compatible dicts
@@ -866,18 +890,33 @@ class ManufacturingPackage:
         ``images/``, and records the image paths on *result* so the
         manifest includes their checksums (issue #3497).
 
-        No-op when the staged report has no figures (e.g. figure
-        generation was skipped because kicad-cli/cairosvg are missing).
+        When the staged report has no figures (e.g. figure generation
+        was skipped because kicad-cli/cairosvg are missing), any
+        pre-existing ``images/`` directory from an earlier export is
+        REMOVED rather than left behind: stale renders that no longer
+        match the gerbers are worse than absent ones, and silently
+        keeping them is how the softstart bundle shipped pre-repair
+        visuals (issue #3583).
         """
-        staged_figures = report_staging / "figures"
-        if not staged_figures.is_dir():
-            return
-
-        pngs = sorted(p for p in staged_figures.iterdir() if p.suffix.lower() == ".png")
-        if not pngs:
-            return
-
         images_dir = out_dir / "images"
+        staged_figures = report_staging / "figures"
+        pngs = (
+            sorted(p for p in staged_figures.iterdir() if p.suffix.lower() == ".png")
+            if staged_figures.is_dir()
+            else []
+        )
+        if not pngs:
+            if images_dir.is_dir():
+                shutil.rmtree(images_dir)
+                msg = (
+                    "Removed stale images/ from a previous export: this run "
+                    "generated no report figures, and stale renders must not "
+                    "ship alongside regenerated gerbers"
+                )
+                result.warnings.append(msg)
+                logger.warning(msg)
+            return
+
         if images_dir.exists():
             shutil.rmtree(images_dir)
         images_dir.mkdir(parents=True)
@@ -970,7 +1009,7 @@ class ManufacturingPackage:
             lines.append("")
 
         desc = file_descriptions["manifest"]
-        lines.append(f"  manifest.json")
+        lines.append("  manifest.json")
         lines.append(f"    {desc[0]}: {desc[1]}")
         lines.append("")
 

@@ -44,6 +44,7 @@ References:
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -64,8 +65,10 @@ ROUTE_DEMO_SCRIPT = BOARD_DIR / "route_demo.py"
 GENERATE_DESIGN_SCRIPT = BOARD_DIR / "generate_design.py"
 OUTPUT_DIR = BOARD_DIR / "output"
 UNROUTED_PCB = OUTPUT_DIR / "charlieplex_3x3.kicad_pcb"
-ROUTED_PCB = OUTPUT_DIR / "charlieplex_3x3_routed.kicad_pcb"
-MFG_MANIFEST = OUTPUT_DIR / "manufacturing" / "manifest.json"
+# NOTE: the end-to-end tests below deliberately do NOT write to the
+# committed OUTPUT_DIR/charlieplex_3x3_routed.kicad_pcb -- they route
+# into tmp_path instead.  Rewriting the committed artifact in-place
+# races every parallel (xdist) reader of that file (issue #3594).
 
 # Minimum number of signal nets ``route_demo.py`` must route on board 02.
 # Issue #3207 acceptance criterion #1: ">= 8/10 routed nets on board 02
@@ -253,6 +256,20 @@ def unrouted_pcb_present() -> Path:
     return UNROUTED_PCB
 
 
+def _stage_schematic(dest_dir: Path) -> None:
+    """Copy board 02's schematic next to the tmp routed output.
+
+    ``kct export`` (invoked by route_demo.py after routing) resolves the
+    BOM schematic by searching the *output PCB's* directory for
+    ``charlieplex_3x3.kicad_sch``.  Since the e2e tests route into
+    ``tmp_path`` (issue #3594), the schematic must be staged there for
+    the manufacturing-bundle step to succeed.
+    """
+    sch = OUTPUT_DIR / "charlieplex_3x3.kicad_sch"
+    if sch.exists():
+        shutil.copy2(sch, dest_dir / sch.name)
+
+
 def test_route_demo_invokes_mfg_bundle_export() -> None:
     """``route_demo.py`` invokes ``kct export`` after routing (Issue #3264).
 
@@ -287,7 +304,7 @@ def test_route_demo_invokes_mfg_bundle_export() -> None:
     )
 
 
-def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path) -> None:
+def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path, tmp_path: Path) -> None:
     """After ``route_demo.py`` runs, ``manifest.json`` mtime is newer
     than the routed PCB's mtime (Issue #3264).
 
@@ -298,13 +315,29 @@ def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path) -> None
     manifest would be left older than the routed PCB and the board would
     drop to non-ship-ready immediately after running the demo.
 
+    The routed PCB (and the manufacturing bundle next to it) is written
+    to ``tmp_path``, NOT to the committed
+    ``output/charlieplex_3x3_routed.kicad_pcb``: rewriting the committed
+    artifact in the working tree races every parallel (xdist) test that
+    reads it -- ``tests/test_fleet_45_census.py`` reproducibly saw a
+    half-written file with zero ``(segment ...)`` entries (issue #3594).
+
     A hard timeout of 300 s guards against router or export hangs.
     """
+    routed_out = tmp_path / "charlieplex_3x3_routed.kicad_pcb"
+    mfg_manifest = tmp_path / "manufacturing" / "manifest.json"
+    _stage_schematic(tmp_path)
+
     # Run the demo.  Exit code 0 (full success) or 1 (partial routing /
     # DRC errors) are both acceptable here -- we pin freshness, not
     # routing completion (the next test covers that).
     proc = subprocess.run(
-        [sys.executable, str(ROUTE_DEMO_SCRIPT)],
+        [
+            sys.executable,
+            str(ROUTE_DEMO_SCRIPT),
+            str(unrouted_pcb_present),
+            str(routed_out),
+        ],
         capture_output=True,
         text=True,
         timeout=300,
@@ -317,19 +350,19 @@ def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path) -> None
         f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
     )
 
-    assert ROUTED_PCB.exists(), (
-        f"route_demo.py did not produce routed PCB at {ROUTED_PCB}.\n"
+    assert routed_out.exists(), (
+        f"route_demo.py did not produce routed PCB at {routed_out}.\n"
         f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
     )
-    assert MFG_MANIFEST.exists(), (
+    assert mfg_manifest.exists(), (
         f"route_demo.py did not produce manufacturing manifest at "
-        f"{MFG_MANIFEST}.  Issue #3264 fix expects the demo to invoke "
+        f"{mfg_manifest}.  Issue #3264 fix expects the demo to invoke "
         f"`kct export` after routing.\n"
         f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
     )
 
-    routed_mtime = ROUTED_PCB.stat().st_mtime
-    manifest_mtime = MFG_MANIFEST.stat().st_mtime
+    routed_mtime = routed_out.stat().st_mtime
+    manifest_mtime = mfg_manifest.stat().st_mtime
     assert manifest_mtime >= routed_mtime, (
         f"Issue #3264 regression: manifest.json ({manifest_mtime}) is "
         f"older than routed PCB ({routed_mtime}) after running "
@@ -340,7 +373,7 @@ def test_route_demo_refreshes_manifest_mtime(unrouted_pcb_present: Path) -> None
     )
 
 
-def test_route_demo_achieves_minimum_completion(unrouted_pcb_present: Path) -> None:
+def test_route_demo_achieves_minimum_completion(unrouted_pcb_present: Path, tmp_path: Path) -> None:
     """``route_demo.py`` routes at least ``MIN_FULLY_ROUTED_NETS`` signal nets.
 
     Issue #3207 acceptance criterion #1: ">= 8/10 routed nets on board
@@ -348,12 +381,23 @@ def test_route_demo_achieves_minimum_completion(unrouted_pcb_present: Path) -> N
     ``router.route_all()`` path completed 4/8.  Post-fix the orchestrator
     path consistently completes 8/8.
 
+    Routes into ``tmp_path`` so the committed routed artifact is never
+    mutated mid-suite (issue #3594, see
+    ``test_route_demo_refreshes_manifest_mtime``).
+
     A hard timeout of 300 s guards against router hangs.  Board 02 is
     small (~37 mm x ~22 mm) so the negotiated routing typically finishes
     in 10-15 s; the timeout is conservative.
     """
+    routed_out = tmp_path / "charlieplex_3x3_routed.kicad_pcb"
+    _stage_schematic(tmp_path)
     proc = subprocess.run(
-        [sys.executable, str(ROUTE_DEMO_SCRIPT)],
+        [
+            sys.executable,
+            str(ROUTE_DEMO_SCRIPT),
+            str(unrouted_pcb_present),
+            str(routed_out),
+        ],
         capture_output=True,
         text=True,
         timeout=300,

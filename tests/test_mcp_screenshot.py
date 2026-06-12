@@ -317,7 +317,12 @@ class TestCheckCairosvgValueError:
 
     def test_returns_false_on_value_error(self):
         """_check_cairosvg returns False when svg2png raises ValueError
-        (e.g. from newer cairosvg with dimensionless probe SVG)."""
+        (e.g. from newer cairosvg with dimensionless probe SVG).
+
+        The macOS Homebrew-preload fallback is stubbed to fail so the
+        outcome does not depend on the host platform or on whether a
+        real cairo installation is present.
+        """
         fake_cairosvg = types.ModuleType("cairosvg")
 
         def raise_value_error(**kwargs):
@@ -325,7 +330,13 @@ class TestCheckCairosvgValueError:
 
         fake_cairosvg.svg2png = raise_value_error
 
-        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+                return_value=False,
+            ),
+        ):
             assert _check_cairosvg() is False
 
     def test_probe_svg_has_dimensions(self):
@@ -892,27 +903,39 @@ class TestTryPreloadCairoMacos:
 
         assert result is False
 
-    def test_returns_false_when_load_library_fails(self, tmp_path):
-        """Returns False when ctypes.cdll.LoadLibrary raises OSError."""
+    def test_returns_false_when_load_library_fails(
+        self, tmp_path, monkeypatch, intercept_cairo_imports
+    ):
+        """Returns False when the probe render fails for every candidate dir."""
         lib_dir = tmp_path / "lib"
         lib_dir.mkdir()
         (lib_dir / "libcairo.dylib").write_bytes(b"fake")
 
-        fake_cairosvg = types.ModuleType("cairosvg")
-        fake_cairosvg.svg2png = lambda **kwargs: (_ for _ in ()).throw(OSError("cannot load"))
+        # Recorded by monkeypatch so the env mutation made by the
+        # function under test is restored on teardown.
+        monkeypatch.setenv("DYLD_FALLBACK_LIBRARY_PATH", "")
 
-        with (
-            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
-            patch(
-                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
-                return_value=[str(lib_dir)],
-            ),
-            patch("kicad_tools.mcp.tools.screenshot.ctypes.cdll") as mock_cdll,
+        probe_calls: list[dict] = []
+
+        def failing_svg2png(**kwargs):
+            probe_calls.append(kwargs)
+            raise OSError("cannot load library")
+
+        finder = intercept_cairo_imports(failing_svg2png)
+
+        with patch(
+            "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+            return_value=[str(lib_dir)],
         ):
-            mock_cdll.LoadLibrary.side_effect = OSError("bad library")
             result = _try_preload_cairo_macos()
 
         assert result is False
+        # The re-import was served hermetically by the meta_path finder
+        # (never the host's real cairosvg) and the probe ran exactly once.
+        assert finder.import_count == 1
+        assert len(probe_calls) == 1
+        # The lib dir was still prepended before the probe failed.
+        assert os.environ["DYLD_FALLBACK_LIBRARY_PATH"] == str(lib_dir)
 
     def test_tries_multiple_dirs_on_failure(self, tmp_path, monkeypatch, intercept_cairo_imports):
         """Tries next directory when the first dir's probe render fails."""

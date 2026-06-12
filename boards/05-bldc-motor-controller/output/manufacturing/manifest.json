@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T02:58:02.003182+00:00",
+  "generated_at": "2026-06-12T05:03:41.535120+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,24 +13,60 @@
       "size": 3702
     },
     "gerbers.zip": {
-      "sha256": "151d841a4fbf9225ffec52079fa6457f848c686b16fe7336e6d01bce999475d1",
-      "size": 101168
+      "sha256": "f09b7a718291ad74875fa9078b66319725311b4c96c0682746a220c09c4cc092",
+      "size": 101170
     },
     "report.pdf": {
-      "sha256": "73c1158da5ae1e9a1b0779000eb486c89ab5a9bc8d98fa4a0cdd062847d76841",
-      "size": 33618
+      "sha256": "b3b3b7574bcf875c0b68d7dfff07c5f47b16c133f02aa2a59522e82f6b2877a7",
+      "size": 2733387
     },
     "report.md": {
-      "sha256": "c59086da14539260015dfa7b85a01ae8b3506a1100971b99c6b3d4b4362e6f88",
-      "size": 4568
+      "sha256": "b814642af948d49eea5394259455d2dea76ab344cd1dba98f1f181e4bd86a2e8",
+      "size": 5106
+    },
+    "assembly.png": {
+      "sha256": "12840e2fe562e0a48c6bd1bff9a12d185f585a3684becb39baacd8fb198adade",
+      "size": 375073
+    },
+    "layer_B_Cu.png": {
+      "sha256": "c6a9418b71d0480a9cfb088e1fa950657a0cf4ec6949e7aa188bf4d093bf6386",
+      "size": 243971
+    },
+    "layer_F_Cu.png": {
+      "sha256": "463be5c28b7c6825a8e1d3a87e2285ff60aee12ade6bb768c00c1114085c1a08",
+      "size": 284136
+    },
+    "layer_In1_Cu.png": {
+      "sha256": "590eadf703a3b5362dec2ad3d4dfa5071e5ac6e6a83d4c586abc357732f5f271",
+      "size": 145365
+    },
+    "layer_In2_Cu.png": {
+      "sha256": "35960b9e191e7a5d9a6ac592b5432cf8e3ba3f423d570a1c8fde1b131637b47a",
+      "size": 140763
+    },
+    "pcb_back.png": {
+      "sha256": "79798715d33a1e0246ab2eca3c6f58d5269ec9423ef0174f7b3754376064df8f",
+      "size": 252459
+    },
+    "pcb_copper.png": {
+      "sha256": "f252b61503ac362ea2a7b8223c8c2121eaa95cf777e1dac5815153ea25d77437",
+      "size": 278474
+    },
+    "pcb_front.png": {
+      "sha256": "3486a3f978b20b93333eeedbdf02ce2d4d906f3dbb23b2c1eb25488d44cda028",
+      "size": 399547
+    },
+    "schematic_bldc_controller.png": {
+      "sha256": "76a4def1efadeb6d54e34cd0976a01d71052d9eff1d441bed4dc76485a82671c",
+      "size": 448101
     },
     "kicad_project.zip": {
-      "sha256": "d2f20e1f95b84c613f8d0e479aee9cf722d808482a84556726e045286a26e938",
+      "sha256": "1abbf14f5c7d3b3971bac608050ac209510da36bba6ef0871d0402f5eaab4c35",
       "size": 152267
     },
     "README.txt": {
-      "sha256": "034e68f244e7f5a99ab8e30659e60f6b9ed572cbc88f7d9822c99fd82aa759de",
-      "size": 764
+      "sha256": "0587de0a1ca3bec46fc5f2da260825343969c31b9cba5eeca8721c362a476a22",
+      "size": 881
     }
   },
   "board": {

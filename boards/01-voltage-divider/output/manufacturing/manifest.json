@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T02:54:32.619046+00:00",
+  "generated_at": "2026-06-12T04:58:53.135784+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,24 +13,52 @@
       "size": 367
     },
     "gerbers.zip": {
-      "sha256": "e55a14632571a24033388ad011c4346c1a526a609ebff444556ff84ab5cbb6a9",
-      "size": 10781
+      "sha256": "66483fbdc236192062c370bbaa7bdfb7d9f0a0142fc90a36a5daae329cd22f7a",
+      "size": 10798
     },
     "report.pdf": {
-      "sha256": "add7001dad5607a6d3ec4d70e306072a32df9c85b40a3149be761e82b0278e11",
-      "size": 29353
+      "sha256": "22fe6c78cc59e8262ac005611a4421c332a9a948a3ebf607d24c82ab2df2613c",
+      "size": 708095
     },
     "report.md": {
-      "sha256": "b86b49bff4c74a72d5a576ea915e1313e725f18ea0d84551b0181a3a056b509c",
-      "size": 1941
+      "sha256": "08e6917d7a00f6987d3b9a475b2e1bfa595394400120e09656901c5f1b413804",
+      "size": 2383
+    },
+    "assembly.png": {
+      "sha256": "f939265d4e6094357cc3dc1a3edb94c5ed3954b25fcf2161a303273b7a182f43",
+      "size": 85525
+    },
+    "layer_B_Cu.png": {
+      "sha256": "4c0543ee930e66ff3cd16b8ea9d0a1780fb918e9e3e64dfb2a5567cb6c9f321e",
+      "size": 66802
+    },
+    "layer_F_Cu.png": {
+      "sha256": "723ad2fbc492439df49fbce4a9d6e2e36a5716fa51b8860d4a1d0446ff507a67",
+      "size": 93163
+    },
+    "pcb_back.png": {
+      "sha256": "b4661f9f7961a63921f2c34beace3c77a61210d0ced7b82c738e3c8034e4530b",
+      "size": 68648
+    },
+    "pcb_copper.png": {
+      "sha256": "4cb6feea93ca34be45298236002d727bb7afb52552d247afed8d09fec00e043b",
+      "size": 70708
+    },
+    "pcb_front.png": {
+      "sha256": "c3c1fd99e0af0f2ea0771a5fa1e13f31d2d1574d35bb305f79bac2289ddceb09",
+      "size": 110676
+    },
+    "schematic_voltage_divider.png": {
+      "sha256": "57fe1192c24ca71912345cd120d21457b22dfb3efb2a1ea33fb0af40ee8346ee",
+      "size": 117914
     },
     "kicad_project.zip": {
-      "sha256": "18d1f7e2c26908ccd58955bc46a472e164937fac4df452af0257b26287364434",
+      "sha256": "67056fa8b20e63ba621145b54cd444176aa9ab167c8345967c171484758256eb",
       "size": 10824
     },
     "README.txt": {
-      "sha256": "a3a46a8839a3d2c6c9df045fc95f0400790a83e6ef0c2a1f697d23d378440b16",
-      "size": 764
+      "sha256": "0243c8aeb013dc632472380022ad84cec3f967b3897330662f8f59ad905ba4bc",
+      "size": 881
     }
   },
   "board": {

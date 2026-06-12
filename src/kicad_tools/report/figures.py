@@ -34,6 +34,11 @@ REPORT_MAX_SIZE_PX = 3000
 #: non-blank.  Title-block-only SVGs exported by kicad-cli are ~93 KB
 #: of XML, while sheets with actual schematic content are ~436 KB+.
 #: A 150 KB threshold sits well within the gap between the two.
+#:
+#: Only applied to MULTI-sheet exports: a single-sheet schematic is the
+#: whole design, so it always ships even when small.  (Board 01's real
+#: 4-component sheet is ~131 KB -- below the threshold -- and was being
+#: silently dropped from its manufacturing bundle; issue #3583.)
 _BLANK_SVG_THRESHOLD_BYTES = 150_000
 
 #: PCB presets to render, in order.
@@ -323,8 +328,12 @@ class ReportFigureGenerator:
                         # Detect blank sheets via SVG file size before
                         # spending time on PNG conversion.  Title-block-only
                         # SVGs are ~93 KB; sheets with content are 400 KB+.
+                        # Never applied to a single-sheet export: the lone
+                        # sheet IS the design, and small real schematics
+                        # (e.g. a 4-component divider at ~131 KB) sit below
+                        # the threshold (issue #3583).
                         svg_size = svg_file.stat().st_size
-                        if svg_size < _BLANK_SVG_THRESHOLD_BYTES:
+                        if total_count > 1 and svg_size < _BLANK_SVG_THRESHOLD_BYTES:
                             blank_count += 1
                             logger.warning(
                                 "Excluding blank schematic sheet '%s' "

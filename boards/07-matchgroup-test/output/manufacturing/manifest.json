@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T01:15:39.775225+00:00",
+  "generated_at": "2026-06-12T05:00:22.203920+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,24 +13,56 @@
       "size": 702
     },
     "gerbers.zip": {
-      "sha256": "9d3666c4726fd685e217b8512439a4213a24908f5bec0a45489686e0035fda5e",
-      "size": 104464
+      "sha256": "2305c379b881c68689a13d0dcd15922759bec47492b059d93b414dde0acc7f48",
+      "size": 104459
     },
     "report.pdf": {
-      "sha256": "c7480dab01275cc634d0399b4f3cd84b730576acd4971ea47e181ab05f9277ec",
-      "size": 31348
+      "sha256": "668c6b3542315e4de9f36986e383b91c9dfeace3039d14619557002ccaf59f4a",
+      "size": 1633815
     },
     "report.md": {
-      "sha256": "fd8e33f92e6cde57f8738a6fbf65e569e3b424160785a7ca6011ea4c559f2a43",
-      "size": 2592
+      "sha256": "0439d569279feaa79b3bc2ec1413b40849e4f66a553821a69e82ff8da46ce2a1",
+      "size": 3460
+    },
+    "assembly.png": {
+      "sha256": "adf5503a95404275f0e33d18787aa6afd8126e9afa77a352262e4c584846d916",
+      "size": 243005
+    },
+    "layer_B_Cu.png": {
+      "sha256": "1583bc692e0eadb13c6a9965da7605e455b47ac30da9f4862115f1763c8727e9",
+      "size": 101261
+    },
+    "layer_F_Cu.png": {
+      "sha256": "1f5414320fb91b2b77d3ac553d0e1c1f699641b4e69dd7f998c9f3bd89590304",
+      "size": 207389
+    },
+    "layer_In1_Cu.png": {
+      "sha256": "4e206340c383285cd49a21f742eb5a6585a0c0af14a3305641a48a8caa069f03",
+      "size": 173607
+    },
+    "layer_In2_Cu.png": {
+      "sha256": "a95255e48ec2c5e4d414619dacbbf82b770f2819fbd180893a177760897aaed5",
+      "size": 164059
+    },
+    "pcb_back.png": {
+      "sha256": "3e55db80d7e78255c0f696ffd006bf6450d37deb0f79ac5dae4ded2386e0c524",
+      "size": 102581
+    },
+    "pcb_copper.png": {
+      "sha256": "9c0c973c8f8b021e416e0cb788e44872f64ada604c6c5a69977fc9224c9bca08",
+      "size": 234659
+    },
+    "pcb_front.png": {
+      "sha256": "f3c0e2dfb9ec0f54d3bf8b5b41c39dcea8426786f49d435fad7f7ed6bde26262",
+      "size": 219512
     },
     "kicad_project.zip": {
-      "sha256": "c4141bea70bb9fe389caf6fc89457acdb110e180e95e86de989cac9db484faed",
+      "sha256": "5aa2f62dc92989dbc1450bc53a07b2cc5d2d9b410513a95019b49fa361188ad7",
       "size": 147600
     },
     "README.txt": {
-      "sha256": "8b763fa3f1265b1e4c21a213a801e13cd85678f507914f3ab1ec51114643b9fb",
-      "size": 764
+      "sha256": "2341fb99f64b1b5baa000e7a3e3bb534eeb84a9c7001676e72c7df06c6f3d4c8",
+      "size": 881
     }
   },
   "board": {

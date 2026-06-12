@@ -1868,6 +1868,7 @@ placement = [
     { name = "cmaes" },
 ]
 report = [
+    { name = "cairosvg" },
     { name = "jinja2" },
     { name = "markdown" },
     { name = "weasyprint" },
@@ -1890,6 +1891,7 @@ visualization = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cairosvg" },
     { name = "jinja2" },
     { name = "pytest-cov" },
 ]
@@ -1901,6 +1903,7 @@ requires-dist = [
     { name = "botorch", marker = "extra == 'all'", specifier = ">=0.12.0" },
     { name = "botorch", marker = "extra == 'bayesian'", specifier = ">=0.12.0" },
     { name = "cairosvg", marker = "extra == 'all'", specifier = ">=2.6" },
+    { name = "cairosvg", marker = "extra == 'report'", specifier = ">=2.6" },
     { name = "cairosvg", marker = "extra == 'screenshot'", specifier = ">=2.6" },
     { name = "cmaes", marker = "extra == 'all'", specifier = ">=0.12.0" },
     { name = "cmaes", marker = "extra == 'dev'", specifier = ">=0.12.0" },
@@ -1973,6 +1976,7 @@ provides-extras = ["geometry", "drc", "parts", "datasheet", "placement", "resear
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cairosvg", specifier = ">=2.6" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
 ]
