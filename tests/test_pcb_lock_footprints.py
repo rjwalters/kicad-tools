@@ -322,25 +322,27 @@ class TestSExpRoundtrip:
     """Verify the (locked) attribute survives KiCad s-expression round-trip."""
 
     def test_locked_attribute_in_sexp(self, tmp_path):
-        """After lock, the .kicad_pcb file contains 'locked' inside (attr ...)."""
+        """After lock, the .kicad_pcb file contains a top-level ``(locked yes)``.
+
+        Issue #3457: the lock must be the MODERN top-level ``(locked yes)``
+        form, NEVER the legacy KiCad-6 in-attr token (``(attr smd locked)``)
+        -- KiCad 10's kicad-cli rejects the legacy form with "Failed to
+        load board", silently breaking zone fill / DRC / gerber export.
+        """
+        import re
+
         from kicad_tools.cli.pcb_lock_footprints import run_lock_footprints
 
         pcb = _write_pcb(tmp_path)
         assert run_lock_footprints(pcb, refs=["J1"]) == 0
 
         text = pcb.read_text()
-        # KiCad emits (attr "locked") or (attr smd locked).  Match either.
-        # The simple assertion is: somewhere in the file, an (attr ...)
-        # block now contains the literal `locked` token.
         assert "locked" in text
-        # Specifically inside an (attr ...) block — sanity check we are
-        # not picking up some unrelated string.
-        # Find J1 footprint block and confirm.
+        # Find J1 footprint block and confirm the lock landed there.
         # (Naive but sufficient for the fixture.)
         j1_start = text.find('"fp-j1"')
         assert j1_start >= 0
         # Search forward until the matching close-paren of J1's footprint.
-        depth = 0
         i = text.rfind("(footprint", 0, j1_start)
         assert i >= 0
         block_start = i
@@ -356,5 +358,9 @@ class TestSExpRoundtrip:
         else:
             block_end = len(text)
         block = text[block_start:block_end]
-        assert "locked" in block
-        assert "(attr" in block
+        assert "(locked yes)" in block
+        # The legacy in-attr token must never be emitted (issue #3457).
+        assert not re.search(r"\(attr\s[^()]*\blocked\b", block), (
+            "lock-footprints emitted the legacy in-attr 'locked' token; "
+            "KiCad 10's kicad-cli rejects '(attr ... locked)'."
+        )

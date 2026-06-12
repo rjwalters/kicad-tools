@@ -453,6 +453,130 @@ class TestLoadFailureMessage:
 
 
 # ---------------------------------------------------------------------------
+# Locked-footprint save form (issue #3457)
+# ---------------------------------------------------------------------------
+#
+# KiCad 10's kicad-cli rejects boards whose footprints carry the legacy
+# KiCad-6 in-attr ``locked`` token (``(attr smd locked)``) with "Failed to
+# load board" (exit 3). ``Footprint._sync_attr_node`` previously re-emitted
+# that token whenever ``fp.locked`` was set and the board was saved through
+# the schema layer (``kct pcb lock-footprints``, optimize-placement flows),
+# silently breaking zone fill / DRC / gerber export downstream. The save
+# path now emits a top-level ``(locked yes)`` child instead, and a legacy
+# file is migrated on load -> save. These tests gate that contract against
+# the real kicad-cli parser.
+
+
+def _locked_fp_pcb_text(footprint_extra: str) -> str:
+    """Minimal kicad-cli-loadable PCB with one footprint + ``footprint_extra``."""
+    return textwrap.dedent(f"""\
+        (kicad_pcb
+            (version 20240108)
+            (generator "kicad_tools")
+            (generator_version "9.0")
+            (general
+                (thickness 1.6)
+                (legacy_teardrops no)
+            )
+            (paper "A4")
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+                (44 "Edge.Cuts" user)
+            )
+            (setup)
+            (net 0 "")
+            (footprint "Test:R_0805"
+                (layer "F.Cu")
+                (uuid "fp-uuid-locked-1")
+                (at 30 30)
+        {footprint_extra}
+                (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+                (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+                (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+                (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+            )
+        )
+    """)
+
+
+class TestLockedFootprintRoundtrip:
+    """Locked footprints saved through the schema layer must load in kicad-cli."""
+
+    def test_schema_locked_save_loads_in_kicad_cli(self, tmp_path: Path) -> None:
+        """``fp.locked = True`` + ``PCB.save()`` must produce a loadable board."""
+        pcb_path = tmp_path / "locked.kicad_pcb"
+        pcb_path.write_text(_locked_fp_pcb_text("        (attr smd)"))
+
+        board = PCB.load(pcb_path)
+        board.get_footprint("R1").locked = True
+        board.save(pcb_path)
+
+        # Regression guard: the legacy in-attr token must be absent before
+        # we even invoke kicad-cli, so the failure is attributed clearly.
+        contents = pcb_path.read_text()
+        assert "(attr smd locked" not in contents, (
+            "Regression guard: PCB.save() re-emitted the legacy in-attr "
+            "'locked' token. KiCad 10's kicad-cli rejects '(attr smd locked)' "
+            "with 'Failed to load board'. See Footprint._sync_attr_node in "
+            "src/kicad_tools/schema/pcb.py (issue #3457)."
+        )
+        assert "(locked yes)" in contents, (
+            "PCB.save() dropped the lock entirely -- expected a top-level "
+            "(locked yes) child on the footprint."
+        )
+
+        _assert_kicad_cli_loads(pcb_path, producer="PCB.save (locked footprint)", tmp_path=tmp_path)
+
+    def test_legacy_locked_migration_loads_in_kicad_cli(self, tmp_path: Path) -> None:
+        """A KiCad-6 legacy-form board must be migrated by load -> save."""
+        pcb_path = tmp_path / "legacy_migrated.kicad_pcb"
+        pcb_path.write_text(_locked_fp_pcb_text("        (attr smd locked)"))
+
+        board = PCB.load(pcb_path)
+        assert board.get_footprint("R1").locked is True
+        board.save(pcb_path)
+
+        contents = pcb_path.read_text()
+        assert "(attr smd locked" not in contents, (
+            "Load -> save round-trip echoed the legacy in-attr 'locked' token "
+            "back via raw-sexp passthrough instead of migrating it. See "
+            "PCB._link_footprint_sexp_nodes (issue #3457)."
+        )
+        assert "(locked yes)" in contents
+
+        _assert_kicad_cli_loads(
+            pcb_path,
+            producer="PCB.load + PCB.save (legacy locked migration)",
+            tmp_path=tmp_path,
+        )
+
+    def test_legacy_in_attr_locked_reproduces_failure(self, tmp_path: Path) -> None:
+        """The legacy ``(attr smd locked)`` form must trip kicad-cli's loader.
+
+        Canary test: if this ever stops failing, kicad-cli has relaxed its
+        parser and the regression class this module gates against has
+        shifted -- a signal to revisit the locked-form migration logic.
+        """
+        pcb_path = tmp_path / "legacy_raw.kicad_pcb"
+        pcb_path.write_text(_locked_fp_pcb_text("        (attr smd locked)"))
+
+        result = run_drc(
+            pcb_path,
+            output_path=tmp_path / "legacy_raw_drc.rpt",
+            format="report",
+            schematic_parity=False,
+        )
+
+        assert not result.success, (
+            "Canary failed: kicad-cli accepted the legacy in-attr 'locked' "
+            "token ('(attr smd locked)'). The regression class this test "
+            "gates against has shifted; review the locked-form handling in "
+            "src/kicad_tools/schema/pcb.py."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Schematic load gate (issue #3587)
 # ---------------------------------------------------------------------------
 #

@@ -640,10 +640,19 @@ class Footprint:
         :meth:`__setattr__`. Removes the existing ``(attr ...)`` node
         (if any), then re-emits it from the current values of
         ``attr``, ``exclude_from_pos_files``, ``exclude_from_bom``,
-        ``locked``, ``dnp``, and any ``_attr_unknown_tokens`` captured
-        during parse. If no flags are set and no unknown tokens are
-        present, no ``(attr ...)`` node is emitted (matches KiCad's
-        canonical "no flags" form).
+        ``dnp``, and any ``_attr_unknown_tokens`` captured during
+        parse. If no flags are set and no unknown tokens are present,
+        no ``(attr ...)`` node is emitted (matches KiCad's canonical
+        "no flags" form).
+
+        ``locked`` is emitted as a top-level ``(locked yes)`` child of
+        the footprint, NEVER as an in-attr ``locked`` token: KiCad 10's
+        kicad-cli rejects the legacy KiCad-6 ``(attr smd locked)`` form
+        with "Failed to load board", which silently breaks zone fill,
+        DRC and gerber export for any board re-saved through the schema
+        layer (issue #3457). Parsing still accepts both forms (see
+        :meth:`from_sexp`), so loading a legacy file and saving it
+        migrates the lock to the modern form.
         """
         sexp_node: SExp | None = self.__dict__.get("_sexp_node")
         if sexp_node is None:
@@ -657,39 +666,49 @@ class Footprint:
         for existing in list(sexp_node.find_children("attr")):
             sexp_node.remove(existing)
 
-        unknown = self.__dict__.get("_attr_unknown_tokens", []) or []
+        # Remove any existing top-level (locked ...) so we can re-emit
+        # it from Python state below. Direct children only -- pads can
+        # legitimately carry their own (locked yes), which must not be
+        # stripped here.
+        for existing in list(sexp_node.find_children("locked")):
+            sexp_node.remove(existing)
+
+        # Defensive: 'locked' is a modeled token (parsed into
+        # ``fp.locked``), but if it ever leaks into the unknown-token
+        # list it must not be echoed back into (attr ...) -- KiCad 10
+        # rejects that form.
+        unknown = [
+            token
+            for token in (self.__dict__.get("_attr_unknown_tokens", []) or [])
+            if token != "locked"
+        ]
 
         # Only emit (attr ...) if there is something to say.
-        if not (
-            self.attr
-            or self.locked
-            or self.dnp
-            or self.exclude_from_pos_files
-            or self.exclude_from_bom
-            or unknown
-        ):
-            return
+        if self.attr or self.dnp or self.exclude_from_pos_files or self.exclude_from_bom or unknown:
+            attr_node = SExp.list("attr")
+            # Canonical KiCad order: <type> [board_only]
+            # [exclude_from_pos_files] [exclude_from_bom]
+            # [allow_missing_courtyard] [dnp]. We emit modeled tokens in
+            # a stable order and append unknown tokens at the end --
+            # KiCad accepts any ordering of these atoms, so this is a
+            # safe simplification.
+            if self.attr:
+                attr_node.add(self.attr)  # 'smd' or 'through_hole'
+            if self.exclude_from_pos_files:
+                attr_node.add("exclude_from_pos_files")
+            if self.exclude_from_bom:
+                attr_node.add("exclude_from_bom")
+            if self.dnp:
+                attr_node.add("dnp")
+            for token in unknown:
+                attr_node.add(token)
 
-        attr_node = SExp.list("attr")
-        # Canonical KiCad order: <type> [board_only] [exclude_from_pos_files]
-        # [exclude_from_bom] [allow_missing_courtyard] [dnp], with `locked`
-        # appearing as a peer token. We emit modeled tokens in a stable
-        # order and append unknown tokens at the end -- KiCad accepts
-        # any ordering of these atoms, so this is a safe simplification.
-        if self.attr:
-            attr_node.add(self.attr)  # 'smd' or 'through_hole'
-        if self.exclude_from_pos_files:
-            attr_node.add("exclude_from_pos_files")
-        if self.exclude_from_bom:
-            attr_node.add("exclude_from_bom")
+            sexp_node.append(attr_node)
+
+        # Modern lock form: top-level (locked yes), the only form
+        # KiCad 10's kicad-cli accepts (issue #3410 / #3457).
         if self.locked:
-            attr_node.add("locked")
-        if self.dnp:
-            attr_node.add("dnp")
-        for token in unknown:
-            attr_node.add(token)
-
-        sexp_node.append(attr_node)
+            sexp_node.append(SExp.list("locked", "yes"))
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Footprint:
@@ -1940,6 +1959,20 @@ class PCB:
                 # both _sexp_node and _board_origin are in place.
                 object.__setattr__(fp, "_board_origin", self._board_origin)
                 object.__setattr__(fp, "_sexp_node", child)
+
+                # Migrate the legacy KiCad-6 in-attr 'locked' token to
+                # the modern top-level ``(locked yes)`` form. KiCad 10's
+                # kicad-cli rejects the legacy form ("Failed to load
+                # board"), so a load->save round-trip must not echo the
+                # original token back via raw-sexp passthrough (issue
+                # #3457). ``fp.locked`` was already set by from_sexp;
+                # rebuilding the attr block from Python state drops the
+                # in-attr token and emits the top-level node.
+                attr_nodes = child.find_children("attr")
+                if attr_nodes and any(
+                    atom.value == "locked" for atom in attr_nodes[0].children if atom.is_atom
+                ):
+                    fp._sync_attr_node()
 
             order_idx += 1
 
