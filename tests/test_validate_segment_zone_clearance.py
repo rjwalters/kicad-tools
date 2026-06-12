@@ -277,6 +277,97 @@ class TestLayers:
 
 
 # ---------------------------------------------------------------------------
+# Invalid fill repair: make_valid must keep every lobe (Issue #3560)
+# ---------------------------------------------------------------------------
+
+# Bowtie ring: two 5x5-mm triangular lobes meeting at (105, 105).  The
+# lower lobe spans y 100..105, the upper lobe y 105..110.  buffer(0)
+# silently drops the negatively-wound lower lobe (keeps only y>=105);
+# make_valid keeps both as a MultiPolygon.
+_BOWTIE_FILL = [(100.0, 100.0), (110.0, 100.0), (100.0, 110.0), (110.0, 110.0)]
+
+
+class TestInvalidFillRepair:
+    def test_bowtie_fixture_buffer0_actually_loses_copper(self):
+        """Sanity-check the fixture exhibits the hazard being hardened.
+
+        If shapely ever changes buffer(0) to be loss-free for bowties,
+        this documents that the other tests in this class no longer
+        discriminate (they would still pass).
+        """
+        from shapely import make_valid
+        from shapely.geometry import Polygon
+
+        bowtie = Polygon(_BOWTIE_FILL)
+        assert not bowtie.is_valid
+        assert make_valid(bowtie).area > bowtie.buffer(0).area
+
+    def test_repair_helper_preserves_all_lobes(self):
+        from shapely.geometry import Polygon
+
+        from kicad_tools.validate.rules.clearance import _repair_fill_polygon
+
+        repaired = _repair_fill_polygon(Polygon(_BOWTIE_FILL))
+        assert repaired.is_valid
+        # Both 12.5 mm^2 lobes survive (buffer(0) keeps only 25.0).
+        assert abs(repaired.area - 50.0) < 1e-9
+        # Full original extent retained, including the dropped lobe's y range.
+        assert repaired.bounds == (100.0, 100.0, 110.0, 110.0)
+
+    def test_repair_helper_extracts_polygons_from_geometrycollection(self):
+        """Zero-area spikes make make_valid return a GeometryCollection."""
+        from shapely.geometry import Polygon
+
+        from kicad_tools.validate.rules.clearance import _repair_fill_polygon
+
+        spike = Polygon([(0, 0), (2, 0), (2, 2), (4, 2), (2, 2), (0, 2)])
+        repaired = _repair_fill_polygon(spike)
+        assert repaired.is_valid
+        assert repaired.geom_type in ("Polygon", "MultiPolygon")
+        assert abs(repaired.area - 4.0) < 1e-9
+
+    def test_repair_helper_fully_degenerate_outline_is_empty(self):
+        """A ring that collapses entirely to linework yields no copper."""
+        from shapely.geometry import Polygon
+
+        from kicad_tools.validate.rules.clearance import _repair_fill_polygon
+
+        line_only = Polygon([(0, 0), (2, 0), (0, 0)])
+        repaired = _repair_fill_polygon(line_only)
+        assert repaired.is_empty
+
+    def test_trace_under_dropped_bowtie_lobe_is_flagged(self):
+        """The hardening payoff: a short under the lobe buffer(0) drops.
+
+        buffer(0) keeps only the upper lobe (y >= 105) of the bowtie,
+        so pre-#3560 a trace crossing the *lower* lobe sailed through.
+        make_valid retains it and the short is reported.
+        """
+        zone = _FakeZone(filled_polygons=[_BOWTIE_FILL])
+        # Horizontal trace through the lower lobe at y=102: the lower
+        # triangle (apexes (100,100), (110,100), (105,105)) spans
+        # x 102..108 there, so the centerline runs straight through it.
+        seg = _FakeSegment(start=(95.0, 102.0), end=(115.0, 102.0))
+        results = _run([zone], [seg])
+
+        assert len(results.violations) == 1
+        v = results.violations[0]
+        assert "Short" in v.message
+        assert v.actual_value < 0
+        assert v.nets == ("SIG", "+3V3")
+
+    def test_traces_under_both_bowtie_lobes_both_flagged(self):
+        """One trace per lobe -> two shorts (buffer(0) would report one)."""
+        zone = _FakeZone(filled_polygons=[_BOWTIE_FILL])
+        lower = _FakeSegment(start=(95.0, 102.0), end=(115.0, 102.0), uuid="aaaa0000-0000")
+        upper = _FakeSegment(start=(95.0, 108.0), end=(115.0, 108.0), uuid="bbbb0000-0000")
+        results = _run([zone], [lower, upper])
+
+        shorts = [v for v in results.violations if "Short" in v.message]
+        assert len(shorts) == 2
+
+
+# ---------------------------------------------------------------------------
 # Zone schema: per-fill layer parsing (Issue #3527 schema change)
 # ---------------------------------------------------------------------------
 
