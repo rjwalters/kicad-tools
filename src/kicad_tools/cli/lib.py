@@ -28,7 +28,7 @@ from kicad_tools.footprints.library_path import (
     list_available_libraries as list_footprint_libraries,
 )
 from kicad_tools.schema import SymbolLibrary
-from kicad_tools.schematic.grid import KICAD_SYMBOL_PATHS
+from kicad_tools.schematic.grid import get_symbol_search_paths
 from kicad_tools.schematic.library import list_libraries as list_symbol_libraries
 
 
@@ -48,7 +48,7 @@ def list_kicad_libraries(
     result: dict[str, Any] = {}
 
     if library_type in ("symbols", "all"):
-        symbol_libs = list_symbol_libraries(KICAD_SYMBOL_PATHS)
+        symbol_libs = list_symbol_libraries(get_symbol_search_paths())
         result["symbols"] = {
             "count": len(symbol_libs),
             "libraries": symbol_libs,
@@ -152,7 +152,7 @@ def _find_symbol_library(library: str) -> Path | None:
     lib_name = library if library.endswith(".kicad_sym") else f"{library}.kicad_sym"
 
     # Search in KiCad paths
-    for search_path in KICAD_SYMBOL_PATHS:
+    for search_path in get_symbol_search_paths():
         candidate = search_path / lib_name
         if candidate.exists():
             return candidate

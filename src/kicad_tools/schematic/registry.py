@@ -26,33 +26,22 @@ Usage:
     pin = registry.get_pin(symbol, "anode")  # Fuzzy matches to "A"
 """
 
-import os
 import re
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 from pathlib import Path
 
+from .grid import get_symbol_search_paths
 
-# Default KiCad library paths (platform-specific)
+
 def _default_symbol_paths() -> list[Path]:
-    """Get platform-appropriate KiCad symbol paths."""
-    paths = []
+    """Get platform-appropriate KiCad symbol paths.
 
-    # macOS
-    paths.append(Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols"))
-
-    # Linux
-    paths.append(Path("/usr/share/kicad/symbols"))
-    paths.append(Path("/usr/local/share/kicad/symbols"))
-
-    # User local (both platforms)
-    paths.append(Path.home() / ".local/share/kicad/symbols")
-
-    # Environment variable override
-    if "KICAD_SYMBOL_DIR" in os.environ:
-        paths.insert(0, Path(os.environ["KICAD_SYMBOL_DIR"]))
-
-    return [p for p in paths if p.exists()]
+    Thin delegation to :func:`kicad_tools.schematic.grid.get_symbol_search_paths`,
+    the single source of truth for symbol library discovery (honors
+    ``KICAD_SYMBOL_DIR`` at call time).
+    """
+    return get_symbol_search_paths()
 
 
 @dataclass
@@ -400,7 +389,7 @@ class SymbolRegistry:
         section_starts = [m.start() for m in re.finditer(r"\n\s*\(pin\s+", sexp)]
         pin_sections = re.split(r"\n\s*\(pin\s+", sexp)[1:]
 
-        for section, offset in zip(pin_sections, section_starts):
+        for section, offset in zip(pin_sections, section_starts, strict=False):
             # Extract pin type and style from start
             type_match = re.match(r"(\w+)\s+(\w+)", section)
             if not type_match:

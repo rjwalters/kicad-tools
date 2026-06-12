@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from .exceptions import LibraryNotFoundError
-from .grid import KICAD_SYMBOL_PATHS
+from .grid import get_symbol_search_paths
 from .helpers import _group_pins_by_type
 from .models.pin import Pin
 from .models.symbol import SymbolInstance
@@ -28,7 +28,7 @@ def list_libraries(lib_paths: list[Path] = None) -> list[str]:
         print(f"Available libraries: {libs[:10]}...")  # First 10
     """
     if lib_paths is None:
-        lib_paths = KICAD_SYMBOL_PATHS
+        lib_paths = get_symbol_search_paths()
 
     libraries = set()
     for search_path in lib_paths:
@@ -54,7 +54,7 @@ def list_symbols(library: str, lib_paths: list[Path] = None) -> list[str]:
         print(f"Audio symbols: {symbols}")
     """
     if lib_paths is None:
-        lib_paths = KICAD_SYMBOL_PATHS
+        lib_paths = get_symbol_search_paths()
 
     lib_file = f"{library}.kicad_sym"
 
@@ -97,7 +97,7 @@ def search_symbols(pattern: str, lib_paths: list[Path] = None) -> list[str]:
     import fnmatch
 
     if lib_paths is None:
-        lib_paths = KICAD_SYMBOL_PATHS
+        lib_paths = get_symbol_search_paths()
 
     results = []
     for lib_name in list_libraries(lib_paths):

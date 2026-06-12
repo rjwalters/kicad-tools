@@ -196,7 +196,7 @@ class Schematic(
         Searches ``self.local_symbol_libs`` first (project-local libs win
         over stock libs, matching KiCad's project-table precedence).
         Returns ``None`` if no match is found in the local libs — callers
-        should fall through to the global ``KICAD_SYMBOL_PATHS`` search
+        should fall through to the global ``get_symbol_search_paths()`` search
         in that case.
 
         Args:
