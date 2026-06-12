@@ -5,12 +5,12 @@
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
-      "sha256": "91cf0f8a65ec320dbe527d5d0de524ee8f5f91853e86570ec924a509f83b411f",
-      "size": 444
+      "sha256": "45599b2cf1e021bcef64ff637cffe71d2e41c1fa57a3d69ed196edcc085acc7c",
+      "size": 436
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "8b4ae1783abf6ee95ae060c1ba5b46fb314d05c9dc7d09777a17616fd95e6cdc",
-      "size": 591
+      "sha256": "a2c7cbc91bb50ed15e8d65a99c1d788aad4b7c2c728db661d314b0e3eddacda6",
+      "size": 583
     },
     "gerbers.zip": {
       "sha256": "d80a9387cb957af983fd3e1c92e9f4bd9356846eb822f2a5984a69bda5475985",

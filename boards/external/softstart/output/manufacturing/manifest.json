@@ -5,12 +5,12 @@
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "bom_jlcpcb.csv": {
-      "sha256": "ee97cedb8c151ff78d8507d720d2066e8142ae81f78d95498a604904f251f0d5",
-      "size": 1935
+      "sha256": "15d0f1dcafad8ac7d8e7b6c355aed21e16408683378f3d57cc23e7adf9dbbcc0",
+      "size": 1900
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "012ae7530431aa72aa096bdf9e8bf0ad664a52c1e3ed0bd9bd876b51a14cda03",
-      "size": 3907
+      "sha256": "1b58a014335748b4f7bb3a7080b2f2af5c273a4789a9fdf959d6991cf2bb8adf",
+      "size": 3850
     },
     "gerbers.zip": {
       "sha256": "a11930353a35e46d209dfa21820f04b6a7365e484f0e77d3ddf1986de71ae42a",

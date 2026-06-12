@@ -442,7 +442,10 @@ class AssemblyPackage:
         # Write to file
         filename = self.config.bom_filename.format(manufacturer=self.fab_family)
         bom_path = output_dir / filename
-        bom_path.write_text(bom_csv)
+        # newline="\n" keeps the on-disk file byte-identical to the
+        # formatted string on every platform, so manifest.json checksums
+        # match the committed (git-normalized, LF) content (issue #3529).
+        bom_path.write_text(bom_csv, newline="\n")
 
         logger.info(f"Generated BOM: {bom_path}")
         return bom_path
@@ -474,7 +477,8 @@ class AssemblyPackage:
         # Write to file
         filename = self.config.pnp_filename.format(manufacturer=self.fab_family)
         pnp_path = output_dir / filename
-        pnp_path.write_text(pnp_csv)
+        # newline="\n": see _generate_bom — keep disk == git == manifest.
+        pnp_path.write_text(pnp_csv, newline="\n")
 
         logger.info(f"Generated CPL: {pnp_path}")
         return pnp_path
