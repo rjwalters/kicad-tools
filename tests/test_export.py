@@ -26,8 +26,10 @@ from kicad_tools.export.pnp import (
     PnPExportConfig,
     export_pnp,
     extract_placements,
+    extract_tht_exclusions,
     get_aux_origin,
     get_pnp_formatter,
+    group_tht_exclusions,
 )
 
 
@@ -796,3 +798,221 @@ class TestAssemblyPackageJLCPCBTHTIntegration:
         assert "C1" in cpl_content
         # THT connector must be excluded
         assert "J1" not in cpl_content
+
+
+class TestExtractTHTExclusions:
+    """Tests for extract_tht_exclusions (issue #3539)."""
+
+    @pytest.fixture
+    def mixed_footprints(self) -> list[MockFootprint]:
+        return [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("R20", "1k", "THT_Axial", (12.0, 20.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint("R6", "1k", "THT_Axial", (14.0, 20.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint(
+                "J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint("U1", "STM32", "LQFP48", (30.0, 30.0), 45.0, "F.Cu", attr="smd"),
+        ]
+
+    def test_lists_exactly_the_excluded_tht_set(self, mixed_footprints):
+        """Exclusions must be exactly the THT parts the CPL filter drops."""
+        config = PnPExportConfig(exclude_tht=True)
+        included = {p.reference for p in extract_placements(mixed_footprints, config)}
+        excluded = extract_tht_exclusions(mixed_footprints, config)
+        excluded_refs = {p.reference for p in excluded}
+
+        assert excluded_refs == {"R6", "R20", "J1"}
+        assert excluded_refs.isdisjoint(included)
+        all_refs = {fp.reference for fp in mixed_footprints}
+        assert included | excluded_refs == all_refs
+
+    def test_natural_reference_ordering(self, mixed_footprints):
+        """R6 must sort before R20 (natural, not lexicographic, order)."""
+        config = PnPExportConfig(exclude_tht=True)
+        refs = [p.reference for p in extract_tht_exclusions(mixed_footprints, config)]
+        assert refs == ["J1", "R6", "R20"]
+
+    def test_exclude_tht_false_returns_empty(self, mixed_footprints):
+        """When the CPL includes THT, nothing is hand-solder-excluded."""
+        config = PnPExportConfig(exclude_tht=False)
+        assert extract_tht_exclusions(mixed_footprints, config) == []
+
+    def test_no_config_returns_empty(self, mixed_footprints):
+        """Default config has exclude_tht=False -> empty exclusion set."""
+        assert extract_tht_exclusions(mixed_footprints) == []
+
+    def test_smd_only_board_returns_empty(self):
+        """SMD-only board has no hand-solder set even with exclude_tht."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        assert extract_tht_exclusions(footprints, config) == []
+
+    def test_dnp_tht_not_listed(self):
+        """DNP THT parts are not placed at all -> not in the hand-solder set."""
+        footprints = [
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint(
+                "J2", "Conn", "PinHeader", (20.0, 10.0), 0.0, "F.Cu", attr="through_hole", dnp=True
+            ),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        refs = [p.reference for p in extract_tht_exclusions(footprints, config)]
+        assert refs == ["J1"]
+
+    def test_exclude_from_pos_files_not_listed(self):
+        """Footprints excluded from position files are never CPL candidates."""
+        footprints = [
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint(
+                "H1",
+                "MountingHole",
+                "MountingHole_3.2mm",
+                (20.0, 10.0),
+                0.0,
+                "F.Cu",
+                attr="through_hole",
+                exclude_from_pos_files=True,
+            ),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        refs = [p.reference for p in extract_tht_exclusions(footprints, config)]
+        assert refs == ["J1"]
+
+
+class TestGroupTHTExclusions:
+    """Tests for group_tht_exclusions presentation grouping (issue #3539)."""
+
+    def test_groups_by_value_and_footprint(self):
+        placements = [
+            PlacementData("R20", "1k", "THT_Axial", 0, 0, 0, "F.Cu"),
+            PlacementData("R6", "1k", "THT_Axial", 0, 0, 0, "F.Cu"),
+            PlacementData("J1", "Conn_01x04", "PinHeader_1x04", 0, 0, 0, "F.Cu"),
+        ]
+        rows = group_tht_exclusions(placements)
+
+        assert rows == [
+            {"value": "Conn_01x04", "footprint": "PinHeader_1x04", "qty": 1, "refs": "J1"},
+            {"value": "1k", "footprint": "THT_Axial", "qty": 2, "refs": "R6, R20"},
+        ]
+
+    def test_same_value_different_footprint_not_merged(self):
+        placements = [
+            PlacementData("R1", "1k", "THT_Axial_Small", 0, 0, 0, "F.Cu"),
+            PlacementData("R2", "1k", "THT_Axial_Large", 0, 0, 0, "F.Cu"),
+        ]
+        rows = group_tht_exclusions(placements)
+        assert len(rows) == 2
+
+    def test_empty_input(self):
+        assert group_tht_exclusions([]) == []
+
+
+class TestAssemblyPackageTHTExcludedSurfacing:
+    """AssemblyPackageResult.tht_excluded records the CPL hand-solder set."""
+
+    def _make_package(self, tmp_path, manufacturer="jlcpcb", pnp_config=None):
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        config = AssemblyConfig(
+            include_bom=False,
+            include_gerbers=False,
+            include_pnp=True,
+            pnp_config=pnp_config,
+        )
+        return AssemblyPackage(
+            pcb_path=pcb_file,
+            schematic_path=None,
+            manufacturer=manufacturer,
+            config=config,
+        )
+
+    def _export_with_footprints(self, pkg, tmp_path, footprints):
+        from unittest.mock import MagicMock, patch
+
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = footprints
+        with patch("kicad_tools.schema.pcb.PCB") as MockPCB:
+            MockPCB.load.return_value = mock_pcb
+            return pkg.export(output_dir=tmp_path / "out")
+
+    def test_jlcpcb_records_tht_excluded(self, tmp_path):
+        """JLCPCB default (exclude_tht=True) surfaces the excluded refs."""
+        pkg = self._make_package(tmp_path)
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+                MockFootprint(
+                    "J1",
+                    "Conn_01x04",
+                    "PinHeader_1x04",
+                    (50.0, 10.0),
+                    0.0,
+                    "F.Cu",
+                    attr="through_hole",
+                ),
+                MockFootprint(
+                    "SW1", "SW_Push", "SW_PUSH_6mm", (60.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+
+        assert [p.reference for p in result.tht_excluded] == ["J1", "SW1"]
+        # Sanity: the same refs are absent from the CPL on disk
+        cpl_content = result.pnp_path.read_text()
+        assert "J1" not in cpl_content
+        assert "SW1" not in cpl_content
+        assert "R1" in cpl_content
+
+    def test_smd_only_board_has_empty_tht_excluded(self, tmp_path):
+        pkg = self._make_package(tmp_path)
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+                MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+            ],
+        )
+        assert result.tht_excluded == []
+
+    def test_explicit_include_tht_has_empty_tht_excluded(self, tmp_path):
+        """exclude_tht=False means the CPL includes THT -> nothing to document."""
+        pkg = self._make_package(tmp_path, pnp_config=PnPExportConfig(exclude_tht=False))
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint(
+                    "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+        assert result.tht_excluded == []
+        assert "J1" in result.pnp_path.read_text()
+
+    def test_generic_manufacturer_has_empty_tht_excluded(self, tmp_path):
+        """Generic formatter includes THT by default -> no hand-solder set."""
+        pkg = self._make_package(tmp_path, manufacturer="generic")
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint(
+                    "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+        assert result.tht_excluded == []

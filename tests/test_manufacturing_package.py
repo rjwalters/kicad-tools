@@ -1184,3 +1184,113 @@ class TestReadmeGeneration:
         """include_readme defaults to True."""
         config = ManufacturingConfig()
         assert config.include_readme is True
+
+
+class TestTHTHandSolderDocumentation:
+    """README/report documentation of the CPL's hand-solder THT set (issue #3539)."""
+
+    @staticmethod
+    def _tht_placements(refs_values_footprints):
+        from kicad_tools.export.pnp import PlacementData
+
+        return [
+            PlacementData(ref, value, footprint, 0.0, 0.0, 0.0, "F.Cu")
+            for ref, value, footprint in refs_values_footprints
+        ]
+
+    def _export(self, tmp_path, monkeypatch, tht_excluded):
+        """Run a ManufacturingPackage export with a faked assembly stage."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator\n")
+            pnp_path = od / "cpl_jlcpcb.csv"
+            pnp_path.write_text("Designator,Val\n")
+            return assembly.AssemblyPackageResult(
+                output_dir=od,
+                bom_path=bom_path,
+                pnp_path=pnp_path,
+                tht_excluded=tht_excluded,
+            )
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        return pkg.export(tmp_path / "output")
+
+    def test_readme_lists_hand_solder_refs(self, tmp_path, monkeypatch):
+        """README.txt's CPL entry must enumerate the excluded THT refs."""
+        tht = self._tht_placements(
+            [
+                ("J1", "Conn_01x04", "PinHeader_1x04"),
+                ("R6", "1k", "R_Axial"),
+                ("SW1", "SW_Push", "SW_PUSH_6mm"),
+            ]
+        )
+        result = self._export(tmp_path, monkeypatch, tht)
+
+        assert result.readme_path is not None
+        content = result.readme_path.read_text()
+        assert "cpl_jlcpcb.csv" in content
+        assert "3 through-hole component(s)" in content
+        assert "hand-soldered" in content
+        assert "J1, R6, SW1" in content
+
+    def test_readme_no_note_for_smd_only_board(self, tmp_path, monkeypatch):
+        """SMD-only boards must not get a spurious hand-solder note."""
+        result = self._export(tmp_path, monkeypatch, [])
+
+        content = result.readme_path.read_text()
+        assert "cpl_jlcpcb.csv" in content
+        assert "hand-soldered" not in content
+        assert "through-hole" not in content
+
+    def test_tht_component_groups_from_assembly_result(self, tmp_path):
+        """_tht_component_groups produces BOM-style rows for the report."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(
+                output_dir=tmp_path,
+                tht_excluded=self._tht_placements(
+                    [
+                        ("R20", "1k", "R_Axial"),
+                        ("R6", "1k", "R_Axial"),
+                        ("J1", "Conn_01x04", "PinHeader_1x04"),
+                    ]
+                ),
+            ),
+        )
+
+        rows = ManufacturingPackage._tht_component_groups(result)
+        assert rows == [
+            {"value": "Conn_01x04", "footprint": "PinHeader_1x04", "qty": 1, "refs": "J1"},
+            {"value": "1k", "footprint": "R_Axial", "qty": 2, "refs": "R6, R20"},
+        ]
+
+    def test_tht_component_groups_empty_cases(self, tmp_path):
+        """No assembly result or empty exclusion set -> no rows."""
+        from kicad_tools.export.assembly import AssemblyPackageResult
+
+        no_assembly = ManufacturingResult(output_dir=tmp_path)
+        assert ManufacturingPackage._tht_component_groups(no_assembly) == []
+
+        empty = ManufacturingResult(
+            output_dir=tmp_path,
+            assembly_result=AssemblyPackageResult(output_dir=tmp_path),
+        )
+        assert ManufacturingPackage._tht_component_groups(empty) == []

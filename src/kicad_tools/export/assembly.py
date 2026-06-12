@@ -21,7 +21,13 @@ from .bom_formats import (
 )
 from .bom_spec_overlay import SpecOverlayReport, apply_spec_overlay, find_spec_file
 from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
-from .pnp import PnPExportConfig, export_pnp
+from .pnp import (
+    PlacementData,
+    PnPExportConfig,
+    export_pnp,
+    extract_tht_exclusions,
+    get_pnp_formatter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +84,12 @@ class AssemblyPackageResult:
     gerber_path: Path | None = None
     spec_overlay: SpecOverlayReport | None = None
     lcsc_enrichment: EnrichmentReport | None = None
+    tht_excluded: list[PlacementData] = field(default_factory=list)
+    """Through-hole components excluded from the CPL by the THT filter
+    (issue #3539).  These are on the board and in the BOM but absent
+    from the SMT pick-and-place file, so the assembler must hand-solder
+    them.  Empty when the effective PnP config has ``exclude_tht=False``
+    or the board has no THT parts."""
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -270,7 +282,7 @@ class AssemblyPackage:
         # Generate CPL
         if self.config.include_pnp:
             try:
-                result.pnp_path = self._generate_pnp(out_dir)
+                result.pnp_path = self._generate_pnp(out_dir, result)
             except Exception as e:
                 result.errors.append(f"CPL generation failed: {e}")
                 logger.error(f"CPL generation failed: {e}")
@@ -458,8 +470,14 @@ class AssemblyPackage:
         logger.info(f"Generated BOM: {bom_path}")
         return bom_path
 
-    def _generate_pnp(self, output_dir: Path) -> Path:
-        """Generate pick-and-place file."""
+    def _generate_pnp(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
+        """Generate pick-and-place file.
+
+        When *result* is provided, the through-hole components excluded
+        from the CPL by the effective THT filter are recorded on
+        ``result.tht_excluded`` so downstream consumers (manufacturing
+        report / README) can enumerate the hand-solder set (issue #3539).
+        """
         # Import here to avoid circular imports
         from ..schema.pcb import PCB
 
@@ -481,6 +499,20 @@ class AssemblyPackage:
             self.config.pnp_config,
             rotation_corrections=rotation_corrections,
         )
+
+        # Record the THT hand-solder set excluded from the CPL.  Use the
+        # formatter's *effective* config so manufacturer defaults
+        # (JLCPCB: exclude_tht=True) are honoured when no explicit
+        # pnp_config was supplied.
+        if result is not None:
+            effective_config = get_pnp_formatter(self.fab_family, self.config.pnp_config).config
+            result.tht_excluded = extract_tht_exclusions(footprints, effective_config)
+            if result.tht_excluded:
+                logger.info(
+                    "CPL excludes %d through-hole component(s) (hand-solder): %s",
+                    len(result.tht_excluded),
+                    ", ".join(p.reference for p in result.tht_excluded),
+                )
 
         # Write to file
         filename = self.config.pnp_filename.format(manufacturer=self.fab_family)
