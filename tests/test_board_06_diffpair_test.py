@@ -754,9 +754,14 @@ class TestBoard06StrictGateGuard:
     grazes against the GND In1.Cu fill at (14.397, 12.083) -- stale-fill
     defects that were always in the committed copper, newly visible).
     Artifact fix tracked in Issue #3554.  20 -> 22.
+
+    PR #3548 (2026-06-11, issues #3515 + #3554): the USB_CC1 In1.Cu
+    corridor moved to clear the USB2_D- via barrel and the GND In1.Cu
+    fill was regenerated via ``kct zones fill``, retiring both
+    ``clearance_segment_zone`` findings.  22 -> 20.
     """
 
-    EXPECTED_STRICT_GATE_ERRORS = 22
+    EXPECTED_STRICT_GATE_ERRORS = 20
     EXPECTED_ADVISORY_CONNECTIVITY = 2
 
     @pytest.fixture(scope="class")
