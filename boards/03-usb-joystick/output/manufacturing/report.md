@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-11 | jlcpcb"
+date: "Rev 1 | 2026-06-12 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,9 +18,9 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 19 (1 SMD, 1 THT, 17 other) |
+| Footprints | 19 (17 SMD, 2 THT, 0 other) |
 | Nets | 16 |
-| Traces | 548 segments |
+| Traces | 582 segments |
 | Vias | 15 |
 | Board Size | 80.0 x 60.0 mm |
 

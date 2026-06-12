@@ -496,14 +496,10 @@ tolerances:
   # TraceOptimizer otherwise re-introduces one ``clearance_segment_via``
   # at the XTAL cluster).  The committed routed PCB is now 13/13 routed
   # with ZERO blocking DRC errors at jlcpcb-tier1 -- tightened 5 -> 0.
-  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
-  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
-  # shorts that were previously invisible to every gate) fired 4
-  # finding(s) on this committed artifact.  All 4 are shorts (BTN3 vs GND B.Cu fill).
-  # Artifact fix tracked in #3551; remove/reduce this entry in the PR
-  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
-  # the rule.
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 4
+  # The #3527 ``clearance_segment_zone`` grandfather (4 stale-fill BTN3
+  # vs GND B.Cu shorts) was cleared by Issue #3551: ``kct zones fill``
+  # regenerated the pours against the final trace set (refill-only, no
+  # copper re-route), restoring the strict 0-error gate.
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
