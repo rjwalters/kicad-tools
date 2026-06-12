@@ -62,6 +62,53 @@ Thermal analysis and high-current routing demo
 
 \newpage
 
+## Schematic Overview
+
+### Schematic: bldc_controller
+
+![Schematic: bldc_controller](images/schematic_bldc_controller.png)
+
+
+\newpage
+
+## PCB Layout
+
+![PCB Front](images/pcb_front.png)
+
+![PCB Back](images/pcb_back.png)
+
+### Copper
+
+![PCB Copper](images/pcb_copper.png)
+
+### Assembly
+
+![Assembly](images/assembly.png)
+
+
+\newpage
+
+## Copper Layers
+
+### F.Cu
+
+![F.Cu](images/layer_F_Cu.png)
+
+### In1.Cu
+
+![In1.Cu](images/layer_In1_Cu.png)
+
+### In2.Cu
+
+![In2.Cu](images/layer_In2_Cu.png)
+
+### B.Cu
+
+![B.Cu](images/layer_B_Cu.png)
+
+
+\newpage
+
 ## Bill of Materials
 
 | Value | Package | Qty | References |

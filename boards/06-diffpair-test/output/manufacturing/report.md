@@ -38,7 +38,7 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Protocol | Signals |
 |----------|---------|
-| UART | PCIE_RX-, USB3_TX2+ |
+| UART | USB3_RX2+, USB3_TX2+ |
 | USB | USB2_D+, USB2_D-, VBUS_USB |
 
 ### Power Architecture
@@ -63,6 +63,44 @@ Epic #2556 Phase 4L (issue #2658)
 
 \newpage
 
+## PCB Layout
+
+![PCB Front](images/pcb_front.png)
+
+![PCB Back](images/pcb_back.png)
+
+### Copper
+
+![PCB Copper](images/pcb_copper.png)
+
+### Assembly
+
+![Assembly](images/assembly.png)
+
+
+\newpage
+
+## Copper Layers
+
+### F.Cu
+
+![F.Cu](images/layer_F_Cu.png)
+
+### In1.Cu
+
+![In1.Cu](images/layer_In1_Cu.png)
+
+### In2.Cu
+
+![In2.Cu](images/layer_In2_Cu.png)
+
+### B.Cu
+
+![B.Cu](images/layer_B_Cu.png)
+
+
+\newpage
+
 ## Bill of Materials
 
 | Value | Package | Qty | References |
@@ -82,11 +120,19 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
-| Warnings | 0 |
-| Blocking | 0 |
+| Errors | 2 |
+| Warnings | 3 |
+| Blocking | 2 |
 
-**Status**: PASS
+**Status**: FAIL
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| clearance_segment_via | 2 |
+| connectivity | 2 |
+| silkscreen_text_height | 2 |
+| silkscreen_over_pad | 1 |
 
 
 \newpage
@@ -97,8 +143,10 @@ Epic #2556 Phase 4L (issue #2658)
 
 ### Action Items
 
+- **[CRITICAL]** Fix 2 blocking DRC violations (clearance_segment_via (2))
 - **[CRITICAL]** Increase min trace width: 0.100mm < 0.102mm required
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
+- **[OPTIONAL]** Review 3 DRC warnings
 
 
 \newpage
