@@ -95,6 +95,7 @@ class PreflightChecker:
         config: PreflightConfig | None = None,
         exclude_tht: bool | None = None,
         bom_source: str = "schematic",
+        parts_cache=None,
     ):
         self.pcb_path = Path(pcb_path)
         self.schematic_path = Path(schematic_path) if schematic_path else None
@@ -102,6 +103,9 @@ class PreflightChecker:
         self.output_dir = Path(output_dir) if output_dir else None
         self.config = config or PreflightConfig()
         self._bom_source = bom_source
+        # Optional injected PartsCache for LCSC value validation
+        # (default: lazily constructed in _check_bom_lcsc_values).
+        self._parts_cache = parts_cache
 
         # Determine THT exclusion: explicit override, or default per manufacturer
         if exclude_tht is not None:
@@ -143,11 +147,11 @@ class PreflightChecker:
 
         # BOM checks: run if schematic is available OR bom_source is "pcb"/"auto"
         can_load_bom = (
-            (self.schematic_path and self.schematic_path.exists())
-            or self._bom_source in ("pcb", "auto")
-        )
+            self.schematic_path and self.schematic_path.exists()
+        ) or self._bom_source in ("pcb", "auto")
         if can_load_bom:
             results.append(self._check_bom_fields())
+            results.append(self._check_bom_lcsc_values())
             results.append(self._check_bom_footprint_match())
             if self._pcb is not None:
                 results.append(self._check_bom_cpl_match())
@@ -559,6 +563,77 @@ class PreflightChecker:
             status=status,
             message=f"BOM field issues: {len(issues)} problem(s)",
             details="; ".join(issues),
+        )
+
+    def _check_bom_lcsc_values(self) -> PreflightResult:
+        """Validate assigned LCSC parts against their known parametric values.
+
+        For every active BOM item that HAS an LCSC number, look the part
+        up in the local parts cache/DB.  When the part is known and its
+        parametric value clearly disagrees with the BOM row value
+        (e.g. 100nF part on a 16nF row -- issue #3590), the check FAILS:
+        a wrong-value passive in a shipped BOM is a manufacturing defect.
+
+        Items whose LCSC part is not in the local cache cannot be
+        validated and are reported as OK (this check is best-effort by
+        design; it must not require network access).
+        """
+        try:
+            bom = self._load_bom()
+        except Exception as e:
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=f"Could not extract BOM: {e}",
+            )
+
+        cache = self._parts_cache
+        if cache is None:
+            try:
+                from ..parts.cache import PartsCache
+
+                cache = PartsCache()
+            except Exception as e:
+                return PreflightResult(
+                    name="bom_lcsc_values",
+                    status="WARN",
+                    message=f"Parts cache unavailable for LCSC value validation: {e}",
+                )
+
+        from .lcsc_value_check import check_lcsc_against_cache
+
+        mismatches: list[str] = []
+        checked = 0
+        for item in bom.items:
+            if item.is_virtual or item.dnp or not item.lcsc:
+                continue
+            checked += 1
+            mismatch = check_lcsc_against_cache(cache, item.lcsc, item.value, item.reference)
+            if mismatch is not None:
+                mismatches.append(
+                    f"{item.reference} ({item.value}) -> {item.lcsc} is {mismatch.candidate_value}"
+                )
+
+        if mismatches:
+            shown = "; ".join(mismatches[:5])
+            suffix = f" (and {len(mismatches) - 5} more)" if len(mismatches) > 5 else ""
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="FAIL",
+                message=(
+                    f"{len(mismatches)} BOM item(s) assigned an LCSC part "
+                    f"whose value does not match the BOM value"
+                ),
+                details=f"{shown}{suffix}",
+            )
+
+        return PreflightResult(
+            name="bom_lcsc_values",
+            status="OK",
+            message=(
+                f"No LCSC value mismatches detected "
+                f"({checked} assigned item(s) checked against local parts cache)"
+            ),
         )
 
     def _check_bom_footprint_match(self) -> PreflightResult:

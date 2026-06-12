@@ -437,6 +437,27 @@ class PartsCache:
                 ),
             )
 
+    def delete_enrichment_match(self, component_value: str, footprint: str) -> bool:
+        """
+        Remove a cached enrichment match for value+footprint.
+
+        Used to evict poisoned/stale entries whose LCSC part fails value
+        validation (issue #3590).
+
+        Args:
+            component_value: Component value (e.g., "16nF")
+            footprint: KiCad footprint string
+
+        Returns:
+            True if an entry was deleted, False if not found
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM enrichment_matches WHERE component_value = ? AND footprint = ?",
+                (component_value, footprint),
+            )
+            return cursor.rowcount > 0
+
     def delete(self, lcsc_part: str) -> bool:
         """
         Delete a part from cache.
