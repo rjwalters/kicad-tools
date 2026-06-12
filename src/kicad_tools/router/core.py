@@ -9988,6 +9988,53 @@ class Autorouter:
             net_routes[net] = []
         return sorted(victims)
 
+    def _unwind_correction_pass_net(
+        self,
+        net: int,
+        net_routes: dict[int, list[Route]],
+        pass_marked_route_ids: set[int],
+    ) -> None:
+        """Unwind copper the clearance-correction pass placed for ``net``.
+
+        Issue #3501: pass-placed copper is committed with ``mark_route``
+        ONLY (the Issue #1694 width-aware-envelope rationale), so the
+        unwind calls ``unmark_route`` only.  The previous rollback also
+        called ``unmark_route_usage`` on this copper, decrementing
+        per-cell ``usage_count`` contributed by OTHER nets sharing those
+        cells (clamped at 0 per cell, so counts were stolen rather than
+        underflowed).
+
+        The ledger (``pass_marked_route_ids``) enforces exact tracking
+        (#3478 transactional discipline): every unwound route must have
+        been marked by this pass.  A route that is not in the ledger was
+        not placed by this pass -- that means the caller's bookkeeping
+        went unbalanced, so a tripwire warning is emitted (copper is
+        still unmarked; usage is never touched here, because this pass
+        never marks usage).
+
+        Args:
+            net: Net whose pass-placed routes should be unwound.
+            net_routes: Mapping of net ID to current routes (mutated:
+                ``net_routes[net]`` is reset to ``[]``).
+            pass_marked_route_ids: ``id()`` ledger of routes the current
+                correction pass committed via ``mark_route`` (mutated:
+                unwound routes are removed).
+        """
+        for route in list(net_routes.get(net, [])):
+            if id(route) in pass_marked_route_ids:
+                pass_marked_route_ids.discard(id(route))
+            else:
+                net_name = self.net_names.get(net, f"Net_{net}")
+                flush_print(
+                    f"  WARNING (Issue #3501): correction-pass unwind for "
+                    f"{net_name} encountered a route it never marked -- "
+                    f"unmarking copper only (usage counts left untouched)"
+                )
+            self.grid.unmark_route(route)
+            if route in self.routes:
+                self.routes.remove(route)
+        net_routes[net] = []
+
     def _post_route_clearance_correction(
         self,
         net_routes: dict[int, list[Route]],
@@ -10102,6 +10149,21 @@ class Autorouter:
             }
             neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
+            # Issue #3501: exact-tracking ledger.  Copper committed by
+            # THIS pass is marked with ``mark_route`` ONLY (never
+            # ``mark_route_usage`` -- see the Issue #1694 note below),
+            # so any unwind of pass-placed copper must call
+            # ``unmark_route`` only.  Calling ``unmark_route_usage`` on
+            # it would decrement per-cell ``usage_count`` contributed
+            # by OTHER nets sharing those cells (clamped at 0 per cell,
+            # so counts are stolen rather than underflowed).  The
+            # ledger records the identity of every pass-placed route so
+            # the retry rip-up and the all-or-nothing rollback unmark
+            # exactly what was marked (#3478 transactional discipline);
+            # any imbalance trips a loud warning instead of silently
+            # corrupting the usage counts.
+            pass_marked_route_ids: set[int] = set()
+
             # Reroute them one at a time, re-validating after each net to
             # catch violations introduced by sequential placement (Issue #1783).
             rerouted_count = 0
@@ -10130,6 +10192,7 @@ class Autorouter:
                         # on the grid, preventing subsequent reroutes from landing
                         # too close to wider traces.
                         self.grid.mark_route(route)
+                        pass_marked_route_ids.add(id(route))
                         self.routes.append(route)
 
                     # Issue #1783: After placing this net, check if it violates
@@ -10152,7 +10215,15 @@ class Autorouter:
                                 if net in inner_violating_nets
                                 else present_factor * 1.5
                             )
-                            neg_router.rip_up_nets([net], net_routes, self.routes)
+                            # Issue #3501: this net's copper was placed by
+                            # THIS pass (mark_route only), so unwind it via
+                            # the exact-tracking ledger instead of
+                            # ``rip_up_nets`` (which would also call
+                            # ``unmark_route_usage`` on usage that was
+                            # never marked).
+                            self._unwind_correction_pass_net(
+                                net, net_routes, pass_marked_route_ids
+                            )
                             retry_routes = self._route_net_negotiated(
                                 net, retry_pf, per_net_timeout=per_net_timeout
                             )
@@ -10160,6 +10231,7 @@ class Autorouter:
                                 net_routes[net] = retry_routes
                                 for route in retry_routes:
                                     self.grid.mark_route(route)
+                                    pass_marked_route_ids.add(id(route))
                                     self.routes.append(route)
 
             # Issue #3413: ALL-OR-NOTHING transaction.  If any ripped net
@@ -10185,13 +10257,23 @@ class Autorouter:
             if failed_to_reland:
                 for net in nets_to_reroute:
                     # Unwind any copper this pass placed (committed via
-                    # ``mark_route`` above).
-                    for route in list(net_routes.get(net, [])):
-                        self.grid.unmark_route(route)
-                        self.grid.unmark_route_usage(route)
-                        if route in self.routes:
-                            self.routes.remove(route)
-                    net_routes[net] = []
+                    # ``mark_route`` above -- NO usage was marked, so
+                    # only ``unmark_route`` is applied; Issue #3501).
+                    self._unwind_correction_pass_net(
+                        net, net_routes, pass_marked_route_ids
+                    )
+                # Issue #3501 tripwire: after unwinding every rerouted
+                # net the ledger must be empty -- every route this pass
+                # marked was unmarked exactly once.  A leftover means
+                # pass-placed copper escaped the rollback and is still
+                # blocking the grid.
+                if pass_marked_route_ids:
+                    flush_print(
+                        f"  WARNING (Issue #3501): correction-pass "
+                        f"rollback left {len(pass_marked_route_ids)} "
+                        f"pass-marked route(s) unaccounted for -- "
+                        f"mark/unmark ledger is unbalanced"
+                    )
                 for net in nets_to_reroute:
                     restored = list(original_correction_routes.get(net, []))
                     net_routes[net] = restored
