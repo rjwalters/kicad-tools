@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 10
+_REQUIRED_CPP_BUILD_VERSION = 11
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -838,6 +838,11 @@ class CppPathfinder:
         # Fallback statistics
         self._fallback_count: int = 0
         self._fallback_nets: list[str] = []
+
+        # Issue #3545: lazy cache for ``compute_component_pitches`` used
+        # by the net-aware same-component carve-out gate in
+        # ``_same_component_carveout_eligible``.
+        self._component_pitches_cache: dict[str, float] | None = None
 
         # Issue #3438: relief-probe mode flag (mirrored into the C++
         # Pathfinder AND the lazy Python fallback router so both backends
@@ -1764,6 +1769,45 @@ class CppPathfinder:
         )
         return route
 
+    def _same_component_carveout_eligible(self, py_grid, ref: str) -> bool:
+        """Return True when ``ref`` may keep the same-component carve-out.
+
+        Issue #3545: the carve-out (skipping clearance checks against
+        same-component pads) is only legitimate where a clearance
+        relaxation is actually in effect for the component:
+
+        1. The component's inter-pad corridor was relaxed by
+           ``_relax_same_component_clearance`` (Issue #2452), or
+        2. A fine-pitch / explicit per-component clearance relaxation
+           applies (``get_clearance_for_component`` returns less than
+           the default ``trace_clearance``, Issue #1764), or
+        3. The component is fine-pitch (min pin pitch below
+           ``rules.fine_pitch_threshold``) -- covers boards routed with
+           ``fine_pitch_clearance`` unset (the default), where the
+           clearance lookup cannot signal the relaxation.
+
+        Standard-pitch components return False, so their FOREIGN-net
+        pads stay in the C++ validator and sub-clearance copper is
+        rejected at route construction time.  Mirrors
+        ``RoutingGrid._same_component_carveout_active``.
+        """
+        relaxed_refs = getattr(py_grid, "_relaxed_clearance_refs", None)
+        if relaxed_refs and ref in relaxed_refs:
+            return True
+        pitches = self._component_pitches_cache
+        if pitches is None:
+            try:
+                pitches = py_grid.compute_component_pitches()
+            except Exception:
+                pitches = {}
+            self._component_pitches_cache = pitches
+        pitch = pitches.get(ref)
+        required = self._rules.get_clearance_for_component(ref, pitch)
+        if required < self._rules.trace_clearance:
+            return True
+        threshold = getattr(self._rules, "fine_pitch_threshold", None)
+        return pitch is not None and threshold is not None and pitch < threshold
+
     def _validate_route_clearance(
         self,
         route: "Route",
@@ -1807,9 +1851,21 @@ class CppPathfinder:
         self._sync_stored_routes(py_grid)
 
         # Build exclude_ref_hashes for start/end pad components (Issue #1764)
+        #
+        # Issue #3545: NET-AWARE tightening.  The C++ validator's
+        # same-component carve-out (``is_excluded_ref`` in
+        # ``Grid3D::validate_route``) silently exempted FOREIGN-net pads
+        # on the route's own components (same-net pads are skipped by
+        # ``pad.net == exclude_net`` anyway), masking sub-clearance
+        # copper like the routing-diagnostic NET3-vs-J1.1 0.127mm gap.
+        # The carve-out's legitimate use is fine-pitch escape (#1764)
+        # and relaxed same-component corridors (#2452) -- include a ref
+        # in the exclusion set ONLY when one of those relaxations is
+        # actually in effect for that component.  Mirrors the Python
+        # validator gate in ``RoutingGrid.validate_segment_clearance``.
         exclude_ref_hashes: list[int] = []
         for pad in (start, end):
-            if pad.ref:
+            if pad.ref and self._same_component_carveout_eligible(py_grid, pad.ref):
                 exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
 
         # Build C++ segment/via lists from route

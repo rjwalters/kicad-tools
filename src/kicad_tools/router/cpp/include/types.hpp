@@ -72,7 +72,18 @@ namespace router {
 // the version forces a rebuild so the post-#3309 performance fix takes
 // effect and the regression test (``tests/test_router_cpp_astar_flat_arrays_3309.py``)
 // passes its build-version guard.
-constexpr int ROUTER_CPP_BUILD_VERSION = 10;
+// Bump to 11 for Issue #3545 (static-blockage survival across rip-up).
+// ``GridCell`` gained a ``static_blocked`` flag set by ``mark_blocked``
+// (static obstacle sync) and consulted by ``unmark_segment`` /
+// ``unmark_via``: ripping up a route whose clearance envelope overlapped
+// a STATIC pad clearance halo must RESTORE the halo (blocked=true,
+// net=original_net) instead of erasing it.  Pre-#3545 .so files erase
+// the halo, letting foreign nets route through a pad's clearance band
+// and ship sub-clearance copper (routing-diagnostic fixture: NET3
+// through J1-1's halo at 0.127mm actual vs 0.200mm required).
+// ``mark_blocked`` also began recording ``original_net`` for ALL static
+// cells (previously pad-metal only) so the restore has the owner net.
+constexpr int ROUTER_CPP_BUILD_VERSION = 11;
 
 // Grid cell state
 struct GridCell {
@@ -85,6 +96,11 @@ struct GridCell {
     bool is_zone = false;
     bool pad_blocked = false;
     int32_t original_net = 0;
+    // Issue #3545: true for cells blocked by STATIC board geometry
+    // (pad metal, pad clearance halos, keepouts) registered via
+    // ``mark_blocked``.  Route marking never sets this; rip-up uses it
+    // to restore static blockage instead of freeing the cell.
+    bool static_blocked = false;
 };
 
 // A* node for priority queue

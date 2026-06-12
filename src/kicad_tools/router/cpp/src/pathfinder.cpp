@@ -247,6 +247,15 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 if (cell.is_obstacle && cell.net != net) {
                     return true;
                 }
+                // Issue #3545: statically blocked foreign cells (pad
+                // clearance halos, keepouts) are non-negotiable
+                // regardless of usage_count -- a pad cannot "negotiate
+                // away", so sharing a halo cell only produces
+                // unresolvable overflow.  Relief probes keep their
+                // #3438 soft-crossing semantics for foreign-net cells.
+                if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                    return true;
+                }
                 if (cell.net == 0 && cell.usage_count == 0) {
                     return true;
                 }
@@ -292,6 +301,15 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 
             if (allow_sharing) {
                 if (cell.is_obstacle && cell.net != net) {
+                    return true;
+                }
+                // Issue #3545: statically blocked foreign cells (pad
+                // clearance halos, keepouts) are non-negotiable
+                // regardless of usage_count -- a pad cannot "negotiate
+                // away", so sharing a halo cell only produces
+                // unresolvable overflow.  Relief probes keep their
+                // #3438 soft-crossing semantics for foreign-net cells.
+                if (cell.static_blocked && cell.net != net && !relief_mode_) {
                     return true;
                 }
                 if (cell.net == 0 && cell.usage_count == 0) {
@@ -401,6 +419,15 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
                 if (cell.is_obstacle && cell.net != net) {
                     return true;
                 }
+                // Issue #3545: statically blocked foreign cells (pad
+                // clearance halos, keepouts) are non-negotiable
+                // regardless of usage_count -- a pad cannot "negotiate
+                // away", so sharing a halo cell only produces
+                // unresolvable overflow.  Relief probes keep their
+                // #3438 soft-crossing semantics for foreign-net cells.
+                if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                    return true;
+                }
                 if (cell.net == 0 && cell.usage_count == 0) {
                     return true;
                 }
@@ -500,6 +527,15 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     if (cell.is_obstacle && cell.net != net) {
                         return true;  // Foreign-net obstacle blocks
                     }
+                    // Issue #3545: statically blocked foreign cells (pad
+                    // clearance halos, keepouts) are non-negotiable
+                    // regardless of usage_count -- a pad cannot "negotiate
+                    // away", so sharing a halo cell only produces
+                    // unresolvable overflow.  Relief probes keep their
+                    // #3438 soft-crossing semantics for foreign-net cells.
+                    if (cell.static_blocked && cell.net != net && !relief_mode_) {
+                        return true;
+                    }
                     if (cell.net == 0 && cell.usage_count == 0) {
                         return true;
                     }
@@ -538,6 +574,15 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
 
                     if (allow_sharing) {
                         if (cell.is_obstacle && cell.net != net) {
+                            return true;
+                        }
+                        // Issue #3545: statically blocked foreign cells (pad
+                        // clearance halos, keepouts) are non-negotiable
+                        // regardless of usage_count -- a pad cannot "negotiate
+                        // away", so sharing a halo cell only produces
+                        // unresolvable overflow.  Relief probes keep their
+                        // #3438 soft-crossing semantics for foreign-net cells.
+                        if (cell.static_blocked && cell.net != net && !relief_mode_) {
                             return true;
                         }
                         if (cell.net == 0 && cell.usage_count == 0) {

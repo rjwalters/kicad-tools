@@ -2000,6 +2000,36 @@ def validate_routes(
     def _resolve_net_name(net_id: int) -> str:
         return net_names.get(net_id, f"Net {net_id}")
 
+    # Issue #3545: NET-AWARE component_inherent classification.  A
+    # same-component FOREIGN-net pad violation is only "inherent" (and
+    # thus filtered from ``drc_verify_and_nudge`` repair) when a
+    # clearance relaxation is actually in effect for the component:
+    # fine-pitch / explicit override (#1764) or a relaxed same-component
+    # corridor (#2452).  Standard-pitch components (e.g. a 2.54mm THT
+    # connector) get no relaxation, so a trace from one of their nets
+    # grazing a sibling pad on another net is a repairable routing
+    # defect, not component geometry.
+    _relaxed_refs = getattr(getattr(router, "grid", None), "_relaxed_clearance_refs", None) or set()
+    try:
+        _pitches: dict[str, float] = router.component_pitches
+    except Exception:
+        _pitches = {}
+
+    def _same_component_relaxation_active(ref: str) -> bool:
+        if ref in _relaxed_refs:
+            return True
+        pitch = _pitches.get(ref)
+        if rules.get_clearance_for_component(ref, pitch) < clearance:
+            return True
+        # Fine-pitch leg: boards routed with ``fine_pitch_clearance``
+        # unset (the default) get no per-component relaxation signal,
+        # but sub-clearance proximity on a fine-pitch footprint is
+        # still forced by the component geometry -- inherent, not a
+        # repairable routing defect.  Mirrors
+        # ``RoutingGrid._same_component_carveout_active``.
+        threshold = getattr(rules, "fine_pitch_threshold", None)
+        return pitch is not None and threshold is not None and pitch < threshold
+
     # Check each route segment against pads of different nets
     for route_idx, route in enumerate(router.routes):
         route_net = route.net
@@ -2077,10 +2107,14 @@ def validate_routes(
                     # to avoid the pad).  Mark these as non-inherent so
                     # ``drc_verify_and_nudge`` (which filters out
                     # ``component_inherent=True``) attempts repair.
+                    # Issue #3545: additionally require an active
+                    # clearance relaxation for the component (fine-pitch
+                    # #1764 or relaxed corridor #2452); otherwise the
+                    # violation is actionable for the nudge pass.
                     is_component_inherent = (
-                        ref in route_component_refs and not (
-                            pad.net == 0 and pad.net_name
-                        )
+                        ref in route_component_refs
+                        and not (pad.net == 0 and pad.net_name)
+                        and _same_component_relaxation_active(ref)
                     )
 
                     violations.append(
@@ -2230,10 +2264,14 @@ def validate_routes(
                     # only "inherent" when it's a true net obstacle, not
                     # when the pad belongs to a skipped pour net (the trace
                     # / via can be re-routed to avoid it).
+                    # Issue #3545: additionally require an active
+                    # clearance relaxation for the component (fine-pitch
+                    # #1764 or relaxed corridor #2452); otherwise the
+                    # violation is actionable for the nudge pass.
                     is_component_inherent = (
-                        ref in route_component_refs and not (
-                            pad.net == 0 and pad.net_name
-                        )
+                        ref in route_component_refs
+                        and not (pad.net == 0 and pad.net_name)
+                        and _same_component_relaxation_active(ref)
                     )
 
                     violations.append(

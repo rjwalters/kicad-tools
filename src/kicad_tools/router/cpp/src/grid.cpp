@@ -54,8 +54,17 @@ void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
     // grid.cpp:188).
     if (pad_blocked) {
         cell.pad_blocked = true;
-        cell.original_net = net;
     }
+    // Issue #3545: every ``mark_blocked`` call registers STATIC board
+    // geometry (pad metal, clearance halos, keepouts) -- route copper
+    // goes through ``mark_segment`` / ``mark_via`` instead.  Record the
+    // static flag and the owning net (previously recorded for pad metal
+    // only) so ``unmark_segment`` / ``unmark_via`` can RESTORE the cell
+    // after a rip-up whose clearance envelope swept it, instead of
+    // erasing the static blockage and letting foreign nets route
+    // through a pad's clearance halo.
+    cell.static_blocked = true;
+    cell.original_net = net;
 }
 
 void Grid3D::mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
@@ -161,8 +170,21 @@ void Grid3D::unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                     if (cell.pad_blocked) {
                         cell.net = cell.original_net;
                     } else if (cell.net == net) {
-                        cell.blocked = false;
-                        cell.net = 0;
+                        // Issue #3545: STATICALLY blocked cells (pad
+                        // clearance halos, keepouts) must survive
+                        // rip-up.  Pre-fix, ripping a route whose
+                        // clearance envelope overlapped its own pads'
+                        // halo cells erased them (blocked=false,
+                        // net=0), after which foreign nets routed
+                        // straight through the halo and shipped
+                        // sub-clearance copper.  Restore the static
+                        // owner instead of freeing.
+                        if (cell.static_blocked) {
+                            cell.net = cell.original_net;
+                        } else {
+                            cell.blocked = false;
+                            cell.net = 0;
+                        }
                     }
                 }
             }
@@ -203,8 +225,15 @@ void Grid3D::unmark_via(int x, int y, int net, int radius_cells) {
                     if (cell.pad_blocked) {
                         cell.net = cell.original_net;
                     } else if (cell.net == net) {
-                        cell.blocked = false;
-                        cell.net = 0;
+                        // Issue #3545: restore static halo / keepout
+                        // cells instead of freeing them (see
+                        // ``unmark_segment`` for rationale).
+                        if (cell.static_blocked) {
+                            cell.net = cell.original_net;
+                        } else {
+                            cell.blocked = false;
+                            cell.net = 0;
+                        }
                     }
                 }
             }

@@ -32,6 +32,11 @@ NB_MODULE(router_cpp, m) {
         .def_rw("is_zone", &GridCell::is_zone)
         .def_rw("pad_blocked", &GridCell::pad_blocked)
         .def_rw("original_net", &GridCell::original_net)
+        // Issue #3545: static-blockage flag -- set by ``mark_blocked``
+        // for board geometry (pads, halos, keepouts); consulted by
+        // ``unmark_segment`` / ``unmark_via`` so rip-up restores static
+        // blockage instead of erasing it.
+        .def_rw("static_blocked", &GridCell::static_blocked)
         .def_rw("avoidance_cost", &GridCell::avoidance_cost);
 
     // DesignRules struct
