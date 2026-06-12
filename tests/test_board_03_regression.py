@@ -1081,7 +1081,7 @@ def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> No
     Parses the ``.kicad_pcb`` text directly with regex; no KiCad
     dependency required for the assertion.
     """
-    pcb_text = PCB_FILE.read_text()
+    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
 
     # Each ``(footprint ...)`` block contains a ``(reference "REF")`` and
     # an ``(at X Y [ROT])`` line for the footprint origin.  We use
@@ -1243,7 +1243,7 @@ def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
     plus a small safety margin).  J2's body (which extends beyond the
     PCB south edge by design) is unaffected -- the nudge is in X only.
     """
-    pcb_text = PCB_FILE.read_text()
+    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
 
     # Find J2's footprint position.
     def _find_footprint_xy(ref: str) -> tuple[float, float] | None:
