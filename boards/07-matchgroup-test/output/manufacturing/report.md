@@ -2,7 +2,7 @@
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-10 | jlcpcb"
+date: "Rev 1 | 2026-06-12 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,10 +18,10 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
-| Footprints | 8 (0 SMD, 0 THT, 8 other) |
+| Footprints | 8 (5 SMD, 3 THT, 0 other) |
 | Nets | 34 |
-| Traces | 703 segments |
-| Vias | 41 |
+| Traces | 1150 segments |
+| Vias | 48 |
 | Board Size | 110.0 x 95.0 mm |
 
 ## Design Overview
@@ -76,38 +76,23 @@ Epic #2661 Phase 3L (issue #2724)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 4 |
-| Warnings | 12 |
-| Blocking | 4 |
+| Errors | 0 |
+| Warnings | 0 |
+| Blocking | 0 |
 
-**Status**: FAIL
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| connectivity | 6 |
-| silkscreen_text_height | 4 |
-| pad_grid | 4 |
-| zone_unfilled | 3 |
-| clearance_segment_via | 1 |
-| clearance_pad_segment | 1 |
-| clearance_pad_via | 1 |
-| diffpair_clearance_intra | 1 |
-| silkscreen_over_pad | 1 |
+**Status**: PASS
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 4 blocking DRC violations (clearance_segment_via (1), clearance_pad_segment (1), clearance_pad_via (1))
-- **[OPTIONAL]** Verify zone fill in KiCad: 4 nets appear incomplete but may be connected via zone fills
+- **[OPTIONAL]** Verify zone fill in KiCad: 3 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
-- **[OPTIONAL]** Review 12 DRC warnings
 
 
 \newpage
@@ -116,12 +101,12 @@ Epic #2661 Phase 3L (issue #2724)
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 87.1% (27/31) |
-| Overall Completion | 82.4% |
-| Complete Nets | 28 / 34 |
+| Signal Net Completion | 90.3% (28/31) |
+| Overall Completion | 85.3% |
+| Complete Nets | 29 / 34 |
 | Zone-Connected Nets | 3 |
-| Incomplete Nets | 6 |
-| Unconnected Pads | 162 |
+| Incomplete Nets | 5 |
+| Unconnected Pads | 161 |
 
 ### Zone-Connected Nets
 
@@ -131,16 +116,14 @@ Epic #2661 Phase 3L (issue #2724)
 
 ### Unrouted Signal Nets
 
-- DQ3
-- MIPI_CLK_N
-- MIPI_DAT0_N
+- DQS_P
+- MIPI_DAT1_N
 - TMDS_D0_N
 
 ### Unrouted Signal Nets
 
-- DQ3
-- MIPI_CLK_N
-- MIPI_DAT0_N
+- DQS_P
+- MIPI_DAT1_N
 - TMDS_D0_N
 
 

@@ -2,7 +2,7 @@
 title: "bldc_controller_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-11 | jlcpcb"
+date: "Rev 1 | 2026-06-12 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,9 +18,9 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
-| Footprints | 55 (0 SMD, 0 THT, 55 other) |
+| Footprints | 55 (40 SMD, 11 THT, 4 other) |
 | Nets | 52 |
-| Traces | 771 segments |
+| Traces | 881 segments |
 | Vias | 56 |
 | Board Size | 80.0 x 100.0 mm |
 
@@ -101,20 +101,11 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 14 |
-| Warnings | 57 |
-| Blocking | 14 |
+| Errors | 0 |
+| Warnings | 0 |
+| Blocking | 0 |
 
-**Status**: FAIL
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| pad_grid | 56 |
-| via_in_pad | 14 |
-| connectivity | 8 |
-| single_pad_net | 8 |
-| zone_unfilled | 1 |
+**Status**: PASS
 
 
 \newpage
@@ -125,11 +116,9 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[CRITICAL]** Fix 14 blocking DRC violations (via_in_pad (14))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.200mm required
 - **[OPTIONAL]** Verify zone fill in KiCad: 7 nets appear incomplete but may be connected via zone fills
-- **[OPTIONAL]** Verify zone fill in KiCad for 6 zone-connected nets
-- **[OPTIONAL]** Review 57 DRC warnings
+- **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
 - **[OPTIONAL]** Analog net: ISENSE_A+ — analog signal; noise-sensitive, avoid crossing digital signals
 - **[OPTIONAL]** Analog net: ISENSE_A- — analog signal; noise-sensitive, avoid crossing digital signals
 - **[OPTIONAL]** Analog net: ISENSE_B+ — analog signal; noise-sensitive, avoid crossing digital signals
@@ -144,10 +133,10 @@ Thermal analysis and high-current routing demo
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 81.6% (31/38) |
+| Signal Net Completion | 82.1% (32/39) |
 | Overall Completion | 84.6% |
 | Complete Nets | 44 / 52 |
-| Zone-Connected Nets | 6 |
+| Zone-Connected Nets | 5 |
 | Single-Pad Nets | 8 (no routing needed) |
 | Incomplete Nets | 8 |
 | Unconnected Pads | 56 |
@@ -158,7 +147,6 @@ Thermal analysis and high-current routing demo
 - +3V3
 - +5V
 - GND
-- PWR_LED
 - VIN
 
 ### Single-Pad Nets
