@@ -7,7 +7,9 @@ This module provides:
 - Predefined net classes for common use cases
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Literal
 
 from .layers import Layer
@@ -1427,10 +1429,24 @@ def net_class_map_from_dict(
 # short connections first access to routing channels.
 SIMPLE_NET_THRESHOLD_MM: float = 10.0
 
-# Default net class map with common net names
-DEFAULT_NET_CLASS_MAP: dict[str, NetClassRouting] = create_net_class_map(
-    power_nets=["+5V", "+3.3V", "+3.3VA", "+1.8V", "VCC", "VDD", "GND", "GNDA", "PGND"],
-    clock_nets=["CLK", "MCLK", "BCLK", "LRCLK", "SCK"],
-    audio_nets=["AUDIO_L", "AUDIO_R", "I2S_DIN", "I2S_DOUT"],
-    debug_nets=["SWDIO", "SWCLK", "NRST", "TDI", "TDO", "TCK", "TMS"],
+# Default net class map with common net names.
+#
+# Issue #3524: this is a module-level singleton shared by reference across
+# every Autorouter/Pathfinder/BlockRouter constructed without an explicit
+# ``net_class_map``.  It used to be a plain dict, and any consumer that
+# wrote into its aliased ``self.net_class_map`` (impedance synthesis,
+# diff-pair partner wiring, matrix layer preferences, test setup code)
+# silently polluted the defaults for every later caller in the same
+# process -- which surfaced as order-dependent failures under pytest-xdist.
+# It is now wrapped in a read-only ``MappingProxyType`` so any in-place
+# mutation raises ``TypeError`` immediately; consumers that need a mutable
+# map must take a copy (``dict(DEFAULT_NET_CLASS_MAP)``), which the router
+# constructors now do.
+DEFAULT_NET_CLASS_MAP: Mapping[str, NetClassRouting] = MappingProxyType(
+    create_net_class_map(
+        power_nets=["+5V", "+3.3V", "+3.3VA", "+1.8V", "VCC", "VDD", "GND", "GNDA", "PGND"],
+        clock_nets=["CLK", "MCLK", "BCLK", "LRCLK", "SCK"],
+        audio_nets=["AUDIO_L", "AUDIO_R", "I2S_DIN", "I2S_DOUT"],
+        debug_nets=["SWDIO", "SWCLK", "NRST", "TDI", "TDO", "TCK", "TMS"],
+    )
 )

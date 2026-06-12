@@ -532,10 +532,6 @@ class TestTripleGate:
     the pipeline invokes the tuner for each detected pair.
     """
 
-    @pytest.mark.xfail(
-        reason="net-class length_critical state polluted by sibling xdist-worker tests -- see issue #3524",
-        strict=False,
-    )
     def test_autorouter_invokes_tuner_for_each_pair(self):
         from kicad_tools.router import diffpair_length_tuning as dlt_module
         from kicad_tools.router.core import Autorouter

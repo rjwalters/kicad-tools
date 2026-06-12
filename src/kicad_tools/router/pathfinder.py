@@ -183,7 +183,9 @@ class Router:
         """
         self.grid = grid
         self.rules = rules
-        self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
+        # Issue #3524: copy the default map instead of aliasing the
+        # module-level singleton -- in-place writes must stay local.
+        self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
         self.heuristic = heuristic or DEFAULT_HEURISTIC
         self.diagonal_routing = diagonal_routing
 
