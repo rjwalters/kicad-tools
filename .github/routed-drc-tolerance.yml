@@ -1294,7 +1294,23 @@ tolerances:
   # pairs lands (#3471-adjacent: 7+7 of the local 33 are that family),
   # at which point re-measure the band with the same recipe and set
   # floor = new-band-max + 1.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 34
+  #
+  # Raised 34 -> 36 (Issue #3620, 2026-06-12): the
+  # matchgroup-routing-regression job moved into the kicad/kicad:10.0
+  # container so ``kct route``'s post-route zone fill actually runs
+  # (it previously no-opped with "Zone fill: skipped (kicad-cli not
+  # installed)" on the bare runner -- the #3509 defect, board 07
+  # edition).  That legitimately shifts the measured band: the CI data
+  # points behind the 34 floor (25..29) were ALL taken against
+  # zero-fill pour artifacts, while the local macOS points (33, the
+  # prior band max) had working fills.  First containerized CI run
+  # (27435410324, 2026-06-12) measured 35 -- consistent with CI now
+  # landing in the with-fills regime alongside the local 33s plus the
+  # documented 2-core load-variance spread.  Floor = new band-max 35
+  # + 1 = 36, same convention as the 34 floor.  Tighten-when guidance
+  # above still applies; re-measure the band from CONTAINERIZED runs
+  # only (the bare-runner 25..29 points are no longer comparable).
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 36
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
