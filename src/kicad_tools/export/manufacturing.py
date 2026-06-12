@@ -554,6 +554,12 @@ class ManufacturingPackage:
             if figures_data:
                 data_kwargs.update(figures_data)
 
+            # Hand-solder (THT) set excluded from the SMT CPL (issue #3539):
+            # surface the exact refs the assembler must hand-place.
+            tht_components = self._tht_component_groups(result)
+            if tht_components:
+                data_kwargs["tht_components"] = tht_components
+
             project_name = self.pcb_path.stem
             data = ReportData(
                 project_name=project_name,
@@ -937,6 +943,22 @@ class ManufacturingPackage:
 
         logger.info(f"Promoted {len(pngs)} report image(s) to {images_dir}")
 
+    @staticmethod
+    def _tht_component_groups(result: ManufacturingResult) -> list[dict]:
+        """Group the CPL's excluded THT components for the report.
+
+        Returns BOM-style rows ``[{value, footprint, qty, refs}]`` built
+        from ``assembly_result.tht_excluded`` (issue #3539), or an empty
+        list when no THT parts were excluded (SMD-only board, or
+        ``exclude_tht=False``).
+        """
+        if result.assembly_result is None or not result.assembly_result.tht_excluded:
+            return []
+
+        from .pnp import group_tht_exclusions
+
+        return group_tht_exclusions(result.assembly_result.tht_excluded)
+
     def _generate_readme(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Generate a README.txt describing the manufacturing package contents."""
         lines = [
@@ -983,6 +1005,14 @@ class ManufacturingPackage:
                 desc = file_descriptions["pnp"]
                 lines.append(f"  {result.assembly_result.pnp_path.name}")
                 lines.append(f"    {desc[0]}: {desc[1]}")
+                tht_excluded = result.assembly_result.tht_excluded
+                if tht_excluded:
+                    refs = ", ".join(p.reference for p in tht_excluded)
+                    lines.append(
+                        f"    Note: {len(tht_excluded)} through-hole component(s) are"
+                        " excluded from this file and must be hand-soldered"
+                        f" after SMT assembly: {refs}"
+                    )
                 lines.append("")
             if result.assembly_result.gerber_path:
                 desc = file_descriptions["gerber"]

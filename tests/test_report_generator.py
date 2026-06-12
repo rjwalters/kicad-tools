@@ -2336,3 +2336,69 @@ class TestDesignNarrative:
         assert "### Functional Blocks" not in content
         assert "### Communication Interfaces" not in content
         assert "### Power Architecture" not in content
+
+
+class TestHandSolderTHTSection:
+    """Hand-Solder (THT) Components section rendering (issue #3539)."""
+
+    _THT_ROWS = [
+        {
+            "value": "Conn_01x04",
+            "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+            "qty": 1,
+            "refs": "J1",
+        },
+        {"value": "1k", "footprint": "Resistor_THT:R_Axial", "qty": 3, "refs": "R6, R20, R21"},
+    ]
+
+    def test_section_rendered_with_tht_components(self, tmp_path: Path) -> None:
+        data = _full_data(tht_components=self._THT_ROWS)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Hand-Solder (THT) Components" in content
+        # Total quantity and intent statement
+        assert "4 through-hole components are" in content
+        assert "excluded from the SMT pick-and-place file" in content
+        # Every excluded ref must be listed (assembler needs the full set)
+        assert "J1" in content
+        assert "R6, R20, R21" in content
+        # short_footprint filter strips the library prefix
+        assert "R_Axial" in content
+
+    def test_section_omitted_when_none(self, tmp_path: Path) -> None:
+        data = _full_data(tht_components=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Hand-Solder (THT) Components" not in content
+        assert "hand-soldered" not in content
+
+    def test_section_omitted_when_empty_list(self, tmp_path: Path) -> None:
+        """SMD-only boards (empty exclusion set) must not get a spurious section."""
+        data = _full_data(tht_components=[])
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Hand-Solder (THT) Components" not in content
+
+    def test_singular_phrasing_for_one_component(self, tmp_path: Path) -> None:
+        data = _full_data(
+            tht_components=[
+                {
+                    "value": "SW_Push",
+                    "footprint": "Button_Switch_THT:SW_PUSH_6mm",
+                    "qty": 1,
+                    "refs": "SW1",
+                }
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "1 through-hole component is" in content
+        assert "It appears" in content

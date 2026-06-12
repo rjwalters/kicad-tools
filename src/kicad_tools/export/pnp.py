@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -403,6 +404,99 @@ def extract_placements(
         )
 
     return placements
+
+
+def _ref_sort_key(reference: str) -> tuple[str, int, str]:
+    """Natural sort key for reference designators (R6 before R20)."""
+    match = re.match(r"([A-Za-z_]*)(\d*)(.*)", reference)
+    if match is None:  # pragma: no cover - regex always matches
+        return (reference, -1, "")
+    prefix, digits, rest = match.groups()
+    return (prefix, int(digits) if digits else -1, rest)
+
+
+def extract_tht_exclusions(
+    footprints: list[Footprint],
+    config: PnPExportConfig | None = None,
+) -> list[PlacementData]:
+    """Return the through-hole placements the CPL's THT filter drops.
+
+    These are the components an SMT-only assembler must hand-solder
+    (or wave/selective-solder): they are present on the board and in
+    the BOM, but :func:`extract_placements` omits them from the
+    pick-and-place file when ``config.exclude_tht`` is enabled.
+
+    The same pre-filters as :func:`extract_placements` apply
+    (``exclude_from_pos_files``, DNP), so the returned set is exactly
+    the difference between the unfiltered and THT-filtered CPLs.
+
+    Args:
+        footprints: List of Footprint objects from PCB
+        config: Effective export config.  When ``exclude_tht`` is
+            False (or config is None), no parts are excluded from the
+            CPL, so this returns an empty list.
+
+    Returns:
+        PlacementData for each excluded THT component, in natural
+        reference order (R6 before R20).
+    """
+    config = config or PnPExportConfig()
+    if not config.exclude_tht:
+        return []
+
+    excluded = []
+    for fp in footprints:
+        if getattr(fp, "exclude_from_pos_files", False):
+            continue
+        if not config.include_dnp and getattr(fp, "dnp", False):
+            continue
+        if getattr(fp, "attr", "") != "through_hole":
+            continue
+
+        x, y = fp.position
+        excluded.append(
+            PlacementData(
+                reference=fp.reference,
+                value=fp.value,
+                footprint=fp.name,
+                x=x,
+                y=y,
+                rotation=fp.rotation,
+                layer=fp.layer,
+            )
+        )
+
+    return sorted(excluded, key=lambda p: _ref_sort_key(p.reference))
+
+
+def group_tht_exclusions(placements: list[PlacementData]) -> list[dict]:
+    """Group excluded THT placements for report/README presentation.
+
+    Groups by (value, footprint) and returns BOM-style rows::
+
+        [{"value": ..., "footprint": ..., "qty": N, "refs": "D1, D2"}]
+
+    Rows are ordered by the natural sort key of each group's first
+    reference, and references within a row are naturally sorted.
+    """
+    groups: dict[tuple[str, str], list[str]] = {}
+    for p in placements:
+        groups.setdefault((p.value, p.footprint), []).append(p.reference)
+
+    rows = []
+    for (value, footprint), refs in groups.items():
+        refs_sorted = sorted(refs, key=_ref_sort_key)
+        rows.append(
+            {
+                "value": value,
+                "footprint": footprint,
+                "qty": len(refs_sorted),
+                "refs": ", ".join(refs_sorted),
+            }
+        )
+
+    rows.sort(key=lambda row: _ref_sort_key(row["refs"].split(", ")[0]))
+    return rows
 
 
 def get_aux_origin(pcb_path: str | Path) -> tuple[float, float]:

@@ -170,6 +170,7 @@ class ReportGenerator:
             "interfaces": data.interfaces,
             "power_architecture": data.power_architecture,
             "assembly_notes": data.assembly_notes,
+            "tht_components": data.tht_components,
             "stackup": data.stackup,
             "off_board": data.off_board,
             "notes": data.notes,

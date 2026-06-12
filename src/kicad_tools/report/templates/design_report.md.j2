@@ -111,6 +111,19 @@ header-includes:
 {% endif %}
 
 {% endif %}
+{% if tht_components %}
+## Hand-Solder (THT) Components
+
+{% set tht_total = tht_components | sum(attribute='qty') %}
+The following {{ tht_total }} through-hole component{{ 's are' if tht_total != 1 else ' is' }} **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. {{ 'They appear' if tht_total != 1 else 'It appears' }} in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+{% for item in tht_components %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) | short_footprint }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) }} |
+{% endfor %}
+
+{% endif %}
 {% if off_board and off_board.assemblies %}
 ## Off-board Assemblies
 

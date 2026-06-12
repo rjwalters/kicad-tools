@@ -88,6 +88,12 @@ class ReportData:
     """Assembly guidance: {fine_pitch_count, thermal_pad_count,
     polarized_count, summary}."""
 
+    tht_components: list[dict] | None = None
+    """Hand-solder THT components excluded from the SMT CPL (issue #3539):
+    [{value, footprint, qty, refs}] where ``refs`` is a comma-joined
+    reference designator string.  ``None``/empty for SMD-only boards or
+    when the CPL includes THT parts (exclude_tht=False)."""
+
     stackup: list[dict] | None = None
     """Layer stackup: [{name, type, thickness_mm, material}].
     Filtered to copper, dielectric, and mask layers."""

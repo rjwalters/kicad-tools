@@ -90,8 +90,10 @@ from .pnp import (
     PnPFormatter,
     export_pnp,
     extract_placements,
+    extract_tht_exclusions,
     get_aux_origin,
     get_pnp_formatter,
+    group_tht_exclusions,
 )
 from .preflight import (
     PreflightChecker,
@@ -153,6 +155,8 @@ __all__ = [
     "PNP_FORMATTERS",
     "export_pnp",
     "extract_placements",
+    "extract_tht_exclusions",
     "get_aux_origin",
     "get_pnp_formatter",
+    "group_tht_exclusions",
 ]
