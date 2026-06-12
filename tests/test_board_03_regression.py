@@ -318,6 +318,58 @@ def test_usb_diff_pair_routes_via_coupled_pathfinder(routed_board_03) -> None:
     )
 
 
+@pytest.mark.slow
+def test_no_python_fallbacks(routed_board_03) -> None:
+    """Issue #3456: board 03 routes entirely on the C++ backend.
+
+    Pre-fix, the standard-mode branch of the C++
+    ``Pathfinder::is_trace_blocked`` rejected trace centerlines within
+    trace-half-width of the net's OWN ``is_obstacle`` pad copper
+    (``cell.is_obstacle || cell.net != net`` instead of the Python
+    Issue #864 semantics ``cell.net != net``).  On this board's J1
+    USB-C pads at the 0.05mm canonical grid that sealed the connector
+    pad pockets: the standard-mode C++ open set exhausted within ~800
+    iterations on the J1->U1 USB edges (and JOY/BTN nets burned up to
+    6M iterations before FAILURE_NO_PATH), silently handing those nets
+    to the 10-100x-slower pure-Python fallback -- 3-7 MINUTES per net
+    at default verbosity, indistinguishable from "router is slow".
+
+    Build version 12 aligns the predicate with Python; this board now
+    routes with ZERO fallback attempts.  Both halves of the #3456 fix
+    are pinned here:
+
+      * the wrongful fallback is gone (``fallback_reasons`` empty --
+        it records every ATTEMPT, including ones whose Python fallback
+        also failed), and
+      * if a future regression reintroduces one, it will be LOUD
+        (once-per-net WARNING -- unit contract in
+        tests/test_router_cpp_fallback_warning_3456.py).
+    """
+    router, _net_map = routed_board_03
+
+    info = router.backend_info
+    if info.get("active") != "cpp":
+        pytest.skip("C++ backend not active; fallback pinning not applicable")
+
+    stats = info["fallback_stats"]
+    assert "fallback_reasons" in stats, (
+        "Issue #3456: fallback_stats must expose 'fallback_reasons' "
+        "(stale router_cpp .so or pre-#3456 cpp_backend.py?)"
+    )
+
+    assert stats["fallback_count"] == 0 and not stats["fallback_reasons"], (
+        f"Issue #3456 regression: nets fell back to the pure-Python A* "
+        f"(fallback_nets={stats['fallback_nets']}, "
+        f"reasons={stats['fallback_reasons']!r}).  The C++ standard-mode "
+        "is_trace_blocked/is_diagonal_blocked predicates must admit "
+        "same-net is_obstacle cells (build version >= 12).  A stale "
+        "router_cpp .so is the most likely cause -- note that "
+        "`kct build-native` SKIPS the rebuild when a matching-version "
+        ".so is already installed; use `kct build-native --force` after "
+        "editing C++ sources."
+    )
+
+
 @pytest.mark.skipif(
     not __import__(
         "kicad_tools.router.via_conflict", fromlist=["TRACE_RIP_REROUTE_ENABLED"]

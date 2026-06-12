@@ -225,7 +225,16 @@ public:
     void set_relief_mode(bool enabled) { relief_mode_ = enabled; }
     bool relief_mode() const { return relief_mode_; }
 
-private:
+    // Check if diagonal move cuts through obstacles.
+    //
+    // Public for binding + unit-test access (Issue #3456): the
+    // regression tests assert standard-mode parity with the Python
+    // sibling ``Router._is_diagonal_corner_blocked`` (same-net cells
+    // passable regardless of the obstacle flag, Issue #864 semantics)
+    // without forcing the tests to drive a full route() call.
+    bool is_diagonal_blocked(int x, int y, int dx, int dy, int layer, int net,
+                             bool allow_sharing) const;
+
     // Check if trace placement is blocked (accounts for trace width)
     // radius_override: if > 0, use this instead of trace_half_width_cells_
     //
@@ -234,15 +243,15 @@ private:
     // matches partner_net are checked against the smaller partner_radius
     // instead of the wider radius.  This implements within-pair clearance
     // for differential pairs.  Defaults preserve pre-#2559 behavior.
+    //
+    // Public for binding + unit-test access (Issue #3456, same parity
+    // rationale as ``is_diagonal_blocked`` above).
     bool is_trace_blocked(int x, int y, int layer, int net, bool allow_sharing,
                           int radius_override = 0,
                           int partner_net = -1,
                           int partner_radius = 0) const;
 
-    // Check if diagonal move cuts through obstacles
-    bool is_diagonal_blocked(int x, int y, int dx, int dy, int layer, int net,
-                             bool allow_sharing) const;
-
+private:
     // Heuristic: Manhattan distance with layer change cost
     float heuristic(int x, int y, int layer, int goal_x, int goal_y, int goal_layer) const;
 

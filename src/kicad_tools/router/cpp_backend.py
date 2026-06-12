@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 11
+_REQUIRED_CPP_BUILD_VERSION = 12
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -838,6 +838,15 @@ class CppPathfinder:
         # Fallback statistics
         self._fallback_count: int = 0
         self._fallback_nets: list[str] = []
+        # Issue #3456: per-net fallback reasons + warn-once bookkeeping.
+        # ``_fallback_reasons`` records WHY the C++ search handed each net
+        # to the Python fallback (first reason per net, including attempts
+        # where the Python fallback ultimately failed too).
+        # ``_fallback_warned`` dedupes the loud per-net WARNING so
+        # negotiated-mode rip-up retries of the same net do not spam the
+        # log -- each net warns at most once per run.
+        self._fallback_reasons: dict[str, str] = {}
+        self._fallback_warned: set[str] = set()
 
         # Issue #3545: lazy cache for ``compute_component_pitches`` used
         # by the net-aware same-component carve-out gate in
@@ -1526,6 +1535,7 @@ class CppPathfinder:
                     per_net_timeout=per_net_timeout,
                     extra_goal_cells=extra_goal_cells,
                     deadline=route_deadline,
+                    reason=self._describe_cpp_failure(result),
                 )
 
             for attempt in range(max_resume_attempts + 1):
@@ -1576,6 +1586,10 @@ class CppPathfinder:
                         per_net_timeout=per_net_timeout,
                         extra_goal_cells=extra_goal_cells,
                         deadline=route_deadline,
+                        reason=(
+                            "post-route clearance validation failed; "
+                            f"exhausted {max_resume_attempts} resume attempts"
+                        ),
                     )
 
                 # Find the goal cell of the failed path and reject it.
@@ -1610,6 +1624,10 @@ class CppPathfinder:
                         per_net_timeout=per_net_timeout,
                         extra_goal_cells=extra_goal_cells,
                         deadline=route_deadline,
+                        reason=(
+                            "resume after rejected goal cell failed: "
+                            + self._describe_cpp_failure(result)
+                        ),
                     )
 
             return None
@@ -1663,6 +1681,40 @@ class CppPathfinder:
             "failure_y": float(getattr(result, "failure_y", 0.0)),
             "iterations": iterations,
         }
+
+    def _describe_cpp_failure(self, result: router_cpp.RouteResult) -> str:
+        """Return a human-readable description of a failed C++ route result.
+
+        Issue #3456: Used to surface WHY a net is being handed to the
+        10-100x-slower Python fallback.  Maps the ``FAILURE_*`` constants
+        from ``types.hpp`` to short explanations; unknown/absent reasons
+        degrade to a generic message rather than raising.
+        """
+        if router_cpp is None:
+            return "C++ backend unavailable"
+
+        reason = int(getattr(result, "failure_reason", router_cpp.FAILURE_NONE))
+        descriptions = {
+            int(router_cpp.FAILURE_NO_PATH): (
+                "no path (C++ A* open set exhausted)"
+            ),
+            int(router_cpp.FAILURE_ITERATION_LIMIT): (
+                "iteration limit reached (memory backstop cap)"
+            ),
+            int(router_cpp.FAILURE_TIMEOUT): (
+                "per-net wall-clock deadline exceeded"
+            ),
+            int(router_cpp.FAILURE_VIA_VIA_BLOCKED): (
+                "all via candidates blocked by stored-via geometry"
+            ),
+        }
+        desc = descriptions.get(reason)
+        if desc is None:
+            return f"C++ search failed (failure_reason={reason})"
+        blocking_net = int(getattr(result, "blocking_via_net", 0))
+        if reason == int(router_cpp.FAILURE_VIA_VIA_BLOCKED) and blocking_net:
+            desc += f" (blocking net id {blocking_net})"
+        return desc
 
     def get_last_failure_info(self) -> dict | None:
         """Return structured failure diagnostics from the most recent failed route().
@@ -1988,6 +2040,7 @@ class CppPathfinder:
         per_net_timeout: float | None = None,
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
         deadline: float | None = None,
+        reason: str = "unknown",
     ) -> Route | None:
         """Attempt to route using the Python pathfinder as a fallback.
 
@@ -2015,6 +2068,10 @@ class CppPathfinder:
                 search left unspent; when none remains it is skipped so a
                 single ``route()`` call can never double-spend its per-net
                 cap inside the 10-100x-slower Python A*.
+            reason: Human-readable explanation of WHY the C++ search
+                handed this net to the Python fallback (issue #3456).
+                Surfaced in the once-per-net WARNING and recorded in
+                ``fallback_stats['fallback_reasons']``.
 
         Returns:
             Route object if fallback succeeds, None if also fails (or the
@@ -2024,6 +2081,17 @@ class CppPathfinder:
         if py_grid is None:
             return None
 
+        # Issue #3456: the silent C++ -> Python downgrade is the bug.
+        # A net grinding 3-7 minutes in the pure-Python A* is otherwise
+        # indistinguishable from "router is slow" at default verbosity.
+        # Warn LOUDLY, once per net per run (negotiated rip-up retries
+        # the same net many times -- dedupe keeps the log readable), and
+        # record the reason for ``fallback_stats`` consumers.  Skipped in
+        # relief-probe mode: probes deliberately stress the search, are
+        # never committed, and a probe-time fallback is not a
+        # user-facing performance event.
+        net_name = getattr(start, "net_name", "?")
+
         # Issue #3474 R1: clamp the fallback budget to the unspent
         # remainder of the shared per-net deadline.
         if deadline is not None:
@@ -2032,7 +2100,7 @@ class CppPathfinder:
                 logger.debug(
                     "Net %s: per-net budget exhausted by C++ search; "
                     "skipping Python fallback (issue #3474)",
-                    getattr(start, "net_name", "?"),
+                    net_name,
                 )
                 return None
             per_net_timeout = (
@@ -2040,6 +2108,25 @@ class CppPathfinder:
                 if per_net_timeout is not None
                 else remaining
             )
+
+        # The fallback is actually going to run -- make it LOUD.  This
+        # sits after the deadline-exhaustion early-return above so a
+        # skipped fallback (no grind) stays quiet, and is suppressed in
+        # relief-probe mode (probes deliberately stress the search, are
+        # never committed, and a probe-time fallback is not a
+        # user-facing performance event).
+        if not self._relief_mode:
+            self._fallback_reasons.setdefault(net_name, reason)
+            if net_name not in self._fallback_warned:
+                self._fallback_warned.add(net_name)
+                logger.warning(
+                    "Net %s: C++ pathfinder gave up (%s); falling back to "
+                    "the pure-Python A* (typically 10-100x slower -- this "
+                    "net may take minutes). See "
+                    "router.backend_info['fallback_stats'] for details.",
+                    net_name,
+                    reason,
+                )
 
         # Lazy-construct the Python Router on first fallback
         if self._py_router is None:
@@ -2071,7 +2158,6 @@ class CppPathfinder:
         )
         dt = time.monotonic() - t0
 
-        net_name = getattr(start, "net_name", "?")
         if route is not None:
             self._fallback_count += 1
             self._fallback_nets.append(net_name)
@@ -2116,10 +2202,17 @@ class CppPathfinder:
             Dictionary with:
                 - fallback_count: Number of nets routed via Python fallback
                 - fallback_nets: List of net names that used fallback
+                - fallback_reasons: Mapping of net name -> human-readable
+                  reason the C++ search handed that net to the Python
+                  fallback (issue #3456).  Includes nets where the Python
+                  fallback was attempted but ALSO failed (those do not
+                  appear in ``fallback_nets``), so slow failed grinds are
+                  attributable too.
         """
         return {
             "fallback_count": self._fallback_count,
             "fallback_nets": list(self._fallback_nets),
+            "fallback_reasons": dict(self._fallback_reasons),
         }
 
     @property
