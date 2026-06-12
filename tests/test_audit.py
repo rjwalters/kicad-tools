@@ -1292,8 +1292,12 @@ class TestZoneConnectedNets:
     (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
   )
-  (segment (start 30.5 50) (end 70.5 50) (width 0.25) (layer "F.Cu") (net 2)
+  (segment (start 30.5 50) (end 30.5 40) (width 0.25) (layer "F.Cu") (net 2)
     (uuid "seg1"))
+  (segment (start 30.5 40) (end 70.5 40) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1b"))
+  (segment (start 70.5 40) (end 70.5 50) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1c"))
   (zone (net 1) (net_name "GND") (layer "F.Cu")
     (uuid "zone1")
     (connect_pads (clearance 0.5))
@@ -1303,11 +1307,22 @@ class TestZoneConnectedNets:
       (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
     ))
     (filled_polygon (layer "F.Cu") (pts
-      (xy 1 1) (xy 99 1) (xy 99 99) (xy 1 99)
+      (xy 1 55) (xy 29.2 55) (xy 29.2 49.7) (xy 29.8 49.7) (xy 29.8 55)
+      (xy 69.2 55) (xy 69.2 49.7) (xy 69.8 49.7) (xy 69.8 55) (xy 99 55)
+      (xy 99 99) (xy 1 99)
     ))
   )
 )
 """
+    # NOTE on PCB_WITH_ZONE copper: the GND filled_polygon is a bottom
+    # slab with two fingers reaching the GND pads (R1.1 / R2.1) and the
+    # +3V3 trace doglegs through y=40 to stay clear of the fill.  The
+    # original whole-board fill put the foreign +3V3 trace inside GND
+    # fill copper, which the ``clearance_segment_zone`` rule (Issue
+    # #3527) correctly reports as a blocking short -- escalating the
+    # zone-fill advisory this fixture pins to priority 1.  The fixture's
+    # purpose is the zone-connectivity advisory, so the copper must be
+    # short-free.
 
     # PCB with both zone-connected and truly-incomplete nets.
     # GND (net 1) has a zone, SIG (net 3) has no zone and no trace.
@@ -1374,11 +1389,23 @@ class TestZoneConnectedNets:
       (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
     ))
     (filled_polygon (layer "F.Cu") (pts
-      (xy 1 1) (xy 99 1) (xy 99 99) (xy 1 99)
+      (xy 1 55) (xy 29.2 55) (xy 29.2 49.7) (xy 29.8 49.7) (xy 29.8 55)
+      (xy 69.2 55) (xy 69.2 49.7) (xy 69.8 49.7) (xy 69.8 55) (xy 99 55)
+      (xy 99 99) (xy 1 99)
     ))
   )
 )
 """
+    # NOTE on the filled_polygon shape above: it is a bottom slab with two
+    # fingers reaching up to the GND pads (R1.1 at (29.5, 50), R2.1 at
+    # (69.5, 50)) so the zone still classifies both pads as
+    # zone-connected.  It deliberately AVOIDS the +3V3 trace seg1
+    # ((30.5, 50) -> (49.5, 30)): the original whole-board fill put that
+    # foreign-net trace inside the GND fill copper, which the
+    # ``clearance_segment_zone`` rule (Issue #3527) correctly reports as
+    # a blocking short -- flipping the audit verdict this fixture pins to
+    # NOT_READY for an unrelated reason.  The fixture's purpose is the
+    # zone-connectivity advisory, so the copper must be short-free.
 
     # PCB with no zones — incomplete signal nets should still be flagged normally.
     #

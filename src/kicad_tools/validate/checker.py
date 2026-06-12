@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import DesignRules, get_profile
 
-from .rules.clearance import ClearanceRule
+from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule
 from .rules.connectivity import ConnectivityRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
@@ -113,6 +113,7 @@ class DRCChecker:
     CHECK_ALL_METHODS: tuple[str, ...] = (
         "check_clearances",
         "check_connectivity",
+        "check_segment_zone_clearances",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
@@ -218,6 +219,26 @@ class DRCChecker:
             DRCResults containing clearance violations
         """
         rule = ClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_segment_zone_clearances(self) -> DRCResults:
+        """Check track segments against foreign-net zone fill copper.
+
+        Validates each segment against the committed ``filled_polygon``
+        geometry of zones on a *different* net and the same layer,
+        flagging both copper overlap (a hard short) and sub-clearance
+        gaps.  Closes the Issue #3527 gap: a trace routed straight
+        through a stale foreign fill was invisible to every other rule
+        (segment-vs-segment / segment-vs-pad / segment-vs-via spacing
+        never consult zone fills), so ``kct check`` certified boards
+        whose committed copper shorts two nets together (found by PR
+        #3526's judge on board 05: PWR_LED through +3V3 fill).
+
+        Returns:
+            DRCResults containing ``clearance_segment_zone`` violations
+            (severity error, blocking).
+        """
+        rule = SegmentZoneClearanceRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_connectivity(self) -> DRCResults:

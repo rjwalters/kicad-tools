@@ -496,7 +496,14 @@ tolerances:
   # TraceOptimizer otherwise re-introduces one ``clearance_segment_via``
   # at the XTAL cluster).  The committed routed PCB is now 13/13 routed
   # with ZERO blocking DRC errors at jlcpcb-tier1 -- tightened 5 -> 0.
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 0
+  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
+  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
+  # shorts that were previously invisible to every gate) fired 4
+  # finding(s) on this committed artifact.  All 4 are shorts (BTN3 vs GND B.Cu fill).
+  # Artifact fix tracked in #3551; remove/reduce this entry in the PR
+  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
+  # the rule.
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 4
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
@@ -888,7 +895,14 @@ tolerances:
   # artifact and this floor are UNCHANGED at 20, and the quality gaps
   # are tracked in #3540-#3544 (#3542, coupled upgrade-in-place, is
   # the reach-safe architecture that re-opens exit clause (a)).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
+  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
+  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
+  # shorts that were previously invisible to every gate) fired 2
+  # finding(s) on this committed artifact.  Both are sub-minimum gaps (USB_CC1 vs GND In1.Cu fill); the 20 pre-existing errors are unchanged.
+  # Artifact fix tracked in #3554; remove/reduce this entry in the PR
+  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
+  # the rule.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 22
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -1507,7 +1521,50 @@ tolerances:
   # LQFP-48 corner cluster of #3267; U2.23 is newly blocked by the
   # recovered NRST B.Cu track, a deliberate signal-over-stitch
   # trade).  Floor stays 0.
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 0
+  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
+  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
+  # shorts that were previously invisible to every gate) fired 28
+  # finding(s) on this committed artifact.  24 shorts + 4 grazes vs the +3.3V F.Cu fill (OSC_IN/OSC_OUT/LED_K/GND stitch traces).
+  # Artifact fix tracked in #3552; remove/reduce this entry in the PR
+  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
+  # the rule.
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 28
+
+  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
+  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
+  # shorts that were previously invisible to every gate) fired 4
+  # finding(s) on this committed artifact.  All 4 are shorts (VIN/VOUT vs GND F.Cu fill).
+  # Artifact fix tracked in #3549; remove/reduce this entry in the PR
+  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
+  # the rule.
+  boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb: 4
+
+  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
+  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
+  # shorts that were previously invisible to every gate) fired 11
+  # finding(s) on this committed artifact.  Shorts + grazes (NODE_B/NODE_C/LINE_A vs VCC F.Cu and GND B.Cu fills).
+  # Artifact fix tracked in #3550; remove/reduce this entry in the PR
+  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
+  # the rule.
+  boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb: 11
+
+  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
+  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
+  # shorts that were previously invisible to every gate) fired 10
+  # finding(s) on this committed artifact.  6 shorts + 4 grazes (SW_OUT/PWM_AL/PWM_BH/GATE_CL/SWDIO vs +24V/+3V3/GND fills).  The #3526 PWR_LED-vs-+3V3 short is FIXED and does not appear.
+  # Artifact fix tracked in #3553; remove/reduce this entry in the PR
+  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
+  # the rule.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 10
+
+  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
+  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
+  # shorts that were previously invisible to every gate) fired 36
+  # finding(s) on this committed artifact.  29 shorts + 7 grazes (AC_NEUTRAL/V_AC_SENSE and others vs FUSED_LINE/VGATE fills).
+  # Artifact fix tracked in #3555; remove/reduce this entry in the PR
+  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
+  # the rule.
+  boards/external/softstart/output/softstart_routed.kicad_pcb: 36
 
 # Per-board manufacturer overrides for the CI gate (optional).
 #

@@ -44,6 +44,10 @@ def _init_type_category_map() -> None:
             ViolationType.CLEARANCE_PAD_SEGMENT: ViolationCategory.ROUTING,
             ViolationType.CLEARANCE_PAD_VIA: ViolationCategory.ROUTING,
             ViolationType.CLEARANCE_SEGMENT_SEGMENT: ViolationCategory.ROUTING,
+            # Segment vs foreign zone fill (Issue #3527): fixable by
+            # rerouting the trace (or refilling the stale zone) -- same
+            # routing-domain remediation as the other clearance subtypes.
+            ViolationType.CLEARANCE_SEGMENT_ZONE: ViolationCategory.ROUTING,
             ViolationType.CLEARANCE_VIA_VIA: ViolationCategory.ROUTING,
             # Differential-pair within-pair clearance (Issue #2560, Epic #2556 Phase 1D).
             # Same category as other clearance subtypes -- fixable by rerouting.
@@ -132,6 +136,10 @@ class ViolationType(Enum):
     CLEARANCE_PAD_VIA = "clearance_pad_via"
     CLEARANCE_PAD_PAD = "clearance_pad_pad"
     CLEARANCE_SEGMENT_SEGMENT = "clearance_segment_segment"
+    # Segment copper vs foreign-net zone *fill* copper (Issue #3527).
+    # Covers both hard shorts (overlap, negative actual_value) and
+    # sub-minimum gaps to committed filled_polygon geometry.
+    CLEARANCE_SEGMENT_ZONE = "clearance_segment_zone"
     CLEARANCE_VIA_VIA = "clearance_via_via"
     # Differential-pair within-pair clearance (Issue #2560, Epic #2556 Phase 1D).
     # Distinct from the generic CLEARANCE family because it validates the

@@ -1004,6 +1004,14 @@ class Zone:
     polygon: list[tuple[float, float]] = field(default_factory=list)
     # Filled polygon regions after DRC (may differ from boundary due to clearances)
     filled_polygons: list[list[tuple[float, float]]] = field(default_factory=list)
+    # Layer of each filled polygon, parallel to ``filled_polygons``.
+    # KiCad writes ``(filled_polygon (layer "F.Cu") (pts ...))`` per fill;
+    # multi-layer zones emit one filled_polygon per layer, so the zone-level
+    # ``layer`` field alone cannot locate fill copper.  Entries may be
+    # missing/empty for programmatically constructed zones -- use
+    # :meth:`filled_polygon_layer`, which falls back to the zone-level
+    # ``layer``.  See Issue #3527.
+    filled_polygon_layers: list[str] = field(default_factory=list)
     # Zone fill priority (higher priority fills later, on top of lower priority)
     priority: int = 0
     # Minimum copper thickness in mm
@@ -1109,8 +1117,24 @@ class Zone:
             points = cls._parse_polygon_pts(filled_poly)
             if points:
                 zone.filled_polygons.append(points)
+                fp_layer = ""
+                if fp_layer_node := filled_poly.find("layer"):
+                    fp_layer = fp_layer_node.get_string(0) or ""
+                zone.filled_polygon_layers.append(fp_layer or zone.layer)
 
         return zone
+
+    def filled_polygon_layer(self, index: int) -> str:
+        """Return the copper layer of ``filled_polygons[index]``.
+
+        Uses the per-fill ``(layer ...)`` value when it was parsed from the
+        S-expression and falls back to the zone-level ``layer`` for zones
+        constructed programmatically (whose ``filled_polygon_layers`` list
+        may be shorter than ``filled_polygons`` or contain empty strings).
+        """
+        if index < len(self.filled_polygon_layers) and self.filled_polygon_layers[index]:
+            return self.filled_polygon_layers[index]
+        return self.layer
 
     @staticmethod
     def _parse_polygon_pts(polygon_sexp: SExp) -> list[tuple[float, float]]:

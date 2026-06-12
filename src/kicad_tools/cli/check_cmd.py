@@ -134,6 +134,7 @@ def run_netlist_sync_gate(
 CHECK_CATEGORIES = [
     "clearance",
     "connectivity",
+    "segment_zone",
     "diffpair_clearance_intra",
     "diffpair_length_skew",
     "diffpair_routing_continuity",
@@ -525,6 +526,7 @@ def run_selected_checks(
     check_methods = {
         "clearance": checker.check_clearances,
         "connectivity": checker.check_connectivity,
+        "segment_zone": checker.check_segment_zone_clearances,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,

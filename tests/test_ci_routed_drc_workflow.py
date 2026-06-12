@@ -177,10 +177,15 @@ class TestAllowlist:
     def test_allowlist_paths_match_routed_pattern(self, allowlist_data: dict) -> None:
         """Every key in the allowlist must be a repo-relative path to a
         routed PCB. Catches typos like a stray space, a wrong board number,
-        or accidentally listing the unrouted PCB."""
+        or accidentally listing the unrouted PCB.
+
+        The board directory may be nested (e.g.
+        ``boards/external/softstart/output/softstart_routed.kicad_pcb``,
+        grandfathered by Issue #3527), so the pattern allows one or more
+        path components between ``boards/`` and ``output/``."""
         import re
 
-        pattern = re.compile(r"^boards/[^/]+/output/[^/]+_routed\.kicad_pcb$")
+        pattern = re.compile(r"^boards/(?:[^/]+/)+output/[^/]+_routed\.kicad_pcb$")
         for key in allowlist_data["tolerances"]:
             assert pattern.match(key), (
                 f"Allowlist key {key!r} does not match the expected pattern "

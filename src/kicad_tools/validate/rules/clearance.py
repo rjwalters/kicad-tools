@@ -738,3 +738,229 @@ class ClearanceRule(DRCRule):
             items=(elem1.reference, elem2.reference),
             nets=(elem1.net_name, elem2.net_name),
         )
+
+
+@dataclass
+class _ZoneFill:
+    """One filled polygon of a zone, resolved to a net and a layer."""
+
+    net_number: int
+    net_name: str
+    layer: str
+    polygon: object  # shapely (Multi)Polygon
+
+
+class SegmentZoneClearanceRule(DRCRule):
+    """Check track segments against foreign-net zone fill copper.
+
+    This repo's convention (issues #3482/#3523) treats committed
+    ``filled_polygon`` data as the copper source of truth for
+    connectivity analysis, so it must also be the source of truth for
+    clearance/short checks.  Before this rule, ``kct check`` validated
+    segment-vs-segment, segment-vs-pad, and segment-vs-via spacing but
+    never compared a segment to the *fill* copper of another net's zone
+    -- a trace routed straight through a stale foreign fill (a hard
+    manufacturing short) sailed through every gate.  PR #3526's judge
+    found exactly that on board 05: a PWR_LED segment crossing ~3.1 mm
+    of +3V3 fill with zero blocking violations reported.  See Issue
+    #3527.
+
+    Two violation flavours, both ``rule_id="clearance_segment_zone"``
+    and severity ``error`` (blocking):
+
+    - **Short**: the segment's copper overlaps the fill polygon
+      (edge-to-edge clearance < 0).  ``actual_value`` is the negative
+      overlap depth.
+    - **Clearance**: the copper gap is positive but below the
+      manufacturer's ``min_clearance_mm``.
+
+    Same-net segment/fill pairs are skipped (a trace inside its own
+    pour is legal and common).  Segments and zones on net 0 are
+    skipped, matching :class:`ClearanceRule` (no net identity -> no
+    foreign-net determination).
+
+    Performance: fill polygons are loaded into one shapely ``STRtree``
+    per layer; each segment only visits fills whose bounding box
+    intersects its inflated bbox, and all distance math is exact
+    shapely C geometry (no centerline sampling), so the rule is safe
+    to run inside CI gates on large boards.
+    """
+
+    rule_id = "clearance_segment_zone"
+    name = "Segment to Zone Fill Clearance"
+    description = "Validates track segments against foreign-net zone fill copper"
+
+    def check(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+    ) -> DRCResults:
+        """Check all segments against foreign-net zone fills.
+
+        Args:
+            pcb: The PCB to check
+            design_rules: Design rules from the manufacturer profile
+
+        Returns:
+            DRCResults containing segment-vs-zone-fill shorts and
+            clearance violations
+        """
+        results = DRCResults()
+        results.rules_checked = 1
+
+        fills_by_layer = self._collect_fills(pcb)
+        if not fills_by_layer:
+            return results
+
+        import shapely
+        from shapely import STRtree
+        from shapely.geometry import LineString
+
+        min_clearance = design_rules.min_clearance_mm
+
+        for layer, fills in fills_by_layer.items():
+            tree = STRtree([f.polygon for f in fills])
+            for seg in pcb.segments_on_layer(layer):
+                if seg.net_number == 0:
+                    continue
+                half_w = seg.width / 2.0
+                line = LineString([seg.start, seg.end])
+                # Inflate the segment bbox by everything that could
+                # matter: its own half-width plus the required gap.
+                margin = half_w + min_clearance
+                minx, miny, maxx, maxy = line.bounds
+                query_box = shapely.box(minx - margin, miny - margin, maxx + margin, maxy + margin)
+                for idx in tree.query(query_box):
+                    fill = fills[int(idx)]
+                    if fill.net_number == seg.net_number:
+                        continue
+                    violation = self._check_pair(seg, line, half_w, fill, min_clearance, layer)
+                    if violation is not None:
+                        results.add(violation)
+
+        return results
+
+    def _collect_fills(self, pcb: PCB) -> dict[str, list[_ZoneFill]]:
+        """Group zone fill polygons by copper layer, resolving zone nets.
+
+        Zones whose net cannot be resolved to a nonzero net number are
+        skipped (keepout/rule areas have no fills anyway; a zone with
+        no net has no foreign-net relationship to enforce).
+        """
+        from shapely.geometry import Polygon
+
+        name_to_number = {net.name: net.number for net in pcb.nets.values() if net.name}
+        number_to_name = {net.number: net.name for net in pcb.nets.values()}
+
+        fills_by_layer: dict[str, list[_ZoneFill]] = {}
+        for zone in pcb.zones:
+            net_number = zone.net_number
+            if net_number == 0 and zone.net_name:
+                # KiCad 9 name-only ``(net "X")`` format -- resolve by name.
+                net_number = name_to_number.get(zone.net_name, 0)
+            if net_number == 0:
+                continue
+            net_name = zone.net_name or number_to_name.get(net_number, "")
+            for i, points in enumerate(zone.filled_polygons):
+                if len(points) < 3:
+                    continue
+                poly = Polygon(points)
+                if not poly.is_valid:
+                    # Stale fills can carry self-touching outlines
+                    # (KiCad traces knockout holes through the exterior
+                    # ring).  buffer(0) re-nodes to equivalent copper.
+                    poly = poly.buffer(0)
+                if poly.is_empty:
+                    continue
+                layer = zone.filled_polygon_layer(i)
+                if not layer:
+                    continue
+                fills_by_layer.setdefault(layer, []).append(
+                    _ZoneFill(
+                        net_number=net_number,
+                        net_name=net_name,
+                        layer=layer,
+                        polygon=poly,
+                    )
+                )
+        return fills_by_layer
+
+    def _check_pair(
+        self,
+        seg: Segment,
+        line: object,
+        half_w: float,
+        fill: _ZoneFill,
+        min_clearance: float,
+        layer: str,
+    ) -> DRCViolation | None:
+        """Check one segment against one foreign fill polygon."""
+        from shapely.ops import nearest_points
+
+        poly = fill.polygon
+        centerline_dist = line.distance(poly)  # type: ignore[attr-defined]
+        seg_net = seg.net_name if seg.net_number != 0 else ""
+        seg_ref = f"Trace-{seg.uuid[:8]}" if seg.uuid else "Trace"
+        zone_ref = f"ZoneFill-{fill.net_name}" if fill.net_name else "ZoneFill"
+
+        if centerline_dist == 0.0:
+            # Centerline touches or enters the fill copper: hard short.
+            # Depth = how far inside the fill the overlap's representative
+            # point sits, plus the trace half-width.
+            intersection = line.intersection(poly)  # type: ignore[attr-defined]
+            if intersection.is_empty:
+                # Grazing contact with no overlap length -- still a
+                # zero-clearance touch.
+                rep = nearest_points(line, poly)[0]
+                depth = 0.0
+            else:
+                rep = intersection.representative_point()
+                depth = poly.boundary.distance(rep)  # type: ignore[attr-defined]
+            clearance = -(depth + half_w)
+            return DRCViolation(
+                rule_id=self.rule_id,
+                severity="error",
+                message=(
+                    f"Short: segment on net '{seg_net}' overlaps zone fill of net "
+                    f"'{fill.net_name}' on {layer} (overlap depth "
+                    f"{depth + half_w:.3f}mm)"
+                ),
+                location=(round(rep.x, 3), round(rep.y, 3)),
+                layer=layer,
+                actual_value=round(clearance, 4),
+                required_value=min_clearance,
+                items=(seg_ref, zone_ref),
+                nets=(seg_net, fill.net_name),
+            )
+
+        clearance = centerline_dist - half_w
+        if clearance + DRC_TOLERANCE >= min_clearance:
+            return None
+
+        p_line, p_poly = nearest_points(line, poly)
+        loc_x = (p_line.x + p_poly.x) / 2.0
+        loc_y = (p_line.y + p_poly.y) / 2.0
+        if clearance < 0:
+            # Centerline outside the fill but the trace copper (width)
+            # overlaps the fill edge: still a short.
+            message = (
+                f"Short: segment on net '{seg_net}' copper overlaps zone fill of "
+                f"net '{fill.net_name}' on {layer} by {-clearance:.3f}mm"
+            )
+        else:
+            message = (
+                f"Segment to zone fill clearance {clearance:.3f}mm < minimum "
+                f"{min_clearance:.3f}mm (net '{seg_net}' vs zone net "
+                f"'{fill.net_name}')"
+            )
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="error",
+            message=message,
+            location=(round(loc_x, 3), round(loc_y, 3)),
+            layer=layer,
+            actual_value=round(clearance, 4),
+            required_value=min_clearance,
+            items=(seg_ref, zone_ref),
+            nets=(seg_net, fill.net_name),
+        )
