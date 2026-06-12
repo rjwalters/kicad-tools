@@ -320,15 +320,10 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # Connect crystal ground to GND rail.  The block's GND port is the
     # MIDPOINT of the C10/C11 ground-bus horizontal wire, and
     # ``connect_to_rails`` drops a vertical wire from that midpoint down to
-    # the rail.  Because the midpoint lands mid-segment on the ground bus
-    # (not on a wire endpoint) and the block adds a junction only at the
-    # rail end, the vertical wire's TOP endpoint is left as an
-    # ``unconnected_wire_endpoint`` (KiCad needs a junction dot to register
-    # the T-connection).  Add a junction at the GND port to close that
-    # warning.  See issue #3149 (AC #2).
+    # the rail, emitting junctions at both the rail end and the ground-bus
+    # midpoint (the latter added by PR #3467; previously this generator had
+    # to add it manually -- see issues #3149 AC #2 and #3468).
     xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
-    _xtal_gnd = xtal.port("GND")
-    sch.add_junction(_xtal_gnd[0], _xtal_gnd[1])
 
     # Wire crystal IN/OUT to OSC_IN / OSC_OUT labels (on stubs).  Labels at the
     # MCU side are added below when we wire the MCU pins.
