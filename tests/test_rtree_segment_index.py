@@ -172,10 +172,6 @@ class TestRtreeBruteForceEquivalence:
         return result_normal, result_brute
 
     @pytest.mark.skipif(not RTREE_AVAILABLE, reason="rtree not installed")
-    @pytest.mark.xfail(
-        reason="RtreeSegmentIndex returns clearance=inf where brute force finds a neighbor -- see issue #3522",
-        strict=False,
-    )
     def test_parity_above_threshold(self, grid):
         """With 200+ segments the R-tree path matches brute-force exactly."""
         self._populate_grid(grid, n_routes=40, n_segs_per_route=6)
@@ -233,6 +229,128 @@ class TestRtreeBruteForceEquivalence:
         # Just verify it returns a valid tuple (no crash)
         assert isinstance(is_valid, bool)
         assert isinstance(clearance, float)
+
+
+# ---------------------------------------------------------------------------
+# Issue #3522: global-minimum clearance parity (pin tests)
+# ---------------------------------------------------------------------------
+
+
+class TestRtreeGlobalMinParity:
+    """Pin tests for issue #3522.
+
+    The R-tree path used a single bounded range query (margin =
+    ``seg_half_width + min_clearance``), so when the true nearest foreign-net
+    segment fell outside that envelope the reported ``actual_clearance`` was
+    either ``inf`` (no candidate at all) or a finite but non-minimal value
+    (a far candidate whose bbox happened to overlap, e.g. a long diagonal).
+    The brute-force reference reports the unbounded global minimum.
+    """
+
+    def _query_both_paths(self, grid, query_seg, exclude_net, min_clearance=0.127):
+        """Run the same query via the R-tree path and the brute-force path."""
+        result_rtree = grid.validate_segment_clearance(
+            query_seg, exclude_net=exclude_net, min_clearance=min_clearance
+        )
+        saved_count = grid._seg_rtree_count
+        grid._seg_rtree_count = 0
+        result_brute = grid.validate_segment_clearance(
+            query_seg, exclude_net=exclude_net, min_clearance=min_clearance
+        )
+        grid._seg_rtree_count = saved_count
+        return result_rtree, result_brute
+
+    @pytest.mark.skipif(not RTREE_AVAILABLE, reason="rtree not installed")
+    def test_far_neighbor_clearance_not_infinite(self, grid):
+        """A neighbor beyond the violation envelope must still be reported.
+
+        33 vertical foreign-net segments sit 4.5mm+ away from the query --
+        far outside the pass-1 envelope (~0.227mm margin) -- so the old code
+        found zero candidates and returned clearance=inf while brute force
+        found 4.3mm.
+        """
+        for i in range(33):
+            s = _make_segment(10.0 + i * 1.0, 20.0, 10.0 + i * 1.0, 30.0, net=i + 1)
+            grid.mark_route(_make_route([s], net=i + 1))
+        assert grid._seg_rtree_count >= RTREE_SEGMENT_THRESHOLD
+
+        query = _make_segment(5.0, 25.0, 5.5, 25.0, net=999)
+        result_rt, result_bf = self._query_both_paths(grid, query, exclude_net=999)
+
+        # Nearest stored segment is at x=10.0: centerline distance 4.5mm,
+        # minus both half-widths (0.1 + 0.1) = 4.3mm edge-to-edge.
+        assert result_bf[1] == pytest.approx(4.3, abs=1e-12)
+        assert result_rt[1] != float("inf"), (
+            "R-tree path dropped the nearest neighbor (issue #3522 regression)"
+        )
+        assert result_rt[0] == result_bf[0]
+        assert abs(result_rt[1] - result_bf[1]) < 1e-9
+
+    @pytest.mark.skipif(not RTREE_AVAILABLE, reason="rtree not installed")
+    def test_bbox_overlap_does_not_mask_true_minimum(self, grid):
+        """A far diagonal candidate must not mask a nearer off-envelope segment.
+
+        The long diagonal's bounding box overlaps the query envelope, so the
+        old single-pass code returned its (large) clearance even though a
+        vertical segment outside the pass-1 envelope was geometrically much
+        closer.  This is the finite-but-non-minimal variant of #3522.
+        """
+        # Long diagonal: bbox covers the query region, but the actual
+        # centerline is ~11mm away from the query segment.
+        diag = _make_segment(0.0, 0.0, 20.0, 20.0, net=1)
+        grid.mark_route(_make_route([diag], net=1))
+
+        # True nearest neighbor: vertical segment 3.5mm right of the query,
+        # well outside the pass-1 envelope (~0.227mm margin).
+        near = _make_segment(6.0, 10.0, 6.0, 26.0, net=2)
+        grid.mark_route(_make_route([near], net=2))
+
+        # Filler segments far away so the R-tree path engages.
+        for i in range(32):
+            s = _make_segment(35.0 + i * 0.4, 35.0, 35.0 + i * 0.4, 45.0, net=100 + i)
+            grid.mark_route(_make_route([s], net=100 + i))
+        assert grid._seg_rtree_count >= RTREE_SEGMENT_THRESHOLD
+
+        query = _make_segment(2.0, 18.0, 2.5, 18.0, net=999)
+        result_rt, result_bf = self._query_both_paths(grid, query, exclude_net=999)
+
+        # Nearest is the vertical segment at x=6.0: centerline distance 3.5mm
+        # minus both half-widths = 3.3mm edge-to-edge.
+        assert result_bf[1] == pytest.approx(3.3, abs=1e-12)
+        assert result_rt[0] == result_bf[0]
+        assert abs(result_rt[1] - result_bf[1]) < 1e-9
+
+    @pytest.mark.skipif(not RTREE_AVAILABLE, reason="rtree not installed")
+    def test_issue_3522_exact_geometry(self, grid):
+        """Pin the exact failing query from the issue #3522 report.
+
+        Reproduces the deterministic geometry from
+        ``test_parity_above_threshold`` (populate seed 42, query seed 99,
+        second query) where the R-tree path returned clearance=inf and brute
+        force found 3.325339152448819mm.
+        """
+        TestRtreeBruteForceEquivalence()._populate_grid(grid, n_routes=40, n_segs_per_route=6)
+        assert grid._seg_rtree_count >= RTREE_SEGMENT_THRESHOLD
+
+        rng = random.Random(99)
+        query = None
+        exclude_net = None
+        for _ in range(2):  # second draw is the historically failing query q1
+            x1 = rng.uniform(2.0, 48.0)
+            y1 = rng.uniform(2.0, 48.0)
+            x2 = x1 + rng.uniform(-5.0, 5.0)
+            y2 = y1 + rng.uniform(-5.0, 5.0)
+            exclude_net = rng.randint(1, 40)
+            query = _make_segment(x1, y1, x2, y2, net=exclude_net)
+
+        result_rt, result_bf = self._query_both_paths(grid, query, exclude_net)
+
+        assert result_bf[1] == pytest.approx(3.325339152448819, abs=1e-9)
+        assert result_rt[1] != float("inf"), (
+            "R-tree path returned clearance=inf for the issue #3522 geometry"
+        )
+        assert result_rt[0] == result_bf[0]
+        assert abs(result_rt[1] - result_bf[1]) < 1e-9
 
 
 # ---------------------------------------------------------------------------

@@ -3118,35 +3118,19 @@ class RoutingGrid:
         )
 
         if use_rtree:
-            # Issue #2335: R-tree envelopes are already inflated by
-            # _rtree_clearance_inflation (= max_clearance).  The query
-            # envelope only needs the query segment's own half-width plus a
-            # small margin for accurate min_actual_clearance reporting on
-            # nearby (non-violating) segments.  Segments whose inflated
-            # envelopes do not intersect this query region are guaranteed to
-            # have edge-to-edge clearance >= max_clearance and can be safely
-            # skipped.  The extra ``min_clearance`` term ensures that all
-            # potential violators are captured even when the query segment's
-            # required clearance differs from the index inflation.
-            search_margin = seg_half_width + min_clearance
-            query_envelope = (
-                min(seg.x1, seg.x2) - search_margin,
-                min(seg.y1, seg.y2) - search_margin,
-                max(seg.x1, seg.x2) + search_margin,
-                max(seg.y1, seg.y2) + search_margin,
-            )
-            candidate_ids = list(self._seg_rtree[seg_layer_idx].intersection(query_envelope))
+            rtree_idx = self._seg_rtree[seg_layer_idx]
             layer_items = self._seg_rtree_items.get(seg_layer_idx, {})
+            seg_min_x = min(seg.x1, seg.x2)
+            seg_min_y = min(seg.y1, seg.y2)
+            seg_max_x = max(seg.x1, seg.x2)
+            seg_max_y = max(seg.y1, seg.y2)
 
-            for cand_id in candidate_ids:
-                other_seg = layer_items.get(cand_id)
-                if other_seg is None:
-                    continue
-                # Skip same-net segments
-                if other_seg.net == exclude_net:
-                    continue
+            def _exact_clearance(other_seg: Segment) -> float:
+                """Edge-to-edge clearance between ``seg`` and ``other_seg``.
 
-                # Exact segment-to-segment distance
+                Uses the exact same arithmetic as the brute-force branch so
+                the two paths produce bit-identical results (Issue #3522).
+                """
                 dist = self._segment_to_segment_distance(
                     seg.x1,
                     seg.y1,
@@ -3157,26 +3141,108 @@ class RoutingGrid:
                     other_seg.x2,
                     other_seg.y2,
                 )
+                return dist - seg_half_width - other_seg.width / 2
 
-                # Edge-to-edge clearance (both segment half-widths)
-                clearance = dist - seg_half_width - other_seg.width / 2
+            def _scan_candidates(
+                margin: float,
+            ) -> tuple[float, bool, tuple[float, float] | None]:
+                """Exact-distance scan of R-tree candidates within ``margin``.
 
-                # Issue #2559 / Phase 1C: tighter clearance for the diff-pair
-                # partner only.
-                effective_clearance = (
-                    partner_clearance
-                    if partner_active and other_seg.net == partner_net
-                    else min_clearance
+                Returns (best_clearance, found_violation, violation_loc) over
+                all foreign-net candidates whose inflated envelopes intersect
+                the query envelope expanded by ``margin``.
+                """
+                envelope = (
+                    seg_min_x - margin,
+                    seg_min_y - margin,
+                    seg_max_x + margin,
+                    seg_max_y + margin,
                 )
+                best = float("inf")
+                found = False
+                loc: tuple[float, float] | None = None
+                for cand_id in rtree_idx.intersection(envelope):
+                    other_seg = layer_items.get(cand_id)
+                    if other_seg is None:
+                        continue
+                    # Skip same-net segments
+                    if other_seg.net == exclude_net:
+                        continue
 
-                if clearance < min_actual_clearance:
-                    min_actual_clearance = clearance
-                if clearance < effective_clearance:
-                    has_violation = True
-                    violation_loc = (
-                        (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
-                        (seg.y1 + seg.y2 + other_seg.y1 + other_seg.y2) / 4,
+                    # Edge-to-edge clearance (both segment half-widths)
+                    clearance = _exact_clearance(other_seg)
+
+                    # Issue #2559 / Phase 1C: tighter clearance for the
+                    # diff-pair partner only.
+                    effective_clearance = (
+                        partner_clearance
+                        if partner_active and other_seg.net == partner_net
+                        else min_clearance
                     )
+
+                    if clearance < best:
+                        best = clearance
+                    if clearance < effective_clearance:
+                        found = True
+                        loc = (
+                            (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
+                            (seg.y1 + seg.y2 + other_seg.y1 + other_seg.y2) / 4,
+                        )
+                return best, found, loc
+
+            # Pass 1 (Issue #2335): R-tree envelopes are already inflated by
+            # _rtree_clearance_inflation (= max_clearance) plus the stored
+            # segment's half-width, so a query envelope expanded by
+            # ``seg_half_width + min_clearance`` is guaranteed to capture
+            # every segment whose edge-to-edge clearance is below
+            # ``min_clearance`` -- all potential violators.  Violation
+            # detection (``is_valid``) is therefore certified by this pass
+            # alone.
+            search_margin = seg_half_width + min_clearance
+            best_clearance, seg_violation, seg_violation_loc = _scan_candidates(search_margin)
+
+            # Pass 2 (Issue #3522): the bounded pass-1 query only certifies
+            # the reported *minimum* when it lies within ``min_clearance``.
+            # The brute-force branch reports the global minimum clearance
+            # over all foreign-net same-layer segments with no distance
+            # bound, so callers relying on ``actual_clearance`` got a false
+            # ``inf`` (or a finite but non-minimal value from a
+            # bbox-overlapping far candidate, e.g. a long diagonal) whenever
+            # the true nearest segment fell outside the pass-1 envelope.
+            # Certify the true minimum by re-querying with the best-known
+            # clearance as the margin: a segment with edge-to-edge clearance
+            # ``c`` has a bbox gap of at most
+            # ``c + seg_half_width + other_half_width`` per axis, and the
+            # stored envelopes already include ``other_half_width``, so a
+            # query margin of ``seg_half_width + c_bound`` captures every
+            # segment with clearance <= ``c_bound``.
+            if best_clearance > min_clearance:
+                if best_clearance == float("inf") and layer_items:
+                    # No foreign-net candidate intersected the pass-1
+                    # envelope.  Seed an upper bound from the nearest stored
+                    # envelopes (ordered by inflated-bbox distance; the first
+                    # foreign-net hit gives a finite -- though not
+                    # necessarily minimal -- clearance bound for the
+                    # certification pass below).
+                    query_bbox = (seg_min_x, seg_min_y, seg_max_x, seg_max_y)
+                    for cand_id in rtree_idx.nearest(query_bbox, num_results=len(layer_items)):
+                        other_seg = layer_items.get(cand_id)
+                        if other_seg is None or other_seg.net == exclude_net:
+                            continue
+                        best_clearance = _exact_clearance(other_seg)
+                        break
+                if best_clearance < float("inf"):
+                    certify_margin = seg_half_width + best_clearance
+                    if certify_margin > search_margin:
+                        best_clearance, seg_violation, seg_violation_loc = _scan_candidates(
+                            certify_margin
+                        )
+
+            if best_clearance < min_actual_clearance:
+                min_actual_clearance = best_clearance
+            if seg_violation:
+                has_violation = True
+                violation_loc = seg_violation_loc
         else:
             # Brute-force path: iterate all routes and segments.
             for route in self.routes:
