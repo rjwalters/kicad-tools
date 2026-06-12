@@ -1341,6 +1341,83 @@ class TestCollectNarrative:
 
         assert interfaces is None
 
+    def test_interface_detection_deterministic(self, tmp_path):
+        """Repeated detection over identical labels yields identical rows.
+
+        Regression test for issue #3574: set iteration order made the
+        first-match-per-pattern choice hash-order dependent, so identical
+        inputs produced different report rows across runs.
+        """
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        # Ambiguous names from the board-06 report plus genuine UART nets,
+        # in several insertion orders to perturb set layout.
+        names = [
+            "PCIE_RX+",
+            "PCIE_RX-",
+            "PCIE_TX+",
+            "PCIE_TX-",
+            "USB3_TX2+",
+            "USB3_TX2-",
+            "UART_TX",
+            "UART_RX",
+            "DEBUG_TXD",
+            "DEBUG_RXD",
+        ]
+        results = []
+        for ordering in (names, list(reversed(names)), sorted(names)):
+            mock_sch = _make_mock_schematic_with_labels(ordering)
+            results.append(
+                collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+            )
+        # Also re-run on the same ordering.
+        mock_sch = _make_mock_schematic_with_labels(names)
+        results.append(
+            collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+        )
+
+        assert all(r == results[0] for r in results[1:])
+
+    def test_interface_detection_uart_excludes_high_speed_diff_pairs(self, tmp_path):
+        """PCIE/USB3 differential nets never satisfy UART TX/RX patterns."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_labels(
+            ["PCIE_RX+", "PCIE_RX-", "PCIE_TX+", "PCIE_TX-", "USB3_TX2+", "USB3_TX2-"]
+        )
+        interfaces = collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+
+        if interfaces is not None:
+            protocols = [i["protocol"] for i in interfaces]
+            assert "UART" not in protocols
+
+    def test_interface_detection_uart_still_detected_alongside_high_speed(self, tmp_path):
+        """Genuine UART nets are detected; UART row contains only them."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_labels(
+            ["PCIE_RX+", "PCIE_RX-", "USB3_TX2+", "USB3_TX2-", "UART_TX", "UART_RX"]
+        )
+        interfaces = collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+
+        assert interfaces is not None
+        uart_rows = [i for i in interfaces if i["protocol"] == "UART"]
+        assert len(uart_rows) == 1
+        assert uart_rows[0]["signals"] == ["UART_RX", "UART_TX"]
+
+    def test_interface_detection_excludes_p_n_suffix_diff_pairs(self, tmp_path):
+        """_P/_N polarity-suffixed nets are excluded from single-ended rows."""
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+
+        mock_sch = _make_mock_schematic_with_labels(
+            ["ETH_TX_P", "ETH_TX_N", "ETH_RX_P", "ETH_RX_N"]
+        )
+        interfaces = collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
+
+        if interfaces is not None:
+            protocols = [i["protocol"] for i in interfaces]
+            assert "UART" not in protocols
+
     def test_power_architecture_finds_rails(self, tmp_path):
         """Power architecture detects power symbols."""
         collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
