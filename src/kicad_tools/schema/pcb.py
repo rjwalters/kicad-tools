@@ -600,8 +600,12 @@ class Footprint:
         if sexp_node is None:
             return
 
+        # Direct children only for the (at)/(layer) lookups below:
+        # properties, fp_texts and pads carry their own (at)/(layer)
+        # nodes, and a recursive find() would mutate a descendant's
+        # node if the footprint-level one were absent (issue #3602).
         if name == "position":
-            at_node = sexp_node.find("at")
+            at_node = sexp_node.find_child("at")
             if at_node is not None:
                 x, y = value  # type: ignore[unpacking-non-sequence]
                 # ``fp.position`` stores board-relative coordinates but the
@@ -612,7 +616,7 @@ class Footprint:
                 at_node.set_value(1, y + origin[1])
 
         elif name == "rotation":
-            at_node = sexp_node.find("at")
+            at_node = sexp_node.find_child("at")
             if at_node is not None:
                 if len(at_node.children) >= 3:
                     at_node.set_value(2, value)
@@ -620,7 +624,7 @@ class Footprint:
                     at_node.add(value)
 
         elif name == "layer":
-            layer_node = sexp_node.find("layer")
+            layer_node = sexp_node.find_child("layer")
             if layer_node is not None:
                 layer_node.set_value(0, value)
 
@@ -734,12 +738,20 @@ class Footprint:
             graphics=[],
         )
 
+        # NOTE: all footprint-level scalar tokens below use
+        # find_child() (direct children only), NOT the recursive
+        # find(). Descendants legitimately carry same-named tokens --
+        # pads have (at)/(uuid)/(locked), properties and fp_texts have
+        # (at)/(layer)/(uuid) -- and a recursive lookup would misread
+        # a descendant's token as the footprint's own whenever the
+        # footprint-level token is absent (issue #3602).
+
         # Layer
-        if layer := sexp.find("layer"):
+        if layer := sexp.find_child("layer"):
             fp.layer = layer.get_string(0) or "F.Cu"
 
         # Position
-        if at := sexp.find("at"):
+        if at := sexp.find_child("at"):
             x = at.get_float(0) or 0.0
             y = at.get_float(1) or 0.0
             rot = at.get_float(2) or 0.0
@@ -747,13 +759,13 @@ class Footprint:
             fp.rotation = rot
 
         # UUID
-        if uuid := sexp.find("uuid"):
+        if uuid := sexp.find_child("uuid"):
             fp.uuid = uuid.get_string(0) or ""
 
         # Description and tags
-        if descr := sexp.find("descr"):
+        if descr := sexp.find_child("descr"):
             fp.description = descr.get_string(0) or ""
-        if tags := sexp.find("tags"):
+        if tags := sexp.find_child("tags"):
             fp.tags = tags.get_string(0) or ""
 
         # Modern lock form: a top-level ``(locked yes)`` child (KiCad 9/10).
@@ -764,11 +776,17 @@ class Footprint:
         # anchor logic (``getattr(fp, "locked", False)``, issue #2845)
         # would silently stop seeing those footprints as locked
         # (issue #3410).
-        if locked_node := sexp.find("locked"):
+        #
+        # Direct children only: PADS can carry their own ``(locked
+        # yes)``, and the recursive find() previously misread a
+        # pad-level lock as the footprint's, so unlocking a footprint
+        # with locked pads didn't persist across save/reload
+        # (issue #3602).
+        if locked_node := sexp.find_child("locked"):
             if (locked_node.get_string(0) or "yes") in ("yes", "true"):
                 fp.locked = True
 
-        if attr := sexp.find("attr"):
+        if attr := sexp.find_child("attr"):
             # The footprint *type* token (``smd`` / ``through_hole``)
             # is optional in KiCad's emitted form. When KiCad omits the
             # type, the first atom is a flag (e.g. ``(attr
@@ -1944,7 +1962,10 @@ class PCB:
             if child.tag != "footprint":
                 continue
 
-            uuid_node = child.find("uuid")
+            # Direct child only: pads/properties carry their own (uuid)
+            # nodes, and a recursive find() would match a descendant's
+            # uuid when the footprint-level one is absent (issue #3602).
+            uuid_node = child.find_child("uuid")
             child_uuid = uuid_node.get_string(0) if uuid_node else None
 
             fp_idx: int | None = None

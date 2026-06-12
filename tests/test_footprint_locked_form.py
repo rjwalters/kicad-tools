@@ -56,6 +56,17 @@ def _pcb_text(footprint_extra: str) -> str:
 """
 
 
+def _lock_both_pads(pcb_text: str) -> str:
+    """Add a pad-level ``(locked yes)`` to both pads of the test footprint."""
+    return pcb_text.replace(
+        '(pad "1" smd rect (at -1 0)',
+        '(pad "1" smd rect (locked yes) (at -1 0)',
+    ).replace(
+        '(pad "2" smd rect (at 1 0)',
+        '(pad "2" smd rect (locked yes) (at 1 0)',
+    )
+
+
 def _footprint_node(saved_text: str):
     """Return the (footprint ...) SExp node from saved board text."""
     doc = parse_string(saved_text)
@@ -203,3 +214,98 @@ class TestLegacyFormMigration:
         board.save(path)
 
         _assert_modern_locked_form(path.read_text())
+
+
+class TestPadLockedNotFootprintLocked:
+    """Pad-level (locked yes) must not be misread as the footprint lock.
+
+    ``Footprint.from_sexp`` previously used the RECURSIVE
+    ``sexp.find("locked")`` to read the footprint lock state, so a
+    pad-level ``(locked yes)`` marked an otherwise-unlocked footprint
+    as ``locked=True`` on load -- and unlocking a footprint with
+    locked pads did not persist across save/reload (issue #3602).
+    """
+
+    def test_locked_pads_do_not_lock_unlocked_footprint(self, tmp_path: Path) -> None:
+        """AC1: from_sexp reads only the footprint's direct (locked ...) child."""
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_lock_both_pads(_pcb_text("    (attr smd)")))
+
+        fp = PCB.load(path).get_footprint("R1")
+        assert fp.locked is False, (
+            "Pad-level (locked yes) was misread as the footprint lock: "
+            "from_sexp must use a direct-children-only lookup (issue #3602)."
+        )
+
+    def test_locked_pads_plus_locked_footprint_still_parses_locked(self, tmp_path: Path) -> None:
+        """A genuine footprint-level lock still parses when pads are locked too."""
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_lock_both_pads(_pcb_text("    (attr smd)\n    (locked yes)")))
+
+        assert PCB.load(path).get_footprint("R1").locked is True
+
+    def test_unlock_with_locked_pads_persists_across_reload(self, tmp_path: Path) -> None:
+        """AC2: unlocked footprint + locked pads survives save -> load -> save."""
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_lock_both_pads(_pcb_text("    (attr smd)\n    (locked yes)")))
+
+        # Unlock the footprint (pads stay locked) and save.
+        board = PCB.load(path)
+        fp = board.get_footprint("R1")
+        assert fp.locked is True
+        fp.locked = False
+        board.save(path)
+
+        # Reload: the footprint must STILL be unlocked (the pad-level
+        # locked tokens must not re-lock it), and a second save must
+        # not resurrect the footprint-level (locked yes) node.
+        board2 = PCB.load(path)
+        fp2 = board2.get_footprint("R1")
+        assert fp2.locked is False, (
+            "Footprint unlock did not persist across save/reload: the "
+            "pad-level (locked yes) re-locked the footprint on load "
+            "(issue #3602)."
+        )
+        board2.save(path)
+
+        saved = path.read_text()
+        fp_node = _footprint_node(saved)
+        assert not fp_node.find_children("locked"), (
+            "Second save resurrected the footprint-level (locked yes) node"
+        )
+        # Pad-level locks must survive both round-trips.
+        pad_locked = [pad for pad in fp_node.find_children("pad") if pad.find_children("locked")]
+        assert len(pad_locked) == 2, "Pad-level (locked yes) nodes were lost across the round-trip"
+        assert PCB.load(path).get_footprint("R1").locked is False
+
+    def test_pure_roundtrip_with_locked_pads_does_not_lock(self, tmp_path: Path) -> None:
+        """Load -> save with no modification must not invent a footprint lock."""
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(_lock_both_pads(_pcb_text("    (attr smd)")))
+
+        board = PCB.load(path)
+        board.save(path)
+
+        saved = path.read_text()
+        fp_node = _footprint_node(saved)
+        assert not fp_node.find_children("locked"), (
+            "Pure load -> save added a spurious footprint-level (locked yes)"
+        )
+        assert PCB.load(path).get_footprint("R1").locked is False
+
+    def test_descendant_uuid_not_misread_as_footprint_uuid(self, tmp_path: Path) -> None:
+        """Same-class audit: a pad's (uuid ...) must not become the footprint uuid."""
+        path = tmp_path / "board.kicad_pcb"
+        # Strip the footprint-level uuid and give a pad its own uuid.
+        text = _pcb_text("    (attr smd)").replace('    (uuid "fp-r1")\n', "")
+        text = text.replace(
+            '(pad "1" smd rect (at -1 0)',
+            '(pad "1" smd rect (at -1 0) (uuid "pad-uuid-1")',
+        )
+        path.write_text(text)
+
+        fp = PCB.load(path).get_footprint("R1")
+        assert fp.uuid == "", (
+            "Footprint without a direct (uuid ...) child inherited a "
+            "descendant's uuid via recursive find() (issue #3602)."
+        )
