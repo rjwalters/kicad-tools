@@ -2,7 +2,7 @@
 title: "voltage_divider_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-08 | jlcpcb"
+date: "Rev 1 | 2026-06-12 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,9 +18,9 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 4 (0 SMD, 0 THT, 4 other) |
+| Footprints | 4 (2 SMD, 2 THT, 0 other) |
 | Nets | 3 |
-| Traces | 9 segments |
+| Traces | 15 segments |
 | Vias | 0 |
 | Board Size | 30.0 x 25.0 mm |
 
