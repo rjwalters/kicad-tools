@@ -56,6 +56,15 @@ Epic #2661 Phase 3L (issue #2724)
 
 \newpage
 
+## Schematic Overview
+
+### Schematic: matchgroup_test
+
+![Schematic: matchgroup_test](images/schematic_matchgroup_test.png)
+
+
+\newpage
+
 ## PCB Layout
 
 ![PCB Front](images/pcb_front.png)

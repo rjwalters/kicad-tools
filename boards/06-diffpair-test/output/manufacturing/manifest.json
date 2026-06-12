@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T04:59:56.285406+00:00",
+  "generated_at": "2026-06-12T06:37:02.167365+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,16 +13,16 @@
       "size": 583
     },
     "gerbers.zip": {
-      "sha256": "f17f5452c3c79e347b4690dc1bc64dcc6f4d145191650b36e37e38d2d57b33a6",
+      "sha256": "29a305b1d0c4ef685f664019de1336442a3795d2970d8a8050c7e055f1a53c5f",
       "size": 106012
     },
     "report.pdf": {
-      "sha256": "d4a7d9c626787a93c4e2161262d9d9dc82df171f0ea08d9f97e865c5f5da0ccd",
-      "size": 1746277
+      "sha256": "7daee4675d354a9b1287e37677b09c976365ab48e17cecc2a0694ea247513ca0",
+      "size": 2042670
     },
     "report.md": {
-      "sha256": "4f663b748fa25a0a5ed7e075a29bd56cb9df294cf97c1955b3e199b39f8b2a95",
-      "size": 3252
+      "sha256": "5fbf675c0b18630e1b6fdf2f94e1d3ace4b81974d5853ed988f83c1f58c7bc1c",
+      "size": 3379
     },
     "assembly.png": {
       "sha256": "380ef614df2000848317336ffde2b503dc9b042dcf258919d8efeffdb5287deb",
@@ -56,12 +56,16 @@
       "sha256": "2ca7c9bb45903fab46a2a4beba283157e6b247908c308ba58b43b07c114add2b",
       "size": 173846
     },
+    "schematic_diffpair_test.png": {
+      "sha256": "ff6a508fd86a4624f922ec6aec66550d9398a4acc72c49b4e62936cb11ffcbbd",
+      "size": 321809
+    },
     "kicad_project.zip": {
-      "sha256": "44e8ec45627f402f9b5dd5658d727f60a623edeaa2e564c4a49d80212ca4df88",
-      "size": 141487
+      "sha256": "31edb72b9836130dbf1ad6e3fca0f38d985d35f5aa36f34fd908680e7bf086a7",
+      "size": 141488
     },
     "README.txt": {
-      "sha256": "57458393ce162ff4aef67bc51c112beae869264c2f7f5c8965ef3abdc3814d25",
+      "sha256": "31fbd9e289962e46aab105183e59595e6e096bb632a671dbd2b2355a3536dc91",
       "size": 879
     }
   },
