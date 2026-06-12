@@ -691,6 +691,28 @@ jobs:
     # the merge button.
     name: Match-Group Routing Regression
     runs-on: ubuntu-latest
+    # Issue #3620 (sibling of #3509): run inside the official KiCad 10
+    # container (same image as the test + kicad-cli-smoke +
+    # diffpair-routing-regression jobs).  The board 07 re-route pipeline
+    # fills copper pours via kicad-cli: ``kct route`` auto-pours zones for
+    # the skipped power nets (run 27433067590 log: "Auto-pour: created 3
+    # zone(s) for +1V2, +1V8, GND") and then attempts
+    # ``_fill_zones_after_route``, which on the bare ubuntu-latest runner
+    # silently no-opped with "Zone fill: skipped (kicad-cli not
+    # installed)" -- so every CI re-route produced zero-fill pour zones
+    # while the gate stayed green by omission (the exact #3509 defect PR
+    # #3615 fixed for board 06).  The container provides kicad-cli 10 so
+    # the fills actually run, matching the local artifact-refresh
+    # environment.
+    container:
+      image: kicad/kicad:10.0
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the test job).
+        shell: bash
     # Issue #2660 acceptance criterion #5 (mirrored for #2726): wall-clock
     # <= 5 min on ubuntu-latest.  The 10-minute limit was the original
     # safety net for slow runners; if the typical run creeps above 5
@@ -703,7 +725,14 @@ jobs:
     # diff-pair pre-pass is skipped.  Reduce back to 10 once #3012 lands
     # and --differential-pairs is re-enabled in
     # boards/07-matchgroup-test/generate_design.py.
-    timeout-minutes: 15
+    #
+    # Issue #3620 re-measure note: the last bare-runner green run took
+    # 12m23s against the prior 15-min ceiling (run 27433067590).  Moving
+    # into the kicad/kicad:10.0 container adds ~1-2 min (image pull + apt
+    # prerequisites) plus the zone fills that previously no-opped, which
+    # leaves no headroom at 15; ceiling raised to 20 min (mirrors the
+    # diffpair job's container re-measure in PR #3615).
+    timeout-minutes: 20
     # Issue #3146 closure: the matrix-scoped soft-fail
     # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
     # that PR #3145 installed pending matchgroup-routing
@@ -742,18 +771,35 @@ jobs:
         # length_match_reference=pace-car semantics) can be added
         # cheaply once they exist.
     steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.  The
+        # ``kicad-cli --version`` probe makes a missing/broken kicad-cli
+        # fail THIS step with an attributable error instead of surfacing
+        # later as zero-fill pour zones (Issue #3620, mirroring the
+        # diffpair-routing-regression job's #3509 fix).
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install uv
+        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # coupling inside the container (mirrors the test + smoke jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        # Pin the interpreter via uv (parity with the sibling jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --extra dev --python 3.12
 
       - name: Build C++ router backend
         # Issue #3146: ``uv sync`` does NOT build the native extension
