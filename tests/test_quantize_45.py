@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 import pytest
@@ -199,6 +200,50 @@ class TestQuantizePcbFile:
         replaced = quantize_pcb_file(pcb, dry_run=True)
         assert replaced == ["00000000-0000-0000-0000-000000000001"]
         assert pcb.read_text() == before
+
+    def test_dogleg_uuid_collision_proof(self, tmp_path):
+        """Re-quantizing a previously-quantized parent must not duplicate
+        its surviving sibling leg's uuid (PR #3557 judge finding).
+
+        The repair->quantize fixpoint loop can drag a previously-emitted
+        first leg off-angle while the old second leg (carrying
+        ``uuid5(parent + ":dogleg")``) is still in the file.  The
+        derivation must then deterministically extend the suffix
+        (``:dogleg:2``) instead of emitting the same uuid twice.
+        """
+        import uuid as _uuid
+
+        parent = "00000000-0000-0000-0000-000000000001"
+        base = str(_uuid.uuid5(_uuid.NAMESPACE_OID, parent + ":dogleg"))
+        bumped = str(_uuid.uuid5(_uuid.NAMESPACE_OID, parent + ":dogleg:2"))
+        stale_sibling = (
+            '\t(segment\n'
+            '\t\t(start 171.19 125.46)\n'
+            '\t\t(end 175 125.46)\n'
+            '\t\t(width 0.4)\n'
+            '\t\t(layer "F.Cu")\n'
+            f'\t\t(uuid "{base}")\n'
+            '\t\t(net 1)\n'
+            '\t)\n'
+        )
+        pcb = self._board(tmp_path, SEG_BLOCK_UUID_BEFORE_NET, stale_sibling)
+        assert quantize_pcb_file(pcb) == [parent]
+        text = pcb.read_text()
+        uuids = re.findall(r'\(uuid "([^"]+)"\)', text)
+        assert len(uuids) == len(set(uuids)), "duplicate uuid emitted"
+        assert uuids.count(base) == 1  # the stale sibling, untouched
+        assert bumped in uuids  # new second leg got the :dogleg:2 uuid
+        _, bad = segment_angle_census(pcb)
+        assert bad == []
+
+        # Determinism survives the bump: a fresh copy quantizes to
+        # byte-identical output.
+        other = tmp_path / "copy.kicad_pcb"
+        other.write_text(
+            "(kicad_pcb\n" + SEG_BLOCK_UUID_BEFORE_NET + stale_sibling + ")\n"
+        )
+        quantize_pcb_file(other)
+        assert other.read_text() == text
 
     def test_axis_first_flip(self, tmp_path):
         pcb_a = self._board(tmp_path, SEG_BLOCK_UUID_BEFORE_NET)

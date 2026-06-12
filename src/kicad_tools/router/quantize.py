@@ -185,6 +185,38 @@ def _fmt_decimal(value: Decimal) -> str:
     return s if s and s != "-0" else "0"
 
 
+#: Matches any ``(uuid "...")`` attribute -- used to collect every uuid
+#: already present in a PCB file so derived dogleg uuids never collide.
+_UUID_ATTR_RE = re.compile(r'\(uuid "([^"]+)"\)')
+
+
+def _derive_dogleg_uuid(parent_uuid: str, seen_uuids: set[str]) -> str:
+    """Deterministic, collision-free uuid for a dogleg second leg.
+
+    The base derivation is ``uuid5(NAMESPACE_OID, parent + ":dogleg")``.
+    If that uuid is already present in the file (e.g. the parent was
+    quantized by a PREVIOUS pipeline run and its old sibling leg
+    survives -- the repair->quantize fixpoint loop makes this a
+    recurring pattern), the suffix is extended (``:dogleg:2``,
+    ``:dogleg:3``, ...) until the candidate is unused.  The probe order
+    is fixed, so the result depends only on the parent uuid and the
+    file's existing uuid population: identical input files yield
+    byte-identical output.
+
+    The chosen uuid is added to *seen_uuids* so later derivations in
+    the same pass cannot collide with it either.
+    """
+    candidate = str(_uuid.uuid5(_uuid.NAMESPACE_OID, parent_uuid + ":dogleg"))
+    n = 1
+    while candidate in seen_uuids:
+        n += 1
+        candidate = str(
+            _uuid.uuid5(_uuid.NAMESPACE_OID, f"{parent_uuid}:dogleg:{n}")
+        )
+    seen_uuids.add(candidate)
+    return candidate
+
+
 def _decimal_dogleg_mid(
     x1: Decimal, y1: Decimal, x2: Decimal, y2: Decimal, axis_first: bool
 ) -> tuple[Decimal, Decimal]:
@@ -253,7 +285,12 @@ def quantize_pcb_file(
     the endpoints changes (bounded perpendicular bulge of
     ``min(|dx|, |dy|)``).  The first leg keeps the original segment's
     uuid; the second leg gets a deterministic uuid5 derived from the
-    original uuid (so repeated runs are byte-identical).
+    original uuid (so repeated runs are byte-identical).  The derived
+    uuid is checked against every uuid already in the file -- when a
+    previously-quantized parent is re-quantized while its old sibling
+    leg survives (the repair->quantize fixpoint pattern), the
+    derivation suffix is extended deterministically instead of
+    duplicating the sibling's uuid (see :func:`_derive_dogleg_uuid`).
 
     Coordinates are manipulated as :class:`~decimal.Decimal` so the
     emitted legs are EXACTLY 45-aligned in the serialized text.
@@ -281,6 +318,9 @@ def quantize_pcb_file(
     flips = set(axis_first_uuids)
     skips = set(skip_uuids)
     replaced: list[str] = []
+    # Every uuid already in the file, plus uuids emitted during this
+    # pass -- derived dogleg uuids must never collide with either.
+    seen_uuids: set[str] = set(_UUID_ATTR_RE.findall(text))
 
     def _rewrite(m: re.Match[str]) -> str:
         indent = m.group(1)
@@ -323,8 +363,11 @@ def quantize_pcb_file(
 
         # Deterministic uuid for the second leg (uuid5 of the original)
         # so repeated runs of the pass produce byte-identical artifacts.
+        # Collision-proof: if the base derivation already exists in the
+        # file (stale sibling from a previous quantization of the same
+        # parent), the suffix is extended deterministically.
         second_uuid = (
-            str(_uuid.uuid5(_uuid.NAMESPACE_OID, seg_uuid + ":dogleg"))
+            _derive_dogleg_uuid(seg_uuid, seen_uuids)
             if seg_uuid is not None
             else None
         )

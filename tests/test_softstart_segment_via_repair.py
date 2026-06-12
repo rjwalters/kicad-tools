@@ -269,3 +269,79 @@ class TestCommittedArtifact:
     def test_all_segments_45_aligned(self):
         segs, _ = _parse(ARTIFACT)
         _assert_all_45(segs)
+
+    def test_uuids_unique_fleet_wide(self):
+        """KiCad object uuids must be unique per file (PR #3557 judge
+        finding: the repair->quantize fixpoint regenerated a dogleg
+        sibling uuid that already shipped, duplicating it).  Scan EVERY
+        committed board artifact — the failure mode is not
+        softstart-specific."""
+        from collections import Counter
+
+        uuid_re = re.compile(r'\(uuid "([^"]+)"\)')
+        boards_dir = REPO_ROOT / "boards"
+        scanned = 0
+        problems = []
+        for pcb in sorted(boards_dir.rglob("*.kicad_pcb")):
+            scanned += 1
+            counts = Counter(uuid_re.findall(pcb.read_text()))
+            dupes = sorted(u for u, c in counts.items() if c > 1)
+            if dupes:
+                problems.append(f"{pcb.relative_to(REPO_ROOT)}: {dupes}")
+        assert scanned > 0, "no board artifacts found (path drift?)"
+        assert not problems, "duplicate uuids:\n" + "\n".join(problems)
+
+
+class TestRepairQuantizeFixpoint:
+    """The steps-10d/10e interleaving: a quantization dogleg can bulge
+    onto a foreign via barrel (how the FUSED_LINE pair shipped on the
+    #3516 artifact), and a clearance repair can drag endpoints
+    off-angle.  The pipeline iterates both passes to a fixpoint; this
+    pins that the loop converges within the pipeline's 5-pass budget
+    and that the converged file is conflict-free, 45-aligned, and free
+    of duplicate uuids."""
+
+    def test_converges_with_clean_invariants(self, recipe, tmp_path):
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        # Off-angle segment whose default dogleg's axis leg (y=1) runs
+        # 0.1 mm from a foreign via barrel -> quantize creates the
+        # conflict, repair shifts the leg, dragging the shared dogleg
+        # corner -> quantize again. Mirrors the committed-artifact
+        # failure shape.
+        body = (
+            _segment_block(0, 0, 10, 1, 0.4, "In1.Cu",
+                           "2171ea18-0000-0000-0000-00000000000a", 21)
+            + _via_block(5, 0.9, 0.6,
+                         "0ddbe986-0000-0000-0000-00000000000b", 2)
+        )
+        pcb = _write_pcb(tmp_path, body)
+        for _pass in range(5):  # same budget as the pipeline
+            shifted = recipe._repair_segment_via_clearance(pcb)
+            quantized = quantize_pcb_file(pcb)
+            if not shifted and not quantized:
+                break
+        else:
+            pytest.fail("repair/quantize did not converge in 5 passes")
+
+        segs, vias = _parse(pcb)
+        _assert_no_barrel_conflicts(segs, vias)
+        _assert_all_45(segs)
+
+        # The chord start survives the loop; the far terminal is
+        # legitimately dragged by the axis-shift strategy (referencing
+        # endpoints follow the shifted leg), so only continuity is
+        # asserted: every leg chains to another leg or a chord end.
+        endpoints = {(s[0], s[1]) for s in segs} | {(s[2], s[3]) for s in segs}
+        assert (0.0, 0.0) in endpoints
+        point_degree = {}
+        for s in segs:
+            for p in ((s[0], s[1]), (s[2], s[3])):
+                point_degree[p] = point_degree.get(p, 0) + 1
+        dangling = [p for p, d in point_degree.items() if d == 1]
+        assert len(dangling) == 2, f"trace broken: open ends {dangling}"
+
+        # No duplicate uuids even though doglegged legs were
+        # re-quantized while their siblings survived (PR #3557 fix).
+        uuids = re.findall(r'\(uuid "([^"]+)"\)', pcb.read_text())
+        assert len(uuids) == len(set(uuids)), f"duplicate uuid in {uuids}"
