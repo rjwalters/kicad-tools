@@ -159,11 +159,14 @@ bayesian = [
 screenshot = [
     "cairosvg>=2.6",
 ]
-# Report generation (Jinja2 Markdown templates) and rendering (Markdown to HTML/PDF)
+# Report generation (Jinja2 Markdown templates) and rendering (Markdown to HTML/PDF).
+# cairosvg is included because manufacturing reports embed PCB/schematic
+# figures by default (issue #3583); without it `kct export` ships no images/.
 report = [
     "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
+    "cairosvg>=2.6",
 ]
 # All optional features
 all = [
@@ -318,4 +321,8 @@ warn_return_any = true
 dev = [
     "pytest-cov>=7.0.0",
     "jinja2>=3.1",
+    # Figure rendering for `kct export` reports (issue #3583): without
+    # cairosvg in the default sync, worktree exports silently shipped
+    # bundles with no images/ (per-layer renders, assembly views).
+    "cairosvg>=2.6",
 ]
