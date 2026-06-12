@@ -77,6 +77,7 @@ from .manufacturing import (
     ManufacturingConfig,
     ManufacturingPackage,
     ManufacturingResult,
+    verify_manifest,
 )
 from .pnp import (
     PNP_FORMATTERS,
@@ -118,6 +119,7 @@ __all__ = [
     "ManufacturingPackage",
     "ManufacturingConfig",
     "ManufacturingResult",
+    "verify_manifest",
     # Pre-flight validation
     "PreflightChecker",
     "PreflightConfig",

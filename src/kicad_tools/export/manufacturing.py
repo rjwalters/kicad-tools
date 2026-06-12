@@ -152,6 +152,66 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def verify_manifest(manifest_path: str | Path) -> list[str]:
+    """Verify a manufacturing bundle's manifest.json against files on disk.
+
+    Recomputes the SHA256 checksum and size of every file listed in the
+    manifest and compares them to the recorded values.  Files are looked
+    up first in the manifest's own directory; entries that aren't found
+    there are searched recursively, because the manifest records bare
+    filenames even for artifacts that live in subdirectories (e.g.
+    ``gerbers.zip`` under ``gerbers/``).
+
+    The manifest itself is excluded from verification (its hash can't
+    contain itself).
+
+    Args:
+        manifest_path: Path to a ``manifest.json`` file.
+
+    Returns:
+        A list of human-readable mismatch descriptions.  Empty list
+        means every listed file exists and matches its recorded
+        checksum and size.
+
+    This is the integrity check behind issue #3529: ``kct export`` used
+    to write BOM/CPL CSVs with CRLF line endings and hash that content,
+    while git normalization stored LF -- so a fresh checkout failed
+    ``sha256sum`` verification against the manifest.
+    """
+    manifest_path = Path(manifest_path)
+    bundle_dir = manifest_path.parent
+    manifest = json.loads(manifest_path.read_text())
+
+    problems: list[str] = []
+    for name, info in manifest.get("files", {}).items():
+        if name == manifest_path.name:
+            continue
+        fpath = bundle_dir / name
+        if not fpath.exists():
+            # Manifest stores bare filenames; some artifacts live in
+            # subdirectories of the bundle (e.g. gerbers/gerbers.zip).
+            candidates = sorted(bundle_dir.rglob(name))
+            if not candidates:
+                problems.append(f"{name}: listed in manifest but not found on disk")
+                continue
+            fpath = candidates[0]
+
+        actual_sha = _sha256_file(fpath)
+        actual_size = fpath.stat().st_size
+        expected_sha = info.get("sha256")
+        expected_size = info.get("size")
+        if expected_sha is not None and actual_sha != expected_sha:
+            problems.append(
+                f"{name}: sha256 mismatch (manifest {expected_sha}, disk {actual_sha})"
+            )
+        if expected_size is not None and actual_size != expected_size:
+            problems.append(
+                f"{name}: size mismatch (manifest {expected_size}, disk {actual_size})"
+            )
+
+    return problems
+
+
 def _create_project_zip(
     pcb_path: Path,
     output_dir: Path,

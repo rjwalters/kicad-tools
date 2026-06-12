@@ -166,7 +166,7 @@ class JLCPCBPnPFormatter(PnPFormatter):
         filtered = self.filter_placements(placements)
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for placement in sorted(filtered, key=lambda p: p.reference):
@@ -218,7 +218,7 @@ class PCBWayPnPFormatter(PnPFormatter):
         filtered = self.filter_placements(placements)
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for placement in sorted(filtered, key=lambda p: p.reference):
@@ -263,7 +263,7 @@ class SeeedPnPFormatter(PnPFormatter):
         filtered = self.filter_placements(placements)
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for placement in sorted(filtered, key=lambda p: p.reference):
@@ -299,7 +299,7 @@ class GenericPnPFormatter(PnPFormatter):
         filtered = self.filter_placements(placements)
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for placement in sorted(filtered, key=lambda p: p.reference):
