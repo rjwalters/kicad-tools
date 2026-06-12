@@ -40,8 +40,27 @@ signal escapes that ran past NC pins on board 04's STM32 LQFP-48 east
 edge.  Narrowing the classifier to require an explicit plane-net
 ``net_name`` restored 8/9 on the C++ backend (matching the production-
 recipe baseline).  This test now runs against the C++ backend (the
-documented default) with an 8/9 floor; the residual NRST gap is
-tracked independently per #3281's acceptance criteria.
+documented default); the residual NRST gap is tracked independently
+per #3281's acceptance criteria.
+
+Issue #3582 (2026-06-11) — the floor dropped 8/9 -> 7/9 at PR #3565
+(``85b631f6``, closes #3545: reject routes through static foreign-pad
+halos).  Bisect showed the prior 8/9 (last seen at ``c7cd574f``) was
+achieved with ILLEGAL copper: the run carried 26 unresolved clearance
+violations, including SWDIO and NRST traces overlapping foreign GND
+pad metal at -0.337mm (negative distance = trace inside the pad) on
+the STM32 LQFP-48 east edge — exactly the #3545 defect class.  With
+static pad halos now non-negotiable, those corridors are gone and
+SWDIO/NRST are honestly dropped instead of shipped as sub-clearance
+copper.  This is a correctness win exposing a 2L capacity gap, NOT a
+router defect, so the floor is re-pinned to 7/9 (do NOT revert #3565).
+The legal-capacity recovery (>= 8/9 WITH zero pad-clearance
+violations) is tracked in issue #3588; when it lands, restore
+``REQUIRED_NETS_ROUTED = 8``.  This test now ALSO asserts the routed
+result contains zero pad-OVERLAP violations (negative clearance) and
+at most one trace-vs-pad near-miss
+(``test_no_pad_overlap_violations``), so a future "fix" cannot
+reclaim 8/9 by re-shipping illegal copper.
 """
 
 from __future__ import annotations
@@ -75,8 +94,24 @@ UNROUTED_PCB = BOARD_DIR / "output" / "stm32_devboard.kicad_pcb"
 # --placement-feedback --micro-via-in-pad-fallback``), and is tracked
 # independently per the #3281 acceptance criteria.
 #
+# Issue #3582 update (2026-06-11): floor re-pinned 8 -> 7.  PR #3565
+# (merge ``85b631f6``, closes #3545) made static foreign-pad halos
+# non-negotiable in the C++ sharing A*.  Bisect proved the previous
+# 8/9 baseline (last green at ``c7cd574f``, pre-#3565) was achieved
+# with ILLEGAL copper: 26 unresolved clearance violations, including
+# SWDIO at -0.337mm vs a GND pad and NRST at -0.337mm vs a GND pad
+# (negative = trace overlapping foreign pad metal) on the STM32
+# LQFP-48 east edge.  This test never asserted DRC-clean output, so
+# the illegal 8/9 passed.  With the halos enforced, SWDIO/NRST have
+# no legal 2L escape on this stripped recipe within the 240s budget
+# and are honestly demoted -> 7/9 (deterministic).  Do NOT "fix" this
+# by reverting #3565 — that re-ships copper overlapping pad metal.
+# The legal-capacity recovery is tracked in issue #3588, whose
+# acceptance criteria restore >= 8/9 WITH zero pad-clearance
+# violations; bump this back to 8 when #3588 lands.
+#
 # Board 04 has 9 routable nets after schematic / PCB sync.
-REQUIRED_NETS_ROUTED = 8
+REQUIRED_NETS_ROUTED = 7
 REQUIRED_NETS_TOTAL = 9
 
 
@@ -107,10 +142,72 @@ def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
     return int(routed), int(total)
 
 
+def _parse_pad_clearance_violations(stdout: str) -> tuple[int, list[tuple[str, float]]]:
+    """Extract unresolved trace-vs-pad clearance violations from route output.
+
+    ``kct route`` runs a pre-save validation pass
+    (``router/io.py::validate_routes``) and prints a summary under the
+    ``--- Pre-save Clearance Validation ---`` header via
+    ``format_clearance_violations``::
+
+        --- Pre-save Clearance Validation ---
+          Found 5 clearance violation(s):
+          pad: 1
+          segment: 4
+          [pad] OSC_OUT vs GND at (126.84, 122.75) on F.Cu: 0.163mm (required 0.200mm)
+
+    The ``pad: N`` line is the per-obstacle-type breakdown of
+    routing-caused (non-component-inherent) violations; the ``[pad]``
+    detail lines carry the actual distances (negative = trace
+    overlapping foreign pad metal).  The header is only printed when
+    at least one violation exists, so an absent section means zero.
+
+    Returns ``(pad_count, details)`` from the LAST validation section
+    (escalation may print multiple), where ``details`` is a list of
+    ``(detail_line, distance_mm)`` for each ``[pad]`` line.  Note the
+    detail listing is capped at 20 lines by the formatter, so
+    ``pad_count`` is authoritative for the total.
+    """
+    header = "Pre-save Clearance Validation"
+    idx = stdout.rfind(header)
+    if idx == -1:
+        return 0, []
+    section = stdout[idx:]
+    # Stop at the next "--- ... ---" stage header to avoid matching
+    # unrelated output further down (e.g. save / DRC summaries).
+    next_stage = re.search(r"\n--- ", section)
+    if next_stage:
+        section = section[: next_stage.start()]
+    count_match = re.search(r"^\s*pad:\s+(\d+)\s*$", section, re.MULTILINE)
+    pad_count = int(count_match.group(1)) if count_match else 0
+    details = [
+        (m.group(0).strip(), float(m.group(1)))
+        for m in re.finditer(
+            r"^\s*\[pad\][^\n]*?:\s+(-?[\d.]+)mm \(required [\d.]+mm\)\s*$",
+            section,
+            re.MULTILINE,
+        )
+    ]
+    return pad_count, details
+
+
+# Issue #3582: the current 7/9 result carries exactly ONE trace-vs-pad
+# near-miss — OSC_OUT vs GND at 0.163mm (required 0.200mm), a positive-
+# distance shortfall in the long-congested crystal area, NOT pad
+# overlap.  Pin the count so a regression cannot silently add more pad
+# violations (the illegal pre-#3565 8/9 carried 4, two of them at
+# -0.337mm), and keep it small enough that the formatter's 20-line
+# detail cap can never hide a negative-distance overlap from the
+# distance assertion in ``test_no_pad_overlap_violations``.
+MAX_PAD_CLEARANCE_VIOLATIONS = 1
+
+
 @pytest.mark.slow
 class TestBoard04OscOutRouting:
-    """Pin >= 8/9 routing on board 04 against the #2745 BLOCKED_BY_COMPONENT
-    recovery fix (and the #3281 NC-pin plane-net misclassification fix).
+    """Pin >= ``REQUIRED_NETS_ROUTED``/9 routing on board 04 against the
+    #2745 BLOCKED_BY_COMPONENT recovery fix (and the #3281 NC-pin
+    plane-net misclassification fix), plus zero pad-overlap copper
+    (issue #3582 / #3545).
 
     These tests run the full ``kct route`` CLI as a subprocess to
     exercise the same path the user invokes interactively.  The fixture
@@ -127,12 +224,16 @@ class TestBoard04OscOutRouting:
     same-component-perimeter signal escape that passed an NC pin --
     blocking SWDIO / SWO / NRST / BOOT0 escapes on board 04's STM32
     LQFP-48 east edge.  The fix narrows the classifier to require an
-    explicit plane-net ``net_name``.  Both backends now route 8/9 on
+    explicit plane-net ``net_name``.  Both backends then routed 8/9 on
     this recipe (cpp) or 7/9 (python -- pure-Python backend is weaker
     than C++ and has additional cluster-routing limitations).
 
     The test now runs on the C++ backend (the documented default per
     #3268 commentary) so the assertion floor reflects production reality.
+
+    Issue #3582: the cpp floor moved to 7/9 when PR #3565 stopped the
+    router from shipping illegal copper through static pad halos; see
+    the module docstring and ``REQUIRED_NETS_ROUTED`` commentary.
     """
 
     @pytest.fixture(scope="class")
@@ -182,7 +283,7 @@ class TestBoard04OscOutRouting:
             return proc.stdout
 
     def test_routes_all_nets_on_2l(self, route_stdout: str) -> None:
-        """Board 04 must route at least 8/9 nets on the 2L attempt.
+        """Board 04 must route at least 7/9 nets on the 2L attempt.
 
         Issue #2745: Before the BLOCKED_BY_COMPONENT recovery gate was
         relaxed, OSC_OUT stagnated at 8/9 routed.  After the fix, the
@@ -196,6 +297,12 @@ class TestBoard04OscOutRouting:
         at ``router/grid.py::_is_plane_net_pad`` restores 8/9 on the
         C++ backend (matching the production-recipe baseline).  The
         residual NRST gap is tracked independently.
+
+        Issue #3582: Floor re-pinned 8 -> 7 after PR #3565 (#3545)
+        made static foreign-pad halos non-negotiable.  The prior 8/9
+        relied on SWDIO/NRST overlapping foreign GND pad metal at
+        -0.337mm; the legal-capacity recovery to >= 8/9 (with zero
+        pad-clearance violations) is tracked in issue #3588.
         """
         parsed = _parse_routed_net_count(route_stdout)
         assert parsed is not None, (
@@ -218,4 +325,55 @@ class TestBoard04OscOutRouting:
             f"expected {REQUIRED_NETS_TOTAL}.  If the schematic or "
             "placement changed and the net count drifted, update "
             "REQUIRED_NETS_TOTAL in this test."
+        )
+
+    def test_no_pad_overlap_violations(self, route_stdout: str) -> None:
+        """The routed result must contain ZERO pad-OVERLAP violations.
+
+        Issue #3582: The pre-#3565 8/9 baseline shipped 26 unresolved
+        clearance violations, including SWDIO and NRST traces
+        overlapping foreign GND pad metal at -0.337mm (negative
+        distance = trace INSIDE the pad) — the test never asserted
+        clean copper, so the illegal result passed.  This assertion
+        closes that hole: a future change cannot reclaim a higher net
+        count by routing through static pad halos again (the #3545
+        defect class).  Issue #3588's recovery to >= 8/9 must keep
+        this clean.
+
+        Two checks against the kct route pre-save clearance validation
+        summary (routing-caused violations only; component-inherent
+        pad spacings are already excluded by
+        ``format_clearance_violations``):
+
+        1. No ``[pad]`` violation with negative distance (trace
+           overlapping foreign pad metal) — the #3545 illegal-copper
+           signature.
+        2. Total pad-violation count <= ``MAX_PAD_CLEARANCE_VIOLATIONS``
+           (currently 1: the known OSC_OUT-vs-GND 0.163mm near-miss).
+           This pins against growth AND guarantees every pad violation
+           appears in the capped detail listing, so check 1 cannot be
+           evaded by volume.
+        """
+        pad_count, details = _parse_pad_clearance_violations(route_stdout)
+
+        overlaps = [(line, dist) for line, dist in details if dist < 0]
+        assert not overlaps, (
+            f"Routed result contains {len(overlaps)} trace-vs-pad OVERLAP "
+            "violation(s) (negative clearance = copper inside foreign pad "
+            "metal) — the #3545 defect class that PR #3565's static-halo "
+            "enforcement eliminated.  A net-count improvement achieved this "
+            "way is ILLEGAL copper, not a routing win; see issues "
+            "#3582/#3588.  Offending violations:\n" + "\n".join(f"  {line}" for line, _ in overlaps)
+        )
+
+        assert pad_count <= MAX_PAD_CLEARANCE_VIOLATIONS, (
+            f"Routed result reports {pad_count} unresolved trace-vs-pad "
+            f"clearance violation(s); the pinned maximum is "
+            f"{MAX_PAD_CLEARANCE_VIOLATIONS} (the known OSC_OUT-vs-GND "
+            "0.163mm near-miss).  New pad-clearance violations suggest "
+            "traces are encroaching on foreign pads again — see issues "
+            "#3545/#3582/#3588 before relaxing this bound.  Detail lines:\n"
+            + "\n".join(f"  {line}" for line, _ in details)
+            + "\nPre-save validation section (last 3000 chars of stdout):\n"
+            + route_stdout[-3000:]
         )
