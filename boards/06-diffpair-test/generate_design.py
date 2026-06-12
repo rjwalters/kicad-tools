@@ -65,6 +65,25 @@ warn_if_stale()
 POUR_NETS: list[str] = ["GND", "VBUS_USB", "+3V3", "+1V8", "+1V2"]
 REQUIRED_SIGNAL_REACH: int = 21
 
+# Issue #3509: pour-connectivity contract.  When True, the CI gate runs
+# this recipe's shapely copper-union audit (``_audit_pour_nets``) against
+# the re-routed artifact and FAILS the job if any pour net is disjoint or
+# any fill-enabled zone has zero filled polygons.  Before this contract
+# the recipe printed "POUR CONNECTIVITY: FAIL" in the CI log while the
+# gate stayed green (PR #3506 run 27343006197) -- a latent artifact-
+# refresh trap.  A board that cannot yet pass must set this to False
+# WITH a tracking-issue comment (the explicit exit clause; mirrors the
+# .github/routed-drc-tolerance.yml grandfathering convention) -- the
+# verdict must never be silently ignored.
+REQUIRE_POUR_CONNECTIVITY: bool = True
+
+# Issue #3509: pour repair <-> re-fill iteration budget.  Was hardcoded
+# at 3, which the CI re-route's convergence trend (GND 79 -> 45 -> 12
+# disjoint groups across rounds) showed is too low when the routed
+# copper differs from the local artifact.  The loop breaks early on
+# audit PASS, so a higher cap only costs wall time in failure scenarios.
+MAX_POUR_REPAIR_ROUNDS: int = 6
+
 
 # =============================================================================
 # Per-Protocol Net Class Declarations
@@ -1852,7 +1871,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         str(output_path),
     ]
     fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
-    if fill_result.returncode == 0:
+    first_fill_ok = fill_result.returncode == 0
+    if first_fill_ok:
         for line in fill_result.stdout.strip().split("\n")[-4:]:
             print(f"   {line}")
     else:
@@ -1924,12 +1944,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # positive) and places offset vias + F.Cu stubs + island bridges that
     # stay legal at the jlcpcb standard tier (no via-in-pad).
     #
-    # Repair and re-fill ITERATE (max 3 rounds): each re-fill recomputes
-    # the pours with the new copper carved in, which can shift fill
-    # edges away from a previous round's bridge endpoint (measured: a
-    # +1V8 bridge connected against the round-1 fill, then the round-2
-    # fill quantised away from it).  The loop converges when the
-    # copper-union audit reports every pour net in one component.
+    # Repair and re-fill ITERATE (max ``MAX_POUR_REPAIR_ROUNDS``): each
+    # re-fill recomputes the pours with the new copper carved in, which
+    # can shift fill edges away from a previous round's bridge endpoint
+    # (measured: a +1V8 bridge connected against the round-1 fill, then
+    # the round-2 fill quantised away from it).  The loop converges when
+    # the copper-union audit reports every pour net in one component,
+    # and short-circuits when the zone filler is unavailable (Issue
+    # #3509: every fill failing with "kicad-cli not found" means no
+    # round can ever clear the zero-fill-zone audit term, so iterating
+    # just grinds repair geometry against an unfillable board).
     def _run_pour_audit(tag: str) -> bool:
         ok = True
         try:
@@ -1963,7 +1987,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         return ok
 
     pour_ok = False
-    for repair_round in range(1, 4):
+    for repair_round in range(1, MAX_POUR_REPAIR_ROUNDS + 1):
         print(
             f"\n10b. Pour-connectivity repair round {repair_round} "
             f"(offset vias + stubs + island bridges)..."
@@ -1979,7 +2003,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # clearance around them (and so the exported copper is final).
         print(f"10c. Re-filling zones (round {repair_round})...")
         fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
-        if fill_result.returncode != 0:
+        refill_ok = fill_result.returncode == 0
+        if not refill_ok:
             print(f"   Zone re-fill failed (rc={fill_result.returncode}):")
             if fill_result.stderr:
                 print(f"   stderr: {fill_result.stderr.strip()}")
@@ -1992,6 +2017,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         print(f"11. Copper-union pour-connectivity audit (round {repair_round})...")
         pour_ok = _run_pour_audit(f"[r{repair_round}]")
         if pour_ok:
+            break
+        # Issue #3509: when the filler is structurally unavailable (the
+        # first pass AND this round's re-fill both failed -- e.g.
+        # kicad-cli missing from the environment), every pour zone stays
+        # zero-fill and no number of repair rounds can converge.  Stop
+        # iterating; the FAIL verdict below (and the CI gate's asserted
+        # pour audit) surfaces the environment defect attributably.
+        if not first_fill_ok and not refill_ok:
+            print(
+                "   Zone filler unavailable (every fill invocation failed) -- "
+                "aborting repair loop; pours CANNOT converge without fills "
+                "(Issue #3509)."
+            )
             break
     if not pour_ok:
         print("   POUR CONNECTIVITY: FAIL (see above)")
