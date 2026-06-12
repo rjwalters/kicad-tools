@@ -25,10 +25,14 @@ It covers:
 4. **Pre-existing-zones idempotency** — running through the write path
    on a PCB that already contains zones does not duplicate or drop
    them.
-5. **Source-level audit** — all five ``output_path.write_text`` call
-   sites in ``route_cmd.py`` use the same
+5. **Source-level audit** — every PCB-write site in ``route_cmd.py``
+   (discovered structurally from the AST, not by pinned counts) routes
+   through the zone-preserving
    ``read_text + _insert_sexp_before_closing + write_text`` pattern so
    a future drift between them cannot silently regress one path.
+   (Originally this pinned exact write-site counts — "five sites" —
+   which went stale when the terminal save sites were consolidated
+   into the central ``_write_routed_pcb`` helper; see issue #3445.)
 
 Acceptance criteria for issue #2770:
 - [x] Regression test added covering ALL FIVE ``output_path.write_text``
@@ -45,6 +49,7 @@ Acceptance criteria for issue #2770:
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -186,7 +191,7 @@ class TestSignatureExtractor:
 
 
 class TestInsertSexpBeforeClosingPreservesZones:
-    """The core helper used by all five route write sites must not drop zones."""
+    """The core helper used by all route write sites must not drop zones."""
 
     def test_route_insertion_keeps_all_input_zones(self):
         """Inserting a route s-expression into a PCB with N zones yields a PCB with N zones."""
@@ -351,99 +356,309 @@ class TestLayerEscalationPreservesZones:
 
 
 # ---------------------------------------------------------------------------
-# Source-level audit: all five write sites use the same pattern
+# Source-level audit: every PCB-write site routes through the
+# zone-preserving helper (sites discovered from the AST, not pinned counts)
 # ---------------------------------------------------------------------------
+
+_ZONE_HELPER = "_insert_sexp_before_closing"
+_CENTRAL_WRITER = "_write_routed_pcb"
+
+
+def _route_cmd_module_ast() -> ast.Module:
+    """Parse ``route_cmd.py`` into an AST for structural inspection."""
+    from kicad_tools.cli import route_cmd
+
+    return ast.parse(Path(route_cmd.__file__).read_text())
+
+
+def _functions_in(tree: ast.Module):
+    """Yield every function definition in the module (including nested)."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node
+
+
+def _shallow_walk(func: ast.AST):
+    """Walk a function's own body without descending into nested defs.
+
+    Nested functions are visited separately by ``_functions_in``, so
+    skipping them here attributes each call site to its *innermost*
+    enclosing function.
+    """
+    stack = list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _called_names(func: ast.AST) -> set[str]:
+    """Names of functions/methods called directly in *func*'s own body."""
+    names: set[str] = set()
+    for node in _shallow_walk(func):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name):
+                names.add(f.id)
+            elif isinstance(f, ast.Attribute):
+                names.add(f.attr)
+    return names
+
+
+def _pcb_write_calls(func: ast.AST) -> list[ast.Call]:
+    """``<path>.write_text(<content_variable>)`` calls in *func*'s own body.
+
+    PCB writes in ``route_cmd.py`` pass a *content variable* (e.g.
+    ``output_content``) that was built upstream via the zone-preserving
+    helper.  Report/export writes pass inline expressions instead
+    (``json.dumps(...)``, ``"\\n".join(...) + ...``, string literals), so
+    classifying by argument shape discovers the PCB-write sites no matter
+    how many there are or what the receiving path variable is called.
+
+    If this classification ever over-matches a genuinely non-PCB write,
+    the failing test's message explains how to proceed — that is the
+    desired behavior for a guard (a reviewable false positive beats a
+    silently stale count).
+    """
+    calls: list[ast.Call] = []
+    for node in _shallow_walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "write_text"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ):
+            calls.append(node)
+    return calls
 
 
 class TestRouteWriteSitesPattern:
-    """Verify all five route write sites share the read+insert+write pattern.
+    """Structural audit: every PCB-write site preserves zones.
 
-    The curator's audit identified five ``output_path.write_text`` /
-    ``save_path.write_text`` call sites in ``route_cmd.py``.  Each one
-    must:
-      1. Read the staged input via ``pcb_path.read_text()``
-      2. Insert route fragments via ``_insert_sexp_before_closing``
-      3. Write back via ``write_text(output_content)``
+    Earlier versions of this class pinned exact write-site counts
+    (exactly 5 ``write_text`` sites, >= 6 ``_insert_sexp_before_closing``
+    occurrences).  A refactor consolidated the terminal save sites into
+    one central helper (``_write_routed_pcb``) and the counts went stale
+    while the *behavior* stayed correct (issue #3445).
 
-    A simple source-level scan locks in that the count of these calls
-    stays in sync.  If a future refactor adds a sixth write path, this
-    test prompts the author to confirm it also preserves zones.
+    These tests now discover the write sites programmatically from the
+    AST and assert the property that actually matters: every function
+    that writes PCB text to disk either IS the central zone-preserving
+    write path, calls it, or builds its content via
+    ``_insert_sexp_before_closing`` directly.  No absolute counts — the
+    guard survives consolidation and expansion alike.
     """
 
-    @pytest.mark.xfail(
-        reason="route_cmd.py write-path refactor consolidated write sites; source-shape guard stale -- see issue #3445",
-        strict=False,
-    )
-    def test_five_write_text_call_sites_in_route_cmd(self):
-        """Exactly five PCB-write call sites in ``route_cmd.py``."""
-        from kicad_tools.cli import route_cmd
+    def test_central_write_path_is_zone_preserving(self):
+        """``_write_routed_pcb`` is the single consolidated write path.
 
-        source = Path(route_cmd.__file__).read_text()
-        # Count both ``output_path.write_text(`` and ``save_path.write_text(``;
-        # the partial-results path uses ``save_path`` while the four
-        # main paths use ``output_path``.
-        write_calls = source.count("output_path.write_text(") + source.count(
-            "save_path.write_text("
-        )
-        assert write_calls == 5, (
-            f"Expected 5 PCB-write call sites in route_cmd.py "
-            f"(1 partial + 1 main + 3 escalation), found {write_calls}. "
-            f"If a new write path was added, ensure it also reads the "
-            f"staged input via read_text() and inserts routes via "
-            f"_insert_sexp_before_closing so zones survive."
-        )
-
-    def test_every_write_site_reads_original_via_read_text(self):
-        """Every PCB-write site must be preceded by ``pcb_path.read_text()``.
-
-        The five sites share a common read-modify-write pattern.  This
-        test asserts the count of ``pcb_path.read_text()`` calls is at
-        least equal to the number of write sites.
+        Structurally verify it (1) reads the staged input fresh via
+        ``read_text``, (2) inserts route fragments via the
+        zone-preserving ``_insert_sexp_before_closing`` helper,
+        (3) gates output through ``_validate_sexp_parentheses``, and
+        (4) writes atomically (``fsync`` + ``os.replace``).
         """
-        from kicad_tools.cli import route_cmd
+        tree = _route_cmd_module_ast()
+        central = [f for f in _functions_in(tree) if f.name == _CENTRAL_WRITER]
+        assert len(central) == 1, (
+            f"Expected exactly one definition of ``{_CENTRAL_WRITER}`` in "
+            f"route_cmd.py, found {len(central)}.  If the central write "
+            f"path was renamed, update _CENTRAL_WRITER in this test module "
+            f"and confirm the new path still preserves zones."
+        )
+        called = _called_names(central[0])
+        for required in ("read_text", _ZONE_HELPER, "_validate_sexp_parentheses"):
+            assert required in called, (
+                f"``{_CENTRAL_WRITER}`` no longer calls ``{required}``; "
+                f"the central PCB write path must read the staged input, "
+                f"insert routes via the zone-preserving helper, and "
+                f"validate parentheses before writing."
+            )
+        for required in ("fsync", "replace"):
+            assert required in called, (
+                f"``{_CENTRAL_WRITER}`` no longer calls ``{required}``; "
+                f"the central write path must stay atomic "
+                f"(tmp + fsync + os.replace, issue #2808)."
+            )
 
-        source = Path(route_cmd.__file__).read_text()
-        read_calls = source.count("pcb_path.read_text()")
-        assert read_calls >= 5, (
-            f"Expected at least 5 ``pcb_path.read_text()`` call sites "
-            f"(one per write path), found {read_calls}.  If a write "
-            f"site does not first read the staged input, zones cannot "
-            f"be preserved end-to-end."
+    def test_every_pcb_write_site_routes_through_zone_preserving_helper(self):
+        """Every function that writes PCB text must preserve zones.
+
+        Discovers PCB-write call sites from the AST (see
+        ``_pcb_write_calls``) and asserts each enclosing function either
+        is ``_write_routed_pcb`` itself, calls it, or calls
+        ``_insert_sexp_before_closing`` directly.
+        """
+        tree = _route_cmd_module_ast()
+        pcb_writers: list[str] = []
+        offenders: list[str] = []
+        for func in _functions_in(tree):
+            writes = _pcb_write_calls(func)
+            if not writes:
+                continue
+            pcb_writers.append(func.name)
+            called = _called_names(func)
+            if (
+                func.name != _CENTRAL_WRITER
+                and _CENTRAL_WRITER not in called
+                and _ZONE_HELPER not in called
+            ):
+                lines = ", ".join(str(w.lineno) for w in writes)
+                offenders.append(f"{func.name} (write_text at line {lines})")
+
+        # Sanity: the discovery heuristic still finds the write paths at
+        # all.  If this fires, the write-site *shape* changed (e.g. no
+        # longer ``path.write_text(content_var)``) — update
+        # ``_pcb_write_calls`` to match the new shape rather than
+        # weakening the assertion.
+        assert pcb_writers, (
+            "No PCB-write sites discovered in route_cmd.py; the "
+            "discovery heuristic in _pcb_write_calls is stale.  Update "
+            "it to match the current write-site shape so the "
+            "zone-preservation audit keeps its teeth."
+        )
+        assert _CENTRAL_WRITER in pcb_writers, (
+            f"``{_CENTRAL_WRITER}`` was not discovered as a PCB-write "
+            f"site; either it was renamed (update _CENTRAL_WRITER) or "
+            f"its write no longer matches the discovery heuristic."
+        )
+        assert not offenders, (
+            f"PCB-write site(s) bypass the zone-preserving write path: "
+            f"{offenders}.  Every function that writes PCB text must "
+            f"either call ``{_CENTRAL_WRITER}`` or build its content "
+            f"via ``{_ZONE_HELPER}`` so input zones survive routing."
         )
 
-    @pytest.mark.xfail(
-        reason="route_cmd.py write-path refactor consolidated write sites; source-shape guard stale -- see issue #3445",
-        strict=False,
-    )
-    def test_every_write_site_uses_insert_sexp_before_closing(self):
-        """Every PCB-write site must use ``_insert_sexp_before_closing``.
+    def test_every_pcb_write_site_reads_original_first(self):
+        """Every PCB-writing function must read the staged input first.
 
-        Counts ``_insert_sexp_before_closing(`` call sites; the helper
-        is defined once and called by each of the five write paths.
+        Replaces the old ``count >= 5`` pin on ``pcb_path.read_text()``:
+        instead of counting occurrences module-wide, assert each
+        discovered PCB-writing function performs a ``read_text`` (or
+        delegates to ``_write_routed_pcb``, which does).
         """
-        from kicad_tools.cli import route_cmd
+        tree = _route_cmd_module_ast()
+        offenders: list[str] = []
+        for func in _functions_in(tree):
+            if not _pcb_write_calls(func):
+                continue
+            called = _called_names(func)
+            if "read_text" not in called and _CENTRAL_WRITER not in called:
+                offenders.append(f"{func.name} (line {func.lineno})")
+        assert not offenders, (
+            f"PCB-write site(s) do not read the staged input via "
+            f"read_text() before writing: {offenders}.  Without a fresh "
+            f"read of the input, zones cannot be preserved end-to-end."
+        )
 
-        source = Path(route_cmd.__file__).read_text()
-        # 1 def + 5 callers = 6 occurrences minimum.
-        # The function is also used in defensive contexts so >= 6.
-        occurrences = source.count("_insert_sexp_before_closing(")
-        assert occurrences >= 6, (
-            f"Expected at least 6 occurrences of "
-            f"``_insert_sexp_before_closing(`` (1 def + 5 callers), "
-            f"found {occurrences}.  A write path that bypasses this "
-            f"helper risks dropping zones from its output."
+    def test_central_writer_is_actually_used_by_save_sites(self):
+        """At least one save site outside the helper calls it.
+
+        Guards against the consolidation becoming dead code: if every
+        caller migrated off ``_write_routed_pcb`` to some new write
+        mechanism, the audit above could pass vacuously.  No exact
+        caller count is pinned — only existence.
+        """
+        tree = _route_cmd_module_ast()
+        external_callers = [
+            func.name
+            for func in _functions_in(tree)
+            if func.name != _CENTRAL_WRITER and _CENTRAL_WRITER in _called_names(func)
+        ]
+        assert external_callers, (
+            f"No function in route_cmd.py calls ``{_CENTRAL_WRITER}``; "
+            f"the central zone-preserving write path appears unused.  "
+            f"If save sites moved to a new helper, point _CENTRAL_WRITER "
+            f"at it and confirm it preserves zones."
         )
 
 
 # ---------------------------------------------------------------------------
-# Behavioral test: end-to-end through the partial-save write path (line 455)
+# Behavioral test: end-to-end through the central _write_routed_pcb path
+# ---------------------------------------------------------------------------
+
+
+class TestWriteRoutedPcbPreservesZones:
+    """Exercise the consolidated ``_write_routed_pcb`` write path on disk.
+
+    The structural audit above proves the source *shape*; these tests
+    prove the *behavior*: zones present in the input PCB survive a real
+    write through the central helper, including the layer-escalation and
+    empty-route variants.
+    """
+
+    def test_route_write_preserves_zones(self, tmp_path: Path):
+        from kicad_tools.cli.route_cmd import _write_routed_pcb
+
+        pcb_path = tmp_path / "input.kicad_pcb"
+        pcb_path.write_text(_make_pcb_with_zones(num_zones=4))
+        output_path = tmp_path / "out_routed.kicad_pcb"
+        zones_in = _extract_zone_signatures(pcb_path.read_text())
+        assert len(zones_in) == 4
+
+        route_sexp = (
+            '(segment (start 10 10) (end 20 10) (width 0.2) (layer "F.Cu") '
+            '(net 2) (uuid "seg-uuid-1"))'
+        )
+        written = _write_routed_pcb(pcb_path, output_path, route_sexp)
+
+        assert written == output_path
+        output_text = output_path.read_text()
+        assert "(segment" in output_text
+        zones_out = _extract_zone_signatures(output_text)
+        assert zones_out == zones_in, (
+            f"Central write path dropped zones; "
+            f"missing: {zones_in - zones_out}, extra: {zones_out - zones_in}"
+        )
+        # Atomic write must not leave its tmp sibling behind.
+        assert not output_path.with_suffix(output_path.suffix + ".tmp").exists()
+
+    def test_escalated_4L_write_preserves_zones(self, tmp_path: Path):
+        from kicad_tools.cli.route_cmd import _write_routed_pcb
+
+        pcb_path = tmp_path / "input.kicad_pcb"
+        pcb_path.write_text(_make_pcb_with_zones(num_zones=4))
+        output_path = tmp_path / "out_routed.kicad_pcb"
+        zones_in = _extract_zone_signatures(pcb_path.read_text())
+
+        route_sexp = (
+            '(segment (start 10 10) (end 20 10) (width 0.2) (layer "F.Cu") '
+            '(net 2) (uuid "seg-uuid-1"))'
+        )
+        _write_routed_pcb(pcb_path, output_path, route_sexp, layer_count=4)
+
+        output_text = output_path.read_text()
+        copper_layer_count = len(re.findall(r'\(\d+\s+"[^"]+\.Cu"\s+\w+', output_text))
+        assert copper_layer_count == 4, (
+            f"Expected 4 copper layers after escalated write, got {copper_layer_count}"
+        )
+        assert _extract_zone_signatures(output_text) == zones_in
+
+    def test_empty_route_sexp_write_preserves_zones(self, tmp_path: Path):
+        """Empty ``route_sexp`` writes the original back — zones intact."""
+        from kicad_tools.cli.route_cmd import _write_routed_pcb
+
+        pcb_path = tmp_path / "input.kicad_pcb"
+        pcb_path.write_text(_make_pcb_with_zones(num_zones=4))
+        output_path = tmp_path / "out_routed.kicad_pcb"
+        zones_in = _extract_zone_signatures(pcb_path.read_text())
+
+        _write_routed_pcb(pcb_path, output_path, "")
+
+        assert _extract_zone_signatures(output_path.read_text()) == zones_in
+
+
+# ---------------------------------------------------------------------------
+# Behavioral test: end-to-end through the partial-save write path
 # ---------------------------------------------------------------------------
 
 
 class TestPartialSaveWritePathPreservesZones:
-    """Exercise the ``_save_partial_results`` write site (route_cmd.py:455).
+    """Exercise the ``_save_partial_results`` write site.
 
-    This is the easiest of the five write paths to invoke
+    This is the easiest write path to invoke
     end-to-end without standing up a full Autorouter.  It exercises
     the read-text + insert + write_text triplet against real disk
     state, catching any future change that bypasses the helper.
