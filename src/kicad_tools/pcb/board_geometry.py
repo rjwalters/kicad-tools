@@ -21,9 +21,12 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -156,6 +159,77 @@ def _linearize_bezier(
             ]
         points.append(work[0])
     return points
+
+
+# ---------------------------------------------------------------------------
+# Outline repair
+# ---------------------------------------------------------------------------
+
+
+def _repair_outline_polygon(poly: Any) -> Any:
+    """Repair an invalid board-outline polygon, keeping the largest piece.
+
+    Self-intersecting outlines (bowties) split into multiple lobes when
+    repaired.  ``buffer(0)`` silently drops the negatively-wound lobe,
+    which *shrinks* the keep-in area -- a conservative failure (routing
+    refuses space that exists) but an invisible one (Issue #3614).
+    ``shapely.make_valid`` keeps every lobe, so we can make a deliberate
+    choice: ``BoardGeometry`` is single-Polygon by design (its Edge.Cuts
+    path also keeps only the largest piece), so keep the largest lobe
+    and log a WARNING naming the area that was discarded.
+
+    ``make_valid`` may return a GeometryCollection when part of the
+    outline collapses to zero-area linework; only polygonal components
+    contribute board area, so extract those (mirrors
+    ``_repair_fill_polygon`` in ``validate/rules/clearance.py``,
+    PR #3613).
+
+    Raises:
+        ValueError: If no polygonal area survives the repair (fully
+            degenerate outline).
+    """
+    from shapely import make_valid
+    from shapely.geometry import GeometryCollection
+    from shapely.geometry import MultiPolygon as ShapelyMultiPolygon
+
+    repaired = make_valid(poly)
+
+    pieces: list[Any] = []
+    if isinstance(repaired, ShapelyPolygon):
+        pieces = [repaired]
+    elif isinstance(repaired, ShapelyMultiPolygon):
+        pieces = list(repaired.geoms)
+    elif isinstance(repaired, GeometryCollection):
+        for geom in repaired.geoms:
+            if isinstance(geom, ShapelyPolygon):
+                pieces.append(geom)
+            elif isinstance(geom, ShapelyMultiPolygon):
+                pieces.extend(geom.geoms)
+
+    pieces = [p for p in pieces if not p.is_empty]
+    if not pieces:
+        raise ValueError(
+            "Board outline is degenerate: repairing the invalid polygon "
+            "produced no polygonal area."
+        )
+
+    if len(pieces) == 1:
+        return pieces[0]
+
+    pieces.sort(key=lambda p: p.area, reverse=True)
+    largest = pieces[0]
+    dropped_area = sum(p.area for p in pieces[1:])
+    logger.warning(
+        "Invalid board outline split into %d pieces after repair; "
+        "keeping the largest (%.4f mm^2) and dropping %d piece(s) "
+        "totalling %.4f mm^2.  The keep-in area shrank -- check the "
+        "outline for self-intersections.",
+        len(pieces),
+        largest.area,
+        len(pieces) - 1,
+        dropped_area,
+    )
+    return largest
 
 
 # ---------------------------------------------------------------------------
@@ -302,9 +376,16 @@ class BoardGeometry:
 
         Useful for testing or when outline points are already extracted.
 
+        Invalid (self-intersecting) outlines are repaired via
+        ``shapely.make_valid``; if the repair splits the outline into
+        multiple pieces, the largest is kept and a WARNING is logged
+        naming the dropped area (see :func:`_repair_outline_polygon`).
+
         Raises:
             ImportError: If Shapely is not installed.
-            ValueError: If fewer than 3 points are provided.
+            ValueError: If fewer than 3 points are provided, or the
+                outline is fully degenerate (no polygonal area survives
+                repair).
         """
         if not _SHAPELY_AVAILABLE:
             raise ImportError(
@@ -317,8 +398,9 @@ class BoardGeometry:
 
         poly = ShapelyPolygon(points)
         if not poly.is_valid:
-            # Attempt to fix via buffer(0) -- common Shapely trick
-            poly = poly.buffer(0)
+            # make_valid + keep-largest (NOT buffer(0), which silently
+            # drops bowtie lobes and shrinks the keep-in -- Issue #3614).
+            poly = _repair_outline_polygon(poly)
         return cls(polygon=poly, origin=origin)
 
     @classmethod

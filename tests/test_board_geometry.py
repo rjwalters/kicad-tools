@@ -87,6 +87,57 @@ class TestConstruction:
         with pytest.raises(ValueError, match="at least 3"):
             BoardGeometry.from_outline_points([(0, 0), (1, 1)])
 
+    def test_valid_outline_is_identity_and_silent(self, caplog):
+        """A valid outline passes through unchanged, with no warning."""
+        from shapely.geometry import Polygon as ShapelyPolygon
+
+        points = [(0.0, 0.0), (50.0, 0.0), (50.0, 30.0), (0.0, 30.0)]
+        with caplog.at_level(
+            "WARNING", logger="kicad_tools.pcb.board_geometry"
+        ):
+            geom = BoardGeometry.from_outline_points(points)
+        assert geom.polygon.equals(ShapelyPolygon(points))
+        assert geom.area == pytest.approx(50.0 * 30.0)
+        assert caplog.records == []
+
+    def test_bowtie_outline_keeps_largest_lobe_and_warns(self, caplog):
+        """A self-intersecting bowtie keeps the largest lobe and warns.
+
+        Pins the Issue #3614 behavior: make_valid splits the bowtie into
+        two lobes; the larger one becomes the board outline and a
+        WARNING names the dropped area (buffer(0) used to do this
+        silently).
+        """
+        # Ring (0,0)->(10,0)->(0,3)->(4,3)->close self-intersects at
+        # (20/7, 15/7), splitting into:
+        #   - large lobe: triangle (0,0),(10,0),X  -> area 75/7
+        #   - small lobe: triangle X,(0,3),(4,3)   -> area 12/7
+        points = [(0.0, 0.0), (10.0, 0.0), (0.0, 3.0), (4.0, 3.0)]
+        with caplog.at_level(
+            "WARNING", logger="kicad_tools.pcb.board_geometry"
+        ):
+            geom = BoardGeometry.from_outline_points(points)
+
+        # Largest lobe kept, smaller lobe dropped
+        assert geom.polygon.geom_type == "Polygon"
+        assert geom.polygon.is_valid
+        assert geom.area == pytest.approx(75.0 / 7.0)
+
+        # Exactly one WARNING naming the kept and dropped areas
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "keeping the largest" in msg
+        assert f"{75.0 / 7.0:.4f}" in msg  # kept area
+        assert f"{12.0 / 7.0:.4f}" in msg  # dropped area
+
+    def test_degenerate_outline_raises(self):
+        """Collinear points yield no polygonal area -> ValueError."""
+        with pytest.raises(ValueError, match="degenerate"):
+            BoardGeometry.from_outline_points(
+                [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+            )
+
     def test_exterior_coords(self):
         geom = _rect_geometry(0, 0, 10, 10)
         coords = geom.exterior_coords
