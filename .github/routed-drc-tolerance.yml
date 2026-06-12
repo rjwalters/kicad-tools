@@ -1557,15 +1557,6 @@ tolerances:
   # the rule.
   boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 10
 
-  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
-  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
-  # shorts that were previously invisible to every gate) fired 36
-  # finding(s) on this committed artifact.  29 shorts + 7 grazes (AC_NEUTRAL/V_AC_SENSE and others vs FUSED_LINE/VGATE fills).
-  # Artifact fix tracked in #3555; remove/reduce this entry in the PR
-  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
-  # the rule.
-  boards/external/softstart/output/softstart_routed.kicad_pcb: 36
-
 # Per-board manufacturer overrides for the CI gate (optional).
 #
 # Default behaviour: every routed PCB is measured with `kct check --mfr
