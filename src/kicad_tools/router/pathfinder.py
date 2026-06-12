@@ -1600,6 +1600,11 @@ class Router:
             (gx + dx, gy),  # C: horizontal neighbor
         ]
 
+        # Issue #3566 (Python parity for #3545): static blockage snapshot
+        # (None until the first ``mark_route``; before that, usage is
+        # uniformly 0 and the legacy usage clause is equivalent).
+        grid_static = getattr(self.grid, "_static_blocked", None)
+
         for cx, cy in adjacent_cells:
             # Check bounds
             if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
@@ -1609,6 +1614,23 @@ class Router:
 
             if cell.blocked:
                 if allow_sharing and not cell.is_obstacle:
+                    # Issue #3566 / #3545: statically blocked foreign
+                    # cells (pad clearance halos, keepouts) are
+                    # non-negotiable regardless of usage_count -- a pad
+                    # cannot "negotiate away", so cutting a corner
+                    # through a halo cell only produces unresolvable
+                    # overflow.  Relief probes keep their #3438
+                    # soft-crossing semantics for foreign-net cells.
+                    # Mirrors the ``cell.static_blocked && cell.net !=
+                    # net && !relief_mode_`` gate in
+                    # ``Pathfinder::is_diagonal_blocked``.
+                    if (
+                        grid_static is not None
+                        and grid_static[layer, cy, cx]
+                        and cell.net != net
+                        and not self.relief_mode
+                    ):
+                        return True
                     # In negotiated mode, non-obstacle cells can be shared
                     # No-net pads (cell.net == 0) must always block other nets
                     # See issue #317: routes incorrectly allowed through no-net pads
@@ -1715,6 +1737,16 @@ class Router:
             is_obstacle_arr = self.grid._is_obstacle[layer, blocked_cy, blocked_cx]
             usage_arr = self.grid._usage_count[layer, blocked_cy, blocked_cx]
 
+            # Issue #3566 (Python parity for #3545): consult the static
+            # blockage snapshot so foreign static cells (pad clearance
+            # halos, keepouts) stay non-negotiable even at usage > 0.
+            grid_static = getattr(self.grid, "_static_blocked", None)
+            static_arr = (
+                grid_static[layer, blocked_cy, blocked_cx]
+                if grid_static is not None
+                else None
+            )
+
             for i in range(len(blocked_indices)):
                 cell_net = net_arr[i]
                 is_obstacle = is_obstacle_arr[i]
@@ -1726,6 +1758,22 @@ class Router:
                 # obstacles still hard-reject.
                 if is_obstacle and cell_net != net:
                     return True  # Obstacles always block (foreign net)
+
+                # Issue #3566 / #3545: statically blocked foreign cells
+                # (pad clearance halos, keepouts) are non-negotiable
+                # regardless of usage_count -- a pad cannot "negotiate
+                # away", so sharing a halo cell only produces
+                # unresolvable overflow.  Relief probes keep their #3438
+                # soft-crossing semantics for foreign-net cells.  Mirrors
+                # the ``cell.static_blocked && cell.net != net &&
+                # !relief_mode_`` gate in ``Pathfinder::is_via_blocked``.
+                if (
+                    static_arr is not None
+                    and static_arr[i]
+                    and cell_net != net
+                    and not self.relief_mode
+                ):
+                    return True
 
                 # No-net pads must always block
                 if cell_net == 0:
