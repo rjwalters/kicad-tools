@@ -899,10 +899,11 @@ tolerances:
   # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
   # shorts that were previously invisible to every gate) fired 2
   # finding(s) on this committed artifact.  Both are sub-minimum gaps (USB_CC1 vs GND In1.Cu fill); the 20 pre-existing errors are unchanged.
-  # Artifact fix tracked in #3554; remove/reduce this entry in the PR
-  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
-  # the rule.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 22
+  # RESOLVED (PR #3548 / issues #3515 + #3554, June 11 2026): the GND
+  # In1.Cu fill was regenerated via ``kct zones fill`` after the
+  # USB_CC1 corridor move; ``--only segment_zone`` now reports 0 and the
+  # floor tightens 22 -> 20 (back to the pre-#3527 count).
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
