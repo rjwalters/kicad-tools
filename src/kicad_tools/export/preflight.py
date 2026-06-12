@@ -566,13 +566,17 @@ class PreflightChecker:
         )
 
     def _check_bom_lcsc_values(self) -> PreflightResult:
-        """Validate assigned LCSC parts against their known parametric values.
+        """Validate assigned LCSC parts against known value AND package.
 
         For every active BOM item that HAS an LCSC number, look the part
         up in the local parts cache/DB.  When the part is known and its
         parametric value clearly disagrees with the BOM row value
-        (e.g. 100nF part on a 16nF row -- issue #3590), the check FAILS:
-        a wrong-value passive in a shipped BOM is a manufacturing defect.
+        (e.g. 100nF part on a 16nF row -- issue #3590) OR its chip
+        package clearly disagrees with the row's footprint (e.g. an 0402
+        part on 0805 footprints -- issue #3597), the check FAILS: a
+        wrong-value or wrong-size passive in a shipped BOM is a
+        manufacturing defect.  Value and package mismatches are reported
+        together in one combined result.
 
         Items whose LCSC part is not in the local cache cannot be
         validated and are reported as OK (this check is best-effort by
@@ -608,10 +612,12 @@ class PreflightChecker:
             if item.is_virtual or item.dnp or not item.lcsc:
                 continue
             checked += 1
-            mismatch = check_lcsc_against_cache(cache, item.lcsc, item.value, item.reference)
+            mismatch = check_lcsc_against_cache(
+                cache, item.lcsc, item.value, item.reference, footprint=item.footprint
+            )
             if mismatch is not None:
                 mismatches.append(
-                    f"{item.reference} ({item.value}) -> {item.lcsc} is {mismatch.candidate_value}"
+                    f"{item.reference} ({item.value}) -> {item.lcsc}: {mismatch.describe()}"
                 )
 
         if mismatches:
@@ -622,7 +628,7 @@ class PreflightChecker:
                 status="FAIL",
                 message=(
                     f"{len(mismatches)} BOM item(s) assigned an LCSC part "
-                    f"whose value does not match the BOM value"
+                    f"whose value or package does not match the BOM row"
                 ),
                 details=f"{shown}{suffix}",
             )
@@ -631,7 +637,7 @@ class PreflightChecker:
             name="bom_lcsc_values",
             status="OK",
             message=(
-                f"No LCSC value mismatches detected "
+                f"No LCSC value/package mismatches detected "
                 f"({checked} assigned item(s) checked against local parts cache)"
             ),
         )

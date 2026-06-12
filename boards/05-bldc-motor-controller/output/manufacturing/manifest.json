@@ -5,8 +5,8 @@
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
-      "sha256": "0876dd1c239e894b4f171d642764872b56bfaa412309f5f5b86d8edeb4e8cfb1",
-      "size": 1573
+      "sha256": "acdfa8d287b66ae952a02b90164ec6b4d9a05c4d3a2e939eca88195ab892135d",
+      "size": 1574
     },
     "cpl_jlcpcb.csv": {
       "sha256": "1852681e4d18774db0984a2ab4deb94993404f43239b0b18400998160ffa696b",

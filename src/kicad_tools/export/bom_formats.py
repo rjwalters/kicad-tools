@@ -390,9 +390,11 @@ def apply_existing_lcsc_assignments(
     Items that already have an LCSC number (schematic/spec priority) or
     are DNP are skipped.  When ``parts_cache`` is provided, each
     candidate assignment is validated against the part's known
-    parametric value; a clear mismatch is dropped with a WARNING instead
-    of being propagated (issue #3590: one bad cache hit must not become
-    sticky in the committed artifact via the read-back merge).
+    parametric value and chip package; a clear mismatch is dropped with
+    a WARNING instead of being propagated (issue #3590: one bad cache
+    hit must not become sticky in the committed artifact via the
+    read-back merge; issue #3597: same for right-value/wrong-package
+    assignments like an 0402 part on 0805 footprints).
 
     Args:
         items: Fresh BOM items (modified in place).
@@ -421,7 +423,9 @@ def apply_existing_lcsc_assignments(
         if not lcsc:
             continue
 
-        mismatch = check_lcsc_against_cache(parts_cache, lcsc, item.value, item.reference)
+        mismatch = check_lcsc_against_cache(
+            parts_cache, lcsc, item.value, item.reference, footprint=item.footprint
+        )
         if mismatch is not None:
             rejected.add(key)
             logger.warning(

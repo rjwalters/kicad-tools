@@ -1,25 +1,34 @@
 """
-Parametric value validation for LCSC part assignments.
+Parametric value and package validation for LCSC part assignments.
 
 Guards against wrong-part LCSC assignments by comparing the BOM row's
-requested value against what is known about the candidate LCSC part
-(its parametric ``value`` field and/or catalog description).
+requested value (and chip package, derived from the footprint) against
+what is known about the candidate LCSC part (its parametric ``value`` /
+``package`` fields, catalog description, and manufacturer part number).
 
-Motivating defect (issue #3590): the enrichment cache fallback assigned
-C1525 -- a 100nF 0402 capacitor -- to a 16nF BOM row, and the bad
-assignment then self-perpetuated through the ``merge_lcsc`` CSV
-read-back on every subsequent export.
+Motivating defects:
+
+- Issue #3590: the enrichment cache fallback assigned C1525 -- a 100nF
+  0402 capacitor -- to a 16nF BOM row, and the bad assignment then
+  self-perpetuated through the ``merge_lcsc`` CSV read-back on every
+  subsequent export.
+- Issue #3597: the same C1525 (an 0402 part) was assigned to 100nF rows
+  with 0805 footprints -- the *value* matched, but JLCPCB would place a
+  part half the size of the pads.  Package validation catches this.
 
 Design notes:
 
 - Value parsing is delegated to :func:`kicad_tools.cost.suggest.parse_component_value`
   (the canonical parser per the #3593 survey) so requested values and
   candidate part values are interpreted with identical semantics.
+- BOM-side package extraction is delegated to
+  :func:`kicad_tools.cost.suggest.extract_package_from_footprint`.
 - Validation is intentionally conservative: a mismatch is only reported
-  when BOTH sides parse to a numeric value of the same kind and they
-  clearly disagree.  Unparseable values (ICs, connectors, exotic value
-  strings) are treated as "cannot validate" and accepted, so this guard
-  never blocks enrichment of parts it does not understand.
+  when BOTH sides parse to a numeric value (or both yield a recognized
+  chip package) and they clearly disagree.  Unparseable values and
+  unknown packages (ICs, connectors, exotic value strings) are treated
+  as "cannot validate" and accepted, so this guard never blocks
+  enrichment of parts it does not understand.
 """
 
 from __future__ import annotations
@@ -30,7 +39,11 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..cost.suggest import ComponentType, parse_component_value
+from ..cost.suggest import (
+    ComponentType,
+    extract_package_from_footprint,
+    parse_component_value,
+)
 
 if TYPE_CHECKING:
     from ..parts.cache import PartsCache
@@ -103,6 +116,249 @@ class ValueMismatch:
         return (
             f"part value {self.candidate_value!r} does not match requested {self.requested_value!r}"
         )
+
+
+@dataclass(frozen=True)
+class PackageMismatch:
+    """A detected disagreement between footprint and part chip packages."""
+
+    requested_package: str  # from the BOM footprint, e.g. "0805"
+    candidate_package: str  # from the part record, e.g. "0402"
+    candidate_source: str  # where the part-side package came from
+
+    def describe(self) -> str:
+        """Human-readable one-line description."""
+        return (
+            f"part package {self.candidate_package!r} ({self.candidate_source}) "
+            f"does not match footprint package {self.requested_package!r}"
+        )
+
+
+# Union of the mismatch kinds this module can report.  Both expose
+# ``describe()`` for logging/reporting.
+LcscMismatch = ValueMismatch | PackageMismatch
+
+# Imperial chip-size codes we know how to compare.  Package validation
+# is restricted to these: two-terminal chip packages where a size
+# disagreement is unambiguous (an 0402 part on 0805 pads is always
+# wrong).  IC/connector package comparisons have far more naming
+# variation and are out of scope (issue #3597).
+CHIP_PACKAGES = frozenset(
+    {"01005", "0201", "0402", "0603", "0805", "1206", "1210", "1812", "2010", "2220", "2512"}
+)
+
+# A chip-size token in free text ("16V 100nF X7R ±10% 0402 MLCC").
+# The lookarounds reject tokens embedded in part numbers like
+# "RC0805FR-0710KL" or "0805W8F1002T5E" -- those are handled by the
+# dedicated MPN decoders below, which understand family conventions.
+_DESC_CHIP_RE = re.compile(
+    r"(?<![A-Za-z0-9.])(01005|0201|0402|0603|0805|1206|1210|1812|2010|2220|2512)(?![A-Za-z0-9])"
+)
+
+# A chip-size token anywhere in a structured ``package`` field
+# (LCSC parametric packages are usually exactly "0402", "0805", ...).
+_PKG_FIELD_CHIP_RE = re.compile(r"(01005|0201|0402|0603|0805|1206|1210|1812|2010|2220|2512)")
+
+# ---------------------------------------------------------------------------
+# MPN size-code decoders.
+#
+# Local cache records are frequently sparse -- empty ``package``, and a
+# description that is just the MPN (the actual #3590/#3597 poison
+# record: C1525 cached with package='' and description='CL05B104KO5NNNC').
+# Chip-passive part numbers encode the size, per family convention.
+# Patterns below were validated against the on-machine parts cache
+# (Samsung CL*, Murata GRM/GCM*, TDK C<metric>*, Yageo CC/RC/AC/AF*,
+# Ever Ohms CR*, UNI-ROYAL 0805W8*, Taiyo Yuden EMK/LMK*).  Unknown
+# families simply decode to nothing (-> cannot validate -> accept).
+# ---------------------------------------------------------------------------
+
+# Samsung MLCC: CL05 = 0402, CL10 = 0603, CL21 = 0805, ...
+_SAMSUNG_CL_RE = re.compile(r"^CL(\d{2})")
+_SAMSUNG_CL_SIZES = {
+    "03": "0201",
+    "05": "0402",
+    "10": "0603",
+    "21": "0805",
+    "31": "1206",
+    "32": "1210",
+}
+
+# Murata MLCC (GRM/GCM/GJM): GRM15 = 0402, GRM18 = 0603, GRM21 = 0805, ...
+_MURATA_G_M_RE = re.compile(r"^G[A-Z]M(\d{2})")
+_MURATA_G_M_SIZES = {
+    "03": "0201",
+    "15": "0402",
+    "18": "0603",
+    "21": "0805",
+    "31": "1206",
+    "32": "1210",
+    "55": "2220",
+}
+
+# TDK C-series MLCC encodes the METRIC size: C1005 = 0402, C2012 = 0805.
+_TDK_C_RE = re.compile(r"^C(1005|1608|2012|3216|3225|4532|5750)(?=[A-Z])")
+_METRIC_TO_IMPERIAL = {
+    "1005": "0402",
+    "1608": "0603",
+    "2012": "0805",
+    "3216": "1206",
+    "3225": "1210",
+    "4532": "1812",
+    "5750": "2220",
+}
+
+# Taiyo Yuden MLCC ([ELU]MK + 3-digit metric short code): LMK212 = 0805.
+_TAIYO_YUDEN_RE = re.compile(r"^[A-Z]MK(\d{3})")
+_TAIYO_YUDEN_SIZES = {
+    "105": "0402",
+    "107": "0603",
+    "212": "0805",
+    "316": "1206",
+    "325": "1210",
+    "432": "1812",
+}
+
+# Literal imperial size embedded right after a 2-letter family prefix:
+# Yageo CC0805.../RC0805FR..., Ever Ohms CR0402FF..., Yageo AC/AF....
+_PREFIXED_CHIP_RE = re.compile(
+    r"^[A-Z]{2}(01005|0201|0402|0603|0805|1206|1210|1812|2010|2220|2512)(?=[A-Z])"
+)
+
+# Literal imperial size at the very start: UNI-ROYAL "0805W8F1002T5E",
+# FH "0805F104M500NT".
+_LEADING_CHIP_RE = re.compile(
+    r"^(01005|0201|0402|0603|0805|1206|1210|1812|2010|2220|2512)(?=[A-Z])"
+)
+
+
+def _package_from_mpn(mpn: str) -> tuple[str, str] | None:
+    """Decode an imperial chip-size code from a chip-passive MPN.
+
+    Returns (imperial size, human-readable source) or None when the MPN
+    does not follow a known family convention.
+    """
+    if not mpn:
+        return None
+    mpn = mpn.strip().upper()
+
+    m = _SAMSUNG_CL_RE.match(mpn)
+    if m is not None:
+        size = _SAMSUNG_CL_SIZES.get(m.group(1))
+        if size is not None:
+            return size, f"MPN prefix CL{m.group(1)}"
+        return None  # known family, unknown size code -- do not guess
+
+    m = _MURATA_G_M_RE.match(mpn)
+    if m is not None:
+        size = _MURATA_G_M_SIZES.get(m.group(1))
+        if size is not None:
+            return size, f"MPN prefix {mpn[:3]}{m.group(1)}"
+        return None
+
+    m = _TDK_C_RE.match(mpn)
+    if m is not None:
+        return _METRIC_TO_IMPERIAL[m.group(1)], f"MPN metric size C{m.group(1)}"
+
+    m = _TAIYO_YUDEN_RE.match(mpn)
+    if m is not None:
+        size = _TAIYO_YUDEN_SIZES.get(m.group(1))
+        if size is not None:
+            return size, f"MPN prefix {mpn[:3]}{m.group(1)}"
+        return None
+
+    m = _PREFIXED_CHIP_RE.match(mpn)
+    if m is not None:
+        return m.group(1), f"MPN size code in {mpn[:2]}{m.group(1)}"
+
+    m = _LEADING_CHIP_RE.match(mpn)
+    if m is not None:
+        return m.group(1), f"MPN leading size code {m.group(1)}"
+
+    return None
+
+
+def _extract_part_chip_package(
+    part_package: str,
+    part_description: str,
+    part_mfr: str,
+    *,
+    allow_mpn: bool,
+) -> tuple[str, str] | None:
+    """Determine the candidate part's chip package, if recognizable.
+
+    Returns (imperial size, human-readable source) or None.  Sources in
+    priority order: structured ``package`` field, free-text description
+    token, MPN family decode (only when ``allow_mpn``; chip-passive MPN
+    conventions do not generalize to LEDs/fuses/etc.).
+    """
+    if part_package:
+        m = _PKG_FIELD_CHIP_RE.search(part_package)
+        if m is not None:
+            return m.group(1), "package field"
+
+    if part_description:
+        m = _DESC_CHIP_RE.search(part_description)
+        if m is not None:
+            return m.group(1), "description"
+
+    if allow_mpn:
+        for text in (part_mfr, part_description):
+            decoded = _package_from_mpn(text)
+            if decoded is not None:
+                return decoded
+
+    return None
+
+
+def find_package_mismatch(
+    footprint: str,
+    reference: str,
+    *,
+    part_package: str = "",
+    part_description: str = "",
+    part_mfr: str = "",
+) -> PackageMismatch | None:
+    """Compare a BOM row's footprint package against a candidate part's.
+
+    Args:
+        footprint: The BOM row footprint (e.g.
+            ``"Capacitor_SMD:C_0805_2012Metric"``).
+        reference: A reference designator from the row (e.g. ``"C12"``).
+            MPN-based package decoding is only trusted for chip passives
+            (R/C/L references); other parts rely on the structured
+            package field or description.
+        part_package: The candidate part's parametric package field.
+        part_description: The candidate part's catalog description.
+        part_mfr: The candidate part's manufacturer part number.
+
+    Returns:
+        A :class:`PackageMismatch` when both sides yield a recognized
+        imperial chip size and they differ, otherwise ``None`` (match OR
+        cannot validate).
+    """
+    requested = extract_package_from_footprint(footprint)
+    if requested not in CHIP_PACKAGES:
+        return None  # not a chip footprint -- out of scope, accept
+
+    # MPN size-code conventions are only reliable for chip passives.
+    parsed = parse_component_value("", reference)
+    allow_mpn = parsed.component_type in _NUMERIC_TYPES
+
+    candidate = _extract_part_chip_package(
+        part_package, part_description, part_mfr, allow_mpn=allow_mpn
+    )
+    if candidate is None:
+        return None  # cannot validate -- accept
+    candidate_package, source = candidate
+
+    if candidate_package == requested:
+        return None
+
+    return PackageMismatch(
+        requested_package=requested,
+        candidate_package=candidate_package,
+        candidate_source=source,
+    )
 
 
 def _parse_requested(value: str, reference: str) -> tuple[float, ComponentType] | None:
@@ -244,17 +500,23 @@ def check_lcsc_against_cache(
     lcsc_part: str,
     requested_value: str,
     reference: str,
-) -> ValueMismatch | None:
+    *,
+    footprint: str = "",
+) -> LcscMismatch | None:
     """Validate an LCSC assignment against the local parts cache/DB.
 
     Looks the part up in the cache (ignoring expiry -- stale parametric
     data is still useful for detecting a 6x value disagreement) and
     compares its known value/description against the requested value.
+    When ``footprint`` is provided, also compares the part's known chip
+    package against the package extracted from the footprint (issue
+    #3597: right value, wrong package -- C1525 0402 on 0805 pads).
 
     Returns:
-        A :class:`ValueMismatch` when the cache knows the part and its
-        value clearly disagrees; ``None`` when the part is unknown, the
-        values agree, or validation is not possible.
+        A :class:`ValueMismatch` or :class:`PackageMismatch` when the
+        cache knows the part and it clearly disagrees; ``None`` when the
+        part is unknown, both sides agree, or validation is not
+        possible.
     """
     if cache is None or not lcsc_part:
         return None
@@ -265,10 +527,19 @@ def check_lcsc_against_cache(
         return None
     if part is None:
         return None
-    return find_value_mismatch(
+    mismatch: LcscMismatch | None = find_value_mismatch(
         requested_value,
         reference,
         part_value=part.value,
         part_description=part.description,
         part_mfr=part.mfr_part,
     )
+    if mismatch is None and footprint:
+        mismatch = find_package_mismatch(
+            footprint,
+            reference,
+            part_package=part.package,
+            part_description=part.description,
+            part_mfr=part.mfr_part,
+        )
+    return mismatch

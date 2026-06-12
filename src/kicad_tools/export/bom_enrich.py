@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING
 from ..cost.suggest import PartSuggester
 from ..parts.cache import PartsCache
 from ..parts.lcsc import LCSCForbiddenError
-from .lcsc_value_check import check_lcsc_against_cache, find_value_mismatch
+from .lcsc_value_check import (
+    check_lcsc_against_cache,
+    find_package_mismatch,
+    find_value_mismatch,
+)
 
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
@@ -162,12 +166,15 @@ def enrich_bom_lcsc(
             if match is not None:
                 lcsc = match["lcsc_part"]
 
-                # Validate the cached part's known parametric value
-                # against the requested BOM value before trusting a
-                # stale entry (issue #3590: C1525/100nF assigned to a
-                # 16nF row from a poisoned cache entry).
+                # Validate the cached part's known parametric value and
+                # package against the requested BOM row before trusting
+                # a stale entry (issue #3590: C1525/100nF assigned to a
+                # 16nF row; issue #3597: C1525/0402 assigned to 0805
+                # footprints -- both from poisoned cache entries).
                 first_ref = refs[0] if refs else ""
-                mismatch = check_lcsc_against_cache(cache, lcsc, value, first_ref)
+                mismatch = check_lcsc_against_cache(
+                    cache, lcsc, value, first_ref, footprint=footprint
+                )
                 if mismatch is not None:
                     cache.delete_enrichment_match(value, footprint)
                     logger.warning(
@@ -295,13 +302,24 @@ def enrich_bom_lcsc(
                 assert best is not None  # guarded by has_suggestion
                 lcsc = best.lcsc_part
 
-                # Validate the suggested part's value against the BOM
-                # value before applying/caching (issue #3590: a wrong
-                # API match cached without validation poisons every
-                # later offline export).
+                # Validate the suggested part's value and package
+                # against the BOM row before applying/caching (issue
+                # #3590: a wrong API match cached without validation
+                # poisons every later offline export; issue #3597: a
+                # right-value/wrong-package match is just as fatal).
                 mismatch = find_value_mismatch(value, first_ref, part_description=best.description)
                 if mismatch is None:
-                    mismatch = check_lcsc_against_cache(cache, lcsc, value, first_ref)
+                    mismatch = find_package_mismatch(
+                        footprint,
+                        first_ref,
+                        part_package=best.package,
+                        part_description=best.description,
+                        part_mfr=best.mfr_part,
+                    )
+                if mismatch is None:
+                    mismatch = check_lcsc_against_cache(
+                        cache, lcsc, value, first_ref, footprint=footprint
+                    )
                 if mismatch is not None:
                     logger.warning(
                         "Rejecting LCSC auto-match %s for %s [%s]: %s",
