@@ -63,6 +63,7 @@ References:
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -550,9 +551,7 @@ def test_xtal2_failure_classified_as_trace_blocker(routed_board_03) -> None:
     if not xtal2_failures:
         # Verify XTAL2 actually has routes (not just absent from
         # routing_failures due to never being attempted).
-        xtal2_segs = sum(
-            len(r.segments) for r in router.routes if r.net == xtal2_id
-        )
+        xtal2_segs = sum(len(r.segments) for r in router.routes if r.net == xtal2_id)
         assert xtal2_segs > 0, (
             "XTAL2 has no failures AND no routes -- it was skipped "
             "entirely, not routed.  Check that the routing pass still "
@@ -600,13 +599,23 @@ def test_xtal2_failure_classified_as_trace_blocker(routed_board_03) -> None:
 
 
 @pytest.fixture(scope="module")
-def regenerated_board() -> Path:
-    """Regenerate the board's schematic + PCB from source and return BOARD_DIR.
+def regenerated_board(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Regenerate the board's schematic + PCB into a TEMP dir and return it.
 
     Running the generators from scratch is the most direct way to assert
     "the generator emits the right components" — relying on the committed
     output files would let a generator regression slip through if someone
     happens to manually re-export the PCB later.
+
+    Issue #3580: the generators MUST NOT write into the committed
+    ``boards/03-usb-joystick/output/`` directory.  Under ``pytest -n
+    auto`` (xdist) other workers read the committed artifacts in
+    parallel (e.g. ``tests/test_fleet_45_census.py``,
+    ``tests/test_manifest_integrity.py``) and can observe a truncated
+    mid-write file; an in-place rewrite also silently clobbers the
+    committed artifact in the working tree (the board-03 incident on
+    PR #3589).  Both generator scripts accept an explicit output path,
+    so we regenerate into a per-module temp dir instead.
 
     Skips the test if a generator script is missing (e.g. the board was
     relocated by a future refactor without updating this test), or if no
@@ -630,13 +639,15 @@ def regenerated_board() -> Path:
             "KICAD_SYMBOL_DIR."
         )
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = tmp_path_factory.mktemp("board03_regen")
 
     # Regenerate schematic FIRST so the PCB sync check below compares
     # against a same-run schematic (avoids false negatives from stale
     # committed output files that pre-date a generator change).
+    # ``generate_schematic.py`` accepts a directory and appends the
+    # default filename (``usb_joystick.kicad_sch``).
     sch_proc = subprocess.run(
-        [sys.executable, str(GEN_SCH_SCRIPT)],
+        [sys.executable, str(GEN_SCH_SCRIPT), str(out_dir)],
         capture_output=True,
         text=True,
         timeout=120,
@@ -650,8 +661,12 @@ def regenerated_board() -> Path:
             f"stderr:\n{sch_proc.stderr[-2000:]}"
         )
 
+    # ``generate_pcb.py`` joins its positional arg onto the script dir;
+    # passing an ABSOLUTE path short-circuits the join (pathlib
+    # semantics), so the PCB lands in the temp dir, never in
+    # ``boards/03-usb-joystick/output/``.
     pcb_proc = subprocess.run(
-        [sys.executable, str(GEN_PCB_SCRIPT)],
+        [sys.executable, str(GEN_PCB_SCRIPT), str(out_dir / "usb_joystick.kicad_pcb")],
         capture_output=True,
         text=True,
         timeout=60,
@@ -665,7 +680,7 @@ def regenerated_board() -> Path:
             f"stderr:\n{pcb_proc.stderr[-2000:]}"
         )
 
-    return BOARD_DIR
+    return out_dir
 
 
 def test_generated_pcb_contains_required_refs(regenerated_board: Path) -> None:
@@ -675,7 +690,7 @@ def test_generated_pcb_contains_required_refs(regenerated_board: Path) -> None:
     precisely targets the issue #2744 root cause (PCB generator missed
     the schematic-emitted load caps + joystick filter parts).
     """
-    pcb_text = PCB_FILE.read_text()
+    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
     missing = [ref for ref in REQUIRED_PCB_REFS if f'reference "{ref}"' not in pcb_text]
     assert not missing, (
         f"generate_pcb.py is missing schematic-side refs from the PCB "
@@ -702,8 +717,8 @@ def test_pcb_sync_clean_against_schematic(regenerated_board: Path) -> None:
             "kicad_tools.cli",
             "validate",
             "--sync",
-            str(SCH_FILE),
-            str(PCB_FILE),
+            str(regenerated_board / "usb_joystick.kicad_sch"),
+            str(regenerated_board / "usb_joystick.kicad_pcb"),
         ],
         capture_output=True,
         text=True,
@@ -773,14 +788,33 @@ def test_route_demo_achieves_minimum_completion(regenerated_board: Path) -> None
     A hard timeout of 600 s guards against router hangs (the curator
     observed a 355 s timeout on net 2/13 in the pre-fix audit; this
     test budget is generous).
+
+    Issue #3580: the demo is pointed at the regenerated TEMP input and a
+    TEMP output path so it never rewrites the committed
+    ``boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb`` (the
+    in-place rewrite clobbered PR #3589's refill-only artifact and races
+    parallel xdist readers of the committed file).  ``route_demo.py``
+    joins its positional args onto the board dir; absolute paths
+    short-circuit the join (pathlib semantics).
     """
+    routed_tmp = regenerated_board / "usb_joystick_routed.kicad_pcb"
+    # PYTHONDONTWRITEBYTECODE: route_demo.py imports generate_design
+    # from the board dir; without this the import drops a __pycache__/
+    # into boards/03-usb-joystick/, dirtying the working tree.
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     proc = subprocess.run(
-        [sys.executable, str(ROUTE_DEMO_SCRIPT)],
+        [
+            sys.executable,
+            str(ROUTE_DEMO_SCRIPT),
+            str(regenerated_board / "usb_joystick.kicad_pcb"),
+            str(routed_tmp),
+        ],
         capture_output=True,
         text=True,
         timeout=600,
         check=False,
         cwd=str(BOARD_DIR),
+        env=env,
     )
     # route_demo.py returns 0 on DRC-clean, 1 on DRC errors.  Either
     # exit code is acceptable here — we are pinning routing completion,
@@ -898,9 +932,7 @@ def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
     try:
         data = _json.loads(json_text)
     except _json.JSONDecodeError:
-        pytest.fail(
-            f"Could not parse fix-drc JSON output:\n{proc.stdout[-2000:]}"
-        )
+        pytest.fail(f"Could not parse fix-drc JSON output:\n{proc.stdout[-2000:]}")
 
     total_violations = data.get("total_violations", 0)
     total_repaired = data.get("total_repaired", 0)
@@ -1049,7 +1081,7 @@ def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> No
     Parses the ``.kicad_pcb`` text directly with regex; no KiCad
     dependency required for the assertion.
     """
-    pcb_text = PCB_FILE.read_text()
+    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
 
     # Each ``(footprint ...)`` block contains a ``(reference "REF")`` and
     # an ``(at X Y [ROT])`` line for the footprint origin.  We use
@@ -1074,9 +1106,7 @@ def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> No
             next_fp = pcb_text.find("(footprint", m.end())
             block_end = next_fp if next_fp != -1 else len(pcb_text)
             block = pcb_text[block_start:block_end]
-            ref_m = re.search(
-                rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block
-            )
+            ref_m = re.search(rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block)
             if ref_m:
                 return float(m.group(1))
         return None
@@ -1089,8 +1119,7 @@ def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> No
         "Did generate_crystal() get removed?"
     )
     assert u1_x is not None, (
-        "U1 (MCU) footprint not found in regenerated board 03 PCB.  "
-        "Did the MCU helper get renamed?"
+        "U1 (MCU) footprint not found in regenerated board 03 PCB.  Did the MCU helper get renamed?"
     )
 
     assert y1_x < u1_x, (
@@ -1214,7 +1243,7 @@ def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
     plus a small safety margin).  J2's body (which extends beyond the
     PCB south edge by design) is unaffected -- the nudge is in X only.
     """
-    pcb_text = PCB_FILE.read_text()
+    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
 
     # Find J2's footprint position.
     def _find_footprint_xy(ref: str) -> tuple[float, float] | None:
@@ -1228,9 +1257,7 @@ def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
             next_fp = pcb_text.find("(footprint", m.end())
             block_end = next_fp if next_fp != -1 else len(pcb_text)
             block = pcb_text[block_start:block_end]
-            ref_m = re.search(
-                rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block
-            )
+            ref_m = re.search(rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block)
             if ref_m:
                 return float(m.group(1)), float(m.group(2))
         return None

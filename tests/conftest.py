@@ -1,8 +1,91 @@
 """Pytest fixtures for kicad-tools tests."""
 
+import hashlib
+import subprocess
 from pathlib import Path
 
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _committed_board_output_files() -> list[str]:
+    """Return git-tracked files under any ``boards/**/output/`` directory.
+
+    Returns an empty list when git is unavailable (e.g. running from an
+    sdist) so the guard degrades to a no-op instead of erroring.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "boards"],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    paths = proc.stdout.decode("utf-8", errors="replace").split("\0")
+    return [p for p in paths if p and "/output/" in p]
+
+
+def _snapshot_hashes(rel_paths: list[str]) -> dict[str, str | None]:
+    """Map each tracked path to its content SHA-256 (None if missing)."""
+    snap: dict[str, str | None] = {}
+    for rel in rel_paths:
+        f = REPO_ROOT / rel
+        try:
+            snap[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError:
+            snap[rel] = None
+    return snap
+
+
+@pytest.fixture(scope="session", autouse=True)
+def committed_board_artifacts_guard():
+    """Fail loudly if the test session modifies committed board artifacts.
+
+    Issue #3580: tests that exercised route demos / board recipes used to
+    rewrite committed artifacts under ``boards/*/output/`` IN PLACE
+    (e.g. ``charlieplex_3x3_routed.kicad_pcb``), racing parallel xdist
+    workers that READ those files (``tests/test_fleet_45_census.py``
+    failed with "census matched no segments" on PR #3575) and silently
+    clobbering committed artifacts in the working tree (the board-03
+    incident on PR #3589).
+
+    This guard snapshots SHA-256 hashes of every git-tracked file under
+    ``boards/**/output/`` at session start and asserts they are
+    unchanged at session end, naming the offending files.  Any test that
+    needs to route / regenerate a board must copy the inputs to a temp
+    dir first (pattern: ``tests/router/test_board03_routing_baseline.py``).
+
+    Notes:
+    - Under ``pytest -n auto`` each xdist worker runs its own session
+      and therefore its own snapshot/verify pair; a writer fails its own
+      worker's teardown (and typically every later-finishing worker's).
+    - The full snapshot is ~10 MB / ~115 files, so the two hashing
+      passes cost well under a second.
+    - Deliberate artifact refreshes are normal DEVELOPMENT actions
+      (run the board recipe directly, then commit); they should never
+      happen as a side effect of running the test suite.
+    """
+    tracked = _committed_board_output_files()
+    before = _snapshot_hashes(tracked)
+    yield
+    after = _snapshot_hashes(tracked)
+    changed = sorted(rel for rel in before if before[rel] != after[rel])
+    if changed:
+        listing = "\n".join(f"  - {rel}" for rel in changed)
+        raise AssertionError(
+            "Issue #3580 guard: the test session MODIFIED committed board "
+            "artifacts in place:\n"
+            f"{listing}\n"
+            "Tests must never write into boards/*/output/ — route or "
+            "regenerate into a temp directory instead (see "
+            "tests/router/test_board03_routing_baseline.py for the "
+            "pattern).  In-place writes race parallel xdist readers of "
+            "the committed artifacts and clobber the working tree.\n"
+            "Restore the files with: git checkout -- " + " ".join(changed)
+        )
 
 
 @pytest.fixture
