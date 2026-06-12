@@ -9911,10 +9911,13 @@ class Autorouter:
         grid resolution (beyond ``drc_verify_and_nudge``'s plausible snap
         reach) is demoted to unrouted instead of shipped.
 
-        Uses :meth:`RoutingGrid.worst_segment_pad_deficit` -- rect-aware
+        Uses :meth:`RoutingGrid.worst_segment_pad_deficit` and (Issue
+        #3566) :meth:`RoutingGrid.worst_via_pad_deficit` -- rect-aware
         exact geometry with per-component clearances and the net-aware
         same-component carve-out -- so fine-pitch escapes and relaxed
         same-component corridors (#1764 / #2452) never trigger demotion.
+        The via quadrant guarantees the contract on BOTH backends even
+        though only the pre-#3566 Python fallback could place such vias.
 
         Args:
             net_routes: Mapping of net ID to committed routes (mutated:
@@ -9937,6 +9940,20 @@ class Autorouter:
                 for seg in route.segments:
                     deficit, loc = self.grid.worst_segment_pad_deficit(
                         seg,
+                        exclude_net=net,
+                        component_pitches=pitches,
+                        exclude_refs=own_refs or None,
+                    )
+                    if deficit > worst_deficit:
+                        worst_deficit = deficit
+                        worst_loc = loc
+                # Issue #3566: via quadrant.  The #3545 backstop iterated
+                # segments only, so a sub-clearance via next to a foreign
+                # pad shipped uncaught (the Python fallback backend's
+                # ``_is_via_blocked`` lacked the static-halo gate).
+                for via in route.vias:
+                    deficit, loc = self.grid.worst_via_pad_deficit(
+                        via,
                         exclude_net=net,
                         component_pitches=pitches,
                         exclude_refs=own_refs or None,

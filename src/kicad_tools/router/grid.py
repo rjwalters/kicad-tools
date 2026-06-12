@@ -2809,6 +2809,102 @@ class RoutingGrid:
 
         return worst_deficit, worst_loc
 
+    def worst_via_pad_deficit(
+        self,
+        via: Via,
+        exclude_net: int,
+        component_pitches: dict[str, float] | None = None,
+        exclude_refs: set[str] | None = None,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """Worst via-vs-FOREIGN-pad clearance deficit for one via.
+
+        Issue #3566 (finalization backstop, via quadrant): sibling of
+        :meth:`worst_segment_pad_deficit` for vias.  The #3545 backstop
+        iterated ``route.segments`` only, so a sub-clearance via next to
+        a foreign pad (placeable pre-#3566 on the Python fallback
+        backend, whose ``_is_via_blocked`` lacked the static-halo gate)
+        shipped uncaught until exact KiCad DRC.  Consumed by
+        ``Autorouter._demote_pad_clearance_violation_nets`` so the
+        finalization contract covers vias on BOTH backends.
+
+        Uses the same per-component clearances and the NET-AWARE
+        same-component carve-out as the segment sibling, so the backstop
+        never fires on legitimate fine-pitch escapes or relaxed
+        same-component corridors.  In-pad escape vias (#2605) sit on
+        their OWN net's pad, which the same-net exclusion already skips.
+
+        Args:
+            via: The committed via to check.
+            exclude_net: The via's net (same-net pads are skipped).
+            component_pitches: Optional ref -> pin pitch map for
+                automatic fine-pitch clearance detection.
+            exclude_refs: Refs of the net's own components (the
+                same-component carve-out is only consulted for these).
+
+        Returns:
+            ``(worst_deficit, worst_location)`` where ``worst_deficit``
+            is ``max(required_clearance - actual_clearance)`` over all
+            checked pads (<= 0 means no violation) and
+            ``worst_location`` is the violating pad center (or ``None``).
+        """
+        min_clearance = self.rules.trace_clearance
+        via_radius = via.diameter / 2
+        worst_deficit = 0.0
+        worst_loc: tuple[float, float] | None = None
+
+        # Layer span of the via (indices, inclusive).  SMD pads on layers
+        # outside this span never interact with the via barrel/annulus.
+        via_idx_a = self.layer_to_index(via.layers[0].value)
+        via_idx_b = self.layer_to_index(via.layers[1].value)
+        via_lo, via_hi = min(via_idx_a, via_idx_b), max(via_idx_a, via_idx_b)
+
+        for pad in self._pads:
+            if pad.net == exclude_net:
+                continue
+
+            if not pad.through_hole:
+                pad_layer_idx = self.layer_to_index(pad.layer.value)
+                if not (via_lo <= pad_layer_idx <= via_hi):
+                    continue
+
+            pad_ref = pad.ref
+            pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
+            required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+
+            # Issue #3545 net-aware carve-out (see validate_segment_clearance)
+            same_component_signal_carveout = (
+                exclude_refs
+                and pad.ref in exclude_refs
+                and not _is_plane_net_pad(pad)
+                and self._same_component_carveout_active(
+                    pad.ref, required_clearance, min_clearance, component_pitches
+                )
+            )
+
+            is_circular_pad = abs(pad.width - pad.height) < 0.001
+            if is_circular_pad:
+                pad_radius = max(pad.width, pad.height) / 2
+                dist = math.hypot(via.x - pad.x, via.y - pad.y)
+                clearance = dist - via_radius - pad_radius
+            else:
+                # Degenerate (point) segment: distance from the pad rect
+                # boundary to the via center.
+                center_dist = _rect_segment_centerline_distance(
+                    pad.x, pad.y, pad.width, pad.height,
+                    via.x, via.y, via.x, via.y,
+                )
+                clearance = center_dist - via_radius
+
+            if same_component_signal_carveout and clearance >= 0:
+                continue
+
+            deficit = required_clearance - clearance
+            if deficit > worst_deficit:
+                worst_deficit = deficit
+                worst_loc = (pad.x, pad.y)
+
+        return worst_deficit, worst_loc
+
     def validate_segment_clearance(
         self,
         seg: Segment,
