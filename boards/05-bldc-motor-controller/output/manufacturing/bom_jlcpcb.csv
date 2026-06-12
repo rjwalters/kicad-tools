@@ -1,5 +1,5 @@
 Comment,Designator,Footprint,LCSC Part #
-100nF,"C12,C13,C14,C15,C2,C7,C8",Capacitor_SMD:C_0805_2012Metric,C1525
+100nF,"C12,C13,C14,C15,C2,C7,C8",Capacitor_SMD:C_0805_2012Metric,C49678
 10k,"R30,R31,R32",Resistor_SMD:R_0805_2012Metric,C17414
 10nF,"C30,C31,C32",Capacitor_SMD:C_0805_2012Metric,
 10uF,C6,Capacitor_SMD:C_0805_2012Metric,C15850
