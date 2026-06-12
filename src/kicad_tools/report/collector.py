@@ -890,6 +890,33 @@ class ReportDataCollector:
         "USB": ["D+", "D-", "VBUS", "USB_D"],
     }
 
+    # Protocols whose signals are single-ended.  Differential-pair nets
+    # (polarity-suffixed ``...+``/``...-`` or ``..._P``/``..._N``) and nets
+    # belonging to known high-speed serial interfaces must never be claimed
+    # by these protocols (e.g. ``PCIE_RX+`` is not a UART RX line).
+    _SINGLE_ENDED_PROTOCOLS: frozenset[str] = frozenset({"I2C", "SPI", "I2S", "UART"})
+
+    # Net-name prefixes for high-speed serial interfaces that use TX/RX
+    # (and similar) signal names but are not single-ended protocols.
+    _HIGH_SPEED_PREFIXES: tuple[str, ...] = ("PCIE_", "USB3_", "LVDS_", "MIPI_")
+
+    @classmethod
+    def _is_high_speed_or_differential(cls, label_text: str) -> bool:
+        """Return True for differential-pair or high-speed serial net names.
+
+        Such nets (``PCIE_RX+``, ``USB3_TX2-``, ``LVDS_D0_P`` ...) must be
+        excluded from single-ended protocol detection (UART/SPI/I2C/I2S).
+        ``label_text`` is expected to be upper-cased.
+        """
+        if label_text.startswith(cls._HIGH_SPEED_PREFIXES):
+            return True
+        # Polarity suffix conventions for differential pairs.
+        if label_text.endswith(("+", "-")):
+            return True
+        if label_text.endswith(("_P", "_N")) and len(label_text) > 2:
+            return True
+        return False
+
     def _detect_interfaces(
         self, sch: Any, sch_path: Path
     ) -> list[dict[str, Any]] | None:
@@ -931,14 +958,27 @@ class ReportDataCollector:
                     exc_info=True,
                 )
 
+        # Sort labels so pattern matching (first match wins) is
+        # deterministic across runs: ``all_labels`` is a set, and iterating
+        # it directly is hash-order (PYTHONHASHSEED) dependent, which
+        # caused identical inputs to produce different report rows.
+        sorted_labels = sorted(all_labels)
+
         detected: list[dict[str, Any]] = []
         for protocol, patterns in self._INTERFACE_PATTERNS.items():
+            single_ended = protocol in self._SINGLE_ENDED_PROTOCOLS
             matched = []
             for pattern in patterns:
-                for label_text in all_labels:
-                    if pattern in label_text:
-                        matched.append(label_text)
-                        break  # one match per pattern is enough
+                for label_text in sorted_labels:
+                    if pattern not in label_text:
+                        continue
+                    # Differential-pair / high-speed nets (PCIE_RX+,
+                    # USB3_TX2+, ...) must not satisfy single-ended
+                    # protocol patterns such as UART TX/RX.
+                    if single_ended and self._is_high_speed_or_differential(label_text):
+                        continue
+                    matched.append(label_text)
+                    break  # one match per pattern is enough
             if len(matched) >= 2:
                 detected.append(
                     {"protocol": protocol, "signals": sorted(set(matched))}
