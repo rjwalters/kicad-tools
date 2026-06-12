@@ -38,7 +38,7 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Protocol | Signals |
 |----------|---------|
-| UART | PCIE_RX+, PCIE_TX- |
+| UART | PCIE_RX-, USB3_TX2+ |
 | USB | USB2_D+, USB2_D-, VBUS_USB |
 
 ### Power Architecture
