@@ -35,10 +35,31 @@ _PCB_FOOTER = """\
 """
 
 
+def _make_outline_footer(origin: tuple[float, float], size: float = 50.0) -> str:
+    """Build an Edge.Cuts gr_line rectangle footer at an arbitrary origin.
+
+    Coordinates are sheet-absolute (the KiCad file format), so a non-zero
+    *origin* produces a board whose ``PCB.board_origin`` is non-zero --
+    exercising the board-relative coordinate conversion in
+    ``PCB._detect_board_origin()``.
+    """
+    x0, y0 = origin
+    x1, y1 = x0 + size, y0 + size
+    stroke = '(stroke (width 0.05) (type default)) (layer "Edge.Cuts")'
+    return (
+        f"  (gr_line (start {x0:g} {y0:g}) (end {x1:g} {y0:g}) {stroke})\n"
+        f"  (gr_line (start {x1:g} {y0:g}) (end {x1:g} {y1:g}) {stroke})\n"
+        f"  (gr_line (start {x1:g} {y1:g}) (end {x0:g} {y1:g}) {stroke})\n"
+        f"  (gr_line (start {x0:g} {y1:g}) (end {x0:g} {y0:g}) {stroke})\n"
+        ")\n"
+    )
+
+
 def _make_pcb(
     net_defs: list[tuple[int, str]],
     pad_nets: list[tuple[int, str]],
     zones: list[str] | None = None,
+    origin: tuple[float, float] = (0.0, 0.0),
 ) -> str:
     """Build a minimal PCB string.
 
@@ -47,14 +68,18 @@ def _make_pcb(
         pad_nets: (net_id, net_name) pairs for pad references inside a
             dummy footprint.
         zones: Optional list of zone S-expression strings to insert.
+        origin: Sheet-absolute position of the board outline's top-left
+            corner.  Non-zero values (e.g. ``(100, 100)`` like board 03)
+            give the board a non-zero ``PCB.board_origin``.
     """
     parts = [_PCB_HEADER]
     parts.append('  (net 0 "")\n')
     for nid, name in net_defs:
         parts.append(f'  (net {nid} "{name}")\n')
 
-    # Single dummy footprint with pads
-    parts.append('  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 10 10)\n')
+    # Single dummy footprint with pads (placed 10mm inside the outline)
+    fp_x, fp_y = origin[0] + 10, origin[1] + 10
+    parts.append(f'  (footprint "TestLib:TestPkg" (layer "F.Cu") (at {fp_x:g} {fp_y:g})\n')
     for idx, (nid, name) in enumerate(pad_nets):
         x_off = idx * 2.0
         parts.append(
@@ -68,7 +93,10 @@ def _make_pcb(
         for z in zones:
             parts.append(f"  {z}\n")
 
-    parts.append(_PCB_FOOTER)
+    if origin == (0.0, 0.0):
+        parts.append(_PCB_FOOTER)
+    else:
+        parts.append(_make_outline_footer(origin))
     return "".join(parts)
 
 
@@ -458,8 +486,8 @@ class TestAutoPourIfMissing:
         xy_matches = re.findall(r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text)
         assert len(xy_matches) > 0, "No zone polygon coordinates found"
 
-        for x_str, y_str in xy_matches:
-            x, y = float(x_str), float(y_str)
+        for x_str, _y_str in xy_matches:
+            x = float(x_str)
             assert x >= 0.3 - 0.01, f"X coord {x} too close to left edge (expected >= 0.3)"
             assert x <= 49.7 + 0.01, f"X coord {x} too close to right edge (expected <= 49.7)"
 
@@ -603,6 +631,129 @@ class TestAutoPourIfMissing:
         # VCC's original inset polygon must still be present verbatim.
         assert "(xy 0.3 0.3)" in text
         assert "(xy 49.7 0.3)" in text
+
+
+class TestNonZeroBoardOrigin:
+    """Zone preservation/reinset on boards with a non-zero origin (#3461).
+
+    Regression tests for the double origin-subtraction bug fixed in
+    PR #3453 (issue #3410): ``Zone.polygon`` vertices are ALREADY
+    board-relative after ``PCB._detect_board_origin()`` runs, but
+    ``_detect_uninset_zones`` used to subtract ``pcb.board_origin`` a
+    second time.  On any board whose Edge.Cuts origin is non-zero
+    (e.g. board 03 at 100,100) that pushed every vertex of a
+    properly-inset zone out to ~-origin, so the zone was flagged
+    "insufficient edge clearance", silently deleted, and replaced
+    with a conflicting auto-pour zone.
+
+    All other zone-preservation tests in this file use boards at
+    origin (0,0), where the buggy subtraction is a no-op -- so a
+    re-regression would pass the entire fast suite.  These tests pin
+    the non-zero-origin behavior directly.
+    """
+
+    # Board 03's convention: outline top-left corner at sheet (100, 100).
+    ORIGIN = (100.0, 100.0)
+
+    def test_preserves_inset_zone_at_nonzero_origin(self, tmp_path: Path):
+        """A properly-inset hand-tuned zone on an offset board is preserved.
+
+        The zone polygon below is written in sheet-absolute coordinates
+        (as KiCad stores it): inset 0.3mm from the 100..150 outline.
+        After load it is board-relative (0.3..49.7).  With the
+        double-subtraction bug, _detect_uninset_zones saw vertices at
+        ~(-99.7..-50.3), flagged the zone as un-inset, and deleted it.
+        """
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        zone_gnd_inset = (
+            '(zone (net 1) (net_name "GND") (layer "B.Cu") (hatch edge 0.5) '
+            "(connect_pads (clearance 0.25)) "
+            "(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
+            "(polygon (pts (xy 100.3 100.3) (xy 149.7 100.3) "
+            "(xy 149.7 149.7) (xy 100.3 149.7))))"
+        )
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "SDA")],
+            pad_nets=[(1, "GND"), (2, "SDA")],
+            zones=[zone_gnd_inset],
+            origin=self.ORIGIN,
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, edge_clearance=0.3)
+
+        # GND already has a properly-inset zone: nothing to create.
+        assert count == 0, (
+            f"Expected the inset GND zone to be preserved (count=0), "
+            f"got count={count} names={names} -- the zone was likely "
+            f"flagged as un-inset due to origin mishandling"
+        )
+        assert names == []
+
+        # The original hand-tuned polygon must survive verbatim.
+        text = pcb_path.read_text()
+        assert "(xy 100.3 100.3)" in text, (
+            "Hand-tuned zone polygon was removed/regenerated despite "
+            "having proper edge clearance on a non-zero-origin board"
+        )
+        assert "(xy 149.7 149.7)" in text
+
+    def test_reinsets_uninset_zone_at_nonzero_origin(self, tmp_path: Path):
+        """A genuinely un-inset zone on an offset board is still detected.
+
+        Companion case: detection must not be broken in the other
+        direction either (e.g. by skipping the check entirely on
+        offset boards).  A zone at the exact 100..150 board edge must
+        be removed and regenerated with the 0.3mm inset.
+        """
+        import re
+
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+
+        zone_gnd_at_edge = (
+            '(zone (net 1) (net_name "GND") (layer "B.Cu") (hatch edge 0.5) '
+            "(connect_pads (clearance 0.25)) "
+            "(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
+            "(polygon (pts (xy 100 100) (xy 150 100) "
+            "(xy 150 150) (xy 100 150))))"
+        )
+        pcb = _make_pcb(
+            net_defs=[(1, "GND"), (2, "SDA")],
+            pad_nets=[(1, "GND"), (2, "SDA")],
+            zones=[zone_gnd_at_edge],
+            origin=self.ORIGIN,
+        )
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        count, names = auto_pour_if_missing(pcb_path, edge_clearance=0.3)
+
+        assert count == 1
+        assert "GND" in names
+
+        text = pcb_path.read_text()
+        # Exactly one zone block: the un-inset original was removed.
+        zone_count = len(re.findall(r"\(zone\b", text))
+        assert zone_count == 1, f"Expected exactly 1 zone block after reinset, got {zone_count}"
+        # Every polygon vertex must be inset 0.3mm from the board edge
+        # in whatever coordinate space the generator wrote (board 0..50
+        # plus optional 100,100 sheet offset both satisfy the modular
+        # check below by validating against the matching edge box).
+        xy_matches = re.findall(r"\(xy\s+([\d.e+-]+)\s+([\d.e+-]+)\)", text)
+        assert len(xy_matches) > 0, "No zone polygon coordinates found"
+        xs = [float(x) for x, _ in xy_matches]
+        ys = [float(y) for _, y in xy_matches]
+        # Determine which space the writer used from the data itself.
+        x_base = 100.0 if min(xs) > 50.0 else 0.0
+        y_base = 100.0 if min(ys) > 50.0 else 0.0
+        for x in xs:
+            assert x >= x_base + 0.3 - 0.01, f"X coord {x} too close to left edge"
+            assert x <= x_base + 49.7 + 0.01, f"X coord {x} too close to right edge"
+        for y in ys:
+            assert y >= y_base + 0.3 - 0.01, f"Y coord {y} too close to top edge"
+            assert y <= y_base + 49.7 + 0.01, f"Y coord {y} too close to bottom edge"
 
 
 class TestErcMarkerNetExclusion:
