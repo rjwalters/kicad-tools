@@ -85,7 +85,9 @@ class BlockRouter:
 
         self.block = block
         self.rules = rules
-        self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
+        # Issue #3524: copy the default map instead of aliasing the
+        # module-level singleton -- in-place writes must stay local.
+        self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
         self.layer_stack = layer_stack or LayerStack.two_layer()
         self.margin = margin
         self._force_python = force_python

@@ -199,21 +199,33 @@ def test_three_pad_no_swap_routes_all_pads():
 def _polarity_swap_router() -> Autorouter:
     """USB-C-shaped fixture with mirrored polarity at source vs sink.
 
-    Source: P at (10, 10), N at (12, 10)  — P-left, N-right
-    Sink (cluster A): P at (28, 9.75), N at (30, 9.75)  — P-left, N-right
-    Sink (cluster B, same net pads): P at (30, 11.25), N at (28, 11.25)
+    Source: P at (4, 4), N at (6, 4)  — P-left, N-right
+    Sink (cluster A): P at (10, 3.75), N at (12, 3.75)  — P-left, N-right
+    Sink (cluster B, same net pads): P at (12, 5.25), N at (10, 5.25)
                                      — P-RIGHT, N-LEFT (polarity inverted)
+
+    Issue #3524: this fixture was originally a 40x20mm board with 16mm
+    between the MCU and connector clusters, which drove the pure-Python
+    coupled A* (plus coverage tracing) to ~60s serially and past the
+    300s module budget under full-suite xdist CPU contention.  The
+    geometry is scaled down to a 16x8mm board with 4mm between clusters
+    -- the polarity-swap shape (mirrored P/N orientation on connector
+    row B, single connector cluster, stub absorption) and the exercised
+    code path (coupled attempt -> independent fallback; the coupled
+    open phase failed on the original geometry too) are preserved
+    exactly, but the route completes in well under a second of router
+    time serially.
     """
     rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
-    router = Autorouter(width=40.0, height=20.0, rules=rules)
+    router = Autorouter(width=16.0, height=8.0, rules=rules)
 
     # MCU side
     router.add_component(
         "U1",
         [
-            {"number": "29", "x": 10.0, "y": 10.0, "width": 0.4, "height": 0.4,
+            {"number": "29", "x": 4.0, "y": 4.0, "width": 0.4, "height": 0.4,
              "net": 1, "net_name": "USB_D+"},
-            {"number": "28", "x": 12.0, "y": 10.0, "width": 0.4, "height": 0.4,
+            {"number": "28", "x": 6.0, "y": 4.0, "width": 0.4, "height": 0.4,
              "net": 2, "net_name": "USB_D-"},
         ],
     )
@@ -222,13 +234,13 @@ def _polarity_swap_router() -> Autorouter:
     router.add_component(
         "J1",
         [
-            {"number": "A6", "x": 28.0, "y": 9.75, "width": 0.25, "height": 0.35,
+            {"number": "A6", "x": 10.0, "y": 3.75, "width": 0.25, "height": 0.35,
              "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 30.0, "y": 9.75, "width": 0.25, "height": 0.35,
+            {"number": "A7", "x": 12.0, "y": 3.75, "width": 0.25, "height": 0.35,
              "net": 2, "net_name": "USB_D-"},
-            {"number": "B6", "x": 30.0, "y": 11.25, "width": 0.25, "height": 0.35,
+            {"number": "B6", "x": 12.0, "y": 5.25, "width": 0.25, "height": 0.35,
              "net": 1, "net_name": "USB_D+"},
-            {"number": "B7", "x": 28.0, "y": 11.25, "width": 0.25, "height": 0.35,
+            {"number": "B7", "x": 10.0, "y": 5.25, "width": 0.25, "height": 0.35,
              "net": 2, "net_name": "USB_D-"},
         ],
     )
@@ -257,10 +269,6 @@ def test_polarity_swap_detected_in_pair_up():
     )
 
 
-@pytest.mark.xfail(
-    reason="pure-Python coupled A* exceeds 300s under full-suite xdist contention -- see issue #3524",
-    strict=False,
-)
 def test_polarity_swap_routes_all_nets():
     """The coupled router still produces routes for both nets when polarity swaps."""
     router = _polarity_swap_router()

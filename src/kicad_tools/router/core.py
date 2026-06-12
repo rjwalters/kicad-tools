@@ -761,7 +761,12 @@ class Autorouter:
                 the ``--max-search-iterations`` CLI flag.
         """
         self.rules = rules or DesignRules()
-        self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
+        # Issue #3524: copy the default map instead of aliasing it.  The
+        # autorouter writes per-net overrides into ``self.net_class_map``
+        # (impedance synthesis, diff-pair partner wiring, matrix layer
+        # preferences); aliasing the module-level singleton leaked those
+        # writes into every later Autorouter in the same process.
+        self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
         self.layer_stack = layer_stack
         self._force_python = force_python
         # Issue #2610: stored so _create_grid_and_routers can pass it to
