@@ -141,18 +141,21 @@ def test_dormant_partner_optimized_path(benchmark, dormant_partner_fixture):
     assert result is False or result is True
 
 
-def test_dormant_partner_optimized_not_slower():
-    """Direct comparison: optimized path must be at least as fast as legacy.
+def _measure_dormant_ratio(
+    n_trials: int = 5, n_iters: int = 20_000
+) -> tuple[float, float, float]:
+    """Measure the optimized/legacy dormant-path timing ratio robustly.
 
-    Uses ``timeit`` (not pytest-benchmark) so this test asserts a stable
-    relative ratio that is CI-safe.  We allow up to 5% slack to absorb
-    timing noise on busy CI hosts.
+    Runs ``n_trials`` *interleaved* (legacy, optimized) ``timeit`` trials
+    and takes the **minimum** time for each path.  Interleaving means a
+    transient CPU-contention spike (xdist sibling workers, shared CI
+    runner neighbors) hits both paths roughly equally instead of biasing
+    one; taking the min discards trials polluted by scheduler noise --
+    the minimum is the best estimator of true cost for a deterministic
+    micro-benchmark.
 
-    Issue #2715 acceptance criterion: dormant-path cost within 2% of
-    pre-#2586 baseline.  Since the pre-#2586 signature did not accept
-    partner kwargs at all, the closest reproducible measurement is the
-    optimized path that skips the tuple eval -- which serves as the
-    "no-tuple-cost" baseline.
+    Returns:
+        (ratio, legacy_min, optimized_min)
     """
     router, net, radius = _build_dense_grid()
     gx = router.grid.cols // 2
@@ -180,19 +183,65 @@ def test_dormant_partner_optimized_not_slower():
         legacy()
         optimized()
 
-    # Time both paths over a large iteration count for stability.
-    n_iters = 50_000
-    legacy_time = timeit.timeit(legacy, number=n_iters)
-    optimized_time = timeit.timeit(optimized, number=n_iters)
+    legacy_min = float("inf")
+    optimized_min = float("inf")
+    for _ in range(n_trials):
+        legacy_min = min(legacy_min, timeit.timeit(legacy, number=n_iters))
+        optimized_min = min(optimized_min, timeit.timeit(optimized, number=n_iters))
 
-    # Optimized must not be more than 5% slower than legacy (CI noise
-    # absorption).  In practice we expect optimized < legacy because
-    # we skip a 4-condition tuple eval on every call.
-    ratio = optimized_time / legacy_time
+    return optimized_min / legacy_min, legacy_min, optimized_min
+
+
+def test_dormant_partner_optimized_not_slower():
+    """Per-PR CI guard: optimized path must not be *materially* slower.
+
+    Uses interleaved min-of-N ``timeit`` trials (see
+    ``_measure_dormant_ratio``) so a transient scheduler spike cannot
+    bias a single measurement, then asserts a noise-safe 1.25x bound.
+
+    Noise budget (issue #3581): the previous single-trial 1.05x
+    threshold failed at **1.065x** on a shared GitHub Actions runner
+    (PR #3575, run 27391284030 -- an artifact-only PR with no router
+    code changes; the same commit passed on rerun).  A 5% margin is
+    below the noise floor of shared runners with xdist CPU contention.
+    1.25x sits comfortably above observed noise (~6.5%) while still
+    failing for any genuine regression of the magnitude that motivated
+    this benchmark (issue #2712's bisect measured ~13% per-net A*
+    slowdown; a re-introduced tuple-eval cost or worse, e.g. 2x, trips
+    this immediately).
+
+    The tight 1.05x assertion is preserved in the nightly ``slow``
+    lane (``test_dormant_partner_optimized_not_slower_tight``).
+    """
+    ratio, legacy_min, optimized_min = _measure_dormant_ratio()
+    assert ratio < 1.25, (
+        f"Optimized dormant path is {ratio:.3f}x slower than legacy "
+        f"(legacy_min={legacy_min:.4f}s, optimized_min={optimized_min:.4f}s, "
+        f"min of 5 interleaved trials x 20000 iters).  Expected ratio < 1.25 "
+        f"(CI noise budget; see issue #3581)."
+    )
+
+
+@pytest.mark.slow
+def test_dormant_partner_optimized_not_slower_tight():
+    """Nightly tight guard: optimized path within 5% of legacy.
+
+    Issue #2715 acceptance criterion: dormant-path cost within 2% of
+    pre-#2586 baseline.  Since the pre-#2586 signature did not accept
+    partner kwargs at all, the closest reproducible measurement is the
+    optimized path that skips the tuple eval -- which serves as the
+    "no-tuple-cost" baseline.
+
+    This runs only in the nightly ``slow-tests`` lane (and locally via
+    ``pytest -m slow``), where a 5% margin combined with interleaved
+    min-of-N sampling is reliable.  The per-PR gate uses a 1.25x noise
+    budget instead (see ``test_dormant_partner_optimized_not_slower``).
+    """
+    ratio, legacy_min, optimized_min = _measure_dormant_ratio()
     assert ratio < 1.05, (
         f"Optimized dormant path is {ratio:.3f}x slower than legacy "
-        f"(legacy={legacy_time:.4f}s, optimized={optimized_time:.4f}s, "
-        f"n={n_iters}).  Expected ratio < 1.05."
+        f"(legacy_min={legacy_min:.4f}s, optimized_min={optimized_min:.4f}s, "
+        f"min of 5 interleaved trials x 20000 iters).  Expected ratio < 1.05."
     )
 
 
