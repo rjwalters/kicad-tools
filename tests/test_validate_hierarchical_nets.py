@@ -40,7 +40,10 @@ HIERARCHICAL_ROOT_SCH = Path(__file__).parent / "fixtures" / "hierarchical" / "r
 # chosen to AGREE with what extract_netlist(hierarchical=True) produces
 # for every component (root + every sub-sheet). On the fixtures this is
 # the auto-generated Net-(<ref>-<pin>) form for sub-sheet pins and the
-# power-symbol names ("VCC", "GND") for the root R1 pins.
+# power-symbol names ("VCC", "GND") for the root R1 pins. Under the
+# CCW-positive rotate-then-negate-Y pin convention (#738/#2129), R1
+# pin 1 (library (0, 3.81)) is the TOP pin at (100, 46.19) touching the
+# VCC rail, and pin 2 is the BOTTOM pin at (100, 53.81) touching GND.
 HIERARCHICAL_PCB_MATCHING_NETS = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -69,8 +72,8 @@ HIERARCHICAL_PCB_MATCHING_NETS = """(kicad_pcb
     (layer "F.Cu") (uuid "fp-r1") (at 100 100)
     (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "p-r1-ref"))
     (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "p-r1-val"))
-    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
-    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu") (uuid "fp-r2") (at 110 100)
@@ -144,8 +147,8 @@ HIERARCHICAL_PCB_BAD_SUBSHEET_NET = """(kicad_pcb
     (layer "F.Cu") (uuid "fp-r1") (at 100 100)
     (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "p-r1-ref"))
     (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "p-r1-val"))
-    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
-    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu") (uuid "fp-r2") (at 110 100)
@@ -272,10 +275,6 @@ class TestCheckNetsHierarchical:
     issue #2633.
     """
 
-    @pytest.mark.xfail(
-        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
-        strict=False,
-    )
     def test_in_sync_hierarchical_reports_no_net_issues(
         self, hierarchical_matching_nets_pcb: Path
     ) -> None:
@@ -288,10 +287,6 @@ class TestCheckNetsHierarchical:
             f"{[(i.reference, i.schematic_value, i.pcb_value) for i in net_issues]}"
         )
 
-    @pytest.mark.xfail(
-        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
-        strict=False,
-    )
     def test_subsheet_net_mismatch_is_detected(
         self, hierarchical_bad_subsheet_net_pcb: Path
     ) -> None:
