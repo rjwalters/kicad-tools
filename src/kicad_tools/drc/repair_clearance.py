@@ -1897,8 +1897,11 @@ class ClearanceRepairer:
             if fp_ref.upper() != ref_upper:
                 continue
 
-            # Get position
-            at_node = fp_node.find("at")
+            # Get position. Direct child only -- pads, properties and
+            # fp_texts carry their own (at) nodes, and a recursive
+            # find() would misread a descendant's position if the
+            # footprint-level (at) were absent (issue #3602).
+            at_node = fp_node.find_child("at")
             if not at_node:
                 continue
             at_atoms = at_node.get_atoms()
@@ -1916,7 +1919,8 @@ class ClearanceRepairer:
                     locked = True
                     break
             if not locked:
-                attr_node = fp_node.find("attr")
+                # Direct child only, matching the locked lookup above.
+                attr_node = fp_node.find_child("attr")
                 if attr_node:
                     for i in range(len(attr_node.children)):
                         token = attr_node.get_string(i)
