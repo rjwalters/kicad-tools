@@ -869,15 +869,16 @@ class TestBuildNetlistFromSchematic:
         with pytest.raises(FileNotFoundError, match="Schematic not found"):
             build_netlist_from_schematic(sch_file)
 
-    @pytest.mark.xfail(
-        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
-        strict=False,
-    )
     def test_build_netlist_extracts_connectivity(self, tmp_path):
         """Test that connectivity is extracted correctly."""
         from kicad_tools.operations.netlist import build_netlist_from_schematic
 
-        # Create a schematic with two resistors connected by a labeled wire
+        # Create a schematic with two resistors connected by a labeled wire.
+        # Pin positions follow the CCW-positive rotate-then-negate-Y
+        # convention (#738/#2129): both resistors are rotated 180 degrees,
+        # so R1 pin 1 (library (0, 3.81)) lands at (100, 53.81) and R2
+        # pin 2 (library (0, -3.81)) lands at (100, 66.19) -- the two
+        # endpoints of the labeled wire.
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(
             """(kicad_sch
@@ -892,14 +893,14 @@ class TestBuildNetlistFromSchematic:
                   (symbol "R_1_1"
                     (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
                     (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
-              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+              (symbol (lib_id "Device:R") (at 100 50 180) (unit 1)
                 (in_bom yes) (on_board yes)
                 (uuid "00000000-0000-0000-0000-000000000010")
                 (property "Reference" "R1" (at 101.6 48.26 0))
                 (property "Value" "10k" (at 101.6 50.8 0))
                 (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
                 (pin "2" (uuid "00000000-0000-0000-0000-000000000012")))
-              (symbol (lib_id "Device:R") (at 100 70 0) (unit 1)
+              (symbol (lib_id "Device:R") (at 100 70 180) (unit 1)
                 (in_bom yes) (on_board yes)
                 (uuid "00000000-0000-0000-0000-000000000020")
                 (property "Reference" "R2" (at 101.6 68.26 0))
@@ -924,7 +925,8 @@ class TestBuildNetlistFromSchematic:
         assert "NODE_A" in net_names
 
         # Check the NODE_A net has the correct pins
-        # Note: With the schematic layout, wire connects R1 pin 1 (at y=53.81) to R2 pin 2 (at y=66.19)
+        # Note: With the 180-degree rotations, the wire connects
+        # R1 pin 1 (at y=53.81) to R2 pin 2 (at y=66.19)
         node_a_net = next(n for n in result.nets if n.name == "NODE_A")
         pin_refs = {(node.reference, node.pin) for node in node_a_net.nodes}
         assert ("R1", "1") in pin_refs

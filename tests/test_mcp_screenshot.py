@@ -7,6 +7,8 @@ conversion -> base64 encoding -> MCP response.
 from __future__ import annotations
 
 import base64
+import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -755,43 +757,120 @@ class TestMacosCairoLibDirs:
                 assert dirs == []
 
 
+class _FakeCairoLoader:
+    """Module loader that builds a fake ``cairosvg``/``cairocffi`` module."""
+
+    def __init__(self, finder: _FakeCairoFinder) -> None:
+        self._finder = finder
+
+    def create_module(self, spec):
+        self._finder.import_count += 1
+        module = types.ModuleType(spec.name)
+        module.svg2png = self._finder.svg2png
+        return module
+
+    def exec_module(self, module):  # pragma: no cover - nothing to execute
+        pass
+
+
+class _FakeCairoFinder:
+    """``sys.meta_path`` finder that hermetically intercepts cairo imports.
+
+    ``_try_preload_cairo_macos`` evicts cached ``cairocffi``/``cairosvg``
+    entries from ``sys.modules`` and then re-imports ``cairosvg``.  This
+    finder answers that re-import with a controlled fake module so the
+    probe outcome never depends on the host's real cairo installation.
+    """
+
+    _INTERCEPTED = ("cairosvg", "cairocffi")
+
+    def __init__(self, svg2png) -> None:
+        self.svg2png = svg2png
+        self.import_count = 0
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] not in self._INTERCEPTED:
+            return None
+        return importlib.util.spec_from_loader(fullname, _FakeCairoLoader(self))
+
+
+@pytest.fixture
+def intercept_cairo_imports():
+    """Factory fixture installing a hermetic cairo import interceptor.
+
+    Returns a callable ``install(svg2png) -> _FakeCairoFinder``.  On
+    teardown the finder is removed from ``sys.meta_path`` and any
+    ``cairocffi``/``cairosvg`` entries in ``sys.modules`` are restored to
+    their pre-test state (the function under test evicts them).
+    """
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name.split(".", 1)[0] in ("cairocffi", "cairosvg")
+    }
+    installed: list[_FakeCairoFinder] = []
+
+    def _install(svg2png) -> _FakeCairoFinder:
+        finder = _FakeCairoFinder(svg2png)
+        sys.meta_path.insert(0, finder)
+        installed.append(finder)
+        return finder
+
+    yield _install
+
+    for finder in installed:
+        if finder in sys.meta_path:
+            sys.meta_path.remove(finder)
+    for name in [n for n in sys.modules if n.split(".", 1)[0] in ("cairocffi", "cairosvg")]:
+        del sys.modules[name]
+    sys.modules.update(saved)
+
+
 class TestTryPreloadCairoMacos:
     """Tests for _try_preload_cairo_macos helper."""
 
-    @pytest.mark.xfail(
-        reason="stale vs _try_preload_cairo_macos rewrite (DYLD env-var approach) -- see issue #3520",
-        strict=False,
-    )
-    def test_succeeds_when_lib_exists_and_probe_passes(self, tmp_path):
-        """Pre-loading from a valid path makes the probe succeed."""
+    def test_succeeds_when_lib_exists_and_probe_passes(
+        self, tmp_path, monkeypatch, intercept_cairo_imports
+    ):
+        """Valid lib dir: env var prepended, stale modules evicted, probe passes."""
         lib_dir = tmp_path / "lib"
         lib_dir.mkdir()
-        dylib_path = lib_dir / "libcairo.dylib"
-        dylib_path.write_bytes(b"fake dylib")
+        (lib_dir / "libcairo.dylib").write_bytes(b"fake dylib")
 
-        fake_cairosvg = types.ModuleType("cairosvg")
-        # First call (in _check_cairosvg) raises OSError; after preload succeeds
-        call_count = [0]
+        monkeypatch.setenv("DYLD_FALLBACK_LIBRARY_PATH", "/pre/existing")
+
+        # Plant stale cached modules to verify the eviction step.
+        stale_cairosvg = types.ModuleType("cairosvg")
+        stale_cairocffi = types.ModuleType("cairocffi")
+        monkeypatch.setitem(sys.modules, "cairosvg", stale_cairosvg)
+        monkeypatch.setitem(sys.modules, "cairocffi", stale_cairocffi)
+
+        probe_calls: list[dict] = []
 
         def fake_svg2png(**kwargs):
-            call_count[0] += 1
+            probe_calls.append(kwargs)
             return b"\x89PNG"
 
-        fake_cairosvg.svg2png = fake_svg2png
+        finder = intercept_cairo_imports(fake_svg2png)
 
-        with (
-            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
-            patch(
-                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
-                return_value=[str(lib_dir)],
-            ),
-            patch("kicad_tools.mcp.tools.screenshot.ctypes.cdll") as mock_cdll,
+        with patch(
+            "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+            return_value=[str(lib_dir)],
         ):
-            mock_cdll.LoadLibrary.return_value = None
             result = _try_preload_cairo_macos()
 
         assert result is True
-        mock_cdll.LoadLibrary.assert_called_once_with(str(dylib_path))
+        # The lib dir was prepended to the existing DYLD_FALLBACK_LIBRARY_PATH.
+        assert os.environ["DYLD_FALLBACK_LIBRARY_PATH"] == f"{lib_dir}:/pre/existing"
+        # The stale cached modules were evicted before the re-import.
+        assert sys.modules.get("cairosvg") is not stale_cairosvg
+        assert "cairocffi" not in sys.modules  # evicted, never re-imported
+        # The re-import was served hermetically by the meta_path finder.
+        assert finder.import_count == 1
+        assert sys.modules["cairosvg"].svg2png is fake_svg2png
+        # The probe render ran exactly once, on the probe SVG bytes.
+        assert len(probe_calls) == 1
+        assert probe_calls[0]["bytestring"].startswith(b"<svg")
 
     def test_returns_false_when_no_dylib_exists(self, tmp_path):
         """Returns False when no libcairo.dylib is found in any candidate dir."""
@@ -835,12 +914,8 @@ class TestTryPreloadCairoMacos:
 
         assert result is False
 
-    @pytest.mark.xfail(
-        reason="stale vs _try_preload_cairo_macos rewrite (DYLD env-var approach) -- see issue #3520",
-        strict=False,
-    )
-    def test_tries_multiple_dirs_on_failure(self, tmp_path):
-        """Tries next directory when first one fails."""
+    def test_tries_multiple_dirs_on_failure(self, tmp_path, monkeypatch, intercept_cairo_imports):
+        """Tries next directory when the first dir's probe render fails."""
         dir1 = tmp_path / "dir1"
         dir1.mkdir()
         (dir1 / "libcairo.dylib").write_bytes(b"fake")
@@ -849,7 +924,8 @@ class TestTryPreloadCairoMacos:
         dir2.mkdir()
         (dir2 / "libcairo.dylib").write_bytes(b"fake")
 
-        fake_cairosvg = types.ModuleType("cairosvg")
+        monkeypatch.delenv("DYLD_FALLBACK_LIBRARY_PATH", raising=False)
+
         probe_calls = [0]
 
         def fake_svg2png(**kwargs):
@@ -858,21 +934,21 @@ class TestTryPreloadCairoMacos:
                 raise OSError("still broken")
             return b"\x89PNG"
 
-        fake_cairosvg.svg2png = fake_svg2png
+        finder = intercept_cairo_imports(fake_svg2png)
 
-        with (
-            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
-            patch(
-                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
-                return_value=[str(dir1), str(dir2)],
-            ),
-            patch("kicad_tools.mcp.tools.screenshot.ctypes.cdll") as mock_cdll,
+        with patch(
+            "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+            return_value=[str(dir1), str(dir2)],
         ):
-            mock_cdll.LoadLibrary.return_value = None
             result = _try_preload_cairo_macos()
 
         assert result is True
-        assert mock_cdll.LoadLibrary.call_count == 2
+        # Probe ran once per directory: first failed, second succeeded.
+        assert probe_calls[0] == 2
+        # Each attempt evicted the cached module and re-imported hermetically.
+        assert finder.import_count == 2
+        # Both dirs were prepended to the env var, most recent first.
+        assert os.environ["DYLD_FALLBACK_LIBRARY_PATH"] == f"{dir2}:{dir1}"
 
     def test_returns_false_when_no_candidates(self):
         """Returns False when _macos_cairo_lib_dirs returns empty list."""

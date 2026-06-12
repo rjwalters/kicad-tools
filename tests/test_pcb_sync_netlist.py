@@ -2564,11 +2564,25 @@ class TestNormalizeKicadCliNetNames:
 
 # ---------------------------------------------------------------------------
 # Board 05 round-trip / drift regression (issue #3370)
+#
+# The fixture pair is FROZEN from git commit 9f11c3ab (PR #3377, the
+# commit that introduced this regression test) so that ongoing board-05
+# rework cannot invalidate the pinned drift scenario again (issue #3521):
+#
+#   git show 9f11c3ab:boards/05-bldc-motor-controller/output/bldc_controller.kicad_sch
+#   git show 9f11c3ab:boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb
+#
+# The PCB copy has zone ``filled_polygon`` blocks stripped (~390 KB of
+# fill geometry irrelevant to netlist sync); footprints, pads, nets,
+# segments, vias, and zone definitions are verbatim.  In this frozen
+# state the PCB carries exactly 40 named nets, none of the 14 drift
+# nets, and U3.1/.3/.5/.15/.17/.29/.30 are stuck on stale rails
+# (GND / +5V / +3.3V / PWM_AH / VMOTOR / ISENSE_B+).
 # ---------------------------------------------------------------------------
 
-_BOARD_05_DIR = Path("boards/05-bldc-motor-controller/output")
+_BOARD_05_DIR = Path("tests/fixtures/board05_sync_drift")
 _BOARD_05_SCH = _BOARD_05_DIR / "bldc_controller.kicad_sch"
-_BOARD_05_PCB = _BOARD_05_DIR / "bldc_controller_routed.kicad_pcb"
+_BOARD_05_PCB = _BOARD_05_DIR / "bldc_controller_drifted.kicad_pcb"
 
 # The 14 hierarchical-local nets that were dropped before the
 # ``/``-prefix fix.  ``+3.3V`` is intentionally excluded -- it is a
@@ -2588,16 +2602,12 @@ _BOARD_05_DRIFT_NETS = frozenset({
 _BOARD_05_MIN_NET_COUNT = 53
 
 
-@pytest.mark.skipif(
-    not _BOARD_05_SCH.exists() or not _BOARD_05_PCB.exists(),
-    reason="Board 05 schematic/PCB artifacts not present in this checkout",
-)
 class TestBoard05SyncDriftRegression:
     """Round-trip + invariants for board 05 schematic-PCB drift (#3370).
 
-    These tests load the on-disk board-05 artifacts (schematic +
-    committed routed PCB), apply :func:`sync_netlist` to a copy of
-    the PCB, and assert:
+    These tests load the frozen board-05 fixture pair (schematic +
+    drifted routed PCB, see module comment above for provenance),
+    apply :func:`sync_netlist` to a copy of the PCB, and assert:
 
       1. All 14 drift nets land in the synced PCB.
       2. The synced PCB exposes >= 53 named nets (was 40 pre-fix).
@@ -2625,10 +2635,6 @@ class TestBoard05SyncDriftRegression:
         assert not result.errors, f"sync_netlist errors: {result.errors}"
         return PCB.load(dst_pcb), result
 
-    @pytest.mark.xfail(
-        reason="board-05 artifacts no longer reproduce the pinned drift scenario -- see issue #3521",
-        strict=False,
-    )
     def test_drift_nets_present(self, synced_pcb):
         """All 14 drift nets land in the synced PCB."""
         pcb, _ = synced_pcb
@@ -2638,10 +2644,6 @@ class TestBoard05SyncDriftRegression:
             f"Drift nets still missing after sync: {sorted(missing)}"
         )
 
-    @pytest.mark.xfail(
-        reason="board-05 artifacts no longer reproduce the pinned drift scenario -- see issue #3521",
-        strict=False,
-    )
     def test_net_count_above_floor(self, synced_pcb):
         """The synced PCB carries >= 53 named nets (was 40 pre-fix)."""
         pcb, _ = synced_pcb
@@ -2660,10 +2662,6 @@ class TestBoard05SyncDriftRegression:
             f"Found /-prefixed net names in synced PCB: {sorted(prefixed)}"
         )
 
-    @pytest.mark.xfail(
-        reason="board-05 artifacts no longer reproduce the pinned drift scenario -- see issue #3521",
-        strict=False,
-    )
     def test_u3_drift_pads_assigned_correctly(self, synced_pcb):
         """U3 pads land on the schematic-intended drift nets, not stale rails.
 

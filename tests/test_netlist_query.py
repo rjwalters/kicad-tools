@@ -7,8 +7,6 @@ Tests the netlist extraction and connectivity query methods:
 - are_connected()
 """
 
-import pytest
-
 from kicad_tools.schematic.models import PinRef, Schematic
 from kicad_tools.schematic.models.elements import Junction, Label, Wire
 from kicad_tools.schematic.models.pin import Pin
@@ -146,16 +144,14 @@ class TestExtractNetlist:
         assert pins[0].symbol_ref == "R1"
         assert pins[0].pin == "2"
 
-    @pytest.mark.xfail(
-        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
-        strict=False,
-    )
     def test_power_net(self):
         """Power symbols create named nets."""
         sch = Schematic("Test")
 
-        # IC with VDD pin
-        ic_def = make_simple_symbol("MCU:Test", [("VDD", "1", 0, -2.54)])
+        # IC with VDD pin.  Pin coordinates are library Y-UP (#738/#2129):
+        # VDD at library (0, +2.54) lands at schematic (100, 47.46) after
+        # the rotate-then-negate-Y transform in SymbolInstance.pin_position.
+        ic_def = make_simple_symbol("MCU:Test", [("VDD", "1", 0, 2.54)])
         ic = SymbolInstance(
             symbol_def=ic_def,
             x=100,
@@ -390,28 +386,28 @@ class TestAreConnected:
 class TestComplexNetlist:
     """Integration tests with more complex schematics."""
 
-    @pytest.mark.xfail(
-        reason="fixture wires drawn at pre-#738 rotation pin positions -- see issue #3518",
-        strict=False,
-    )
     def test_power_distribution(self):
         """Multiple components on a power net."""
         sch = Schematic("Test")
 
-        # IC with multiple power pins
+        # IC with multiple power pins.  Pin coordinates are library Y-UP
+        # (#738/#2129): VDD at library (0, +5.08) is the TOP pin and lands
+        # at schematic (100, 44.92) after the rotate-then-negate-Y
+        # transform; VSS at library (0, -5.08) lands at (100, 55.08).
         ic_def = make_simple_symbol(
             "MCU:Test",
             [
-                ("VDD", "1", 0, -5.08),
-                ("VSS", "2", 0, 5.08),
+                ("VDD", "1", 0, 5.08),
+                ("VSS", "2", 0, -5.08),
                 ("IO", "3", 5.08, 0),
             ],
         )
         ic = SymbolInstance(symbol_def=ic_def, x=100, y=50, rotation=0, reference="U1", value="MCU")
         sch.symbols.append(ic)
 
-        # Decoupling capacitor
-        c_def = make_simple_symbol("Device:C", [("~", "1", 0, -2.54), ("~", "2", 0, 2.54)])
+        # Decoupling capacitor: pin 1 at library (0, +2.54) -> schematic
+        # (90, 47.46); pin 2 at library (0, -2.54) -> schematic (90, 52.54).
+        c_def = make_simple_symbol("Device:C", [("~", "1", 0, 2.54), ("~", "2", 0, -2.54)])
         cap = SymbolInstance(symbol_def=c_def, x=90, y=50, rotation=0, reference="C1", value="100n")
         sch.symbols.append(cap)
 

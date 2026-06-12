@@ -9277,6 +9277,25 @@ class Autorouter:
                 f"(now {successful_nets}/{total_nets} routed)"
             )
 
+        # Issue #3545 (safety net): never commit copper that genuinely
+        # violates FOREIGN-pad clearance beyond nudge reach.  The
+        # negotiated loop can exit holding a best snapshot whose copper
+        # crossed a static foreign-pad halo (unresolvable overflow the
+        # loop oscillated on) -- exact KiCad DRC flags it, so an
+        # unrouted net (advisory connectivity finding) is the strictly
+        # better trade.  Sub-resolution deficits are left for
+        # ``drc_verify_and_nudge`` / post-route correction, mirroring
+        # the #3433 demote-only-unrepairable philosophy.
+        pad_demoted = self._demote_pad_clearance_violation_nets(net_routes)
+        if pad_demoted:
+            successful_nets = sum(1 for routes in net_routes.values() if routes)
+            flush_print(
+                f"\n  ⚠ Demoted {len(pad_demoted)} net(s) with sub-clearance "
+                f"copper against foreign pads to unrouted: "
+                f"{sorted(pad_demoted)} "
+                f"(now {successful_nets}/{total_nets} routed)"
+            )
+
         if progress_callback is not None:
             # Issue #2597: Distinguish ``stagnated`` from ``timeout`` and
             # bare ``f"overflow={N}"`` so callers (and CI) can pick the
@@ -9874,6 +9893,78 @@ class Autorouter:
                     self.routes.remove(route)
             net_routes[net] = []
         return victims
+
+    def _demote_pad_clearance_violation_nets(
+        self,
+        net_routes: dict[int, list[Route]],
+    ) -> list[int]:
+        """Strip nets whose copper violates foreign-pad clearance beyond repair.
+
+        Issue #3545 (safety net): the negotiated loop's in-loop metrics
+        historically had no seg-vs-pad quadrant, so a best snapshot whose
+        copper crossed a static foreign-pad clearance halo was committed
+        and only exact KiCad DRC caught it.  The #3545 root fixes (static
+        halo survival across rip-up + net-aware validator carve-out)
+        prevent such routes from being constructed, but this backstop
+        guarantees the contract at finalization: any net whose committed
+        segments have a FOREIGN-pad clearance deficit larger than one
+        grid resolution (beyond ``drc_verify_and_nudge``'s plausible snap
+        reach) is demoted to unrouted instead of shipped.
+
+        Uses :meth:`RoutingGrid.worst_segment_pad_deficit` -- rect-aware
+        exact geometry with per-component clearances and the net-aware
+        same-component carve-out -- so fine-pitch escapes and relaxed
+        same-component corridors (#1764 / #2452) never trigger demotion.
+
+        Args:
+            net_routes: Mapping of net ID to committed routes (mutated:
+                demoted nets are reset to ``[]``).
+
+        Returns:
+            Sorted list of demoted net ids (empty in the common case).
+        """
+        pitches = self.component_pitches
+        nudge_reach = self.grid.resolution
+        victims: list[int] = []
+
+        for net, routes in net_routes.items():
+            if not routes:
+                continue
+            own_refs = {ref for ref, _pin in self.nets.get(net, [])}
+            worst_deficit = 0.0
+            worst_loc: tuple[float, float] | None = None
+            for route in routes:
+                for seg in route.segments:
+                    deficit, loc = self.grid.worst_segment_pad_deficit(
+                        seg,
+                        exclude_net=net,
+                        component_pitches=pitches,
+                        exclude_refs=own_refs or None,
+                    )
+                    if deficit > worst_deficit:
+                        worst_deficit = deficit
+                        worst_loc = loc
+            if worst_deficit > nudge_reach:
+                loc_str = (
+                    f" at ({worst_loc[0]:.3f}, {worst_loc[1]:.3f})"
+                    if worst_loc
+                    else ""
+                )
+                flush_print(
+                    f"    Net {net} ({self.net_names.get(net, '?')}): "
+                    f"foreign-pad clearance deficit {worst_deficit:.3f}mm"
+                    f"{loc_str} exceeds nudge reach ({nudge_reach:.3f}mm)"
+                )
+                victims.append(net)
+
+        for net in victims:
+            for route in net_routes.get(net, []):
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                if route in self.routes:
+                    self.routes.remove(route)
+            net_routes[net] = []
+        return sorted(victims)
 
     def _post_route_clearance_correction(
         self,

@@ -803,6 +803,23 @@ class RoutingGrid:
         # manufacturability at that pitch.
         self._component_pads: dict[str, list[Pad]] = {}
 
+        # Issue #3545: component refs whose inter-pad corridor was
+        # actually relaxed by ``_relax_same_component_clearance``
+        # (Issue #2452).  For these components the same-component
+        # validator carve-out must stay available even when no
+        # fine-pitch clearance relaxation applies -- escape traces
+        # legitimately pass sub-default-clearance from the neighbour
+        # pad inside the relaxed corridor.  All other components get
+        # the NET-AWARE tightened carve-out (foreign-net same-component
+        # pads are validated at full clearance).
+        self._relaxed_clearance_refs: set[str] = set()
+
+        # Issue #3545: lazy cache for the grid-computed component pitch
+        # map used by the fine-pitch leg of the same-component carve-out
+        # gate (``_component_is_fine_pitch``).  Invalidated by
+        # ``add_pad`` so late pad additions re-measure.
+        self._component_pitch_cache: dict[str, float] | None = None
+
         # Issue #3371 (P_FP2): Fine-pitch escape regions detected on this
         # board.  Populated by the autorouter (or test fixture) once after
         # all pads are added via :meth:`set_fine_pitch_regions`.  Consumed
@@ -959,6 +976,43 @@ class RoutingGrid:
         self._is_zone = xp.zeros(grid_shape, dtype=np.bool_)
         self._pad_blocked = xp.zeros(grid_shape, dtype=np.bool_)
         self._original_net = xp.zeros(grid_shape, dtype=np.int32)
+        # Issue #3545: snapshot of the STATIC blocked bitmap, captured
+        # lazily on the first ``mark_route`` call (after all pads /
+        # keepouts / same-component relaxations have shaped ``_blocked``
+        # but before any route copper is marked).  ``_unmark_segment`` /
+        # ``_unmark_via`` consult it during rip-up: a statically blocked
+        # cell (pad clearance halo, keepout) must be RESTORED to its
+        # static owner (``blocked=True, net=original_net``) instead of
+        # being freed.  Pre-#3545 rip-up erased same-net static halo
+        # cells outright (``blocked=False, net=0``), letting foreign
+        # nets route through a pad's clearance halo and ship
+        # sub-clearance copper (routing-diagnostic fixture: NET3 through
+        # J1-1's halo at 0.127mm actual vs 0.200mm required).
+        self._static_blocked: np.ndarray | None = None
+
+    def _ensure_static_blockage_snapshot(self) -> None:
+        """Capture the static blocked bitmap before the first route mark.
+
+        Issue #3545: called from :meth:`mark_route` (under the grid lock)
+        so the snapshot reflects ALL static obstacles -- pad metal,
+        clearance halos, keepouts -- including the cells re-opened by
+        ``_relax_same_component_clearance`` (those are NOT static-blocked:
+        a route ripped off a relaxed corridor cell must free it again).
+        Idempotent after the first call.
+        """
+        if self._static_blocked is None:
+            self._static_blocked = to_numpy(self._blocked).copy()
+
+    def invalidate_static_blockage_snapshot(self) -> None:
+        """Drop the static-blockage snapshot (Issue #3545).
+
+        Call when static geometry changes AFTER routing has begun (e.g.
+        late ``add_pad`` / ``add_keepout``); the next ``mark_route``
+        re-captures.  Note the re-capture would then include any
+        currently-marked route copper, so callers mutating static
+        geometry mid-route should do so only while no routes are marked.
+        """
+        self._static_blocked = None
 
     def sync_to_cpu(self) -> None:
         """Transfer GPU arrays to CPU for A* operations.
@@ -1470,6 +1524,8 @@ class RoutingGrid:
         # clearance relaxation.
         if pad.ref:
             self._component_pads.setdefault(pad.ref, []).append(pad)
+            # Issue #3545: pitch cache is stale once a new pad lands.
+            self._component_pitch_cache = None
 
         # Issue #2604 follow-up: remember the pin_pitch this pad was added
         # with so ``find_pad_ref_at`` can reproduce the reduced fine-pitch
@@ -2551,6 +2607,11 @@ class RoutingGrid:
 
                         # Unblock the cell so A* can route through
                         self._blocked[layer_idx, gy, gx] = False
+                        # Issue #3545: record that this component's
+                        # corridor was relaxed so the same-component
+                        # validator carve-out stays available for it
+                        # (see ``validate_segment_clearance``).
+                        self._relaxed_clearance_refs.add(pad.ref)
 
     def add_keepout(
         self,
@@ -2607,6 +2668,146 @@ class RoutingGrid:
         if cell.blocked:
             return cell.net == 0 or cell.net != net
         return False
+
+    def _component_is_fine_pitch(
+        self,
+        ref: str,
+        component_pitches: dict[str, float] | None = None,
+    ) -> bool:
+        """True when ``ref``'s minimum pin pitch is below the fine-pitch
+        threshold (Issue #3545 carve-out gate, fine-pitch leg).
+
+        Prefers the caller-supplied ``component_pitches`` map (matching
+        the per-component clearance lookup); falls back to a lazily
+        computed grid-level pitch map so call sites that do not thread
+        pitches (e.g. direct validator invocations) still recognise
+        fine-pitch components.
+        """
+        pitch: float | None = None
+        if component_pitches:
+            pitch = component_pitches.get(ref)
+        if pitch is None:
+            cache = self._component_pitch_cache
+            if cache is None:
+                cache = self.compute_component_pitches()
+                self._component_pitch_cache = cache
+            pitch = cache.get(ref)
+        threshold = getattr(self.rules, "fine_pitch_threshold", None)
+        return pitch is not None and threshold is not None and pitch < threshold
+
+    def _same_component_carveout_active(
+        self,
+        ref: str,
+        required_clearance: float,
+        min_clearance: float,
+        component_pitches: dict[str, float] | None = None,
+    ) -> bool:
+        """NET-AWARE same-component carve-out gate (Issue #3545).
+
+        Same-net pads are skipped before the carve-out is consulted, so
+        every pad it exempts is on a FOREIGN net.  The exemption is only
+        legitimate where the component's geometry forces sub-clearance
+        proximity:
+
+        1. an explicit / fine-pitch clearance relaxation is in effect
+           (``required_clearance < min_clearance``, Issue #1764), or
+        2. the component's inter-pad corridor was relaxed by
+           ``_relax_same_component_clearance`` (Issue #2452), or
+        3. the component is fine-pitch (min pin pitch below
+           ``rules.fine_pitch_threshold``) -- covers boards that route
+           with ``fine_pitch_clearance`` unset (the default), where the
+           per-component clearance lookup cannot signal the relaxation.
+
+        Standard-pitch components (e.g. a 2.54mm THT connector) match
+        none of these, so their foreign-net pads stay in the validator
+        and sub-clearance copper is rejected (the routing-diagnostic
+        NET3-vs-J1.1 0.127mm defect).
+        """
+        return (
+            required_clearance < min_clearance
+            or ref in self._relaxed_clearance_refs
+            or self._component_is_fine_pitch(ref, component_pitches)
+        )
+
+    def worst_segment_pad_deficit(
+        self,
+        seg: Segment,
+        exclude_net: int,
+        component_pitches: dict[str, float] | None = None,
+        exclude_refs: set[str] | None = None,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """Worst seg-vs-FOREIGN-pad clearance deficit for one segment.
+
+        Issue #3545 (finalization backstop): exact-geometry sibling of the
+        pad quadrant in :meth:`validate_segment_clearance`, restricted to
+        pads so the negotiated loop's final acceptance can demote nets
+        whose committed copper genuinely violates pad clearance (e.g. a
+        route that crossed a static foreign-pad halo) without re-running
+        the (heavier, multi-quadrant) full validation.
+
+        Uses the same rect-aware geometry, per-component clearances, and
+        the NET-AWARE same-component carve-out as the validator, so the
+        backstop never fires on legitimate fine-pitch escapes or relaxed
+        same-component corridors.
+
+        Returns:
+            ``(worst_deficit, worst_location)`` where ``worst_deficit`` is
+            ``max(required_clearance - actual_clearance)`` over all
+            checked pads (<= 0 means no violation) and ``worst_location``
+            is the violating pad center (or ``None``).
+        """
+        min_clearance = self.rules.trace_clearance
+        seg_half_width = seg.width / 2
+        worst_deficit = 0.0
+        worst_loc: tuple[float, float] | None = None
+
+        for pad in self._pads:
+            if pad.net == exclude_net:
+                continue
+
+            if not pad.through_hole:
+                pad_layer_idx = self.layer_to_index(pad.layer.value)
+                seg_layer_idx = self.layer_to_index(seg.layer.value)
+                if pad_layer_idx != seg_layer_idx:
+                    continue
+
+            pad_ref = pad.ref
+            pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
+            required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+
+            # Issue #3545 net-aware carve-out (see validate_segment_clearance)
+            same_component_signal_carveout = (
+                exclude_refs
+                and pad.ref in exclude_refs
+                and not _is_plane_net_pad(pad)
+                and self._same_component_carveout_active(
+                    pad.ref, required_clearance, min_clearance, component_pitches
+                )
+            )
+
+            is_circular_pad = abs(pad.width - pad.height) < 0.001
+            if is_circular_pad:
+                pad_radius = max(pad.width, pad.height) / 2
+                dist = self._point_to_segment_distance(
+                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+                clearance = dist - seg_half_width - pad_radius
+            else:
+                center_dist = _rect_segment_centerline_distance(
+                    pad.x, pad.y, pad.width, pad.height,
+                    seg.x1, seg.y1, seg.x2, seg.y2,
+                )
+                clearance = center_dist - seg_half_width
+
+            if same_component_signal_carveout and clearance >= 0:
+                continue
+
+            deficit = required_clearance - clearance
+            if deficit > worst_deficit:
+                worst_deficit = deficit
+                worst_loc = (pad.x, pad.y)
+
+        return worst_deficit, worst_loc
 
     def validate_segment_clearance(
         self,
@@ -2722,12 +2923,6 @@ class RoutingGrid:
             # same-component pads, so the trace-through-pad pathology is now
             # caught at the validator while the fine-pitch escape exemption
             # (positive clearance < required_clearance) is unchanged.
-            same_component_signal_carveout = (
-                exclude_refs
-                and pad.ref in exclude_refs
-                and not _is_plane_net_pad(pad)
-            )
-
             # Skip pads on different layers (unless PTH)
             if not pad.through_hole:
                 # Convert layer for comparison
@@ -2741,6 +2936,36 @@ class RoutingGrid:
             pad_ref = pad.ref
             pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
             required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+
+            # Issue #3545: NET-AWARE tightening of the same-component
+            # carve-out.  Same-net pads are already skipped at the top of
+            # this loop, so every pad reaching this point is on a FOREIGN
+            # net -- the carve-out was silently exempting foreign-net pads
+            # on the route's own components (routing-diagnostic fixture:
+            # NET3 routed 0.127mm from J1 pad 1 / NET1, masked because
+            # NET3 also connects to J1 pad 2).  The legitimate use of the
+            # carve-out is fine-pitch escape routing (Issue #1764), which
+            # is exactly the case where a per-component clearance
+            # relaxation is in effect (``required_clearance <
+            # min_clearance`` via fine-pitch detection or an explicit
+            # component override).  Standard-pitch components get no
+            # relaxation, so their foreign-net pads now stay in the
+            # validator and sub-clearance copper is rejected.
+            #
+            # The carve-out remains active where the component geometry
+            # legitimately forces sub-clearance proximity: explicit /
+            # fine-pitch clearance relaxations (#1764), relaxed
+            # same-component corridors (#2452), and fine-pitch
+            # components routed without ``fine_pitch_clearance``
+            # configured -- see ``_same_component_carveout_active``.
+            same_component_signal_carveout = (
+                exclude_refs
+                and pad.ref in exclude_refs
+                and not _is_plane_net_pad(pad)
+                and self._same_component_carveout_active(
+                    pad.ref, required_clearance, min_clearance, component_pitches
+                )
+            )
 
             # Issue #2908: Rect-aware geometry for rectangular SMD pads. The
             # previous disc bound (``radius = max(w, h) / 2``) over-rejected
@@ -3503,6 +3728,10 @@ class RoutingGrid:
                 (Issue #1692).  Falls back to ``rules.trace_width``.
         """
         with self._acquire_lock():
+            # Issue #3545: capture the static blocked bitmap before the
+            # first route copper lands so rip-up can restore pad halos /
+            # keepouts instead of erasing them.
+            self._ensure_static_blockage_snapshot()
             for seg in route.segments:
                 # Issue #1674: Use seg.width instead of rules.trace_width
                 # so wider net-class traces block the correct number of cells.
@@ -3867,6 +4096,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
+        static_blocked = self._static_blocked
 
         def unmark_with_clearance(gx: int, gy: int) -> None:
             for dy in range(-clearance_cells, clearance_cells + 1):
@@ -3878,8 +4108,20 @@ class RoutingGrid:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
                         elif cell.net == seg.net:
-                            cell.blocked = False
-                            cell.net = 0
+                            # Issue #3545: STATICALLY blocked cells (pad
+                            # clearance halos, keepouts) must survive
+                            # rip-up.  Pre-fix, ripping a route whose
+                            # clearance envelope overlapped its OWN pads'
+                            # halo cells erased those cells outright
+                            # (blocked=False, net=0), after which foreign
+                            # nets could route straight through the halo
+                            # and ship sub-clearance copper.  Restore the
+                            # static owner instead of freeing.
+                            if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
+                                cell.net = cell.original_net
+                            else:
+                                cell.blocked = False
+                                cell.net = 0
 
         if gx1 == gx2:
             for gy in range(min(gy1, gy2), max(gy1, gy2) + 1):
@@ -3923,6 +4165,7 @@ class RoutingGrid:
         # cells are cleared during rip-up.
         radius += 1
 
+        static_blocked = self._static_blocked
         for layer_idx in range(self.num_layers):
             for dy in range(-radius, radius + 1):
                 for dx in range(-radius, radius + 1):
@@ -3933,8 +4176,14 @@ class RoutingGrid:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
                         elif cell.net == via.net:
-                            cell.blocked = False
-                            cell.net = 0
+                            # Issue #3545: restore static halo / keepout
+                            # cells instead of freeing them (see
+                            # ``_unmark_segment`` for rationale).
+                            if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
+                                cell.net = cell.original_net
+                            else:
+                                cell.blocked = False
+                                cell.net = 0
 
     def find_relief_conflict_nets(self, route: Route, net: int) -> set[int]:
         """Owner nets of foreign static cells conflicting with ``route``.
@@ -4753,8 +5002,22 @@ class RoutingGrid:
                     & (self._usage_count == 0)
                 )
             else:
+                # Issue #3545: statically blocked cells (pad clearance
+                # halos, keepouts) are non-negotiable -- a pad cannot
+                # "negotiate away", so overflow on these cells is
+                # unresolvable by construction.  Pre-fix, the
+                # ``usage_count == 0`` clause released a static halo cell
+                # to foreign nets as soon as ANY route's envelope touched
+                # it (usage > 0), letting the negotiated loop oscillate
+                # on unresolvable halo overflow and ship sub-clearance
+                # copper.  The snapshot is captured on first
+                # ``mark_route``; before that, usage is uniformly 0 and
+                # the legacy clause is equivalent.
+                static_usage_free = self._usage_count == 0
+                if self._static_blocked is not None:
+                    static_usage_free = static_usage_free | self._static_blocked
                 static_blocks = (
-                    self._blocked & ~self._is_obstacle & different_net & (self._usage_count == 0)
+                    self._blocked & ~self._is_obstacle & different_net & static_usage_free
                 )
             base_blocked = obstacle_blocks | static_blocks
         else:

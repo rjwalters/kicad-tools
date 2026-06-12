@@ -102,7 +102,7 @@ class JLCPCBBOMFormatter(BOMFormatter):
             }
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for key, group_items in sorted(grouped.items()):
@@ -163,7 +163,7 @@ class PCBWayBOMFormatter(BOMFormatter):
             grouped = {(item.value, item.footprint): [item] for item in filtered}
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for idx, (key, group_items) in enumerate(sorted(grouped.items()), 1):
@@ -214,7 +214,7 @@ class SeeedBOMFormatter(BOMFormatter):
             grouped = {item.reference: [item] for item in filtered}
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for _key, group_items in sorted(grouped.items()):
@@ -263,7 +263,7 @@ class GenericBOMFormatter(BOMFormatter):
             grouped = {item.reference: [item] for item in filtered}
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for key, group_items in sorted(grouped.items()):

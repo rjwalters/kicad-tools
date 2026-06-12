@@ -1474,7 +1474,16 @@ class Router:
             obstacle_blocks = blocked_region & obstacle_region & different_net
 
             # Case 2: Blocked non-obstacles with different net AND static (usage == 0)
-            static_blocks = blocked_region & ~obstacle_region & different_net & (usage_region == 0)
+            # Issue #3545: statically blocked cells (pad clearance halos,
+            # keepouts) are additionally non-negotiable regardless of
+            # usage_count -- a pad cannot "negotiate away", so sharing a
+            # halo cell only produces unresolvable overflow.  Mirrors
+            # ``RoutingGrid.compute_expanded_blocked``.
+            static_usage_free = usage_region == 0
+            grid_static = getattr(self.grid, "_static_blocked", None)
+            if grid_static is not None:
+                static_usage_free = static_usage_free | grid_static[layer, y1:y2, x1:x2]
+            static_blocks = blocked_region & ~obstacle_region & different_net & static_usage_free
 
             combined = obstacle_blocks | static_blocks
             if partner_relax_mask is not None:
