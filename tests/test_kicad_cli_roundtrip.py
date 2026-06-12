@@ -34,6 +34,7 @@ When ``find_kicad_cli()`` returns ``None`` the entire module is skipped
 
 from __future__ import annotations
 
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -41,11 +42,13 @@ import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli, run_drc
 from kicad_tools.schema.pcb import PCB
-from kicad_tools.sexp.builders import gr_text_node, zone_node
+from kicad_tools.sexp.builders import gr_text_node, sheet_instances, zone_node
 from kicad_tools.sexp.parser import parse_string
 from kicad_tools.silkscreen.generator import SilkscreenGenerator
 
 pytestmark = pytest.mark.skipif(find_kicad_cli() is None, reason="kicad-cli not installed")
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -447,3 +450,148 @@ class TestLoadFailureMessage:
         assert str(broken_path) in message
         assert "kicad-cli return code:" in message
         assert "Producer: PCB.save (canary)" in message
+
+
+# ---------------------------------------------------------------------------
+# Schematic load gate (issue #3587)
+# ---------------------------------------------------------------------------
+#
+# Boards 06/07 shipped .kicad_sch files whose sheet_instances block contained
+# an UNQUOTED page number — ``(page 1)`` instead of ``(page "1")``. KiCad 10's
+# kicad-cli rejects the bare-numeric form with "Failed to load schematic"
+# (exit 3), which silently dropped schematic figures from those boards'
+# manufacturing reports (#3583) and breaks any kicad-cli-based schematic
+# tooling (ERC, netlist export).
+#
+# The generator was fixed in PR #2785 (``sheet_instances`` builder now emits
+# ``SExp.quoted_atom(str(page))``), but boards 06/07 were generated one day
+# before that fix landed and the stale artifacts were never re-validated.
+# These tests close both gaps:
+#   1. Every committed schematic in boards/*/output must load in kicad-cli,
+#      so stale-artifact drift fails CI.
+#   2. A canary documents the regression class (bare-numeric page rejected,
+#      quoted accepted) so we notice if kicad-cli's strictness shifts.
+
+
+def _committed_schematics() -> list[Path]:
+    """All .kicad_sch files committed under boards/*/output."""
+    return sorted(
+        list(REPO_ROOT.glob("boards/*/output/*.kicad_sch"))
+        + list(REPO_ROOT.glob("boards/external/*/output/*.kicad_sch"))
+    )
+
+
+def _run_sch_export_svg(sch_path: Path, out_dir: Path) -> subprocess.CompletedProcess:
+    """Load ``sch_path`` via ``kicad-cli sch export svg``.
+
+    SVG export is the cheapest kicad-cli operation that exercises the full
+    schematic parser (exit 3 == "Failed to load schematic"). It is also the
+    exact operation the #3583 report-figure pipeline performs.
+    """
+    kicad_cli = find_kicad_cli()
+    assert kicad_cli is not None  # guarded by module-level skipif
+    return subprocess.run(
+        [str(kicad_cli), "sch", "export", "svg", "--output", str(out_dir), str(sch_path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+class TestCommittedSchematicsLoad:
+    """Every committed boards/*/output/*.kicad_sch must load in kicad-cli."""
+
+    @pytest.mark.parametrize(
+        "sch_path",
+        _committed_schematics(),
+        ids=lambda p: str(p.relative_to(REPO_ROOT)),
+    )
+    def test_schematic_loads_in_kicad_cli(self, sch_path: Path, tmp_path: Path) -> None:
+        out_dir = tmp_path / "svg"
+        result = _run_sch_export_svg(sch_path, out_dir)
+
+        assert result.returncode == 0, (
+            "kicad-cli rejected a committed schematic.\n"
+            f"  Schematic: {sch_path}\n"
+            f"  kicad-cli return code: {result.returncode}\n"
+            "  kicad-cli stderr:\n"
+            f"    {result.stderr.strip() or '<empty>'}\n"
+            "\n"
+            "If the schematic was regenerated, the generator has drifted from\n"
+            "KiCad's strict parser. Diff the sheet_instances / property blocks\n"
+            "against a loading board (e.g. boards/01-voltage-divider) and fix\n"
+            "the writer (src/kicad_tools/sexp/builders.py, schematic models),\n"
+            "not just the committed file. See issue #3587 for the diagnosis\n"
+            "workflow (delta-debugging by top-level tag group)."
+        )
+
+        svgs = list(out_dir.glob("*.svg"))
+        assert svgs, (
+            f"kicad-cli exited 0 but produced no SVG for {sch_path} — "
+            "load-success signal is unreliable; investigate."
+        )
+
+    def test_no_schematics_glob_regression(self) -> None:
+        """The glob must keep finding the demo-board schematics.
+
+        Guards against a repo reorganisation silently emptying the
+        parametrized sweep above (pytest would report 0 tests rather
+        than failing).
+        """
+        found = {p.name for p in _committed_schematics()}
+        assert {"diffpair_test.kicad_sch", "matchgroup_test.kicad_sch"} <= found, (
+            f"Expected boards 06/07 schematics in sweep, found only: {sorted(found)}"
+        )
+
+
+class TestSheetInstancesPageQuoting:
+    """Regression class for issue #3587 / PR #2785.
+
+    KiCad 10 requires the sheet page to be a quoted string: ``(page "1")``.
+    The bare-numeric form ``(page 1)`` fails the whole schematic load.
+    """
+
+    MINIMAL_SCH = textwrap.dedent("""\
+        (kicad_sch
+            (version 20231120)
+            (generator "eeschema")
+            (generator_version "9.0")
+            (uuid "00000000-0000-0000-0000-000000000001")
+            (paper "A4")
+            (lib_symbols)
+            (sheet_instances
+                (path "/00000000-0000-0000-0000-000000000001" (page {page}))
+            )
+        )
+    """)
+
+    def test_unquoted_page_reproduces_failure(self, tmp_path: Path) -> None:
+        """Canary: bare-numeric page must trip kicad-cli's loader.
+
+        If this stops failing, kicad-cli has relaxed its parser and the
+        quoted-page constraint in ``sheet_instances`` (builders.py) can be
+        revisited.
+        """
+        sch = tmp_path / "unquoted_page.kicad_sch"
+        sch.write_text(self.MINIMAL_SCH.format(page="1"))
+        result = _run_sch_export_svg(sch, tmp_path / "out")
+        assert result.returncode != 0, (
+            "Canary failed: kicad-cli accepted a bare-numeric (page 1). "
+            "The regression class this test gates against has shifted; "
+            "review sheet_instances() in src/kicad_tools/sexp/builders.py."
+        )
+
+    def test_quoted_page_loads(self, tmp_path: Path) -> None:
+        """Control: the quoted form must load."""
+        sch = tmp_path / "quoted_page.kicad_sch"
+        sch.write_text(self.MINIMAL_SCH.format(page='"1"'))
+        result = _run_sch_export_svg(sch, tmp_path / "out")
+        assert result.returncode == 0, (
+            f"Minimal quoted-page schematic failed to load:\n{result.stderr}"
+        )
+
+    def test_sheet_instances_builder_emits_quoted_page(self) -> None:
+        """Generator-level guard: the builder must serialize page quoted."""
+        node = sheet_instances("/00000000-0000-0000-0000-000000000001", "1")
+        text = node.to_string()
+        assert '(page "1")' in text, f"sheet_instances builder emitted: {text}"
