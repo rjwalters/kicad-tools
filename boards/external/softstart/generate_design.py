@@ -3595,79 +3595,150 @@ def _repair_drill_drill_vias(pcb_path: Path, min_clearance: float = 0.1016) -> i
     return moved
 
 
+def _point_segment_distance(
+    px: float, py: float, sx: float, sy: float, ex: float, ey: float
+) -> tuple[float, float]:
+    """Exact distance from point (px, py) to segment (s)-(e).
+
+    Returns ``(distance, t)`` where ``t`` is the clamped projection
+    parameter (0 at the start endpoint, 1 at the end endpoint) of the
+    closest point — used to classify interior vs endpoint proximity.
+    """
+    import math
+
+    dx, dy = ex - sx, ey - sy
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-18:
+        return math.hypot(px - sx, py - sy), 0.0
+    t = ((px - sx) * dx + (py - sy) * dy) / length_sq
+    t = max(0.0, min(1.0, t))
+    cx, cy = sx + t * dx, sy + t * dy
+    return math.hypot(px - cx, py - cy), t
+
+
 def _repair_segment_via_clearance(
-    pcb_path: Path, min_clearance: float = 0.1016
+    pcb_path: Path, min_clearance: float = 0.1016, max_fixes: int = 50
 ) -> int:
-    """Shift segments that violate clearance against a FOREIGN-net via
-    (PR #3481 review fix).
+    """Repair segments that violate clearance against a FOREIGN-net via
+    (PR #3481 review fix; diagonal support per issue #3516).
 
     The router's via placement does not always honour the
     via-vs-committed-segment clearance (the #3480 defect class): in the
     measured artifact a SRC_NEG via landed 0.40 mm from a UCC_LO_NEG
     trace centreline where 0.552 mm is required — the copper physically
     OVERLAPS (a cross-net short the connectivity audit cannot see,
-    because it unions same-net copper only).
+    because it unions same-net copper only).  Through-via barrels are
+    physical copper on EVERY layer they span (issue #3487), so a
+    conflict on an inner layer is just as real as one on F.Cu.
 
-    For each axis-aligned segment too close to a foreign via, the
-    segment is shifted perpendicular, away from the via, far enough to
-    restore ``min_clearance`` (+0.05 mm margin); every other segment
-    endpoint that referenced the moved endpoints follows, so the trace
-    stays continuous.  Diagonal segments are left for ``kct check`` to
-    report — measured, the violator class is the axis-aligned corridor
-    run.  Returns the number of segments moved.
+    Repair strategies, per violator geometry:
+
+    * **Axis-aligned segment**: shifted perpendicular, away from the
+      via, far enough to restore ``min_clearance`` (+0.05 mm margin);
+      every other segment endpoint that referenced the moved endpoints
+      follows, so the trace stays continuous.
+    * **45-degree diagonal, via near the segment INTERIOR** (issue
+      #3516 — the I_SENSE_OUT vs GND-barrel short): the segment is
+      replaced in place by a three-leg 45-quantized DETOUR (axis jog
+      away from the via, parallel diagonal, axis jog back) sharing the
+      original endpoints, so no endpoint dragging is needed and
+      connectivity is preserved by construction.
+    * **45-degree diagonal, via near an ENDPOINT**: the offending
+      endpoint is dragged radially away along the nearest of the 8
+      routing directions (every segment referencing it follows); the
+      step-10e quantization pass doglegs any residual skew.
+
+    Violations are fixed ONE at a time, re-parsing the file after each
+    mutation (single-sweep regex mutation goes stale as soon as one fix
+    rewrites a neighbour's endpoints).  Axis-aligned violators are
+    fixed before diagonal ones: measured on the #3516 defect pair, the
+    axis shift drags the shared dogleg corner clear of the via and
+    resolves the partner diagonal's endpoint violation for free.
+
+    Returns the number of repairs applied.
     """
+    import math
     import re
+    import uuid as _uuid
 
-    text = pcb_path.read_text()
-    net_ids: dict[str, str] = {}
-    vias: list[tuple[float, float, float, str]] = []
     via_fmt = re.compile(
         r"\(via\s*\n\s*\(at ([\d.-]+) ([\d.-]+)\)\s*\n\s*\(size ([\d.]+)\)"
         r"[\s\S]*?\(net (\d+)\)"
     )
-    for vm in via_fmt.finditer(text):
-        vias.append(
-            (float(vm.group(1)), float(vm.group(2)), float(vm.group(3)) / 2.0, vm.group(4))
-        )
-
     seg_fmt = re.compile(
         r'\(segment\s*\n\s*\(start ([\d.-]+) ([\d.-]+)\)\s*\n\s*'
         r'\(end ([\d.-]+) ([\d.-]+)\)\s*\n\s*\(width ([\d.]+)\)\s*\n\s*'
-        r'\(layer "([^"]+)"\)\s*\n\s*\(uuid "[^"]+"\)\s*\n\s*\(net (\d+)\)'
+        r'\(layer "([^"]+)"\)\s*\n\s*\(uuid "([^"]+)"\)\s*\n\s*\(net (\d+)\)'
     )
-    moved = 0
-    for sm in list(seg_fmt.finditer(text)):
+
+    text = pcb_path.read_text()
+    fixed = 0
+    while fixed < max_fixes:
+        vias = [
+            (
+                float(vm.group(1)),
+                float(vm.group(2)),
+                float(vm.group(3)) / 2.0,
+                vm.group(4),
+            )
+            for vm in via_fmt.finditer(text)
+        ]
+
+        # Scan for violations; collect (is_diagonal, seg-match, via).
+        axis_hit = None
+        diag_hit = None
+        for sm in seg_fmt.finditer(text):
+            sx, sy, ex, ey, width = map(float, sm.groups()[:5])
+            net = sm.group(8)
+            adx, ady = abs(ex - sx), abs(ey - sy)
+            axis_aligned = adx < 1e-9 or ady < 1e-9
+            diagonal = not axis_aligned and abs(adx - ady) < 1e-6
+            if not (axis_aligned or diagonal):
+                continue  # off-angle: step-10e quantizes, then we re-run
+            for via in vias:
+                vx, vy, v_rad, v_net = via
+                if v_net == net:
+                    continue
+                required = width / 2.0 + v_rad + min_clearance
+                # Cheap bbox rejection before the exact distance.
+                if not (
+                    min(sx, ex) - required <= vx <= max(sx, ex) + required
+                    and min(sy, ey) - required <= vy <= max(sy, ey) + required
+                ):
+                    continue
+                dist, t = _point_segment_distance(vx, vy, sx, sy, ex, ey)
+                # Small epsilon so borderline-legal router placements
+                # (dist == required to float precision) are not shifted.
+                if dist >= required - 1e-4:
+                    continue
+                if axis_aligned and axis_hit is None:
+                    axis_hit = (sm, via, dist, t)
+                elif diagonal and diag_hit is None:
+                    diag_hit = (sm, via, dist, t)
+                break
+            if axis_hit is not None:
+                break
+        hit = axis_hit or diag_hit
+        if hit is None:
+            break
+
+        sm, (vx, vy, v_rad, v_net), dist, t = hit
         sx, sy, ex, ey, width = map(float, sm.groups()[:5])
-        net = sm.group(7)
-        vertical = abs(sx - ex) < 1e-9
-        horizontal = abs(sy - ey) < 1e-9
-        if not (vertical or horizontal):
-            continue
-        for vx, vy, v_rad, v_net in vias:
-            if v_net == net:
-                continue
-            # Distance from via center to the segment (axis-aligned).
-            if vertical:
-                lo, hi = min(sy, ey), max(sy, ey)
-                if not (lo - 1.0 <= vy <= hi + 1.0):
-                    continue
-                dist = abs(vx - sx) if lo <= vy <= hi else min(
-                    ((vx - sx) ** 2 + (vy - lo) ** 2) ** 0.5,
-                    ((vx - sx) ** 2 + (vy - hi) ** 2) ** 0.5,
-                )
-            else:
-                lo, hi = min(sx, ex), max(sx, ex)
-                if not (lo - 1.0 <= vx <= hi + 1.0):
-                    continue
-                dist = abs(vy - sy) if lo <= vx <= hi else min(
-                    ((vy - sy) ** 2 + (vx - lo) ** 2) ** 0.5,
-                    ((vy - sy) ** 2 + (vx - hi) ** 2) ** 0.5,
-                )
-            required = width / 2.0 + v_rad + min_clearance
-            # Small epsilon so borderline-legal router placements
-            # (dist == required to float precision) are not shifted.
-            if dist >= required - 1e-4:
-                continue
+        net = sm.group(8)
+        seg_uuid = sm.group(7)
+        required = width / 2.0 + v_rad + min_clearance
+        seg_len = math.hypot(ex - sx, ey - sy)
+        # Jog length for the diagonal detour: an axis-aligned unit jog
+        # has a 1/sqrt(2) component along the away-from-via normal.
+        jog = round((required - dist + 0.05) * math.sqrt(2.0) + 0.0001, 4)
+        interior = (
+            hit is not axis_hit
+            and t * seg_len > jog + 0.05
+            and (1.0 - t) * seg_len > jog + 0.05
+        )
+
+        if hit is axis_hit:
+            vertical = abs(sx - ex) < 1e-9
             shift = required - dist + 0.05
             if vertical:
                 new_axis = round(sx - shift if vx > sx else sx + shift, 4)
@@ -3689,11 +3760,78 @@ def _repair_segment_via_clearance(
                 f"foreign via @ ({vx}, {vy}): {dist:.3f} < {required:.3f} mm "
                 f"-> shifted to axis {new_axis}"
             )
-            moved += 1
-            break
-    if moved:
+        elif interior:
+            # 45-diagonal, via beside the interior: replace with a
+            # three-leg detour bulging AWAY from the via.  The away
+            # normal decomposes into two axis unit jogs e1 + e2; jogging
+            # e1 at the start and e2 (reversed) at the end keeps the
+            # middle leg EXACTLY parallel to the original diagonal.
+            ux, uy = (ex - sx) / seg_len, (ey - sy) / seg_len
+            # Normal pointing from the segment line TOWARD the via.
+            nx_, ny_ = -uy, ux
+            side = (vx - sx) * nx_ + (vy - sy) * ny_
+            if side > 0:
+                nx_, ny_ = -nx_, -ny_  # flip: now points away from via
+            e1 = (math.copysign(1.0, nx_), 0.0)
+            e2 = (0.0, math.copysign(1.0, ny_))
+            p1 = (round(sx + e1[0] * jog, 4), round(sy + e1[1] * jog, 4))
+            p2 = (round(ex + e2[0] * jog, 4), round(ey + e2[1] * jog, 4))
+            uuid2 = str(_uuid.uuid5(_uuid.NAMESPACE_OID, seg_uuid + ":detour1"))
+            uuid3 = str(_uuid.uuid5(_uuid.NAMESPACE_OID, seg_uuid + ":detour2"))
+
+            def _leg(
+                ax: float, ay: float, bx: float, by: float, leg_uuid: str
+            ) -> str:
+                return (
+                    "(segment\n"
+                    f"\t\t(start {_fmt(ax)} {_fmt(ay)})\n"
+                    f"\t\t(end {_fmt(bx)} {_fmt(by)})\n"
+                    f"\t\t(width {sm.group(5)})\n"
+                    f'\t\t(layer "{sm.group(6)}")\n'
+                    f'\t\t(uuid "{leg_uuid}")\n'
+                    f"\t\t(net {net})"
+                )
+            replacement = (
+                _leg(sx, sy, p1[0], p1[1], seg_uuid)
+                + "\n\t)\n\t"
+                + _leg(p1[0], p1[1], p2[0], p2[1], uuid2)
+                + "\n\t)\n\t"
+                + _leg(p2[0], p2[1], ex, ey, uuid3)
+            )
+            text = text.replace(sm.group(0), replacement, 1)
+            print(
+                f"   diagonal @ ({sx}, {sy})-({ex}, {ey}) [net {net}] vs "
+                f"foreign via @ ({vx}, {vy}): {dist:.3f} < {required:.3f} mm "
+                f"-> detoured via ({p1[0]}, {p1[1]})-({p2[0]}, {p2[1]})"
+            )
+        else:
+            # 45-diagonal, via beside an endpoint: drag the endpoint
+            # radially away (8-direction snapped — issue #3532 policy);
+            # every segment referencing it follows, and step-10e doglegs
+            # any residual skew.
+            from kicad_tools.router.quantize import snap_direction_8
+
+            px, py = (sx, sy) if t < 0.5 else (ex, ey)
+            dx_, dy_ = px - vx, py - vy
+            if abs(dx_) < 1e-9 and abs(dy_) < 1e-9:
+                dx_, dy_ = -(ey - sy), ex - sx  # degenerate: go perpendicular
+            ux, uy = snap_direction_8(dx_, dy_)
+            npx = round(vx + ux * (required + 0.05), 4)
+            npy = round(vy + uy * (required + 0.05), 4)
+            for kw in ("start", "end"):
+                text = re.sub(
+                    rf"\({kw} {re.escape(_fmt(px))} {re.escape(_fmt(py))}\)",
+                    f"({kw} {_fmt(npx)} {_fmt(npy)})",
+                    text,
+                )
+            print(
+                f"   diagonal endpoint @ ({px}, {py}) [net {net}] vs "
+                f"foreign via @ ({vx}, {vy}): {dist:.3f} < {required:.3f} mm "
+                f"-> dragged to ({npx}, {npy})"
+            )
+        fixed += 1
         pcb_path.write_text(text)
-    return moved
+    return fixed
 
 
 def _fmt(value: float) -> str:
@@ -4242,37 +4380,45 @@ def route_pcb(
     except Exception as exc:
         print(f"   WARNING: drill-conflict repair failed: {exc}")
 
-    # PR #3481 review fix: cross-net segment-vs-via clearance repair.
-    # The router can drop a via touching a foreign-net trace (a SHORT
-    # the same-net connectivity audit cannot see) — shift the trace.
-    print("\n10d. Repairing cross-net segment/via clearance...")
-    try:
-        shifted = _repair_segment_via_clearance(output_path)
-        if shifted:
-            print(f"   Shifted {shifted} segment(s) clear of foreign vias")
-        else:
-            print("   No cross-net segment/via clearance conflicts")
-    except Exception as exc:
-        print(f"   WARNING: segment/via clearance repair failed: {exc}")
-
-    # Issue #3532: 45-degree quantization pass.  The 10a-10d repairs
-    # (and historical router emitters) drag segment endpoints to raw
-    # coordinates, leaving arbitrary-angle copper (acute-angle junctions
-    # can etch poorly).  Replace every off-angle segment with an exact
-    # two-leg dogleg (45-degree leg + axis leg) sharing the original
-    # endpoints; the step-12 DRC gate re-verifies clearances on the
-    # quantized geometry.
-    print("\n10e. Quantizing segments to the 45-degree set...")
+    # PR #3481 review fix: cross-net segment-vs-via clearance repair,
+    # interleaved with the issue #3532 45-degree quantization pass.
+    #
+    # 10d: the router can drop a via touching a foreign-net trace (a
+    # SHORT the same-net connectivity audit cannot see) — shift/detour
+    # the trace.  Handles diagonals too (issue #3516: the I_SENSE_OUT
+    # vs GND-barrel short was a 45-degree In2.Cu segment the old
+    # axis-aligned-only sweep skipped).
+    #
+    # 10e: the 10a-10d repairs (and historical router emitters) drag
+    # segment endpoints to raw coordinates, leaving arbitrary-angle
+    # copper (acute-angle junctions can etch poorly).  Replace every
+    # off-angle segment with an exact two-leg dogleg.
+    #
+    # The two passes are iterated to a FIXPOINT: a quantization dogleg
+    # can bulge onto a via barrel (the FUSED_LINE vs AC_NEUTRAL pair on
+    # the #3516 artifact shipped exactly this way), and a clearance
+    # repair can drag endpoints off-angle.  The step-12 DRC gate
+    # re-verifies the converged geometry.
+    print("\n10d/10e. Cross-net segment/via clearance + 45-degree "
+          "quantization (to fixpoint)...")
     try:
         from kicad_tools.router.quantize import quantize_pcb_file
 
-        quantized = quantize_pcb_file(output_path)
-        if quantized:
-            print(f"   Quantized {len(quantized)} off-angle segment(s)")
+        for _pass in range(5):
+            shifted = _repair_segment_via_clearance(output_path)
+            if shifted:
+                print(f"   Repaired {shifted} segment(s) clear of foreign vias")
+            quantized = quantize_pcb_file(output_path)
+            if quantized:
+                print(f"   Quantized {len(quantized)} off-angle segment(s)")
+            if not shifted and not quantized:
+                print("   Converged: no clearance conflicts, all segments "
+                      "45-degree aligned")
+                break
         else:
-            print("   All segments already 45-degree aligned")
+            print("   WARNING: repair/quantize did not converge in 5 passes")
     except Exception as exc:
-        print(f"   WARNING: 45-degree quantization failed: {exc}")
+        print(f"   WARNING: segment/via clearance repair failed: {exc}")
 
     # Re-fill after stitching/repair: the new via barrels pass through
     # the In1/In2 planes of the OTHER net, so the fills must be
