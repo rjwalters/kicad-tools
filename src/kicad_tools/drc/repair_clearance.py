@@ -1905,15 +1905,24 @@ class ClearanceRepairer:
             fp_x = float(at_atoms[0]) if at_atoms else 0.0
             fp_y = float(at_atoms[1]) if len(at_atoms) > 1 else 0.0
 
-            # Check locked status from attr
+            # Check locked status. Modern form (KiCad 9/10) is a
+            # top-level ``(locked yes)`` child; the legacy KiCad-6 form
+            # is a ``locked`` token inside ``(attr ...)``. Accept both
+            # (issue #3457) -- direct children only, since pads can
+            # carry their own (locked yes).
             locked = False
-            attr_node = fp_node.find("attr")
-            if attr_node:
-                for i in range(len(attr_node.children)):
-                    token = attr_node.get_string(i)
-                    if token == "locked":
-                        locked = True
-                        break
+            for locked_node in fp_node.find_children("locked"):
+                if (locked_node.get_string(0) or "yes") in ("yes", "true"):
+                    locked = True
+                    break
+            if not locked:
+                attr_node = fp_node.find("attr")
+                if attr_node:
+                    for i in range(len(attr_node.children)):
+                        token = attr_node.get_string(i)
+                        if token == "locked":
+                            locked = True
+                            break
 
             # Count pads
             pad_count = len(list(fp_node.find_all("pad")))
