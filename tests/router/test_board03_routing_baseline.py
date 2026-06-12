@@ -244,15 +244,14 @@ EXPECTED_TOTAL_NETS = 13
 # (segments vs foreign-net zone *fill* copper) surfaced 4 pre-existing
 # stale-fill shorts in the committed artifact (BTN3 vs the GND B.Cu
 # fill).  These were always in the copper -- the gate simply could not
-# see them before the rule existed.  Artifact fix tracked in Issue
-# #3551; when it lands, restore the ceiling to 0 and drop the rule from
-# the allowlist set below.  The ceiling is EXACT-count grandfathering
-# (mirrors .github/routed-drc-tolerance.yml) so any further regression
-# still trips.
-MAX_COMMITTED_DRC_ERRORS = 4
+# see them before the rule existed.
+# Issue #3551 (June 11 2026): ``kct zones fill`` regenerated the pours
+# against the final trace set (refill-only -- segment/via copper is
+# byte-identical to the pre-fix artifact), clearing all 4 shorts.  The
+# ceiling is back at 0 and the rule is dropped from the allowlist set.
+MAX_COMMITTED_DRC_ERRORS = 0
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
-    "clearance_segment_zone",
 }
 
 
