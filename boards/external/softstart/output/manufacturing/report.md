@@ -2,7 +2,7 @@
 title: "softstart_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-11 | jlcpcb-tier1"
+date: "Rev 1 | 2026-06-12 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 78 (56 SMD, 18 THT, 4 other) |
 | Nets | 41 |
-| Traces | 4723 segments |
+| Traces | 4727 segments |
 | Vias | 158 |
 | Board Size | 150.0 x 100.0 mm |
 
