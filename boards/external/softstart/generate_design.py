@@ -4458,6 +4458,41 @@ def route_pcb(
     else:
         print("   No zero-fill zones — every reinforcement pour has copper")
 
+    # Issue #3555: fill-freshness gate.  The committed artifact shipped
+    # with 29 stale-fill shorts + 7 grazes (clearance_segment_zone,
+    # issue #3527's rule) because copper-mutating passes ran AFTER the
+    # last zone fill — historically via surgical artifact-patch PRs
+    # (the #3493 / #3537 class) that edited traces in the committed
+    # file without recomputing the pours.  Re-fill ONCE more here, as
+    # the recipe's LAST copper-mutating step, then verify with the
+    # clearance_segment_zone rule that no trace copper overlaps or
+    # grazes a foreign-net fill.  Any future copper-mutating pass
+    # inserted below this stage trips the gate instead of shipping
+    # stale fills; artifact-patch PRs must re-run `kct zones fill` +
+    # this check (the same pair) on the committed file.
+    print("\n11c. Final zone fill + stale-fill gate (issue #3555)...")
+    fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+    if fill_result.returncode != 0:
+        print(f"   Final zone fill failed (rc={fill_result.returncode}):")
+        if fill_result.stderr:
+            print(f"   stderr: {fill_result.stderr.strip()}")
+        return False
+    seg_zone_argv = [
+        sys.executable, "-m", "kicad_tools.cli", "check",
+        str(output_path),
+        "--mfr", "jlcpcb-tier1",
+        "--only", "segment_zone",
+        "--errors-only",
+    ]
+    gate_result = subprocess.run(seg_zone_argv, capture_output=True, text=True)
+    if gate_result.returncode == 0:
+        print("   Fills fresh: 0 segment-vs-foreign-fill findings")
+    else:
+        print("   ERROR: stale-fill findings remain after the final fill:")
+        for line in gate_result.stdout.strip().split("\n")[-12:]:
+            print(f"   {line}")
+        return False
+
     # Final connectivity gate (issue #3343 P-R4 AC, hardened per the
     # PR #3481 review): every pour net must be GEOMETRICALLY continuous
     # (all pads in one copper component — ``_audit_pour_nets``), no
