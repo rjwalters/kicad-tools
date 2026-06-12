@@ -77,14 +77,17 @@ def routed_pcb_path() -> Path:
 # (segments vs foreign-net zone *fill* copper) revealed 10 pre-existing
 # stale-fill defects in board 05's committed artifact (6 shorts + 4
 # sub-clearance grazes: SW_OUT/PWM_AL/PWM_BH/GATE_CL/SWDIO vs the
-# +24V/+3V3/GND fills).  These are NOT a routing regression introduced by
-# a code change -- they were always in the copper; the gate simply could
-# not see them before the rule existed.  The artifact fix (re-route /
-# refill) is tracked in Issue #3553; the allowlist entry was re-added at
-# exactly this value so any FURTHER regression still trips the gate.
-# When #3553 lands, remove the entry (restoring the #3470 strict-0 gate)
-# and set this constant back to ``None``.
-BOARD_05_EXPECTED_TOLERANCE: int | None = 10
+# +24V/+3V3/GND fills).  These were NOT a routing regression introduced
+# by a code change -- they were always in the copper; the gate simply
+# could not see them before the rule existed.
+#
+# Issue #3553 (2026-06-11) fixed the artifact: the fills were stale
+# (computed before the offending traces existed), so regenerating the
+# zone fills against the final copper (``kct zones fill``, same recipe
+# as board 06 / PR #3548) cleared all 10 findings with zero trace, via,
+# or zone-outline changes.  The allowlist entry was removed, restoring
+# the #3470 strict-0 gate (``None`` = entry absent = 0 blocking errors).
+BOARD_05_EXPECTED_TOLERANCE: int | None = None
 
 
 @pytest.fixture(scope="module")
