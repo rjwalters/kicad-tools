@@ -425,8 +425,21 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
             "before relaxing the assertion."
         )
 
-    # Exact baseline numbers (re-baselined 2026-06-11 for Issue #3532:
-    # 45-degree quantization of the pad-tail emitters.  Off-grid pad
+    # Exact baseline numbers (re-baselined 2026-06-11 for Issue #3545:
+    # static foreign-pad halo cells now SURVIVE rip-up -- pre-fix the
+    # unmark erased them, letting later iterations route through pad
+    # clearance halos -- and the negotiated A* treats them as
+    # non-negotiable.  Routes, vias, total length and reach are
+    # UNCHANGED (22 routes, 24 vias, 328.16mm, full reach, 0 DRC at
+    # jlcpcb tier-1); the +10 segment delta (387 -> 397) is collinear
+    # re-splitting from the restored halo cells shifting merge
+    # boundaries -- the same harmless mode the stale-venv NOTE below
+    # documents.  All 3 cpp seeds (42/43/44) bit-perfect at
+    # (22, 397, 24, 328.16), measured in a uv.lock-synced venv.
+    #
+    # Prior pin (22, 387, 24, 328.16), re-baselined 2026-06-11 for
+    # Issue #3532: 45-degree quantization of the pad-tail emitters.
+    # Off-grid pad
     # tails are now emitted as exact two-leg doglegs instead of a single
     # skewed segment (+1 segment per off-grid tail), and the pull-tight
     # pass declines moves that would skew chain neighbours off the
@@ -453,7 +466,7 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # that the cross-seed equality check above would silently allow
     # (e.g. a router cost-function tweak that improves all seeds in
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
-    EXPECTED = (22, 387, 24, 328.16)
+    EXPECTED = (22, 397, 24, 328.16)
     assert ref == EXPECTED, (
         f"Board 02 routing baseline drifted: got {ref}, expected "
         f"{EXPECTED}. This is consistent across seeds (so no determinism "

@@ -617,13 +617,31 @@ class TestIssue2933SameComponentSignalMetalOverlap:
         assert clearance < 0
         assert location is not None
 
-    def test_trace_in_clearance_envelope_outside_pad_metal_is_accepted(self) -> None:
-        """The flip side of the regression: a trace that stays OUTSIDE
-        the same-component pad's metal -- even when below manufacturer
-        clearance -- must still pass under the #1764/#2933 carve-out.
-        This is the regime the carve-out is intended for (escape routing
-        past a neighbour pad with sub-DRC clearance, geometric
-        feasibility guaranteed by the component's designed pitch).
+    def test_trace_in_clearance_envelope_outside_pad_metal_is_rejected_3545(self) -> None:
+        """Issue #3545 NET-AWARE tightening of the #1764/#2933 carve-out.
+
+        Pre-#3545 contract: a trace that stayed OUTSIDE the
+        same-component pad's metal passed even below manufacturer
+        clearance, on the assumption that the component's designed
+        pitch guaranteed geometric feasibility.  That assumption is
+        net-blind: R1.2 here is a FOREIGN net (NODE_A vs the trace's
+        LINE_B), the component is standard pitch (2.0mm, above
+        ``fine_pitch_threshold``), no clearance relaxation is in
+        effect, and full-clearance routing around the pad is
+        geometrically feasible.  Exempting it shipped sub-clearance
+        copper that exact KiCad DRC flags (the routing-diagnostic
+        NET3-vs-J1.1 0.127mm defect).
+
+        Post-#3545 the carve-out only engages where the component
+        geometry forces the proximity: fine-pitch components (pitch
+        below ``rules.fine_pitch_threshold``), explicit / fine-pitch
+        clearance relaxations, or #2452-relaxed corridors.  This 0805
+        at 2.0mm pitch matches none, so the sub-clearance segment is
+        now REJECTED.  (The fine-pitch regime keeping the carve-out is
+        pinned by ``test_signal_net_carve_out_still_applies`` on the
+        0.5mm-pitch LQFP-48 fixture.)  Board 02 -- the #2933 origin --
+        still routes 22/22 with 0 DRC at jlcpcb tier-1 under the new
+        contract (re-measured for the #3545 re-baseline).
         """
         grid = self._make_0805_resistor_grid()
 
@@ -654,9 +672,11 @@ class TestIssue2933SameComponentSignalMetalOverlap:
             exclude_refs={"R1"},
         )
 
-        # Trace stays outside R1.2's metal (clearance >= 0) so the
-        # same-component carve-out applies and the segment passes.
-        assert is_valid is True
+        # Issue #3545: R1.2 is a foreign-net pad on a standard-pitch
+        # component with no relaxation in effect, so the validator now
+        # reports the sub-clearance gap (0.1mm actual vs 0.127mm
+        # required) instead of carving it out.
+        assert is_valid is False
 
 
 def test_validator_does_not_over_reject_non_fine_pitch_geometry() -> None:
