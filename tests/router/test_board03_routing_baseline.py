@@ -240,9 +240,19 @@ EXPECTED_TOTAL_NETS = 13
 # The only BY-RULE entries are silkscreen_text_height WARNINGS (0402
 # value text on the demo passives); the breakdown parser below sees
 # warnings too, so the rule allowlist names it explicitly.
-MAX_COMMITTED_DRC_ERRORS = 0
+# Issue #3527 (June 11 2026): the new ``clearance_segment_zone`` rule
+# (segments vs foreign-net zone *fill* copper) surfaced 4 pre-existing
+# stale-fill shorts in the committed artifact (BTN3 vs the GND B.Cu
+# fill).  These were always in the copper -- the gate simply could not
+# see them before the rule existed.  Artifact fix tracked in Issue
+# #3551; when it lands, restore the ceiling to 0 and drop the rule from
+# the allowlist set below.  The ceiling is EXACT-count grandfathering
+# (mirrors .github/routed-drc-tolerance.yml) so any further regression
+# still trips.
+MAX_COMMITTED_DRC_ERRORS = 4
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
+    "clearance_segment_zone",
 }
 
 

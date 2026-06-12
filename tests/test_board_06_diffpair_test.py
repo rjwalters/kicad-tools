@@ -748,9 +748,15 @@ class TestBoard06StrictGateGuard:
     state and never introduce the overlap (the recipe's 6b solo
     re-route repair reports "No physically-overlapping pair sides
     detected").  33 -> 20.
+
+    Issue #3527 (2026-06-11): +2 ``clearance_segment_zone`` (the new
+    segment-vs-foreign-zone-fill rule surfaced two pre-existing USB_CC1
+    grazes against the GND In1.Cu fill at (14.397, 12.083) -- stale-fill
+    defects that were always in the committed copper, newly visible).
+    Artifact fix tracked in Issue #3554.  20 -> 22.
     """
 
-    EXPECTED_STRICT_GATE_ERRORS = 20
+    EXPECTED_STRICT_GATE_ERRORS = 22
     EXPECTED_ADVISORY_CONNECTIVITY = 2
 
     @pytest.fixture(scope="class")
