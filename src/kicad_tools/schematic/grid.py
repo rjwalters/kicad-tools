@@ -4,6 +4,7 @@ KiCad Grid Constants and Snapping Utilities
 Provides grid size constants and functions for snapping coordinates to grid points.
 """
 
+import os
 import warnings
 from enum import Enum
 from pathlib import Path
@@ -28,12 +29,43 @@ class GridSize(Enum):
 # Default grid for schematic operations
 DEFAULT_GRID = GridSize.SCH_STANDARD.value  # 1.27mm
 
-# Default KiCad library paths
-KICAD_SYMBOL_PATHS = [
-    Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols"),
-    Path("/usr/share/kicad/symbols"),
-    Path.home() / ".local/share/kicad/symbols",
-]
+
+def get_symbol_search_paths() -> list[Path]:
+    """Get KiCad symbol library search paths, honoring ``KICAD_SYMBOL_DIR``.
+
+    This is the single source of truth for symbol library discovery,
+    mirroring how ``detect_kicad_library_path()`` resolves footprint
+    paths from ``KICAD_FOOTPRINT_DIR``. The environment variable is read
+    at call time (not import time), so it works regardless of when it is
+    set — important on systems like NixOS where libraries live in
+    non-standard store paths.
+
+    Priority order:
+    1. ``KICAD_SYMBOL_DIR`` environment variable
+    2. Platform default locations (macOS app bundle, Linux system dirs,
+       user-local share)
+
+    Returns:
+        List of existing directories, highest priority first. Paths that
+        do not exist on this machine are filtered out.
+    """
+    paths: list[Path] = []
+
+    # 1. Environment variable override (highest priority)
+    env_dir = os.environ.get("KICAD_SYMBOL_DIR")
+    if env_dir:
+        paths.append(Path(env_dir))
+
+    # 2. Platform defaults
+    # macOS
+    paths.append(Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols"))
+    # Linux
+    paths.append(Path("/usr/share/kicad/symbols"))
+    paths.append(Path("/usr/local/share/kicad/symbols"))
+    # User local (both platforms)
+    paths.append(Path.home() / ".local/share/kicad/symbols")
+
+    return [p for p in paths if p.exists()]
 
 
 def snap_to_grid(value: float, grid: float = DEFAULT_GRID) -> float:

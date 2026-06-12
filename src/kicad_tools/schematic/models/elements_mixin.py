@@ -231,7 +231,7 @@ class SchematicElementsMixin:
         1. If the lib_id's library prefix matches a local lib registered
            on ``self.local_symbol_libs``, parse from that file directly.
         2. Otherwise, fall through to ``SymbolDef.from_library()`` which
-           uses the global ``KICAD_SYMBOL_PATHS`` search.
+           uses the global ``get_symbol_search_paths()`` search.
 
         Args:
             lib_id: Library:Symbol format id (e.g., ``"softstart_custom:UCC27211"``).

@@ -7,9 +7,11 @@ import pytest
 
 def _kicad_installed() -> bool:
     """Check if KiCad standard libraries are available."""
-    from kicad_tools.schematic.grid import KICAD_SYMBOL_PATHS
+    from kicad_tools.schematic.grid import get_symbol_search_paths
 
-    return any(path.exists() and any(path.glob("*.kicad_sym")) for path in KICAD_SYMBOL_PATHS)
+    return any(
+        path.exists() and any(path.glob("*.kicad_sym")) for path in get_symbol_search_paths()
+    )
 
 
 class TestLibListCommand:

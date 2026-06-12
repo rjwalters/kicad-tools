@@ -22,7 +22,7 @@ from kicad_tools.sexp.builders import (
 from kicad_tools.sexp.builders import fmt as sexp_fmt
 
 from ..exceptions import LibraryNotFoundError, PinNotFoundError, SymbolNotFoundError
-from ..grid import KICAD_SYMBOL_PATHS
+from ..grid import get_symbol_search_paths
 from ..helpers import _expand_pin_aliases, _find_similar, _fmt_coord
 from .pin import Pin
 
@@ -95,7 +95,7 @@ class SymbolDef:
         from kicad_tools.sexp import parse_file
 
         if lib_paths is None:
-            lib_paths = KICAD_SYMBOL_PATHS
+            lib_paths = get_symbol_search_paths()
 
         lib_name, sym_name = lib_id.split(":", 1)
         lib_file = f"{lib_name}.kicad_sym"
