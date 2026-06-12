@@ -246,11 +246,23 @@ class TestWorkflowJob:
             f"Found: {sorted(workflow['jobs'].keys())}"
         )
 
-    def test_job_runs_on_ubuntu_no_container(self, workflow: dict) -> None:
-        """Pure-Python; don't pay container-pull cost."""
+    def test_job_runs_in_kicad_container(self, workflow: dict) -> None:
+        """Issue #3509: the board 06 recipe's pour pipeline shells out to
+        ``kct zones fill``, which is backed by kicad-cli.  On the bare
+        ubuntu-latest runner every fill failed ("kicad-cli not found"),
+        all pour zones stayed zero-fill, and the pour-repair loop could
+        not converge -- the FAIL-while-green trap from PR #3506.  The
+        job must run inside the official KiCad container (same image as
+        the test + kicad-cli-smoke jobs) so the fills actually run."""
         job = workflow["jobs"][JOB_NAME]
         assert job["runs-on"] == "ubuntu-latest"
-        assert "container" not in job
+        container = job.get("container")
+        assert isinstance(container, dict), (
+            "diffpair-routing-regression must run inside the kicad/kicad "
+            "container -- without kicad-cli the recipe's zone fills fail "
+            "and the pour audit can never pass (Issue #3509)."
+        )
+        assert str(container.get("image", "")).startswith("kicad/kicad:")
 
     def test_job_has_reasonable_timeout(self, workflow: dict) -> None:
         """Issue #2660 AC #5: <= 5 min on ubuntu-latest.  Timeout-minutes
@@ -305,18 +317,18 @@ class TestWorkflowJob:
                     "regressions."
                 )
 
-    def test_no_kicad_cli_dependency(self, workflow: dict) -> None:
-        """Like sibling job: pure Python.  No kicad-cli setup steps."""
+    def test_job_probes_kicad_cli_availability(self, workflow: dict) -> None:
+        """Issue #3509: a missing/broken kicad-cli must fail an early,
+        attributable setup step -- not surface 15 minutes later as
+        zero-fill pour zones.  The prerequisites step probes
+        ``kicad-cli --version``."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
-        for s in steps:
-            if not isinstance(s, dict):
-                continue
-            uses = s.get("uses", "")
-            run = s.get("run", "")
-            assert "kicad" not in uses.lower(), (
-                f"Unexpected kicad-cli setup step: {s}"
-            )
-            assert "apt-get install" not in run or "kicad" not in run.lower()
+        run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
+        assert any("kicad-cli --version" in r for r in run_blocks), (
+            "Expected an early 'kicad-cli --version' probe in "
+            f"{JOB_NAME} so a missing filler backend fails setup "
+            "attributably (Issue #3509)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -508,3 +520,127 @@ class TestMeasureSignalReach:
         assert mod is not None
         assert mod.REQUIRED_SIGNAL_REACH == 21
         assert set(mod.POUR_NETS) == {"GND", "VBUS_USB", "+3V3", "+1V8", "+1V2"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #3509: pour-connectivity assertion
+# ---------------------------------------------------------------------------
+
+
+def _fake_recipe(audit_result=None, crash=False, omit_audit_fn=False):
+    """Build a stand-in recipe module for measure_pour_connectivity."""
+    import types
+
+    mod = types.SimpleNamespace()
+    if omit_audit_fn:
+        return mod
+
+    def _audit_pour_nets(pcb_path, net_names):
+        if crash:
+            raise ValueError("synthetic audit crash")
+        return audit_result
+
+    mod._audit_pour_nets = _audit_pour_nets
+    return mod
+
+
+def _net_ok(n_pads=4):
+    return {
+        "connected": True,
+        "pad_groups": [[(f"U1.{i}", False) for i in range(n_pads)]],
+        "zero_fill_zones": 0,
+    }
+
+
+class TestMeasurePourConnectivity:
+    """Unit tests for the Issue #3509 pour-connectivity gate term.
+
+    Before this helper the recipe printed "POUR CONNECTIVITY: FAIL" in
+    the CI log while the job stayed green (PR #3506 run 27343006197).
+    """
+
+    def test_all_connected_returns_empty(self, tmp_path):
+        mod = _load_helper_module()
+        recipe = _fake_recipe({"GND": _net_ok(), "+3V3": _net_ok()})
+        failures = mod.measure_pour_connectivity(
+            recipe, tmp_path / "x.kicad_pcb", {"GND", "+3V3"}
+        )
+        assert failures == []
+
+    def test_disjoint_net_reported(self, tmp_path):
+        mod = _load_helper_module()
+        audit = {
+            "GND": {
+                "connected": False,
+                "pad_groups": [
+                    [("U1.1", False), ("U1.2", False)],
+                    [("J1.5", False)],
+                ],
+                "zero_fill_zones": 0,
+            }
+        }
+        failures = mod.measure_pour_connectivity(
+            _fake_recipe(audit), tmp_path / "x.kicad_pcb", {"GND"}
+        )
+        assert len(failures) == 1
+        assert "GND" in failures[0]
+        assert "2 disjoint pad groups" in failures[0]
+        assert "largest 2/3" in failures[0]
+
+    def test_zero_fill_zone_reported(self, tmp_path):
+        """A zero-fill zone fails the audit even when the pads happen to
+        be connected by stitching copper -- a dead pour is the #3482
+        boundary-test illusion this audit exists to catch."""
+        mod = _load_helper_module()
+        audit = {"+1V8": {**_net_ok(), "zero_fill_zones": 1}}
+        failures = mod.measure_pour_connectivity(
+            _fake_recipe(audit), tmp_path / "x.kicad_pcb", {"+1V8"}
+        )
+        assert len(failures) == 1
+        assert "ZERO filled polygons" in failures[0]
+
+    def test_missing_net_in_audit_reported(self, tmp_path):
+        mod = _load_helper_module()
+        failures = mod.measure_pour_connectivity(
+            _fake_recipe({}), tmp_path / "x.kicad_pcb", {"GND"}
+        )
+        assert failures == ["GND: missing from audit result"]
+
+    def test_missing_audit_fn_raises(self, tmp_path):
+        """A recipe that declares the contract but lost its audit function
+        is a tool failure, never a silent pass (the PR #3481 lesson)."""
+        mod = _load_helper_module()
+        with pytest.raises(RuntimeError, match="_audit_pour_nets"):
+            mod.measure_pour_connectivity(
+                _fake_recipe(omit_audit_fn=True), tmp_path / "x.kicad_pcb", {"GND"}
+            )
+
+    def test_audit_crash_raises(self, tmp_path):
+        mod = _load_helper_module()
+        with pytest.raises(RuntimeError, match="crashed"):
+            mod.measure_pour_connectivity(
+                _fake_recipe(crash=True), tmp_path / "x.kicad_pcb", {"GND"}
+            )
+
+    def test_board_06_declares_pour_connectivity_contract(self):
+        """Board 06 must opt in -- the explicit gate, never silent."""
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        repo_root = _Path(__file__).resolve().parent.parent
+        ci_dir = repo_root / "scripts" / "ci"
+        _sys.path.insert(0, str(ci_dir))
+        try:
+            from net_class_map_resolver import load_board_recipe_module
+        finally:
+            _sys.path.pop(0)
+
+        mod = load_board_recipe_module(repo_root / "boards" / "06-diffpair-test")
+        assert mod is not None
+        assert mod.REQUIRE_POUR_CONNECTIVITY is True
+        # The repair loop budget must exceed the historical 3-round cap
+        # that the CI convergence trend (GND 79 -> 45 -> 12 disjoint
+        # groups) showed was too low.
+        assert mod.MAX_POUR_REPAIR_ROUNDS >= 6
+        # The audit function the gate calls must exist.
+        assert callable(mod._audit_pour_nets)

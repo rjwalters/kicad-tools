@@ -14,6 +14,14 @@ asserting:
      a regression that disables diff-pair detection (e.g., flipping
      ``coupled_routing`` back to ``False``) would silently produce a
      0-error report and hide the defect.
+  3. (Issue #3413 phase 5) Signal-net reach meets the board's
+     ``REQUIRED_SIGNAL_REACH`` contract.
+  4. (Issue #3509) For boards declaring ``REQUIRE_POUR_CONNECTIVITY``,
+     the recipe's copper-union pour audit passes on the re-routed
+     artifact: every pour net is one copper component and no
+     fill-enabled zone has zero filled polygons.  Previously the recipe
+     printed "POUR CONNECTIVITY: FAIL" in the job log while the gate
+     stayed green.
 
 The three rule_ids this script asserts coverage of are:
 
@@ -250,6 +258,71 @@ def measure_signal_reach(
     complete = [n for n in signal if n.status == "complete"]
     incomplete_names = sorted(n.net_name for n in signal if n.status != "complete")
     return len(complete), len(signal), incomplete_names
+
+
+def measure_pour_connectivity(
+    recipe_mod, pcb_path: Path, pour_nets: set[str]
+) -> list[str]:
+    """Run the board recipe's copper-union pour audit on a routed PCB.
+
+    Issue #3509: the board 06 recipe runs a shapely copper-union audit
+    (``_audit_pour_nets``) at the end of its pour pipeline and prints
+    PASS/FAIL -- but until this helper the gate never consumed that
+    verdict, so a re-route whose pours failed the audit still went green
+    (PR #3506 run 27343006197: "POUR CONNECTIVITY: FAIL" in the log,
+    job passed).  Boards opt in by declaring
+    ``REQUIRE_POUR_CONNECTIVITY = True`` next to their ``POUR_NETS``
+    contract; the gate then re-runs the audit against the routed
+    artifact and fails the job on any disjoint pour net or zero-fill
+    zone.
+
+    Args:
+        recipe_mod: The board's imported ``generate_design`` module (must
+            expose ``_audit_pour_nets(pcb_path, net_names)``).
+        pcb_path: Routed PCB to audit.
+        pour_nets: The board's ``POUR_NETS`` set.
+
+    Returns:
+        List of human-readable failure strings; empty means every pour
+        net is one copper component with real fill geometry.
+
+    Raises:
+        RuntimeError: When the audit cannot run at all (missing
+            ``_audit_pour_nets``, shapely unavailable, audit crash).
+            Callers must treat this as a tool failure (exit 1), NOT a
+            pass -- a silent skip is how dead pours shipped in the
+            first place (PR #3481).
+    """
+    audit_fn = getattr(recipe_mod, "_audit_pour_nets", None)
+    if audit_fn is None:
+        raise RuntimeError(
+            "Board declares REQUIRE_POUR_CONNECTIVITY but its "
+            "generate_design module does not expose _audit_pour_nets()."
+        )
+    try:
+        audit = audit_fn(pcb_path, sorted(pour_nets))
+    except Exception as e:
+        raise RuntimeError(f"Pour-connectivity audit crashed: {e}") from e
+
+    failures: list[str] = []
+    for net in sorted(pour_nets):
+        info = audit.get(net)
+        if info is None:
+            failures.append(f"{net}: missing from audit result")
+            continue
+        n_pads = sum(len(g) for g in info["pad_groups"])
+        if not info["connected"]:
+            largest = len(info["pad_groups"][0]) if info["pad_groups"] else 0
+            failures.append(
+                f"{net}: {len(info['pad_groups'])} disjoint pad groups "
+                f"(largest {largest}/{n_pads})"
+            )
+        if info.get("zero_fill_zones"):
+            failures.append(
+                f"{net}: {info['zero_fill_zones']} fill-enabled zone(s) "
+                f"with ZERO filled polygons (dead pour)"
+            )
+    return failures
 
 
 def _measure_skew_data_from_pcb(
@@ -517,11 +590,16 @@ def check_board(
     # boards without it (none today in this gate's matrix) skip it.
     required_reach: int | None = None
     pour_nets: set[str] = set()
+    require_pour_connectivity = False
+    recipe_mod = None
     try:
         recipe_mod = load_board_recipe_module(board_dir)
         if recipe_mod is not None:
             required_reach = getattr(recipe_mod, "REQUIRED_SIGNAL_REACH", None)
             pour_nets = set(getattr(recipe_mod, "POUR_NETS", ()) or ())
+            require_pour_connectivity = bool(
+                getattr(recipe_mod, "REQUIRE_POUR_CONNECTIVITY", False)
+            )
     except Exception as e:
         annotate_error(
             str(board_dir),
@@ -594,6 +672,41 @@ def check_board(
             print(
                 f"[diffpair-coverage] OK: reach {complete}/{signal_total} "
                 f">= {required_reach}."
+            )
+
+    # Issue #3509: pour-connectivity assertion.  The board recipe's
+    # copper-union audit verdict was previously informational only --
+    # the recipe printed "POUR CONNECTIVITY: FAIL" while this gate stayed
+    # green.  Boards opting in via REQUIRE_POUR_CONNECTIVITY get the
+    # audit re-run here against the routed artifact; failures gate.
+    if require_pour_connectivity:
+        try:
+            pour_failures = measure_pour_connectivity(
+                recipe_mod, routed_pcb, pour_nets
+            )
+        except RuntimeError as e:
+            annotate_error(
+                str(routed_pcb),
+                f"Pour-connectivity audit could not run: {e}  (A skipped "
+                "audit must be a tool failure, never a silent pass.)",
+            )
+            return 1
+        if pour_failures:
+            annotate_error(
+                str(routed_pcb),
+                f"Pour-connectivity regression on re-routed {routed_pcb}: "
+                f"{'; '.join(pour_failures)}.  Every pour net must be ONE "
+                "copper component with non-empty zone fills (copper-union "
+                "audit, Issue #3509).  See the recipe's pour pipeline in "
+                f"{board_dir.name}/generate_design.py (steps 9-11); if the "
+                "fill log shows 'kicad-cli not found', the CI environment "
+                "lost its KiCad container.",
+            )
+            failed = True
+        else:
+            print(
+                f"[diffpair-coverage] OK: pour connectivity "
+                f"({len(pour_nets)} pour nets, copper-union audit)."
             )
 
     # AC #4: each of the three diff-pair rules must have been exercised.

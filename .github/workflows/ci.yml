@@ -431,6 +431,30 @@ jobs:
     # the merge button.
     name: Diff-Pair Routing Regression
     runs-on: ubuntu-latest
+    # Issue #3509: run inside the official KiCad 10 container (same image
+    # as the test + kicad-cli-smoke jobs).  The board 06 recipe's pour
+    # pipeline (zone fill -> stitch -> pour-connectivity repair -> re-fill
+    # -> copper-union audit) shells out to ``kct zones fill``, which is
+    # backed by kicad-cli.  On the bare ubuntu-latest runner kicad-cli
+    # does not exist, so EVERY fill invocation failed with rc=1
+    # ("kicad-cli not found"), all 5 pour zones stayed zero-fill, and the
+    # repair loop was left trying to do a copper plane's job with discrete
+    # vias/bridges -- the non-converging "FAIL while the gate is green"
+    # trap from PR #3506's run 27343006197.  The container provides
+    # kicad-cli 10 so the fills actually run, matching the local artifact-
+    # refresh environment.  The gate also asserts the pour audit verdict
+    # now (see scripts/ci/check_diffpair_coverage.py + the board recipe's
+    # REQUIRE_POUR_CONNECTIVITY contract), so a future fill regression
+    # fails the job instead of rotting in the log.
+    container:
+      image: kicad/kicad:10.0
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the test job).
+        shell: bash
     # Issue #2660 acceptance criterion #5: wall-clock <= 5 min on
     # ubuntu-latest.  Originally a 10-minute safety-net ceiling, bumped
     # to 15 minutes per PR #3141 Judge feedback (2026-05-27):
@@ -479,6 +503,14 @@ jobs:
     # budgeted (per-pair 60s, negotiated 360s, repair loop capped at 3
     # rounds), so 30 min gives ~20-30% headroom over the worst expected
     # wall without masking a genuine hang.
+    #
+    # Issue #3509 re-measure note: moving into the kicad/kicad:10.0
+    # container adds ~1-2 min (image pull + apt prerequisites) but the
+    # zone fills now succeed, so the pour-repair loop converges instead
+    # of grinding its full round budget against unfillable zero-fill
+    # zones (the pre-#3509 runs burned ~2.2 min on 3 futile rounds).
+    # Prior green run wall: 20m42s (run 27343006197); ceiling kept at
+    # 30 min.
     timeout-minutes: 30
     # Board 06 (diffpair-test) status (M-F closure, Issue #3097):
     #
@@ -530,18 +562,34 @@ jobs:
         # Future: add boards/03-usb-joystick here once #2589 stabilises
         # its router determinism and #2513 (USB-C blockers) clears.
     steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.  The
+        # ``kicad-cli --version`` probe makes a missing/broken kicad-cli
+        # fail THIS step with an attributable error instead of surfacing
+        # later as zero-fill pour zones (Issue #3509).
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install uv
+        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # coupling inside the container (mirrors the test + smoke jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        # Pin the interpreter via uv (parity with the sibling jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --extra dev --python 3.12
 
       - name: Build C++ router backend
         # `uv sync` does NOT build the native extension (see repo CLAUDE.md
