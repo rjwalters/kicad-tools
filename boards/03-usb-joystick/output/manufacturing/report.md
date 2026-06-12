@@ -62,6 +62,45 @@ Demonstrates autolayout functionality
 
 \newpage
 
+## Schematic Overview
+
+### Schematic: usb_joystick
+
+![Schematic: usb_joystick](images/schematic_usb_joystick.png)
+
+
+\newpage
+
+## PCB Layout
+
+![PCB Front](images/pcb_front.png)
+
+![PCB Back](images/pcb_back.png)
+
+### Copper
+
+![PCB Copper](images/pcb_copper.png)
+
+### Assembly
+
+![Assembly](images/assembly.png)
+
+
+\newpage
+
+## Copper Layers
+
+### F.Cu
+
+![F.Cu](images/layer_F_Cu.png)
+
+### B.Cu
+
+![B.Cu](images/layer_B_Cu.png)
+
+
+\newpage
+
 ## Bill of Materials
 
 | Value | Package | Qty | References |

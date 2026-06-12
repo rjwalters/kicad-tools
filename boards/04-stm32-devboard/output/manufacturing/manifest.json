@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T02:58:09.878891+00:00",
+  "generated_at": "2026-06-12T06:36:15.615711+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,24 +13,52 @@
       "size": 1257
     },
     "gerbers.zip": {
-      "sha256": "fd004a64375d5bc9760bad8404e7289bb9a1854ecdae62ea1b4effb68e0f0502",
-      "size": 47157
+      "sha256": "a6fed7ad2d6fc89b078913299e596507010afe20a49a368c664cc8d0fb2afa4b",
+      "size": 47151
     },
     "report.pdf": {
-      "sha256": "76a1c8086e42ec4e22ae12ebc8f96126e5c2fe32dafba773adc4a2284793dc90",
-      "size": 32018
+      "sha256": "cd4cc18fee20d3be617215e23b0379de46379e8bdc26a433a9b0b9b10c60a410",
+      "size": 1306337
     },
     "report.md": {
-      "sha256": "02f25d7f9381952ae68530a4e7f46408800dbfb397c728dd58e12a9602d63abe",
-      "size": 2846
+      "sha256": "1fb32e554f22d3f78b8108f409212507356d5f2d9fa0c36ed1827eb7ec3d45c6",
+      "size": 3285
+    },
+    "assembly.png": {
+      "sha256": "073f3f0b6a2b188d10724e09a579dda8f7bf0a448c2e58a8dbe5fac06ea67757",
+      "size": 178833
+    },
+    "layer_B_Cu.png": {
+      "sha256": "6d7a324fa8ebd339b61bb7a92deb91578e801a2bd4c759fa73e96ce6e3b10a6d",
+      "size": 116200
+    },
+    "layer_F_Cu.png": {
+      "sha256": "ecb5e7efc871d77e9ed53378190473888af6fc7ff98b45149fd4f439cb1d6014",
+      "size": 161630
+    },
+    "pcb_back.png": {
+      "sha256": "4f931e7c0ce0cd2a336f277efdd89666f15394dd33be84266b5a1fa964648485",
+      "size": 118259
+    },
+    "pcb_copper.png": {
+      "sha256": "e7b119be60660fb556500a9e4fd01466a81593d80affa202629b71486e95f2b1",
+      "size": 137380
+    },
+    "pcb_front.png": {
+      "sha256": "46905b00516f1beafa1269c6d882612b7d85c572273f42bbb72812f0abba9eb1",
+      "size": 209533
+    },
+    "schematic_stm32_devboard.png": {
+      "sha256": "2a03e8ac788af4ead397652588414ee4e4319237b626a7e39c88cbdc76f93ad7",
+      "size": 289422
     },
     "kicad_project.zip": {
-      "sha256": "f6f8b91f82e850773240f5f20270c72cacc3f5bec0084d678d970037b9ac9966",
+      "sha256": "591789c2f3c36348822886abc14f1bcd9fa24619b8fcc74b159642063362fb5e",
       "size": 64686
     },
     "README.txt": {
-      "sha256": "93316f8bb2dde2bd63ec7d7b5103625ebd951ca0eb87a2ab4489a805af85d358",
-      "size": 763
+      "sha256": "d3b2c23a0540dc1a29d623e7ef7f1c7a712cb4c2dab586db688945666de19a90",
+      "size": 880
     }
   },
   "board": {

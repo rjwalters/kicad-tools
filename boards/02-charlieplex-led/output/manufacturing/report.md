@@ -56,6 +56,45 @@ Charlieplex LED Grid
 
 \newpage
 
+## Schematic Overview
+
+### Schematic: charlieplex_3x3
+
+![Schematic: charlieplex_3x3](images/schematic_charlieplex_3x3.png)
+
+
+\newpage
+
+## PCB Layout
+
+![PCB Front](images/pcb_front.png)
+
+![PCB Back](images/pcb_back.png)
+
+### Copper
+
+![PCB Copper](images/pcb_copper.png)
+
+### Assembly
+
+![Assembly](images/assembly.png)
+
+
+\newpage
+
+## Copper Layers
+
+### F.Cu
+
+![F.Cu](images/layer_F_Cu.png)
+
+### B.Cu
+
+![B.Cu](images/layer_B_Cu.png)
+
+
+\newpage
+
 ## Bill of Materials
 
 | Value | Package | Qty | References |

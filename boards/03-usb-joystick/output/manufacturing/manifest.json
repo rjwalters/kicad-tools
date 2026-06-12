@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T04:27:14.690006+00:00",
+  "generated_at": "2026-06-12T06:35:58.400349+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,24 +13,52 @@
       "size": 1305
     },
     "gerbers.zip": {
-      "sha256": "55bbd51fe0db47a986263904fb191e560a81ed1dfc06b7bb59467392397ed243",
-      "size": 58155
+      "sha256": "b5fe8db5a346346e681728de6c3abdaf21e7b146697d6c1b1a930aca9b97b3e9",
+      "size": 58153
     },
     "report.pdf": {
-      "sha256": "4cf267278d58052625c5dd16bb19b6f658a542da1b0966e8315c38cc6882575b",
-      "size": 31807
+      "sha256": "e6d33e617807a6e628fb07a7f0f5666f0195d370254f060608865e704f99ca3a",
+      "size": 1211837
     },
     "report.md": {
-      "sha256": "3ae3c5912b0ca60d4ba5c8382ea8eb3b429e4fe762c2d9a3b3d7f5eaf53108e7",
-      "size": 2684
+      "sha256": "a3bc0cc651730d4613f6bf63b84cec8b2404a56ac02750fa1c3159e0e954785b",
+      "size": 3117
+    },
+    "assembly.png": {
+      "sha256": "0ea7c5658df09436cdafac0d3022bce47426ac6430bea4f7c8d4c23edae2afce",
+      "size": 149642
+    },
+    "layer_B_Cu.png": {
+      "sha256": "bc04f8b617d9b7056f273121202062c5087367416d404af302aa8c094c05fc2f",
+      "size": 97639
+    },
+    "layer_F_Cu.png": {
+      "sha256": "082ca50c5eff6b3b260c857f5d319cc40a8c5705b69934da627bd9997516774a",
+      "size": 130753
+    },
+    "pcb_back.png": {
+      "sha256": "ff704988b9e0d76f8c7a78f15271dd3ed66c701c8b50680a92aef622d623835f",
+      "size": 100092
+    },
+    "pcb_copper.png": {
+      "sha256": "1be01a201ca3a3973529490a31c96af9ba169b3c316756b9a20bf8f3ff919457",
+      "size": 117557
+    },
+    "pcb_front.png": {
+      "sha256": "848521bcd771e4aa357a6f6d03aa2b503aef31229b5229ce4eac29fdc07d892a",
+      "size": 168288
+    },
+    "schematic_usb_joystick.png": {
+      "sha256": "6db6857b8f31fd7d5cfb6f266c59966953fa351a15b44255e87b10ec8a9e0608",
+      "size": 356614
     },
     "kicad_project.zip": {
-      "sha256": "32827137fbb8b73f58493840e38cd853efd0151aa51a89d9f1205c6e2929726b",
+      "sha256": "b29ee3fe30bcb853b3efa4bb9cfa141ffcc2102c6e1741146b8817f9028a208c",
       "size": 83827
     },
     "README.txt": {
-      "sha256": "b7ac7ae6ebca3b3bfce4449f9e9244864b9dee3665c207c6cf3810da7ea0e619",
-      "size": 761
+      "sha256": "2dace3aa3c6424b0367802db93ca9932a6967478e6d419249e0412e6f9612cfb",
+      "size": 878
     }
   },
   "board": {

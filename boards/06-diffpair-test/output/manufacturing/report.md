@@ -38,7 +38,7 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Protocol | Signals |
 |----------|---------|
-| UART | USB3_RX2+, USB3_TX2+ |
+| UART | PCIE_RX-, PCIE_TX+ |
 | USB | USB2_D+, USB2_D-, VBUS_USB |
 
 ### Power Architecture
@@ -59,6 +59,15 @@ Epic #2556 Phase 4L (issue #2658)
 | Warnings | 0 |
 
 **Status**: SKIPPED -- ERC skipped by user request
+
+
+\newpage
+
+## Schematic Overview
+
+### Schematic: diffpair_test
+
+![Schematic: diffpair_test](images/schematic_diffpair_test.png)
 
 
 \newpage

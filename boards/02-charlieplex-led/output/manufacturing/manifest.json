@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T02:45:07.217746+00:00",
+  "generated_at": "2026-06-12T06:34:54.417675+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,28 +13,122 @@
       "size": 945
     },
     "gerbers.zip": {
-      "sha256": "381effcff7ef049966f1a646c39ed968f8f0922e1417ee429ad0263e238c8bba",
-      "size": 31986
+      "sha256": "703a48666851291799f66b53d1c292387280599a1a0517d6613d472ce57a579c",
+      "size": 31987
     },
     "report.pdf": {
-      "sha256": "358c1931730314fc7c62da64f491acf2e480aa48d86eb011c5d17956146ab9dc",
-      "size": 31325
+      "sha256": "6616ab6c49b6da35032d356509e702ee6e26bd22414af0a2b274317c8ec97dc3",
+      "size": 1505585
     },
     "report.md": {
-      "sha256": "af238a7f635554064d7eaec8a5828f6eef3d89942139fcc5d627370648869d4a",
-      "size": 2622
+      "sha256": "e73918217d543a9bec8506d8b17add0855391af8f3ec27b334cbec3c0510f5bd",
+      "size": 3064
+    },
+    "assembly.png": {
+      "sha256": "a2e6faa0113256418d4afdf32922e69cfe7e27346eba62bb3b2e88009b66466f",
+      "size": 223199
+    },
+    "layer_B_Cu.png": {
+      "sha256": "b7d4b3714a0a258faae5b9a421814a3829afafa5a752b980cf492f799a76f0b5",
+      "size": 159669
+    },
+    "layer_F_Cu.png": {
+      "sha256": "9f40d77513f1c6378d1fd5b7cd25b528992ccf3f7e16ce737055ac58733c2923",
+      "size": 183587
+    },
+    "pcb_back.png": {
+      "sha256": "f17fd101985a8cc87225909f49ddd9317f2d24c7b1adb949d3d70f10765948d9",
+      "size": 161701
+    },
+    "pcb_copper.png": {
+      "sha256": "034a8481619ce0018993b06b36d972e014f42d4d219ff1246a9ead6a5d02291c",
+      "size": 188402
+    },
+    "pcb_front.png": {
+      "sha256": "6aaf7664cf9b9397561643e0f3d895f9516b8bb46cf5b03023c2d3999f168cab",
+      "size": 223355
+    },
+    "schematic_charlieplex_3x3.png": {
+      "sha256": "e48f1144f3001194a9c24b02d2ceaa5557324b284266d24e6119a3b0f7466910",
+      "size": 230835
     },
     "kicad_project.zip": {
-      "sha256": "579a017a4c012606b364005e26fbebd7ba83ffc815b39e5220dac76021ee48fa",
+      "sha256": "c68cab3c46f0269884b6fa536f3eeebde9236ce8c31f762931be8fba11de5ae9",
       "size": 41136
     },
     "README.txt": {
-      "sha256": "38de37dae27902935d6f6c1765f09434f3160b6b028be78155ba434c31dea16f",
-      "size": 764
+      "sha256": "690570f79addb4e915a4d054492e62377a26e52e2154d64f7dd36fdf1c52c0e0",
+      "size": 881
     }
   },
   "board": {
     "name": "charlieplex_3x3_routed",
     "pcb_file": "charlieplex_3x3_routed.kicad_pcb"
-  }
+  },
+  "preflight": [
+    {
+      "name": "pcb_file",
+      "status": "OK",
+      "message": "PCB file parsed successfully",
+      "details": "Footprints: 14"
+    },
+    {
+      "name": "schematic_file",
+      "status": "OK",
+      "message": "Schematic auto-detected: charlieplex_3x3.kicad_sch"
+    },
+    {
+      "name": "board_outline",
+      "status": "OK",
+      "message": "Board outline is closed (5 points)"
+    },
+    {
+      "name": "footprints",
+      "status": "OK",
+      "message": "All 14 footprints have library footprint names"
+    },
+    {
+      "name": "board_dimensions",
+      "status": "OK",
+      "message": "Board dimensions within limits (50.00 x 55.00 mm)"
+    },
+    {
+      "name": "drill_holes",
+      "status": "OK",
+      "message": "Drill holes present (24 vias, 8 TH pads)"
+    },
+    {
+      "name": "tht_in_cpl",
+      "status": "OK",
+      "message": "No through-hole components in CPL-eligible footprints"
+    },
+    {
+      "name": "bom_fields",
+      "status": "WARN",
+      "message": "BOM field issues: 1 problem(s)",
+      "details": "14/14 active item(s) missing LCSC part number"
+    },
+    {
+      "name": "bom_pcb_match",
+      "status": "OK",
+      "message": "BOM and PCB references match (14 components)"
+    },
+    {
+      "name": "bom_cpl_match",
+      "status": "OK",
+      "message": "BOM and CPL references match (14 components)"
+    },
+    {
+      "name": "drc",
+      "status": "WARN",
+      "message": "No DRC report found; run kicad-cli or kct check first",
+      "details": "Use --drc-report to specify a report file, or --skip-drc to skip"
+    },
+    {
+      "name": "erc",
+      "status": "WARN",
+      "message": "No ERC report found; run kicad-cli first",
+      "details": "Use --erc-report to specify a report file, or --skip-erc to skip"
+    }
+  ]
 }
