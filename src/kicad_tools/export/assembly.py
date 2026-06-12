@@ -13,9 +13,14 @@ from pathlib import Path
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 
 from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
-from .bom_formats import BOMExportConfig, export_bom, read_existing_lcsc_assignments
+from .bom_formats import (
+    BOMExportConfig,
+    apply_existing_lcsc_assignments,
+    export_bom,
+    read_existing_lcsc_assignments,
+)
 from .bom_spec_overlay import SpecOverlayReport, apply_spec_overlay, find_spec_file
-from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter, GerberManufacturerPreset
+from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import PnPExportConfig, export_pnp
 
 logger = logging.getLogger(__name__)
@@ -403,16 +408,19 @@ class AssemblyPackage:
             if existing_csv.is_file():
                 existing = read_existing_lcsc_assignments(existing_csv)
                 if existing:
-                    merged_count = 0
-                    for item in items:
-                        if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
-                            continue
-                        key = (item.value, item.footprint)
-                        lcsc = existing.get(key)
-                        if lcsc:
-                            item.lcsc = lcsc
-                            csv_merge_refs.add(item.reference)
-                            merged_count += 1
+                    # Validate read-back assignments against the local
+                    # parts cache so a wrong-part LCSC in the committed
+                    # CSV does not self-perpetuate (issue #3590).
+                    parts_cache = None
+                    try:
+                        from ..parts.cache import PartsCache
+
+                        parts_cache = PartsCache()
+                    except Exception as e:
+                        logger.debug("Parts cache unavailable for CSV-merge validation: %s", e)
+                    merged_count, csv_merge_refs = apply_existing_lcsc_assignments(
+                        items, existing, parts_cache=parts_cache
+                    )
                     if merged_count:
                         logger.info(
                             "CSV merge: preserved %d LCSC assignment(s) from existing BOM",

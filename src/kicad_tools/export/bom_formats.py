@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,10 @@ from typing import TYPE_CHECKING
 from kicad_tools.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
+    from ..parts.cache import PartsCache
     from ..schema.bom import BOMItem
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -62,11 +66,7 @@ class BOMFormatter(ABC):
         ``VIN`` power symbol leaked into ``bom_jlcpcb.csv`` after the
         schematic was rewritten to use ``VIN`` instead of stock ``+5V``.
         """
-        filtered = [
-            item
-            for item in items
-            if not getattr(item, "is_virtual", False)
-        ]
+        filtered = [item for item in items if not getattr(item, "is_virtual", False)]
         if self.config.include_dnp:
             return filtered
         return [item for item in filtered if not getattr(item, "dnp", False)]
@@ -378,6 +378,67 @@ def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]
         # caller will simply regenerate without merging.
         return {}
     return assignments
+
+
+def apply_existing_lcsc_assignments(
+    items: list[BOMItem],
+    existing: dict[tuple[str, str], str],
+    parts_cache: PartsCache | None = None,
+) -> tuple[int, set[str]]:
+    """Apply LCSC assignments from an existing BOM CSV to fresh items.
+
+    Items that already have an LCSC number (schematic/spec priority) or
+    are DNP are skipped.  When ``parts_cache`` is provided, each
+    candidate assignment is validated against the part's known
+    parametric value; a clear mismatch is dropped with a WARNING instead
+    of being propagated (issue #3590: one bad cache hit must not become
+    sticky in the committed artifact via the read-back merge).
+
+    Args:
+        items: Fresh BOM items (modified in place).
+        existing: Mapping of ``(value, footprint)`` to LCSC part number,
+            as returned by :func:`read_existing_lcsc_assignments`.
+        parts_cache: Optional local parts cache used to validate the
+            read-back assignments.
+
+    Returns:
+        Tuple of (number of items that received an LCSC, set of
+        references that were assigned).
+    """
+    from .lcsc_value_check import check_lcsc_against_cache
+
+    merged_count = 0
+    merged_refs: set[str] = set()
+    rejected: set[tuple[str, str]] = set()
+
+    for item in items:
+        if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
+            continue
+        key = (item.value, item.footprint)
+        if key in rejected:
+            continue
+        lcsc = existing.get(key)
+        if not lcsc:
+            continue
+
+        mismatch = check_lcsc_against_cache(parts_cache, lcsc, item.value, item.reference)
+        if mismatch is not None:
+            rejected.add(key)
+            logger.warning(
+                "Dropping LCSC assignment %s read back from existing BOM "
+                "for %s [%s]: %s -- leaving row unassigned",
+                lcsc,
+                item.value,
+                item.footprint,
+                mismatch.describe(),
+            )
+            continue
+
+        item.lcsc = lcsc
+        merged_refs.add(item.reference)
+        merged_count += 1
+
+    return merged_count, merged_refs
 
 
 def export_bom(

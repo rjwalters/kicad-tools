@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from ..cost.suggest import PartSuggester
 from ..parts.cache import PartsCache
 from ..parts.lcsc import LCSCForbiddenError
+from .lcsc_value_check import check_lcsc_against_cache, find_value_mismatch
 
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
@@ -157,15 +158,42 @@ def enrich_bom_lcsc(
         or ``source="unmatched"`` on miss.
         """
         if cache is not None:
-            match = cache.get_enrichment_match(
-                value, footprint, ignore_expiry=True
-            )
+            match = cache.get_enrichment_match(value, footprint, ignore_expiry=True)
             if match is not None:
                 lcsc = match["lcsc_part"]
+
+                # Validate the cached part's known parametric value
+                # against the requested BOM value before trusting a
+                # stale entry (issue #3590: C1525/100nF assigned to a
+                # 16nF row from a poisoned cache entry).
+                first_ref = refs[0] if refs else ""
+                mismatch = check_lcsc_against_cache(cache, lcsc, value, first_ref)
+                if mismatch is not None:
+                    cache.delete_enrichment_match(value, footprint)
+                    logger.warning(
+                        "Rejecting cached LCSC match %s for %s [%s]: %s "
+                        "-- evicted poisoned cache entry",
+                        lcsc,
+                        value,
+                        footprint,
+                        mismatch.describe(),
+                    )
+                    return EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part="",
+                        source="unmatched",
+                        error=(f"cached match {lcsc} rejected: {mismatch.describe()}"),
+                    )
+
                 for it in group_items:
                     it.lcsc = lcsc
-                logger.info(
-                    "Cache fallback %s [%s] -> %s (stale cache)",
+                # WARNING, not INFO: ignore_expiry=True is a degraded
+                # mode that explicitly accepts stale data.
+                logger.warning(
+                    "Cache fallback %s [%s] -> %s "
+                    "(stale cache; API unavailable -- verify before fab)",
                     value,
                     footprint,
                     lcsc,
@@ -218,11 +246,7 @@ def enrich_bom_lcsc(
                 # Determine source: if any ref in the group was set by spec,
                 # report as "spec"; otherwise "schematic".
                 _spec_refs = spec_refs or set()
-                source = (
-                    "spec"
-                    if any(r in _spec_refs for r in refs)
-                    else "schematic"
-                )
+                source = "spec" if any(r in _spec_refs for r in refs) else "schematic"
                 report.entries.append(
                     EnrichmentEntry(
                         value=value,
@@ -270,6 +294,33 @@ def enrich_bom_lcsc(
                 best = suggestion.best_suggestion
                 assert best is not None  # guarded by has_suggestion
                 lcsc = best.lcsc_part
+
+                # Validate the suggested part's value against the BOM
+                # value before applying/caching (issue #3590: a wrong
+                # API match cached without validation poisons every
+                # later offline export).
+                mismatch = find_value_mismatch(value, first_ref, part_description=best.description)
+                if mismatch is None:
+                    mismatch = check_lcsc_against_cache(cache, lcsc, value, first_ref)
+                if mismatch is not None:
+                    logger.warning(
+                        "Rejecting LCSC auto-match %s for %s [%s]: %s",
+                        lcsc,
+                        value,
+                        footprint,
+                        mismatch.describe(),
+                    )
+                    report.entries.append(
+                        EnrichmentEntry(
+                            value=value,
+                            footprint=footprint,
+                            references=refs,
+                            lcsc_part="",
+                            source="unmatched",
+                            error=(f"auto-match {lcsc} rejected: {mismatch.describe()}"),
+                        )
+                    )
+                    continue
 
                 # Write back to all items in the group
                 for it in group_items:
