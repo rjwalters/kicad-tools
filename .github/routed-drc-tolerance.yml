@@ -1522,14 +1522,12 @@ tolerances:
   # LQFP-48 corner cluster of #3267; U2.23 is newly blocked by the
   # recovered NRST B.Cu track, a deliberate signal-over-stitch
   # trade).  Floor stays 0.
-  # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
-  # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill
-  # shorts that were previously invisible to every gate) fired 28
-  # finding(s) on this committed artifact.  24 shorts + 4 grazes vs the +3.3V F.Cu fill (OSC_IN/OSC_OUT/LED_K/GND stitch traces).
-  # Artifact fix tracked in #3552; remove/reduce this entry in the PR
-  # that re-routes the offenders or refreshes the fills.  Do NOT weaken
-  # the rule.
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 28
+  #
+  # Issue #3552 (June 2026): the #3527 ``clearance_segment_zone``
+  # grandfather entry (28: 24 shorts + 4 grazes vs the +3.3V F.Cu
+  # fill) is REMOVED -- zones re-filled against the final copper
+  # (refill-only, no re-routes); board 04 is back on the strict
+  # 0-error gate.
 
   # Issue #3527 grandfather (June 11 2026): the new ``clearance_segment_zone``
   # DRC rule (segments vs foreign-net zone *fill* copper -- stale-fill

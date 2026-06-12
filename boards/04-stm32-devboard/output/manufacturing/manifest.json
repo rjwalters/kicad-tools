@@ -1,35 +1,35 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-08T17:43:15.958337+00:00",
+  "generated_at": "2026-06-12T02:58:09.878891+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
-      "sha256": "904844034e7499338ca01d1c2af36b8802fef3ddb772f759cbc93c2b0d790561",
-      "size": 626
+      "sha256": "ae3337f1e284eee54c52a648aafef4fe64e019357e63d3d6fe5402ee7ec31e74",
+      "size": 630
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "1c0e5ee6c95494fc23d114c83df127e2f841feac78b7ff4aba273f3002e5a1d1",
-      "size": 1275
+      "sha256": "01907b6930cc8c0d6f8a0b92b3c94604b54b801fb35e6f9925b1af8a42b15baa",
+      "size": 1257
     },
     "gerbers.zip": {
-      "sha256": "d795ce4a4a18234b0887a8b61be43ddfd402d9ef5a9f59eb06ad9bd2aa192773",
-      "size": 47926
+      "sha256": "fd004a64375d5bc9760bad8404e7289bb9a1854ecdae62ea1b4effb68e0f0502",
+      "size": 47157
     },
     "report.pdf": {
-      "sha256": "728e70fa63d3a0da0480537a97d1cd9bd52240eb9af6238b19ace2764d2c13b4",
-      "size": 32813
+      "sha256": "76a1c8086e42ec4e22ae12ebc8f96126e5c2fe32dafba773adc4a2284793dc90",
+      "size": 32018
     },
     "report.md": {
-      "sha256": "fa38d211596b6e866ce63911d7e3d4949314b5e5135d108fbf57f0558d761a7a",
-      "size": 3049
+      "sha256": "02f25d7f9381952ae68530a4e7f46408800dbfb397c728dd58e12a9602d63abe",
+      "size": 2846
     },
     "kicad_project.zip": {
-      "sha256": "b278a58246005aee8b8e556fce4caa872bd70a0af09f6b96d48e720839583773",
-      "size": 70556
+      "sha256": "f6f8b91f82e850773240f5f20270c72cacc3f5bec0084d678d970037b9ac9966",
+      "size": 64686
     },
     "README.txt": {
-      "sha256": "7e7013eca4073fc74fdb3fc98949e621c1b38717aa458cb6dcb62672296e2d78",
+      "sha256": "93316f8bb2dde2bd63ec7d7b5103625ebd951ca0eb87a2ab4489a805af85d358",
       "size": 763
     }
   },
@@ -67,7 +67,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (25 vias, 8 TH pads)"
+      "message": "Drill holes present (28 vias, 8 TH pads)"
     },
     {
       "name": "tht_in_cpl",
@@ -92,9 +92,9 @@
     },
     {
       "name": "drc",
-      "status": "WARN",
-      "message": "No DRC report found; run kicad-cli or kct check first",
-      "details": "Use --drc-report to specify a report file, or --skip-drc to skip"
+      "status": "FAIL",
+      "message": "DRC has 2 error(s)",
+      "details": "connectivity: Net 'GND' is partially routed: 2 of 18 pads stranded (connected island has 16 pads); connectivity: Net 'NRST' is partially routed: 1 of 2 pads stranded (connected island has 1 pads)"
     },
     {
       "name": "erc",
