@@ -787,6 +787,45 @@ class _ZoneFill:
     polygon: object  # shapely (Multi)Polygon
 
 
+def _repair_fill_polygon(poly):  # type: ignore[no-untyped-def]
+    """Repair an invalid fill ring, preserving every copper lobe.
+
+    Stale fills can carry self-touching outlines (KiCad traces knockout
+    holes through the exterior ring) or, in the worst case, genuinely
+    self-intersecting bowtie rings.  ``buffer(0)`` re-nodes the former
+    losslessly but silently *drops* the negatively-wound lobe of a
+    bowtie -- and dropped copper is exactly the copper this rule exists
+    to check, so a real short under that lobe would be masked (Issue
+    #3560).  ``shapely.make_valid`` instead keeps all lobes as a
+    MultiPolygon.
+
+    ``make_valid`` may return a GeometryCollection when part of the
+    outline collapses to zero-area linework; only the polygonal
+    components are copper, so extract those (an empty Polygon is
+    returned if nothing polygonal survives, which callers skip via
+    ``is_empty``).
+    """
+    from shapely import make_valid
+    from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
+
+    repaired = make_valid(poly)
+    if isinstance(repaired, (Polygon, MultiPolygon)):
+        return repaired
+    polys: list[Polygon] = []
+    if isinstance(repaired, GeometryCollection):
+        for geom in repaired.geoms:
+            if isinstance(geom, Polygon):
+                polys.append(geom)
+            elif isinstance(geom, MultiPolygon):
+                polys.extend(geom.geoms)
+    # Pure linework / points (fully degenerate outline) -> no copper.
+    if not polys:
+        return Polygon()
+    if len(polys) == 1:
+        return polys[0]
+    return MultiPolygon(polys)
+
+
 class SegmentZoneClearanceRule(DRCRule):
     """Check track segments against foreign-net zone fill copper.
 
@@ -903,10 +942,9 @@ class SegmentZoneClearanceRule(DRCRule):
                     continue
                 poly = Polygon(points)
                 if not poly.is_valid:
-                    # Stale fills can carry self-touching outlines
-                    # (KiCad traces knockout holes through the exterior
-                    # ring).  buffer(0) re-nodes to equivalent copper.
-                    poly = poly.buffer(0)
+                    # make_valid keeps every copper lobe (buffer(0)
+                    # drops bowtie lobes -- see _repair_fill_polygon).
+                    poly = _repair_fill_polygon(poly)
                 if poly.is_empty:
                     continue
                 layer = zone.filled_polygon_layer(i)
