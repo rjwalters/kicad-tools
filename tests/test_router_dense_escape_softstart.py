@@ -421,26 +421,43 @@ class TestEscapeStdoutLogLine:
 
 
 # ---------------------------------------------------------------------------
-# Test 4 -- the softstart call site is wired through route_with_escape
+# Test 4 -- the softstart call site routes via the ``kct route`` subprocess
+#           (post-PR #3481 recipe overhaul; refs #3343, #3492)
 # ---------------------------------------------------------------------------
 
 
 class TestSoftstartCallSite:
-    """Source-level regression: the softstart generator must use route_with_escape.
+    """Source-level regression: the softstart generator must route via ``kct route``.
 
-    The bug in #3138 was specifically that
-    ``boards/external/softstart/generate_design.py:1659`` called
-    ``route_all_negotiated()`` directly.  If a future refactor reverts
-    this back, the unit-level escape tests above would still pass but
-    the end-to-end softstart routing would silently regress to 6/10.
+    The original #3138 bug was that
+    ``boards/external/softstart/generate_design.py`` called
+    ``route_all_negotiated()`` directly, bypassing the dense-package
+    escape pre-pass and capping reach at 6/10 nets.  The first fix
+    (Approach A) swapped that call site to the in-process
+    ``router.route_with_escape(...)``.
+
+    PR #3481 (issue #3343 P-R1..P-R4) then overhauled the recipe again:
+    the rev B board no longer routes in-process at all.  It shells out
+    to the ``kct route`` CLI (the board-05 #3425/#3472 production
+    pattern), which runs the escape pre-pass *and* the DRC-nudge +
+    validation post-passes that drain the negotiated loop's overflow
+    copper.  Measured A/B on this board (same placement,
+    PYTHONHASHSEED=0): ``kct route`` reaches 24/26 with 1 clearance
+    error versus the in-process path's 22/26 with 75.
+
+    This guard now pins the post-#3481 reality: the softstart generator
+    must invoke ``kct route`` as a subprocess.  Reverting to the bare
+    in-process ``route_all_negotiated()`` call (the #3138 regression)
+    would once again bypass the escape pre-pass and the post-passes.
+    The end-to-end rev B reach floor is enforced by
+    ``tests/router/test_softstart_revb_fine_pitch_escape.py``; the
+    unit-level escape-pre-pass guards above (Tests 1-3, 5) still cover
+    the ``route_with_escape`` -> ``generate_escape_routes`` call path
+    that ``kct route`` exercises internally.
     """
 
-    @pytest.mark.xfail(
-        reason="PR #3481 recipe overhaul shells out to kct route; call-site guard stale -- see issue #3492",
-        strict=False,
-    )
-    def test_softstart_generator_calls_route_with_escape(self):
-        """generate_design.py must invoke route_with_escape, not route_all_negotiated."""
+    def test_softstart_generator_routes_via_kct_route(self):
+        """generate_design.py must shell out to ``kct route`` (not the bare in-process loop)."""
         from pathlib import Path
 
         gen_path = (
@@ -457,19 +474,34 @@ class TestSoftstartCallSite:
             )
 
         text = gen_path.read_text()
-        assert "router.route_with_escape(" in text, (
-            "Issue #3138: softstart generate_design.py must call "
-            "router.route_with_escape(...) so the dense-package escape "
-            "pre-pass runs on the U1 TSSOP-20.  Reverting to "
-            "router.route_all_negotiated(...) bypasses the pre-pass "
-            "and caps reach at 6/10 nets."
+
+        # PR #3481: the recipe builds a ``kct route`` argv via
+        # ``sys.executable, "-m", "kicad_tools.cli", "route", ...`` and
+        # runs it with subprocess.run(...).  The two tokens together
+        # uniquely identify the production subprocess invocation.
+        assert '"-m", "kicad_tools.cli", "route"' in text, (
+            "Issue #3492: softstart generate_design.py must shell out to "
+            "the ``kct route`` CLI (``sys.executable -m kicad_tools.cli "
+            "route ...``) -- the board-05 #3425/#3472 production pattern "
+            "PR #3481 adopted.  The CLI runs the dense-package escape "
+            "pre-pass AND the DRC-nudge / validation post-passes that "
+            "drain the negotiated loop's overflow copper (24/26 vs 22/26 "
+            "for the in-process path)."
         )
-        # Strict: the bare route_all_negotiated() call must not be the
-        # ONLY routing entry -- if it appears in the script, the
-        # route_with_escape call must also appear.  (We allow both
-        # because some future variant may call route_all_negotiated for
-        # a non-dense board, but the dense softstart path must go
-        # through route_with_escape.)
-        if "router.route_all_negotiated(" in text:
-            # ok as long as the route_with_escape call is also present
-            assert "router.route_with_escape(" in text
+        assert "subprocess.run(" in text, (
+            "Issue #3492: the ``kct route`` argv must actually be executed "
+            "via subprocess.run(...).  A bare argv with no subprocess call "
+            "means routing never runs."
+        )
+
+        # Regression guard: the #3138 bug was a *bare* in-process
+        # ``route_all_negotiated()`` call as the routing entry point.
+        # The post-#3481 recipe routes exclusively through the
+        # ``kct route`` subprocess, so the in-process call must not have
+        # crept back in.
+        assert "router.route_all_negotiated(" not in text, (
+            "Issue #3138 regression: the softstart recipe must not call "
+            "the in-process ``router.route_all_negotiated(...)`` directly "
+            "-- that bypasses the escape pre-pass and the DRC post-passes. "
+            "Route through the ``kct route`` subprocess (PR #3481)."
+        )
