@@ -18,7 +18,7 @@ and teardrop geometry would be exempt, but the fleet uses straight
 ``(segment ...)`` copper only -- arcs are a different s-expression
 (``(arc ...)``) and are not counted by the census.
 
-Documented residuals (tracked by issue #3535):
+Documented residuals:
 
 * a corridor chord on board 06 where BOTH dogleg variants (diag-first
   and axis-first) introduce a clearance violation against neighbouring
@@ -27,14 +27,26 @@ Documented residuals (tracked by issue #3535):
   issue #3617's filled re-route; it is gone now and the pour-repair
   emitter quantizes its own stubs/bridges, so board 07 needs no
   ``DOCUMENTED_OFF_ANGLE`` entry.)
-* board 07's ``DDR_DATA_BYTE_0`` length-tuning meanders: the group is
-  tuned to exactly-equal member lengths by SLOPED meander segments, and
-  doglegging them changes lengths unevenly (DQ6 +1.149 mm), tripping
-  ``match_group_length_skew``.  Exempted per net in
-  ``EXEMPT_TUNED_NETS`` until the tuning emitter generates 45-degree
-  trombones (issue #3535).
 
-Any NEW off-angle segment outside these pinned sets still fails.
+Resolved by issue #3535 (no longer exempt):
+
+* board 07's ``DDR_DATA_BYTE_0`` length-tuning meanders: the trombone
+  emitter
+  (:meth:`kicad_tools.router.optimizer.serpentine.SerpentineGenerator.generate_trombone`)
+  now snaps the along-segment travel direction to the legal 8-direction
+  set and quantizes its closing exit leg, so every emitted meander leg
+  is 45-aligned by construction even when A* hands it an off-axis host
+  segment; the pair-aware N-side mirror
+  (``match_group_tuning._mirror_segments_about_centerline``) re-quantizes
+  each reflected leg the same way.  The committed board 07 artifact
+  carries 0 off-angle segments and ``match_group_length_skew`` stays
+  clean, so ``EXEMPT_TUNED_NETS`` is now empty.
+
+``EXEMPT_TUNED_NETS`` is kept (empty) with a stale-entry ratchet so any
+future tuned-net exemption that the emitter fix makes unnecessary fails
+here instead of silently masking off-angle copper.
+
+Any NEW off-angle segment outside the pinned sets still fails.
 """
 
 from __future__ import annotations
@@ -68,16 +80,15 @@ DOCUMENTED_OFF_ANGLE: dict[str, dict[str, str]] = {
     # ratchet check below cannot resurrect a stale uuid.)
 }
 
-#: Per-artifact nets whose off-angle segments are length-tuning meanders
-#: (issue #3535): the ``DDR_DATA_BYTE_0`` match group is tuned to
-#: exactly-equal member lengths by sloped meanders, so in-place
-#: dogleg quantization breaks ``match_group_length_skew``.  Exempt until
-#: the tuning emitter generates 45-degree trombones.
-EXEMPT_TUNED_NETS: dict[str, frozenset[str]] = {
-    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": frozenset(
-        {"DQ0", "DQ1", "DQ2", "DQ3", "DQ4", "DQ5", "DQ6", "DQ7", "DM0"}
-    ),
-}
+#: Per-artifact nets whose off-angle segments were length-tuning
+#: meanders.  Issue #3535 made the tuning emitter generate 45-aligned
+#: trombones by construction, so this set is now EMPTY -- every committed
+#: meander is on the {0,45,90,135} angle set.  The mapping is retained
+#: (empty) so the stale-entry ratchet in
+#: :func:`test_committed_artifact_is_45_aligned` keeps watch: if a future
+#: change ever re-adds a tuned-net exemption that the artifact does not
+#: actually need (no off-angle segment on that net), the ratchet fails.
+EXEMPT_TUNED_NETS: dict[str, frozenset[str]] = {}
 
 
 def _net_ids_by_name(pcb_path: Path, names: frozenset[str]) -> set[int]:
@@ -162,3 +173,15 @@ def test_committed_artifact_is_45_aligned(artifact: Path) -> None:
         f"no longer present -- remove them from DOCUMENTED_OFF_ANGLE to "
         f"lock in the improvement."
     )
+    # Ratchet the tuned-net exemption the same way (issue #3535): a net
+    # listed in EXEMPT_TUNED_NETS that carries NO off-angle segment is
+    # stale -- the emitter fix made it 45-aligned, so the exemption must
+    # be removed instead of silently masking a future regression.
+    if tuned_names:
+        off_angle_tuned_ids = {b["net"] for b in bad if b["net"] in tuned_ids}
+        stale_tuned = sorted(tuned_ids - off_angle_tuned_ids)
+        assert not stale_tuned, (
+            f"{artifact}: tuned-net exemption(s) for net id(s) "
+            f"{stale_tuned} carry no off-angle segment -- remove them "
+            f"from EXEMPT_TUNED_NETS to lock in the improvement."
+        )

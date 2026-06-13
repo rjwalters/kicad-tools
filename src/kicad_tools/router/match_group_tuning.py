@@ -1989,24 +1989,45 @@ def _mirror_segments_about_centerline(
         the N-side route.
     """
     from .primitives import Segment as _Segment
+    from .quantize import dogleg_points, is_45_aligned
 
     _ = p_net_id  # caller-side clarity
     mirrored: list[_Segment] = []
     for pseg in new_p_segments:
         rx1, ry1 = _reflect_point_about_axis(pseg.x1, pseg.y1, cx, cy, nx, ny)
         rx2, ry2 = _reflect_point_about_axis(pseg.x2, pseg.y2, cx, cy, nx, ny)
-        mirrored.append(
-            _Segment(
-                x1=_snap_to_grid(rx1, grid_resolution_mm),
-                y1=_snap_to_grid(ry1, grid_resolution_mm),
-                x2=_snap_to_grid(rx2, grid_resolution_mm),
-                y2=_snap_to_grid(ry2, grid_resolution_mm),
-                width=pseg.width,
-                layer=pseg.layer,
-                net=n_net_id,
-                net_name=n_net_name,
+        sx1 = _snap_to_grid(rx1, grid_resolution_mm)
+        sy1 = _snap_to_grid(ry1, grid_resolution_mm)
+        sx2 = _snap_to_grid(rx2, grid_resolution_mm)
+        sy2 = _snap_to_grid(ry2, grid_resolution_mm)
+        # Issue #3535: even though the P-side meander is 45-aligned by
+        # construction, reflecting it about the pair centerline (whose
+        # normal is the arbitrary outer-normal hint, not necessarily a
+        # legal routing direction) and snapping each endpoint to the
+        # grid INDEPENDENTLY can rotate a leg off the {0,45,90,135} set.
+        # Re-quantize each mirrored leg through the shared dogleg helper:
+        # an aligned leg stays a single segment, an off-angle leg becomes
+        # an exact 45-degree leg + axis leg.  The shared endpoints stay
+        # pinned, so the N-side chain stays contiguous and connected.
+        if is_45_aligned(sx2 - sx1, sy2 - sy1):
+            pts = [(sx1, sy1), (sx2, sy2)]
+        else:
+            pts = dogleg_points(sx1, sy1, sx2, sy2)
+        for (ax, ay), (bx, by) in zip(pts[:-1], pts[1:], strict=True):
+            if ax == bx and ay == by:
+                continue  # skip a degenerate zero-length leg
+            mirrored.append(
+                _Segment(
+                    x1=ax,
+                    y1=ay,
+                    x2=bx,
+                    y2=by,
+                    width=pseg.width,
+                    layer=pseg.layer,
+                    net=n_net_id,
+                    net_name=n_net_name,
+                )
             )
-        )
     return mirrored
 
 
