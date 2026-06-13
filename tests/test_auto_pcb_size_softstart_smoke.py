@@ -23,7 +23,7 @@ schematic + PCB and running a single layer escalation attempt at
 to include, AND set ``KICAD_RUN_SLOW_SOFTSTART_REACH=1`` to opt the
 softstart-specific tests in (matches the convention used by
 ``tests/router/test_softstart_routing_reach_regression`` and
-``tests/router/test_softstart_manufacturable_baseline``).
+``tests/router/test_softstart_revb_fine_pitch_escape``).
 
 The mocked refusal-message test does NOT regenerate the recipe -- it
 patches the inner routing call to a deterministic over-constrained

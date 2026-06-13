@@ -72,7 +72,7 @@ def _slow_tests_enabled() -> bool:
     """Whether the slow softstart routing tests are enabled.
 
     Matches the convention of ``test_softstart_routing_reach_regression``
-    and ``test_softstart_manufacturable_baseline``.  CI sets this env
+    and ``test_softstart_revb_fine_pitch_escape``.  CI sets this env
     var in the dedicated slow-board job.
     """
     return os.environ.get("KICAD_RUN_SLOW_SOFTSTART_REACH") == "1"
