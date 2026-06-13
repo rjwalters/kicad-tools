@@ -341,6 +341,20 @@ class PlacementFeedbackLoop:
         best_routed_count = -1
         best_iteration = -1
 
+        # Issue #3504: the routes snapshot above is only geometrically
+        # meaningful when paired with the component placement it was
+        # computed against.  Placement adjustments are applied to
+        # ``self.pcb`` in-place at the END of each iteration, so if the
+        # best snapshot came from iteration N (or the pre-loop input) and
+        # the loop moved components in iterations N..final, then restoring
+        # only ``self.router.routes`` pairs stale routes with a moved
+        # placement -- the saved artifact can contain opens/DRC at the new
+        # pad positions.  Snapshot the placement ALONGSIDE the routes and
+        # restore them together so the best snapshot is atomic.
+        best_placement_snapshot: dict[str, tuple[tuple[float, float], float]] = (
+            self._snapshot_placement()
+        )
+
         # Issue #3474 (chorus R2): seed the best-known state with the
         # PRE-LOOP routes.  The #2840 snapshot only made the loop
         # monotonic across its own iterations -- iteration 0 still calls
@@ -433,6 +447,13 @@ class PlacementFeedbackLoop:
                 best_routed_count = routed_count
                 best_routes_snapshot = copy.deepcopy(list(self.router.routes))
                 best_iteration = iteration
+                # Issue #3504: capture the placement these routes were
+                # computed against, atomically with the routes themselves.
+                # At this point in the iteration NO move has yet been
+                # applied for the current pass (moves happen at the bottom
+                # of the loop body), so ``self.pcb`` still reflects the
+                # placement that produced ``routes`` above.
+                best_placement_snapshot = self._snapshot_placement()
             else:
                 improved = False
 
@@ -556,6 +577,14 @@ class PlacementFeedbackLoop:
         # solely from ``self.router.routes`` (core.py:8320), so restoring
         # the routes is sufficient to make the reported failed-net count
         # consistent with the restored snapshot.
+        #
+        # Issue #3504: ALSO restore the component placement captured
+        # alongside the routes.  The restored routes were computed against
+        # ``best_placement_snapshot``; if the loop applied moves after that
+        # snapshot was taken, ``self.pcb`` no longer matches.  Restoring
+        # the placement keeps the returned routes geometrically consistent
+        # with the placement (and with ``placement_diff``, which is built
+        # from ``self.pcb`` below).
         current_routed_count = len(self.router.nets) - 1 - len(self.router.get_failed_nets())
         if best_routed_count > current_routed_count:
             if self.verbose:
@@ -573,6 +602,8 @@ class PlacementFeedbackLoop:
             # cannot be mutated through ``self.router.routes`` after
             # this call returns.
             self.router.routes = copy.deepcopy(best_routes_snapshot)
+            # Issue #3504: restore the placement those routes belong to.
+            self._restore_placement(best_placement_snapshot)
 
         # Final failure analysis -- computed AFTER restoration so the
         # result reflects the restored state, not the live last-iteration
@@ -882,6 +913,51 @@ class PlacementFeedbackLoop:
             pos = fp.position
             rotation = float(getattr(fp, "rotation", 0.0))
             self._original_positions[ref] = ((pos[0], pos[1]), rotation)
+
+    def _snapshot_placement(self) -> dict[str, tuple[tuple[float, float], float]]:
+        """Capture every footprint's (x, y) position and rotation.
+
+        Issue #3504: used to take an atomic best snapshot of the
+        component placement alongside the best routes.  Returns a mapping
+        ``ref -> ((x, y), rotation)``.  When no PCB is attached (routing-
+        strategies-only mode) this returns an empty dict, which makes
+        ``_restore_placement`` a no-op.
+        """
+        snapshot: dict[str, tuple[tuple[float, float], float]] = {}
+        if self.pcb is None:
+            return snapshot
+        for fp in getattr(self.pcb, "footprints", []):
+            ref = getattr(fp, "reference", None)
+            if ref is None:
+                continue
+            pos = fp.position
+            rotation = float(getattr(fp, "rotation", 0.0))
+            snapshot[ref] = ((pos[0], pos[1]), rotation)
+        return snapshot
+
+    def _restore_placement(
+        self,
+        snapshot: dict[str, tuple[tuple[float, float], float]],
+    ) -> None:
+        """Restore footprint positions/rotations from a placement snapshot.
+
+        Issue #3504: counterpart to :meth:`_snapshot_placement`.  Writes
+        the captured ``(x, y)`` and rotation back onto each footprint so
+        the live ``self.pcb`` matches the placement the restored routes
+        were computed against.  Refs present in the PCB but absent from the
+        snapshot are left untouched (defensive against footprints added
+        mid-loop, which does not happen in practice).
+        """
+        if self.pcb is None or not snapshot:
+            return
+        for fp in getattr(self.pcb, "footprints", []):
+            ref = getattr(fp, "reference", None)
+            if ref is None or ref not in snapshot:
+                continue
+            (x, y), rotation = snapshot[ref]
+            fp.position = (x, y)
+            if hasattr(fp, "rotation"):
+                fp.rotation = rotation
 
     def _build_placement_diff(self) -> list[PlacementDiffEntry]:
         """Build the placement diff from snapshotted original positions.
