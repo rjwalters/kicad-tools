@@ -9371,6 +9371,24 @@ class Autorouter:
                 f"(now {successful_nets}/{total_nets} routed)"
             )
 
+        # Issue #3486 (safety net): never ship a via whose barrel shorts
+        # a FOREIGN-net trace.  The negotiated loop can exit holding a
+        # best snapshot whose via lands within clearance of a committed
+        # foreign segment (the #3020 post-iteration hook only reroutes
+        # such vias BETWEEN iterations).  A through-via barrel is copper
+        # on every layer it spans (#3487), so the overlap is a physical
+        # cross-net short the same-net connectivity audit cannot see.
+        # An unrouted net is the strictly better trade.
+        via_seg_demoted = self._demote_via_segment_violation_nets(net_routes)
+        if via_seg_demoted:
+            successful_nets = sum(1 for routes in net_routes.values() if routes)
+            flush_print(
+                f"\n  ⚠ Demoted {len(via_seg_demoted)} net(s) whose via "
+                f"barrel shorts a foreign-net trace to unrouted: "
+                f"{sorted(via_seg_demoted)} "
+                f"(now {successful_nets}/{total_nets} routed)"
+            )
+
         if progress_callback is not None:
             # Issue #2597: Distinguish ``stagnated`` from ``timeout`` and
             # bare ``f"overflow={N}"`` so callers (and CI) can pick the
@@ -10104,6 +10122,95 @@ class Autorouter:
             if route in self.routes:
                 self.routes.remove(route)
         net_routes[net] = []
+
+    def _demote_via_segment_violation_nets(
+        self,
+        net_routes: dict[int, list[Route]],
+    ) -> list[int]:
+        """Strip nets whose via barrel shorts a foreign-net trace.
+
+        Issue #3486 (safety net): a through-via barrel is physical
+        copper on EVERY layer it spans, so a via placed within
+        ``via_radius + seg.width/2 + via_clearance`` of a foreign-net
+        trace centreline is a cross-net SHORT -- and the same-net
+        connectivity audit cannot see it (it unions same-net copper
+        only, issue #3487).
+
+        The negotiated loop's post-iteration
+        :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
+        hook (#3020) feeds such violators back into the rip-up cohort
+        BETWEEN iterations, but when the loop exits (converged,
+        stagnated, timed out) still holding a residual violation,
+        nothing strips it -- it ships uncaught (the softstart SRC_NEG
+        via at 0.40 mm from a UCC_LO_NEG trace where 0.552 mm was
+        required: a -0.05 mm copper OVERLAP).  This backstop guarantees
+        the contract at finalization the same way
+        :meth:`_demote_pad_clearance_violation_nets` (#3545 / #3566)
+        covers foreign pads and :meth:`_demote_seg_seg_overlap_nets`
+        (#3433) covers seg-seg overlap: any net whose committed via has
+        a FOREIGN-segment clearance deficit larger than one grid
+        resolution (beyond ``drc_verify_and_nudge``'s plausible snap
+        reach) is demoted to unrouted instead of shipped as a short.
+
+        Escape-phase stubs (non-rippable infrastructure) are folded
+        into the foreign-segment universe via ``extra_routes`` so a
+        main-router via that clips an escape stub is also surfaced.
+        Per the #3020 net-attribution rule the VIA's net is the victim,
+        never the (possibly permanent) segment's net.
+
+        Uses :meth:`RoutingGrid.worst_via_segment_deficit` -- the same
+        STANDARD ``via_clears_foreign_segment`` geometry the
+        post-iteration hook and both backends' post-route validator use
+        -- so the gate and the demotion agree bit-for-bit.
+
+        Args:
+            net_routes: Mapping of net ID to committed routes (mutated:
+                demoted nets are reset to ``[]``).
+
+        Returns:
+            Sorted list of demoted net ids (empty in the common case).
+        """
+        nudge_reach = self.grid.resolution
+        extra = self._collect_extra_routes_for_revalidation(net_routes)
+        victims: list[int] = []
+
+        for net, routes in net_routes.items():
+            if not routes:
+                continue
+            worst_deficit = 0.0
+            worst_loc: tuple[float, float] | None = None
+            for route in routes:
+                for via in route.vias:
+                    deficit, loc = self.grid.worst_via_segment_deficit(
+                        via,
+                        exclude_net=net,
+                        extra_routes=extra,
+                    )
+                    if deficit > worst_deficit:
+                        worst_deficit = deficit
+                        worst_loc = loc
+            if worst_deficit > nudge_reach:
+                loc_str = (
+                    f" at ({worst_loc[0]:.3f}, {worst_loc[1]:.3f})"
+                    if worst_loc
+                    else ""
+                )
+                flush_print(
+                    f"    Net {net} ({self.net_names.get(net, '?')}): "
+                    f"via-vs-foreign-segment clearance deficit "
+                    f"{worst_deficit:.3f}mm{loc_str} exceeds nudge reach "
+                    f"({nudge_reach:.3f}mm)"
+                )
+                victims.append(net)
+
+        for net in victims:
+            for route in net_routes.get(net, []):
+                self.grid.unmark_route_usage(route)
+                self.grid.unmark_route(route)
+                if route in self.routes:
+                    self.routes.remove(route)
+            net_routes[net] = []
+        return sorted(victims)
 
     def _post_route_clearance_correction(
         self,
