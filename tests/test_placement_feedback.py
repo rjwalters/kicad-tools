@@ -1676,3 +1676,203 @@ class TestPlacementFeedbackLoopRollback:
         # Iteration 0 (3 routed) beats the seeded input (1 routed).
         assert sorted(r.net for r in result.routes) == [1, 2, 3]
         assert sorted(result.failed_nets) == [4]
+
+
+class TestPlacementFeedbackBestSnapshotAtomicPlacement:
+    """Issue #3504: best-snapshot restore must restore placement too.
+
+    Placement adjustments are applied to ``self.pcb`` in-place at the END
+    of each iteration.  When the loop restores a best-routes snapshot taken
+    BEFORE one or more of those moves, restoring only the routes pairs them
+    with a placement that has since moved -- the returned routes describe
+    pad positions that no longer exist on the PCB.
+
+    These tests drive the loop with an applicator that actually mutates a
+    footprint position, then assert the final PCB placement matches the
+    placement the restored routes were computed under (and that
+    ``placement_diff`` agrees).
+    """
+
+    @staticmethod
+    def _make_moving_loop(loop, *, move_to: tuple[float, float], target_ref: str = "U1"):
+        """Patch the loop so each accepted strategy moves ``target_ref``.
+
+        The strategy generator is bypassed (mirroring the #2840 rollback
+        tests) and the applicator physically relocates ``target_ref`` to
+        ``move_to`` on ``loop.pcb``.  This models the real applicator
+        writing ``fp.position`` in place at the end of each iteration.
+        """
+        dummy_strategy = ResolutionStrategy(
+            type=StrategyType.MOVE_COMPONENT,
+            difficulty=Difficulty.EASY,
+            confidence=0.99,
+            actions=[
+                Action(
+                    type="move",
+                    target=target_ref,
+                    params={"x": move_to[0], "y": move_to[1]},
+                )
+            ],
+        )
+
+        def _dummy_find(_failed, _conf):
+            return dummy_strategy
+
+        pcb = loop.pcb
+
+        class _MovingApplicator:
+            def apply_strategy(self, _pcb, _strategy):
+                for fp in pcb.footprints:
+                    if getattr(fp, "reference", None) == target_ref:
+                        fp.position = (move_to[0], move_to[1])
+                        return ApplicationResult(
+                            success=True,
+                            components_moved=[target_ref],
+                            message=f"moved {target_ref} -> {move_to}",
+                        )
+                return ApplicationResult(
+                    success=False,
+                    components_moved=[],
+                    message="ref not found",
+                )
+
+            def is_safe_to_apply(self, _strategy, _pcb):
+                return True
+
+        loop._find_best_placement_strategy = _dummy_find  # type: ignore[method-assign]
+        loop._strategy_applicator = _MovingApplicator()
+        return loop
+
+    def test_restored_routes_match_restored_placement(self):
+        """Iter 0 is best; iter 1 moves a component and regresses.
+
+        After the loop restores iteration 0's routes, the PCB placement
+        must be restored to iteration 0's (pre-move) positions so the
+        returned routes describe pads that actually exist where the
+        routes say they do.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        original_xy = (10.0, 20.0)
+        moved_xy = (40.0, 50.0)
+
+        # iter-0: 3/4 routed (best); iter-1: 1/4 routed (regression).
+        iter0_routes = [_make_test_route(i) for i in (1, 2, 3)]
+        iter1_routes = [_make_test_route(1)]
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes],
+        )
+
+        pcb = MockPCB()
+        u1 = MockFootprint("U1", *original_xy)
+        pcb.footprints.append(u1)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+            max_movement=None,  # allow the 40mm move
+        )
+        self._make_moving_loop(loop, move_to=moved_xy)
+        result = loop.run(max_adjustments=1)  # 2 iterations
+
+        # Routes restored from iteration 0 (the best).
+        assert sorted(r.net for r in result.routes) == [1, 2, 3], (
+            "Issue #3504: expected iteration-0 routes restored as best"
+        )
+        # Placement restored to iteration-0 (pre-move) positions: the
+        # routes were computed against U1 at original_xy, so U1 must be
+        # back at original_xy -- NOT the moved position.
+        assert u1.position == original_xy, (
+            f"Issue #3504: best-snapshot restore left U1 at the moved "
+            f"position {u1.position}; restored routes were computed "
+            f"against U1 at {original_xy}, so the placement must be "
+            f"restored atomically with the routes"
+        )
+        # The router's live placement-bearing state agrees.
+        assert loop.pcb.footprints[0].position == original_xy
+
+    def test_placement_diff_consistent_with_restored_placement(self):
+        """placement_diff must reflect the restored (reverted) placement.
+
+        With iter-0 as best and the only move reverted on restore, U1 ends
+        back at its original position, so ``placement_diff`` must contain
+        NO entry for U1 (it did not net-move).
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        original_xy = (10.0, 20.0)
+        moved_xy = (40.0, 50.0)
+
+        iter0_routes = [_make_test_route(i) for i in (1, 2, 3)]
+        iter1_routes = [_make_test_route(1)]
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes],
+        )
+
+        pcb = MockPCB()
+        u1 = MockFootprint("U1", *original_xy)
+        pcb.footprints.append(u1)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+            max_movement=None,
+        )
+        self._make_moving_loop(loop, move_to=moved_xy)
+        result = loop.run(max_adjustments=1)
+
+        moved_refs = {entry.ref for entry in result.placement_diff}
+        assert "U1" not in moved_refs, (
+            f"Issue #3504: placement_diff reports U1 as moved but the "
+            f"best snapshot reverted the move; diff must be consistent "
+            f"with the restored placement. diff={result.placement_diff}"
+        )
+
+    def test_improving_move_kept_when_later_iteration_is_best(self):
+        """When the move IMPROVES routing, the moved placement is kept.
+
+        iter-0: 1/4 routed; iter-1 moves U1 and reaches 3/4 (best).  No
+        restore is needed, so U1 must remain at the moved position -- the
+        atomic-snapshot logic must not spuriously revert a winning move.
+        """
+        from kicad_tools.router import PlacementFeedbackLoop
+
+        original_xy = (10.0, 20.0)
+        moved_xy = (40.0, 50.0)
+
+        iter0_routes = [_make_test_route(1)]
+        iter1_routes = [_make_test_route(i) for i in (1, 2, 3)]
+        router = _RoutingFakeRouter(
+            total_nets=4,
+            routes_per_call=[iter0_routes, iter1_routes],
+        )
+
+        pcb = MockPCB()
+        u1 = MockFootprint("U1", *original_xy)
+        pcb.footprints.append(u1)
+
+        loop = PlacementFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            stagnation_patience=0,
+            max_movement=None,
+        )
+        self._make_moving_loop(loop, move_to=moved_xy)
+        result = loop.run(max_adjustments=1)
+
+        # iter-1 is best (3 routed), captured AFTER iter-0's move was
+        # applied at the bottom of iteration 0.
+        assert sorted(r.net for r in result.routes) == [1, 2, 3]
+        # The winning move must be retained, not reverted.
+        assert u1.position == moved_xy, (
+            f"Issue #3504: the improving move was reverted ({u1.position}); "
+            f"only restores that roll back to an earlier best should revert "
+            f"placement"
+        )
