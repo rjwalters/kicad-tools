@@ -10172,6 +10172,19 @@ class Autorouter:
         """
         nudge_reach = self.grid.resolution
         extra = self._collect_extra_routes_for_revalidation(net_routes)
+        # Issue #3486 (stale-grid-universe guard): measure against the
+        # AUTHORITATIVE committed ``net_routes``, not the grid's own
+        # ``self.routes`` list.  The best-iteration restore
+        # (#2540/#2803) re-syncs ``net_routes`` and the per-cell usage
+        # grid but rewinds the grid's route LIST via ``*_usage`` only,
+        # so after a restore ``grid.routes`` can still hold a stale,
+        # worse iteration's geometry.  Reading it there flagged
+        # false-positive shorts on board 02 (NODE_B/NODE_C), demoted
+        # otherwise-clean nets, and forced a +9-via / +25 mm layer
+        # escalation.  Passing ``foreign_routes=committed`` makes the
+        # backstop agree bit-for-bit with the in-loop #3020 hook (which
+        # already builds its universe from ``net_routes``).
+        committed = [r for routes in net_routes.values() for r in routes]
         victims: list[int] = []
 
         for net, routes in net_routes.items():
@@ -10185,6 +10198,7 @@ class Autorouter:
                         via,
                         exclude_net=net,
                         extra_routes=extra,
+                        foreign_routes=committed,
                     )
                     if deficit > worst_deficit:
                         worst_deficit = deficit

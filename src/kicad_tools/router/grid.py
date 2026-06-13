@@ -2913,6 +2913,7 @@ class RoutingGrid:
         via: Via,
         exclude_net: int,
         extra_routes: list["Route"] | None = None,
+        foreign_routes: list[Route] | None = None,
     ) -> tuple[float, tuple[float, float] | None]:
         """Worst via-vs-FOREIGN-net committed-segment clearance deficit.
 
@@ -2949,6 +2950,27 @@ class RoutingGrid:
                 the foreign-segment universe but are NOT in
                 ``self.routes`` (escape-phase stubs etc, mirrors the
                 #3077 ``extra_routes`` of the post-iteration hook).
+            foreign_routes: Issue #3486 (stale-grid-universe guard).
+                When provided, the foreign-segment universe is drawn
+                from THIS explicit route list instead of the grid's own
+                ``self.routes``.  The finalization backstop
+                ``Autorouter._demote_via_segment_violation_nets`` passes
+                the AUTHORITATIVE committed ``net_routes`` here so the
+                deficit is computed against the exact same route set the
+                negotiated loop's in-loop
+                :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
+                hook trusts.  This matters because the best-iteration
+                restore (core.py #2540/#2803) re-syncs ``net_routes``
+                and the per-cell usage grid, but rewinds ``self.routes``
+                via the ``*_usage`` calls only -- so the grid's
+                ``self.routes`` list can still hold a STALE (worse)
+                iteration's geometry after a restore.  Measuring against
+                the stale grid list produced false-positive shorts
+                (board-02 NODE_B/NODE_C vias that the committed
+                ``net_routes`` does NOT actually short), demoting clean
+                nets and forcing a +9-via / +25 mm layer escalation.
+                ``extra_routes`` still extends whichever universe is
+                selected.
 
         Returns:
             ``(worst_deficit, worst_location)`` where ``worst_deficit``
@@ -2967,7 +2989,8 @@ class RoutingGrid:
         via_idx_b = self.layer_to_index(via.layers[1].value)
         via_lo, via_hi = min(via_idx_a, via_idx_b), max(via_idx_a, via_idx_b)
 
-        routes_iter = list(self.routes)
+        base_routes = self.routes if foreign_routes is None else foreign_routes
+        routes_iter = list(base_routes)
         if extra_routes:
             routes_iter.extend(extra_routes)
 
