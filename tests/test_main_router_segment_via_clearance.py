@@ -94,8 +94,12 @@ class TestSetSegmentForeignContext:
         grid = _make_grid(rules)
         router = _make_router(grid, rules)
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=42,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=42,
         )
         router.set_segment_foreign_context(foreign_vias=[via])
         assert len(router._foreign_vias) == 1
@@ -107,8 +111,12 @@ class TestSetSegmentForeignContext:
         grid = _make_grid(rules)
         router = _make_router(grid, rules)
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=42,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=42,
         )
         router.set_segment_foreign_context(foreign_vias=[via])
         router.set_segment_foreign_context(foreign_vias=None)
@@ -124,8 +132,12 @@ class TestSetSegmentForeignContext:
         # Seed a positive cache entry.
         router._via_cache[(0, 0, 1, 3)] = True
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=42,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=42,
         )
         router.set_segment_foreign_context(foreign_vias=[via])
         assert router._via_cache == {}
@@ -146,8 +158,13 @@ class TestValidateRouteClearanceWithForeignContext:
         grid = _make_grid(rules)
         router = _make_router(grid, rules)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
         )
         route = Route(net=5, net_name="SWDIO", segments=[seg], vias=[])
         assert router._validate_route_clearance(route, exclude_net=5) is True
@@ -160,14 +177,23 @@ class TestValidateRouteClearanceWithForeignContext:
         grid = _make_grid(rules)
         router = _make_router(grid, rules)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
         )
         route = Route(net=5, net_name="SWDIO", segments=[seg], vias=[])
         # Centered on segment centerline -- worst case.
         foreign_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=99,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=99,
         )
         router.set_segment_foreign_context(foreign_vias=[foreign_via])
         assert router._validate_route_clearance(route, exclude_net=5) is False
@@ -178,13 +204,22 @@ class TestValidateRouteClearanceWithForeignContext:
         grid = _make_grid(rules)
         router = _make_router(grid, rules)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
         )
         route = Route(net=5, net_name="SWDIO", segments=[seg], vias=[])
         same_net_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=5,  # SAME net.
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=5,  # SAME net.
         )
         router.set_segment_foreign_context(foreign_vias=[same_net_via])
         assert router._validate_route_clearance(route, exclude_net=5) is True
@@ -195,20 +230,32 @@ class TestValidateRouteClearanceWithForeignContext:
         grid = _make_grid(rules)
         # 4-layer stack so In1.Cu is meaningful.
         grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules,
-            origin_x=0.0, origin_y=0.0,
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            origin_x=0.0,
+            origin_y=0.0,
             layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
         )
         router = _make_router(grid, rules)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
         )
         route = Route(net=5, net_name="SIG", segments=[seg], vias=[])
         # Blind via F.Cu -> In1.Cu (does NOT reach B.Cu).
         foreign_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.IN1_CU), net=99,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.IN1_CU),
+            net=99,
         )
         router.set_segment_foreign_context(foreign_vias=[foreign_via])
         assert router._validate_route_clearance(route, exclude_net=5) is True
@@ -235,24 +282,36 @@ class TestFindNetsWithSegmentViaViolations:
         neg = self._make_neg_router(grid, rules)
         # Two nets, geometrically separated.
         seg_a = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         seg_b = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=2,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=2,
         )
         via_b = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg_a], vias=[])],
             2: [Route(net=2, net_name="B", segments=[seg_b], vias=[via_b])],
         }
-        assert neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15
-        ) == []
+        assert neg.find_nets_with_segment_via_violations(net_routes, trace_clearance=0.15) == []
 
     def test_detects_segment_clipping_foreign_via(self):
         """Regression: SWDIO/BOOT0 -- the segment of net A clips net
@@ -268,27 +327,42 @@ class TestFindNetsWithSegmentViaViolations:
         neg = self._make_neg_router(grid, rules)
         # Net A: B.Cu segment running through (5.0, 5.0)
         seg_a = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1, net_name="SWDIO",
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
+            net_name="SWDIO",
         )
         # Net B: through-hole via centered on net A's segment
         via_b = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="BOOT0",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="BOOT0",
         )
         # The via itself is on a tiny net B stub so it appears in
         # net_routes.
         stub_b = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=2, net_name="BOOT0",
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="BOOT0",
         )
         net_routes = {
             1: [Route(net=1, net_name="SWDIO", segments=[seg_a], vias=[])],
             2: [Route(net=2, net_name="BOOT0", segments=[stub_b], vias=[via_b])],
         }
-        violators = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15
-        )
+        violators = neg.find_nets_with_segment_via_violations(net_routes, trace_clearance=0.15)
         # Net A's segment violates -- net A surfaces.
         assert 1 in violators
         # Net B's stub is far from any foreign via.
@@ -300,19 +374,26 @@ class TestFindNetsWithSegmentViaViolations:
         grid = _make_grid(rules)
         neg = self._make_neg_router(grid, rules)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,  # SAME net.
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,  # SAME net.
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg], vias=[via])],
         }
-        assert neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15
-        ) == []
+        assert neg.find_nets_with_segment_via_violations(net_routes, trace_clearance=0.15) == []
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +438,7 @@ class TestCppBackendSegmentForeignContext:
 
         if not is_cpp_available():
             import pytest
+
             pytest.skip("C++ backend not available in this environment")
 
         # Construct via the lightweight ``__new__`` path -- we only
@@ -368,8 +450,12 @@ class TestCppBackendSegmentForeignContext:
 
         # Push a foreign-net via.
         foreign_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=42,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=42,
         )
         pf.set_segment_foreign_context(foreign_vias=[foreign_via])
         assert pf._foreign_vias == [foreign_via]
@@ -400,10 +486,16 @@ class TestIterationMetricsClearanceViolations:
         from kicad_tools.router.core import IterationMetrics
 
         clean_higher_overflow = IterationMetrics(
-            iteration=2, routed_count=30, overflow=10, clearance_violations=0,
+            iteration=2,
+            routed_count=30,
+            overflow=10,
+            clearance_violations=0,
         )
         dirty_lower_overflow = IterationMetrics(
-            iteration=1, routed_count=30, overflow=5, clearance_violations=1,
+            iteration=1,
+            routed_count=30,
+            overflow=5,
+            clearance_violations=1,
         )
         assert clean_higher_overflow.is_better_than(dirty_lower_overflow)
         assert not dirty_lower_overflow.is_better_than(clean_higher_overflow)
@@ -415,10 +507,16 @@ class TestIterationMetricsClearanceViolations:
         from kicad_tools.router.core import IterationMetrics
 
         more_routed_dirty = IterationMetrics(
-            iteration=1, routed_count=30, overflow=10, clearance_violations=5,
+            iteration=1,
+            routed_count=30,
+            overflow=10,
+            clearance_violations=5,
         )
         less_routed_clean = IterationMetrics(
-            iteration=0, routed_count=29, overflow=0, clearance_violations=0,
+            iteration=0,
+            routed_count=29,
+            overflow=0,
+            clearance_violations=0,
         )
         assert more_routed_dirty.is_better_than(less_routed_clean)
         assert not less_routed_clean.is_better_than(more_routed_dirty)
@@ -469,36 +567,56 @@ class TestFindNetsWithSegmentViaViolationsPerformance:
         grid = _make_grid(rules)
         neg = self._make_neg_router(rules, grid)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         stub = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=2,
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
             2: [Route(net=2, net_name="B", segments=[stub], vias=[via])],
         }
         first = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, cache_key=("iter", 5),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("iter", 5),
         )
         # Mutate the routes (drop the violating segment) BUT reuse the
         # same cache_key.  Memo returns the snapshot from the first
         # call, proving the cache is being consulted.
         net_routes[1] = []
         second = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, cache_key=("iter", 5),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("iter", 5),
         )
         assert first == second
         # Distinct cache_key bypasses the memo -> recomputes -> returns
         # the up-to-date empty set.
         third = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, cache_key=("iter", 6),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("iter", 6),
         )
         assert third == []
 
@@ -511,29 +629,45 @@ class TestFindNetsWithSegmentViaViolationsPerformance:
         grid = _make_grid(rules)
         neg = self._make_neg_router(rules, grid)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         stub = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=2,
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
             2: [Route(net=2, net_name="B", segments=[stub], vias=[via])],
         }
         first = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15,
+            net_routes,
+            trace_clearance=0.15,
         )
         assert 1 in first
         # Mutate routes; cache_key=None -> recompute.
         net_routes[1] = []
         second = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15,
+            net_routes,
+            trace_clearance=0.15,
         )
         assert second == []
 
@@ -550,23 +684,38 @@ class TestFindNetsWithSegmentViaViolationsPerformance:
         # Envelope is at most 0.3 + 0.1 + 0.15 = 0.55mm, so the via
         # is well outside.
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         via_far = Via(
-            x=5.0, y=15.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.0,
+            y=15.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         stub = Segment(
-            x1=5.0, y1=15.0, x2=5.5, y2=15.0,
-            width=0.2, layer=Layer.F_CU, net=2,
+            x1=5.0,
+            y1=15.0,
+            x2=5.5,
+            y2=15.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
             2: [Route(net=2, net_name="B", segments=[stub], vias=[via_far])],
         }
         violators = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15,
+            net_routes,
+            trace_clearance=0.15,
         )
         assert violators == []
 
@@ -581,24 +730,39 @@ class TestFindNetsWithSegmentViaViolationsPerformance:
         neg = self._make_neg_router(rules, grid)
         # B.Cu segment.
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         # F.Cu-only via (blind, same layer twice -- doesn't reach B.Cu).
         via_blind = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.F_CU), net=2,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.F_CU),
+            net=2,
         )
         stub = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=2,
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
             2: [Route(net=2, net_name="B", segments=[stub], vias=[via_blind])],
         }
         violators = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15,
+            net_routes,
+            trace_clearance=0.15,
         )
         assert violators == []
 
@@ -608,7 +772,6 @@ class TestFindNetsWithSegmentViaViolationsPerformance:
         so the four call sites within one iteration share one rebuild.
         """
         from kicad_tools.router.core import Autorouter
-        from kicad_tools.router.primitives import Pad
 
         ar = Autorouter(width=20.0, height=20.0, force_python=True)
         # Cache starts empty.
@@ -617,12 +780,20 @@ class TestFindNetsWithSegmentViaViolationsPerformance:
         # Add a couple of routes to ``self.routes`` and call the
         # method once -- cache populates.
         via_a = Via(
-            x=2.0, y=2.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=2.0,
+            y=2.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         via_b = Via(
-            x=8.0, y=8.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=8.0,
+            y=8.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         ar.routes = [
             Route(net=1, net_name="A", segments=[], vias=[via_a]),

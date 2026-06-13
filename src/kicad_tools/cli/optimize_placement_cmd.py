@@ -42,7 +42,6 @@ from kicad_tools.placement.vector import (
     decode,
 )
 
-
 # ---------------------------------------------------------------------------
 # Interrupt handling (SIGINT / SIGTERM)
 # ---------------------------------------------------------------------------
@@ -95,7 +94,11 @@ def _save_best_placement_on_interrupt() -> bool:
     try:
         board_origin = _interrupt_state.get("board_origin", (0.0, 0.0))
         _write_placements_to_pcb_atomic(
-            pcb_path, output_path, best_vector, components, board_origin,
+            pcb_path,
+            output_path,
+            best_vector,
+            components,
+            board_origin,
         )
         if not quiet:
             print(f"  Best placement saved to: {output_path}")
@@ -214,8 +217,7 @@ def _parse_weights(weights_json: str | None) -> PlacementCostConfig:
         except ValueError as e:
             valid = ", ".join(m.value for m in CostMode)
             print(
-                f"Error: invalid 'mode' in --weights JSON "
-                f"(got {raw_mode!r}; valid: {valid})",
+                f"Error: invalid 'mode' in --weights JSON (got {raw_mode!r}; valid: {valid})",
                 file=sys.stderr,
             )
             raise SystemExit(1) from e
@@ -399,7 +401,6 @@ def _compute_net_anchor_weight(
         return 1.0
     fraction = anchored / len(pins)
     return 1.0 + anchor_weight * fraction
-
 
 
 # _extract_board_outline is imported from kicad_tools.placement.geometry
@@ -600,7 +601,8 @@ def run_optimize_placement(
     # Read board data
     try:
         components, nets, board_outline, rules, board_origin = _read_board_data(
-            pcb_path, anchor_weight=anchor_weight,
+            pcb_path,
+            anchor_weight=anchor_weight,
         )
     except Exception as e:
         print(f"Error reading PCB: {e}", file=sys.stderr)
@@ -936,7 +938,9 @@ def run_optimize_placement(
         print(f"\nWriting result to: {output_path}")
 
     try:
-        _write_placements_to_pcb_atomic(pcb_path, output_path, best_vector, components, board_origin)
+        _write_placements_to_pcb_atomic(
+            pcb_path, output_path, best_vector, components, board_origin
+        )
     except Exception as e:
         print(f"Error writing output: {e}", file=sys.stderr)
         if verbose:
@@ -996,11 +1000,7 @@ def run_optimize_placement(
     # where ``is_feasible`` is still computed but the feasibility gate
     # may behave differently. Skipped under ``--allow-infeasible``.
     if has_unresolved_overlaps and not allow_infeasible:
-        pad_overlaps = [
-            d
-            for d in post_slide_result.overlap_details
-            if d.actual_clearance_mm < 0
-        ]
+        pad_overlaps = [d for d in post_slide_result.overlap_details if d.actual_clearance_mm < 0]
         if pad_overlaps:
             return 1
 

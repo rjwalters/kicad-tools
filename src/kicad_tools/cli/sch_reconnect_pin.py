@@ -91,9 +91,7 @@ def _wire_endpoints(wire_sexp: SExp) -> list[tuple[float, float]]:
     return endpoints
 
 
-def _other_endpoint(
-    wire_sexp: SExp, point: tuple[float, float]
-) -> tuple[float, float] | None:
+def _other_endpoint(wire_sexp: SExp, point: tuple[float, float]) -> tuple[float, float] | None:
     """Return the wire endpoint that is NOT at *point*."""
     eps = _wire_endpoints(wire_sexp)
     if len(eps) < 2:
@@ -281,7 +279,12 @@ def _is_power_net(name: str, schematic: Schematic) -> bool:
         return True
     # Heuristic: names like GND, GNDA, GNDD, VCC, +3V3, +5V, etc.
     upper = name.upper()
-    if upper.startswith("GND") or upper.startswith("+") or upper.startswith("VCC") or upper.startswith("VDD"):
+    if (
+        upper.startswith("GND")
+        or upper.startswith("+")
+        or upper.startswith("VCC")
+        or upper.startswith("VDD")
+    ):
         return True
     return False
 
@@ -384,13 +387,23 @@ def plan_reconnect(
         # Shared bus: only remove the naming element, keep wires
         for ps in stub.power_symbols:
             name = _get_power_symbol_name(ps)
-            planned.append(PlannedAction("remove_symbol", f"Remove power symbol {name} (shared bus wires preserved)"))
+            planned.append(
+                PlannedAction(
+                    "remove_symbol", f"Remove power symbol {name} (shared bus wires preserved)"
+                )
+            )
         for gl in stub.global_labels:
             text = _get_label_text(gl)
-            planned.append(PlannedAction("remove_label", f"Remove global label {text} (shared bus wires preserved)"))
+            planned.append(
+                PlannedAction(
+                    "remove_label", f"Remove global label {text} (shared bus wires preserved)"
+                )
+            )
         for ll in stub.labels:
             text = _get_label_text(ll)
-            planned.append(PlannedAction("remove_label", f"Remove label {text} (shared bus wires preserved)"))
+            planned.append(
+                PlannedAction("remove_label", f"Remove label {text} (shared bus wires preserved)")
+            )
 
     # 4. Plan placement of new connection
     is_power = _is_power_net(to_net, schematic)
@@ -405,13 +418,21 @@ def plan_reconnect(
             place_pos = stub.far_end
         else:
             place_pos = (pos[0], _snap(pos[1] + GRID))
-        planned.append(PlannedAction("add_power", f"Place power symbol {to_net} at ({place_pos[0]:.2f}, {place_pos[1]:.2f})"))
+        planned.append(
+            PlannedAction(
+                "add_power",
+                f"Place power symbol {to_net} at ({place_pos[0]:.2f}, {place_pos[1]:.2f})",
+            )
+        )
         # Wire from pin to power symbol if not at same position
         if not _points_match(pos, place_pos):
-            if stub.is_stub and stub.wires:
-                planned.append(PlannedAction("add_wire", f"Wire from pin to {to_net} at ({place_pos[0]:.2f}, {place_pos[1]:.2f})"))
-            elif not stub.wires:
-                planned.append(PlannedAction("add_wire", f"Wire from pin to {to_net} at ({place_pos[0]:.2f}, {place_pos[1]:.2f})"))
+            if stub.is_stub and stub.wires or not stub.wires:
+                planned.append(
+                    PlannedAction(
+                        "add_wire",
+                        f"Wire from pin to {to_net} at ({place_pos[0]:.2f}, {place_pos[1]:.2f})",
+                    )
+                )
     else:
         # Signal net -> place global label
         if stub.is_stub and stub.far_end:
@@ -421,9 +442,19 @@ def plan_reconnect(
             place_pos = pos
         else:
             place_pos = pos
-        planned.append(PlannedAction("add_label", f"Place global label {to_net} at ({place_pos[0]:.2f}, {place_pos[1]:.2f})"))
+        planned.append(
+            PlannedAction(
+                "add_label",
+                f"Place global label {to_net} at ({place_pos[0]:.2f}, {place_pos[1]:.2f})",
+            )
+        )
         if not _points_match(pos, place_pos) and stub.is_stub:
-            planned.append(PlannedAction("add_wire", f"Wire from pin to label at ({place_pos[0]:.2f}, {place_pos[1]:.2f})"))
+            planned.append(
+                PlannedAction(
+                    "add_wire",
+                    f"Wire from pin to label at ({place_pos[0]:.2f}, {place_pos[1]:.2f})",
+                )
+            )
 
     return planned, pos, stub
 
@@ -591,16 +622,10 @@ def main(argv=None):
     parser.add_argument("--ref", required=True, help="Symbol reference (e.g., C41)")
     parser.add_argument("--pin", required=True, help="Pin number to reconnect")
     parser.add_argument("--to-net", required=True, help="Target net name (e.g., GNDD)")
-    parser.add_argument(
-        "--lib-path", action="append", dest="lib_paths", help="Library search path"
-    )
+    parser.add_argument("--lib-path", action="append", dest="lib_paths", help="Library search path")
     parser.add_argument("--lib", action="append", dest="libs", help="Specific library file")
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     args = parser.parse_args(argv)
     return run_reconnect_pin(args)

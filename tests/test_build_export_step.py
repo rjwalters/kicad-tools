@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from rich.console import Console
 
 from kicad_tools.cli.build_cmd import (
@@ -162,9 +161,7 @@ class TestRunStepExport:
         console = Console(quiet=True)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1, stderr="export error", stdout=""
-            )
+            mock_run.return_value = MagicMock(returncode=1, stderr="export error", stdout="")
             result = _run_step_export(ctx, console)
 
         assert not result.success

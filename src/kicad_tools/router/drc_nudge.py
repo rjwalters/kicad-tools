@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
+)
+from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .io import ClearanceViolation, validate_routes
@@ -49,6 +51,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DRCNudgeResult:
@@ -94,6 +97,7 @@ class DRCNudgeResult:
 # Geometry helpers
 # ---------------------------------------------------------------------------
 
+
 def _segment_length(seg: Segment) -> float:
     """Return the Euclidean length of a segment."""
     dx = seg.x2 - seg.x1
@@ -130,7 +134,7 @@ def _nudge_segment_with_chain(
     amount: float,
     router: Autorouter,
     chain_tol: float | None = None,
-    result: "DRCNudgeResult | None" = None,
+    result: DRCNudgeResult | None = None,
 ) -> bool:
     """Translate *seg* and update connecting segments to preserve the chain.
 
@@ -268,8 +272,7 @@ def _nudge_segment_with_chain(
         if result is not None:
             result._bump_skipped("foreign_via_blocked")
         logger.debug(
-            "Declining nudge for net %s: post-nudge position would clip "
-            "a foreign-net via",
+            "Declining nudge for net %s: post-nudge position would clip a foreign-net via",
             seg.net,
         )
         return False
@@ -289,29 +292,17 @@ def _nudge_segment_with_chain(
             if other.layer != seg.layer:
                 continue
             # Endpoint 1 of "other" matches old endpoint 1 of seg?
-            if (
-                abs(other.x1 - old_x1) < chain_tol
-                and abs(other.y1 - old_y1) < chain_tol
-            ):
+            if abs(other.x1 - old_x1) < chain_tol and abs(other.y1 - old_y1) < chain_tol:
                 other.x1 = new_x1
                 other.y1 = new_y1
-            elif (
-                abs(other.x1 - old_x2) < chain_tol
-                and abs(other.y1 - old_y2) < chain_tol
-            ):
+            elif abs(other.x1 - old_x2) < chain_tol and abs(other.y1 - old_y2) < chain_tol:
                 other.x1 = new_x2
                 other.y1 = new_y2
             # Endpoint 2 of "other" matches?
-            if (
-                abs(other.x2 - old_x1) < chain_tol
-                and abs(other.y2 - old_y1) < chain_tol
-            ):
+            if abs(other.x2 - old_x1) < chain_tol and abs(other.y2 - old_y1) < chain_tol:
                 other.x2 = new_x1
                 other.y2 = new_y1
-            elif (
-                abs(other.x2 - old_x2) < chain_tol
-                and abs(other.y2 - old_y2) < chain_tol
-            ):
+            elif abs(other.x2 - old_x2) < chain_tol and abs(other.y2 - old_y2) < chain_tol:
                 other.x2 = new_x2
                 other.y2 = new_y2
 
@@ -418,16 +409,10 @@ def _segment_endpoints_anchored_to_net_pads(
         if pad is None:
             continue
         # Endpoint 1
-        if (
-            abs(seg.x1 - pad.x) < _PAD_ANCHOR_TOL
-            and abs(seg.y1 - pad.y) < _PAD_ANCHOR_TOL
-        ):
+        if abs(seg.x1 - pad.x) < _PAD_ANCHOR_TOL and abs(seg.y1 - pad.y) < _PAD_ANCHOR_TOL:
             return True
         # Endpoint 2
-        if (
-            abs(seg.x2 - pad.x) < _PAD_ANCHOR_TOL
-            and abs(seg.y2 - pad.y) < _PAD_ANCHOR_TOL
-        ):
+        if abs(seg.x2 - pad.x) < _PAD_ANCHOR_TOL and abs(seg.y2 - pad.y) < _PAD_ANCHOR_TOL:
             return True
     return False
 
@@ -473,16 +458,10 @@ def _segment_endpoints_anchored_to_net_vias(
             continue
         for via in route.vias:
             # Endpoint 1
-            if (
-                abs(seg.x1 - via.x) < _VIA_ANCHOR_TOL
-                and abs(seg.y1 - via.y) < _VIA_ANCHOR_TOL
-            ):
+            if abs(seg.x1 - via.x) < _VIA_ANCHOR_TOL and abs(seg.y1 - via.y) < _VIA_ANCHOR_TOL:
                 return True
             # Endpoint 2
-            if (
-                abs(seg.x2 - via.x) < _VIA_ANCHOR_TOL
-                and abs(seg.y2 - via.y) < _VIA_ANCHOR_TOL
-            ):
+            if abs(seg.x2 - via.x) < _VIA_ANCHOR_TOL and abs(seg.y2 - via.y) < _VIA_ANCHOR_TOL:
                 return True
     return False
 
@@ -495,8 +474,14 @@ def _point_to_segment_distance(
 
 
 def _segment_to_segment_distance(
-    x1: float, y1: float, x2: float, y2: float,
-    x3: float, y3: float, x4: float, y4: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    x3: float,
+    y3: float,
+    x4: float,
+    y4: float,
 ) -> float:
     """Minimum distance between two line segments."""
     return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
@@ -518,10 +503,18 @@ def _expand_via_layers(surviving: Via, removed: Via) -> None:
     that either original via connected.  This converts the surviving via
     to a through-via (or wider span) when necessary.
     """
-    min_layer = min(surviving.layers[0].value, surviving.layers[1].value,
-                    removed.layers[0].value, removed.layers[1].value)
-    max_layer = max(surviving.layers[0].value, surviving.layers[1].value,
-                    removed.layers[0].value, removed.layers[1].value)
+    min_layer = min(
+        surviving.layers[0].value,
+        surviving.layers[1].value,
+        removed.layers[0].value,
+        removed.layers[1].value,
+    )
+    max_layer = max(
+        surviving.layers[0].value,
+        surviving.layers[1].value,
+        removed.layers[0].value,
+        removed.layers[1].value,
+    )
     if min_layer != surviving.layers[0].value or max_layer != surviving.layers[1].value:
         surviving.layers = (Layer(min_layer), Layer(max_layer))
 
@@ -579,21 +572,21 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                 if j in merged_indices:
                     continue
                 via_b = route.vias[j]
-                dist = math.sqrt(
-                    (via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2
-                )
+                dist = math.sqrt((via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2)
                 if dist < merge_threshold:
                     _reconnect_segments(
-                        route.segments, via_b.x, via_b.y,
-                        via_a.x, via_a.y, _ENDPOINT_TOL,
+                        route.segments,
+                        via_b.x,
+                        via_b.y,
+                        via_a.x,
+                        via_a.y,
+                        _ENDPOINT_TOL,
                     )
                     _expand_via_layers(via_a, via_b)
                     merged_indices.add(j)
 
         if merged_indices:
-            route.vias = [
-                v for idx, v in enumerate(route.vias) if idx not in merged_indices
-            ]
+            route.vias = [v for idx, v in enumerate(route.vias) if idx not in merged_indices]
             total_merged += len(merged_indices)
 
     # --- Phase 2: cross-route merges (different Route objects, same net) ---
@@ -620,23 +613,23 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                     for bj, via_b in enumerate(route_b.vias):
                         if bj in remove_from_b:
                             continue
-                        dist = math.sqrt(
-                            (via_a.x - via_b.x) ** 2
-                            + (via_a.y - via_b.y) ** 2
-                        )
+                        dist = math.sqrt((via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2)
                         if dist < merge_threshold:
                             # Keep via_a, remove via_b, reconnect route_b segments
                             _reconnect_segments(
-                                route_b.segments, via_b.x, via_b.y,
-                                via_a.x, via_a.y, _ENDPOINT_TOL,
+                                route_b.segments,
+                                via_b.x,
+                                via_b.y,
+                                via_a.x,
+                                via_a.y,
+                                _ENDPOINT_TOL,
                             )
                             _expand_via_layers(via_a, via_b)
                             remove_from_b.add(bj)
 
                 if remove_from_b:
                     route_b.vias = [
-                        v for idx, v in enumerate(route_b.vias)
-                        if idx not in remove_from_b
+                        v for idx, v in enumerate(route_b.vias) if idx not in remove_from_b
                     ]
                     total_merged += len(remove_from_b)
 
@@ -645,7 +638,7 @@ def _merge_same_net_vias(router: Autorouter) -> int:
     existing_routes: list[Route] = getattr(router, "existing_routes", [])
     if existing_routes:
         # Build lookup of existing vias grouped by net.
-        existing_net_vias: dict[int, list["Via"]] = defaultdict(list)
+        existing_net_vias: dict[int, list[Via]] = defaultdict(list)
         for eroute in existing_routes:
             for evia in eroute.vias:
                 existing_net_vias[eroute.net].append(evia)
@@ -661,15 +654,18 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                     continue
                 for existing_via in ev_list:
                     dist = math.sqrt(
-                        (new_via.x - existing_via.x) ** 2
-                        + (new_via.y - existing_via.y) ** 2
+                        (new_via.x - existing_via.x) ** 2 + (new_via.y - existing_via.y) ** 2
                     )
                     if dist < merge_threshold:
                         # Keep existing via, remove new via.  Reconnect
                         # the new route's segments to the existing via pos.
                         _reconnect_segments(
-                            route.segments, new_via.x, new_via.y,
-                            existing_via.x, existing_via.y, _ENDPOINT_TOL,
+                            route.segments,
+                            new_via.x,
+                            new_via.y,
+                            existing_via.x,
+                            existing_via.y,
+                            _ENDPOINT_TOL,
                         )
                         # Expand existing via layers to cover new via layers
                         _expand_via_layers(existing_via, new_via)
@@ -677,10 +673,7 @@ def _merge_same_net_vias(router: Autorouter) -> int:
                         break  # new_via already merged, move on
 
             if remove_indices:
-                route.vias = [
-                    v for idx, v in enumerate(route.vias)
-                    if idx not in remove_indices
-                ]
+                route.vias = [v for idx, v in enumerate(route.vias) if idx not in remove_indices]
                 total_merged += len(remove_indices)
 
     return total_merged
@@ -718,6 +711,7 @@ def _reconnect_segments(
 # Segment-to-segment nudge
 # ---------------------------------------------------------------------------
 
+
 def _try_nudge_seg_seg(
     violation: ClearanceViolation,
     router: Autorouter,
@@ -744,8 +738,13 @@ def _try_nudge_seg_seg(
 
     # Find the segment in the router routes
     target_seg = _find_segment(
-        router, violation.net, violation.segment_index,
-        violation.x1, violation.y1, violation.x2, violation.y2,
+        router,
+        violation.net,
+        violation.segment_index,
+        violation.x1,
+        violation.y1,
+        violation.x2,
+        violation.y2,
         layer=violation.layer,
     )
     if target_seg is None:
@@ -773,7 +772,12 @@ def _try_nudge_seg_seg(
     # Issue #3028: pass ``result`` so the foreign-via destination gate
     # can record a structured skip reason on refusal.
     return _nudge_segment_with_chain(
-        target_seg, perp_x, perp_y, nudge_amount, router, result=result,
+        target_seg,
+        perp_x,
+        perp_y,
+        nudge_amount,
+        router,
+        result=result,
     )
 
 
@@ -795,8 +799,13 @@ def _try_nudge_seg_via(
         return False
 
     target_seg = _find_segment(
-        router, violation.net, violation.segment_index,
-        violation.x1, violation.y1, violation.x2, violation.y2,
+        router,
+        violation.net,
+        violation.segment_index,
+        violation.x1,
+        violation.y1,
+        violation.x2,
+        violation.y2,
         layer=violation.layer,
     )
     if target_seg is None:
@@ -824,7 +833,12 @@ def _try_nudge_seg_via(
     # Issue #2475: Use chain-aware nudge.
     # Issue #3028: pass ``result`` for the foreign-via destination gate.
     return _nudge_segment_with_chain(
-        target_seg, nx, ny, nudge_amount, router, result=result,
+        target_seg,
+        nx,
+        ny,
+        nudge_amount,
+        router,
+        result=result,
     )
 
 
@@ -922,9 +936,7 @@ def _nudge_via_with_chain(
             if route.net != via.net:
                 continue
             for seg in route.segments:
-                touches = (
-                    abs(seg.x1 - old_x) < chain_tol and abs(seg.y1 - old_y) < chain_tol
-                ) or (
+                touches = (abs(seg.x1 - old_x) < chain_tol and abs(seg.y1 - old_y) < chain_tol) or (
                     abs(seg.x2 - old_x) < chain_tol and abs(seg.y2 - old_y) < chain_tol
                 )
                 if not touches:
@@ -932,10 +944,7 @@ def _nudge_via_with_chain(
                 sdx = seg.x2 - seg.x1
                 sdy = seg.y2 - seg.y1
                 snorm = math.sqrt(sdx * sdx + sdy * sdy)
-                if (
-                    snorm > 1e-9
-                    and abs(sdx * move_dy - sdy * move_dx) / (snorm * move_norm) > 1e-4
-                ):
+                if snorm > 1e-9 and abs(sdx * move_dy - sdy * move_dx) / (snorm * move_norm) > 1e-4:
                     logger.debug(
                         "Skipping via nudge for net %s: chain snap would "
                         "skew a connected segment off the 45-degree set",
@@ -1368,7 +1377,11 @@ def _scan_and_repair_via_in_pad(
                     result._bump_skipped("via_pad_centred_escape")
                     break
                 if _try_nudge_via_pad(
-                    via, bbox, router, via_pad_budget, result=result,
+                    via,
+                    bbox,
+                    router,
+                    via_pad_budget,
+                    result=result,
                 ):
                     nudged += 1
                 # Whether we moved it or not, one pad per via is enough --
@@ -1417,8 +1430,13 @@ def _try_nudge_seg_edge(
         return False
 
     target_seg = _find_segment(
-        router, violation.net, violation.segment_index,
-        violation.x1, violation.y1, violation.x2, violation.y2,
+        router,
+        violation.net,
+        violation.segment_index,
+        violation.x1,
+        violation.y1,
+        violation.x2,
+        violation.y2,
         layer=violation.layer,
     )
     if target_seg is None:
@@ -1466,7 +1484,12 @@ def _try_nudge_seg_edge(
     # (which produces no structured reason from the inner helper).
     _fvb_before = result.skipped.get("foreign_via_blocked", 0) if result else 0
     success = _nudge_segment_with_chain(
-        target_seg, nx, ny, nudge_amount, router, result=result,
+        target_seg,
+        nx,
+        ny,
+        nudge_amount,
+        router,
+        result=result,
     )
     if not success and result is not None:
         _fvb_after = result.skipped.get("foreign_via_blocked", 0)
@@ -1495,8 +1518,13 @@ def _try_nudge_seg_pad(
         return False
 
     target_seg = _find_segment(
-        router, violation.net, violation.segment_index,
-        violation.x1, violation.y1, violation.x2, violation.y2,
+        router,
+        violation.net,
+        violation.segment_index,
+        violation.x1,
+        violation.y1,
+        violation.x2,
+        violation.y2,
         layer=violation.layer,
     )
     if target_seg is None:
@@ -1523,13 +1551,19 @@ def _try_nudge_seg_pad(
     # variant also refuses to nudge pad-anchored segments outright.
     # Issue #3028: pass ``result`` for the foreign-via destination gate.
     return _nudge_segment_with_chain(
-        target_seg, nx, ny, nudge_amount, router, result=result,
+        target_seg,
+        nx,
+        ny,
+        nudge_amount,
+        router,
+        result=result,
     )
 
 
 # ---------------------------------------------------------------------------
 # Segment lookup helper
 # ---------------------------------------------------------------------------
+
 
 def _find_segment(
     router: Autorouter,
@@ -1540,7 +1574,7 @@ def _find_segment(
     x2: float,
     y2: float,
     tol: float = 0.001,
-    layer: "Layer | None" = None,
+    layer: Layer | None = None,
 ) -> Segment | None:
     """Locate a segment in *router.routes* by net + coordinates + optional layer.
 
@@ -1550,6 +1584,7 @@ def _find_segment(
     prevents inner-layer segments from being confused with outer-layer
     segments that share similar coordinates (Issue #1798).
     """
+
     def _coords_match(seg: Segment) -> bool:
         return (
             abs(seg.x1 - x1) < tol
@@ -1579,6 +1614,7 @@ def _find_segment(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def drc_verify_and_nudge(
     router: Autorouter,
@@ -1626,9 +1662,7 @@ def drc_verify_and_nudge(
     # Defensive getattr: unit tests drive this pass with stub routers
     # that carry routes but no grid -- the resync is then a no-op.
     _grid = getattr(router, "grid", None)
-    _grid_snapshot = (
-        [(r.copy_geometry(), r) for r in router.routes] if _grid is not None else []
-    )
+    _grid_snapshot = [(r.copy_geometry(), r) for r in router.routes] if _grid is not None else []
     try:
         return _drc_verify_and_nudge_impl(
             router,
@@ -1693,7 +1727,10 @@ def _drc_verify_and_nudge_impl(
                 # Issue #3028: plumb ``result`` so the foreign-via gate
                 # in ``_nudge_segment_with_chain`` can record the skip.
                 success = _try_nudge_seg_seg(
-                    v, router, max_displacement, result=result,
+                    v,
+                    router,
+                    max_displacement,
+                    result=result,
                 )
             elif v.obstacle_type == "via":
                 # Issue #2743: ``segment_index == -1`` marks a via-vs-via
@@ -1702,24 +1739,26 @@ def _drc_verify_and_nudge_impl(
                 # an unmatchable shape and silently fail.  Dispatch to
                 # the via-via handler instead.
                 if v.segment_index == -1:
-                    success = _try_nudge_via_via(
-                        v, router, max_displacement, result=result
-                    )
+                    success = _try_nudge_via_via(v, router, max_displacement, result=result)
                 else:
                     # Issue #3028: same as seg-seg above.
                     success = _try_nudge_seg_via(
-                        v, router, max_displacement, result=result,
+                        v,
+                        router,
+                        max_displacement,
+                        result=result,
                     )
             elif v.obstacle_type == "pad":
                 success = _try_nudge_seg_pad(
-                    v, router, max_displacement, result=result,
+                    v,
+                    router,
+                    max_displacement,
+                    result=result,
                 )
             elif v.obstacle_type == "edge":
                 # Issue #2743: trace-vs-board-edge violations now flow
                 # through the same dispatch path.
-                success = _try_nudge_seg_edge(
-                    v, router, max_displacement, result=result
-                )
+                success = _try_nudge_seg_edge(v, router, max_displacement, result=result)
             else:
                 # Unknown obstacle type — record a structured skip so
                 # the user sees "0/1 resolved; 1 unsupported" instead of

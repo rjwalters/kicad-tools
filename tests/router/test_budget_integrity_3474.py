@@ -169,8 +169,7 @@ class TestGraceNoProgressTierExit:
             per_net_timeout=None,
         )
         assert GRACE_PASS_TIER_CAPS_S[1] in set(caps_seen), (
-            "tier 2 must re-attempt the tier-1 failures when tier 1 routed "
-            "at least one net"
+            "tier 2 must re-attempt the tier-1 failures when tier 1 routed at least one net"
         )
 
     def test_budget_s_parameter_bounds_the_sweep(self):
@@ -311,9 +310,7 @@ class TestAnalyzeFailureBudgeted:
             calls.append(kwargs["net"])
             return None
 
-        monkeypatch.setattr(
-            RootCauseAnalyzer, "analyze_routing_failure", fake_analyze
-        )
+        monkeypatch.setattr(RootCauseAnalyzer, "analyze_routing_failure", fake_analyze)
         for _ in range(3):
             router._analyze_failure_budgeted(1, "NET1", (2.0, 10.0), (18.0, 10.0))
         assert len(calls) == 1, "repeat failures of one net must reuse the analysis"
@@ -326,9 +323,7 @@ class TestAnalyzeFailureBudgeted:
             calls.append(kwargs["net"])
             return None
 
-        monkeypatch.setattr(
-            RootCauseAnalyzer, "analyze_routing_failure", fake_analyze
-        )
+        monkeypatch.setattr(RootCauseAnalyzer, "analyze_routing_failure", fake_analyze)
         # Pre-exhaust the budget.
         router._failure_analysis_cache = {}
         router._failure_analysis_spent = Autorouter._FAILURE_ANALYSIS_BUDGET_S + 1.0

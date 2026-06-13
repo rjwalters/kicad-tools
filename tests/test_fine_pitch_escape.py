@@ -39,7 +39,6 @@ from kicad_tools.router.mfr_limits import (
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-
 # ============================================================================
 # Q_FP1 trigger predicate
 # ============================================================================
@@ -201,7 +200,7 @@ class TestFinePitchThresholdRaised:
     def test_soic_1p27mm_now_below_default_threshold(self):
         """1.27mm SOIC pitch IS now below the default fine_pitch_threshold."""
         rules = DesignRules()
-        assert 1.27 < rules.fine_pitch_threshold
+        assert rules.fine_pitch_threshold > 1.27
 
     def test_old_threshold_still_settable(self):
         """Callers can still pin the pre-#3371 value of 0.8mm explicitly."""
@@ -214,7 +213,7 @@ class TestFinePitchThresholdConstantSyncedWithEscape:
 
     def test_constants_match(self):
         """FINE_PITCH_THRESHOLD_MM equals DesignRules.fine_pitch_threshold default."""
-        assert FINE_PITCH_THRESHOLD_MM == DesignRules().fine_pitch_threshold
+        assert DesignRules().fine_pitch_threshold == FINE_PITCH_THRESHOLD_MM
 
 
 # ============================================================================

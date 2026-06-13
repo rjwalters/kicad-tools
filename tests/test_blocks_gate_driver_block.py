@@ -57,8 +57,7 @@ def mock_schematic():
         comp.reference = ref
         comp.symbol = symbol
         comp.pin_position.side_effect = lambda name, _x=x, _y=y: (
-            (_x + driver_pin_map_template[name][0],
-             _y + driver_pin_map_template[name][1])
+            (_x + driver_pin_map_template[name][0], _y + driver_pin_map_template[name][1])
             if name in driver_pin_map_template
             else (_x, _y)
         )
@@ -78,7 +77,9 @@ class TestGateDriverBlockPinNets:
     def test_default_emits_no_pin_labels(self, mock_schematic):
         """Without ``pin_nets``, no pin-net labels are emitted (AC4)."""
         GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,  # disable bootstrap to keep label count low
         )
         assert mock_schematic.add_label.call_count == 0
@@ -86,7 +87,9 @@ class TestGateDriverBlockPinNets:
     def test_pin_nets_left_edge_pin_stubs_left(self, mock_schematic):
         """Pins to the left of the symbol center stub leftward."""
         block = GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,
             pin_nets={"UHSG": "GATE_DRV_AH"},
         )
@@ -106,7 +109,9 @@ class TestGateDriverBlockPinNets:
     def test_pin_nets_right_edge_pin_stubs_right(self, mock_schematic):
         """Pins to the right of the symbol center stub rightward."""
         GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,
             pin_nets={"INHA": "PWM_AH"},
         )
@@ -124,7 +129,9 @@ class TestGateDriverBlockPinNets:
         """``pin_nets`` keys may be pin numbers, not just pin names."""
         # Our mock advertises "32" as an alias for UHSG.
         GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,
             pin_nets={"32": "GATE_DRV_AH"},
         )
@@ -148,7 +155,9 @@ class TestGateDriverBlockPinNets:
             "INLC": "PWM_CL",
         }
         GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,
             pin_nets=pin_nets,
         )
@@ -160,7 +169,9 @@ class TestGateDriverBlockPinNets:
     def test_alias_ports_added_for_each_pin_net(self, mock_schematic):
         """Each ``pin_nets`` entry adds a port keyed by the net name."""
         block = GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,
             pin_nets={"UHSG": "GATE_DRV_AH", "INHA": "PWM_AH"},
         )
@@ -172,7 +183,9 @@ class TestGateDriverBlockPinNets:
         # The block already has a "GND" placeholder port at (x, y + 20).
         original_gnd = (100, 120)
         block = GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,
             pin_nets={"GND": "GND"},  # try to overwrite
         )
@@ -188,7 +201,9 @@ class TestGateDriverBlockPinNets:
         ``test_blocks_gate_drive_resistor_array.py``.
         """
         GateDriverBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             bootstrap_caps=None,
             pin_nets={
                 "UHSG": "GATE_DRV_AH",
@@ -224,10 +239,16 @@ class TestGateDriverBlockPinNets:
     def test_external_ports_unchanged_without_pin_nets(self, mock_schematic):
         """Block ports unchanged when ``pin_nets`` is ``None`` (back-compat)."""
         b1 = GateDriverBlock(
-            mock_schematic, x=100, y=100, bootstrap_caps=None,
+            mock_schematic,
+            x=100,
+            y=100,
+            bootstrap_caps=None,
         )
         b2 = GateDriverBlock(
-            mock_schematic, x=100, y=100, bootstrap_caps=None,
+            mock_schematic,
+            x=100,
+            y=100,
+            bootstrap_caps=None,
             pin_nets={"UHSG": "GATE_DRV_AH"},
         )
         # Original placeholder ports survive in both blocks.

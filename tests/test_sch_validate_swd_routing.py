@@ -4,18 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _is_stm32_mcu,
     _swd_net_ok,
     _swd_override_present,
-    _tokenize_name,
     check_swd_pin_routing,
     validate_schematic,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics
@@ -62,12 +57,14 @@ def _make_ic_lib_symbol(
 
 
 def _make_symbol_instance(
-    ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    ref: str,
+    lib_id: str,
+    pins: list[tuple[str, str, str]],
+    x: float,
+    y: float,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -80,7 +77,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -360,8 +357,7 @@ class TestCheckSwdPinRouting:
 
         issues = check_swd_pin_routing(str(sch_path))
         swd_warnings = [
-            i for i in issues
-            if i.category == "swd_routing" and i.severity == "warning"
+            i for i in issues if i.category == "swd_routing" and i.severity == "warning"
         ]
         # Should warn about both PA13 and PA14
         warning_pins = {i.message for i in swd_warnings}
@@ -396,7 +392,7 @@ class TestSkipFlag:
             "1": "+3V3",
             "2": "GND",
             "4": "I2S_SYNC",  # Wrong -- would normally error
-            "5": "SPI_SCK",   # Wrong -- would normally error
+            "5": "SPI_SCK",  # Wrong -- would normally error
         }
         sch_text = _make_schematic("MCU_ST:STM32C011F6", _STM32_PINS, pin_nets)
         sch_path = tmp_path / "skip_test.kicad_sch"

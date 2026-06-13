@@ -44,13 +44,6 @@ from .bom_enrich import (
     EnrichmentReport,
     enrich_bom_lcsc,
 )
-from .bom_spec_overlay import (
-    SpecOverlayEntry,
-    SpecOverlayReport,
-    apply_spec_overlay,
-    expand_ref_range,
-    find_spec_file,
-)
 from .bom_formats import (
     BOM_FORMATTERS,
     BOMExportConfig,
@@ -61,6 +54,13 @@ from .bom_formats import (
     SeeedBOMFormatter,
     export_bom,
     get_bom_formatter,
+)
+from .bom_spec_overlay import (
+    SpecOverlayEntry,
+    SpecOverlayReport,
+    apply_spec_overlay,
+    expand_ref_range,
+    find_spec_file,
 )
 from .gerber import (
     MANUFACTURER_PRESETS,
@@ -84,10 +84,10 @@ from .pnp import (
     GenericPnPFormatter,
     JLCPCBPnPFormatter,
     PCBWayPnPFormatter,
-    SeeedPnPFormatter,
     PlacementData,
     PnPExportConfig,
     PnPFormatter,
+    SeeedPnPFormatter,
     export_pnp,
     extract_placements,
     extract_tht_exclusions,

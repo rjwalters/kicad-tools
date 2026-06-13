@@ -27,7 +27,6 @@ from kicad_tools.operations.pinmap import (
     match_pins,
 )
 from kicad_tools.operations.symbol_ops import (
-    PinTypeChange,
     find_symbol_by_reference,
     get_symbol_lib_id,
     get_symbol_pins,
@@ -684,7 +683,7 @@ class TestDerivedSymbolRoundTrip:
 
     def test_from_sexp_parses_extends(self):
         """Parsing a derived symbol sets the extends field."""
-        from kicad_tools.schema.library import LibrarySymbol, SymbolLibrary
+        from kicad_tools.schema.library import SymbolLibrary
 
         lib = SymbolLibrary.load_from_string(DERIVED_SYMBOL_LIB)
         derived = lib.get_symbol("AP2112K-3.3")
@@ -792,9 +791,7 @@ class TestReplaceDerivedSymbol:
 
         names = [sym.get_string(0) for sym in lib_syms.find_all("symbol")]
         # Base must be present
-        assert "AP2204K-1.5" in names, (
-            f"Base symbol should be embedded. Found: {names}"
-        )
+        assert "AP2204K-1.5" in names, f"Base symbol should be embedded. Found: {names}"
         # Derived entry must be present (renamed to the new lib_id)
         assert "Regulator_Linear:AP2112K-3.3" in names, (
             f"Derived symbol should be embedded. Found: {names}"
@@ -880,8 +877,7 @@ class TestReplaceDerivedSymbol:
         sexp = parse_string(sch_file.read_text())
         lib_syms = sexp.find("lib_symbols")
         base_count = sum(
-            1 for sym in lib_syms.find_all("symbol")
-            if sym.get_string(0) == "AP2204K-1.5"
+            1 for sym in lib_syms.find_all("symbol") if sym.get_string(0) == "AP2204K-1.5"
         )
         assert base_count == 1, f"Base should appear exactly once, found {base_count}"
 
@@ -1020,7 +1016,9 @@ SAME_PIN_LIB = """(kicad_symbol_lib
 class TestWireAdjustmentOnReplace:
     """Tests for wire endpoint adjustment when pin positions differ during symbol replace."""
 
-    def _write_schematic(self, tmp_path: Path, content: str = REGULATOR_SCHEMATIC_WITH_WIRES) -> Path:
+    def _write_schematic(
+        self, tmp_path: Path, content: str = REGULATOR_SCHEMATIC_WITH_WIRES
+    ) -> Path:
         sch_file = tmp_path / "regulator.kicad_sch"
         sch_file.write_text(content)
         return sch_file
@@ -1062,9 +1060,15 @@ class TestWireAdjustmentOnReplace:
         def has_point(x, y):
             return any(abs(ex - x) < 0.01 and abs(ey - y) < 0.01 for ex, ey in endpoints)
 
-        assert has_point(117.46, 98.73), f"Pin 1 wire endpoint not found at (117.46, 98.73), got {endpoints}"
-        assert has_point(120.0, 102.54), f"Pin 2 wire endpoint not found at (120, 102.54), got {endpoints}"
-        assert has_point(122.54, 98.73), f"Pin 3 wire endpoint not found at (122.54, 98.73), got {endpoints}"
+        assert has_point(117.46, 98.73), (
+            f"Pin 1 wire endpoint not found at (117.46, 98.73), got {endpoints}"
+        )
+        assert has_point(120.0, 102.54), (
+            f"Pin 2 wire endpoint not found at (120, 102.54), got {endpoints}"
+        )
+        assert has_point(122.54, 98.73), (
+            f"Pin 3 wire endpoint not found at (122.54, 98.73), got {endpoints}"
+        )
 
         # The OTHER endpoint of each wire should be unchanged (not connected to pin)
         assert has_point(100.0, 97.46), "Wire 1 far endpoint should not change"

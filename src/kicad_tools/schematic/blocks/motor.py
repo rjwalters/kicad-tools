@@ -242,12 +242,20 @@ class HalfBridge(CircuitBlock):
         # land on a foreign wire.
         if gate_hs_net is not None:
             _emit_pin_net_stub(
-                sch, hs_gate, hs_gate[0] + 1.0, gate_hs_net, self.ports,
+                sch,
+                hs_gate,
+                hs_gate[0] + 1.0,
+                gate_hs_net,
+                self.ports,
                 block_label="HalfBridge ",
             )
         if gate_ls_net is not None:
             _emit_pin_net_stub(
-                sch, ls_gate, ls_gate[0] + 1.0, gate_ls_net, self.ports,
+                sch,
+                ls_gate,
+                ls_gate[0] + 1.0,
+                gate_ls_net,
+                self.ports,
                 block_label="HalfBridge ",
             )
 
@@ -1107,9 +1115,7 @@ class GateDriverBlock(CircuitBlock):
             cap_ref = f"C{bypass_start + i}"
             cap_x = x + 20 + i * 10
             cap_y = y - 15
-            cap = sch.add_symbol(
-                "Device:C", cap_x, cap_y, cap_ref, cap_value, **bypass_add_kwargs
-            )
+            cap = sch.add_symbol("Device:C", cap_x, cap_y, cap_ref, cap_value, **bypass_add_kwargs)
             self.bypass_caps.append(cap)
             self.components[f"C_BYPASS{i + 1}"] = cap
 
@@ -1158,7 +1164,11 @@ class GateDriverBlock(CircuitBlock):
                 # (raises ``ValueError`` if both sides collide; see issue
                 # #3015).
                 _emit_pin_net_stub(
-                    sch, pin_pos, x, net_name, self.ports,
+                    sch,
+                    pin_pos,
+                    x,
+                    net_name,
+                    self.ports,
                     block_label="GateDriverBlock ",
                 )
 
@@ -2053,4 +2063,3 @@ class UCC27211GateDriver(CircuitBlock):
         self.uvlo_trip_v = self.UVLO_TRIP_V
         self.peak_drive_a = self.PEAK_DRIVE_A
         self.dvdt_immunity_v_per_ns = self.DVDT_IMMUNITY_V_PER_NS
-

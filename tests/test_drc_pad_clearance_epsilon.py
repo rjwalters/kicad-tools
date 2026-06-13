@@ -17,8 +17,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from kicad_tools.drc.incremental import IncrementalDRC, _CLEARANCE_EPSILON_MM
-
+from kicad_tools.drc.incremental import _CLEARANCE_EPSILON_MM, IncrementalDRC
 
 # ---------------------------------------------------------------------------
 # Sanity checks on the epsilon constant
@@ -42,7 +41,7 @@ class TestEpsilonConstant:
             _CLEARANCE_EPSILON_MM as edge_epsilon,
         )
 
-        assert _CLEARANCE_EPSILON_MM == edge_epsilon
+        assert edge_epsilon == _CLEARANCE_EPSILON_MM
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +49,13 @@ class TestEpsilonConstant:
 # ---------------------------------------------------------------------------
 
 
-def _make_pad(number: str, position: tuple[float, float], size: tuple[float, float],
-              net_number: int = 1, net_name: str = "NET1"):
+def _make_pad(
+    number: str,
+    position: tuple[float, float],
+    size: tuple[float, float],
+    net_number: int = 1,
+    net_name: str = "NET1",
+):
     """Create a Pad-like object with the attributes the DRC reads."""
     pad = SimpleNamespace()
     pad.number = number
@@ -63,8 +67,9 @@ def _make_pad(number: str, position: tuple[float, float], size: tuple[float, flo
     return pad
 
 
-def _make_footprint(reference: str, position: tuple[float, float], pads: list,
-                    rotation: float = 0.0):
+def _make_footprint(
+    reference: str, position: tuple[float, float], pads: list, rotation: float = 0.0
+):
     """Create a Footprint-like object with the attributes the DRC reads."""
     fp = SimpleNamespace()
     fp.reference = reference
@@ -110,9 +115,7 @@ class TestPadPadEpsilonPython:
 
         drc = _make_drc(min_clearance=0.150)
         violation = drc._check_pair_clearance_python(fp1, fp2, "R1", "R2")
-        assert violation is None, (
-            "Clearance exactly at minimum must not flag a violation"
-        )
+        assert violation is None, "Clearance exactly at minimum must not flag a violation"
 
     def test_no_violation_at_minimum_minus_half_epsilon(self):
         """Floating-point edge case: clearance = min - 0.5*epsilon (within
@@ -127,9 +130,7 @@ class TestPadPadEpsilonPython:
 
         drc = _make_drc(min_clearance=0.150)
         violation = drc._check_pair_clearance_python(fp1, fp2, "R1", "R2")
-        assert violation is None, (
-            "Sub-epsilon shortfall (0.149999mm vs 0.150mm) must not flag"
-        )
+        assert violation is None, "Sub-epsilon shortfall (0.149999mm vs 0.150mm) must not flag"
 
     def test_violation_at_real_shortfall(self):
         """Real violations (well above epsilon) must still flag.
@@ -142,9 +143,7 @@ class TestPadPadEpsilonPython:
 
         drc = _make_drc(min_clearance=0.150)
         violation = drc._check_pair_clearance_python(fp1, fp2, "R1", "R2")
-        assert violation is not None, (
-            "5-micron clearance shortfall must flag a violation"
-        )
+        assert violation is not None, "5-micron clearance shortfall must flag a violation"
         assert violation.actual_value < 0.150
         assert violation.required_value == 0.150
 

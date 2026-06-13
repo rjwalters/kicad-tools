@@ -10,9 +10,7 @@ Tests verify:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, PropertyMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer.collision import (
@@ -21,7 +19,6 @@ from kicad_tools.router.optimizer.collision import (
     make_collision_checker,
 )
 from kicad_tools.router.primitives import Segment
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -428,8 +425,13 @@ class TestVectorCollisionCheckerForeignVia:
         # XTAL1 (net 15) compressed B.Cu segment -- the path the optimizer
         # produced pre-fix.  Must be rejected.
         result = checker.path_is_clear(
-            128.68, 128.01, 122.71, 128.31,
-            Layer.B_CU, 0.2, exclude_net=15,
+            128.68,
+            128.01,
+            122.71,
+            128.31,
+            Layer.B_CU,
+            0.2,
+            exclude_net=15,
         )
         assert result is False, (
             "Optimizer path through XTAL2 via must be rejected by "
@@ -451,8 +453,13 @@ class TestVectorCollisionCheckerForeignVia:
 
         checker = VectorCollisionChecker(grid)
         result = checker.path_is_clear(
-            0.0, 0.0, 5.0, 0.0,
-            Layer.F_CU, 0.2, exclude_net=1,
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.F_CU,
+            0.2,
+            exclude_net=1,
         )
         assert result is True
 
@@ -469,8 +476,13 @@ class TestVectorCollisionCheckerForeignVia:
 
         checker = VectorCollisionChecker(grid)
         result = checker.path_is_clear(
-            0.0, 0.0, 5.0, 0.0,
-            Layer.F_CU, 0.2, exclude_net=1,
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.F_CU,
+            0.2,
+            exclude_net=1,
         )
         assert result is True
 
@@ -492,8 +504,13 @@ class TestVectorCollisionCheckerForeignVia:
 
         checker = VectorCollisionChecker(grid)
         result = checker.path_is_clear(
-            0.0, 0.0, 5.0, 0.0,
-            Layer.F_CU, 0.2, exclude_net=1,
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.F_CU,
+            0.2,
+            exclude_net=1,
         )
         assert result is False
 
@@ -516,9 +533,11 @@ class TestVectorCollisionCheckerForeignVia:
         )
         route = _make_route_with_via(net=2, via=via)
         grid = _make_mock_grid(routes=[route])
+
         # Override layer_to_index so F.Cu=0, B.Cu=1
         def _layer_to_index(name: str) -> int:
             return {"F.Cu": 0, "B.Cu": 1}.get(name, 0)
+
         grid.layer_to_index = MagicMock(side_effect=_layer_to_index)
         mock_rtree = MagicMock()
         mock_rtree.intersection = MagicMock(return_value=[])
@@ -528,12 +547,16 @@ class TestVectorCollisionCheckerForeignVia:
         checker = VectorCollisionChecker(grid)
         # Trace on B.Cu, the F.Cu-only via should be ignored on B.Cu.
         result = checker.path_is_clear(
-            0.0, 0.0, 5.0, 0.0,
-            Layer.B_CU, 0.2, exclude_net=1,
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.B_CU,
+            0.2,
+            exclude_net=1,
         )
         assert result is True, (
-            "Blind via that does not touch the trace's layer must not "
-            "block the path."
+            "Blind via that does not touch the trace's layer must not block the path."
         )
 
     def test_through_hole_via_blocks_on_both_layers(self):
@@ -541,8 +564,10 @@ class TestVectorCollisionCheckerForeignVia:
         via = _make_via(2.5, 0.0, net=2)
         route = _make_route_with_via(net=2, via=via)
         grid = _make_mock_grid(routes=[route])
+
         def _layer_to_index(name: str) -> int:
             return {"F.Cu": 0, "B.Cu": 1}.get(name, 0)
+
         grid.layer_to_index = MagicMock(side_effect=_layer_to_index)
         mock_rtree = MagicMock()
         mock_rtree.intersection = MagicMock(return_value=[])
@@ -552,13 +577,23 @@ class TestVectorCollisionCheckerForeignVia:
         checker = VectorCollisionChecker(grid)
         # F.Cu trace through the via -- must reject.
         f_result = checker.path_is_clear(
-            0.0, 0.0, 5.0, 0.0,
-            Layer.F_CU, 0.2, exclude_net=1,
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.F_CU,
+            0.2,
+            exclude_net=1,
         )
         assert f_result is False
         # B.Cu trace through the via -- must also reject.
         b_result = checker.path_is_clear(
-            0.0, 0.0, 5.0, 0.0,
-            Layer.B_CU, 0.2, exclude_net=1,
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.B_CU,
+            0.2,
+            exclude_net=1,
         )
         assert b_result is False

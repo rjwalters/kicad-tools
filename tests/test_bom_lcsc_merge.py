@@ -12,10 +12,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-
 from kicad_tools.export.bom_formats import read_existing_lcsc_assignments
 from kicad_tools.schema.bom import BOMItem
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -119,8 +119,9 @@ class TestClearanceValidationRotation:
 
     def test_clearance_pad_position_transform(self):
         """Test that clearance validation transforms pad positions correctly."""
-        from kicad_tools.validate.rules.clearance import _transform_pad_position
         from dataclasses import dataclass
+
+        from kicad_tools.validate.rules.clearance import _transform_pad_position
 
         @dataclass
         class MockPad:

@@ -18,7 +18,6 @@ from kicad_tools.cli.sch_validate import (
     run_erc,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -66,7 +65,10 @@ def _run_erc_with_violations(violations: list[dict]) -> list[ValidationIssue]:
     with (
         patch("kicad_tools.cli.sch_validate.find_kicad_cli", return_value="/usr/bin/kicad-cli"),
         patch("kicad_tools.cli.sch_validate.subprocess.run") as mock_run,
-        patch("kicad_tools.cli.sch_validate.filter_cross_sheet_global_labels", side_effect=lambda v, p: v),
+        patch(
+            "kicad_tools.cli.sch_validate.filter_cross_sheet_global_labels",
+            side_effect=lambda v, p: v,
+        ),
         patch("tempfile.NamedTemporaryFile", return_value=_FakeTmp()),
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")

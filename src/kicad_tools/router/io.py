@@ -52,6 +52,8 @@ if TYPE_CHECKING:
 from .core import Autorouter
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
+)
+from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
@@ -376,13 +378,9 @@ def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
             rules.min_via_drill = float(min_drill_match.group(1))
 
         # Parse minimum drill-to-drill clearance (KiCad 8+: min_drill)
-        min_drill_clearance_match = re.search(
-            r"\(min_drill\s+([\d.]+)\)", design_text
-        )
+        min_drill_clearance_match = re.search(r"\(min_drill\s+([\d.]+)\)", design_text)
         if min_drill_clearance_match:
-            rules.min_drill_clearance = float(
-                min_drill_clearance_match.group(1)
-            )
+            rules.min_drill_clearance = float(min_drill_clearance_match.group(1))
 
     return rules
 
@@ -589,9 +587,7 @@ class MultiResolutionGridPlan:
         for zone in self.fine_zones:
             offset_str = ""
             if zone.x_offset != 0.0 or zone.y_offset != 0.0:
-                offset_str = (
-                    f" offset=({zone.x_offset:.4f},{zone.y_offset:.4f})"
-                )
+                offset_str = f" offset=({zone.x_offset:.4f},{zone.y_offset:.4f})"
             lines.append(
                 f"    {zone.ref}: {zone.resolution:.4f}mm "
                 f"({zone.width:.1f}x{zone.height:.1f}mm, "
@@ -599,9 +595,7 @@ class MultiResolutionGridPlan:
             )
         lines.append(f"  Total cell estimate: {self.total_cell_estimate:,}")
         if self.uniform_fallback > 0:
-            lines.append(
-                f"  Uniform fallback would be: {self.uniform_fallback:.3f}mm"
-            )
+            lines.append(f"  Uniform fallback would be: {self.uniform_fallback:.3f}mm")
         return "\n".join(lines)
 
 
@@ -654,19 +648,19 @@ class GridAutoSelection:
                 f"{self.origin_offset[1]:.4f})mm"
             )
         if self.memory_capped and self.uncapped_resolution is not None:
-            lines.append(
-                f"  (capped from {self.uncapped_resolution}mm due to memory budget)"
-            )
+            lines.append(f"  (capped from {self.uncapped_resolution}mm due to memory budget)")
         if self.lattice_rescued:
             lines.append(
                 "  (lattice rescue: memory budget bumped to "
                 f"{self.memory_budget_used:,} cells to admit the dominant "
                 "pad-lattice grid -- issue #3441)"
             )
-        lines.extend([
-            f"  Total pads: {self.total_pads}",
-            f"  Off-grid pads: {self.off_grid_pads} ({self.off_grid_percentage:.1f}%)",
-        ])
+        lines.extend(
+            [
+                f"  Total pads: {self.total_pads}",
+                f"  Off-grid pads: {self.off_grid_pads} ({self.off_grid_percentage:.1f}%)",
+            ]
+        )
         if self.candidates_tried:
             lines.append("  Candidates analyzed:")
             for res, off_grid in self.candidates_tried:
@@ -927,10 +921,7 @@ def _compute_zone_resolution_and_offset(
     # Keep only candidates strictly finer than the coarse grid and at or
     # above the minimum floor.  A fine zone at >= coarse_resolution would
     # not refine anything (the coarse grid would suffice).
-    candidates = [
-        c for c in raw_candidates
-        if c < coarse_resolution and c >= min_fine_resolution
-    ]
+    candidates = [c for c in raw_candidates if c < coarse_resolution and c >= min_fine_resolution]
 
     if not candidates:
         # Fall back to half the coarse grid floored at the minimum.  This
@@ -1060,9 +1051,7 @@ def auto_select_grid_resolution(
     pre_memory_candidates = list(valid_candidates)
     effective_max_cells = max_cells
 
-    def _apply_memory_filter(
-        cands: list[float], budget: int
-    ) -> tuple[list[float], bool]:
+    def _apply_memory_filter(cands: list[float], budget: int) -> tuple[list[float], bool]:
         """Apply memory filter to a candidate list with the given budget.
 
         Returns (filtered_candidates, capped_flag).
@@ -1070,9 +1059,7 @@ def auto_select_grid_resolution(
         if board_width is None or board_height is None:
             return cands, False
         board_area_local = board_width * board_height
-        memory_valid_local = [
-            res for res in cands if board_area_local / (res * res) <= budget
-        ]
+        memory_valid_local = [res for res in cands if board_area_local / (res * res) <= budget]
         if memory_valid_local:
             return memory_valid_local, len(memory_valid_local) < len(cands)
         # All are too memory-intensive, keep the coarsest DRC-compliant one
@@ -1080,9 +1067,7 @@ def auto_select_grid_resolution(
             return [cands[0]], True
         return cands, False
 
-    valid_candidates, memory_capped = _apply_memory_filter(
-        valid_candidates, effective_max_cells
-    )
+    valid_candidates, memory_capped = _apply_memory_filter(valid_candidates, effective_max_cells)
 
     # Memoized off-grid analysis per candidate resolution (used by both
     # the issue #3441 lattice rescue below and the main analysis loop).
@@ -1215,23 +1200,14 @@ def auto_select_grid_resolution(
             bumped_candidates, bumped_capped = _apply_memory_filter(
                 pre_memory_candidates, bumped_budget
             )
-            newly_unlocked = [
-                c for c in bumped_candidates if c not in valid_candidates
-            ]
+            newly_unlocked = [c for c in bumped_candidates if c not in valid_candidates]
             if newly_unlocked:
-                current_best_off = min(
-                    _off_grid_for(c)[0] for c in valid_candidates
-                )
+                current_best_off = min(_off_grid_for(c)[0] for c in valid_candidates)
                 # Prefer the unlocked candidate with the fewest off-grid
                 # pads; break ties toward the coarser grid (fewer cells).
-                unlocked_best = min(
-                    newly_unlocked, key=lambda c: (_off_grid_for(c)[0], -c)
-                )
+                unlocked_best = min(newly_unlocked, key=lambda c: (_off_grid_for(c)[0], -c))
                 unlocked_off = _off_grid_for(unlocked_best)[0]
-                if (
-                    unlocked_off < current_best_off
-                    and unlocked_off * 10 <= total_pads
-                ):
+                if unlocked_off < current_best_off and unlocked_off * 10 <= total_pads:
                     old_cells = effective_max_cells
                     valid_candidates = bumped_candidates
                     memory_capped = bumped_capped
@@ -1559,16 +1535,18 @@ def compute_multi_resolution_plan(
         # zero-origin fine grid (TSSOP, SOIC, etc.).
         x_off, y_off = pad_position_offsets.get(ref, (0.0, 0.0))
 
-        fine_zones.append(FineZone(
-            ref=ref,
-            x_min=x_min,
-            y_min=y_min,
-            x_max=x_max,
-            y_max=y_max,
-            resolution=fine_res,
-            x_offset=x_off,
-            y_offset=y_off,
-        ))
+        fine_zones.append(
+            FineZone(
+                ref=ref,
+                x_min=x_min,
+                y_min=y_min,
+                x_max=x_max,
+                y_max=y_max,
+                resolution=fine_res,
+                x_offset=x_off,
+                y_offset=y_off,
+            )
+        )
 
     if not fine_zones:
         return None
@@ -1851,15 +1829,11 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
 
         # Get footprint reference
-        ref_match = re.search(
-            r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section
-        )
+        ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
         ref = ref_match.group(1) if ref_match else ""
 
         # Get footprint position and rotation
-        at_match = re.search(
-            r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section
-        )
+        at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
         if not at_match:
             continue
 
@@ -1895,16 +1869,12 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
             # Extract pad size
-            size_match = re.search(
-                r"\(size\s+([-\d.]+)\s+([-\d.]+)\)", pad_block
-            )
+            size_match = re.search(r"\(size\s+([-\d.]+)\s+([-\d.]+)\)", pad_block)
             width = float(size_match.group(1)) if size_match else 0.3
             height = float(size_match.group(2)) if size_match else 0.3
 
             # Rotate pad dimensions to PCB space (same fix as load_pcb_for_routing)
-            pad_rot_match = re.search(
-                r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block
-            )
+            pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
             total_rot = (fp_rot + pad_rot) % 360
             if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
@@ -1915,9 +1885,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             net_num = int(net_match.group(1)) if net_match else 0
 
             # Extract net name
-            net_name_match = re.search(
-                r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block
-            )
+            net_name_match = re.search(r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block)
             net_name = net_name_match.group(1).strip() if net_name_match else ""
 
             # Determine layer
@@ -1925,19 +1893,21 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             if "B.Cu" in pad_block and "F.Cu" not in pad_block:
                 layer = Layer.B_CU
 
-            pads.append(PadObj(
-                x=abs_x,
-                y=abs_y,
-                width=width,
-                height=height,
-                net=net_num,
-                net_name=net_name,
-                ref=ref,
-                pin=pin,
-                layer=layer,
-                through_hole=is_thru,
-                footprint_name=footprint_name,
-            ))
+            pads.append(
+                PadObj(
+                    x=abs_x,
+                    y=abs_y,
+                    width=width,
+                    height=height,
+                    net=net_num,
+                    net_name=net_name,
+                    ref=ref,
+                    pin=pin,
+                    layer=layer,
+                    through_hole=is_thru,
+                    footprint_name=footprint_name,
+                )
+            )
 
     return pads
 
@@ -2081,16 +2051,19 @@ def validate_routes(
                 # for traces that legally clear the rectangular copper.
                 # Pad ``width``/``height`` are already rotated into PCB
                 # space at load time, so the bounding box is correct.
-                effective_dist = _segment_to_aabb_distance(
-                    segment.x1,
-                    segment.y1,
-                    segment.x2,
-                    segment.y2,
-                    pad.x,
-                    pad.y,
-                    pad.width / 2,
-                    pad.height / 2,
-                ) - seg_half_width
+                effective_dist = (
+                    _segment_to_aabb_distance(
+                        segment.x1,
+                        segment.y1,
+                        segment.x2,
+                        segment.y2,
+                        pad.x,
+                        pad.y,
+                        pad.width / 2,
+                        pad.height / 2,
+                    )
+                    - seg_half_width
+                )
 
                 # For skipped-pour-net pads, look up the clearance under the
                 # named net (GND, +3V3, ...) rather than net 0, so the
@@ -2102,9 +2075,7 @@ def validate_routes(
                     if pad_class is not None:
                         pad_class_clear = pad_class.clearance
                 pair_clear = max(
-                    _get_pair_clearance(
-                        route_net, pad.net, clearance, net_names, ncm
-                    ),
+                    _get_pair_clearance(route_net, pad.net, clearance, net_names, ncm),
                     pad_class_clear,
                 )
 
@@ -2209,7 +2180,9 @@ def validate_routes(
 
             # --- Segment-to-via checks ---
             # Include pre-existing routes so new segments are checked against old vias.
-            _all_routes_for_via = itertools.chain(router.routes, getattr(router, "existing_routes", []))
+            _all_routes_for_via = itertools.chain(
+                router.routes, getattr(router, "existing_routes", [])
+            )
             for other_route in _all_routes_for_via:
                 if other_route.net == route_net:
                     continue
@@ -2271,9 +2244,12 @@ def validate_routes(
                 # rectangle rather than a bounding circle so anisotropic
                 # SMD lands do not produce false-positive via-clearance
                 # violations along their short axis.
-                effective_dist = _point_to_aabb_distance(
-                    via.x, via.y, pad.x, pad.y, pad.width / 2, pad.height / 2
-                ) - via_radius
+                effective_dist = (
+                    _point_to_aabb_distance(
+                        via.x, via.y, pad.x, pad.y, pad.width / 2, pad.height / 2
+                    )
+                    - via_radius
+                )
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is
@@ -2452,8 +2428,14 @@ def validate_routes(
                 closest_pt: tuple[float, float] | None = None
                 for (ex1, ey1), (ex2, ey2) in edge_segments:
                     d = _segment_to_segment_distance(
-                        segment.x1, segment.y1, segment.x2, segment.y2,
-                        ex1, ey1, ex2, ey2,
+                        segment.x1,
+                        segment.y1,
+                        segment.x2,
+                        segment.y2,
+                        ex1,
+                        ey1,
+                        ex2,
+                        ey2,
                     )
                     if d < closest_dist:
                         closest_dist = d
@@ -2469,21 +2451,17 @@ def validate_routes(
                         sample_points = [
                             (segment.x1, segment.y1),
                             (segment.x2, segment.y2),
-                            ((segment.x1 + segment.x2) / 2,
-                             (segment.y1 + segment.y2) / 2),
+                            ((segment.x1 + segment.x2) / 2, (segment.y1 + segment.y2) / 2),
                         ]
                         for px, py in sample_points:
                             if edge_len_sq < 1e-12:
                                 cx, cy = ex1, ey1
                             else:
-                                t = ((px - ex1) * edge_dx
-                                     + (py - ey1) * edge_dy) / edge_len_sq
+                                t = ((px - ex1) * edge_dx + (py - ey1) * edge_dy) / edge_len_sq
                                 t = max(0.0, min(1.0, t))
                                 cx = ex1 + t * edge_dx
                                 cy = ey1 + t * edge_dy
-                            pt_dist = math.sqrt(
-                                (cx - px) ** 2 + (cy - py) ** 2
-                            )
+                            pt_dist = math.sqrt((cx - px) ** 2 + (cy - py) ** 2)
                             if pt_dist < best_local:
                                 best_local = pt_dist
                                 best_pt = (cx, cy)
@@ -3400,9 +3378,7 @@ def load_pcb_for_routing(
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
             # Also extract per-pad rotation if present
-            pad_rot_match = re.search(
-                r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block
-            )
+            pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
 
             # Rotate pad dimensions to PCB space.  The combined rotation
@@ -3873,7 +3849,7 @@ def _remove_conflicting_vias(pcb_text: str, clearance: float) -> str:
 
 def verify_output_connectivity(
     pcb_content: str,
-    net_pads: dict[int, list["Pad"]],
+    net_pads: dict[int, list[Pad]],
     net_names: dict[int, str] | None = None,
     tolerance: float = 0.01,
 ) -> dict[int, dict]:
@@ -3904,7 +3880,7 @@ def verify_output_connectivity(
         - ``disconnected_pads``: list of ``"<ref>:<pin>"`` strings for pads
           not in the main component (empty when ``connected`` is True)
     """
-    from .observability import _UnionFind, _pt
+    from .observability import _pt, _UnionFind
 
     # Parse segments from PCB content: (segment (start X Y) (end X Y) ... (net N) ...)
     seg_pattern = re.compile(
@@ -3966,9 +3942,7 @@ def verify_output_connectivity(
         net_vias = vias_by_net.get(net_id, [])
 
         if not net_segs and not net_vias:
-            disconnected = [
-                f"{p.ref}:{p.pin}" for p in pads
-            ]
+            disconnected = [f"{p.ref}:{p.pin}" for p in pads]
             result[net_id] = {
                 "net_name": net_name,
                 "total_pads": len(pads),
@@ -3995,7 +3969,7 @@ def verify_output_connectivity(
                     uf.union(via_pt, p2)
 
         # Link pads to nearest segment endpoints (same logic as observability)
-        pad_points: list[tuple[tuple[float, float], "Pad"]] = []
+        pad_points: list[tuple[tuple[float, float], Pad]] = []
         for pad in pads:
             pad_pt = _pt(pad.x, pad.y, tolerance)
             best_dist = float("inf")

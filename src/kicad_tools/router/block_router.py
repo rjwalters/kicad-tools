@@ -275,9 +275,7 @@ class BlockRouter:
         result.inter_block_nets = set(inter_block_nets)
 
         if not internal_nets:
-            logger.info(
-                "Block '%s': no internal nets to route", self.block.block_id
-            )
+            logger.info("Block '%s': no internal nets to route", self.block.block_id)
             return result
 
         # Create sub-grid and register pads
@@ -294,9 +292,7 @@ class BlockRouter:
         # Route each internal net
         from .algorithms import MSTRouter
 
-        mst_router = MSTRouter(
-            self._grid, self._router, self.rules, self.net_class_map
-        )
+        mst_router = MSTRouter(self._grid, self._router, self.rules, self.net_class_map)
 
         for net_id in internal_nets:
             pad_keys = self._nets.get(net_id, [])
@@ -316,13 +312,12 @@ class BlockRouter:
             )
 
             try:
+
                 def _mark_on_subgrid(route: Route) -> None:
                     assert self._grid is not None
                     self._grid.mark_route(route)
 
-                routes = mst_router.route_net(
-                    pad_objs, _mark_on_subgrid
-                )
+                routes = mst_router.route_net(pad_objs, _mark_on_subgrid)
                 if routes:
                     result.routes.extend(routes)
                     result.routed_nets.add(net_id)
@@ -370,10 +365,7 @@ class BlockRouter:
         Returns:
             True if the point is inside the block's bounding box (with margin).
         """
-        return (
-            self._abs_min_x <= x <= self._abs_max_x
-            and self._abs_min_y <= y <= self._abs_max_y
-        )
+        return self._abs_min_x <= x <= self._abs_max_x and self._abs_min_y <= y <= self._abs_max_y
 
 
 __all__ = [

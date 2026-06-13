@@ -173,11 +173,7 @@ def _linear_scan_path_is_clear(
             try:
                 start_idx = grid.layer_to_index(via.layers[0].value)
                 end_idx = grid.layer_to_index(via.layers[1].value)
-                lo, hi = (
-                    (start_idx, end_idx)
-                    if start_idx <= end_idx
-                    else (end_idx, start_idx)
-                )
+                lo, hi = (start_idx, end_idx) if start_idx <= end_idx else (end_idx, start_idx)
                 if not (lo <= layer_idx <= hi):
                     continue
             except Exception:
@@ -235,9 +231,7 @@ class TestViaRtreeCorrectness:
             x2 = x1 + math.cos(angle) * length
             y2 = y1 + math.sin(angle) * length
             # exclude_net=999 -> never matches any route (all are 100..N).
-            rtree_decision = checker.path_is_clear(
-                x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999
-            )
+            rtree_decision = checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
             linear_decision = _linear_scan_path_is_clear(
                 grid, x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999
             )
@@ -250,9 +244,7 @@ class TestViaRtreeCorrectness:
             # the linear-scan reference rejects -- and assert the
             # checker agrees in that direction.
             if linear_decision is False and rtree_decision is True:
-                mismatches.append(
-                    (x1, y1, x2, y2, rtree_decision, linear_decision)
-                )
+                mismatches.append((x1, y1, x2, y2, rtree_decision, linear_decision))
 
         assert not mismatches, (
             f"Via R-tree disagreed with linear scan on {len(mismatches)} "
@@ -267,8 +259,12 @@ class TestViaRtreeCorrectness:
         foreign = Route(net=2, net_name="foreign")
         foreign.vias.append(
             Via(
-                x=10.0, y=10.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=2,
+                x=10.0,
+                y=10.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=2,
             )
         )
         grid.mark_route(foreign)
@@ -276,8 +272,12 @@ class TestViaRtreeCorrectness:
         own = Route(net=1, net_name="own")
         own.vias.append(
             Via(
-                x=10.0, y=10.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1,
+                x=10.0,
+                y=10.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
             )
         )
         grid.mark_route(own)
@@ -289,9 +289,7 @@ class TestViaRtreeCorrectness:
         # -- this test confirms the own-net filter still applies.
         # Verify the own-net filter by removing the foreign route first.
         grid.unmark_route(foreign)
-        result = checker.path_is_clear(
-            5.0, 10.0, 15.0, 10.0, Layer.F_CU, 0.2, exclude_net=1
-        )
+        result = checker.path_is_clear(5.0, 10.0, 15.0, 10.0, Layer.F_CU, 0.2, exclude_net=1)
         assert result is True, "Own-net vias must not block via R-tree path"
 
 
@@ -336,14 +334,10 @@ class TestViaRtreePerformance:
         # Warm-up so the first-call lazy import / index access doesn't
         # taint the comparison.
         for x1, y1, x2, y2 in queries[:5]:
-            checker.path_is_clear(
-                x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999
-            )
+            checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
         start = time.perf_counter()
         for x1, y1, x2, y2 in queries:
-            checker.path_is_clear(
-                x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999
-            )
+            checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
         rtree_elapsed = time.perf_counter() - start
 
         # Linear-scan path: re-run with the via R-tree disabled to
@@ -356,14 +350,10 @@ class TestViaRtreePerformance:
             grid._via_rtree = None
             grid._via_rtree_items = {}
             for x1, y1, x2, y2 in queries[:5]:
-                checker.path_is_clear(
-                    x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999
-                )
+                checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
             start = time.perf_counter()
             for x1, y1, x2, y2 in queries:
-                checker.path_is_clear(
-                    x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999
-                )
+                checker.path_is_clear(x1, y1, x2, y2, Layer.F_CU, 0.2, exclude_net=999)
             linear_elapsed = time.perf_counter() - start
         finally:
             grid._via_rtree = saved_rtree

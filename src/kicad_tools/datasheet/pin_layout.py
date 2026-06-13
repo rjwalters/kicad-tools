@@ -16,7 +16,6 @@ from kicad_tools.core.types import LayoutStyle
 
 from .pins import ExtractedPin
 
-
 # Pin grouping categories for functional layout
 PIN_GROUPS: dict[str, list[str]] = {
     "power_positive": [

@@ -4,7 +4,6 @@ import pytest
 
 from kicad_tools.validate.rules.solder_mask import SolderMaskPadRules
 
-
 # -- Mock classes ----------------------------------------------------------
 
 
@@ -93,9 +92,11 @@ class TestSolderMaskClearance:
         """Zero mask clearance (KiCad default) should not be flagged."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(solder_mask_margin=None),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(solder_mask_margin=None),
+                    ]
+                ),
             ],
             setup=MockSetup(pad_to_mask_clearance=0.0),
         )
@@ -111,9 +112,11 @@ class TestSolderMaskClearance:
         """Per-pad mask clearance below minimum should be flagged."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(solder_mask_margin=0.02),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(solder_mask_margin=0.02),
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_solder_mask_clearance_mm=0.05)
@@ -131,9 +134,11 @@ class TestSolderMaskClearance:
         """Board-level mask clearance below minimum should be flagged."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(solder_mask_margin=None),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(solder_mask_margin=None),
+                    ]
+                ),
             ],
             setup=MockSetup(pad_to_mask_clearance=0.03),
         )
@@ -149,9 +154,11 @@ class TestSolderMaskClearance:
         """Clearance at or above minimum should pass."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(solder_mask_margin=0.05),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(solder_mask_margin=0.05),
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_solder_mask_clearance_mm=0.05)
@@ -166,12 +173,14 @@ class TestSolderMaskClearance:
         """Pads without mask layers should not be checked."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(
-                        solder_mask_margin=0.01,
-                        layers=["F.Cu"],  # No mask layer
-                    ),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(
+                            solder_mask_margin=0.01,
+                            layers=["F.Cu"],  # No mask layer
+                        ),
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_solder_mask_clearance_mm=0.05)
@@ -186,9 +195,11 @@ class TestSolderMaskClearance:
         """Per-pad margin should override board-level setting."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(solder_mask_margin=0.06),  # Above min
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(solder_mask_margin=0.06),  # Above min
+                    ]
+                ),
             ],
             setup=MockSetup(pad_to_mask_clearance=0.01),  # Below min
         )
@@ -211,9 +222,11 @@ class TestMinPadSize:
         """Pads at or above minimum should pass."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(size=(0.5, 0.8)),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(size=(0.5, 0.8)),
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_pad_size_mm=0.25)
@@ -228,9 +241,11 @@ class TestMinPadSize:
         """Pad with smallest dimension below minimum should be flagged."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(size=(0.2, 0.5)),  # Width 0.2 < 0.25
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(size=(0.2, 0.5)),  # Width 0.2 < 0.25
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_pad_size_mm=0.25)
@@ -249,14 +264,16 @@ class TestMinPadSize:
         """Non-plated through holes should not be checked for size."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(
-                        type="np_thru_hole",
-                        size=(0.1, 0.1),
-                        drill=0.1,
-                        layers=["*.Cu"],
-                    ),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(
+                            type="np_thru_hole",
+                            size=(0.1, 0.1),
+                            drill=0.1,
+                            layers=["*.Cu"],
+                        ),
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_pad_size_mm=0.25)
@@ -320,15 +337,17 @@ class TestPTHAnnularRing:
         """Through-hole pad with adequate ring should pass."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(
-                        type="thru_hole",
-                        size=(1.8, 1.8),
-                        drill=1.0,
-                        layers=["*.Cu", "*.Mask"],
-                        net_name="VCC",
-                    ),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(
+                            type="thru_hole",
+                            size=(1.8, 1.8),
+                            drill=1.0,
+                            layers=["*.Cu", "*.Mask"],
+                            net_name="VCC",
+                        ),
+                    ]
+                ),
             ],
         )
         # annular_ring = (1.8 - 1.0) / 2 = 0.4mm > 0.15mm
@@ -376,9 +395,11 @@ class TestPTHAnnularRing:
         """SMD pads should not be checked for annular ring."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(type="smd", size=(0.5, 0.5)),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(type="smd", size=(0.5, 0.5)),
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_annular_ring_mm=0.15)
@@ -421,9 +442,11 @@ class TestPTHAnnularRing:
         """Through-hole pad with no drill should be skipped."""
         pcb = MockPCB(
             footprints=[
-                MockFootprint(pads=[
-                    MockPad(type="thru_hole", size=(1.0, 1.0), drill=0.0),
-                ]),
+                MockFootprint(
+                    pads=[
+                        MockPad(type="thru_hole", size=(1.0, 1.0), drill=0.0),
+                    ]
+                ),
             ],
         )
         rules = MockDesignRules(min_annular_ring_mm=0.15)

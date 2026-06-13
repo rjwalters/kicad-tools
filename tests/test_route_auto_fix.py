@@ -1063,6 +1063,7 @@ class TestAutoFixSkippedExitCode:
                     return_value=(5, 0),
                 )
             )
+
             # Auto-fix is "called" but returns 1 (skipped) AND leaves
             # args._auto_fix_status as "skipped_deadline".  We model
             # this by patching the helper to a function that preserves

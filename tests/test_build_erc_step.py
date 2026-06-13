@@ -232,9 +232,7 @@ class TestRunErcLoadFailure:
         assert result.success is False
         assert "Failed to load" in (result.stderr or "")
 
-    def test_empty_output_with_nonzero_exit_returns_success_false(
-        self, tmp_path: Path
-    ) -> None:
+    def test_empty_output_with_nonzero_exit_returns_success_false(self, tmp_path: Path) -> None:
         """Even without the magic stderr text, an empty output file paired
         with a non-zero exit code must be treated as failure."""
         from unittest.mock import patch

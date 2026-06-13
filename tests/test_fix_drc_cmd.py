@@ -2211,7 +2211,8 @@ class TestConnectivityCheckRollback:
         # "DRILL CLEARANCE: " and check it doesn't show a non-zero
         # repaired count without a (reverted) annotation.
         cat_lines = [
-            ln for ln in out.splitlines()
+            ln
+            for ln in out.splitlines()
             if ln.startswith("CLEARANCE:") or ln.startswith("DRILL CLEARANCE:")
         ]
         for line in cat_lines:
@@ -2234,8 +2235,7 @@ class TestConnectivityCheckRollback:
                 # detail "at (x, y) ..." continuation lines).
                 if "reverted" not in line.lower():
                     raise AssertionError(
-                        f"Listed nudge entry not tagged '(reverted)' "
-                        f"on rollback: {line!r}"
+                        f"Listed nudge entry not tagged '(reverted)' on rollback: {line!r}"
                     )
 
     def test_rollback_json_output_is_self_consistent(
@@ -2291,8 +2291,7 @@ class TestConnectivityCheckRollback:
         # the JSON is internally consistent.
         if data.get("clearance", {}).get("violations", 0) > 0:
             assert data["clearance"]["repaired"] == 0, (
-                f"On rollback, clearance.repaired must be 0, "
-                f"got: {data['clearance']['repaired']}"
+                f"On rollback, clearance.repaired must be 0, got: {data['clearance']['repaired']}"
             )
         if data.get("drill_clearance", {}).get("violations", 0) > 0:
             assert data["drill_clearance"]["repaired"] == 0, (
@@ -2472,12 +2471,8 @@ class TestGranularRollback:
                 return _make_result(baseline_count, baseline_issues)
             return _make_result(after_count, after_issues)
 
-        monkeypatch.setattr(
-            "kicad_tools.cli.fix_drc_cmd._count_connected_nets", mock_count
-        )
-        monkeypatch.setattr(
-            "kicad_tools.cli.fix_drc_cmd._connectivity_report", mock_report
-        )
+        monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd._count_connected_nets", mock_count)
+        monkeypatch.setattr("kicad_tools.cli.fix_drc_cmd._connectivity_report", mock_report)
         return count_calls, report_calls
 
     def test_synthetic_positive_control_partial_rollback(
@@ -2544,8 +2539,7 @@ class TestGranularRollback:
         reverted_count = sum(1 for n in nudges if n["reverted"])
         expected_kept = total_attempted - reverted_count
         assert data["total_repaired"] == expected_kept, (
-            f"Expected total_repaired={expected_kept}, "
-            f"got {data['total_repaired']}"
+            f"Expected total_repaired={expected_kept}, got {data['total_repaired']}"
         )
 
     def test_full_rollback_when_all_nudges_touch_offending_net(
@@ -2874,7 +2868,9 @@ DRC_REPORT_ZONE_FILL = """\
 class TestFixDrcNewDefaults:
     """Tests for the updated default values (max-displacement=0.5, local-reroute=True)."""
 
-    def test_default_max_displacement_is_0_5(self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys):
+    def test_default_max_displacement_is_0_5(
+        self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys
+    ):
         """Default max-displacement should be 0.5mm (not the old 0.25mm).
 
         The enlarged-via violation requires 0.28mm displacement, which exceeds
@@ -2899,7 +2895,6 @@ class TestFixDrcNewDefaults:
 
     def test_local_reroute_on_by_default(self, tmp_path: Path):
         """--local-reroute should be enabled by default (no flag needed)."""
-        import argparse
 
         from kicad_tools.cli.fix_drc_cmd import main as fix_main
 
@@ -2908,12 +2903,8 @@ class TestFixDrcNewDefaults:
 
         # Parse with no --local-reroute flag -- should default to True
         # We test by checking that --no-local-reroute disables it
-        result_with = fix_main(
-            [str(pcb_file), "--dry-run", "--quiet"]
-        )
-        result_without = fix_main(
-            [str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"]
-        )
+        result_with = fix_main([str(pcb_file), "--dry-run", "--quiet"])
+        result_without = fix_main([str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"])
         # Both should complete without error (valid exit codes 0-3)
         assert result_with in (0, 1, 2, 3)
         assert result_without in (0, 1, 2, 3)
@@ -2925,9 +2916,7 @@ class TestFixDrcNewDefaults:
         pcb_file = tmp_path / "board.kicad_pcb"
         pcb_file.write_text(PCB_WITH_CLEARANCE)
 
-        result = cli_main(
-            ["fix-drc", str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"]
-        )
+        result = cli_main(["fix-drc", str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"])
         assert result in (0, 1, 2, 3)  # Valid exit code, not SystemExit
 
 
@@ -3091,9 +3080,7 @@ class TestNonTargetedViolations:
         # Text output should mention non-repairable violations
         assert "non-repairable" in captured.out.lower()
 
-    def test_summary_output_reports_non_targeted(
-        self, pcb_clearance: Path, tmp_path: Path, capsys
-    ):
+    def test_summary_output_reports_non_targeted(self, pcb_clearance: Path, tmp_path: Path, capsys):
         """Summary output should mention non-repairable violations."""
         report_file = tmp_path / "mixed-drc.rpt"
         report_file.write_text(DRC_REPORT_WITH_EDGE_AND_CLEARANCE)

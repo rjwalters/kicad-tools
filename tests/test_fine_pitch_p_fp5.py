@@ -54,7 +54,6 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
-
 # ============================================================================
 # Helpers (mirror P_FP4 fixtures with horizontal SOIC-8 row geometry)
 # ============================================================================
@@ -228,7 +227,9 @@ class TestStaggeredRowUsesPerComponentClearance:
         router.grid.set_fine_pitch_regions([region])
 
         baseline_escapes = router._create_staggered_row_escapes(
-            pads=pads, direction=EscapeDirection.NORTH, package=_FakePackage(pads),
+            pads=pads,
+            direction=EscapeDirection.NORTH,
+            package=_FakePackage(pads),
         )
         # The via must sit closer to the pad than the legacy
         # ``escape_clearance + trace_width`` distance would put it.
@@ -264,7 +265,9 @@ class TestStaggeredRowUsesPerComponentClearance:
         router.grid.set_fine_pitch_regions([])
 
         escapes = router._create_staggered_row_escapes(
-            pads=pads, direction=EscapeDirection.NORTH, package=_FakePackage(pads),
+            pads=pads,
+            direction=EscapeDirection.NORTH,
+            package=_FakePackage(pads),
         )
         first = escapes[0]
         via_x, via_y = first.via_pos  # type: ignore[misc]
@@ -272,8 +275,7 @@ class TestStaggeredRowUsesPerComponentClearance:
         via_dist = via_y - pad.y
         legacy_dist = router.escape_clearance + router.rules.trace_width
         assert via_dist == pytest.approx(legacy_dist, abs=0.01), (
-            f"Expected legacy launch dist {legacy_dist:.3f}mm with no region; "
-            f"got {via_dist:.3f}mm"
+            f"Expected legacy launch dist {legacy_dist:.3f}mm with no region; got {via_dist:.3f}mm"
         )
 
     def test_out_of_region_ref_preserves_legacy(self):
@@ -294,7 +296,9 @@ class TestStaggeredRowUsesPerComponentClearance:
         router.grid.set_fine_pitch_regions([region])
 
         escapes = router._create_staggered_row_escapes(
-            pads=pads, direction=EscapeDirection.NORTH, package=_FakePackage(pads),
+            pads=pads,
+            direction=EscapeDirection.NORTH,
+            package=_FakePackage(pads),
         )
         first = escapes[0]
         via_x, via_y = first.via_pos  # type: ignore[misc]
@@ -348,10 +352,7 @@ class TestLadderCompositionGating:
     def test_tier1_with_explicit_flag_disables_compose(self):
         """Explicit ``--micro-via-in-pad-fallback`` keeps original ladder."""
         user_explicit_fallback = True  # i.e. CLI flag passed
-        enabled = (
-            not user_explicit_fallback
-            and _mfr_supports_via_in_pad("jlcpcb-tier1")
-        )
+        enabled = not user_explicit_fallback and _mfr_supports_via_in_pad("jlcpcb-tier1")
         assert enabled is False
         ladder = _interleave_fine_pitch_fallback_attempts(
             [(2, "2L"), (4, "4L")],
@@ -366,10 +367,7 @@ class TestLadderCompositionGating:
     def test_tier1_default_enables_compose(self):
         """jlcpcb-tier1 default flow -> compose interleaves the ladder."""
         user_explicit_fallback = False
-        enabled = (
-            not user_explicit_fallback
-            and _mfr_supports_via_in_pad("jlcpcb-tier1")
-        )
+        enabled = not user_explicit_fallback and _mfr_supports_via_in_pad("jlcpcb-tier1")
         assert enabled is True
         ladder = _interleave_fine_pitch_fallback_attempts(
             [(2, "2L"), (4, "4L"), (6, "6L")],

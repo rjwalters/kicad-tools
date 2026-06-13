@@ -180,8 +180,7 @@ def _print_summary(
     parts = []
     if line_result.total_fixed > 0:
         parts.append(
-            f"{line_result.total_fixed} line width violation(s)"
-            f" (min: {line_result.min_width_mm}mm)"
+            f"{line_result.total_fixed} line width violation(s) (min: {line_result.min_width_mm}mm)"
         )
     if text_result.total_fixed > 0:
         parts.append(
@@ -242,10 +241,7 @@ def _print_text(
                 height_examples[key] = (fix.old_height, fix.new_height)
         for fp_ref, count in by_fp_text.most_common():
             old_h, new_h = height_examples[fp_ref]
-            print(
-                f"  {fp_ref}: {count} text element(s) scaled"
-                f" ({old_h:.2f}mm -> {new_h:.2f}mm)"
-            )
+            print(f"  {fp_ref}: {count} text element(s) scaled ({old_h:.2f}mm -> {new_h:.2f}mm)")
 
 
 def main(argv: list[str] | None = None) -> int:

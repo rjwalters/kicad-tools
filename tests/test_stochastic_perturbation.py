@@ -86,18 +86,52 @@ class TestNetPriorityPerturbation:
         router = Autorouter(width=50.0, height=50.0)
 
         # Add components with pads using add_component API
-        router.add_component("R1", [
-            {"number": "1", "x": 5.0, "y": 5.0, "width": 1.0, "height": 1.0,
-             "net": 1, "net_name": "NET1"},
-            {"number": "2", "x": 15.0, "y": 5.0, "width": 1.0, "height": 1.0,
-             "net": 1, "net_name": "NET1"},
-        ])
-        router.add_component("R2", [
-            {"number": "1", "x": 5.0, "y": 15.0, "width": 1.0, "height": 1.0,
-             "net": 2, "net_name": "NET2"},
-            {"number": "2", "x": 15.0, "y": 15.0, "width": 1.0, "height": 1.0,
-             "net": 2, "net_name": "NET2"},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 5.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 1,
+                    "net_name": "NET1",
+                },
+                {
+                    "number": "2",
+                    "x": 15.0,
+                    "y": 5.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 1,
+                    "net_name": "NET1",
+                },
+            ],
+        )
+        router.add_component(
+            "R2",
+            [
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 15.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 2,
+                    "net_name": "NET2",
+                },
+                {
+                    "number": "2",
+                    "x": 15.0,
+                    "y": 15.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 2,
+                    "net_name": "NET2",
+                },
+            ],
+        )
 
         return router
 
@@ -168,9 +202,7 @@ class TestNetPriorityPerturbation:
 
         # With strong enough perturbation, ordering should change at least once
         # (probabilistic, but 50 trials with magnitude=1.0 is very likely)
-        assert found_different, (
-            "Expected perturbation to change net ordering at least once"
-        )
+        assert found_different, "Expected perturbation to change net ordering at least once"
 
 
 class TestPerturbationDoesNotActivateAtZeroOverflow:
@@ -196,9 +228,7 @@ class TestPerturbationDoesNotActivateAtZeroOverflow:
 
         # overflow=0 but unrouted nets remain
         history = [5, 3, 0, 0, 0]
-        result = should_terminate_early(
-            history, iteration=5, min_iterations=3, unrouted_count=2
-        )
+        result = should_terminate_early(history, iteration=5, min_iterations=3, unrouted_count=2)
         assert result is False
 
 

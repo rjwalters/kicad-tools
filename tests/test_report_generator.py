@@ -1168,25 +1168,27 @@ class TestLoadDataDir:
         from kicad_tools.cli.report_cmd import _load_data_dir
 
         (tmp_path / "narrative.json").write_text(
-            json.dumps({
-                "design_narrative": "A USB audio interface board.",
-                "functional_blocks": [
-                    {"name": "Power Supply", "filename": "power.kicad_sch"},
-                ],
-                "interfaces": [
-                    {"protocol": "I2C", "signals": ["SCL", "SDA"]},
-                ],
-                "power_architecture": [
-                    {"rail": "+3V3", "type": "power_symbol"},
-                ],
-                "assembly_notes": {
-                    "fine_pitch_count": 1,
-                    "fine_pitch_parts": ["U1"],
-                    "thermal_pad_count": 0,
-                    "polarized_count": 0,
-                    "summary": "1 fine-pitch component",
-                },
-            })
+            json.dumps(
+                {
+                    "design_narrative": "A USB audio interface board.",
+                    "functional_blocks": [
+                        {"name": "Power Supply", "filename": "power.kicad_sch"},
+                    ],
+                    "interfaces": [
+                        {"protocol": "I2C", "signals": ["SCL", "SDA"]},
+                    ],
+                    "power_architecture": [
+                        {"rail": "+3V3", "type": "power_symbol"},
+                    ],
+                    "assembly_notes": {
+                        "fine_pitch_count": 1,
+                        "fine_pitch_parts": ["U1"],
+                        "thermal_pad_count": 0,
+                        "polarized_count": 0,
+                        "summary": "1 fine-pitch component",
+                    },
+                }
+            )
         )
         result = _load_data_dir(str(tmp_path))
 
@@ -1206,18 +1208,20 @@ class TestLoadDataDir:
         from kicad_tools.cli.report_cmd import _load_data_dir
 
         (tmp_path / "narrative.json").write_text(
-            json.dumps({
-                "schema_version": 1,
-                "generated_at": "2026-04-24T00:00:00+00:00",
-                "pcb_path": "board.kicad_pcb",
-                "data": {
-                    "design_narrative": "Test narrative.",
-                    "functional_blocks": None,
-                    "interfaces": None,
-                    "power_architecture": None,
-                    "assembly_notes": None,
-                },
-            })
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-24T00:00:00+00:00",
+                    "pcb_path": "board.kicad_pcb",
+                    "data": {
+                        "design_narrative": "Test narrative.",
+                        "functional_blocks": None,
+                        "interfaces": None,
+                        "power_architecture": None,
+                        "assembly_notes": None,
+                    },
+                }
+            )
         )
         result = _load_data_dir(str(tmp_path))
 
@@ -1232,11 +1236,13 @@ class TestLoadDataDir:
         from kicad_tools.cli.report_cmd import _load_data_dir
 
         (tmp_path / "narrative.json").write_text(
-            json.dumps({
-                "schema_version": 1,
-                "generated_at": "2026-04-24T00:00:00+00:00",
-                "data": None,
-            })
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-24T00:00:00+00:00",
+                    "data": None,
+                }
+            )
         )
         result = _load_data_dir(str(tmp_path))
 
@@ -2006,14 +2012,20 @@ class TestNetClassification:
                 "unrouted_count": 0,
                 "total_unconnected_pads": 20,
                 "incomplete_net_names": [
-                    "AUDIO_L", "I2S_DIN", "Net-(U1-1)", "Net-(U2-3)",
+                    "AUDIO_L",
+                    "I2S_DIN",
+                    "Net-(U1-1)",
+                    "Net-(U2-3)",
                     "unconnected-(C40-2)",
                 ],
                 "signal_net_count": 18,
                 "signal_complete_count": 10,
                 "signal_completion_percent": 55.6,
                 "signal_incomplete_net_names": [
-                    "AUDIO_L", "I2S_DIN", "Net-(U1-1)", "Net-(U2-3)",
+                    "AUDIO_L",
+                    "I2S_DIN",
+                    "Net-(U1-1)",
+                    "Net-(U2-3)",
                     "unconnected-(C40-2)",
                 ],
                 "signal_incomplete_named": ["AUDIO_L", "I2S_DIN"],
@@ -2227,9 +2239,7 @@ class TestDesignNarrative:
         assert "| I2C | SCL, SDA |" in content
         assert "| SPI | MISO, MOSI, SCK |" in content
 
-    def test_power_architecture_renders_rails_and_regulators(
-        self, tmp_path: Path
-    ) -> None:
+    def test_power_architecture_renders_rails_and_regulators(self, tmp_path: Path) -> None:
         """Power architecture shows rails and regulator table."""
         data = _full_data(
             power_architecture=[

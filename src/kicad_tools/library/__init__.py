@@ -16,8 +16,8 @@ Usage:
     fp.save("MyFootprints.pretty/R_0603_Custom.kicad_mod")
 """
 
-from .footprint import Footprint, GraphicArc, GraphicCircle, GraphicLine, GraphicRect, Pad
 from .dsl import parse_footprint_dsl
+from .footprint import Footprint, GraphicArc, GraphicCircle, GraphicLine, GraphicRect, Pad
 from .generators import (
     create_bga,
     create_bga_standard,

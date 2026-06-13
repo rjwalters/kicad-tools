@@ -77,10 +77,10 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Pin / Unit / Entity models
 # ---------------------------------------------------------------------------
+
 
 class PinDirection(Enum):
     """Electrical direction of a pin."""
@@ -174,6 +174,7 @@ class Entity:
 # ComposedPart (top-level binding)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ComposedPart:
     """
@@ -233,8 +234,7 @@ class ComposedPart:
         while current is not None:
             if current.id in seen:
                 raise ValueError(
-                    f"Circular inheritance detected: {current.id} "
-                    f"appears twice in the chain"
+                    f"Circular inheritance detected: {current.id} appears twice in the chain"
                 )
             seen.add(current.id)
             chain.append(current)
@@ -261,8 +261,14 @@ class ComposedPart:
         result: dict[str, object] = {}
         for part in reversed(chain):
             for attr in (
-                "id", "package", "category", "mpn", "manufacturer",
-                "description", "lcsc_part", "datasheet_url",
+                "id",
+                "package",
+                "category",
+                "mpn",
+                "manufacturer",
+                "description",
+                "lcsc_part",
+                "datasheet_url",
             ):
                 val = getattr(part, attr)
                 if val:
@@ -280,6 +286,7 @@ class ComposedPart:
 # ---------------------------------------------------------------------------
 # Serialisation helpers (Unit / Entity / ComposedPart <-> dict/JSON)
 # ---------------------------------------------------------------------------
+
 
 def _pin_to_dict(pin: UnitPin) -> dict:
     d: dict[str, object] = {
@@ -336,6 +343,7 @@ def _entity_from_dict(d: dict) -> Entity:
 # ---------------------------------------------------------------------------
 # SQLite-backed store with parametric search
 # ---------------------------------------------------------------------------
+
 
 class ComposedPartStore:
     """
@@ -435,9 +443,7 @@ class ComposedPartStore:
                     ON composed_part_tags(tag);
             """)
 
-            cur = conn.execute(
-                "SELECT value FROM composed_meta WHERE key = 'schema_version'"
-            )
+            cur = conn.execute("SELECT value FROM composed_meta WHERE key = 'schema_version'")
             row = cur.fetchone()
             if row is None:
                 conn.execute(
@@ -496,9 +502,7 @@ class ComposedPartStore:
     def get(self, part_id: str) -> ComposedPart | None:
         """Retrieve a single composed part by ID."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM composed_parts WHERE id = ?", (part_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM composed_parts WHERE id = ?", (part_id,)).fetchone()
             if row is None:
                 return None
             return self._row_to_part(conn, row)

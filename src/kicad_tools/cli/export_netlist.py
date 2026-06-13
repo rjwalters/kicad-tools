@@ -285,7 +285,6 @@ class Netlist:
         return power_nets
 
 
-
 def export_netlist(
     sch_path: Path,
     output_path: Path,

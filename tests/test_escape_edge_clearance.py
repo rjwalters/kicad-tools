@@ -3,16 +3,12 @@
 import pytest
 
 from kicad_tools.router.escape import (
-    EscapeRoute,
     EscapeRouter,
-    PackageType,
-    get_package_info,
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Pad, Segment, Via
+from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
-
 
 # ==============================================================================
 # Helpers
@@ -151,7 +147,8 @@ class TestClampToEdgeClearance:
         grid = make_grid()
         rules = make_rules()
         router = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=0.5,
             board_bounds=(0.0, 0.0, 30.0, 30.0),
         )
@@ -167,7 +164,8 @@ class TestClampToEdgeClearance:
         grid = make_grid()
         rules = make_rules()
         router = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=0.5,
             board_bounds=(0.0, 0.0, 30.0, 30.0),
         )
@@ -194,7 +192,8 @@ class TestClampToEdgeClearance:
         grid = make_grid()
         rules = make_rules()
         router = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=0.3,
             board_bounds=(0.0, 0.0, 20.0, 20.0),
         )
@@ -212,7 +211,8 @@ class TestClampToEdgeClearance:
         grid = make_grid()
         rules = make_rules()
         router = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=1.0,
             board_bounds=(10.0, 10.0, 50.0, 40.0),
         )
@@ -243,7 +243,8 @@ class TestGenerateEscapesEdgeClearance:
         edge_clearance = 0.5
 
         router = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=edge_clearance,
             board_bounds=board_bounds,
         )
@@ -297,7 +298,8 @@ class TestGenerateEscapesEdgeClearance:
         router_no_ec = EscapeRouter(grid, rules)
         # With edge clearance
         router_with_ec = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=0.3,
             board_bounds=board_bounds,
         )
@@ -336,7 +338,8 @@ class TestGenerateEscapesEdgeClearance:
         edge_clearance = 1.0
 
         router = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=edge_clearance,
             board_bounds=board_bounds,
         )
@@ -365,12 +368,8 @@ class TestGenerateEscapesEdgeClearance:
         for escape in escapes:
             if escape.via_pos is not None:
                 vx, vy = escape.via_pos
-                assert vx <= max_x + 1e-6, (
-                    f"Via x={vx} violates right edge clearance (max={max_x})"
-                )
-                assert vy <= max_y + 1e-6, (
-                    f"Via y={vy} violates top edge clearance (max={max_y})"
-                )
+                assert vx <= max_x + 1e-6, f"Via x={vx} violates right edge clearance (max={max_x})"
+                assert vy <= max_y + 1e-6, f"Via y={vy} violates top edge clearance (max={max_y})"
 
     def test_segment_endpoints_clamped(self):
         """Non-origin segment endpoints must respect edge clearance."""
@@ -380,7 +379,8 @@ class TestGenerateEscapesEdgeClearance:
         edge_clearance = 1.0
 
         router = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             edge_clearance=edge_clearance,
             board_bounds=board_bounds,
         )
@@ -430,9 +430,7 @@ class TestMfrEdgeClearanceIntegration:
         from kicad_tools.router.mfr_limits import MFR_LIMITS
 
         for name, mfr in MFR_LIMITS.items():
-            assert mfr.min_edge_clearance > 0, (
-                f"Manufacturer '{name}' has zero edge clearance"
-            )
+            assert mfr.min_edge_clearance > 0, f"Manufacturer '{name}' has zero edge clearance"
 
     def test_jlcpcb_edge_clearance_matches_dru(self):
         """JLCPCB edge clearance should match the .kicad_dru file value."""

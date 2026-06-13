@@ -99,9 +99,7 @@ class PnPFormatter(ABC):
             y = -y
 
         # Per-footprint rotation correction
-        fp_correction = match_rotation_correction(
-            placement.footprint, self.rotation_corrections
-        )
+        fp_correction = match_rotation_correction(placement.footprint, self.rotation_corrections)
 
         rotation = (placement.rotation + fp_correction + self.config.rotation_offset) % 360
 

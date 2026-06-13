@@ -31,14 +31,12 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.schematic.blocks import (
-    BuckConverter,
     DebugHeader,
     GateDriverBlock,
     HalfBridge,
     LDOBlock,
 )
 from kicad_tools.schematic.models.schematic import Schematic
-
 
 STUB = 2.54
 
@@ -53,10 +51,7 @@ def _label_coords(sch: Schematic) -> set[tuple[float, float]]:
 
 def _label_at(sch: Schematic, x: float, y: float) -> bool:
     """True iff a label exists exactly at (x, y) (within grid snap)."""
-    for lbl in sch.labels:
-        if abs(lbl.x - x) < 0.01 and abs(lbl.y - y) < 0.01:
-            return True
-    return False
+    return any(abs(lbl.x - x) < 0.01 and abs(lbl.y - y) < 0.01 for lbl in sch.labels)
 
 
 # ---------------------------------------------------------------------------
@@ -74,16 +69,16 @@ class TestLDOPinNetsCollision:
         """Baseline: no foreign wire, label lands on the primary-side stub."""
         sch = _make_schematic()
         LDOBlock(
-            sch, x=self.LDO_X, y=self.LDO_Y,
+            sch,
+            x=self.LDO_X,
+            y=self.LDO_Y,
             ref="U1",
             ldo_symbol="Regulator_Linear:AMS1117-3.3",
             pin_nets={"VI": "+5V"},
         )
         # VI is on the symbol's left edge so the primary stub goes left.
         plus5v_labels = [lbl for lbl in sch.labels if lbl.text == "+5V"]
-        assert len(plus5v_labels) == 1, (
-            f"Expected exactly one +5V label, got {len(plus5v_labels)}"
-        )
+        assert len(plus5v_labels) == 1, f"Expected exactly one +5V label, got {len(plus5v_labels)}"
 
     def test_auto_shift_on_one_side_collision(self) -> None:
         """A foreign wire on the primary side triggers auto-shift to the other side."""
@@ -94,7 +89,9 @@ class TestLDOPinNetsCollision:
         # placed exactly on the primary-side stub endpoint.
         probe = _make_schematic()
         probe_ldo = LDOBlock(
-            probe, x=self.LDO_X, y=self.LDO_Y,
+            probe,
+            x=self.LDO_X,
+            y=self.LDO_Y,
             ref="U99",
             ldo_symbol="Regulator_Linear:AMS1117-3.3",
         )
@@ -114,7 +111,9 @@ class TestLDOPinNetsCollision:
         )
 
         LDOBlock(
-            sch, x=self.LDO_X, y=self.LDO_Y,
+            sch,
+            x=self.LDO_X,
+            y=self.LDO_Y,
             ref="U1",
             ldo_symbol="Regulator_Linear:AMS1117-3.3",
             pin_nets={"VI": "+5V"},
@@ -123,8 +122,7 @@ class TestLDOPinNetsCollision:
         # The label must NOT land on the foreign wire's coordinate; it
         # should land on the fallback side.
         assert not _label_at(sch, primary_x, vi_pos[1]), (
-            f"Regression of #3015: +5V label landed on foreign wire at "
-            f"({primary_x}, {vi_pos[1]})."
+            f"Regression of #3015: +5V label landed on foreign wire at ({primary_x}, {vi_pos[1]})."
         )
         assert _label_at(sch, fallback_x, vi_pos[1]), (
             f"Expected auto-shift to fallback side at "
@@ -138,7 +136,9 @@ class TestLDOPinNetsCollision:
         # Probe to find pin coordinate.
         probe = _make_schematic()
         probe_ldo = LDOBlock(
-            probe, x=self.LDO_X, y=self.LDO_Y,
+            probe,
+            x=self.LDO_X,
+            y=self.LDO_Y,
             ref="U99",
             ldo_symbol="Regulator_Linear:AMS1117-3.3",
         )
@@ -160,7 +160,9 @@ class TestLDOPinNetsCollision:
 
         with pytest.raises(ValueError) as exc_info:
             LDOBlock(
-                sch, x=self.LDO_X, y=self.LDO_Y,
+                sch,
+                x=self.LDO_X,
+                y=self.LDO_Y,
                 ref="U1",
                 ldo_symbol="Regulator_Linear:AMS1117-3.3",
                 pin_nets={"VI": "+5V"},
@@ -188,7 +190,9 @@ class TestGateDriverPinNetsCollision:
         # public API exposes ``self.driver.pin_position``.
         probe = _make_schematic()
         probe_drv = GateDriverBlock(
-            probe, x=self.DRIVER_X, y=self.DRIVER_Y,
+            probe,
+            x=self.DRIVER_X,
+            y=self.DRIVER_Y,
             ref="U99",
             driver_symbol="Device:R",  # 2-pin symbol, "1"/"2" pin numbers
             bootstrap_caps=None,
@@ -211,7 +215,9 @@ class TestGateDriverPinNetsCollision:
         )
 
         GateDriverBlock(
-            sch, x=self.DRIVER_X, y=self.DRIVER_Y,
+            sch,
+            x=self.DRIVER_X,
+            y=self.DRIVER_Y,
             ref="U1",
             driver_symbol="Device:R",
             bootstrap_caps=None,
@@ -228,7 +234,9 @@ class TestGateDriverPinNetsCollision:
 
         probe = _make_schematic()
         probe_drv = GateDriverBlock(
-            probe, x=self.DRIVER_X, y=self.DRIVER_Y,
+            probe,
+            x=self.DRIVER_X,
+            y=self.DRIVER_Y,
             ref="U99",
             driver_symbol="Device:R",
             bootstrap_caps=None,
@@ -255,7 +263,9 @@ class TestGateDriverPinNetsCollision:
 
         with pytest.raises(ValueError) as exc_info:
             GateDriverBlock(
-                sch, x=self.DRIVER_X, y=self.DRIVER_Y,
+                sch,
+                x=self.DRIVER_X,
+                y=self.DRIVER_Y,
                 ref="U1",
                 driver_symbol="Device:R",
                 bootstrap_caps=None,
@@ -280,7 +290,9 @@ class TestHalfBridgeGateCollision:
         """Baseline: gate label on the primary (left) side."""
         sch = _make_schematic()
         HalfBridge(
-            sch, x=self.HB_X, y=self.HB_Y,
+            sch,
+            x=self.HB_X,
+            y=self.HB_Y,
             ref_prefix="Q",
             gate_hs_net="UHSG",
         )
@@ -293,7 +305,9 @@ class TestHalfBridgeGateCollision:
 
         probe = _make_schematic()
         probe_hb = HalfBridge(
-            probe, x=self.HB_X, y=self.HB_Y,
+            probe,
+            x=self.HB_X,
+            y=self.HB_Y,
             ref_prefix="Q",
         )
         hs_gate = probe_hb.mosfet_hs.pin_position("G")
@@ -308,7 +322,9 @@ class TestHalfBridgeGateCollision:
         )
 
         HalfBridge(
-            sch, x=self.HB_X, y=self.HB_Y,
+            sch,
+            x=self.HB_X,
+            y=self.HB_Y,
             ref_prefix="Q",
             gate_hs_net="UHSG",
         )
@@ -322,7 +338,9 @@ class TestHalfBridgeGateCollision:
 
         probe = _make_schematic()
         probe_hb = HalfBridge(
-            probe, x=self.HB_X, y=self.HB_Y,
+            probe,
+            x=self.HB_X,
+            y=self.HB_Y,
             ref_prefix="Q",
         )
         hs_gate = probe_hb.mosfet_hs.pin_position("G")
@@ -342,7 +360,9 @@ class TestHalfBridgeGateCollision:
 
         with pytest.raises(ValueError) as exc_info:
             HalfBridge(
-                sch, x=self.HB_X, y=self.HB_Y,
+                sch,
+                x=self.HB_X,
+                y=self.HB_Y,
                 ref_prefix="Q",
                 gate_hs_net="UHSG",
             )
@@ -366,8 +386,12 @@ class TestDebugHeaderPinNetsCollision:
 
         probe = _make_schematic()
         probe_hdr = DebugHeader(
-            probe, x=self.HDR_X, y=self.HDR_Y,
-            interface="swd", pins=10, ref="J99",
+            probe,
+            x=self.HDR_X,
+            y=self.HDR_Y,
+            interface="swd",
+            pins=10,
+            ref="J99",
         )
         pin_pos = probe_hdr.header.pin_position("1")
         if pin_pos[0] < self.HDR_X:
@@ -384,8 +408,12 @@ class TestDebugHeaderPinNetsCollision:
         )
 
         DebugHeader(
-            sch, x=self.HDR_X, y=self.HDR_Y,
-            interface="swd", pins=10, ref="J1",
+            sch,
+            x=self.HDR_X,
+            y=self.HDR_Y,
+            interface="swd",
+            pins=10,
+            ref="J1",
             pin_nets={"1": "+3V3"},
         )
 
@@ -398,8 +426,12 @@ class TestDebugHeaderPinNetsCollision:
 
         probe = _make_schematic()
         probe_hdr = DebugHeader(
-            probe, x=self.HDR_X, y=self.HDR_Y,
-            interface="swd", pins=10, ref="J99",
+            probe,
+            x=self.HDR_X,
+            y=self.HDR_Y,
+            interface="swd",
+            pins=10,
+            ref="J99",
         )
         pin_pos = probe_hdr.header.pin_position("1")
         if pin_pos[0] < self.HDR_X:
@@ -422,8 +454,12 @@ class TestDebugHeaderPinNetsCollision:
 
         with pytest.raises(ValueError) as exc_info:
             DebugHeader(
-                sch, x=self.HDR_X, y=self.HDR_Y,
-                interface="swd", pins=10, ref="J1",
+                sch,
+                x=self.HDR_X,
+                y=self.HDR_Y,
+                interface="swd",
+                pins=10,
+                ref="J1",
                 pin_nets={"1": "+3V3"},
             )
         msg = str(exc_info.value)
@@ -454,7 +490,9 @@ class TestBoardRealisticCollision:
         # Probe to compute the would-be primary stub coordinate.
         probe = _make_schematic()
         probe_ldo = LDOBlock(
-            probe, x=LDO_X, y=LDO_Y,
+            probe,
+            x=LDO_X,
+            y=LDO_Y,
             ref="U99",
             ldo_symbol="Regulator_Linear:AMS1117-3.3",
         )
@@ -475,7 +513,9 @@ class TestBoardRealisticCollision:
         # would silently bridge +5V into whatever net the foreign rail
         # belongs to; the fix auto-shifts to the other side.
         block = LDOBlock(
-            sch, x=LDO_X, y=LDO_Y,
+            sch,
+            x=LDO_X,
+            y=LDO_Y,
             ref="U1",
             ldo_symbol="Regulator_Linear:AMS1117-3.3",
             pin_nets={"VI": "+5V"},

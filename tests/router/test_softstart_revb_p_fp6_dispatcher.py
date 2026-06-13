@@ -87,9 +87,16 @@ def _load_router(pcb_path: Path):
         str(pcb_path),
         rules=rules,
         skip_nets=[
-            "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-            "+3.3V", "VRECT",
-            "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+            "AC_LINE",
+            "AC_NEUTRAL",
+            "FUSED_LINE",
+            "GND",
+            "+3.3V",
+            "VRECT",
+            "SCAP_POS+",
+            "SCAP_POS_GND",
+            "SCAP_NEG+",
+            "SCAP_NEG_GND",
             "ISENSE_POS",
         ],
     )
@@ -144,8 +151,7 @@ def test_softstart_revb_p_fp6_dispatcher_eligible(tmp_path: Path) -> None:
 
     er = EscapeRouter(router.grid, router.rules)
     assert er.via_in_pad_supported, (
-        "Expected via_in_pad_supported=True at jlcpcb-tier1; "
-        "the rescue would never fire otherwise."
+        "Expected via_in_pad_supported=True at jlcpcb-tier1; the rescue would never fire otherwise."
     )
 
     for ref in UCC_REFS:
@@ -165,7 +171,8 @@ def test_softstart_revb_p_fp6_dispatcher_eligible(tmp_path: Path) -> None:
 
 
 def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Dispatch is defer-all by default; env cap=1 rescues pin 8 only.
 
@@ -205,10 +212,7 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
     caplog.set_level(logging.INFO, logger="kicad_tools.router.escape")
 
     # --- Phase 1: production default (cap 0) -> NO geometry at all. ---
-    clean_env = {
-        k: v for k, v in os.environ.items()
-        if k != "KICAD_TOOLS_SOP_RESCUE_ROW_CAP"
-    }
+    clean_env = {k: v for k, v in os.environ.items() if k != "KICAD_TOOLS_SOP_RESCUE_ROW_CAP"}
     with mock.patch.dict(os.environ, clean_env, clear=True):
         for ref in UCC_REFS:
             pads = [p for p in router.pads.values() if p.ref == ref]
@@ -231,22 +235,21 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
     # pads all defer (consumer-aware rescue, like U7).  U5 (positive
     # bank, y=142) remains ~44 mm away and keeps its pin-8 rescue.
     expected_rescued = {
-        "U5": {"8"},   # GATE_POS_A -> MCU north face, ~44 mm (far)
-        "U6": set(),   # GATE_NEG_A -> MCU north face, ~14 mm (local, P-R2)
-        "U7": set(),   # all consumers local (2-12 mm)
+        "U5": {"8"},  # GATE_POS_A -> MCU north face, ~44 mm (far)
+        "U6": set(),  # GATE_NEG_A -> MCU north face, ~14 mm (local, P-R2)
+        "U7": set(),  # all consumers local (2-12 mm)
     }
 
     with mock.patch.dict(
-        os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+        os.environ,
+        {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
     ):
         for ref in UCC_REFS:
             pads = [p for p in router.pads.values() if p.ref == ref]
             package_info = er.analyze_package(pads)
             routes = er.generate_escapes(package_info)
             in_pad_pins = {
-                r.pad.pin
-                for r in routes
-                if r.via is not None and getattr(r.via, "in_pad", False)
+                r.pad.pin for r in routes if r.via is not None and getattr(r.via, "in_pad", False)
             }
             assert in_pad_pins == expected_rescued[ref], (
                 f"{ref}: expected in-pad rescues exactly on far-consumer "
@@ -255,8 +258,7 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
             )
             # Rescue-only band: no staggered fallback geometry may appear.
             staggered = [
-                r for r in routes
-                if r.via is not None and not getattr(r.via, "in_pad", False)
+                r for r in routes if r.via is not None and not getattr(r.via, "in_pad", False)
             ]
             assert not staggered, (
                 f"{ref}: rescue-only-band package emitted "
@@ -270,8 +272,7 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
     # north face -- issue #3343 P-R2), and it must appear exactly once
     # (cap=1 phase only; the cap-0 phase logs nothing).
     rescue_lines = [
-        rec.getMessage() for rec in caplog.records
-        if "SOP in-pad rescue" in rec.getMessage()
+        rec.getMessage() for rec in caplog.records if "SOP in-pad rescue" in rec.getMessage()
     ]
     assert len(rescue_lines) == 1, (
         f"Expected exactly 1 rescue log line (U5 pin 8; U6 defers "
@@ -279,8 +280,7 @@ def test_softstart_revb_p_fp6_dispatcher_emits_in_pad_vias(
     )
     matching = [l for l in rescue_lines if " U5 " in l]
     assert len(matching) == 1, (
-        f"Expected 1 SOP in-pad rescue log for U5 (per-row cap); "
-        f"all rescue lines: {rescue_lines}"
+        f"Expected 1 SOP in-pad rescue log for U5 (per-row cap); all rescue lines: {rescue_lines}"
     )
 
 

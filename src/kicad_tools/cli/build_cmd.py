@@ -1626,8 +1626,7 @@ def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
         pads = []
 
     needs_stitch = any(
-        pad.pad_type != "thru_hole" and pad.layer != plane_nets.get(pad.net_name)
-        for pad in pads
+        pad.pad_type != "thru_hole" and pad.layer != plane_nets.get(pad.net_name) for pad in pads
     )
 
     if not needs_stitch:

@@ -89,9 +89,7 @@ def find_stale_nets(pcb: PCB) -> list[StaleNetGroup]:
         if m:
             ref, pad_id = m.group(1), m.group(2)
             key = _canonical_key(ref, pad_id)
-            canonical_groups.setdefault(key, []).append(
-                (net_number, name, "old")
-            )
+            canonical_groups.setdefault(key, []).append((net_number, name, "old"))
             continue
 
         # Try new-style pattern
@@ -103,9 +101,7 @@ def find_stale_nets(pcb: PCB) -> list[StaleNetGroup]:
             if pad_id.startswith("Pad"):
                 continue
             key = _canonical_key(ref, pad_id)
-            canonical_groups.setdefault(key, []).append(
-                (net_number, name, "new")
-            )
+            canonical_groups.setdefault(key, []).append((net_number, name, "new"))
             continue
 
     # Step 2: Filter to groups with more than one net (duplicates).

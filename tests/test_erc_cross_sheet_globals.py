@@ -2,15 +2,12 @@
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.erc.cross_sheet import (
     _extract_label_name,
     build_global_label_inventory,
     build_sheet_label_presence,
     filter_cross_sheet_global_labels,
 )
-
 
 # ---------------------------------------------------------------------------
 # Schematic templates with global labels
@@ -176,9 +173,7 @@ class TestBuildGlobalLabelInventory:
     def test_label_on_single_sheet(self, tmp_path: Path):
         """Label only on root should map to one path."""
         root_labels = _make_global_label("LONELY_NET", uuid="gl-lonely")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels=root_labels, sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels=root_labels, sheets="")
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
@@ -193,17 +188,15 @@ class TestBuildGlobalLabelInventory:
         sub_b = "sub_b.kicad_sch"
 
         root_labels = _make_global_label("AUDIO_L", uuid="gl-root-audio")
-        root_sheets = (
-            _make_sheet("SubA", sub_a, uuid="sheet-a")
-            + _make_sheet("SubB", sub_b, uuid="sheet-b")
+        root_sheets = _make_sheet("SubA", sub_a, uuid="sheet-a") + _make_sheet(
+            "SubB", sub_b, uuid="sheet-b"
         )
         root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
             global_labels=root_labels, sheets=root_sheets
         )
 
-        sub_a_labels = (
-            _make_global_label("AUDIO_L", uuid="gl-a-audio")
-            + _make_global_label("SPI_CLK", uuid="gl-a-spi")
+        sub_a_labels = _make_global_label("AUDIO_L", uuid="gl-a-audio") + _make_global_label(
+            "SPI_CLK", uuid="gl-a-spi"
         )
         sub_a_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
             uuid="sub-a-uuid", global_labels=sub_a_labels
@@ -226,9 +219,7 @@ class TestBuildGlobalLabelInventory:
 
     def test_no_global_labels(self, tmp_path: Path):
         """Schematic with no global labels returns empty inventory."""
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         inventory = build_global_label_inventory(str(tmp_path / "root.kicad_sch"))
@@ -270,24 +261,18 @@ class TestFilterCrossSheetGlobalLabels:
         (tmp_path / sub_file).write_text(sub_content)
 
         violations = [self._make_violation("single_global_label", "AUDIO_L")]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 0
 
     def test_preserves_genuine_single_global_label(self, tmp_path: Path):
         """single_global_label for a label on 1 sheet should be kept."""
         root_labels = _make_global_label("LONELY_NET", uuid="gl-lonely")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels=root_labels, sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels=root_labels, sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         violations = [self._make_violation("single_global_label", "LONELY_NET")]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 1
 
@@ -310,17 +295,13 @@ class TestFilterCrossSheetGlobalLabels:
         (tmp_path / sub_file).write_text(sub_content)
 
         violations = [self._make_violation("isolated_pin_label", "SPI_MOSI")]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 0
 
     def test_other_violation_types_pass_through(self, tmp_path: Path):
         """Violations of other types should not be affected."""
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         violations = [
@@ -335,9 +316,7 @@ class TestFilterCrossSheetGlobalLabels:
                 "description": "Duplicate reference R12",
             },
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 2
 
@@ -364,9 +343,8 @@ class TestFilterCrossSheetGlobalLabels:
         should be removed."""
         sub_file = "sub.kicad_sch"
 
-        root_labels = (
-            _make_global_label("MULTI_SHEET", uuid="gl-root-multi")
-            + _make_global_label("SINGLE_ONLY", uuid="gl-root-single")
+        root_labels = _make_global_label("MULTI_SHEET", uuid="gl-root-multi") + _make_global_label(
+            "SINGLE_ONLY", uuid="gl-root-single"
         )
         root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
         root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
@@ -382,17 +360,15 @@ class TestFilterCrossSheetGlobalLabels:
         (tmp_path / sub_file).write_text(sub_content)
 
         violations = [
-            self._make_violation("single_global_label", "MULTI_SHEET"),   # false positive
-            self._make_violation("single_global_label", "SINGLE_ONLY"),   # genuine
+            self._make_violation("single_global_label", "MULTI_SHEET"),  # false positive
+            self._make_violation("single_global_label", "SINGLE_ONLY"),  # genuine
             {
                 "type": "pin_not_connected",
                 "severity": "error",
                 "description": "Pin 1 of R1 is not connected",
             },
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 2
         types = [v["type"] for v in result]
@@ -428,9 +404,7 @@ class TestFilterCrossSheetGlobalLabels:
                 "description": "Some unusual description with no label name",
             },
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         # Cannot parse label name, so violation is kept
         assert len(result) == 1
@@ -441,13 +415,10 @@ class TestFilterCrossSheetGlobalLabels:
         sub_a = "sub_a.kicad_sch"
         sub_b = "sub_b.kicad_sch"
 
-        root_sheets = (
-            _make_sheet("SubA", sub_a, uuid="sheet-a")
-            + _make_sheet("SubB", sub_b, uuid="sheet-b")
+        root_sheets = _make_sheet("SubA", sub_a, uuid="sheet-a") + _make_sheet(
+            "SubB", sub_b, uuid="sheet-b"
         )
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=root_sheets
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets=root_sheets)
 
         sub_a_labels = _make_global_label("CHILD_NET", uuid="gl-a")
         sub_a_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
@@ -464,19 +435,14 @@ class TestFilterCrossSheetGlobalLabels:
         (tmp_path / sub_b).write_text(sub_b_content)
 
         violations = [self._make_violation("single_global_label", "CHILD_NET")]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 0
 
     def test_empty_violations_list(self, tmp_path: Path):
         """Empty violations list should return empty list."""
-        result = filter_cross_sheet_global_labels(
-            [], str(tmp_path / "nonexistent.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels([], str(tmp_path / "nonexistent.kicad_sch"))
         assert result == []
-
 
     def _make_kicad10_violation(self, vtype: str, label_name: str) -> dict:
         """Helper to create a KiCad 10 style violation dict.
@@ -523,9 +489,7 @@ class TestFilterCrossSheetGlobalLabels:
         violations = [
             self._make_kicad10_violation("single_global_label", "AUDIO_L"),
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 0
 
@@ -551,9 +515,7 @@ class TestFilterCrossSheetGlobalLabels:
         violations = [
             self._make_kicad10_violation("isolated_pin_label", "SYNC_R"),
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 0
 
@@ -566,27 +528,20 @@ class TestFilterCrossSheetGlobalLabels:
 
         labels = ["AUDIO_L", "AUDIO_R", "SYNC_L", "SYNC_R"]
 
-        root_labels = "\n".join(
-            _make_global_label(name, uuid=f"gl-root-{name}") for name in labels
-        )
-        root_sheets = (
-            _make_sheet("Sync", sync_file, uuid="sheet-sync")
-            + _make_sheet("DAC", dac_file, uuid="sheet-dac")
+        root_labels = "\n".join(_make_global_label(name, uuid=f"gl-root-{name}") for name in labels)
+        root_sheets = _make_sheet("Sync", sync_file, uuid="sheet-sync") + _make_sheet(
+            "DAC", dac_file, uuid="sheet-dac"
         )
         root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
             global_labels=root_labels, sheets=root_sheets
         )
 
-        sync_labels = "\n".join(
-            _make_global_label(name, uuid=f"gl-sync-{name}") for name in labels
-        )
+        sync_labels = "\n".join(_make_global_label(name, uuid=f"gl-sync-{name}") for name in labels)
         sync_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
             uuid="sync-uuid", global_labels=sync_labels
         )
 
-        dac_labels = "\n".join(
-            _make_global_label(name, uuid=f"gl-dac-{name}") for name in labels
-        )
+        dac_labels = "\n".join(_make_global_label(name, uuid=f"gl-dac-{name}") for name in labels)
         dac_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
             uuid="dac-uuid", global_labels=dac_labels
         )
@@ -598,16 +553,10 @@ class TestFilterCrossSheetGlobalLabels:
         # Build violations matching KiCad 10 output format
         violations = []
         for name in labels:
-            violations.append(
-                self._make_kicad10_violation("isolated_pin_label", name)
-            )
-            violations.append(
-                self._make_kicad10_violation("single_global_label", name)
-            )
+            violations.append(self._make_kicad10_violation("isolated_pin_label", name))
+            violations.append(self._make_kicad10_violation("single_global_label", name))
 
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 0
 
@@ -615,17 +564,13 @@ class TestFilterCrossSheetGlobalLabels:
         """KiCad 10 format: a label that truly appears on only one
         sheet should still be reported."""
         root_labels = _make_global_label("LONELY_NET", uuid="gl-lonely")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels=root_labels, sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels=root_labels, sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         violations = [
             self._make_kicad10_violation("single_global_label", "LONELY_NET"),
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 1
 
@@ -635,9 +580,7 @@ class TestFilterCrossSheetGlobalLabels:
 
         # Root has only sheet references, no labels at all
         root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=root_sheets
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets=root_sheets)
 
         sub_labels = _make_global_label("SPI_MOSI", uuid="gl-sub")
         sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
@@ -655,9 +598,7 @@ class TestFilterCrossSheetGlobalLabels:
                 "_sheet_path": "/",
             },
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         # Root sheet has no labels -- violation is a phantom detection
         assert len(result) == 0
@@ -665,9 +606,7 @@ class TestFilterCrossSheetGlobalLabels:
     def test_keeps_unparseable_violation_on_sheet_with_labels(self, tmp_path: Path):
         """isolated_pin_label on a sheet that has labels should be kept."""
         root_labels = _make_local_label("LOCAL_NET", uuid="ll-root")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels=root_labels, sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels=root_labels, sheets="")
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
@@ -679,18 +618,14 @@ class TestFilterCrossSheetGlobalLabels:
                 "_sheet_path": "/",
             },
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         # Root sheet has a local label -- violation is kept
         assert len(result) == 1
 
     def test_keeps_unparseable_violation_without_sheet_path(self, tmp_path: Path):
         """isolated_pin_label without _sheet_path should be kept (safe default)."""
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         violations = [
@@ -701,9 +636,7 @@ class TestFilterCrossSheetGlobalLabels:
                 # No _sheet_path key
             },
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         # No sheet path info -- keep to be safe
         assert len(result) == 1
@@ -713,13 +646,10 @@ class TestFilterCrossSheetGlobalLabels:
         sub_a = "sub_a.kicad_sch"
         sub_b = "sub_b.kicad_sch"
 
-        root_sheets = (
-            _make_sheet("SubA", sub_a, uuid="sheet-a")
-            + _make_sheet("SubB", sub_b, uuid="sheet-b")
+        root_sheets = _make_sheet("SubA", sub_a, uuid="sheet-a") + _make_sheet(
+            "SubB", sub_b, uuid="sheet-b"
         )
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=root_sheets
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets=root_sheets)
 
         sub_a_labels = _make_global_label("NET_A", uuid="gl-a")
         sub_a_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
@@ -745,9 +675,7 @@ class TestFilterCrossSheetGlobalLabels:
             }
             for _ in range(4)
         ]
-        result = filter_cross_sheet_global_labels(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_global_labels(violations, str(tmp_path / "root.kicad_sch"))
 
         assert len(result) == 0
 
@@ -763,9 +691,7 @@ class TestBuildSheetLabelPresence:
     def test_root_with_global_labels(self, tmp_path: Path):
         """Root sheet with global labels should be in the presence set."""
         root_labels = _make_global_label("AUDIO_L", uuid="gl-root")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels=root_labels, sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels=root_labels, sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         presence = build_sheet_label_presence(str(tmp_path / "root.kicad_sch"))
@@ -774,9 +700,7 @@ class TestBuildSheetLabelPresence:
 
     def test_root_without_labels(self, tmp_path: Path):
         """Root sheet with no labels should not be in the presence set."""
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         presence = build_sheet_label_presence(str(tmp_path / "root.kicad_sch"))
@@ -786,9 +710,7 @@ class TestBuildSheetLabelPresence:
     def test_root_with_local_labels(self, tmp_path: Path):
         """Root sheet with local labels should be in the presence set."""
         root_labels = _make_local_label("LOCAL_NET", uuid="ll-root")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels=root_labels, sheets=""
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels=root_labels, sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         presence = build_sheet_label_presence(str(tmp_path / "root.kicad_sch"))
@@ -800,9 +722,7 @@ class TestBuildSheetLabelPresence:
         sub_file = "sub.kicad_sch"
 
         root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
-        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
-            global_labels="", sheets=root_sheets
-        )
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets=root_sheets)
 
         sub_labels = _make_global_label("NET_A", uuid="gl-sub")
         sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(

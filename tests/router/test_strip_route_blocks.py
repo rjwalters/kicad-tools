@@ -149,10 +149,10 @@ class TestStripRouteBlocks:
 
     def test_handles_quoted_parens(self):
         # Quoted strings containing "(" or ")" must not affect depth.
-        content = '''(kicad_pcb
+        content = """(kicad_pcb
 \t(layer "Some (weird) Layer")
 \t(segment (start 0 0) (end 1 1) (width 0.1) (net 1))
-)'''
+)"""
         stripped, segs, vias = _strip_route_blocks(content)
         assert segs == 1
         assert vias == 0

@@ -311,9 +311,7 @@ def test_coupled_routing_uses_corridor_phase(caplog, monkeypatch):
     """
     router = _two_pad_diffpair_router()
     config = DifferentialPairConfig(enabled=True, spacing=0.8)
-    monkeypatch.setattr(
-        DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None
-    )
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
 
     with caplog.at_level(logging.INFO, logger="kicad_tools.router.diffpair_routing"):
         routes, warnings, routed_net_ids = router.route_diffpair_prepass(config)
@@ -364,12 +362,8 @@ def test_iteration_budget_is_split_between_corridor_and_fallback(monkeypatch):
     """
     # Issue #3508: bypass the shadow constructor so the corridor/
     # fallback budget split is what this test exercises.
-    monkeypatch.setattr(
-        DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None
-    )
-    monkeypatch.setattr(
-        DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None
-    )
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    monkeypatch.setattr(DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None)
     router = _two_pad_diffpair_router()
     pairs = router._diffpair.detect_differential_pairs()
     assert len(pairs) == 1
@@ -402,9 +396,7 @@ def test_iteration_budget_is_split_between_corridor_and_fallback(monkeypatch):
     )
 
     assert routes == [] and warning is None
-    assert len(budgets_seen) == 2, (
-        f"expected corridor attempt + open fallback, got {budgets_seen}"
-    )
+    assert len(budgets_seen) == 2, f"expected corridor attempt + open fallback, got {budgets_seen}"
     corridor_budget, fallback_budget = budgets_seen
     assert corridor_budget == 2000, (
         f"corridor attempt must get half the iteration budget, got {corridor_budget}"
@@ -421,12 +413,8 @@ def test_fallback_gets_full_remainder_when_corridor_exits_early(monkeypatch):
     wall-clock remaining-budget arithmetic)."""
     # Issue #3508: bypass the shadow constructor so the corridor/
     # fallback budget split is what this test exercises.
-    monkeypatch.setattr(
-        DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None
-    )
-    monkeypatch.setattr(
-        DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None
-    )
+    monkeypatch.setattr(DiffPairRouter, "_shadow_route_pair", lambda self, *a, **k: None)
+    monkeypatch.setattr(DiffPairRouter, "_rescue_near_miss_coupled", lambda self, *a, **k: None)
     router = _two_pad_diffpair_router()
     pairs = router._diffpair.detect_differential_pairs()
 
@@ -479,9 +467,7 @@ def test_guide_route_probe_receives_deadline(monkeypatch):
 
     def spying_route(start, end, *args, per_net_timeout=None, **kwargs):
         probe_timeouts.append(per_net_timeout)
-        return original_route(
-            start, end, *args, per_net_timeout=per_net_timeout, **kwargs
-        )
+        return original_route(start, end, *args, per_net_timeout=per_net_timeout, **kwargs)
 
     monkeypatch.setattr(router.router, "route", spying_route)
 
@@ -548,6 +534,4 @@ def test_failed_probe_clears_avoidance_costs():
 
     result = router._diffpair._single_ended_guide_route(start, end)
     assert result is None
-    assert stub.cleared == 1, (
-        "clear_avoidance_costs must run even when the probe raises"
-    )
+    assert stub.cleared == 1, "clear_avoidance_costs must run even when the probe raises"

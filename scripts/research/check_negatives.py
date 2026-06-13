@@ -21,10 +21,7 @@ import sys
 from pathlib import Path
 
 import joblib
-import numpy as np
 import pandas as pd
-
-from kicad_tools.optim.fom_features import PHASE0_FEATURE_NAMES
 
 logger = logging.getLogger("fom_phase0.negatives")
 

@@ -79,5 +79,6 @@ __all__ = [
     "ThermalSource",
     "TraceLengthAnalyzer",
     "TraceLengthReport",
+    "build_zone_net_map",
     "detect_analog_components",
 ]

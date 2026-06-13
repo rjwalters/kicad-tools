@@ -7,8 +7,6 @@ hierarchical schematic traversal, and dry-run mode.
 import json
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.modify_schematic import (
     delete_symbol_text,
     find_symbol_text_range,
@@ -122,7 +120,9 @@ SPACE_INDENTED_SCHEMATIC = """\
 """
 
 
-def _write_sch(tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch") -> Path:
+def _write_sch(
+    tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch"
+) -> Path:
     p = tmp_path / name
     p.write_text(content)
     return p
@@ -289,10 +289,14 @@ class TestRunSetValue:
     def test_batch_json_mapping(self, tmp_path):
         sch = _write_sch(tmp_path)
         map_path = tmp_path / "map.json"
-        map_path.write_text(json.dumps({
-            "R1": "4.7k",
-            "C1": "220nF",
-        }))
+        map_path.write_text(
+            json.dumps(
+                {
+                    "R1": "4.7k",
+                    "C1": "220nF",
+                }
+            )
+        )
         ret = run_set_value(
             schematic_path=sch,
             map_path=map_path,
@@ -494,10 +498,14 @@ class TestHierarchicalSchematic:
         child.write_text(CHILD_SCHEMATIC)
 
         map_path = tmp_path / "map.json"
-        map_path.write_text(json.dumps({
-            "R1": "4.7k",
-            "C2": "2.2uF",
-        }))
+        map_path.write_text(
+            json.dumps(
+                {
+                    "R1": "4.7k",
+                    "C2": "2.2uF",
+                }
+            )
+        )
         ret = run_set_value(
             schematic_path=parent,
             map_path=map_path,
@@ -533,10 +541,14 @@ class TestHierarchicalSchematic:
         child.write_text(CHILD_SCHEMATIC)
 
         map_path = tmp_path / "map.json"
-        map_path.write_text(json.dumps({
-            "R1": "4.7k",
-            "ZZZZ": "NotFound",
-        }))
+        map_path.write_text(
+            json.dumps(
+                {
+                    "R1": "4.7k",
+                    "ZZZZ": "NotFound",
+                }
+            )
+        )
         ret = run_set_value(
             schematic_path=parent,
             map_path=map_path,

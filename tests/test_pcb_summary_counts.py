@@ -16,7 +16,6 @@ import pytest
 
 from kicad_tools.schema import PCB
 
-
 # ---------------------------------------------------------------------------
 # Fixture: PCB with known vias, zones, and segments
 # ---------------------------------------------------------------------------
@@ -298,9 +297,7 @@ class TestCountsAfterSaveReload:
         assert reloaded_summary["zones"] == original_summary["zones"]
         assert reloaded_summary["segments"] == original_summary["segments"]
 
-    def test_counts_survive_modify_save_reload(
-        self, pcb_no_vias_zones: Path, tmp_path: Path
-    ):
+    def test_counts_survive_modify_save_reload(self, pcb_no_vias_zones: Path, tmp_path: Path):
         """Add vias, save, reload -- counts must match."""
         pcb = PCB.load(pcb_no_vias_zones)
         pcb.add_via(105, 100, net="GND")
@@ -487,9 +484,7 @@ class TestZoneCountZeroRegression:
         """zone_count must match manual traversal of sexp children."""
         pcb = PCB.load(pcb_kicad9_no_zones)
         manual_count = sum(
-            1
-            for child in pcb._sexp.children
-            if not child.is_atom and child.name == "zone"
+            1 for child in pcb._sexp.children if not child.is_atom and child.name == "zone"
         )
         assert pcb.zone_count == manual_count == 0
 

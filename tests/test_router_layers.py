@@ -714,13 +714,21 @@ class TestQuickTuneLayerCosts:
         from kicad_tools.router.tuning import BoardCharacteristics, quick_tune
 
         chars_2 = BoardCharacteristics(
-            total_pads=100, total_nets=50, board_area=4000,
-            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            total_pads=100,
+            total_nets=50,
+            board_area=4000,
+            pin_density=0.025,
+            avg_net_size=2,
+            avg_net_span=20,
             layer_count=2,
         )
         chars_4 = BoardCharacteristics(
-            total_pads=100, total_nets=50, board_area=4000,
-            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            total_pads=100,
+            total_nets=50,
+            board_area=4000,
+            pin_density=0.025,
+            avg_net_size=2,
+            avg_net_span=20,
             layer_count=4,
         )
 
@@ -734,13 +742,21 @@ class TestQuickTuneLayerCosts:
         from kicad_tools.router.tuning import BoardCharacteristics, quick_tune
 
         chars_2 = BoardCharacteristics(
-            total_pads=100, total_nets=50, board_area=4000,
-            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            total_pads=100,
+            total_nets=50,
+            board_area=4000,
+            pin_density=0.025,
+            avg_net_size=2,
+            avg_net_span=20,
             layer_count=2,
         )
         chars_4 = BoardCharacteristics(
-            total_pads=100, total_nets=50, board_area=4000,
-            pin_density=0.025, avg_net_size=2, avg_net_span=20,
+            total_pads=100,
+            total_nets=50,
+            board_area=4000,
+            pin_density=0.025,
+            avg_net_size=2,
+            avg_net_span=20,
             layer_count=4,
         )
 
@@ -758,8 +774,12 @@ class TestQuickTuneLayerCosts:
         from kicad_tools.router.tuning import BoardCharacteristics, quick_tune
 
         chars = BoardCharacteristics(
-            total_pads=180, total_nets=54, board_area=3969,
-            pin_density=0.045, avg_net_size=2, avg_net_span=15,
+            total_pads=180,
+            total_nets=54,
+            board_area=3969,
+            pin_density=0.045,
+            avg_net_size=2,
+            avg_net_span=15,
             layer_count=4,
         )
         params = quick_tune(chars)

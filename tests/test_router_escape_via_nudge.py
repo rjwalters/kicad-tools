@@ -101,8 +101,15 @@ class TestSelectInPadViaPositionDeadCentrePasses:
         router = EscapeRouter(grid, rules)
 
         target = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y, width=1.4, height=0.3,
-            net=5, net_name="OSC_OUT", ref="U2", pin="5", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=1.4,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
         )
         package = _make_package([target])
 
@@ -125,14 +132,28 @@ class TestSelectInPadViaPositionDeadCentrePasses:
         router = EscapeRouter(grid, rules)
 
         target = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y, width=1.4, height=0.3,
-            net=5, net_name="OSC_OUT", ref="U2", pin="5", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=1.4,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
         )
         # Foreign square pad far from target -- 3mm along X, well past
         # any clearance envelope.
         neighbor = Pad(
-            x=ANCHOR_X + 3.0, y=ANCHOR_Y, width=0.3, height=0.3,
-            net=9, net_name="NRST", ref="U2", pin="9", layer=Layer.F_CU,
+            x=ANCHOR_X + 3.0,
+            y=ANCHOR_Y,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="NRST",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
         )
         package = _make_package([target, neighbor])
 
@@ -154,8 +175,15 @@ class TestSelectInPadViaPositionDeadCentrePasses:
         router = EscapeRouter(grid, rules)
 
         target = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y, width=1.4, height=0.3,
-            net=5, net_name="OSC_OUT", ref="U2", pin="5", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=1.4,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
         )
         via_x, via_y, nudged = router._select_in_pad_via_position(
             pad=target,
@@ -199,13 +227,27 @@ class TestSelectInPadViaPositionNudgeSucceeds:
         router = EscapeRouter(grid, rules)
 
         target = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y, width=1.4, height=0.3,
-            net=5, net_name="OSC_OUT", ref="U2", pin="5", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=1.4,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
         )
         # Foreign pad too close along +X to clear dead-centre.
         neighbor = Pad(
-            x=ANCHOR_X + 0.55, y=ANCHOR_Y, width=0.3, height=0.3,
-            net=9, net_name="NRST", ref="U2", pin="9", layer=Layer.F_CU,
+            x=ANCHOR_X + 0.55,
+            y=ANCHOR_Y,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="NRST",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
         )
         package = _make_package([target, neighbor])
 
@@ -268,12 +310,26 @@ class TestSelectInPadViaPositionNudgeSucceeds:
         router = EscapeRouter(grid, rules)
 
         target = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y, width=1.4, height=0.3,
-            net=5, net_name="OSC_OUT", ref="U2", pin="5", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=1.4,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
         )
         neighbor = Pad(
-            x=ANCHOR_X + 0.55, y=ANCHOR_Y, width=0.3, height=0.3,
-            net=9, net_name="NRST", ref="U2", pin="9", layer=Layer.F_CU,
+            x=ANCHOR_X + 0.55,
+            y=ANCHOR_Y,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="NRST",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
         )
         package = _make_package([target, neighbor])
 
@@ -304,13 +360,27 @@ class TestSelectInPadViaPositionNudgeSucceeds:
 
         # Tall pad: long axis = Y.
         target = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y, width=0.3, height=1.4,
-            net=5, net_name="OSC_OUT", ref="U2", pin="5", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
         )
         # Foreign pad along +Y -- the long axis direction.
         neighbor = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y + 0.55, width=0.3, height=0.3,
-            net=9, net_name="NRST", ref="U2", pin="9", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y + 0.55,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="NRST",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
         )
         package = _make_package([target, neighbor])
 
@@ -350,13 +420,27 @@ class TestSelectInPadViaPositionFallback:
         # fail clearance so the helper enters the nudge path and then
         # exits via the ``max_offset <= 0`` early-return.
         target = Pad(
-            x=ANCHOR_X, y=ANCHOR_Y, width=0.65, height=0.65,
-            net=5, net_name="A", ref="U2", pin="5", layer=Layer.F_CU,
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=0.65,
+            height=0.65,
+            net=5,
+            net_name="A",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
         )
         # Foreign pad too close to clear dead-centre via.
         neighbor = Pad(
-            x=ANCHOR_X + 0.50, y=ANCHOR_Y, width=0.3, height=0.3,
-            net=9, net_name="B", ref="U2", pin="9", layer=Layer.F_CU,
+            x=ANCHOR_X + 0.50,
+            y=ANCHOR_Y,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="B",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
         )
         package = _make_package([target, neighbor])
 

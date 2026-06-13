@@ -13,16 +13,22 @@ from kicad_tools.router.congestion_estimator import (
 )
 from kicad_tools.router.primitives import Pad
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_pad(x: float, y: float, net: int = 1, ref: str = "U1", pin: str = "1") -> Pad:
     """Create a minimal Pad for testing."""
     return Pad(
-        x=x, y=y, width=0.5, height=0.5,
-        net=net, net_name=f"Net{net}", ref=ref, pin=pin,
+        x=x,
+        y=y,
+        width=0.5,
+        height=0.5,
+        net=net,
+        net_name=f"Net{net}",
+        ref=ref,
+        pin=pin,
     )
 
 
@@ -48,6 +54,7 @@ def _build_simple_estimator(
 # ---------------------------------------------------------------------------
 # TileGrid tests
 # ---------------------------------------------------------------------------
+
 
 class TestTileGrid:
     """Tests for TileGrid construction and coordinate mapping."""
@@ -105,6 +112,7 @@ class TestTileGrid:
 # NetBBox tests
 # ---------------------------------------------------------------------------
 
+
 class TestNetBBox:
     """Tests for NetBBox property calculations."""
 
@@ -122,6 +130,7 @@ class TestNetBBox:
 # ---------------------------------------------------------------------------
 # CongestionEstimator core tests
 # ---------------------------------------------------------------------------
+
 
 class TestCongestionEstimator:
     """Tests for RUDY computation."""
@@ -144,9 +153,7 @@ class TestCongestionEstimator:
 
         # Check some tiles have demand
         total_demand = sum(
-            est.get_tile_demand(r, c)
-            for r in range(est.grid.rows)
-            for c in range(est.grid.cols)
+            est.get_tile_demand(r, c) for r in range(est.grid.rows) for c in range(est.grid.cols)
         )
         assert total_demand == pytest.approx(40.0)  # Total demand = HPWL
 
@@ -168,9 +175,7 @@ class TestCongestionEstimator:
         # Both nets have same bbox -> tiles in overlap get double demand
         # Net 1: HPWL=20, Net 2: HPWL=20 -> total HPWL distributed = 40
         total_demand = sum(
-            est.get_tile_demand(r, c)
-            for r in range(est.grid.rows)
-            for c in range(est.grid.cols)
+            est.get_tile_demand(r, c) for r in range(est.grid.rows) for c in range(est.grid.cols)
         )
         assert total_demand == pytest.approx(40.0)
 
@@ -217,15 +222,15 @@ class TestCongestionEstimator:
         est = CongestionEstimator.from_nets(
             nets=nets,
             pads=pads,
-            board_origin_x=0, board_origin_y=0,
-            board_width=100, board_height=100,
+            board_origin_x=0,
+            board_origin_y=0,
+            board_width=100,
+            board_height=100,
             pour_net_ids={1},
         )
         assert est.get_net_congestion_score(1) == 0.0
         total_demand = sum(
-            est.get_tile_demand(r, c)
-            for r in range(est.grid.rows)
-            for c in range(est.grid.cols)
+            est.get_tile_demand(r, c) for r in range(est.grid.rows) for c in range(est.grid.cols)
         )
         assert total_demand == 0.0
 

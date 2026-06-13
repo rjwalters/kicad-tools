@@ -175,9 +175,7 @@ class TestRegionInstallation:
             trace_clearance=0.20,
             grid_resolution=0.1,
         )
-        grid = RoutingGrid(
-            width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer()
-        )
+        grid = RoutingGrid(width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer())
 
         # No regions installed -- default state.
         assert grid.get_fine_pitch_regions() == []
@@ -216,9 +214,7 @@ class TestPadHaloShrinkInRegion:
         # Region's escape_clearance = jlcpcb-tier1 floor (0.127) + 0.013
         # safety margin = 0.140.  Halo = escape_clearance + trace_width/2.
         expected = 0.140 + grid.rules.trace_width / 2
-        assert abs(halo - expected) < 1e-6, (
-            f"In-region halo {halo:.4f} != expected {expected:.4f}"
-        )
+        assert abs(halo - expected) < 1e-6, f"In-region halo {halo:.4f} != expected {expected:.4f}"
 
     def test_out_of_region_pad_uses_standard_halo(self) -> None:
         grid, _ = self._make_grid_with_region()
@@ -253,9 +249,7 @@ class TestImpedanceGuardPreserved:
     """Impedance-controlled nets must NOT pick up the escape shrink."""
 
     def test_diff_impedance_net_bypasses_escape_clearance(self) -> None:
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1")
         pads = _ucc27211_pads()
         regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB_TIER1)
         assert len(regions) == 1
@@ -282,9 +276,7 @@ class TestImpedanceGuardPreserved:
         )
 
     def test_single_impedance_net_bypasses_escape_clearance(self) -> None:
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1")
         pads = _ucc27211_pads()
         regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB_TIER1)
         single_class = NetClassRouting(
@@ -380,9 +372,7 @@ class TestQFNRegionDetection:
                 )
             )
 
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1")
         regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB_TIER1)
         assert len(regions) == 1, "QFN fixture should yield exactly one region"
         assert regions[0].package_ref == "U99"
@@ -488,9 +478,16 @@ class TestLoadPcbIntegration:
         router, _ = load_pcb_for_routing(
             str(pcb_path),
             skip_nets=[
-                "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-                "+3.3V", "VRECT",
-                "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+                "AC_LINE",
+                "AC_NEUTRAL",
+                "FUSED_LINE",
+                "GND",
+                "+3.3V",
+                "VRECT",
+                "SCAP_POS+",
+                "SCAP_POS_GND",
+                "SCAP_NEG+",
+                "SCAP_NEG_GND",
                 "ISENSE_POS",
             ],
             rules=rules,
@@ -544,9 +541,7 @@ class TestInfeasibleRegionGuard:
             manufacturer="jlcpcb",
             min_trace_width=0.10,
         )
-        grid = RoutingGrid(
-            width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer()
-        )
+        grid = RoutingGrid(width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer())
         # QFN/BGA-style region: 0.8mm pitch, escape clearance 0.14.
         # Corridor at escape clearance: 0.8 - 0.28 - 0.15 = 0.37 < 0.43
         # required -> guard must decline for EVERY pad this region covers.
@@ -567,8 +562,15 @@ class TestInfeasibleRegionGuard:
         standard halo (the pre-P_FP3 value for board 06's 0.8mm pads)."""
         grid, _, rules = self._board06_like_setup()
         own_pad = Pad(
-            x=25.0, y=25.0, width=0.3, height=0.3,
-            net=1, net_name="SIG", layer=Layer.F_CU, ref="U3", pin="1",
+            x=25.0,
+            y=25.0,
+            width=0.3,
+            height=0.3,
+            net=1,
+            net_name="SIG",
+            layer=Layer.F_CU,
+            ref="U3",
+            pin="1",
         )
         halo = grid._clearance_for_pin_pitch(pin_pitch=0.8, pad=own_pad)
         # Legacy shrink: min_trace_width / 2 = 0.05 (its own #2865 guard
@@ -586,8 +588,15 @@ class TestInfeasibleRegionGuard:
         # (0.96) would pass the guard (0.96 - 0.28 - 0.15 = 0.53 >= 0.43)
         # but the region's package pitch (0.8) must dominate.
         foreign_pad = Pad(
-            x=27.0, y=25.0, width=0.5, height=0.5,
-            net=2, net_name="SIG2", layer=Layer.F_CU, ref="C7", pin="1",
+            x=27.0,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="SIG2",
+            layer=Layer.F_CU,
+            ref="C7",
+            pin="1",
         )
         halo = grid._clearance_for_pin_pitch(pin_pitch=0.96, pad=foreign_pad)
         # Pre-P_FP3 value for this pad: legacy shrink (0.96 pitch passes
@@ -602,12 +611,26 @@ class TestInfeasibleRegionGuard:
         clearance for every pad covered by an infeasible region."""
         grid, region, rules = self._board06_like_setup()
         own_pad = Pad(
-            x=25.0, y=25.0, width=0.3, height=0.3,
-            net=1, net_name="SIG", layer=Layer.F_CU, ref="U3", pin="1",
+            x=25.0,
+            y=25.0,
+            width=0.3,
+            height=0.3,
+            net=1,
+            net_name="SIG",
+            layer=Layer.F_CU,
+            ref="U3",
+            pin="1",
         )
         foreign_pad = Pad(
-            x=27.0, y=25.0, width=0.5, height=0.5,
-            net=2, net_name="SIG2", layer=Layer.F_CU, ref="C7", pin="1",
+            x=27.0,
+            y=25.0,
+            width=0.5,
+            height=0.5,
+            net=2,
+            net_name="SIG2",
+            layer=Layer.F_CU,
+            ref="C7",
+            pin="1",
         )
         for pad, pitch in ((own_pad, 0.8), (foreign_pad, 0.96), (foreign_pad, 2.54)):
             clearance = resolve_clearance_with_escape_region(
@@ -621,12 +644,8 @@ class TestInfeasibleRegionGuard:
     def test_feasible_region_still_shrinks(self) -> None:
         """Control: a SOIC-style region whose corridor IS feasible at the
         escape clearance keeps the escape shrink (softstart behaviour)."""
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
-        )
-        grid = RoutingGrid(
-            width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer()
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1")
+        grid = RoutingGrid(width=50.0, height=50.0, rules=rules, layer_stack=LayerStack.two_layer())
         region = FinePitchRegion(
             package_ref="U5",
             package_origin=(25.0, 25.0),
@@ -638,8 +657,15 @@ class TestInfeasibleRegionGuard:
         )
         grid.set_fine_pitch_regions([region])
         own_pad = Pad(
-            x=25.0, y=25.0, width=0.3, height=1.55,
-            net=1, net_name="N1", layer=Layer.F_CU, ref="U5", pin="1",
+            x=25.0,
+            y=25.0,
+            width=0.3,
+            height=1.55,
+            net=1,
+            net_name="N1",
+            layer=Layer.F_CU,
+            ref="U5",
+            pin="1",
         )
         # 1.27 - 0.28 - 0.30 = 0.69 >= 0.58 required -> shrink applies.
         halo = grid._clearance_for_pin_pitch(pin_pitch=1.27, pad=own_pad)

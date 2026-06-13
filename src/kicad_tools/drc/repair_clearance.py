@@ -131,7 +131,9 @@ class RepairResult:
         if self.footprint_skipped_connector > 0:
             lines.append(f"  Skipped (connector footprint): {self.footprint_skipped_connector}")
         if self.footprint_skipped_same_component > 0:
-            lines.append(f"  Skipped (same component pads): {self.footprint_skipped_same_component}")
+            lines.append(
+                f"  Skipped (same component pads): {self.footprint_skipped_same_component}"
+            )
         if self.skipped_exceeds_max > 0:
             lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
@@ -225,14 +227,26 @@ class ClearanceRepairer:
         """
         result = RepairResult()
 
-        clearances = [v for v in report.by_type(ViolationType.CLEARANCE)
-                      if not self._is_zone_fill_violation(v)]
-        segment_via_clearances = [v for v in report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
-                                  if not self._is_zone_fill_violation(v)]
-        pad_segment_clearances = [v for v in report.by_type(ViolationType.CLEARANCE_PAD_SEGMENT)
-                                  if not self._is_zone_fill_violation(v)]
-        pad_via_clearances = [v for v in report.by_type(ViolationType.CLEARANCE_PAD_VIA)
-                              if not self._is_zone_fill_violation(v)]
+        clearances = [
+            v
+            for v in report.by_type(ViolationType.CLEARANCE)
+            if not self._is_zone_fill_violation(v)
+        ]
+        segment_via_clearances = [
+            v
+            for v in report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+            if not self._is_zone_fill_violation(v)
+        ]
+        pad_segment_clearances = [
+            v
+            for v in report.by_type(ViolationType.CLEARANCE_PAD_SEGMENT)
+            if not self._is_zone_fill_violation(v)
+        ]
+        pad_via_clearances = [
+            v
+            for v in report.by_type(ViolationType.CLEARANCE_PAD_VIA)
+            if not self._is_zone_fill_violation(v)
+        ]
         all_clearances = (
             clearances + segment_via_clearances + pad_segment_clearances + pad_via_clearances
         )
@@ -308,9 +322,7 @@ class ClearanceRepairer:
 
         # Phase 3: Footprint nudging for pad-pad violations
         if nudge_footprints:
-            self._repair_pad_pad_violations(
-                report, result, max_displacement, margin, dry_run
-            )
+            self._repair_pad_pad_violations(report, result, max_displacement, margin, dry_run)
 
         return result
 
@@ -939,13 +951,9 @@ class ClearanceRepairer:
 
                     center_dx = obj_x - other_cx
                     center_dy = obj_y - other_cy
-                    current_center_dist = math.sqrt(
-                        center_dx * center_dx + center_dy * center_dy
-                    )
+                    current_center_dist = math.sqrt(center_dx * center_dx + center_dy * center_dy)
 
-                    width_aware_disp = max(
-                        0.0, required_center_dist - current_center_dist
-                    )
+                    width_aware_disp = max(0.0, required_center_dist - current_center_dist)
                     required_displacement = max(required_displacement, width_aware_disp)
 
                     # Re-check max_displacement with the adjusted value
@@ -1655,12 +1663,10 @@ class ClearanceRepairer:
             via_positions = self._find_via_positions()
             tolerance = 0.001
             start_at_via = any(
-                math.sqrt((sx - vx) ** 2 + (sy - vy) ** 2) <= tolerance
-                for vx, vy in via_positions
+                math.sqrt((sx - vx) ** 2 + (sy - vy) ** 2) <= tolerance for vx, vy in via_positions
             )
             end_at_via = any(
-                math.sqrt((ex - vx) ** 2 + (ey - vy) ** 2) <= tolerance
-                for vx, vy in via_positions
+                math.sqrt((ex - vx) ** 2 + (ey - vy) ** 2) <= tolerance for vx, vy in via_positions
             )
 
             if start_at_via and end_at_via:
@@ -1755,7 +1761,8 @@ class ClearanceRepairer:
         - Violations exceeding max_displacement
         """
         pad_pad_violations = [
-            v for v in report.by_type(ViolationType.CLEARANCE_PAD_PAD)
+            v
+            for v in report.by_type(ViolationType.CLEARANCE_PAD_PAD)
             if not self._is_zone_fill_violation(v)
         ]
 
@@ -1807,9 +1814,7 @@ class ClearanceRepairer:
                 continue
 
             # Select nudge target: prefer smaller/less-connected, skip locked/connectors
-            target, other = self._select_nudge_target(
-                fp1_info, fp2_info, result
-            )
+            target, other = self._select_nudge_target(fp1_info, fp2_info, result)
             if target is None:
                 continue
 

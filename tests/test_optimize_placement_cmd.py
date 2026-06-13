@@ -16,6 +16,7 @@ from kicad_tools.cli.optimize_placement_cmd import (
     _parse_weights,
     _print_score,
     _vector_to_placements,
+    _write_placements_to_pcb_atomic,
     run_optimize_placement,
 )
 from kicad_tools.placement.cmaes_strategy import CMAESStrategy
@@ -670,7 +671,6 @@ class TestInterruptHandling:
 
     def test_keyboard_interrupt_writes_output_and_returns_2(self, tmp_pcb, tmp_path, monkeypatch):
         """When KeyboardInterrupt fires, best placement is saved and exit code is 2."""
-        from kicad_tools.cli import optimize_placement_cmd as mod
 
         call_count = 0
         original_suggest = None
@@ -703,9 +703,6 @@ class TestInterruptHandling:
 
     def test_atomic_write_prevents_corruption(self, tmp_pcb, tmp_path):
         """Atomic write creates output even if process is killed between steps."""
-        from kicad_tools.cli.optimize_placement_cmd import (
-            _write_placements_to_pcb_atomic,
-        )
 
         components, nets, board, rules, _origin = _read_board_data(str(tmp_pcb))
         seed = _generate_seed("random", components, nets, board)
@@ -752,9 +749,7 @@ from kicad_tools.cli.optimize_placement_cmd import (
     _extract_board_outline,
     _read_board_data,
     _write_placements_to_pcb,
-    _write_placements_to_pcb_atomic,
 )
-
 
 # ---------------------------------------------------------------------------
 # Board-origin coordinate system tests (issue #2054)
@@ -985,8 +980,11 @@ class TestSlideOffOverlapDetails:
         vector = PlacementVector(data=data)
 
         _, result = slide_off_overlaps(
-            vector, comps, board,
-            max_iterations=5, max_displacement_mm=5.0,
+            vector,
+            comps,
+            board,
+            max_iterations=5,
+            max_displacement_mm=5.0,
         )
         assert result.overlaps_remaining > 0
         assert len(result.overlap_details) > 0
@@ -1167,11 +1165,13 @@ class TestAnchorWeight:
             )
 
     def test_read_board_data_anchor_weight_inflates_locked_net(
-        self, anchored_pcb: Path,
+        self,
+        anchored_pcb: Path,
     ) -> None:
         """Anchor weight inflates only the net touching the (locked) J1."""
         _comps, nets, _board, _rules, _origin = _read_board_data(
-            str(anchored_pcb), anchor_weight=4.0,
+            str(anchored_pcb),
+            anchor_weight=4.0,
         )
         nets_by_name = {n.name: n for n in nets}
         assert "NET_ANCHOR" in nets_by_name, "anchored net missing"
@@ -1188,7 +1188,9 @@ class TestAnchorWeight:
         assert interior_net.weight == pytest.approx(1.0)
 
     def test_anchor_weight_zero_is_regression_safe(
-        self, anchored_pcb: Path, tmp_path: Path,
+        self,
+        anchored_pcb: Path,
+        tmp_path: Path,
     ) -> None:
         """Two runs with anchor_weight=0.0 must produce byte-identical PCBs.
 
@@ -1220,7 +1222,9 @@ class TestAnchorWeight:
         )
 
     def test_anchor_weight_preserves_locked_net(
-        self, anchored_pcb: Path, tmp_path: Path,
+        self,
+        anchored_pcb: Path,
+        tmp_path: Path,
     ) -> None:
         """A non-zero anchor weight should not stretch NET_ANCHOR more than
         the unweighted run does.
@@ -1323,12 +1327,9 @@ class TestFeasibilityGatedExitCode:
         )
         captured = capsys.readouterr()
         assert result == 1, (
-            f"Expected exit 1 for infeasible placement, got {result}. "
-            f"stderr={captured.err!r}"
+            f"Expected exit 1 for infeasible placement, got {result}. stderr={captured.err!r}"
         )
-        assert "FATAL" in captured.err, (
-            f"Expected 'FATAL' in stderr, got {captured.err!r}"
-        )
+        assert "FATAL" in captured.err, f"Expected 'FATAL' in stderr, got {captured.err!r}"
         # Output is still written so callers can inspect.
         assert output.exists()
 
@@ -1349,7 +1350,10 @@ class TestFeasibilityGatedExitCode:
         assert output.exists()
 
     def test_allow_infeasible_flag_restores_zero_exit(
-        self, pathological_pcb, tmp_path, capsys,
+        self,
+        pathological_pcb,
+        tmp_path,
+        capsys,
     ):
         """``--allow-infeasible`` opt-in restores legacy exit-0 behaviour."""
         output = tmp_path / "allow_infeasible_out.kicad_pcb"
@@ -1363,8 +1367,7 @@ class TestFeasibilityGatedExitCode:
         )
         captured = capsys.readouterr()
         assert result == 0, (
-            f"Expected exit 0 with --allow-infeasible, got {result}. "
-            f"stderr={captured.err!r}"
+            f"Expected exit 0 with --allow-infeasible, got {result}. stderr={captured.err!r}"
         )
         # No FATAL on stderr in opt-in mode.
         assert "FATAL" not in captured.err
@@ -1401,7 +1404,10 @@ class TestFeasibilityGatedExitCode:
         assert result in (0, 1), f"Expected exit 0 or 1, got {result}"
 
     def test_fatal_message_names_failing_components(
-        self, pathological_pcb, tmp_path, capsys,
+        self,
+        pathological_pcb,
+        tmp_path,
+        capsys,
     ):
         """The FATAL message lists which cost components failed.
 
@@ -1419,9 +1425,7 @@ class TestFeasibilityGatedExitCode:
         captured = capsys.readouterr()
         # Must mention at least one of the failure components by name.
         # On the pathological board overlap is guaranteed to be > 0.
-        assert "overlap" in captured.err, (
-            f"Expected FATAL to name 'overlap', got {captured.err!r}"
-        )
+        assert "overlap" in captured.err, f"Expected FATAL to name 'overlap', got {captured.err!r}"
 
     def test_default_cost_mode_is_lexicographic(self):
         """Issue #2821: default cost mode for optimize-placement is LEXICOGRAPHIC.
@@ -1458,9 +1462,7 @@ class TestCLIFlagsForFeasibilityGate:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args(
-            ["optimize-placement", "board.kicad_pcb", "--time-budget", "30"]
-        )
+        args = parser.parse_args(["optimize-placement", "board.kicad_pcb", "--time-budget", "30"])
         assert args.time_budget == 30.0
 
     def test_parser_default_time_budget_is_none(self):
@@ -1474,9 +1476,7 @@ class TestCLIFlagsForFeasibilityGate:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args(
-            ["optimize-placement", "board.kicad_pcb", "--allow-infeasible"]
-        )
+        args = parser.parse_args(["optimize-placement", "board.kicad_pcb", "--allow-infeasible"])
         assert args.allow_infeasible is True
 
     def test_parser_default_allow_infeasible_is_false(self):

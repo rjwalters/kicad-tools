@@ -605,14 +605,22 @@ def _build_synthetic_usb_pair_autorouter():
         "J1",
         [
             {
-                "number": "1", "x": 2.0, "y": 10.0,
-                "width": 0.5, "height": 0.5,
-                "net": 1, "net_name": "USB_D+",
+                "number": "1",
+                "x": 2.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "USB_D+",
             },
             {
-                "number": "2", "x": 2.0, "y": 12.0,
-                "width": 0.5, "height": 0.5,
-                "net": 2, "net_name": "USB_D-",
+                "number": "2",
+                "x": 2.0,
+                "y": 12.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "USB_D-",
             },
         ],
     )
@@ -620,14 +628,22 @@ def _build_synthetic_usb_pair_autorouter():
         "U1",
         [
             {
-                "number": "1", "x": 18.0, "y": 10.0,
-                "width": 0.5, "height": 0.5,
-                "net": 1, "net_name": "USB_D+",
+                "number": "1",
+                "x": 18.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "USB_D+",
             },
             {
-                "number": "2", "x": 18.0, "y": 12.0,
-                "width": 0.5, "height": 0.5,
-                "net": 2, "net_name": "USB_D-",
+                "number": "2",
+                "x": 18.0,
+                "y": 12.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "USB_D-",
             },
         ],
     )
@@ -719,9 +735,13 @@ class TestFinalizeRoutingDriftPrevention:
             "J1",
             [
                 {
-                    "number": "1", "x": 2.0, "y": 10.0,
-                    "width": 0.5, "height": 0.5,
-                    "net": 1, "net_name": "SIG_A",
+                    "number": "1",
+                    "x": 2.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG_A",
                 },
             ],
         )
@@ -729,9 +749,13 @@ class TestFinalizeRoutingDriftPrevention:
             "U1",
             [
                 {
-                    "number": "1", "x": 18.0, "y": 10.0,
-                    "width": 0.5, "height": 0.5,
-                    "net": 1, "net_name": "SIG_A",
+                    "number": "1",
+                    "x": 18.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG_A",
                 },
             ],
         )

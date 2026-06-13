@@ -20,7 +20,6 @@ from kicad_tools.validate.sch_orphan_label import (
     find_orphan_labels,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers for building synthetic Schematic / LibrarySymbol shims.
 # ---------------------------------------------------------------------------
@@ -38,9 +37,7 @@ class _FakeLibSymbol:
     def __init__(self, pin_positions_abs: dict[str, tuple[float, float]]):
         self._abs = pin_positions_abs
 
-    def get_all_pin_positions(
-        self, instance_pos, instance_rot=0, mirror="", snap_to_grid=True
-    ):
+    def get_all_pin_positions(self, instance_pos, instance_rot=0, mirror="", snap_to_grid=True):
         # Translate absolute coordinates by subtracting the requested
         # instance position so a test can place the same library
         # symbol at multiple positions.  The synthetic library always
@@ -65,8 +62,15 @@ def _no_connect(x: float, y: float):
     return SimpleNamespace(position=(x, y))
 
 
-def _symbol(reference: str, lib_id: str, x: float = 0.0, y: float = 0.0,
-            rotation: float = 0.0, mirror: str = "", dnp: bool = False):
+def _symbol(
+    reference: str,
+    lib_id: str,
+    x: float = 0.0,
+    y: float = 0.0,
+    rotation: float = 0.0,
+    mirror: str = "",
+    dnp: bool = False,
+):
     return SimpleNamespace(
         reference=reference,
         lib_id=lib_id,
@@ -203,7 +207,10 @@ class TestOrphanLabelDetection:
         lbl = _label("SPARE_GPIO", 40.0, 40.0)
         nc = _no_connect(30.0, 40.0)
         sheet = _sheet(
-            symbols=[u1], global_labels=[lbl], wires=[wire], no_connects=[nc],
+            symbols=[u1],
+            global_labels=[lbl],
+            wires=[wire],
+            no_connects=[nc],
         )
 
         findings = find_orphan_labels(
@@ -234,10 +241,12 @@ class TestOrphanLabelDetection:
 
     def test_multiple_orphans_reported_individually(self):
         """When multiple labels orphan-fire, each is reported."""
-        lib_mcu = _FakeLibSymbol({
-            "9": (50.0, 50.0),
-            "10": (50.0, 52.54),
-        })
+        lib_mcu = _FakeLibSymbol(
+            {
+                "9": (50.0, 50.0),
+                "10": (50.0, 52.54),
+            }
+        )
         u8 = _symbol("U8", "MCU:Test")
         w1 = _wire(50.0, 50.0, 60.0, 50.0)
         w2 = _wire(50.0, 52.54, 60.0, 52.54)

@@ -66,12 +66,22 @@ def _make_router_with_four_nets() -> Autorouter:
     # Failed net (A).
     pads_a = [
         {
-            "number": "1", "x": 5.0, "y": 20.0,
-            "width": 0.5, "height": 0.5, "net": 1, "net_name": "A",
+            "number": "1",
+            "x": 5.0,
+            "y": 20.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "A",
         },
         {
-            "number": "2", "x": 60.0, "y": 20.0,
-            "width": 0.5, "height": 0.5, "net": 1, "net_name": "A",
+            "number": "2",
+            "x": 60.0,
+            "y": 20.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "A",
         },
     ]
     router.add_component("U_A", pads_a)
@@ -79,12 +89,22 @@ def _make_router_with_four_nets() -> Autorouter:
     for idx, net_id, name in [(0, 2, "B"), (1, 3, "C"), (2, 4, "D")]:
         pads = [
             {
-                "number": "1", "x": 15.0 + idx * 12.0, "y": 12.0,
-                "width": 0.5, "height": 0.5, "net": net_id, "net_name": name,
+                "number": "1",
+                "x": 15.0 + idx * 12.0,
+                "y": 12.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": name,
             },
             {
-                "number": "2", "x": 15.0 + idx * 12.0, "y": 28.0,
-                "width": 0.5, "height": 0.5, "net": net_id, "net_name": name,
+                "number": "2",
+                "x": 15.0 + idx * 12.0,
+                "y": 28.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": name,
             },
         ]
         router.add_component(f"U_{name}", pads)
@@ -114,8 +134,13 @@ def _stub_route(net: int, offset: float = 0.0) -> Route:
         net_name=f"Net{net}",
         segments=[
             Segment(
-                x1=0.0 + offset, y1=0.0, x2=1.0 + offset, y2=1.0,
-                width=0.2, layer=Layer.F_CU, net=net,
+                x1=0.0 + offset,
+                y1=0.0,
+                x2=1.0 + offset,
+                y2=1.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=net,
             ),
         ],
     )
@@ -138,7 +163,11 @@ class TestTargetedRipupGeometricFastFail:
             net_class_map={},
         )
         pads_by_net = _build_pads_by_net(router)
-        net_routes: dict[int, list] = {2: [_stub_route(2)], 3: [_stub_route(3)], 4: [_stub_route(4)]}
+        net_routes: dict[int, list] = {
+            2: [_stub_route(2)],
+            3: [_stub_route(3)],
+            4: [_stub_route(4)],
+        }
         routes_list: list = list(net_routes[2]) + list(net_routes[3]) + list(net_routes[4])
 
         def fake_route_net(self_neg, pads, *args, **kwargs):
@@ -246,7 +275,11 @@ class TestTargetedRipupGeometricFastFail:
             net_class_map={},
         )
         pads_by_net = _build_pads_by_net(router)
-        net_routes: dict[int, list] = {2: [_stub_route(2)], 3: [_stub_route(3)], 4: [_stub_route(4)]}
+        net_routes: dict[int, list] = {
+            2: [_stub_route(2)],
+            3: [_stub_route(3)],
+            4: [_stub_route(4)],
+        }
 
         sibling_timeouts: list[float | None] = []
         failed_timeouts: list[float | None] = []
@@ -298,7 +331,11 @@ class TestTargetedRipupGeometricFastFail:
             net_class_map={},
         )
         pads_by_net = _build_pads_by_net(router)
-        net_routes: dict[int, list] = {2: [_stub_route(2)], 3: [_stub_route(3)], 4: [_stub_route(4)]}
+        net_routes: dict[int, list] = {
+            2: [_stub_route(2)],
+            3: [_stub_route(3)],
+            4: [_stub_route(4)],
+        }
 
         per_net_timeout = 1.0  # Keep it small so tests run quickly.
 
@@ -352,7 +389,11 @@ class TestTargetedRipupGeometricFastFail:
             net_class_map={},
         )
         pads_by_net = _build_pads_by_net(router)
-        net_routes: dict[int, list] = {2: [_stub_route(2)], 3: [_stub_route(3)], 4: [_stub_route(4)]}
+        net_routes: dict[int, list] = {
+            2: [_stub_route(2)],
+            3: [_stub_route(3)],
+            4: [_stub_route(4)],
+        }
 
         sibling_timeouts: list[float | None] = []
 
@@ -403,7 +444,11 @@ class TestTargetedRipupGeometricFastFail:
             net_class_map={},
         )
         pads_by_net = _build_pads_by_net(router)
-        net_routes: dict[int, list] = {2: [_stub_route(2)], 3: [_stub_route(3)], 4: [_stub_route(4)]}
+        net_routes: dict[int, list] = {
+            2: [_stub_route(2)],
+            3: [_stub_route(3)],
+            4: [_stub_route(4)],
+        }
 
         def fake_route_net(self_neg, pads, *args, **kwargs):
             if pads[0].net == 1:
@@ -526,9 +571,7 @@ class TestTargetedRipupTransactionalRollback:
         new_partial = _stub_route(1, offset=10.0)
         invocations: list[int] = []
 
-        def fake_route_net(
-            self_neg, pads, *args, failure_callback=None, **kwargs
-        ):
+        def fake_route_net(self_neg, pads, *args, failure_callback=None, **kwargs):
             net_id = pads[0].net
             invocations.append(net_id)
             if net_id == 1:
@@ -615,8 +658,7 @@ class TestTargetedRipupTransactionalRollback:
         # net 4, whose reroute never ran (transaction aborted at net 3).
         for net_id in (2, 3, 4):
             assert net_routes[net_id] == [original[net_id]], (
-                f"Sibling {net_id} must be restored verbatim; "
-                f"got {net_routes[net_id]}"
+                f"Sibling {net_id} must be restored verbatim; got {net_routes[net_id]}"
             )
             assert original[net_id] in routes_list
 
@@ -657,8 +699,7 @@ class TestTargetedRipupTransactionalRollback:
 
         assert success is False, "Sibling degradation must abort the transaction"
         assert net_routes[2] == [sib2_a, sib2_b], (
-            f"Degraded sibling must get BOTH original routes back; "
-            f"got {len(net_routes[2])}"
+            f"Degraded sibling must get BOTH original routes back; got {len(net_routes[2])}"
         )
         assert net_routes[3] == [original3]
         assert net_routes.get(1, []) == []

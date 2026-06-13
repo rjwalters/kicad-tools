@@ -552,8 +552,13 @@ def slide_off_overlaps(
     overlap_details: tuple[OverlapDetail, ...] = ()
     if remaining_overlaps > 0:
         detail_list = _get_overlap_details(
-            positions, half_sizes, sides, margin_mm, n,
-            component_defs, spatial_grid,
+            positions,
+            half_sizes,
+            sides,
+            margin_mm,
+            n,
+            component_defs,
+            spatial_grid,
         )
         overlap_details = tuple(detail_list)
 

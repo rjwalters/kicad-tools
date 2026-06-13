@@ -227,7 +227,7 @@ class TestPCBEditorZoneAPI:
     @pytest.fixture
     def simple_pcb(self, tmp_path):
         """Create a simple PCB file for testing."""
-        pcb_content = '''(kicad_pcb
+        pcb_content = """(kicad_pcb
   (version 20240108)
   (generator "kicad_tools")
   (general
@@ -247,7 +247,7 @@ class TestPCBEditorZoneAPI:
   (gr_line (start 100 0) (end 100 80) (layer "Edge.Cuts") (width 0.1))
   (gr_line (start 100 80) (end 0 80) (layer "Edge.Cuts") (width 0.1))
   (gr_line (start 0 80) (end 0 0) (layer "Edge.Cuts") (width 0.1))
-)'''
+)"""
         pcb_path = tmp_path / "test_board.kicad_pcb"
         pcb_path.write_text(pcb_content)
         return pcb_path
@@ -435,7 +435,7 @@ class TestBoardOutlineExtraction:
     @pytest.fixture
     def pcb_with_outline(self, tmp_path):
         """Create a PCB with Edge.Cuts outline."""
-        pcb_content = '''(kicad_pcb
+        pcb_content = """(kicad_pcb
   (version 20240108)
   (generator "kicad_tools")
   (layers
@@ -449,7 +449,7 @@ class TestBoardOutlineExtraction:
   (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (width 0.1))
   (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (width 0.1))
   (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (width 0.1))
-)'''
+)"""
         pcb_path = tmp_path / "outline_board.kicad_pcb"
         pcb_path.write_text(pcb_content)
         return pcb_path
@@ -472,7 +472,7 @@ class TestBoardOutlineExtraction:
 
     def test_fallback_when_no_outline(self, tmp_path):
         """_get_board_outline falls back to default when no Edge.Cuts."""
-        pcb_content = '''(kicad_pcb
+        pcb_content = """(kicad_pcb
   (version 20240108)
   (generator "kicad_tools")
   (layers
@@ -481,7 +481,7 @@ class TestBoardOutlineExtraction:
   )
   (net 0 "")
   (net 1 "GND")
-)'''
+)"""
         pcb_path = tmp_path / "no_outline.kicad_pcb"
         pcb_path.write_text(pcb_content)
 

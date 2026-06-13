@@ -243,9 +243,7 @@ class TestStitchMainMfrFlag:
             "Expected 4-layer jlcpcb-tier1 via drill (0.2mm) in output"
         )
 
-    def test_no_mfr_preserves_existing_defaults(
-        self, two_layer_pcb: Path, tmp_path: Path
-    ) -> None:
+    def test_no_mfr_preserves_existing_defaults(self, two_layer_pcb: Path, tmp_path: Path) -> None:
         """Without --mfr, the historical CLI defaults (0.45/0.2) are preserved.
 
         This pins the contract from Curator guidance: "Default behavior
@@ -274,9 +272,7 @@ class TestStitchMainMfrFlag:
             "Default (no --mfr) stitch must preserve historical via drill (0.2mm)"
         )
 
-    def test_unknown_mfr_returns_error(
-        self, two_layer_pcb: Path, tmp_path: Path, capsys
-    ) -> None:
+    def test_unknown_mfr_returns_error(self, two_layer_pcb: Path, tmp_path: Path, capsys) -> None:
         """Unknown manufacturer surfaces a clear error and exits non-zero."""
         output_file = tmp_path / "out.kicad_pcb"
         exit_code = main(
@@ -294,9 +290,7 @@ class TestStitchMainMfrFlag:
         captured = capsys.readouterr()
         assert "does-not-exist" in captured.err
 
-    def test_mfr_short_alias_route_cmd_compat(
-        self, two_layer_pcb: Path, tmp_path: Path
-    ) -> None:
+    def test_mfr_short_alias_route_cmd_compat(self, two_layer_pcb: Path, tmp_path: Path) -> None:
         """The --manufacturer alias matches route_cmd's spelling and works identically."""
         output_file = tmp_path / "out.kicad_pcb"
         exit_code = main(

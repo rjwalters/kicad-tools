@@ -414,14 +414,46 @@ def _make_two_phase_router():
     autorouter = Autorouter(width=50.0, height=40.0)
     # Net 1: two pads
     pads1 = [
-        {"number": "1", "x": 5.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "VCC"},
-        {"number": "2", "x": 15.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "VCC"},
+        {
+            "number": "1",
+            "x": 5.0,
+            "y": 20.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "VCC",
+        },
+        {
+            "number": "2",
+            "x": 15.0,
+            "y": 20.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "VCC",
+        },
     ]
     autorouter.add_component("U1", pads1)
     # Net 2: two pads
     pads2 = [
-        {"number": "1", "x": 10.0, "y": 15.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "GND"},
-        {"number": "2", "x": 10.0, "y": 25.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "GND"},
+        {
+            "number": "1",
+            "x": 10.0,
+            "y": 15.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 2,
+            "net_name": "GND",
+        },
+        {
+            "number": "2",
+            "x": 10.0,
+            "y": 25.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 2,
+            "net_name": "GND",
+        },
     ]
     autorouter.add_component("U2", pads2)
 
@@ -673,8 +705,13 @@ def _progress_stub_route(net: int):
         net_name=f"Net{net}",
         segments=[
             Segment(
-                x1=float(net), y1=0.0, x2=float(net) + 1.0, y2=1.0,
-                width=0.2, layer=Layer.F_CU, net=net,
+                x1=float(net),
+                y1=0.0,
+                x2=float(net) + 1.0,
+                y2=1.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=net,
             ),
         ],
     )
@@ -690,20 +727,68 @@ def _make_router_with_three_nets():
     router = Autorouter(width=60.0, height=40.0)
     # Net 1: failed net (A)
     pads_a = [
-        {"number": "1", "x": 5.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "A"},
-        {"number": "2", "x": 25.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "A"},
+        {
+            "number": "1",
+            "x": 5.0,
+            "y": 20.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "A",
+        },
+        {
+            "number": "2",
+            "x": 25.0,
+            "y": 20.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "A",
+        },
     ]
     router.add_component("U1", pads_a)
     # Net 2: sibling (B) - crosses A's path
     pads_b = [
-        {"number": "1", "x": 12.0, "y": 15.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "B"},
-        {"number": "2", "x": 12.0, "y": 25.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "B"},
+        {
+            "number": "1",
+            "x": 12.0,
+            "y": 15.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 2,
+            "net_name": "B",
+        },
+        {
+            "number": "2",
+            "x": 12.0,
+            "y": 25.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 2,
+            "net_name": "B",
+        },
     ]
     router.add_component("U2", pads_b)
     # Net 3: sibling (C)
     pads_c = [
-        {"number": "1", "x": 18.0, "y": 15.0, "width": 0.5, "height": 0.5, "net": 3, "net_name": "C"},
-        {"number": "2", "x": 18.0, "y": 25.0, "width": 0.5, "height": 0.5, "net": 3, "net_name": "C"},
+        {
+            "number": "1",
+            "x": 18.0,
+            "y": 15.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 3,
+            "net_name": "C",
+        },
+        {
+            "number": "2",
+            "x": 18.0,
+            "y": 25.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 3,
+            "net_name": "C",
+        },
     ]
     router.add_component("U3", pads_c)
     return router
@@ -955,9 +1040,7 @@ class TestAttemptBlockedComponentRipupNegotiatedLogging:
             assert re.search(r"rip-up \[\d+/3\] for", msg), (
                 f"Expected '[i/3] for' counter in: {msg}"
             )
-            assert re.search(r"elapsed \d+\.\d+s", msg), (
-                f"Expected 'elapsed N.Ns' in: {msg}"
-            )
+            assert re.search(r"elapsed \d+\.\d+s", msg), f"Expected 'elapsed N.Ns' in: {msg}"
 
         # Counters increase 1..3.
         counters = []

@@ -141,9 +141,7 @@ def test_dormant_partner_optimized_path(benchmark, dormant_partner_fixture):
     assert result is False or result is True
 
 
-def _measure_dormant_ratio(
-    n_trials: int = 5, n_iters: int = 20_000
-) -> tuple[float, float, float]:
+def _measure_dormant_ratio(n_trials: int = 5, n_iters: int = 20_000) -> tuple[float, float, float]:
     """Measure the optimized/legacy dormant-path timing ratio robustly.
 
     Runs ``n_trials`` *interleaved* (legacy, optimized) ``timeit`` trials
@@ -163,7 +161,11 @@ def _measure_dormant_ratio(
 
     def legacy() -> bool:
         return router._is_trace_blocked(
-            gx, gy, 0, net, False,
+            gx,
+            gy,
+            0,
+            net,
+            False,
             radius=radius,
             partner_net=-1,
             partner_radius=None,
@@ -171,7 +173,11 @@ def _measure_dormant_ratio(
 
     def optimized() -> bool:
         return router._is_trace_blocked(
-            gx, gy, 0, net, False,
+            gx,
+            gy,
+            0,
+            net,
+            False,
             radius=radius,
             partner_net=-1,
             partner_radius=None,
@@ -278,7 +284,11 @@ def test_active_partner_branch_still_works():
     # Use partner_radius=1 (very tight), trace radius=5 (wider).  Query
     # at (10, 16) -- Chebyshev distance 6 from the partner cell.
     blocked_with_partner_active = router._is_trace_blocked(
-        10, 16, 0, net, False,
+        10,
+        16,
+        0,
+        net,
+        False,
         radius=5,
         partner_net=partner_net_id,
         partner_radius=1,
@@ -287,7 +297,11 @@ def test_active_partner_branch_still_works():
     # Without partner relaxation (treat partner like any other foreign
     # net), the same query would be blocked.
     blocked_without_partner = router._is_trace_blocked(
-        10, 16, 0, net, False,
+        10,
+        16,
+        0,
+        net,
+        False,
         radius=5,
         partner_net=-1,
         partner_radius=None,

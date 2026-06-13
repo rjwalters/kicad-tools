@@ -193,11 +193,11 @@ _THREE_SYMBOL_SCH = """(kicad_sch
 """
 
 _R_ONLY_LIB_TABLE = (
-    '(fp_lib_table\n'
-    '  (version 7)\n'
+    "(fp_lib_table\n"
+    "  (version 7)\n"
     '  (lib (name "OnlyLib") (type "KiCad") (uri "${KIPRJMOD}/OnlyLib.pretty")'
     '       (options "") (descr "Test"))\n'
-    ')'
+    ")"
 )
 
 
@@ -219,9 +219,7 @@ def _make_project(
     lib_dir.mkdir()
     (lib_dir / "OnlyChoice.kicad_mod").write_text(_MINI_FP_2, encoding="utf-8")
     if add_second_candidate:
-        (lib_dir / "SecondChoice.kicad_mod").write_text(
-            _MINI_FP_2_ALT, encoding="utf-8"
-        )
+        (lib_dir / "SecondChoice.kicad_mod").write_text(_MINI_FP_2_ALT, encoding="utf-8")
 
     sch = tmp_path / "proj.kicad_sch"
     sch.write_text(_THREE_SYMBOL_SCH, encoding="utf-8")
@@ -281,22 +279,16 @@ def test_is_unambiguous_handsolder_breaks_tie():
 # ---------------------------------------------------------------------------
 
 
-def test_dry_run_unambiguous_assignment_reports_mapping(
-    tmp_path, monkeypatch, capsys
-):
+def test_dry_run_unambiguous_assignment_reports_mapping(tmp_path, monkeypatch, capsys):
     """``--dry-run --format json`` proposes an unambiguous assignment for R2/R3.
 
     Only ``OnlyChoice`` exists in the project library, so both empty-footprint
     symbols (R2, R3) get the same single-candidate match. R1 is pre-assigned
     and must be skipped.
     """
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
     # find_footprint_candidates pulls from this module too:
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     sch = _make_project(tmp_path)
     rc = run_assign_footprints(sch, dry_run=True, output_format="json")
@@ -316,16 +308,10 @@ def test_dry_run_unambiguous_assignment_reports_mapping(
     assert data["dry_run"] is True
 
 
-def test_assignment_writes_mapping_and_creates_backup(
-    tmp_path, monkeypatch, capsys
-):
+def test_assignment_writes_mapping_and_creates_backup(tmp_path, monkeypatch, capsys):
     """Full write path: file actually mutates, ``.bak`` exists."""
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     sch = _make_project(tmp_path)
     rc = run_assign_footprints(sch, dry_run=False, output_format="text")
@@ -340,16 +326,10 @@ def test_assignment_writes_mapping_and_creates_backup(
     assert backups, f"no backup file found in {sch.parent}"
 
 
-def test_no_force_does_not_overwrite_existing_footprint(
-    tmp_path, monkeypatch, capsys
-):
+def test_no_force_does_not_overwrite_existing_footprint(tmp_path, monkeypatch, capsys):
     """Without ``--force``, R1's pre-assigned footprint is left alone."""
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     sch = _make_project(tmp_path)
     run_assign_footprints(sch, dry_run=True, output_format="json")
@@ -363,39 +343,26 @@ def test_no_force_does_not_overwrite_existing_footprint(
     assert "R1" not in seen_refs, "R1 already had a footprint and must be skipped"
 
 
-def test_force_reconsiders_already_assigned_symbol(
-    tmp_path, monkeypatch, capsys
-):
+def test_force_reconsiders_already_assigned_symbol(tmp_path, monkeypatch, capsys):
     """``--force`` flips R1 back into the scan -> it gets the same OnlyChoice."""
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     sch = _make_project(tmp_path)
     run_assign_footprints(sch, dry_run=True, output_format="json", force=True)
     out = capsys.readouterr().out
     data = json.loads(out)
-    seen_refs = (
-        [r["reference"] for r in data["assigned"]]
-        + [r["reference"] for r in data["ambiguous"]]
-    )
+    seen_refs = [r["reference"] for r in data["assigned"]] + [
+        r["reference"] for r in data["ambiguous"]
+    ]
     # R1 should now be considered (assigned in this case — single candidate).
     assert "R1" in seen_refs
 
 
-def test_two_equally_ranked_candidates_are_ambiguous(
-    tmp_path, monkeypatch, capsys
-):
+def test_two_equally_ranked_candidates_are_ambiguous(tmp_path, monkeypatch, capsys):
     """With two project candidates and no filters, R2 / R3 are ambiguous."""
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     sch = _make_project(tmp_path, add_second_candidate=True)
     rc = run_assign_footprints(sch, dry_run=True, output_format="json")
@@ -411,9 +378,7 @@ def test_two_equally_ranked_candidates_are_ambiguous(
 
 def test_no_library_returns_nonzero(tmp_path, monkeypatch, capsys):
     """No global libs AND no project table -> actionable error + exit 1."""
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
 
     # No fp-lib-table; just the schematic in a plain directory.
     sch = tmp_path / "proj.kicad_sch"
@@ -433,16 +398,10 @@ def test_missing_schematic_file_returns_nonzero(capsys):
     assert "not found" in err.lower()
 
 
-def test_text_output_lists_assigned_and_ambiguous(
-    tmp_path, monkeypatch, capsys
-):
+def test_text_output_lists_assigned_and_ambiguous(tmp_path, monkeypatch, capsys):
     """Default text format renders each bucket so a CLI user can read it."""
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     sch = _make_project(tmp_path, add_second_candidate=True)
     run_assign_footprints(sch, dry_run=True, output_format="text")
@@ -455,12 +414,8 @@ def test_text_output_lists_assigned_and_ambiguous(
 
 def test_no_missing_symbols_returns_zero(tmp_path, monkeypatch, capsys):
     """A schematic with every footprint already set is a success (0), not a 1."""
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     # Every symbol has a non-empty Footprint property.
     pre_assigned_sch = _THREE_SYMBOL_SCH.replace(
@@ -491,17 +446,14 @@ def test_iter_missing_matches_preflight_check(tmp_path, monkeypatch):
     """
     sch = _make_project(tmp_path)
 
-    iter_refs = {
-        sym.reference
-        for _node, sym, _sch in iter_missing_footprint_symbols(sch)
-    }
+    iter_refs = {sym.reference for _node, sym, _sch in iter_missing_footprint_symbols(sch)}
     preflight_refs: set[str] = set()
     for issue in check_missing_footprints(str(sch)):
         if issue.category == "footprint" and issue.severity == "warning":
             # The validator message format is "Missing footprint: REF (VALUE)".
             msg = issue.message
             if msg.startswith("Missing footprint:"):
-                tail = msg[len("Missing footprint:"):].strip()
+                tail = msg[len("Missing footprint:") :].strip()
                 ref = tail.split(" ", 1)[0]
                 preflight_refs.add(ref)
 
@@ -513,21 +465,15 @@ def test_iter_missing_matches_preflight_check(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_no_validate_flag_propagates_to_set_footprint(
-    tmp_path, monkeypatch, capsys
-):
+def test_no_validate_flag_propagates_to_set_footprint(tmp_path, monkeypatch, capsys):
     """``validate=False`` must thread through to :func:`run_set_footprint`.
 
     Regression for the assign-write split: the new path must respect the
     ``--no-validate`` flag the user passed. We verify by intercepting the
     ``run_set_footprint`` call and inspecting the kwarg.
     """
-    monkeypatch.setattr(
-        sch_assign_footprints, "detect_kicad_library_path", _no_global_libs
-    )
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs
-    )
+    monkeypatch.setattr(sch_assign_footprints, "detect_kicad_library_path", _no_global_libs)
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _no_global_libs)
 
     captured: dict[str, Any] = {}
 
@@ -535,9 +481,7 @@ def test_no_validate_flag_propagates_to_set_footprint(
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(
-        sch_assign_footprints, "run_set_footprint", _capture_set_footprint
-    )
+    monkeypatch.setattr(sch_assign_footprints, "run_set_footprint", _capture_set_footprint)
 
     sch = _make_project(tmp_path)
     rc = run_assign_footprints(
@@ -554,9 +498,7 @@ def test_no_validate_flag_propagates_to_set_footprint(
 
 
 @requires_kicad_libs
-def test_pin_count_validation_still_fires_through_assign_path(
-    tmp_path, monkeypatch, capsys
-):
+def test_pin_count_validation_still_fires_through_assign_path(tmp_path, monkeypatch, capsys):
     """End-to-end: when the assign path produces a wrong-pad-count mapping,
     ``run_set_footprint``'s validator must still emit its warning.
 
@@ -582,9 +524,7 @@ def test_pin_count_validation_still_fires_through_assign_path(
             }
         ]
 
-    monkeypatch.setattr(
-        sch_assign_footprints, "find_footprint_candidates", _bad_candidate
-    )
+    monkeypatch.setattr(sch_assign_footprints, "find_footprint_candidates", _bad_candidate)
 
     run_assign_footprints(
         sch, dry_run=False, output_format="text", validate=True, no_project_lib=True

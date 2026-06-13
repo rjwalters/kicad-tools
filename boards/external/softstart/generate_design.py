@@ -102,14 +102,12 @@ from kicad_tools.schematic.blocks import (
     UCC27211GateDriver,
     VoltageDividerSense,
 )
-from kicad_tools.schematic.blocks.mcu import BootModeSelector, MCUBlock, ResetButton
+from kicad_tools.schematic.blocks.mcu import BootModeSelector, ResetButton
 from kicad_tools.schematic.models.schematic import Schematic
 
 # Path to the project-local KiCad symbol library that ships the custom
 # UCC27211 gate-driver symbol (PR #3344 / Issue #3343 P1).
-_CUSTOM_SYMBOL_LIB = (
-    Path(__file__).parent / "symbols" / "softstart_custom.kicad_sym"
-)
+_CUSTOM_SYMBOL_LIB = Path(__file__).parent / "symbols" / "softstart_custom.kicad_sym"
 
 # Nets excluded from autorouting.  These get their copper as zone pours +
 # stitching (see ``route_pcb`` step 7) rather than autorouted traces.
@@ -140,8 +138,10 @@ _CUSTOM_SYMBOL_LIB = (
 # continuous copper — and additionally bulked with a reinforcement pour
 # (``REINFORCEMENT_POUR_NETS``) wherever the fill resolver allows.
 ROUTE_SKIP_NETS = [
-    "GND", "+3.3V",
-    "SCAP_POS_GND", "SCAP_NEG_GND",
+    "GND",
+    "+3.3V",
+    "SCAP_POS_GND",
+    "SCAP_NEG_GND",
 ]
 
 # Per-net trace widths (mm) for the power nets that are ROUTED rather
@@ -169,11 +169,16 @@ POWER_TRACE_WIDTHS_MM: dict[str, float] = {
     # BLOCKED_BY_COMPONENT rip-up that destabilised the UCC_* gate
     # nets; BUS_LINE / SCAP_POS+ / VRECT never closed).  Their pours
     # carry the bulk; the 0.3 mm skeleton pins connectivity.
-    "BUS_LINE": 0.3, "SRC_POS": 0.3,
-    "SCAP_POS+": 0.3, "VRECT": 0.3,
+    "BUS_LINE": 0.3,
+    "SRC_POS": 0.3,
+    "SCAP_POS+": 0.3,
+    "VRECT": 0.3,
     # These route cleanly at 0.4 mm (measured this PR).
-    "SRC_NEG": 0.4, "SCAP_NEG+": 0.4,
-    "AC_LINE": 0.4, "AC_NEUTRAL": 0.4, "FUSED_LINE": 0.4,
+    "SRC_NEG": 0.4,
+    "SCAP_NEG+": 0.4,
+    "AC_LINE": 0.4,
+    "AC_NEUTRAL": 0.4,
+    "FUSED_LINE": 0.4,
     "VGATE": 0.4,
     # Kelvin sense from the R9 shunt high side to the INA180 input
     # (2 pads, high impedance) — signal-width trace, no reinforcement.
@@ -187,8 +192,10 @@ POWER_TRACE_WIDTHS_MM: dict[str, float] = {
 # above the jlcpcb-tier1 2 oz floor (0.1524 mm) and opens the envelope
 # to 0.62 mm.  Nets without an entry use the global 0.20 mm.
 POWER_TRACE_CLEARANCES_MM: dict[str, float] = {
-    "BUS_LINE": 0.16, "SRC_POS": 0.16,
-    "SCAP_POS+": 0.16, "VRECT": 0.16,
+    "BUS_LINE": 0.16,
+    "SRC_POS": 0.16,
+    "SCAP_POS+": 0.16,
+    "VRECT": 0.16,
 }
 
 # Routed power nets that also get a reinforcement pour (pad-bbox zone,
@@ -196,9 +203,7 @@ POWER_TRACE_CLEARANCES_MM: dict[str, float] = {
 # continuity, the pour adds bulk).  ISENSE_POS is excluded: it is a
 # Kelvin sense line whose tiny pad box sits entirely under the
 # discharge-cluster pours (the PR #3481 zero-fill zone finding).
-REINFORCEMENT_POUR_NETS: list[str] = [
-    n for n in POWER_TRACE_WIDTHS_MM if n != "ISENSE_POS"
-]
+REINFORCEMENT_POUR_NETS: list[str] = [n for n in POWER_TRACE_WIDTHS_MM if n != "ISENSE_POS"]
 
 # Nets that must route FIRST in the shared pass (net-class priority 1 —
 # the negotiated router's primary ordering key — versus the other
@@ -280,29 +285,29 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # =========================================================================
     # Power Rail Y Coordinates
     # =========================================================================
-    RAIL_3V3 = 30       # 3.3V logic supply
-    RAIL_VRECT = 50     # Rectified DC (~12V from bridge rectifier)
-    RAIL_12V = 70       # 12V VGATE rail (LM7812 output) for UCC27211 supply
-    RAIL_GND = 280      # Ground
+    RAIL_3V3 = 30  # 3.3V logic supply
+    RAIL_VRECT = 50  # Rectified DC (~12V from bridge rectifier)
+    RAIL_12V = 70  # 12V VGATE rail (LM7812 output) for UCC27211 supply
+    RAIL_GND = 280  # Ground
 
     # Schematic section X positions
     X_AC_INPUT = 25
     X_VSENSE = 80
     X_ZC_DETECT = 130
     X_CHARGE = 180
-    X_DISCHARGE_POS = 240        # Back-to-back pair Q1A/Q1B (positive bank)
-    X_DRIVER_POS = 280            # UCC27211 driver for Q1A/Q1B
-    X_DISCHARGE_NEG = 330        # Back-to-back pair Q2A/Q2B (negative bank)
-    X_DRIVER_NEG = 370            # UCC27211 driver for Q2A/Q2B
-    X_PRECHARGE = 410             # Precharge subsystems (both banks)
-    X_ISENSE = 460                # Current sense shunt + INA180A3
-    X_OC = 500                    # LM393 overcurrent comparator
-    X_BANKDIV = 540               # Bank voltage divider pair
-    X_BUSBUF = 600                # MCP6001 bus envelope buffer (east of U7 unit B)
-    X_MCU = 640                   # STM32G031K8T6
-    X_LDO = 720                   # XC6206 3.3V LDO + LM7812 12V
-    X_LED = 780                   # Status LED
-    X_DEBUG = 810                 # SWD debug header
+    X_DISCHARGE_POS = 240  # Back-to-back pair Q1A/Q1B (positive bank)
+    X_DRIVER_POS = 280  # UCC27211 driver for Q1A/Q1B
+    X_DISCHARGE_NEG = 330  # Back-to-back pair Q2A/Q2B (negative bank)
+    X_DRIVER_NEG = 370  # UCC27211 driver for Q2A/Q2B
+    X_PRECHARGE = 410  # Precharge subsystems (both banks)
+    X_ISENSE = 460  # Current sense shunt + INA180A3
+    X_OC = 500  # LM393 overcurrent comparator
+    X_BANKDIV = 540  # Bank voltage divider pair
+    X_BUSBUF = 600  # MCP6001 bus envelope buffer (east of U7 unit B)
+    X_MCU = 640  # STM32G031K8T6
+    X_LDO = 720  # XC6206 3.3V LDO + LM7812 12V
+    X_LED = 780  # Status LED
+    X_DEBUG = 810  # SWD debug header
 
     # =========================================================================
     # Section 1: Power Rails
@@ -408,7 +413,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="TB",
         footprint="TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
     )
-    print(f"   J1: AC input terminal block")
+    print("   J1: AC input terminal block")
 
     # Fuse (15A for 120VAC line)
     fuse = FuseBlock(
@@ -418,7 +423,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         current_rating="15A",
         ref="F1",
     )
-    print(f"   F1: 15A fuse")
+    print("   F1: 15A fuse")
 
     # Varistor (MOV for surge protection) - pins are "1" and "2"
     mov = sch.add_symbol(
@@ -430,7 +435,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         rotation=90,
         footprint="Varistor:RV_Disc_D12mm_W4.2mm_P7.5mm",
     )
-    print(f"   RV1: Varistor 275VAC")
+    print("   RV1: Varistor 275VAC")
 
     # AC output terminal block (pass-through to load)
     j_ac_out = sch.add_symbol(
@@ -441,7 +446,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="TB",
         footprint="TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
     )
-    print(f"   J2: AC output terminal block")
+    print("   J2: AC output terminal block")
 
     # Wire AC input section
     j1_pin1 = j_ac_in.pin_position("1")  # LINE
@@ -532,7 +537,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="H11AA1",
         footprint="Package_DIP:DIP-6_W7.62mm",
     )
-    print(f"   U2: H11AA1 zero-crossing detector")
+    print("   U2: H11AA1 zero-crossing detector")
 
     # Input resistors for the optocoupler (limit LED current)
     r_zc1 = sch.add_symbol(
@@ -551,7 +556,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="33k",
         auto_footprint=True,
     )
-    print(f"   R3, R4: 33k input resistors for opto LED")
+    print("   R3, R4: 33k input resistors for opto LED")
 
     # Wire opto input side
     r3_pin1 = r_zc1.pin_position("1")
@@ -581,7 +586,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="10k",
         auto_footprint=True,
     )
-    print(f"   R5: 10k pull-up on opto output")
+    print("   R5: 10k pull-up on opto output")
 
     r5_pin1 = r_zc_pull.pin_position("1")
     r5_pin2 = r_zc_pull.pin_position("2")
@@ -633,7 +638,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="DB107",
         footprint="Diode_THT:Diode_Bridge_DIP-4_W7.62mm_P5.08mm",
     )
-    print(f"   D1: DB107 bridge rectifier for charging")
+    print("   D1: DB107 bridge rectifier for charging")
 
     # Charging resistor (limit current to ~0.5-1A)
     r_charge = sch.add_symbol(
@@ -644,7 +649,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="150R 5W",
         footprint="Resistor_THT:R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal",
     )
-    print(f"   R6: 150 ohm 5W charging resistor")
+    print("   R6: 150 ohm 5W charging resistor")
 
     # Wire charging resistor input from AC (stub + label)
     r6_pin1 = r_charge.pin_position("1")
@@ -692,7 +697,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         value="TB",
         footprint="TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
     )
-    print(f"   J3, J4: Supercap bank connectors (positive, negative)")
+    print("   J3, J4: Supercap bank connectors (positive, negative)")
 
     # Labels for supercap bank voltages (add stub wires for labels)
     j3_pin1 = j_scap_pos.pin_position("1")
@@ -728,7 +733,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ref_a="Q1A",
         ref_b="Q1B",
         mosfet_value="IRFB4110",
-        kelvin_label="SRC_POS",   # name the Kelvin tie node
+        kelvin_label="SRC_POS",  # name the Kelvin tie node
     )
     # Drain A → SCAP_POS+ (positive bank top)
     pa_da = pair_pos.port("DRAIN_A")
@@ -751,13 +756,13 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ref="U5",
         vgate_net="VGATE",
         kelvin_source_net="SRC_POS",
-        li_net="GATE_POS_B",       # MCU drives low-side (Q1B) gate
-        hi_net="GATE_POS_A",       # MCU drives high-side (Q1A) gate
-        lo_net="UCC_LO_POS",       # driver LO output → Q1B gate stub
-        ho_net="UCC_HO_POS",       # driver HO output → Q1A gate stub
+        li_net="GATE_POS_B",  # MCU drives low-side (Q1B) gate
+        hi_net="GATE_POS_A",  # MCU drives high-side (Q1A) gate
+        lo_net="UCC_LO_POS",  # driver LO output → Q1B gate stub
+        ho_net="UCC_HO_POS",  # driver HO output → Q1A gate stub
         hb_net="VBOOT_POS",
-        hs_net="SRC_POS",          # HS = switch node = common source
-        cap_ref_start=20,          # C20=C_BOOT, C21=C_BULK, C22=C_BYPASS
+        hs_net="SRC_POS",  # HS = switch node = common source
+        cap_ref_start=20,  # C20=C_BOOT, C21=C_BULK, C22=C_BYPASS
     )
     # Tie driver VDD pin to VGATE net (stub label).
     drv_vdd = drv_pos.port("VDD")
@@ -807,7 +812,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ho_net="UCC_HO_NEG",
         hb_net="VBOOT_NEG",
         hs_net="SRC_NEG",
-        cap_ref_start=23,          # C23=C_BOOT, C24=C_BULK, C25=C_BYPASS
+        cap_ref_start=23,  # C23=C_BOOT, C24=C_BULK, C25=C_BYPASS
     )
     drv_neg_vdd = drv_neg.port("VDD")
     sch.add_wire(drv_neg_vdd, (drv_neg_vdd[0], drv_neg_vdd[1] - 5))
@@ -991,14 +996,10 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # the clean low-density area between the recipe's other south-band
     # PWR_FLAGs (x=200-260, y=320).  Each protection block uses its own
     # x column to avoid label-stub collisions with adjacent blocks.
-    _emit_gate_protection(300, 305, "UCC_HO_POS", "SRC_POS",
-                          "R_GB1", "D_TVS1")
-    _emit_gate_protection(300, 330, "UCC_LO_POS", "SRC_POS",
-                          "R_GB2", "D_TVS2")
-    _emit_gate_protection(340, 305, "UCC_HO_NEG", "SRC_NEG",
-                          "R_GB3", "D_TVS3")
-    _emit_gate_protection(340, 330, "UCC_LO_NEG", "SRC_NEG",
-                          "R_GB4", "D_TVS4")
+    _emit_gate_protection(300, 305, "UCC_HO_POS", "SRC_POS", "R_GB1", "D_TVS1")
+    _emit_gate_protection(300, 330, "UCC_LO_POS", "SRC_POS", "R_GB2", "D_TVS2")
+    _emit_gate_protection(340, 305, "UCC_HO_NEG", "SRC_NEG", "R_GB3", "D_TVS3")
+    _emit_gate_protection(340, 330, "UCC_LO_NEG", "SRC_NEG", "R_GB4", "D_TVS4")
 
     # ---- Failsafe pull-downs on driver LI/HI inputs (per Q8 resolution) ----
     # Two 2N7002 N-FETs: drain to UCC27211 LI/HI input pins, gate to NRST,
@@ -1175,10 +1176,10 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     print("   U3: INA180A3 current sense amplifier (100 V/V gain, rev B)")
 
     # Wire INA180 inputs to shunt via labels
-    ina_inp = u_ina.pin_position("+")     # pin 3 = IN+
-    ina_inn = u_ina.pin_position("-")     # pin 4 = IN-
-    ina_out = u_ina.pin_position("1")     # pin 1 = OUT
-    ina_vs = u_ina.pin_position("V+")    # pin 5 = V+
+    ina_inp = u_ina.pin_position("+")  # pin 3 = IN+
+    ina_inn = u_ina.pin_position("-")  # pin 4 = IN-
+    ina_out = u_ina.pin_position("1")  # pin 1 = OUT
+    ina_vs = u_ina.pin_position("V+")  # pin 5 = V+
     ina_gnd = u_ina.pin_position("GND")  # pin 2 = GND
 
     # IN+ label (shunt high side = BUS_LINE)
@@ -1221,6 +1222,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # All 3 units (1=channel A, 2=channel B, 3=power) are placed with their
     # logical pins at grid-aligned positions.
     from kicad_tools.schematic.models.symbol import SymbolInstance as _SymInst
+
     lm393_def_ref = "Comparator:LM393"
     # Unit 1 (channel A — the actual OC comparator)
     u7_a = sch.add_symbol(
@@ -1247,10 +1249,20 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # R_TH_LO: bottom half (between threshold and GND)
     # ratio Vcc/Vth = 3.3/3.0 = 1.1 → R_TH_HI = R_TH_LO * 0.1
     r_th_hi = sch.add_symbol(
-        "Device:R", x=X_OC - 30, y=125, ref="R22", value="1k", rotation=0,
+        "Device:R",
+        x=X_OC - 30,
+        y=125,
+        ref="R22",
+        value="1k",
+        rotation=0,
     )
     r_th_lo = sch.add_symbol(
-        "Device:R", x=X_OC - 30, y=160, ref="R23", value="10k", rotation=0,
+        "Device:R",
+        x=X_OC - 30,
+        y=160,
+        ref="R23",
+        value="10k",
+        rotation=0,
     )
     rh_p1 = r_th_hi.pin_position("1")
     rh_p2 = r_th_hi.pin_position("2")
@@ -1273,7 +1285,12 @@ def create_softstart_schematic(output_dir: Path) -> Path:
 
     # R_PULLUP (R24): pull-up between OC_TRIP and +3.3V
     r_pullup = sch.add_symbol(
-        "Device:R", x=X_OC + 30, y=120, ref="R24", value="10k", rotation=0,
+        "Device:R",
+        x=X_OC + 30,
+        y=120,
+        ref="R24",
+        value="10k",
+        rotation=0,
     )
     rp_p1 = r_pullup.pin_position("1")
     rp_p2 = r_pullup.pin_position("2")
@@ -1287,7 +1304,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     lm393_def = sch._symbol_defs["Comparator:LM393"]
     u7_pwr = _SymInst(
         symbol_def=lm393_def,
-        x=556.26,    # grid-aligned (matches earlier analysis)
+        x=556.26,  # grid-aligned (matches earlier analysis)
         y=142.24,
         rotation=0,
         reference="U7",
@@ -1321,7 +1338,11 @@ def create_softstart_schematic(output_dir: Path) -> Path:
 
     # Decoupling cap C34 for LM393 supply
     c_lm393 = sch.add_symbol(
-        "Device:C", x=X_OC + 15, y=85, ref="C34", value="100nF",
+        "Device:C",
+        x=X_OC + 15,
+        y=85,
+        ref="C34",
+        value="100nF",
         footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     sch.wire_decoupling_cap(c_lm393, RAIL_3V3, RAIL_GND)
@@ -1336,7 +1357,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x=X_BANKDIV,
         y=110,
         ratio=30.0,
-        ref_start=25,    # R25, R26
+        ref_start=25,  # R25, R26
     )
     # Override the computed nominal values (R25=290.0k, R26=10k) with the
     # E-series parts on the routed PCB (270k / 9.1k → ~30:1 ratio).
@@ -1358,7 +1379,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x=X_BANKDIV,
         y=180,
         ratio=30.0,
-        ref_start=27,    # R27, R28
+        ref_start=27,  # R27, R28
     )
     # Override the computed nominal values (R27=290.0k, R28=10k) with the
     # E-series parts on the routed PCB (270k / 9.1k → ~30:1 ratio).
@@ -1423,7 +1444,11 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # taps (X_BUSBUF - 15 = 585 is well clear of both U8 OUT extension
     # at x≈612 and any U7 LM393 west-side activity at x≈505-540).
     c_buf = sch.add_symbol(
-        "Device:C", x=X_BUSBUF - 15, y=155, ref="C30", value="100nF",
+        "Device:C",
+        x=X_BUSBUF - 15,
+        y=155,
+        ref="C30",
+        value="100nF",
         footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     sch.wire_decoupling_cap(c_buf, RAIL_3V3, RAIL_GND)
@@ -1432,12 +1457,22 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # dV/dt differentiator: C31 (0.1µF) in series + R29 (10k) shunt to GND.
     # Output V_BUS_DVDT → MCU PA1.
     c_dvdt = sch.add_symbol(
-        "Device:C", x=X_BUSBUF - 5, y=200, ref="C31", value="100nF",
-        rotation=90, footprint="Capacitor_SMD:C_0805_2012Metric",
+        "Device:C",
+        x=X_BUSBUF - 5,
+        y=200,
+        ref="C31",
+        value="100nF",
+        rotation=90,
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     r_dvdt = sch.add_symbol(
-        "Device:R", x=X_BUSBUF + 10, y=220, ref="R29", value="10k",
-        rotation=90, auto_footprint=True,
+        "Device:R",
+        x=X_BUSBUF + 10,
+        y=220,
+        ref="R29",
+        value="10k",
+        rotation=90,
+        auto_footprint=True,
     )
     cdv_p1 = c_dvdt.pin_position("1")
     cdv_p2 = c_dvdt.pin_position("2")
@@ -1488,12 +1523,28 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_junction(mcu_vss[0], RAIL_GND)
 
     # Bypass capacitors
-    c2 = sch.add_symbol("Device:C", x=X_MCU - 30, y=160, ref="C2", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
-    c3 = sch.add_symbol("Device:C", x=X_MCU - 20, y=160, ref="C3", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
-    c4 = sch.add_symbol("Device:C", x=X_MCU - 10, y=160, ref="C4", value="4.7uF", auto_footprint=True)
+    c2 = sch.add_symbol(
+        "Device:C",
+        x=X_MCU - 30,
+        y=160,
+        ref="C2",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c3 = sch.add_symbol(
+        "Device:C",
+        x=X_MCU - 20,
+        y=160,
+        ref="C3",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
+    c4 = sch.add_symbol(
+        "Device:C", x=X_MCU - 10, y=160, ref="C4", value="4.7uF", auto_footprint=True
+    )
     for cap in [c2, c3, c4]:
         sch.wire_decoupling_cap(cap, RAIL_3V3, RAIL_GND)
-    print(f"   C2-C4: Bypass capacitors")
+    print("   C2-C4: Bypass capacitors")
 
     # Reset button
     reset = ResetButton(
@@ -1511,7 +1562,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         gnd_rail_y=RAIL_GND,
         avoid_x_range=(X_MCU - 30, X_MCU + 30),
     )
-    print(f"   SW1: Reset button with R10 pull-up, C5 debounce")
+    print("   SW1: Reset button with R10 pull-up, C5 debounce")
 
     # Boot mode selector (BOOT0 = low for normal flash boot).  On STM32G031
     # BOOT0 is sampled at reset from PA14 (shared with SWCLK) when the
@@ -1536,7 +1587,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     boot_stub = (boot_pin[0] + 5, boot_pin[1])
     sch.add_wire(boot_pin, boot_stub)
     sch.add_label("SWCLK", boot_stub[0], boot_stub[1])
-    print(f"   R11: BOOT0 pull-down (10k, sampled on SWCLK/PA14 at reset)")
+    print("   R11: BOOT0 pull-down (10k, sampled on SWCLK/PA14 at reset)")
 
     # SWD debug header
     debug = DebugHeader(
@@ -1566,7 +1617,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     j5_pin5 = debug.header.pin_position("5")
     sch.add_wire(j5_pin5, (j5_pin5[0] + 5, j5_pin5[1]))
     sch.add_label("GND", j5_pin5[0] + 5, j5_pin5[1])
-    print(f"   J5: 6-pin SWD debug header (SWDIO/SWCLK/NRST labels added; pin5 GND wired)")
+    print("   J5: 6-pin SWD debug header (SWDIO/SWCLK/NRST labels added; pin5 GND wired)")
 
     # MCU signal labels (rev B LQFP-32).  All right-side pins (PA0-PA15
     # alternates) emit stubs to the RIGHT; the left-side pins (PB3-PB8,
@@ -1654,18 +1705,18 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Unused MCU pins (LQFP-32): mark explicitly no-connect so ERC passes.
     # Per Q6 resolution: UCC27211 has no EN pin — no DRV_EN_POS/NEG used.
     mcu_no_connect_pins = [
-        "PB9",        # pin 1
-        "PC14",       # pin 2
-        "PC15",       # pin 3
-        "PA7",        # pin 14 (P-R2: gate signals moved to north face)
-        "PB0",        # pin 15
-        "PB1",        # pin 16
-        "PB2",        # pin 17
-        "PA8",        # pin 18
-        "NC/PA9",     # pin 19 (unbonded — no_connect type)
-        "PC6",        # pin 20 (P-R2: precharge moved to PB8)
-        "NC/PA10",    # pin 21 (unbonded — no_connect type)
-        "PA9/PA11",   # pin 22
+        "PB9",  # pin 1
+        "PC14",  # pin 2
+        "PC15",  # pin 3
+        "PA7",  # pin 14 (P-R2: gate signals moved to north face)
+        "PB0",  # pin 15
+        "PB1",  # pin 16
+        "PB2",  # pin 17
+        "PA8",  # pin 18
+        "NC/PA9",  # pin 19 (unbonded — no_connect type)
+        "PC6",  # pin 20 (P-R2: precharge moved to PB8)
+        "NC/PA10",  # pin 21 (unbonded — no_connect type)
+        "PA9/PA11",  # pin 22
         "PA10/PA12",  # pin 23
     ]
     for nc_pin in mcu_no_connect_pins:
@@ -1729,12 +1780,23 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_junction(ldo_gnd[0], RAIL_GND)
 
     # Input cap
-    c6 = sch.add_symbol("Device:C", x=X_LDO - 15, y=115, ref="C6", value="10uF", auto_footprint=True)
+    c6 = sch.add_symbol(
+        "Device:C", x=X_LDO - 15, y=115, ref="C6", value="10uF", auto_footprint=True
+    )
     sch.wire_decoupling_cap(c6, RAIL_VRECT, RAIL_GND)
 
     # Output caps
-    c7 = sch.add_symbol("Device:C", x=X_LDO + 15, y=115, ref="C7", value="10uF", auto_footprint=True)
-    c8 = sch.add_symbol("Device:C", x=X_LDO + 25, y=115, ref="C8", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
+    c7 = sch.add_symbol(
+        "Device:C", x=X_LDO + 15, y=115, ref="C7", value="10uF", auto_footprint=True
+    )
+    c8 = sch.add_symbol(
+        "Device:C",
+        x=X_LDO + 25,
+        y=115,
+        ref="C8",
+        value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
+    )
     sch.wire_decoupling_cap(c7, RAIL_3V3, RAIL_GND)
     sch.wire_decoupling_cap(c8, RAIL_3V3, RAIL_GND)
 
@@ -1769,15 +1831,24 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Input cap C32 sits east of the LM7812 input pin; wire to VRECT rail
     # and GND rail.
     c32 = sch.add_symbol(
-        "Device:C", x=X_LDO + 30, y=60, ref="C32", value="10uF",
+        "Device:C",
+        x=X_LDO + 30,
+        y=60,
+        ref="C32",
+        value="10uF",
         auto_footprint=True,
     )
     sch.wire_decoupling_cap(c32, RAIL_VRECT, RAIL_GND)
     # Output cap C33: VGATE → GND.  Use stub labels to avoid the wire-
     # crossing issue with RAIL_12V (which doesn't exist as a rail anymore).
     c33 = sch.add_symbol(
-        "Device:C", x=X_LDO + 55, y=140, ref="C33", value="100nF",
-        rotation=0, footprint="Capacitor_SMD:C_0805_2012Metric",
+        "Device:C",
+        x=X_LDO + 55,
+        y=140,
+        ref="C33",
+        value="100nF",
+        rotation=0,
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     c33_p1 = c33.pin_position("1")
     c33_p2 = c33.pin_position("2")
@@ -1816,7 +1887,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     led_gnd_side = led.port("GND")  # actually MCU side in this topology
     sch.add_wire(led_gnd_side, (led_gnd_side[0], led_gnd_side[1] + 5))
     sch.add_label("STATUS_LED", led_gnd_side[0], led_gnd_side[1] + 5)
-    print(f"   D2: Status LED with 1k resistor (R12 current-limit, MCU low-side switching)")
+    print("   D2: Status LED with 1k resistor (R12 current-limit, MCU low-side switching)")
 
     # =========================================================================
     # Section 11: Design Notes
@@ -2018,10 +2089,10 @@ def create_softstart_pcb(output_dir: Path) -> Path:
 
     # ---- Row 1: AC INPUT + CHARGING + 12V LDO ----
     # F1 (fuse holder) is 28mm long.  Space it well clear of J1.
-    J1_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 12)          # AC input TB
-    F1_POS = (BOARD_ORIGIN_X + 28, BOARD_ORIGIN_Y + 12)         # Fuse (28mm long)
-    RV1_POS = (BOARD_ORIGIN_X + 48, BOARD_ORIGIN_Y + 12)        # Varistor
-    J2_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 28)          # AC output TB
+    J1_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 12)  # AC input TB
+    F1_POS = (BOARD_ORIGIN_X + 28, BOARD_ORIGIN_Y + 12)  # Fuse (28mm long)
+    RV1_POS = (BOARD_ORIGIN_X + 48, BOARD_ORIGIN_Y + 12)  # Varistor
+    J2_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 28)  # AC output TB
 
     # Voltage divider (now 100:1 = 1M + 10k).
     # Issue #3343 P-R3 (architect S3): moved from the AC-input row
@@ -2034,11 +2105,11 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     # copper.  The pocket between the R20/R21 5 W axial pad columns
     # (x=215.4 @ y=151/165) and U7's passives (x≈205) is free at
     # x≈216-222, y≈155-161.
-    R1_POS = (BOARD_ORIGIN_X + 118, BOARD_ORIGIN_Y + 56)        # 1M (AC_LINE side)
-    R2_POS = (BOARD_ORIGIN_X + 118, BOARD_ORIGIN_Y + 60)        # 10k (GND side)
+    R1_POS = (BOARD_ORIGIN_X + 118, BOARD_ORIGIN_Y + 56)  # 1M (AC_LINE side)
+    R2_POS = (BOARD_ORIGIN_X + 118, BOARD_ORIGIN_Y + 60)  # 10k (GND side)
 
     # Zero-crossing detection (H11AA1 in DIP-6)
-    U2_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 28)         # H11AA1 DIP-6
+    U2_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 28)  # H11AA1 DIP-6
     R3_POS = (BOARD_ORIGIN_X + 70, BOARD_ORIGIN_Y + 22)
     R4_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 22)
     R5_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 22)
@@ -2046,44 +2117,44 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     # Charging circuit (right of zero-crossing)
     # R6 (150Ω 5W axial, 25.4mm pitch): pad1 (92, 12), pad2 (117.4, 12).
     # Body x=91-118 with body half-h=3 (y=9-15).  Place D1 well east.
-    R6_POS = (BOARD_ORIGIN_X + 92, BOARD_ORIGIN_Y + 12)         # 150Ω 5W axial
-    D1_POS = (BOARD_ORIGIN_X + 128, BOARD_ORIGIN_Y + 16)        # Bridge rect
+    R6_POS = (BOARD_ORIGIN_X + 92, BOARD_ORIGIN_Y + 12)  # 150Ω 5W axial
+    D1_POS = (BOARD_ORIGIN_X + 128, BOARD_ORIGIN_Y + 16)  # Bridge rect
 
     # 12V regulator (LM7812 TO-220) for UCC27211 supply.
     # Placed in the right region, fed from D1's VRECT output.
-    U9_POS = (BOARD_ORIGIN_X + 138, BOARD_ORIGIN_Y + 15)        # LM7812
-    C32_POS = (BOARD_ORIGIN_X + 144, BOARD_ORIGIN_Y + 12)       # 10uF input
-    C33_POS = (BOARD_ORIGIN_X + 144, BOARD_ORIGIN_Y + 18)       # 100nF output
+    U9_POS = (BOARD_ORIGIN_X + 138, BOARD_ORIGIN_Y + 15)  # LM7812
+    C32_POS = (BOARD_ORIGIN_X + 144, BOARD_ORIGIN_Y + 12)  # 10uF input
+    C33_POS = (BOARD_ORIGIN_X + 144, BOARD_ORIGIN_Y + 18)  # 100nF output
 
     # ---- Row 2: SUPERCAP POS / DISCHARGE POS / DRIVER POS / PRECHARGE POS ----
     # Supercap POS connector on LEFT edge.  Bank is off-board (hand-soldered).
-    J3_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 42)          # Pos bank TB
+    J3_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 42)  # Pos bank TB
     # Back-to-back FET pair Q1A/Q1B — TO-220 vertical, 12mm apart.
     # Sources tied via short Kelvin run to U5 COM (~5mm away).
-    Q1A_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 42)        # TO-220 vertical
-    Q1B_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 42)        # TO-220 vertical
-    U5_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 42)         # UCC27211 SOIC-8
+    Q1A_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 42)  # TO-220 vertical
+    Q1B_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 42)  # TO-220 vertical
+    U5_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 42)  # UCC27211 SOIC-8
     # Bootstrap + bypass caps for U5 (placed above driver)
-    C20_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 36)        # boot 100nF
-    C21_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 36)        # VCC bulk 10uF
-    C22_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 36)        # VCC bypass 100nF
+    C20_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 36)  # boot 100nF
+    C21_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 36)  # VCC bulk 10uF
+    C22_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 36)  # VCC bypass 100nF
     # Precharge POS subsystem (in-current-path, before main FETs).
     # R20 is 25.4mm pitch axial (5W body 17mm long).  Horizontal placement
     # well east of Q5 so the body (pin1 at R20_POS, pin2 at R20_POS+25.4)
     # extends into the empty corridor between row 2 (driver column) and
     # row 3 (shunt column).
-    Q5_POS = (BOARD_ORIGIN_X + 72, BOARD_ORIGIN_Y + 42)         # AO3400 SOT-23
+    Q5_POS = (BOARD_ORIGIN_X + 72, BOARD_ORIGIN_Y + 42)  # AO3400 SOT-23
     # R20 (100Ω 5W axial, 25.4mm pad pitch) horizontal in the corridor
     # BETWEEN row 2 (y=42) and row 3 (y=58).  Pad1 (90, 51), pad2 (115.4, 51).
     # Six-mm body half-height fits cleanly in the 47-55 corridor.
-    R20_POS = (BOARD_ORIGIN_X + 90, BOARD_ORIGIN_Y + 51)        # 100Ω 5W axial pad1
+    R20_POS = (BOARD_ORIGIN_X + 90, BOARD_ORIGIN_Y + 51)  # 100Ω 5W axial pad1
     # Gate protection (R_GB1-2 + D_TVS1-2 + Q7 failsafe) — clustered SOUTH of U5
     # 0805 R (2.5mm), D_SMA (5mm) → space 5mm apart minimum
     R_GB1_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 49)
     D_TVS1_POS = (BOARD_ORIGIN_X + 51, BOARD_ORIGIN_Y + 49)
     R_GB2_POS = (BOARD_ORIGIN_X + 57, BOARD_ORIGIN_Y + 49)
     D_TVS2_POS = (BOARD_ORIGIN_X + 63, BOARD_ORIGIN_Y + 49)
-    Q7_POS = (BOARD_ORIGIN_X + 69, BOARD_ORIGIN_Y + 49)         # 2N7002 failsafe
+    Q7_POS = (BOARD_ORIGIN_X + 69, BOARD_ORIGIN_Y + 49)  # 2N7002 failsafe
 
     # ---- Row 3: SHUNT + CURRENT SENSE + OC COMPARATOR + BUS ENVELOPE ----
     # R9 shunt (5mΩ 2512) sits at center as the star-ground tie.
@@ -2102,53 +2173,53 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     # LM393 comparator (SOIC-8) + threshold divider + pull-up.
     # Passives placed directly NEXT to U7 body (not above/below) to avoid
     # collision with the precharge corridor at y=51 (R20) and y=65 (R21).
-    U7_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 58)        # LM393 SOIC-8
-    R22_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 56)        # 1k threshold top
-    R23_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 60)        # 10k threshold bot
-    R24_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 56)       # 10k pull-up
-    C34_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 60)       # LM393 100nF
+    U7_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 58)  # LM393 SOIC-8
+    R22_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 56)  # 1k threshold top
+    R23_POS = (BOARD_ORIGIN_X + 95, BOARD_ORIGIN_Y + 60)  # 10k threshold bot
+    R24_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 56)  # 10k pull-up
+    C34_POS = (BOARD_ORIGIN_X + 105, BOARD_ORIGIN_Y + 60)  # LM393 100nF
     # MCP6001 bus-envelope buffer (SOT-23-5) — near AC sense input
     U8_POS = (BOARD_ORIGIN_X + 125, BOARD_ORIGIN_Y + 58)
-    C30_POS = (BOARD_ORIGIN_X + 130, BOARD_ORIGIN_Y + 58)       # 100nF bypass east
+    C30_POS = (BOARD_ORIGIN_X + 130, BOARD_ORIGIN_Y + 58)  # 100nF bypass east
     # dV/dt cap + load resistor (place east of bus envelope)
-    C31_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 56)       # 100nF series
-    R29_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 60)       # 10k to GND
+    C31_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 56)  # 100nF series
+    R29_POS = (BOARD_ORIGIN_X + 135, BOARD_ORIGIN_Y + 60)  # 10k to GND
 
     # ---- Row 4: SUPERCAP NEG / DISCHARGE NEG / DRIVER NEG / PRECHARGE NEG ----
-    J4_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 74)          # Neg bank TB (left edge)
-    Q2A_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 74)        # TO-220 vertical
-    Q2B_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 74)        # TO-220 vertical
-    U6_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 74)         # UCC27211 SOIC-8
-    C23_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 68)        # boot 100nF
-    C24_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 68)        # VCC bulk 10uF
-    C25_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 68)        # VCC bypass 100nF
-    Q6_POS = (BOARD_ORIGIN_X + 72, BOARD_ORIGIN_Y + 74)         # AO3400 SOT-23
+    J4_POS = (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 74)  # Neg bank TB (left edge)
+    Q2A_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 74)  # TO-220 vertical
+    Q2B_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 74)  # TO-220 vertical
+    U6_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 74)  # UCC27211 SOIC-8
+    C23_POS = (BOARD_ORIGIN_X + 55, BOARD_ORIGIN_Y + 68)  # boot 100nF
+    C24_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 68)  # VCC bulk 10uF
+    C25_POS = (BOARD_ORIGIN_X + 65, BOARD_ORIGIN_Y + 68)  # VCC bypass 100nF
+    Q6_POS = (BOARD_ORIGIN_X + 72, BOARD_ORIGIN_Y + 74)  # AO3400 SOT-23
     # R21: horizontal in the corridor between row 3 (y=58) and row 4 (y=74).
     # Pad1 (90, 65), pad2 (115.4, 65).
-    R21_POS = (BOARD_ORIGIN_X + 90, BOARD_ORIGIN_Y + 65)        # 100Ω 5W axial pad1
+    R21_POS = (BOARD_ORIGIN_X + 90, BOARD_ORIGIN_Y + 65)  # 100Ω 5W axial pad1
     R_GB3_POS = (BOARD_ORIGIN_X + 45, BOARD_ORIGIN_Y + 80)
     D_TVS3_POS = (BOARD_ORIGIN_X + 51, BOARD_ORIGIN_Y + 80)
     R_GB4_POS = (BOARD_ORIGIN_X + 57, BOARD_ORIGIN_Y + 80)
     D_TVS4_POS = (BOARD_ORIGIN_X + 63, BOARD_ORIGIN_Y + 80)
-    Q8_POS = (BOARD_ORIGIN_X + 69, BOARD_ORIGIN_Y + 80)         # 2N7002 failsafe
+    Q8_POS = (BOARD_ORIGIN_X + 69, BOARD_ORIGIN_Y + 80)  # 2N7002 failsafe
 
     # ---- Row 5: BANK DIVIDERS + 3V3 LDO + MCU island ----
     # Bank voltage dividers (30:1 = ~270k + 9.1k, but recipe value is just nominal)
-    R25_POS = (BOARD_ORIGIN_X + 10, BOARD_ORIGIN_Y + 88)        # bank pos top
-    R26_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 88)        # bank pos bot
-    R27_POS = (BOARD_ORIGIN_X + 18, BOARD_ORIGIN_Y + 88)        # bank neg top
-    R28_POS = (BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 88)        # bank neg bot
+    R25_POS = (BOARD_ORIGIN_X + 10, BOARD_ORIGIN_Y + 88)  # bank pos top
+    R26_POS = (BOARD_ORIGIN_X + 14, BOARD_ORIGIN_Y + 88)  # bank pos bot
+    R27_POS = (BOARD_ORIGIN_X + 18, BOARD_ORIGIN_Y + 88)  # bank neg top
+    R28_POS = (BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 88)  # bank neg bot
     # 3.3V LDO (XC6206 SOT-23-3)
-    U4_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 88)         # XC6206
-    C6_POS = (BOARD_ORIGIN_X + 35, BOARD_ORIGIN_Y + 88)         # 10uF input
-    C7_POS = (BOARD_ORIGIN_X + 39, BOARD_ORIGIN_Y + 88)         # 10uF output
-    C8_POS = (BOARD_ORIGIN_X + 43, BOARD_ORIGIN_Y + 88)         # 100nF output
+    U4_POS = (BOARD_ORIGIN_X + 30, BOARD_ORIGIN_Y + 88)  # XC6206
+    C6_POS = (BOARD_ORIGIN_X + 35, BOARD_ORIGIN_Y + 88)  # 10uF input
+    C7_POS = (BOARD_ORIGIN_X + 39, BOARD_ORIGIN_Y + 88)  # 10uF output
+    C8_POS = (BOARD_ORIGIN_X + 43, BOARD_ORIGIN_Y + 88)  # 100nF output
     # MCU (STM32G031K8T6 LQFP-32, 7×7mm with 0.8mm pitch — larger than TSSOP-20)
     # Placed in MCU island, isolated from the high-current rows (y=42..80).
-    U1_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 90)         # LQFP-32
-    C2_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 87)         # 100nF
-    C3_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 90)         # 100nF
-    C4_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 93)         # 4.7uF
+    U1_POS = (BOARD_ORIGIN_X + 60, BOARD_ORIGIN_Y + 90)  # LQFP-32
+    C2_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 87)  # 100nF
+    C3_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 90)  # 100nF
+    C4_POS = (BOARD_ORIGIN_X + 50, BOARD_ORIGIN_Y + 93)  # 4.7uF
 
     # ---- Row 6: MCU SUPPORT + STATUS LED + DEBUG ----
     # SW1 is 8x7mm — issue #3343 P-R3 (architect S3): dropped SW1 + C5
@@ -2156,13 +2227,13 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     # run straight east from U1 to J5 without threading the 8×7 mm
     # switch body; NRST also benefits (its J5 + reset-cluster pads stop
     # competing with SWD for the same pad-gap channels).
-    SW1_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 96)        # reset button
-    R10_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 87)        # 10k NRST pull-up
-    C5_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 96)         # 100nF debounce
-    R11_POS = (BOARD_ORIGIN_X + 84, BOARD_ORIGIN_Y + 87)        # 10k BOOT0
-    D2_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 88)         # Status LED
-    R12_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 92)        # 1k LED limit
-    J5_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 90)        # SWD header 1x6
+    SW1_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 96)  # reset button
+    R10_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 87)  # 10k NRST pull-up
+    C5_POS = (BOARD_ORIGIN_X + 80, BOARD_ORIGIN_Y + 96)  # 100nF debounce
+    R11_POS = (BOARD_ORIGIN_X + 84, BOARD_ORIGIN_Y + 87)  # 10k BOOT0
+    D2_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 88)  # Status LED
+    R12_POS = (BOARD_ORIGIN_X + 88, BOARD_ORIGIN_Y + 92)  # 1k LED limit
+    J5_POS = (BOARD_ORIGIN_X + 100, BOARD_ORIGIN_Y + 90)  # SWD header 1x6
 
     # =========================================================================
     # Footprint generators
@@ -2253,7 +2324,9 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (pad "2" thru_hole oval (at 2.54 0) (size 2.5 2.5) (drill 1.3) (layers "*.Cu" "*.Mask") (net {n2} "{net2}"))
   )"""
 
-    def generate_to220(ref: str, pos: tuple, value: str, gate_net: str, drain_net: str, source_net: str) -> str:
+    def generate_to220(
+        ref: str, pos: tuple, value: str, gate_net: str, drain_net: str, source_net: str
+    ) -> str:
         x, y = pos
         g = NETS.get(gate_net, 0)
         d = NETS.get(drain_net, 0)
@@ -2331,7 +2404,9 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     (pad "2" smd roundrect (at 3.1 0) (size 1.6 2.7) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {n2} "{net2}"))
   )"""
 
-    def generate_sot223(ref: str, pos: tuple, value: str, pin1_net: str, pin2_net: str, pin3_net: str) -> str:
+    def generate_sot223(
+        ref: str, pos: tuple, value: str, pin1_net: str, pin2_net: str, pin3_net: str
+    ) -> str:
         x, y = pos
         n1 = NETS.get(pin1_net, 0)
         n2 = NETS.get(pin2_net, 0)
@@ -2386,26 +2461,26 @@ def create_softstart_pcb(output_dir: Path) -> Path:
         pitch = 0.65
         # Pin -> net assignments by physical pin number (1..20)
         pin_net = {
-            1: "",          # NC
-            2: "",          # NC
-            3: "",          # NC
+            1: "",  # NC
+            2: "",  # NC
+            3: "",  # NC
             4: "+3.3V",
             5: "GND",
             6: "NRST",
             7: "V_AC_SENSE",
             8: "I_SENSE_OUT",
-            9: "",          # NC
-            10: "",         # NC
+            9: "",  # NC
+            10: "",  # NC
             11: "ZC_DETECT",
-            12: "",         # NC
+            12: "",  # NC
             13: "GATE_POS",
             14: "GATE_NEG",
             15: "STATUS_LED",
-            16: "",         # NC
-            17: "",         # NC
+            16: "",  # NC
+            17: "",  # NC
             18: "SWDIO",
             19: "SWCLK",
-            20: "",         # NC
+            20: "",  # NC
         }
 
         pad_lines = []
@@ -2420,11 +2495,11 @@ def create_softstart_pcb(output_dir: Path) -> Path:
                 # Pin 1 should be at top-left or bottom-left depending on convention.
                 # KiCad standard: TSSOP pin 1 at top-left with pin-1 marker.
                 # Y increases downward in the footprint frame.
-                pad_y = ((pin - 5.5) * pitch)  # pin 1 -> -2.925, pin 10 -> 2.925
+                pad_y = (pin - 5.5) * pitch  # pin 1 -> -2.925, pin 10 -> 2.925
             else:
                 # Right column: pin 11 at bottom-right, pin 20 at top-right
                 pad_x = 2.85
-                pad_y = ((15.5 - pin) * pitch)  # pin 11 -> 2.925, pin 20 -> -2.925
+                pad_y = (15.5 - pin) * pitch  # pin 11 -> 2.925, pin 20 -> -2.925
             pad_lines.append(
                 f'    (pad "{pin}" smd rect (at {pad_x:.3f} {pad_y:.3f}) '
                 f'(size 1.5 0.4) (layers "F.Cu" "F.Paste" "F.Mask") '
@@ -2540,7 +2615,11 @@ def create_softstart_pcb(output_dir: Path) -> Path:
   )"""
 
     def generate_resistor_axial(
-        ref: str, pos: tuple, value: str, net1: str, net2: str,
+        ref: str,
+        pos: tuple,
+        value: str,
+        net1: str,
+        net2: str,
         rotation: float = 0,
     ) -> str:
         """Axial 5W resistor (25.4mm pad pitch).  Set rotation=90 for vertical."""
@@ -2658,7 +2737,9 @@ def create_softstart_pcb(output_dir: Path) -> Path:
             else:
                 pad_x = 2.4
                 # pin 8 at -1.905, pin 7 at -0.635, pin 6 at +0.635, pin 5 at +1.905
-                pad_y = (8.5 - pin) * 1.27 * -1 + 0  # pin8=-1.905, pin7=-0.635, pin6=+0.635, pin5=+1.905
+                pad_y = (
+                    8.5 - pin
+                ) * 1.27 * -1 + 0  # pin8=-1.905, pin7=-0.635, pin6=+0.635, pin5=+1.905
                 # Simpler: pin 5 -> +1.905, pin 6 -> +0.635, pin 7 -> -0.635, pin 8 -> -1.905
                 pad_y = (6.5 - pin) * 1.27
             pad_lines.append(
@@ -2681,7 +2762,9 @@ def create_softstart_pcb(output_dir: Path) -> Path:
 {pads}
   )"""
 
-    def generate_sot23_3(ref: str, pos: tuple, value: str, pin1_net: str, pin2_net: str, pin3_net: str) -> str:
+    def generate_sot23_3(
+        ref: str, pos: tuple, value: str, pin1_net: str, pin2_net: str, pin3_net: str
+    ) -> str:
         """SOT-23-3 (3-pin) footprint for AO3400, 2N7002, etc.
 
         Pin layout:
@@ -2823,9 +2906,9 @@ def create_softstart_pcb(output_dir: Path) -> Path:
             1: "",  # PB9 NC
             2: "",  # PC14 NC
             3: "",  # PC15 NC
-            4: "+3.3V",   # VDD
-            5: "GND",     # VSS
-            6: "NRST",    # PF2/NRST
+            4: "+3.3V",  # VDD
+            5: "GND",  # VSS
+            6: "NRST",  # PF2/NRST
             7: "V_AC_SENSE",
             8: "V_BUS_DVDT",
             9: "I_SENSE_OUT",
@@ -2866,15 +2949,15 @@ def create_softstart_pcb(output_dir: Path) -> Path:
         # from the nominal 3.75 to 3.85 so the inner corner gap clears the
         # 0.127mm JLCPCB tier-1 pad-pad rule with margin.
         pad_lines = []
-        pad_long = 1.4     # pad length (long dimension, perpendicular to body edge)
-        pad_short = 0.40   # pad width (along pitch)
+        pad_long = 1.4  # pad length (long dimension, perpendicular to body edge)
+        pad_short = 0.40  # pad width (along pitch)
         pad_offset = 3.85  # pad center offset from body center
         for pin in range(1, 33):
             net_name = pin_net.get(pin, "")
             net_num = NETS.get(net_name, 0) if net_name else 0
 
             side = (pin - 1) // 8  # 0=left, 1=bottom, 2=right, 3=top
-            idx = (pin - 1) % 8     # 0..7 within the side
+            idx = (pin - 1) % 8  # 0..7 within the side
 
             if side == 0:
                 # Left side, pins 1-8 top to bottom
@@ -2991,25 +3074,31 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_to220("Q1B", Q1B_POS, "IRFB4110", "UCC_LO_POS", "BUS_LINE", "SRC_POS"))
 
     print("\n9. Adding rev B UCC27211 gate driver (positive bank)...")
-    parts.append(generate_soic8("U5", U5_POS, "UCC27211", {
-        1: "VGATE",      # VDD
-        2: "VBOOT_POS",  # HB
-        3: "UCC_HO_POS", # HO (drives Q1A gate via R_GB1/D_TVS1 protection)
-        4: "SRC_POS",    # HS (Kelvin source — adjacent to Q1A/Q1B source-tie)
-        5: "UCC_LO_POS", # LO (drives Q1B gate)
-        6: "SRC_POS",    # VSS (Kelvin source — common with HS)
-        7: "GATE_POS_B", # LI (low-side input from MCU)
-        8: "GATE_POS_A", # HI (high-side input from MCU)
-    }))
-    parts.append(generate_cap_0805("C20", C20_POS, "100nF", "VBOOT_POS", "SRC_POS"))    # bootstrap
-    parts.append(generate_cap_0805("C21", C21_POS, "10uF", "VGATE", "SRC_POS"))         # VCC bulk
-    parts.append(generate_cap_0805("C22", C22_POS, "100nF", "VGATE", "SRC_POS"))        # VCC bypass
+    parts.append(
+        generate_soic8(
+            "U5",
+            U5_POS,
+            "UCC27211",
+            {
+                1: "VGATE",  # VDD
+                2: "VBOOT_POS",  # HB
+                3: "UCC_HO_POS",  # HO (drives Q1A gate via R_GB1/D_TVS1 protection)
+                4: "SRC_POS",  # HS (Kelvin source — adjacent to Q1A/Q1B source-tie)
+                5: "UCC_LO_POS",  # LO (drives Q1B gate)
+                6: "SRC_POS",  # VSS (Kelvin source — common with HS)
+                7: "GATE_POS_B",  # LI (low-side input from MCU)
+                8: "GATE_POS_A",  # HI (high-side input from MCU)
+            },
+        )
+    )
+    parts.append(generate_cap_0805("C20", C20_POS, "100nF", "VBOOT_POS", "SRC_POS"))  # bootstrap
+    parts.append(generate_cap_0805("C21", C21_POS, "10uF", "VGATE", "SRC_POS"))  # VCC bulk
+    parts.append(generate_cap_0805("C22", C22_POS, "100nF", "VGATE", "SRC_POS"))  # VCC bypass
 
     print("\n10. Adding rev B precharge subsystem (positive bank)...")
     # Q5 (AO3400 SOT-23): gate=PRECHARGE_POS, source=SRC_POS, drain=BUS_LINE
     # R20: 100Ω 5W axial in series between SCAP_POS+ and Q5 drain.
-    parts.append(generate_sot23_3("Q5", Q5_POS, "AO3400",
-                                  "PRECHARGE_POS", "SRC_POS", "BUS_LINE"))
+    parts.append(generate_sot23_3("Q5", Q5_POS, "AO3400", "PRECHARGE_POS", "SRC_POS", "BUS_LINE"))
     parts.append(generate_resistor_axial("R20", R20_POS, "100R 5W", "SCAP_POS+", "BUS_LINE"))
 
     print("\n11. Adding rev B gate protection (positive bank)...")
@@ -3028,16 +3117,23 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_cap_0805("C1", C1_POS, "100nF", "+3.3V", "GND"))
 
     print("\n13. Adding rev B LM393 hardware OC comparator...")
-    parts.append(generate_soic8("U7", U7_POS, "LM393", {
-        1: "OC_TRIP",      # 1A OUT (open-collector)
-        2: "V_OC_TH",      # 1A IN-
-        3: "I_SENSE_OUT",  # 1A IN+
-        4: "GND",          # GND
-        5: "",             # 2B IN+ NC
-        6: "",             # 2B IN- NC
-        7: "",             # 2B OUT NC
-        8: "+3.3V",        # VCC
-    }))
+    parts.append(
+        generate_soic8(
+            "U7",
+            U7_POS,
+            "LM393",
+            {
+                1: "OC_TRIP",  # 1A OUT (open-collector)
+                2: "V_OC_TH",  # 1A IN-
+                3: "I_SENSE_OUT",  # 1A IN+
+                4: "GND",  # GND
+                5: "",  # 2B IN+ NC
+                6: "",  # 2B IN- NC
+                7: "",  # 2B OUT NC
+                8: "+3.3V",  # VCC
+            },
+        )
+    )
     parts.append(generate_resistor_0805("R22", R22_POS, "1k", "+3.3V", "V_OC_TH"))
     parts.append(generate_resistor_0805("R23", R23_POS, "10k", "V_OC_TH", "GND"))
     parts.append(generate_resistor_0805("R24", R24_POS, "10k", "+3.3V", "OC_TRIP"))
@@ -3072,23 +3168,29 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_to220("Q2B", Q2B_POS, "IRFB4110", "UCC_LO_NEG", "BUS_LINE", "SRC_NEG"))
 
     print("\n16. Adding rev B UCC27211 gate driver (negative bank)...")
-    parts.append(generate_soic8("U6", U6_POS, "UCC27211", {
-        1: "VGATE",
-        2: "VBOOT_NEG",
-        3: "UCC_HO_NEG",
-        4: "SRC_NEG",
-        5: "UCC_LO_NEG",
-        6: "SRC_NEG",
-        7: "GATE_NEG_B",
-        8: "GATE_NEG_A",
-    }))
+    parts.append(
+        generate_soic8(
+            "U6",
+            U6_POS,
+            "UCC27211",
+            {
+                1: "VGATE",
+                2: "VBOOT_NEG",
+                3: "UCC_HO_NEG",
+                4: "SRC_NEG",
+                5: "UCC_LO_NEG",
+                6: "SRC_NEG",
+                7: "GATE_NEG_B",
+                8: "GATE_NEG_A",
+            },
+        )
+    )
     parts.append(generate_cap_0805("C23", C23_POS, "100nF", "VBOOT_NEG", "SRC_NEG"))
     parts.append(generate_cap_0805("C24", C24_POS, "10uF", "VGATE", "SRC_NEG"))
     parts.append(generate_cap_0805("C25", C25_POS, "100nF", "VGATE", "SRC_NEG"))
 
     print("\n17. Adding rev B precharge subsystem (negative bank)...")
-    parts.append(generate_sot23_3("Q6", Q6_POS, "AO3400",
-                                  "PRECHARGE_NEG", "SRC_NEG", "BUS_LINE"))
+    parts.append(generate_sot23_3("Q6", Q6_POS, "AO3400", "PRECHARGE_NEG", "SRC_NEG", "BUS_LINE"))
     parts.append(generate_resistor_axial("R21", R21_POS, "100R 5W", "SCAP_NEG+", "BUS_LINE"))
 
     print("\n18. Adding rev B gate protection (negative bank)...")
@@ -3121,13 +3223,19 @@ def create_softstart_pcb(output_dir: Path) -> Path:
     parts.append(generate_resistor_0805("R12", R12_POS, "1k", "+3.3V", "STATUS_LED"))
 
     print("\n23. Adding debug header...")
-    parts.append(generate_pin_header("J5", J5_POS, 6, "SWD", ["+3.3V", "SWDIO", "GND", "SWCLK", "GND", "NRST"]))
+    parts.append(
+        generate_pin_header(
+            "J5", J5_POS, 6, "SWD", ["+3.3V", "SWDIO", "GND", "SWCLK", "GND", "NRST"]
+        )
+    )
 
     print("\n24. Adding reset/boot components...")
     parts.append(generate_switch("SW1", SW1_POS))
     parts.append(generate_resistor_0805("R10", R10_POS, "10k", "+3.3V", "NRST"))
     parts.append(generate_cap_0805("C5", C5_POS, "100nF", "NRST", "GND"))
-    parts.append(generate_resistor_0805("R11", R11_POS, "10k", "GND", "SWCLK"))  # BOOT0 pull-down; pad2 ties to SWCLK to match schematic (issue #3087)
+    parts.append(
+        generate_resistor_0805("R11", R11_POS, "10k", "GND", "SWCLK")
+    )  # BOOT0 pull-down; pad2 ties to SWCLK to match schematic (issue #3087)
 
     parts.append(")")  # Close kicad_pcb
 
@@ -3194,23 +3302,36 @@ def _route_pcb_with_auto_pcb_size(input_path: Path, output_path: Path) -> bool:
     sidecar_path = _write_power_net_class_sidecar(output_path.parent)
 
     cmd = [
-        sys.executable, "-m", "kicad_tools.cli", "route",
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
         str(input_path),
-        "--output", str(output_path),
-        "--backend", "cpp",
+        "--output",
+        str(output_path),
+        "--backend",
+        "cpp",
         "--auto-pcb-size",
-        "--manufacturer", "jlcpcb-tier1",
-        "--skip-nets", skip,
+        "--manufacturer",
+        "jlcpcb-tier1",
+        "--skip-nets",
+        skip,
         # PR #3481 review fix: skeleton traces for the routed power nets.
-        "--net-class-map", str(sidecar_path),
-        "--seed", "42",
-        "--timeout", "420",
-        "--per-net-timeout", "45",
+        "--net-class-map",
+        str(sidecar_path),
+        "--seed",
+        "42",
+        "--timeout",
+        "420",
+        "--per-net-timeout",
+        "45",
         # The recipe's rev B clearance target is 0.20mm (per the
         # architect plan #3343 P4); the manufacturer profile pins the
         # rest of the design-rule defaults.
-        "--clearance", "0.20",
-        "--trace-width", "0.30",
+        "--clearance",
+        "0.20",
+        "--trace-width",
+        "0.30",
     ]
 
     print(f"\n   Command: {' '.join(cmd)}")
@@ -3565,11 +3686,13 @@ def _repair_drill_drill_vias(pcb_path: Path, min_clearance: float = 0.1016) -> i
             px, py = pad.position
             rx = px * math.cos(theta) + py * math.sin(theta)
             ry = -px * math.sin(theta) + py * math.cos(theta)
-            th_drills.append((
-                fp.position[0] + rx + origin_x,
-                fp.position[1] + ry + origin_y,
-                float(pad.drill) / 2.0,
-            ))
+            th_drills.append(
+                (
+                    fp.position[0] + rx + origin_x,
+                    fp.position[1] + ry + origin_y,
+                    float(pad.drill) / 2.0,
+                )
+            )
 
     text = pcb_path.read_text()
     moved = 0
@@ -3625,9 +3748,7 @@ def _fmt(value: float) -> str:
     return s if s else "0"
 
 
-def _bridge_power_net_islands(
-    pcb_path: Path, candidate_nets: list[str]
-) -> list[str]:
+def _bridge_power_net_islands(pcb_path: Path, candidate_nets: list[str]) -> list[str]:
     """Join disconnected power-net islands with a B.Cu bridge pour
     (PR #3481 review fix).
 
@@ -3692,10 +3813,7 @@ def _bridge_power_net_islands(
     import re
 
     net_ids = {
-        name: int(num)
-        for num, name in re.findall(
-            r'\(net (\d+) "([^"]*)"\)', pcb_path.read_text()
-        )
+        name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', pcb_path.read_text())
     }
 
     # Bridge zones (B.Cu, priorities above the F.Cu reinforcements).
@@ -3729,7 +3847,7 @@ def _bridge_power_net_islands(
             for name, x, y, _w in anchors:
                 print(f"   bridge via-in-pad @ ({x:.2f}, {y:.2f}) for {name} ({net})")
                 via_lines.append(
-                    f'  (via (at {x} {y}) (size 0.45) (drill 0.2) '
+                    f"  (via (at {x} {y}) (size 0.45) (drill 0.2) "
                     f'(layers "F.Cu" "B.Cu") (net {net_ids[net]}) '
                     f'(uuid "{generate_uuid()}"))'
                 )
@@ -3855,27 +3973,42 @@ def route_pcb(
         preserve: bool,
     ) -> list[str]:
         cmd = [
-            sys.executable, "-m", "kicad_tools.cli", "route",
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "route",
             str(in_p),
-            "--output", str(out_p),
+            "--output",
+            str(out_p),
             "--auto-layers",
-            "--starting-layers", "4",
-            "--max-layers", "4",
-            "--manufacturer", "jlcpcb-tier1",
-            "--backend", "cpp",
+            "--starting-layers",
+            "4",
+            "--max-layers",
+            "4",
+            "--manufacturer",
+            "jlcpcb-tier1",
+            "--backend",
+            "cpp",
             # jlcpcb-tier1 supports via-in-pad; 0.3 mm in-pad rescues
             # keep the U1 LQFP-32 escapes manufacturable (board-05
             # #3425 pattern)
             "--micro-via-in-pad-fallback",
-            "--seed", str(ROUTE_SEED),
-            "--timeout", str(timeout_s),
-            "--per-net-timeout", str(per_net_s),
-            "--clearance", "0.20",
-            "--trace-width", "0.30",
-            "--skip-nets", ",".join(skip),
+            "--seed",
+            str(ROUTE_SEED),
+            "--timeout",
+            str(timeout_s),
+            "--per-net-timeout",
+            str(per_net_s),
+            "--clearance",
+            "0.20",
+            "--trace-width",
+            "0.30",
+            "--skip-nets",
+            ",".join(skip),
             # PR #3481 review fix: 0.3-0.4 mm skeleton traces for the
             # routed power-distribution nets.
-            "--net-class-map", str(sidecar_path),
+            "--net-class-map",
+            str(sidecar_path),
         ]
         if preserve:
             cmd.append("--preserve-existing")
@@ -3883,11 +4016,9 @@ def route_pcb(
 
     import re as _re
 
-    all_nets = sorted({
-        name
-        for name in _re.findall(r'\(net \d+ "([^"]*)"\)', input_path.read_text())
-        if name
-    })
+    all_nets = sorted(
+        {name for name in _re.findall(r'\(net \d+ "([^"]*)"\)', input_path.read_text()) if name}
+    )
 
     env = dict(os.environ)
     env.setdefault("PYTHONHASHSEED", "0")
@@ -3895,8 +4026,7 @@ def route_pcb(
     print(f"\n1. Input: {input_path}")
     print(f"   Output: {output_path}")
     print(f"   Skipping pour nets ({len(skip_nets)}): {skip_nets}")
-    print(f"   Power-trace net classes: {sidecar_path.name} "
-          f"({len(POWER_TRACE_WIDTHS_MM)} nets)")
+    print(f"   Power-trace net classes: {sidecar_path.name} ({len(POWER_TRACE_WIDTHS_MM)} nets)")
 
     # Pass 2a: main pass.  ``ROUTE_FIRST_NETS`` order first via their
     # priority-1 net class in the sidecar.
@@ -3942,9 +4072,7 @@ def route_pcb(
         incomplete = [
             n.net_name
             for n in analyzer.analyze().nets
-            if n.net_name not in skip_nets
-            and n.total_pads >= 2
-            and n.status != "complete"
+            if n.net_name not in skip_nets and n.total_pads >= 2 and n.status != "complete"
         ]
     except Exception as exc:
         print(f"   WARNING: recovery-pass analysis failed ({exc}); skipping")
@@ -4014,13 +4142,8 @@ def route_pcb(
     # skeletons (see ``_add_reinforcement_zones`` for the contract).
     print("\n7b. Adding reinforcement pours for routed power nets...")
     try:
-        reinforcement_count = _add_reinforcement_zones(
-            output_path, REINFORCEMENT_POUR_NETS
-        )
-        print(
-            f"   Added {reinforcement_count} reinforcement zone(s) for "
-            f"{REINFORCEMENT_POUR_NETS}"
-        )
+        reinforcement_count = _add_reinforcement_zones(output_path, REINFORCEMENT_POUR_NETS)
+        print(f"   Added {reinforcement_count} reinforcement zone(s) for {REINFORCEMENT_POUR_NETS}")
     except Exception as exc:
         print(f"   ERROR: reinforcement zone generation failed: {exc}")
         return False
@@ -4029,7 +4152,11 @@ def route_pcb(
     # connectivity analyzer below see actual filled polygons.
     print("\n8. Filling zones (first pass)...")
     fill_argv = [
-        sys.executable, "-m", "kicad_tools.cli", "zones", "fill",
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "zones",
+        "fill",
         str(output_path),
     ]
     fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
@@ -4046,12 +4173,18 @@ def route_pcb(
     # land inside a neighbouring same-net pad (issue #3271).
     print("\n9. Stitching plane-net pads (GND, +3.3V)...")
     stitch_argv = [
-        sys.executable, "-m", "kicad_tools.cli", "stitch",
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "stitch",
         str(output_path),
-        "--mfr", "jlcpcb-tier1",
+        "--mfr",
+        "jlcpcb-tier1",
         "--avoid-pad-overlap",
-        "--net", "GND",
-        "--net", "+3.3V",
+        "--net",
+        "GND",
+        "--net",
+        "+3.3V",
     ]
     stitch_result = subprocess.run(stitch_argv, capture_output=True, text=True)
     if stitch_result.returncode == 0:
@@ -4080,9 +4213,7 @@ def route_pcb(
         audit = _audit_pour_nets(output_path, skip_nets)
         net_ids = {
             name: int(num)
-            for num, name in _re.findall(
-                r'\(net (\d+) "([^"]*)"\)', output_path.read_text()
-            )
+            for num, name in _re.findall(r'\(net (\d+) "([^"]*)"\)', output_path.read_text())
         }
         # Absolute pad centers for the stranded pads.
         analyzer = NetStatusAnalyzer(output_path)
@@ -4116,16 +4247,14 @@ def route_pcb(
                         )
                         continue
                     x, y = pad_centers[(net, pad_name)]
-                    repair_vias.append(
-                        (x, y, net_ids[net], f"{pad_name} ({net})")
-                    )
+                    repair_vias.append((x, y, net_ids[net], f"{pad_name} ({net})"))
         if repair_vias:
             content = output_path.read_text()
             via_lines = []
             for x, y, net_num, label in repair_vias:
                 print(f"   via-in-pad @ ({x:.2f}, {y:.2f}) for {label}")
                 via_lines.append(
-                    f'  (via (at {x} {y}) (size 0.45) (drill 0.2) '
+                    f"  (via (at {x} {y}) (size 0.45) (drill 0.2) "
                     f'(layers "F.Cu" "B.Cu") (net {net_num}) '
                     f'(uuid "{generate_uuid()}"))'
                 )
@@ -4198,7 +4327,11 @@ def route_pcb(
     # gerbers contain the final copper).
     print("\n11. Re-filling zones (final pass)...")
     fill_argv = [
-        sys.executable, "-m", "kicad_tools.cli", "zones", "fill",
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "zones",
+        "fill",
         str(output_path),
     ]
     fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
@@ -4250,10 +4383,15 @@ def route_pcb(
             print(f"   stderr: {fill_result.stderr.strip()}")
         return False
     seg_zone_argv = [
-        sys.executable, "-m", "kicad_tools.cli", "check",
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "check",
         str(output_path),
-        "--mfr", "jlcpcb-tier1",
-        "--only", "segment_zone",
+        "--mfr",
+        "jlcpcb-tier1",
+        "--only",
+        "segment_zone",
         "--errors-only",
     ]
     gate_result = subprocess.run(seg_zone_argv, capture_output=True, text=True)
@@ -4288,9 +4426,7 @@ def route_pcb(
         # their bridge zone's boundary polygon makes the analyzer below
         # report their pads connected even if the fill never joined the
         # islands (issue #3482).
-        audit_nets = sorted(
-            set(skip_nets) | set(POWER_TRACE_WIDTHS_MM) | set(bridged_nets)
-        )
+        audit_nets = sorted(set(skip_nets) | set(POWER_TRACE_WIDTHS_MM) | set(bridged_nets))
         audit = _audit_pour_nets(output_path, audit_nets)
         for net, info in audit.items():
             n_pads = sum(len(g) for g in info["pad_groups"])
@@ -4343,9 +4479,7 @@ def route_pcb(
     except Exception as exc:
         print(f"   WARNING: routed-net verification failed: {exc}")
 
-    success = (
-        pour_ok and signal_total > 0 and signal_complete == signal_total
-    )
+    success = pour_ok and signal_total > 0 and signal_complete == signal_total
     if success:
         print(f"\n   SUCCESS: all {signal_total} routed nets + all pours connected!")
     else:
@@ -4412,8 +4546,12 @@ def run_drc(pcb_path: Path) -> bool:
         # default jlcpcb profile does not).
         result = subprocess.run(
             [
-                sys.executable, "-m", "kicad_tools.cli", "check",
-                "--mfr", "jlcpcb-tier1",
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                "--mfr",
+                "jlcpcb-tier1",
                 str(pcb_path),
             ],
             capture_output=True,

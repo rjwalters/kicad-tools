@@ -28,9 +28,7 @@ def _build_parser():
 def _resolve_two_phase_iterations(parser, args):
     """Apply the same resolution logic as route_cmd.main."""
     _TWO_PHASE_DEFAULT = 20
-    _two_phase_iters_explicit = (
-        getattr(args, "two_phase_iterations", None) is not None
-    )
+    _two_phase_iters_explicit = getattr(args, "two_phase_iterations", None) is not None
     _iterations_explicitly_set = args.iterations != parser.get_default("iterations")
     if not _two_phase_iters_explicit:
         if _iterations_explicitly_set:
@@ -53,28 +51,44 @@ class TestTwoPhaseIterationResolution:
     def test_iterations_only_falls_back_to_iterations(self):
         """--iterations 5 without --two-phase-iterations resolves to 5."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--two-phase", "--iterations", "5",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--two-phase",
+                "--iterations",
+                "5",
+            ]
+        )
         _resolve_two_phase_iterations(parser, args)
         assert args.two_phase_iterations == 5
 
     def test_two_phase_iterations_explicit_wins(self):
         """--two-phase-iterations 10 --iterations 5 resolves to 10."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--two-phase",
-            "--two-phase-iterations", "10", "--iterations", "5",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--two-phase",
+                "--two-phase-iterations",
+                "10",
+                "--iterations",
+                "5",
+            ]
+        )
         _resolve_two_phase_iterations(parser, args)
         assert args.two_phase_iterations == 10
 
     def test_two_phase_iterations_alone(self):
         """--two-phase-iterations 7 alone resolves to 7."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--two-phase", "--two-phase-iterations", "7",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--two-phase",
+                "--two-phase-iterations",
+                "7",
+            ]
+        )
         _resolve_two_phase_iterations(parser, args)
         assert args.two_phase_iterations == 7
 
@@ -93,9 +107,14 @@ class TestTwoPhaseIterationResolution:
         # When the user passes --iterations 15, argparse cannot distinguish
         # from the default. This is a known limitation: if the user explicitly
         # passes the same value as the default, it behaves as if not set.
-        args = parser.parse_args([
-            "test.kicad_pcb", "--two-phase", "--iterations", "15",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--two-phase",
+                "--iterations",
+                "15",
+            ]
+        )
         _resolve_two_phase_iterations(parser, args)
         # This will resolve to 20 because we can't detect explicit 15 vs default 15.
         # This is acceptable behavior documented in the help text.
@@ -104,18 +123,28 @@ class TestTwoPhaseIterationResolution:
     def test_large_iteration_count_propagates(self):
         """--iterations 100 propagates to two-phase when not explicitly set."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--two-phase", "--iterations", "100",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--two-phase",
+                "--iterations",
+                "100",
+            ]
+        )
         _resolve_two_phase_iterations(parser, args)
         assert args.two_phase_iterations == 100
 
     def test_iterations_1_propagates(self):
         """--iterations 1 propagates to two-phase (edge case)."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--two-phase", "--iterations", "1",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--two-phase",
+                "--iterations",
+                "1",
+            ]
+        )
         _resolve_two_phase_iterations(parser, args)
         assert args.two_phase_iterations == 1
 
@@ -126,9 +155,13 @@ class TestTwoPhaseHighPerformanceResolution:
     def test_high_performance_overrides_two_phase_default(self):
         """--high-performance applies calibrated iterations to two-phase."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--high-performance", "--two-phase",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--high-performance",
+                "--two-phase",
+            ]
+        )
         explicit = _resolve_two_phase_iterations(parser, args)
 
         # Simulate high-performance override (as route_cmd does)
@@ -143,10 +176,15 @@ class TestTwoPhaseHighPerformanceResolution:
     def test_explicit_two_phase_iters_not_overridden_by_high_perf(self):
         """--two-phase-iterations 10 --high-performance keeps 10."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--high-performance", "--two-phase",
-            "--two-phase-iterations", "10",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--high-performance",
+                "--two-phase",
+                "--two-phase-iterations",
+                "10",
+            ]
+        )
         explicit = _resolve_two_phase_iterations(parser, args)
 
         # Simulate high-performance override
@@ -162,10 +200,15 @@ class TestTwoPhaseHighPerformanceResolution:
     def test_high_perf_with_explicit_iterations_not_two_phase(self):
         """--high-performance --iterations 3 applies calibrated to two-phase."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "test.kicad_pcb", "--high-performance", "--two-phase",
-            "--iterations", "3",
-        ])
+        args = parser.parse_args(
+            [
+                "test.kicad_pcb",
+                "--high-performance",
+                "--two-phase",
+                "--iterations",
+                "3",
+            ]
+        )
         explicit = _resolve_two_phase_iterations(parser, args)
 
         # After resolution, two_phase_iterations = 3 (from --iterations fallback)
@@ -189,6 +232,7 @@ class TestTwoPhaseIterationsHelpText:
         with patch.object(sys, "stdout", help_output):
             with contextlib.suppress(SystemExit):
                 from kicad_tools.cli.route_cmd import main as route_main
+
                 route_main(["--help"])
 
         help_text = help_output.getvalue()
@@ -201,6 +245,7 @@ class TestTwoPhaseIterationsHelpText:
         with patch.object(sys, "stdout", help_output):
             with contextlib.suppress(SystemExit):
                 from kicad_tools.cli.route_cmd import main as route_main
+
                 route_main(["--help"])
 
         help_text = help_output.getvalue()
@@ -212,6 +257,7 @@ class TestTwoPhaseIterationsHelpText:
         with patch.object(sys, "stdout", help_output):
             with contextlib.suppress(SystemExit):
                 from kicad_tools.cli.route_cmd import main as route_main
+
                 route_main(["--help"])
 
         help_text = help_output.getvalue()
@@ -224,15 +270,11 @@ class TestTwoPhaseIterationsCallSiteDefense:
 
     def test_call_site_pattern_uses_getattr_none(self):
         """All call sites use getattr(args, 'two_phase_iterations', None)."""
-        from pathlib import Path
         import re
+        from pathlib import Path
 
         route_cmd_path = (
-            Path(__file__).parent.parent
-            / "src"
-            / "kicad_tools"
-            / "cli"
-            / "route_cmd.py"
+            Path(__file__).parent.parent / "src" / "kicad_tools" / "cli" / "route_cmd.py"
         )
         content = route_cmd_path.read_text()
 
@@ -256,11 +298,7 @@ class TestTwoPhaseIterationsCallSiteDefense:
         from pathlib import Path
 
         route_cmd_path = (
-            Path(__file__).parent.parent
-            / "src"
-            / "kicad_tools"
-            / "cli"
-            / "route_cmd.py"
+            Path(__file__).parent.parent / "src" / "kicad_tools" / "cli" / "route_cmd.py"
         )
         content = route_cmd_path.read_text()
 

@@ -306,10 +306,7 @@ class VectorCollisionChecker:
             return False
 
         # Check if R-tree is available and populated for this layer
-        if (
-            not self.grid._rtree_available
-            or layer_idx not in self.grid._seg_rtree
-        ):
+        if not self.grid._rtree_available or layer_idx not in self.grid._seg_rtree:
             return self._get_grid_fallback().path_is_clear(
                 x1, y1, x2, y2, layer, width, exclude_net
             )
@@ -325,12 +322,8 @@ class VectorCollisionChecker:
             max(x1, x2) + search_radius,
             max(y1, y2) + search_radius,
         )
-        candidate_ids = list(
-            self.grid._seg_rtree[layer_idx].intersection(query_envelope)
-        )
-        layer_items: dict[int, Any] = self.grid._seg_rtree_items.get(
-            layer_idx, {}
-        )
+        candidate_ids = list(self.grid._seg_rtree[layer_idx].intersection(query_envelope))
+        layer_items: dict[int, Any] = self.grid._seg_rtree_items.get(layer_idx, {})
 
         # Narrow phase: exact distance check for each candidate
         for cand_id in candidate_ids:
@@ -344,8 +337,14 @@ class VectorCollisionChecker:
 
             # Exact center-to-center distance
             dist = segment_to_segment_distance(
-                x1, y1, x2, y2,
-                other_seg.x1, other_seg.y1, other_seg.x2, other_seg.y2,
+                x1,
+                y1,
+                x2,
+                y2,
+                other_seg.x1,
+                other_seg.y1,
+                other_seg.x2,
+                other_seg.y2,
             )
 
             # Edge-to-edge clearance
@@ -419,9 +418,7 @@ class VectorCollisionChecker:
                 if not self._via_on_layer(via, layer_idx):
                     continue
                 via_radius = via.diameter / 2
-                dist = point_to_segment_distance(
-                    via.x, via.y, x1, y1, x2, y2
-                )
+                dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
                 clearance = dist - half_width - via_radius
                 if clearance < min_clearance:
                     return False
@@ -436,9 +433,7 @@ class VectorCollisionChecker:
                     if not self._via_on_layer(via, layer_idx):
                         continue
                     via_radius = via.diameter / 2
-                    dist = point_to_segment_distance(
-                        via.x, via.y, x1, y1, x2, y2
-                    )
+                    dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
                     clearance = dist - half_width - via_radius
                     if clearance < min_clearance:
                         return False
@@ -446,9 +441,7 @@ class VectorCollisionChecker:
         # Also check hard obstacles (pads, keepouts) via the grid
         # The R-tree only indexes routed segments, not static obstacles,
         # so we use the grid's obstacle layer for pad/keepout checks.
-        if not self._check_obstacles_clear(
-            x1, y1, x2, y2, layer_idx, width, exclude_net
-        ):
+        if not self._check_obstacles_clear(x1, y1, x2, y2, layer_idx, width, exclude_net):
             return False
 
         return True
@@ -520,10 +513,7 @@ class VectorCollisionChecker:
                 for cx in range(-clearance_cells, clearance_cells + 1):
                     check_x = gx + cx
                     check_y = gy + cy
-                    if not (
-                        0 <= check_x < self.grid.cols
-                        and 0 <= check_y < self.grid.rows
-                    ):
+                    if not (0 <= check_x < self.grid.cols and 0 <= check_y < self.grid.rows):
                         continue
                     cell = self.grid.grid[layer_idx][check_y][check_x]
                     if cell.blocked and (cell.is_obstacle or cell.pad_blocked):

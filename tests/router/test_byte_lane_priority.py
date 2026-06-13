@@ -72,7 +72,6 @@ from __future__ import annotations
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.rules import NetClassRouting
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -368,13 +367,27 @@ class TestPermutationInvariant:
             # Horizontal row: y fixed, x varies.
             router.add_component(
                 "UH",
-                [{"number": str(i + 1), "x": 10.0 + i * 0.8, "y": 30.0,
-                  "net": net_id, "net_name": nm}],
+                [
+                    {
+                        "number": str(i + 1),
+                        "x": 10.0 + i * 0.8,
+                        "y": 30.0,
+                        "net": net_id,
+                        "net_name": nm,
+                    }
+                ],
             )
             router.add_component(
                 "UI",
-                [{"number": str(i + 1), "x": 10.0 + i * 0.8, "y": 60.0,
-                  "net": net_id, "net_name": nm}],
+                [
+                    {
+                        "number": str(i + 1),
+                        "x": 10.0 + i * 0.8,
+                        "y": 60.0,
+                        "net": net_id,
+                        "net_name": nm,
+                    }
+                ],
             )
             net_class_map[nm] = cls
             net_ids.append(net_id)

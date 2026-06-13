@@ -324,7 +324,9 @@ def remove_component(
 
     # Collect connectable points from other elements
     other_connectable = _collect_all_connectable_points(
-        schematic, lib_manager, reference,
+        schematic,
+        lib_manager,
+        reference,
     )
 
     # Find wires connected to this symbol
@@ -439,7 +441,9 @@ def preview_remove_component(
         pin_keys = {(int(symbol.position[0] * 10), int(symbol.position[1] * 10))}
 
     other_connectable = _collect_all_connectable_points(
-        schematic, lib_manager, reference,
+        schematic,
+        lib_manager,
+        reference,
     )
 
     # Find connected wires
@@ -460,8 +464,7 @@ def preview_remove_component(
                 all_connected_wires.append(wire)
 
     exclusive_count = sum(
-        1 for w in all_connected_wires
-        if _is_wire_exclusive(w, pin_keys, other_connectable)
+        1 for w in all_connected_wires if _is_wire_exclusive(w, pin_keys, other_connectable)
     )
     shared_count = len(all_connected_wires) - exclusive_count
 
@@ -591,17 +594,11 @@ def main(argv=None):
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument("--ref", required=True, help="Symbol reference designator (e.g., U1)")
-    parser.add_argument(
-        "--lib-path", action="append", dest="lib_paths", help="Library search path"
-    )
+    parser.add_argument("--lib-path", action="append", dest="lib_paths", help="Library search path")
     parser.add_argument("--lib", action="append", dest="libs", help="Specific library file")
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
-    parser.add_argument(
-        "--format", choices=["text", "json"], default="text", help="Output format"
-    )
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
 
     args = parser.parse_args(argv)
     return run_remove_component(args)

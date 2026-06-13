@@ -43,7 +43,7 @@ def generate_dru(
     # --- Trace Width ---
     lines.append(
         f'(rule "Trace Width{label_suffix}"\n'
-        f'  (condition "A.Type == \'track\'")\n'
+        f"  (condition \"A.Type == 'track'\")\n"
         f"  (constraint track_width (min {rules.min_trace_width_mm}mm)))"
     )
 
@@ -56,14 +56,14 @@ def generate_dru(
     # --- Via Drill ---
     lines.append(
         f'(rule "Via Drill{label_suffix}"\n'
-        f'  (condition "A.Type == \'via\'")\n'
+        f"  (condition \"A.Type == 'via'\")\n"
         f"  (constraint hole_size (min {rules.min_via_drill_mm}mm)))"
     )
 
     # --- Via Diameter ---
     lines.append(
         f'(rule "Via Diameter{label_suffix}"\n'
-        f'  (condition "A.Type == \'via\'")\n'
+        f"  (condition \"A.Type == 'via'\")\n"
         f"  (constraint via_diameter (min {rules.min_via_diameter_mm}mm)))"
     )
 
@@ -82,21 +82,21 @@ def generate_dru(
     # --- Hole to Edge ---
     lines.append(
         f'(rule "Hole to Edge{label_suffix}"\n'
-        f'  (condition "A.Type == \'via\' || A.Type == \'pad\'")\n'
+        f"  (condition \"A.Type == 'via' || A.Type == 'pad'\")\n"
         f"  (constraint hole_clearance (min {rules.min_hole_to_edge_mm}mm)))"
     )
 
     # --- Silkscreen Width ---
     lines.append(
         f'(rule "Silkscreen Width{label_suffix}"\n'
-        f'  (condition "A.Type == \'text\' && A.Layer == \'F.Silkscreen\'")\n'
+        f"  (condition \"A.Type == 'text' && A.Layer == 'F.Silkscreen'\")\n"
         f"  (constraint text_thickness (min {rules.min_silkscreen_width_mm}mm)))"
     )
 
     # --- Silkscreen Height ---
     lines.append(
         f'(rule "Silkscreen Height{label_suffix}"\n'
-        f'  (condition "A.Type == \'text\' && A.Layer == \'F.Silkscreen\'")\n'
+        f"  (condition \"A.Type == 'text' && A.Layer == 'F.Silkscreen'\")\n"
         f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
     )
 

@@ -6,26 +6,25 @@ junction insertion, --dry-run, --backup, library embedding, and round-trip.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli.sch_add_component import (
-    ConnectSpec,
     _is_power_symbol,
     _point_on_wire_midpoint,
     _point_on_wire_segment,
     _round_pos,
     _snap,
-    main as add_component_main,
     parse_connect,
-    run_add_component,
 )
-from kicad_tools.schema.library import LibrarySymbol
+from kicad_tools.cli.sch_add_component import (
+    main as add_component_main,
+)
 from kicad_tools.cli.sch_add_junction import main as add_junction_main
 from kicad_tools.cli.sch_add_wire import main as add_wire_main
 from kicad_tools.schema import Schematic
+from kicad_tools.schema.library import LibrarySymbol
 
 # ---------------------------------------------------------------------------
 # Minimal schematic content for testing
@@ -167,14 +166,22 @@ class TestUtilityFunctions:
 class TestPlaceSymbol:
     def test_place_resistor(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R14",
-            "--value", "100k",
-            "--footprint", "Resistor_SMD:R_0402_1005Metric",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R14",
+                "--value",
+                "100k",
+                "--footprint",
+                "Resistor_SMD:R_0402_1005Metric",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         # Reload and verify
@@ -192,16 +199,26 @@ class TestPlaceSymbol:
 
     def test_place_with_rotation_and_mirror(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R2",
-            "--value", "4.7k",
-            "--footprint", "Resistor_SMD:R_0402_1005Metric",
-            "--at", "100.33", "80.01",
-            "--rotation", "90",
-            "--mirror", "x",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R2",
+                "--value",
+                "4.7k",
+                "--footprint",
+                "Resistor_SMD:R_0402_1005Metric",
+                "--at",
+                "100.33",
+                "80.01",
+                "--rotation",
+                "90",
+                "--mirror",
+                "x",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -218,11 +235,16 @@ class TestPlaceSymbol:
 class TestPlacePowerSymbol:
     def test_place_gnd(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "power:GND",
-            "--at", "100.33", "90.17",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:GND",
+                "--at",
+                "100.33",
+                "90.17",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -244,15 +266,24 @@ class TestConnect:
         # Pin 1 of Device:R at position (100.33, 80.01) with 0 rotation
         # Pin 1 is at offset (0, 3.81) from center -> (0, -3.81) after 270 deg at pin
         # The pin position will be computed by the library
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -265,15 +296,24 @@ class TestConnect:
         sch_path = _write_sch(tmp_path)
         # Existing wire goes from (100, 50) to (150, 50)
         # Target (125, 50) is at the midpoint -> should create junction
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "125.73", "40.64",
-            "--connect", "2:125.73,49.53",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "125.73",
+                "40.64",
+                "--connect",
+                "2:125.73,49.53",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -298,12 +338,18 @@ class TestConnect:
         # Place GND at (124.46, 49.53).  GND pin "1" is at offset (0,0),
         # so pin_pos == target == (124.46, 49.53).  No wire needed but a
         # junction IS required because the target is a wire midpoint.
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "power:GND",
-            "--at", "124.46", "49.53",
-            "--connect", "1:124.46,49.53",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:GND",
+                "--at",
+                "124.46",
+                "49.53",
+                "--connect",
+                "1:124.46,49.53",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -311,9 +357,11 @@ class TestConnect:
         assert len(sch.wires) == 1
         # A junction must exist at the midpoint.
         assert len(sch.junctions) >= 1
-        jx = [j for j in sch.junctions
-              if abs(j.position[0] - 124.46) < 0.2
-              and abs(j.position[1] - 49.53) < 0.2]
+        jx = [
+            j
+            for j in sch.junctions
+            if abs(j.position[0] - 124.46) < 0.2 and abs(j.position[1] - 49.53) < 0.2
+        ]
         assert len(jx) == 1, (
             f"Expected exactly one junction near (124.46, 49.53), "
             f"found {len(jx)}: {[(j.position) for j in sch.junctions]}"
@@ -321,29 +369,48 @@ class TestConnect:
 
     def test_connect_invalid_pin(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--connect", "99:120,80",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "99:120,80",
+            ]
+        )
         assert result == 1  # Error: pin not found
 
     def test_multiple_connects(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--connect", "1:120.65,80.01",
-            "--connect", "2:80.01,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "1:120.65,80.01",
+                "--connect",
+                "2:80.01,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -361,15 +428,23 @@ class TestDryRun:
         sch_path = _write_sch(tmp_path)
         original_content = sch_path.read_text()
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--dry-run",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--dry-run",
+            ]
+        )
         assert result == 0
 
         # File should be unchanged
@@ -385,15 +460,23 @@ class TestBackup:
     def test_backup_creates_file(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--backup",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--backup",
+            ]
+        )
         assert result == 0
 
         # Should have created a backup file
@@ -410,35 +493,47 @@ class TestLibraryEmbed:
     def test_symbol_already_embedded(self, tmp_path: Path):
         """When lib_id already exists in lib_symbols, no duplicate is added."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
-        count = sum(
-            1
-            for s in sch.lib_symbols.find_all("symbol")
-            if s.get_string(0) == "Device:R"
-        )
+        count = sum(1 for s in sch.lib_symbols.find_all("symbol") if s.get_string(0) == "Device:R")
         assert count == 1
 
     def test_lib_id_not_found_no_lib_path(self, tmp_path: Path):
         """Error when lib_id is missing and no --lib-path provided."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:C",
-            "--reference", "C1",
-            "--value", "100nF",
-            "--footprint", "SMD:C_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:C",
+                "--reference",
+                "C1",
+                "--value",
+                "100nF",
+                "--footprint",
+                "SMD:C_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 1
 
 
@@ -450,22 +545,35 @@ class TestLibraryEmbed:
 class TestErrors:
     def test_missing_reference_for_non_power(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 1
 
     def test_schematic_not_found(self, tmp_path: Path):
-        result = add_component_main([
-            str(tmp_path / "nonexistent.kicad_sch"),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--at", "100", "80",
-        ])
+        result = add_component_main(
+            [
+                str(tmp_path / "nonexistent.kicad_sch"),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--at",
+                "100",
+                "80",
+            ]
+        )
         assert result == 1
 
 
@@ -480,14 +588,22 @@ class TestRoundTrip:
         sch_before = Schematic.load(sch_path)
         original_wire_count = len(sch_before.wires)
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         sch_after = Schematic.load(sch_path)
@@ -508,14 +624,22 @@ class TestInstancesBlock:
     def test_instances_block_auto_detected(self, tmp_path: Path):
         """add-component should auto-detect project name and emit instances."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         # Read the raw file and verify (instances ...) is present
@@ -536,16 +660,26 @@ class TestInstancesBlock:
     def test_instances_block_with_explicit_project(self, tmp_path: Path):
         """--project-name and --instance-path override auto-detection."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--project-name", "my-board",
-            "--instance-path", "/aaaa-bbbb-cccc",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--project-name",
+                "my-board",
+                "--instance-path",
+                "/aaaa-bbbb-cccc",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -556,14 +690,22 @@ class TestInstancesBlock:
     def test_instances_block_contains_reference_and_unit(self, tmp_path: Path):
         """The instances block must include reference and unit."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R42",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R42",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         content = sch_path.read_text()
@@ -577,14 +719,22 @@ class TestInstancesBlock:
         pro_path = tmp_path / "chorus-board.kicad_pro"
         pro_path.write_text("{}")  # Minimal content
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -594,11 +744,16 @@ class TestInstancesBlock:
     def test_power_symbol_no_instances_block(self, tmp_path: Path):
         """Power symbols should NOT get an instances block (KiCad convention)."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "power:GND",
-            "--at", "100.33", "90.17",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:GND",
+                "--at",
+                "100.33",
+                "90.17",
+            ]
+        )
         assert result == 0
 
         content = sch_path.read_text()
@@ -626,6 +781,7 @@ class TestProjectNameDisambiguation:
         (tmp_path / "test_add_comp-backup.kicad_pro").write_text("{}")
 
         from kicad_tools.schema.instances import find_project_name
+
         assert find_project_name(sch_path) == "test_add_comp"
 
     def test_falls_back_sorted_when_no_match(self, tmp_path: Path):
@@ -635,12 +791,14 @@ class TestProjectNameDisambiguation:
         (tmp_path / "beta.kicad_pro").write_text("{}")
 
         from kicad_tools.schema.instances import find_project_name
+
         assert find_project_name(sch_path) == "alpha"
 
     def test_falls_back_to_sch_stem_no_pro(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
         # No .kicad_pro at all -> schematic stem
         from kicad_tools.schema.instances import find_project_name
+
         assert find_project_name(sch_path) == "test_add_comp"
 
     def test_instances_block_uses_correct_project(self, tmp_path: Path):
@@ -649,14 +807,22 @@ class TestProjectNameDisambiguation:
         (tmp_path / "test_add_comp.kicad_pro").write_text("{}")
         (tmp_path / "test_add_comp-fresh.kicad_pro").write_text("{}")
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -674,11 +840,16 @@ class TestPowerSymbolReference:
 
     def test_gnd_gets_pwr_prefix(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "power:GND",
-            "--at", "100.33", "90.17",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:GND",
+                "--at",
+                "100.33",
+                "90.17",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -704,11 +875,16 @@ class TestPowerSymbolReference:
         )
         sch_path = _write_sch(tmp_path, content=content)
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "power:PWR_FLAG",
-            "--at", "100.33", "90.17",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:PWR_FLAG",
+                "--at",
+                "100.33",
+                "90.17",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -718,16 +894,26 @@ class TestPowerSymbolReference:
     def test_sequential_numbering(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
         # Place two GND symbols sequentially
-        add_component_main([
-            str(sch_path),
-            "--lib-id", "power:GND",
-            "--at", "100.33", "90.17",
-        ])
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "power:GND",
-            "--at", "110.33", "90.17",
-        ])
+        add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:GND",
+                "--at",
+                "100.33",
+                "90.17",
+            ]
+        )
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:GND",
+                "--at",
+                "110.33",
+                "90.17",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -737,11 +923,16 @@ class TestPowerSymbolReference:
     def test_reference_not_bare_name(self, tmp_path: Path):
         """Regression: reference must never be '#GND' or '#PWR_FLAG'."""
         sch_path = _write_sch(tmp_path)
-        add_component_main([
-            str(sch_path),
-            "--lib-id", "power:GND",
-            "--at", "100.33", "90.17",
-        ])
+        add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "power:GND",
+                "--at",
+                "100.33",
+                "90.17",
+            ]
+        )
         sch = Schematic.load(sch_path)
         sym = sch.symbols[0]
         assert sym.reference != "#GND"
@@ -790,15 +981,24 @@ class TestDuplicateWireRegression:
         sch_before = Schematic.load(sch_path)
         original_wire_count = len(sch_before.wires)
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -811,16 +1011,26 @@ class TestDuplicateWireRegression:
         sch_before = Schematic.load(sch_path)
         original_wire_count = len(sch_before.wires)
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--connect", "1:120.65,80.01",
-            "--connect", "2:80.01,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "1:120.65,80.01",
+                "--connect",
+                "2:80.01,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -844,15 +1054,24 @@ class TestJunctionAtEndpoint:
         )
         sch_path = _write_sch(tmp_path, content=sch_content)
         # Place component and connect pin 2 to the wire start endpoint
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "40.64",
-            "--connect", "2:100.33,49.53",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "40.64",
+                "--connect",
+                "2:100.33,49.53",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -883,15 +1102,24 @@ class TestWireEndpointAlignment:
         """Wire start at pin 1 must equal the computed pin position (no _snap)."""
         sch_path = _write_sch(tmp_path)
         # Place at a grid-aligned position and connect pin 1
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -899,18 +1127,19 @@ class TestWireEndpointAlignment:
         lib_sym_sexp = sch.get_lib_symbol("Device:R")
         assert lib_sym_sexp is not None
         lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
-        expected_pin1 = lib_sym.get_pin_position(
-            "1", instance_pos=(100.33, 80.01), instance_rot=0
-        )
+        expected_pin1 = lib_sym.get_pin_position("1", instance_pos=(100.33, 80.01), instance_rot=0)
         assert expected_pin1 is not None
         expected_pin1 = _round_pos(expected_pin1)
 
         # Find the newly added wire (not the pre-existing one from 100,50 to 150,50)
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
-                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+                abs(w.start[0] - 100) < 1
+                and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1
+                and abs(w.end[1] - 50) < 1
             )
         ]
         assert len(new_wires) == 1
@@ -923,31 +1152,42 @@ class TestWireEndpointAlignment:
     def test_rotated_symbol_pin_alignment(self, tmp_path: Path):
         """Wire endpoints for a 90-degree rotated symbol should still align."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--rotation", "90",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--rotation",
+                "90",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         lib_sym_sexp = sch.get_lib_symbol("Device:R")
         lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
-        expected = lib_sym.get_pin_position(
-            "1", instance_pos=(100.33, 80.01), instance_rot=90
-        )
+        expected = lib_sym.get_pin_position("1", instance_pos=(100.33, 80.01), instance_rot=90)
         expected = _round_pos(expected)
 
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
-                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+                abs(w.start[0] - 100) < 1
+                and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1
+                and abs(w.end[1] - 50) < 1
             )
         ]
         assert len(new_wires) == 1
@@ -957,31 +1197,42 @@ class TestWireEndpointAlignment:
     def test_180_rotation_pin_alignment(self, tmp_path: Path):
         """Wire endpoints for a 180-degree rotation should align."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--rotation", "180",
-            "--connect", "2:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--rotation",
+                "180",
+                "--connect",
+                "2:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         lib_sym_sexp = sch.get_lib_symbol("Device:R")
         lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
-        expected = lib_sym.get_pin_position(
-            "2", instance_pos=(100.33, 80.01), instance_rot=180
-        )
+        expected = lib_sym.get_pin_position("2", instance_pos=(100.33, 80.01), instance_rot=180)
         expected = _round_pos(expected)
 
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
-                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+                abs(w.start[0] - 100) < 1
+                and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1
+                and abs(w.end[1] - 50) < 1
             )
         ]
         assert len(new_wires) == 1
@@ -991,31 +1242,42 @@ class TestWireEndpointAlignment:
     def test_270_rotation_pin_alignment(self, tmp_path: Path):
         """Wire endpoints for a 270-degree rotation should align."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--rotation", "270",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--rotation",
+                "270",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         lib_sym_sexp = sch.get_lib_symbol("Device:R")
         lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
-        expected = lib_sym.get_pin_position(
-            "1", instance_pos=(100.33, 80.01), instance_rot=270
-        )
+        expected = lib_sym.get_pin_position("1", instance_pos=(100.33, 80.01), instance_rot=270)
         expected = _round_pos(expected)
 
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
-                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+                abs(w.start[0] - 100) < 1
+                and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1
+                and abs(w.end[1] - 50) < 1
             )
         ]
         assert len(new_wires) == 1
@@ -1036,23 +1298,35 @@ class TestTargetSnapsToExistingConnections:
         sch_path = _write_sch(tmp_path)
         # Existing wire: (100, 50) -> (150, 50)
         # Target slightly off the endpoint: (100.05, 50.05) should snap to (100, 50)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "40.64",
-            "--connect", "2:100.05,50.05",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "40.64",
+                "--connect",
+                "2:100.05,50.05",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 0.5 and abs(w.start[1] - 50) < 0.5
-                and abs(w.end[0] - 150) < 0.5 and abs(w.end[1] - 50) < 0.5
+                abs(w.start[0] - 100) < 0.5
+                and abs(w.start[1] - 50) < 0.5
+                and abs(w.end[0] - 150) < 0.5
+                and abs(w.end[1] - 50) < 0.5
             )
         ]
         assert len(new_wires) >= 1
@@ -1066,22 +1340,31 @@ class TestTargetSnapsToExistingConnections:
         """Target far from any existing connection should grid-snap as before."""
         sch_path = _write_sch(tmp_path)
         # Target (200, 200) is far from the existing wire (100,50)-(150,50)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "200.66", "190.50",
-            "--connect", "1:200,200",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "200.66",
+                "190.50",
+                "--connect",
+                "1:200,200",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         new_wires = [
-            w for w in sch.wires
-            if abs(w.end[0] - _snap(200)) < 0.5
-            and abs(w.end[1] - _snap(200)) < 0.5
+            w
+            for w in sch.wires
+            if abs(w.end[0] - _snap(200)) < 0.5 and abs(w.end[1] - _snap(200)) < 0.5
         ]
         assert len(new_wires) >= 1
 
@@ -1101,15 +1384,24 @@ class TestNoDanglingStubs:
         sch_before = Schematic.load(sch_path)
         original_wire_count = len(sch_before.wires)
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "40.64",
-            "--connect", "2:100.33,49.53",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "40.64",
+                "--connect",
+                "2:100.33,49.53",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -1142,8 +1434,7 @@ class TestNoDanglingStubs:
                 matches = sum(
                     1
                     for cp in conn_points
-                    if abs(cp[0] - ep[0]) < tolerance
-                    and abs(cp[1] - ep[1]) < tolerance
+                    if abs(cp[0] - ep[0]) < tolerance and abs(cp[1] - ep[1]) < tolerance
                 )
                 assert matches >= 2, (
                     f"Dangling endpoint at ({ep[0]:.2f}, {ep[1]:.2f}) "
@@ -1167,6 +1458,7 @@ class TestRoundPos:
     def test_round_pos_eliminates_float_drift(self):
         # Simulate trig drift: cos(90 deg) should be 0 but may be ~6e-17
         import math
+
         drifted_x = 100.33 + 3.81 * math.cos(math.radians(90))
         drifted_y = 80.01 + 3.81 * math.sin(math.radians(90))
         result = _round_pos((drifted_x, drifted_y))
@@ -1187,9 +1479,7 @@ class TestGridAwareSnap:
         lib_sym = LibrarySymbol.from_sexp(
             Schematic.load(_write_sch(tmp_path)).get_lib_symbol("Device:R")
         )
-        pos = lib_sym.get_pin_position(
-            "1", instance_pos=(100.33, 80.01), instance_rot=90
-        )
+        pos = lib_sym.get_pin_position("1", instance_pos=(100.33, 80.01), instance_rot=90)
         assert pos is not None
         # Pin 1 is at (0, 3.81) in lib coords.
         # Rotated 90 in lib coords (Y-up):
@@ -1211,9 +1501,7 @@ class TestGridAwareSnap:
         assert abs(pin.position[1]) == pytest.approx(3.81, abs=0.01)
 
         # After 90-degree rotation, the offset should still land on grid
-        pos = lib_sym.get_pin_position(
-            "1", instance_pos=(0.0, 0.0), instance_rot=90
-        )
+        pos = lib_sym.get_pin_position("1", instance_pos=(0.0, 0.0), instance_rot=90)
         assert pos is not None
         # Check that each coordinate is a multiple of 1.27
         assert pos[0] % 1.27 == pytest.approx(0.0, abs=0.001)
@@ -1249,31 +1537,42 @@ class TestGridSnapWithWires:
         (no rounding error gap).
         """
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--rotation", "45",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--rotation",
+                "45",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         lib_sym_sexp = sch.get_lib_symbol("Device:R")
         lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
-        expected = lib_sym.get_pin_position(
-            "1", instance_pos=(100.33, 80.01), instance_rot=45
-        )
+        expected = lib_sym.get_pin_position("1", instance_pos=(100.33, 80.01), instance_rot=45)
         expected = _round_pos(expected)
 
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
-                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+                abs(w.start[0] - 100) < 1
+                and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1
+                and abs(w.end[1] - 50) < 1
             )
         ]
         assert len(new_wires) == 1
@@ -1283,30 +1582,41 @@ class TestGridSnapWithWires:
     def test_30_degree_rotation_wire_matches_pin(self, tmp_path: Path):
         """30-degree rotation: wire start must match computed pin position."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--rotation", "30",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--rotation",
+                "30",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         lib_sym = LibrarySymbol.from_sexp(sch.get_lib_symbol("Device:R"))
-        expected = lib_sym.get_pin_position(
-            "1", instance_pos=(100.33, 80.01), instance_rot=30
-        )
+        expected = lib_sym.get_pin_position("1", instance_pos=(100.33, 80.01), instance_rot=30)
         expected = _round_pos(expected)
 
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
-                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+                abs(w.start[0] - 100) < 1
+                and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1
+                and abs(w.end[1] - 50) < 1
             )
         ]
         assert len(new_wires) == 1
@@ -1316,30 +1626,41 @@ class TestGridSnapWithWires:
     def test_60_degree_rotation_wire_matches_pin(self, tmp_path: Path):
         """60-degree rotation: wire start must match computed pin position."""
         sch_path = _write_sch(tmp_path)
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-            "--rotation", "60",
-            "--connect", "1:120.65,80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+                "--rotation",
+                "60",
+                "--connect",
+                "1:120.65,80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
         lib_sym = LibrarySymbol.from_sexp(sch.get_lib_symbol("Device:R"))
-        expected = lib_sym.get_pin_position(
-            "1", instance_pos=(100.33, 80.01), instance_rot=60
-        )
+        expected = lib_sym.get_pin_position("1", instance_pos=(100.33, 80.01), instance_rot=60)
         expected = _round_pos(expected)
 
         new_wires = [
-            w for w in sch.wires
+            w
+            for w in sch.wires
             if not (
-                abs(w.start[0] - 100) < 1 and abs(w.start[1] - 50) < 1
-                and abs(w.end[0] - 150) < 1 and abs(w.end[1] - 50) < 1
+                abs(w.start[0] - 100) < 1
+                and abs(w.start[1] - 50) < 1
+                and abs(w.end[0] - 150) < 1
+                and abs(w.end[1] - 50) < 1
             )
         ]
         assert len(new_wires) == 1
@@ -1424,14 +1745,22 @@ class TestPlacementOnlyUnchanged:
         sch_before = Schematic.load(sch_path)
         original_wire_count = len(sch_before.wires)
 
-        result = add_component_main([
-            str(sch_path),
-            "--lib-id", "Device:R",
-            "--reference", "R1",
-            "--value", "10k",
-            "--footprint", "SMD:R_0402",
-            "--at", "100.33", "80.01",
-        ])
+        result = add_component_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:R",
+                "--reference",
+                "R1",
+                "--value",
+                "10k",
+                "--footprint",
+                "SMD:R_0402",
+                "--at",
+                "100.33",
+                "80.01",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -1449,11 +1778,17 @@ class TestStandaloneAddWire:
         sch_before = Schematic.load(sch_path)
         original_wire_count = len(sch_before.wires)
 
-        result = add_wire_main([
-            str(sch_path),
-            "--from", "100", "80",
-            "--to", "120", "80",
-        ])
+        result = add_wire_main(
+            [
+                str(sch_path),
+                "--from",
+                "100",
+                "80",
+                "--to",
+                "120",
+                "80",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -1463,12 +1798,18 @@ class TestStandaloneAddWire:
         sch_path = _write_sch(tmp_path)
         original_content = sch_path.read_text()
 
-        result = add_wire_main([
-            str(sch_path),
-            "--from", "100", "80",
-            "--to", "120", "80",
-            "--dry-run",
-        ])
+        result = add_wire_main(
+            [
+                str(sch_path),
+                "--from",
+                "100",
+                "80",
+                "--to",
+                "120",
+                "80",
+                "--dry-run",
+            ]
+        )
         assert result == 0
         assert sch_path.read_text() == original_content
 
@@ -1484,21 +1825,33 @@ class TestStandaloneAddWire:
         sch_path = _write_sch(tmp_path)
         original_content = sch_path.read_text()
 
-        result = add_wire_main([
-            str(sch_path),
-            "--from", "100", "80",
-            "--to", "100", "80",
-        ])
+        result = add_wire_main(
+            [
+                str(sch_path),
+                "--from",
+                "100",
+                "80",
+                "--to",
+                "100",
+                "80",
+            ]
+        )
         assert result == 0
         # Nothing was written
         assert sch_path.read_text() == original_content
 
     def test_add_wire_schematic_not_found(self, tmp_path: Path):
-        result = add_wire_main([
-            str(tmp_path / "nonexistent.kicad_sch"),
-            "--from", "100", "80",
-            "--to", "120", "80",
-        ])
+        result = add_wire_main(
+            [
+                str(tmp_path / "nonexistent.kicad_sch"),
+                "--from",
+                "100",
+                "80",
+                "--to",
+                "120",
+                "80",
+            ]
+        )
         assert result == 1
 
 
@@ -1511,10 +1864,14 @@ class TestStandaloneAddJunction:
     def test_add_junction(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path)
 
-        result = add_junction_main([
-            str(sch_path),
-            "--at", "125", "50",
-        ])
+        result = add_junction_main(
+            [
+                str(sch_path),
+                "--at",
+                "125",
+                "50",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -1524,17 +1881,25 @@ class TestStandaloneAddJunction:
         sch_path = _write_sch(tmp_path)
         original_content = sch_path.read_text()
 
-        result = add_junction_main([
-            str(sch_path),
-            "--at", "125", "50",
-            "--dry-run",
-        ])
+        result = add_junction_main(
+            [
+                str(sch_path),
+                "--at",
+                "125",
+                "50",
+                "--dry-run",
+            ]
+        )
         assert result == 0
         assert sch_path.read_text() == original_content
 
     def test_add_junction_schematic_not_found(self, tmp_path: Path):
-        result = add_junction_main([
-            str(tmp_path / "nonexistent.kicad_sch"),
-            "--at", "125", "50",
-        ])
+        result = add_junction_main(
+            [
+                str(tmp_path / "nonexistent.kicad_sch"),
+                "--at",
+                "125",
+                "50",
+            ]
+        )
         assert result == 1

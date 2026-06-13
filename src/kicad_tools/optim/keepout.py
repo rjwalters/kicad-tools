@@ -550,7 +550,6 @@ def _detect_kicad_keepout_zones(pcb: PCB) -> list[KeepoutZone]:
     return zones
 
 
-
 # _extract_board_outline is imported from kicad_tools.optim.board_outline
 # (consolidated in #2349).
 

@@ -34,10 +34,10 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
-
 # ---------------------------------------------------------------------------
 # Lightweight stub for Autorouter (mirrors test_drc_nudge.py's _StubAutorouter)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _StubAutorouter:
@@ -68,6 +68,7 @@ def _board04_rules() -> DesignRules:
 # Predicate: _post_nudge_introduces_foreign_via_violation
 # ---------------------------------------------------------------------------
 
+
 class TestPostNudgeForeignViaPredicate:
     """Unit tests for the predicate that powers the destination gate."""
 
@@ -76,11 +77,21 @@ class TestPostNudgeForeignViaPredicate:
         rules = _board04_rules()
         # Far-apart geometry: seg on B.Cu, via on B.Cu, 5mm apart.
         seg = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         foreign_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=20,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=20,
         )
         foreign_route = Route(net=20, net_name="BOOT0", vias=[foreign_via])
         router = _StubAutorouter(routes=[foreign_route], rules=rules)
@@ -93,11 +104,21 @@ class TestPostNudgeForeignViaPredicate:
         # edge-to-edge clearance with via_radius=0.3, half_seg=0.1,
         # trace_clearance=0.15).
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0, width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         foreign_via = Via(
-            x=5.0, y=5.1, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=20,
+            x=5.0,
+            y=5.1,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=20,
         )
         foreign_route = Route(net=20, net_name="BOOT0", vias=[foreign_via])
         router = _StubAutorouter(routes=[foreign_route], rules=rules)
@@ -111,11 +132,21 @@ class TestPostNudgeForeignViaPredicate:
         """
         rules = _board04_rules()
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0, width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         same_net_via = Via(
-            x=5.0, y=5.1, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=10,
+            x=5.0,
+            y=5.1,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=10,
         )
         same_route = Route(net=10, net_name="SWDIO", vias=[same_net_via])
         router = _StubAutorouter(routes=[same_route], rules=rules)
@@ -127,11 +158,21 @@ class TestPostNudgeForeignViaPredicate:
         rules = _board04_rules()
         # Segment on B.Cu, via spans F.Cu only (a hypothetical blind via).
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0, width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         f_only_via = Via(
-            x=5.0, y=5.1, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.F_CU), net=20,
+            x=5.0,
+            y=5.1,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.F_CU),
+            net=20,
         )
         foreign_route = Route(net=20, net_name="BOOT0", vias=[f_only_via])
         router = _StubAutorouter(routes=[foreign_route], rules=rules)
@@ -143,6 +184,7 @@ class TestPostNudgeForeignViaPredicate:
 # ---------------------------------------------------------------------------
 # Gate: _nudge_segment_with_chain
 # ---------------------------------------------------------------------------
+
 
 class TestNudgeForeignViaGate:
     """Integration tests for the destination gate in _nudge_segment_with_chain."""
@@ -159,26 +201,42 @@ class TestNudgeForeignViaGate:
         rules = _board04_rules()
         # SWDIO segment on B.Cu, candidate nudge direction = -y.
         swdio_seg = Segment(
-            x1=0.0, y1=5.5, x2=10.0, y2=5.5,
-            width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.5,
+            x2=10.0,
+            y2=5.5,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         swdio_route = Route(net=10, net_name="SWDIO", segments=[swdio_seg])
         # BOOT0 via 0.5 mm below the nudge target -- well within the
         # clearance threshold (required = 0.3 + 0.1 + 0.15 = 0.55 mm).
         boot0_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=20, net_name="BOOT0",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=20,
+            net_name="BOOT0",
         )
         boot0_route = Route(net=20, net_name="BOOT0", vias=[boot0_via])
         router = _StubAutorouter(
-            routes=[swdio_route, boot0_route], rules=rules,
+            routes=[swdio_route, boot0_route],
+            rules=rules,
         )
         result = DRCNudgeResult()
 
         # Attempt to nudge -0.4 in y.  Without the gate this would land
         # swdio_seg at y=5.1 (0.1 mm from BOOT0 via centre).
         success = _nudge_segment_with_chain(
-            swdio_seg, 0.0, -1.0, 0.4, router, result=result,
+            swdio_seg,
+            0.0,
+            -1.0,
+            0.4,
+            router,
+            result=result,
         )
 
         assert success is False
@@ -191,23 +249,39 @@ class TestNudgeForeignViaGate:
         """A nudge whose destination is clear of foreign-net vias must PROCEED."""
         rules = _board04_rules()
         swdio_seg = Segment(
-            x1=0.0, y1=5.5, x2=10.0, y2=5.5,
-            width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.5,
+            x2=10.0,
+            y2=5.5,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         swdio_route = Route(net=10, net_name="SWDIO", segments=[swdio_seg])
         # BOOT0 via FAR from the nudge target (5mm away).
         boot0_via = Via(
-            x=50.0, y=50.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=20, net_name="BOOT0",
+            x=50.0,
+            y=50.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=20,
+            net_name="BOOT0",
         )
         boot0_route = Route(net=20, net_name="BOOT0", vias=[boot0_via])
         router = _StubAutorouter(
-            routes=[swdio_route, boot0_route], rules=rules,
+            routes=[swdio_route, boot0_route],
+            rules=rules,
         )
         result = DRCNudgeResult()
 
         success = _nudge_segment_with_chain(
-            swdio_seg, 0.0, -1.0, 0.4, router, result=result,
+            swdio_seg,
+            0.0,
+            -1.0,
+            0.4,
+            router,
+            result=result,
         )
 
         assert success is True
@@ -220,17 +294,28 @@ class TestNudgeForeignViaGate:
         """A same-net via must NOT block the nudge."""
         rules = _board04_rules()
         swdio_seg = Segment(
-            x1=0.0, y1=5.5, x2=10.0, y2=5.5,
-            width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.5,
+            x2=10.0,
+            y2=5.5,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         # Same-net via close to the nudge target -- this is a chain
         # situation, NOT a foreign clearance violation.
         same_net_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=10, net_name="SWDIO",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=10,
+            net_name="SWDIO",
         )
         swdio_route = Route(
-            net=10, net_name="SWDIO",
+            net=10,
+            net_name="SWDIO",
             segments=[swdio_seg],
             vias=[same_net_via],
         )
@@ -243,7 +328,12 @@ class TestNudgeForeignViaGate:
         # the via-anchor guard does not fire and the nudge can proceed.
         # The new foreign-via gate must ALSO let this through.
         success = _nudge_segment_with_chain(
-            swdio_seg, 0.0, -1.0, 0.4, router, result=result,
+            swdio_seg,
+            0.0,
+            -1.0,
+            0.4,
+            router,
+            result=result,
         )
 
         assert success is True
@@ -260,29 +350,60 @@ class TestNudgeForeignViaGate:
         """
         rules = _board04_rules()
         seg_a = Segment(
-            x1=0.0, y1=5.5, x2=2.0, y2=5.5, width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.5,
+            x2=2.0,
+            y2=5.5,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         seg_b = Segment(
-            x1=2.0, y1=5.5, x2=8.0, y2=5.5, width=0.2, layer=Layer.B_CU, net=10,
+            x1=2.0,
+            y1=5.5,
+            x2=8.0,
+            y2=5.5,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         seg_c = Segment(
-            x1=8.0, y1=5.5, x2=10.0, y2=5.5, width=0.2, layer=Layer.B_CU, net=10,
+            x1=8.0,
+            y1=5.5,
+            x2=10.0,
+            y2=5.5,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         swdio_route = Route(
-            net=10, net_name="SWDIO", segments=[seg_a, seg_b, seg_c],
+            net=10,
+            net_name="SWDIO",
+            segments=[seg_a, seg_b, seg_c],
         )
         boot0_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=20, net_name="BOOT0",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=20,
+            net_name="BOOT0",
         )
         boot0_route = Route(net=20, net_name="BOOT0", vias=[boot0_via])
         router = _StubAutorouter(
-            routes=[swdio_route, boot0_route], rules=rules,
+            routes=[swdio_route, boot0_route],
+            rules=rules,
         )
         result = DRCNudgeResult()
 
         success = _nudge_segment_with_chain(
-            seg_b, 0.0, -1.0, 0.4, router, result=result,
+            seg_b,
+            0.0,
+            -1.0,
+            0.4,
+            router,
+            result=result,
         )
 
         assert success is False
@@ -303,21 +424,37 @@ class TestNudgeForeignViaGate:
         """
         rules = _board04_rules()
         swdio_seg = Segment(
-            x1=0.0, y1=5.5, x2=10.0, y2=5.5,
-            width=0.2, layer=Layer.B_CU, net=10,
+            x1=0.0,
+            y1=5.5,
+            x2=10.0,
+            y2=5.5,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         swdio_route = Route(net=10, net_name="SWDIO", segments=[swdio_seg])
         boot0_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=20, net_name="BOOT0",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=20,
+            net_name="BOOT0",
         )
         boot0_route = Route(net=20, net_name="BOOT0", vias=[boot0_via])
         router = _StubAutorouter(
-            routes=[swdio_route, boot0_route], rules=rules,
+            routes=[swdio_route, boot0_route],
+            rules=rules,
         )
 
         success = _nudge_segment_with_chain(
-            swdio_seg, 0.0, -1.0, 0.4, router, result=None,
+            swdio_seg,
+            0.0,
+            -1.0,
+            0.4,
+            router,
+            result=None,
         )
         assert success is False
         assert math.isclose(swdio_seg.y1, 5.5)
@@ -334,18 +471,29 @@ class TestNudgeForeignViaGate:
         rules = _board04_rules()
         # SWDIO segment at y=120.4 on B.Cu.
         swdio_seg = Segment(
-            x1=140.0, y1=120.4, x2=145.0, y2=120.4,
-            width=0.2, layer=Layer.B_CU, net=10,
+            x1=140.0,
+            y1=120.4,
+            x2=145.0,
+            y2=120.4,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
         )
         swdio_route = Route(net=10, net_name="SWDIO", segments=[swdio_seg])
         # BOOT0 via at y=119.7 on F.Cu/B.Cu (spans both layers).
         boot0_via = Via(
-            x=143.8, y=119.7, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=20, net_name="BOOT0",
+            x=143.8,
+            y=119.7,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=20,
+            net_name="BOOT0",
         )
         boot0_route = Route(net=20, net_name="BOOT0", vias=[boot0_via])
         router = _StubAutorouter(
-            routes=[swdio_route, boot0_route], rules=rules,
+            routes=[swdio_route, boot0_route],
+            rules=rules,
         )
         result = DRCNudgeResult()
 
@@ -354,7 +502,12 @@ class TestNudgeForeignViaGate:
         # Without the gate this would land the segment at the
         # exact -0.0754mm clearance position the routed PCB shows.
         success = _nudge_segment_with_chain(
-            swdio_seg, 0.0, -1.0, 0.3754, router, result=result,
+            swdio_seg,
+            0.0,
+            -1.0,
+            0.3754,
+            router,
+            result=result,
         )
 
         assert success is False

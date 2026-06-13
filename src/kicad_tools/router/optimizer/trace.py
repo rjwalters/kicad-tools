@@ -22,15 +22,12 @@ from .geometry import (
     is_90_degree_corner,
     is_connected,
     is_zigzag,
-    perpendicular_direction,
-    project_point_onto_line,
     same_direction,
     segment_direction,
     segments_touch,
     shorten_segment_end,
     shorten_segment_start,
     total_length,
-    translate_segment,
 )
 from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
 from .via_optimizer import ViaOptimizationConfig, ViaOptimizer

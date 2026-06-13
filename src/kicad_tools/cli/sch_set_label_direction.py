@@ -183,8 +183,7 @@ def set_label_direction(
     if sheet_filter:
         sf_lower = sheet_filter.lower()
         all_files = [
-            f for f in all_files
-            if sf_lower in f.name.lower() or sf_lower in str(f).lower()
+            f for f in all_files if sf_lower in f.name.lower() or sf_lower in str(f).lower()
         ]
 
     all_changes: list[LabelChange] = []

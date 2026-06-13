@@ -21,17 +21,23 @@ def _make_simple_block(
     """Create a simple block with 2 components and 2 ports for testing."""
     block = PCBBlock(name=name, block_id=block_id)
     block.add_component(
-        "U1", "SOT-23", 0, 0,
+        "U1",
+        "SOT-23",
+        0,
+        0,
         pads={"1": (-0.5, 0), "2": (0.5, 0), "3": (0, 0.5)},
     )
     block.add_component(
-        "C1", "C_0805", 2, 0,
+        "C1",
+        "C_0805",
+        2,
+        0,
         pads={"1": (-0.5, 0), "2": (0.5, 0)},
     )
     block.add_port("VIN", -3, 0, direction="in")
     block.add_port("VOUT", 5, 0, direction="out")
     block.add_trace((-0.5, 0), (-3, 0), net="VIN")  # U1.1 to VIN port
-    block.add_trace((0.5, 0), (5, 0), net="VOUT")   # U1.2 to VOUT port
+    block.add_trace((0.5, 0), (5, 0), net="VOUT")  # U1.2 to VOUT port
     block.place(origin[0], origin[1])
     return block
 
@@ -39,6 +45,7 @@ def _make_simple_block(
 # =========================================================================
 # Unit: block_id field
 # =========================================================================
+
 
 class TestBlockId:
     """Verify PCBBlock has block_id attribute."""
@@ -60,6 +67,7 @@ class TestBlockId:
 # =========================================================================
 # Unit: register_block
 # =========================================================================
+
 
 class TestRegisterBlock:
     """Verify register_block stores block and marks bounding box as blocked."""
@@ -114,6 +122,7 @@ class TestRegisterBlock:
 # Unit: port pads available after register_block
 # =========================================================================
 
+
 class TestPortPadsAvailable:
     """Verify port pad grid cells are NOT fully blocked after registration."""
 
@@ -138,6 +147,7 @@ class TestPortPadsAvailable:
 # =========================================================================
 # Unit: trace metadata includes block_id
 # =========================================================================
+
 
 class TestTraceMetadata:
     """Verify get_placed_traces and export_traces include block_id."""
@@ -182,6 +192,7 @@ class TestTraceMetadata:
 # Edge case: overlapping blocks
 # =========================================================================
 
+
 class TestOverlappingBlocks:
     """Register two blocks with overlapping bounding boxes."""
 
@@ -218,6 +229,7 @@ class TestOverlappingBlocks:
 # Integration: boundary enforcement -- route_all avoids block interior
 # =========================================================================
 
+
 class TestBoundaryEnforcement:
     """Set up a board with one block and two external pads. Verify routing
     goes around the block, not through it."""
@@ -232,14 +244,34 @@ class TestBoundaryEnforcement:
         router.register_block(block)
 
         # Add two pads on opposite sides of the block (net 1)
-        router.add_component("EXT_L", [
-            {"number": "1", "x": 10.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("EXT_R", [
-            {"number": "1", "x": 40.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "EXT_L",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "EXT_R",
+            [
+                {
+                    "number": "1",
+                    "x": 40.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         result = router.route_all()
 
@@ -254,6 +286,7 @@ class TestBoundaryEnforcement:
 # Integration: port routing -- external pad connects to block port
 # =========================================================================
 
+
 class TestPortRouting:
     """External pad connects to a block port via route_all."""
 
@@ -267,10 +300,20 @@ class TestPortRouting:
 
         # VIN port absolute position is (25-3, 25) = (22, 25)
         # Register an external pad on the same net as the port
-        router.add_component("EXT", [
-            {"number": "1", "x": 10.0, "y": 25.0, "net": 2, "net_name": "VIN_EXT",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "EXT",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 25.0,
+                    "net": 2,
+                    "net_name": "VIN_EXT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         # Register the port pad with the same net so they need routing
         port_pad_key = (f"_block_{block.block_id}", "VIN")
@@ -298,12 +341,18 @@ def _make_block_with_internal_traces(
     block = PCBBlock(name=block_id, block_id=block_id)
     # U1: LDO with VIN, VOUT, GND
     block.add_component(
-        "U1", "SOT-23", 0, 0,
+        "U1",
+        "SOT-23",
+        0,
+        0,
         pads={"1": (-1, 0), "2": (1, 0), "3": (0, 1)},
     )
     # C1: input cap
     block.add_component(
-        "C1", "C_0805", -2, 1,
+        "C1",
+        "C_0805",
+        -2,
+        1,
         pads={"1": (-0.5, 0), "2": (0.5, 0)},
     )
     # Ports
@@ -326,15 +375,15 @@ class TestTraceSegmentInternal:
     """Verify TraceSegment internal flag."""
 
     def test_default_internal_false(self):
-        from kicad_tools.pcb.primitives import TraceSegment
         from kicad_tools.pcb.geometry import Point
+        from kicad_tools.pcb.primitives import TraceSegment
 
         t = TraceSegment(start=Point(0, 0), end=Point(1, 1))
         assert t.internal is False
 
     def test_internal_flag_set(self):
-        from kicad_tools.pcb.primitives import TraceSegment
         from kicad_tools.pcb.geometry import Point
+        from kicad_tools.pcb.primitives import TraceSegment
 
         t = TraceSegment(start=Point(0, 0), end=Point(1, 1), internal=True)
         assert t.internal is True
@@ -381,20 +430,61 @@ class TestBlockInternalRouteSkip:
         # C1 is at block-relative (-2,1) -> absolute (18, 21)
         # C1 pad 1 at (-0.5,0) relative to C1 -> (17.5, 21) absolute
         # C1 pad 2 at (0.5,0) relative to C1 -> (18.5, 21) absolute
-        router.add_component("U1", [
-            {"number": "1", "x": 19.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 21.0, "y": 20.0, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-            {"number": "3", "x": 20.0, "y": 21.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1", [
-            {"number": "1", "x": 17.5, "y": 21.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 18.5, "y": 21.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 19.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 21.0,
+                    "y": 20.0,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "3",
+                    "x": 20.0,
+                    "y": 21.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": 17.5,
+                    "y": 21.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 18.5,
+                    "y": 21.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         # Register the block -- this should index internal traces
         router.register_block(block)
@@ -427,12 +517,29 @@ class TestBlockInternalRouteSkip:
     def test_no_blocks_baseline(self):
         """Without blocks, _create_block_internal_routes returns empty."""
         router = Autorouter(50, 50, force_python=True)
-        router.add_component("R1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 10.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 20.0,
+                    "y": 10.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         pads = router.nets[1]
         routes, connected = router._create_block_internal_routes(1, pads)
         assert routes == []
@@ -450,19 +557,49 @@ class TestPartialNetRouting:
         block = _make_block_with_internal_traces(origin=(20, 20))
 
         # U1 pad 1 and C1 pad 1 are both on VIN net, connected internally
-        router.add_component("U1", [
-            {"number": "1", "x": 19.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1", [
-            {"number": "1", "x": 17.5, "y": 21.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 19.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": 17.5,
+                    "y": 21.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         # External pad on VIN, far from block
-        router.add_component("EXT", [
-            {"number": "1", "x": 5.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "EXT",
+            [
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         router.register_block(block)
 
@@ -502,22 +639,62 @@ class TestMultiBlockSameNet:
         block_b.place(40, 20)
 
         # Register component pads matching block positions
-        router.add_component("U1A", [
-            {"number": "1", "x": 15.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1A", [
-            {"number": "1", "x": 17.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("U1B", [
-            {"number": "1", "x": 40.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1B", [
-            {"number": "1", "x": 42.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1A",
+            [
+                {
+                    "number": "1",
+                    "x": 15.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1A",
+            [
+                {
+                    "number": "1",
+                    "x": 17.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "U1B",
+            [
+                {
+                    "number": "1",
+                    "x": 40.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1B",
+            [
+                {
+                    "number": "1",
+                    "x": 42.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         router.register_block(block_a)
         router.register_block(block_b)
@@ -548,10 +725,20 @@ class TestBlockTraceUnknownNet:
         block.place(20, 20)
 
         # Register a dummy pad so the router has some nets
-        router.add_component("R1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 10.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         # Should not raise, should log a warning
         router.register_block(block)

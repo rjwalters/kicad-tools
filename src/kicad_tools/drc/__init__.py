@@ -18,7 +18,6 @@ With fix suggestions:
     ...         print(f"  Fix: {suggestion.description}")
 """
 
-from .net_compat import resolve_net_atom
 from .checker import (
     CheckResult,
     ManufacturerCheck,
@@ -30,6 +29,7 @@ from .incremental import (
     IncrementalDRC,
     SpatialIndex,
 )
+from .net_compat import resolve_net_atom
 from .predictive import PredictiveAnalyzer, PredictiveWarning
 from .repair_clearance import ClearanceRepairer, NudgeResult, RepairResult
 from .repair_drill_clearance import DrillClearanceRepairer, DrillRepairAction, DrillRepairResult

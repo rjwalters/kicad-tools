@@ -54,11 +54,9 @@ def snap_coord(coord: Coord, known: set[Coord], tolerance: int = 1) -> Coord:
 # ---------------------------------------------------------------------------
 
 
-def _point_on_segment(
-    point: Coord, seg_start: Coord, seg_end: Coord
-) -> bool:
+def _point_on_segment(point: Coord, seg_start: Coord, seg_end: Coord) -> bool:
     """Check if *point* lies strictly on the interior of a wire segment."""
-    if point == seg_start or point == seg_end:
+    if point in (seg_start, seg_end):
         return False
 
     dx1 = seg_end[0] - seg_start[0]
@@ -145,9 +143,7 @@ def build_wire_graph(
             adjacency[start].add(end)
             adjacency[end].add(start)
         else:
-            on_wire.sort(
-                key=lambda p: (p[0] - start[0]) ** 2 + (p[1] - start[1]) ** 2
-            )
+            on_wire.sort(key=lambda p: (p[0] - start[0]) ** 2 + (p[1] - start[1]) ** 2)
             chain = [start] + on_wire + [end]
             for i in range(len(chain) - 1):
                 adjacency[chain[i]].add(chain[i + 1])

@@ -199,11 +199,7 @@ def _imports_placement_design_rules(tree: ast.AST) -> bool:
 
 
 def _iter_python_files() -> list[Path]:
-    return [
-        p
-        for p in _SRC_ROOT.rglob("*.py")
-        if "__pycache__" not in p.parts
-    ]
+    return [p for p in _SRC_ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 
 
 _NOQA_RE = re.compile(r"#\s*noqa\s*:\s*MFR001\b", re.IGNORECASE)
@@ -234,17 +230,11 @@ def test_manufacturer_propagation_in_router_design_rules():
             continue
 
         # Skip files that don't import DesignRules at all.
-        if not (
-            _imports_router_design_rules(tree)
-            or "DesignRules(" in source
-        ):
+        if not (_imports_router_design_rules(tree) or "DesignRules(" in source):
             continue
 
         # If the file imports ONLY placement.DesignRules, skip it.
-        if (
-            _imports_placement_design_rules(tree)
-            and not _imports_router_design_rules(tree)
-        ):
+        if _imports_placement_design_rules(tree) and not _imports_router_design_rules(tree):
             continue
 
         finder = _DesignRulesCallFinder(tree)
@@ -275,9 +265,8 @@ def test_manufacturer_propagation_in_router_design_rules():
                 f'reason="..."` on the same line.'
             )
 
-    assert not violations, (
-        "manufacturer propagation regression (Issue #2708):\n  "
-        + "\n  ".join(violations)
+    assert not violations, "manufacturer propagation regression (Issue #2708):\n  " + "\n  ".join(
+        violations
     )
 
 
@@ -305,8 +294,7 @@ def test_allowlist_entries_resolve_to_actual_call_sites():
         for lineno in lines:
             if lineno not in site_lines:
                 stale.append(
-                    f"{rel}:{lineno}: no DesignRules() call at this line "
-                    f"(allowlist out of date)"
+                    f"{rel}:{lineno}: no DesignRules() call at this line (allowlist out of date)"
                 )
 
     assert not stale, "Stale entries in _ALLOWLIST:\n  " + "\n  ".join(stale)
@@ -335,9 +323,7 @@ def test_fixed_sites_pass_manufacturer(site_description):
     finder = _DesignRulesCallFinder(tree)
     finder.visit(tree)
 
-    sites_with_mfr = [
-        site for site in finder.sites if "manufacturer" in site[1]
-    ]
+    sites_with_mfr = [site for site in finder.sites if "manufacturer" in site[1]]
     assert sites_with_mfr, (
         f"{rel} ({description}): expected at least one DesignRules(...) "
         f"call passing manufacturer=, found none. Issue #2708 audit must "

@@ -734,9 +734,7 @@ class TestEscalationPolicy:
         # 4 with default max_layers=4: equal, valid.
         assert EscalationPolicy(starting_layers=4).starting_layers == 4
         # 6 requires bumping max_layers (cross-field constraint).
-        assert (
-            EscalationPolicy(starting_layers=6, max_layers=6).starting_layers == 6
-        )
+        assert EscalationPolicy(starting_layers=6, max_layers=6).starting_layers == 6
 
     def test_starting_layers_rejects_below_2(self):
         """starting_layers < 2 raises ValidationError (Field ge=2 constraint)."""
@@ -850,12 +848,7 @@ class TestBackCompatExistingBoards:
 
         from kicad_tools.spec.parser import load_spec
 
-        path = (
-            Path(__file__).resolve().parent.parent
-            / "boards"
-            / board_dir
-            / "project.kct"
-        )
+        path = Path(__file__).resolve().parent.parent / "boards" / board_dir / "project.kct"
         if not path.exists():
             pytest.skip(f"project.kct not found at {path}")
         spec = load_spec(path)

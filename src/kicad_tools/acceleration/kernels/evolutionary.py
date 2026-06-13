@@ -77,15 +77,11 @@ def evaluate_population_gpu(
     board_gpu = backend.array(board_vertices)
 
     # Compute each fitness component (vectorized across population)
-    wire_lengths = _compute_wire_lengths_batch(
-        pos_gpu, springs_gpu, pin_offsets_gpu, backend
-    )
+    wire_lengths = _compute_wire_lengths_batch(pos_gpu, springs_gpu, pin_offsets_gpu, backend)
 
     overlaps = _compute_overlaps_batch(pos_gpu, sizes_gpu, backend)
 
-    boundary_violations = _compute_boundary_violations_batch(
-        pos_gpu, board_gpu, backend
-    )
+    boundary_violations = _compute_boundary_violations_batch(pos_gpu, board_gpu, backend)
 
     routability = _compute_routability_batch(pos_gpu, backend)
 
@@ -160,7 +156,7 @@ def _compute_wire_lengths_batch(
 
     # Compute distances
     diff = pin2_pos - pin1_pos  # (pop_size, n_springs, 2)
-    distances = backend.sqrt(backend.sum(diff ** 2, axis=2))  # (pop_size, n_springs)
+    distances = backend.sqrt(backend.sum(diff**2, axis=2))  # (pop_size, n_springs)
 
     # Sum distances per individual
     wire_lengths = backend.sum(distances, axis=1)  # (pop_size,)
@@ -342,7 +338,7 @@ def _compute_routability_batch(
     pos_i = backend.expand_dims(positions, axis=2)  # (pop, n, 1, 2)
     pos_j = backend.expand_dims(positions, axis=1)  # (pop, 1, n, 2)
     diff = pos_i - pos_j  # (pop, n, n, 2)
-    distances = backend.sqrt(backend.sum(diff ** 2, axis=3))  # (pop, n, n)
+    distances = backend.sqrt(backend.sum(diff**2, axis=3))  # (pop, n, n)
 
     # Create upper triangle mask (excluding diagonal)
     # We want to sum only distances where i < j

@@ -124,9 +124,8 @@ def run_erc(
         # an empty output file paired with a non-zero exit code) as a
         # genuine failure so the caller doesn't false-pass a broken
         # schematic.  See issue #2780.
-        load_failed = (
-            "Failed to load schematic" in (result.stderr or "")
-            or "Failed to load" in (result.stderr or "")
+        load_failed = "Failed to load schematic" in (result.stderr or "") or "Failed to load" in (
+            result.stderr or ""
         )
         empty_output = not output_path.exists() or output_path.stat().st_size == 0
         kicad_cli_errored = result.returncode != 0 and empty_output
@@ -394,9 +393,7 @@ def _run_fill_zones_native(
             # rewrote them.  Guard on file existence since the output may
             # be at a different path than the input.
             if expected_path.exists():
-                _restore_net_declarations(
-                    expected_path, input_net_nodes, input_element_nets
-                )
+                _restore_net_declarations(expected_path, input_net_nodes, input_element_nets)
 
             return KiCadCLIResult(
                 success=True,
@@ -582,9 +579,7 @@ def _get_element_uuid(child) -> str | None:
     return uuid_node.get_string(0)
 
 
-def _canonicalize_net_node(
-    net_node, name_to_number: dict[str, int], *, numeric_only: bool = False
-):
+def _canonicalize_net_node(net_node, name_to_number: dict[str, int], *, numeric_only: bool = False):
     """Canonicalize a ``(net ...)`` S-expression to canonical format.
 
     KiCad 10 may emit inline net references as ``(net "name")`` without a

@@ -149,9 +149,7 @@ def test_no_rev_a_discharge_topology(generated_schematic: Path):
     # GATE_POS_A/B and GATE_NEG_A/B (4 nets, one per FET in back-to-back pair).
     # Direct string match for the rev-A net names.
     for old_net in ('"GATE_POS"', '"GATE_NEG"'):
-        assert old_net not in content, (
-            f"Rev A net {old_net} should be gone from rev B schematic"
-        )
+        assert old_net not in content, f"Rev A net {old_net} should be gone from rev B schematic"
 
 
 def test_recipe_imports_p1_classes():

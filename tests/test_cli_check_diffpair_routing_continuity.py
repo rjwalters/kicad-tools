@@ -72,9 +72,7 @@ class TestDiffPairRoutingContinuityCLI:
 
         assert "diffpair_routing_continuity" in CHECK_CATEGORIES
 
-    def test_only_diffpair_routing_continuity_runs_clean(
-        self, minimal_diffpair_pcb: Path, capsys
-    ):
+    def test_only_diffpair_routing_continuity_runs_clean(self, minimal_diffpair_pcb: Path, capsys):
         """Standalone CLI with --only flag -> exit 0 (no engaged pairs).
 
         Today the CLI does not thread an ``engaged_pairs`` set into the
@@ -86,15 +84,11 @@ class TestDiffPairRoutingContinuityCLI:
         """
         from kicad_tools.cli.check_cmd import main
 
-        result = main(
-            [str(minimal_diffpair_pcb), "--only", "diffpair_routing_continuity"]
-        )
+        result = main([str(minimal_diffpair_pcb), "--only", "diffpair_routing_continuity"])
         # 0 = passed (no violations reported because no engaged pairs).
         assert result == 0
 
-    def test_skip_diffpair_routing_continuity_runs_clean(
-        self, minimal_diffpair_pcb: Path, capsys
-    ):
+    def test_skip_diffpair_routing_continuity_runs_clean(self, minimal_diffpair_pcb: Path, capsys):
         """--skip diffpair_routing_continuity is accepted by the CLI.
 
         The fixture has a tight 0.075 mm intra gap so without the
@@ -109,7 +103,5 @@ class TestDiffPairRoutingContinuityCLI:
         # The CLI accepts the flag and runs to completion (any int exit
         # code is OK -- we're only validating that ``--skip
         # diffpair_routing_continuity`` is a recognized category id).
-        result = main(
-            [str(minimal_diffpair_pcb), "--skip", "diffpair_routing_continuity"]
-        )
+        result = main([str(minimal_diffpair_pcb), "--skip", "diffpair_routing_continuity"])
         assert isinstance(result, int)

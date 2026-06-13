@@ -66,88 +66,123 @@ class TestSegmentClearsForeignVia:
     def test_passes_when_via_far_enough(self):
         """Distance > via_radius + seg_half_width + trace_clearance -> pass."""
         seg = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         via = Via(
-            x=5.0, y=2.0,  # 2.0mm away from segment centerline
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=2.0,  # 2.0mm away from segment centerline
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=99, net_name="BOOT0",
+            net=99,
+            net_name="BOOT0",
         )
         # required = 0.3 + 0.1 + 0.15 = 0.55; actual = 2.0 -> pass
-        assert EscapeRouter._segment_clears_foreign_via(
-            seg, via, trace_clearance=0.15
-        )
+        assert EscapeRouter._segment_clears_foreign_via(seg, via, trace_clearance=0.15)
 
     def test_rejects_when_via_within_clearance(self):
         """The board-04 case: B.Cu segment clipping a through-hole via."""
         seg = Segment(
-            x1=140.0, y1=119.7, x2=150.0, y2=119.7,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=140.0,
+            y1=119.7,
+            x2=150.0,
+            y2=119.7,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         # Via centered on the segment centerline (worst case).
         via = Via(
-            x=143.8, y=119.7,
-            drill=0.3, diameter=0.6,
+            x=143.8,
+            y=119.7,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=99, net_name="BOOT0",
+            net=99,
+            net_name="BOOT0",
         )
         # required = 0.3 + 0.1 + 0.15 = 0.55; actual = 0 -> reject
-        assert not EscapeRouter._segment_clears_foreign_via(
-            seg, via, trace_clearance=0.15
-        )
+        assert not EscapeRouter._segment_clears_foreign_via(seg, via, trace_clearance=0.15)
 
     def test_layer_filter_skips_non_overlapping_via(self):
         """A B.Cu segment ignores a via whose layer range stops at In1.Cu."""
         seg = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SIG",
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SIG",
         )
         # Blind via F.Cu -> In1.Cu (does NOT reach B.Cu).
         via = Via(
-            x=5.0, y=0.0,  # right on the centerline
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=0.0,  # right on the centerline
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.IN1_CU),
-            net=99, net_name="OTHER",
+            net=99,
+            net_name="OTHER",
         )
         # Despite geometric overlap, layer mismatch -> pass.
-        assert EscapeRouter._segment_clears_foreign_via(
-            seg, via, trace_clearance=0.15
-        )
+        assert EscapeRouter._segment_clears_foreign_via(seg, via, trace_clearance=0.15)
 
     def test_layer_filter_admits_overlapping_via(self):
         """Same geometry, but via now spans B.Cu -> rejected."""
         seg = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SIG",
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SIG",
         )
         via = Via(
-            x=5.0, y=0.0,
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=0.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=99, net_name="OTHER",
+            net=99,
+            net_name="OTHER",
         )
-        assert not EscapeRouter._segment_clears_foreign_via(
-            seg, via, trace_clearance=0.15
-        )
+        assert not EscapeRouter._segment_clears_foreign_via(seg, via, trace_clearance=0.15)
 
     def test_threshold_boundary_passes(self):
         """At exactly the required distance the predicate admits."""
         seg = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SIG",
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SIG",
         )
         # required = 0.3 + 0.1 + 0.15 = 0.55
         via = Via(
-            x=5.0, y=0.55,
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=0.55,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=99, net_name="OTHER",
+            net=99,
+            net_name="OTHER",
         )
-        assert EscapeRouter._segment_clears_foreign_via(
-            seg, via, trace_clearance=0.15
-        )
+        assert EscapeRouter._segment_clears_foreign_via(seg, via, trace_clearance=0.15)
 
 
 class TestApplyEscapeRoutesGate:
@@ -157,13 +192,25 @@ class TestApplyEscapeRoutesGate:
         """A single escape with no foreign vias commits normally."""
         router, grid, rules = _make_router()
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         pad = Pad(
-            x=5.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=5.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         escape = EscapeRoute(
             pad=pad,
@@ -177,6 +224,7 @@ class TestApplyEscapeRoutesGate:
         )
         # Use a real EscapeDirection rather than the bound method.
         from kicad_tools.router.escape import EscapeDirection
+
         escape.direction = EscapeDirection.EAST
 
         routes = router.apply_escape_routes([escape])
@@ -197,15 +245,25 @@ class TestApplyEscapeRoutesGate:
         router, grid, rules = _make_router()
 
         # Foreign via at (5, 5); through-hole, F.Cu -> B.Cu.
-        grid.mark_route(Route(
-            net=10, net_name="OSC_OUT",
-            segments=[],
-            vias=[Via(
-                x=5.0, y=5.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU),
-                net=10, net_name="OSC_OUT", in_pad=True,
-            )],
-        ))
+        grid.mark_route(
+            Route(
+                net=10,
+                net_name="OSC_OUT",
+                segments=[],
+                vias=[
+                    Via(
+                        x=5.0,
+                        y=5.0,
+                        drill=0.3,
+                        diameter=0.6,
+                        layers=(Layer.F_CU, Layer.B_CU),
+                        net=10,
+                        net_name="OSC_OUT",
+                        in_pad=True,
+                    )
+                ],
+            )
+        )
 
         # B.Cu segment 0.4 mm away from via center.
         # via_radius (0.3) + seg_half_width (0.1) = 0.4.
@@ -215,15 +273,28 @@ class TestApplyEscapeRoutesGate:
         # 0.15 the STANDARD threshold would be 0.55 and this segment
         # would fail -- exactly the case we are NOT dropping.)
         marginal_seg = Segment(
-            x1=0.0, y1=5.4, x2=10.0, y2=5.4,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="NRST",
+            x1=0.0,
+            y1=5.4,
+            x2=10.0,
+            y2=5.4,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="NRST",
         )
         marginal_pad = Pad(
-            x=0.0, y=5.4, width=0.3, height=1.4,
-            net=5, net_name="NRST", layer=Layer.F_CU,
-            ref="U1", pin="7",
+            x=0.0,
+            y=5.4,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="NRST",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="7",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         candidate = EscapeRoute(
             pad=marginal_pad,
             direction=EscapeDirection.EAST,
@@ -258,28 +329,48 @@ class TestApplyEscapeRoutesGate:
 
         # Pre-commit a foreign-net route holding the BOOT0 via.
         boot0_via = Via(
-            x=5.0, y=5.0,
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=10, net_name="BOOT0",
+            net=10,
+            net_name="BOOT0",
             in_pad=True,
         )
-        grid.mark_route(Route(
-            net=10, net_name="BOOT0",
-            segments=[], vias=[boot0_via],
-        ))
+        grid.mark_route(
+            Route(
+                net=10,
+                net_name="BOOT0",
+                segments=[],
+                vias=[boot0_via],
+            )
+        )
 
         # Candidate SWDIO escape: B.Cu segment that clips BOOT0 via center.
         swdio_seg = Segment(
-            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=4.0,
+            y1=5.0,
+            x2=8.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         swdio_pad = Pad(
-            x=4.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=4.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         candidate = EscapeRoute(
             pad=swdio_pad,
             direction=EscapeDirection.EAST,
@@ -297,8 +388,7 @@ class TestApplyEscapeRoutesGate:
         committed = router.apply_escape_routes([candidate])
         # The escape must be dropped -- defer to main router.
         assert committed == [], (
-            "Issue #2998: escape segment clipping foreign via must be "
-            "dropped, not committed"
+            "Issue #2998: escape segment clipping foreign via must be dropped, not committed"
         )
         # Grid state must be unchanged (no new route appended).
         assert len(grid.routes) == routes_before
@@ -309,27 +399,47 @@ class TestApplyEscapeRoutesGate:
 
         # Same-net via at the segment's path (legitimate own-net geometry).
         own_via = Via(
-            x=5.0, y=5.0,
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=5, net_name="SWDIO",
+            net=5,
+            net_name="SWDIO",
         )
-        grid.mark_route(Route(
-            net=5, net_name="SWDIO",
-            segments=[], vias=[own_via],
-        ))
+        grid.mark_route(
+            Route(
+                net=5,
+                net_name="SWDIO",
+                segments=[],
+                vias=[own_via],
+            )
+        )
 
         # Same-net segment that geometrically overlaps the same-net via.
         own_seg = Segment(
-            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=4.0,
+            y1=5.0,
+            x2=8.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         own_pad = Pad(
-            x=4.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=4.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         candidate = EscapeRoute(
             pad=own_pad,
             direction=EscapeDirection.EAST,
@@ -361,28 +471,48 @@ class TestApplyEscapeRoutesGate:
         router = EscapeRouter(grid, rules)
 
         blind_via = Via(
-            x=5.0, y=5.0,
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.IN1_CU),  # Does NOT reach B.Cu
-            net=10, net_name="OTHER",
+            net=10,
+            net_name="OTHER",
         )
-        grid.mark_route(Route(
-            net=10, net_name="OTHER",
-            segments=[], vias=[blind_via],
-        ))
+        grid.mark_route(
+            Route(
+                net=10,
+                net_name="OTHER",
+                segments=[],
+                vias=[blind_via],
+            )
+        )
 
         # B.Cu segment that would overlap blind_via geometrically but not
         # by layer.
         b_seg = Segment(
-            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=4.0,
+            y1=5.0,
+            x2=8.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         pad = Pad(
-            x=4.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=4.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         candidate = EscapeRoute(
             pad=pad,
             direction=EscapeDirection.EAST,
@@ -410,41 +540,72 @@ class TestApplyEscapeRoutesGate:
         router, grid, rules = _make_router()
 
         # Foreign via blocking SWDIO's path.
-        grid.mark_route(Route(
-            net=10, net_name="BOOT0",
-            segments=[],
-            vias=[Via(
-                x=5.0, y=5.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU),
-                net=10, net_name="BOOT0", in_pad=True,
-            )],
-        ))
+        grid.mark_route(
+            Route(
+                net=10,
+                net_name="BOOT0",
+                segments=[],
+                vias=[
+                    Via(
+                        x=5.0,
+                        y=5.0,
+                        drill=0.3,
+                        diameter=0.6,
+                        layers=(Layer.F_CU, Layer.B_CU),
+                        net=10,
+                        net_name="BOOT0",
+                        in_pad=True,
+                    )
+                ],
+            )
+        )
 
         swdio_pad = Pad(
-            x=4.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=4.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         candidate = EscapeRoute(
             pad=swdio_pad,
             direction=EscapeDirection.EAST,
             escape_point=(8.0, 5.0),
             escape_layer=Layer.B_CU,
             via_pos=None,
-            segments=[Segment(
-                x1=4.0, y1=5.0, x2=8.0, y2=5.0,
-                width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
-            )],
+            segments=[
+                Segment(
+                    x1=4.0,
+                    y1=5.0,
+                    x2=8.0,
+                    y2=5.0,
+                    width=0.2,
+                    layer=Layer.B_CU,
+                    net=5,
+                    net_name="SWDIO",
+                )
+            ],
             via=None,
             ring_index=0,
         )
 
         # Clean second escape on a different net that does NOT clip.
         gpio_pad = Pad(
-            x=10.0, y=15.0, width=0.3, height=1.4,
-            net=7, net_name="GPIO", layer=Layer.F_CU,
-            ref="U1", pin="36",
+            x=10.0,
+            y=15.0,
+            width=0.3,
+            height=1.4,
+            net=7,
+            net_name="GPIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="36",
         )
         clean = EscapeRoute(
             pad=gpio_pad,
@@ -452,10 +613,18 @@ class TestApplyEscapeRoutesGate:
             escape_point=(14.0, 15.0),
             escape_layer=Layer.B_CU,
             via_pos=None,
-            segments=[Segment(
-                x1=10.0, y1=15.0, x2=14.0, y2=15.0,
-                width=0.2, layer=Layer.B_CU, net=7, net_name="GPIO",
-            )],
+            segments=[
+                Segment(
+                    x1=10.0,
+                    y1=15.0,
+                    x2=14.0,
+                    y2=15.0,
+                    width=0.2,
+                    layer=Layer.B_CU,
+                    net=7,
+                    net_name="GPIO",
+                )
+            ],
             via=None,
             ring_index=0,
         )
@@ -478,21 +647,36 @@ class TestApplyEscapeRoutesGate:
         router, grid, rules = _make_router()
 
         gpio_pad = Pad(
-            x=10.0, y=15.0, width=0.3, height=1.4,
-            net=7, net_name="GPIO", layer=Layer.F_CU,
-            ref="U1", pin="36",
+            x=10.0,
+            y=15.0,
+            width=0.3,
+            height=1.4,
+            net=7,
+            net_name="GPIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="36",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         clean = EscapeRoute(
             pad=gpio_pad,
             direction=EscapeDirection.EAST,
             escape_point=(14.0, 15.0),
             escape_layer=Layer.B_CU,
             via_pos=None,
-            segments=[Segment(
-                x1=10.0, y1=15.0, x2=14.0, y2=15.0,
-                width=0.2, layer=Layer.B_CU, net=7, net_name="GPIO",
-            )],
+            segments=[
+                Segment(
+                    x1=10.0,
+                    y1=15.0,
+                    x2=14.0,
+                    y2=15.0,
+                    width=0.2,
+                    layer=Layer.B_CU,
+                    net=7,
+                    net_name="GPIO",
+                )
+            ],
             via=None,
             ring_index=0,
         )
@@ -512,20 +696,38 @@ class TestApplyEscapeRoutesGate:
 
         # BOOT0 escape: in-pad via at (5, 5) plus a tiny stub on B.Cu.
         boot0_pad = Pad(
-            x=5.0, y=5.0, width=0.3, height=1.4,
-            net=10, net_name="BOOT0", layer=Layer.F_CU,
-            ref="U1", pin="44",
+            x=5.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=10,
+            net_name="BOOT0",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="44",
         )
         boot0_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=10, net_name="BOOT0", in_pad=True,
+            net=10,
+            net_name="BOOT0",
+            in_pad=True,
         )
         boot0_seg = Segment(
-            x1=5.0, y1=5.0, x2=5.0, y2=6.0,  # Goes north, away from SWDIO path
-            width=0.2, layer=Layer.B_CU, net=10, net_name="BOOT0",
+            x1=5.0,
+            y1=5.0,
+            x2=5.0,
+            y2=6.0,  # Goes north, away from SWDIO path
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
+            net_name="BOOT0",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         boot0_esc = EscapeRoute(
             pad=boot0_pad,
             direction=EscapeDirection.NORTH,
@@ -539,13 +741,25 @@ class TestApplyEscapeRoutesGate:
 
         # SWDIO escape: B.Cu segment that runs through (5, 5) -- clips BOOT0 via.
         swdio_pad = Pad(
-            x=4.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=4.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         swdio_seg = Segment(
-            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=4.0,
+            y1=5.0,
+            x2=8.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         swdio_esc = EscapeRoute(
             pad=swdio_pad,
@@ -587,15 +801,28 @@ class TestApplyEscapeRoutesGate:
         # SWDIO escape: B.Cu segment that runs through (5, 5).
         # Processed FIRST (production order on board-04's south edge).
         swdio_pad = Pad(
-            x=4.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=4.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         swdio_seg = Segment(
-            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=4.0,
+            y1=5.0,
+            x2=8.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         swdio_esc = EscapeRoute(
             pad=swdio_pad,
             direction=EscapeDirection.EAST,
@@ -611,18 +838,35 @@ class TestApplyEscapeRoutesGate:
         # Processed SECOND -- the via has not committed when SWDIO is
         # gated in the OLD single-pass loop.
         boot0_pad = Pad(
-            x=5.0, y=5.0, width=0.3, height=1.4,
-            net=10, net_name="BOOT0", layer=Layer.F_CU,
-            ref="U1", pin="44",
+            x=5.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=10,
+            net_name="BOOT0",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="44",
         )
         boot0_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=10, net_name="BOOT0", in_pad=True,
+            net=10,
+            net_name="BOOT0",
+            in_pad=True,
         )
         boot0_seg = Segment(
-            x1=5.0, y1=5.0, x2=5.0, y2=6.0,  # Goes north, clear of SWDIO
-            width=0.2, layer=Layer.B_CU, net=10, net_name="BOOT0",
+            x1=5.0,
+            y1=5.0,
+            x2=5.0,
+            y2=6.0,  # Goes north, clear of SWDIO
+            width=0.2,
+            layer=Layer.B_CU,
+            net=10,
+            net_name="BOOT0",
         )
         boot0_esc = EscapeRoute(
             pad=boot0_pad,
@@ -646,15 +890,11 @@ class TestApplyEscapeRoutesGate:
             "Issue #3013: SWDIO-first ordering must drop SWDIO when its "
             "segment would clip BOOT0's planned via (two-pass commit)"
         )
-        assert committed[0].net == 10, (
-            "Issue #3013: BOOT0 (net 10) must be the survivor"
-        )
+        assert committed[0].net == 10, "Issue #3013: BOOT0 (net 10) must be the survivor"
         # In-place mutation contract preserved (PR #2999): the dropped
         # SWDIO escape is removed from the input list so the override
         # loop in ``Autorouter.generate_escape_routes`` skips it.
-        assert escapes == [boot0_esc], (
-            "Issue #3013: dropped escape must be removed from input list"
-        )
+        assert escapes == [boot0_esc], "Issue #3013: dropped escape must be removed from input list"
 
     def test_two_pass_dropped_escape_via_not_committed(self):
         """Issue #3013 (rollback correctness): when Pass B rejects an
@@ -674,34 +914,61 @@ class TestApplyEscapeRoutesGate:
 
         # Foreign via at (5, 5) -- via already on the grid before the call.
         pre_existing_via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=10, net_name="BOOT0", in_pad=True,
+            net=10,
+            net_name="BOOT0",
+            in_pad=True,
         )
-        grid.mark_route(Route(
-            net=10, net_name="BOOT0",
-            segments=[], vias=[pre_existing_via],
-        ))
+        grid.mark_route(
+            Route(
+                net=10,
+                net_name="BOOT0",
+                segments=[],
+                vias=[pre_existing_via],
+            )
+        )
         routes_before = len(grid.routes)
         assert routes_before == 1
 
         # SWDIO escape that WILL be rejected.  It also carries its own
         # via -- the test ensures that via does NOT survive on the grid.
         swdio_pad = Pad(
-            x=4.0, y=5.0, width=0.3, height=1.4,
-            net=5, net_name="SWDIO", layer=Layer.F_CU,
-            ref="U1", pin="34",
+            x=4.0,
+            y=5.0,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="SWDIO",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="34",
         )
         swdio_via = Via(
-            x=4.0, y=5.0, drill=0.3, diameter=0.6,
+            x=4.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.F_CU, Layer.B_CU),
-            net=5, net_name="SWDIO", in_pad=True,
+            net=5,
+            net_name="SWDIO",
+            in_pad=True,
         )
         swdio_seg = Segment(
-            x1=4.0, y1=5.0, x2=8.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SWDIO",
+            x1=4.0,
+            y1=5.0,
+            x2=8.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SWDIO",
         )
         from kicad_tools.router.escape import EscapeDirection
+
         swdio_esc = EscapeRoute(
             pad=swdio_pad,
             direction=EscapeDirection.EAST,
@@ -716,9 +983,7 @@ class TestApplyEscapeRoutesGate:
         committed = router.apply_escape_routes([swdio_esc])
 
         # The escape is rejected (segment clips pre-existing BOOT0 via).
-        assert committed == [], (
-            "Issue #3013: SWDIO with segment clipping BOOT0 via must drop"
-        )
+        assert committed == [], "Issue #3013: SWDIO with segment clipping BOOT0 via must drop"
         # The grid state is UNCHANGED: no extra route, no orphan via.
         assert len(grid.routes) == routes_before, (
             "Issue #3013: rejected escape must NOT leave any route on the grid "
@@ -740,35 +1005,49 @@ class TestSegmentClearsForeignViaLayerEdgeCases:
     def test_via_layer_range_inclusive(self):
         """A buried via spanning In1.Cu..In3.Cu blocks an In2.Cu segment."""
         seg = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-            width=0.2, layer=Layer.IN2_CU, net=5, net_name="SIG",
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.IN2_CU,
+            net=5,
+            net_name="SIG",
         )
         buried = Via(
-            x=5.0, y=0.0,  # on centerline
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=0.0,  # on centerline
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.IN1_CU, Layer.IN3_CU),
-            net=99, net_name="OTHER",
+            net=99,
+            net_name="OTHER",
         )
-        assert not EscapeRouter._segment_clears_foreign_via(
-            seg, buried, trace_clearance=0.15
-        )
+        assert not EscapeRouter._segment_clears_foreign_via(seg, buried, trace_clearance=0.15)
 
     def test_via_layer_range_reversed_tuple_normalised(self):
         """Predicate must work regardless of (lo, hi) vs (hi, lo) tuple order."""
         seg = Segment(
-            x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-            width=0.2, layer=Layer.B_CU, net=5, net_name="SIG",
+            x1=0.0,
+            y1=0.0,
+            x2=10.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=5,
+            net_name="SIG",
         )
         # layers = (B_CU, F_CU) -- reversed.
         via = Via(
-            x=5.0, y=0.0,
-            drill=0.3, diameter=0.6,
+            x=5.0,
+            y=0.0,
+            drill=0.3,
+            diameter=0.6,
             layers=(Layer.B_CU, Layer.F_CU),
-            net=99, net_name="OTHER",
+            net=99,
+            net_name="OTHER",
         )
-        assert not EscapeRouter._segment_clears_foreign_via(
-            seg, via, trace_clearance=0.15
-        )
+        assert not EscapeRouter._segment_clears_foreign_via(seg, via, trace_clearance=0.15)
 
 
 if __name__ == "__main__":

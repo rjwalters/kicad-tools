@@ -78,9 +78,7 @@ def _make_grid_and_rules() -> tuple[RoutingGrid, DesignRules]:
     return grid, rules
 
 
-def _paint_own_net_obstacle(
-    cpp_grid: CppGrid, gx: int, gy: int, net: int
-) -> None:
+def _paint_own_net_obstacle(cpp_grid: CppGrid, gx: int, gy: int, net: int) -> None:
     """Mark the cell at grid (gx, gy) as a same-net obstacle on every
     layer.  Mirrors the post-PR #2928 isolated-pad first-touch
     bookkeeping the Python ``EscapeRouter`` does.
@@ -114,9 +112,7 @@ class TestIsViaBlockedOwnNetObstacle:
         _paint_own_net_obstacle(cpp_grid, gx, gy, pad_net)
 
         # allow_sharing=True (negotiated mode) is the regression site.
-        assert not pathfinder._impl.is_via_blocked(
-            gx, gy, pad_net, True, 0
-        ), (
+        assert not pathfinder._impl.is_via_blocked(gx, gy, pad_net, True, 0), (
             "Issue #2989: same-net via must be admitted on an own-net "
             "is_obstacle cell in negotiated mode (diff-pair partner B "
             "pad reachability for USB3/PCIE/MIPI escapes)."
@@ -137,9 +133,7 @@ class TestIsViaBlockedOwnNetObstacle:
         gx, gy = cpp_grid._impl.world_to_grid(2.5, 2.5)
         _paint_own_net_obstacle(cpp_grid, gx, gy, obstacle_net)
 
-        assert pathfinder._impl.is_via_blocked(
-            gx, gy, probe_net, True, 0
-        ), (
+        assert pathfinder._impl.is_via_blocked(gx, gy, probe_net, True, 0), (
             "Issue #2989: foreign-net obstacle cells must still reject "
             "the via (preserves PR #2928's invariant)."
         )
@@ -171,9 +165,7 @@ class TestIsViaBlockedOwnNetObstacle:
 
         # Standard mode now admits the own-net via, matching the Python
         # ``_is_via_blocked`` standard branch (same-net passable).
-        assert not pathfinder._impl.is_via_blocked(
-            gx, gy, pad_net, False, 0
-        ), (
+        assert not pathfinder._impl.is_via_blocked(gx, gy, pad_net, False, 0), (
             "Issue #3622: standard-mode via probe at an own-net "
             "is_obstacle cell must be admitted (Python #864 parity); "
             "foreign-net obstacles still reject."
@@ -195,9 +187,7 @@ class TestIsViaBlockedOwnNetObstacle:
         gx, gy = cpp_grid._impl.world_to_grid(2.5, 2.5)
         _paint_own_net_obstacle(cpp_grid, gx, gy, obstacle_net)
 
-        assert pathfinder._impl.is_via_blocked(
-            gx, gy, probe_net, False, 0
-        ), (
+        assert pathfinder._impl.is_via_blocked(gx, gy, probe_net, False, 0), (
             "Issue #3622: foreign-net cells must still reject the via in "
             "standard mode (same-net relaxation only)."
         )

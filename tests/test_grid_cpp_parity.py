@@ -129,8 +129,7 @@ class TestMarkViaReservationParity:
         # Python contract: reserved cell must remain unblocked when the
         # via belongs to a non-owner net.
         assert not grid_4layer.grid[inner_layer_idx][gy][gx].blocked, (
-            "Python _mark_via must skip cells reserved for a different net set "
-            "(Issue #2677)."
+            "Python _mark_via must skip cells reserved for a different net set (Issue #2677)."
         )
 
     def test_cpp_grid_ignores_python_reservations(
@@ -177,8 +176,7 @@ class TestMarkViaReservationParity:
         # Confirm the C++ mirror starts with the cell unblocked
         # (reservations don't block, only Python ``_mark_via`` does).
         assert not cpp_grid._impl.at(gx, gy, inner_layer_idx).blocked, (
-            "Cell should start unblocked on the C++ side; reservations alone "
-            "do not block cells."
+            "Cell should start unblocked on the C++ side; reservations alone do not block cells."
         )
 
         # Place a foreign-net via through the C++ binding.  The radius
@@ -199,6 +197,4 @@ class TestMarkViaReservationParity:
             "the rationale comments in cpp/src/grid.cpp and "
             "src/kicad_tools/router/grid.py:_mark_via."
         )
-        assert cell.net == 42, (
-            "Foreign-net via should claim the cell on the C++ side."
-        )
+        assert cell.net == 42, "Foreign-net via should claim the cell on the C++ side."

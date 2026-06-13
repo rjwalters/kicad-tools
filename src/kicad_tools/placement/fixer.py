@@ -562,9 +562,7 @@ class PlacementFixer:
         all_conflicts = analyzer.find_conflicts(pcb_path, rules)
 
         # Filter to pad clearance only
-        pad_conflicts = [
-            c for c in all_conflicts if c.type == ConflictType.PAD_CLEARANCE
-        ]
+        pad_conflicts = [c for c in all_conflicts if c.type == ConflictType.PAD_CLEARANCE]
 
         if not pad_conflicts:
             return FixResult(
@@ -594,13 +592,9 @@ class PlacementFixer:
         initial_pad_count = len(pad_conflicts)
 
         # Record original conflict fingerprints for new-conflict detection
-        original_pairs = {
-            (c.component1, c.component2, c.type) for c in all_conflicts
-        }
+        original_pairs = {(c.component1, c.component2, c.type) for c in all_conflicts}
 
-        with tempfile.NamedTemporaryFile(
-            suffix=".kicad_pcb", mode="w", delete=False
-        ) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as tmp:
             tmp_path = Path(tmp.name)
             tmp.write(content)
 
@@ -609,10 +603,7 @@ class PlacementFixer:
                 # Re-detect pad clearance violations
                 tmp_path.write_text(content)
                 current_conflicts = analyzer.find_conflicts(tmp_path, rules)
-                current_pad = [
-                    c for c in current_conflicts
-                    if c.type == ConflictType.PAD_CLEARANCE
-                ]
+                current_pad = [c for c in current_conflicts if c.type == ConflictType.PAD_CLEARANCE]
 
                 if not current_pad:
                     break
@@ -650,12 +641,9 @@ class PlacementFixer:
         # Final verification
         final_conflicts = analyzer.find_conflicts(output_path, rules)
         newly_introduced = [
-            c for c in final_conflicts
-            if (c.component1, c.component2, c.type) not in original_pairs
+            c for c in final_conflicts if (c.component1, c.component2, c.type) not in original_pairs
         ]
-        remaining_pad = [
-            c for c in final_conflicts if c.type == ConflictType.PAD_CLEARANCE
-        ]
+        remaining_pad = [c for c in final_conflicts if c.type == ConflictType.PAD_CLEARANCE]
 
         if remaining_pad:
             msg = (
@@ -785,26 +773,30 @@ class PlacementFixer:
             conflict_count = len(conflicts)
 
             if conflict_count == 0:
-                pass_results.append(PassResult(
-                    pass_number=pass_num,
-                    conflicts_before=prev_conflict_count,
-                    conflicts_after=0,
-                    fixes_applied=0,
-                    escalation_factor=current_escalation,
-                ))
+                pass_results.append(
+                    PassResult(
+                        pass_number=pass_num,
+                        conflicts_before=prev_conflict_count,
+                        conflicts_after=0,
+                        fixes_applied=0,
+                        escalation_factor=current_escalation,
+                    )
+                )
                 break
 
             # Suggest fixes
             fixes = self.suggest_fixes(conflicts, analyzer)
 
             if not fixes:
-                pass_results.append(PassResult(
-                    pass_number=pass_num,
-                    conflicts_before=conflict_count,
-                    conflicts_after=conflict_count,
-                    fixes_applied=0,
-                    escalation_factor=current_escalation,
-                ))
+                pass_results.append(
+                    PassResult(
+                        pass_number=pass_num,
+                        conflicts_before=conflict_count,
+                        conflicts_after=conflict_count,
+                        fixes_applied=0,
+                        escalation_factor=current_escalation,
+                    )
+                )
                 break
 
             # Filter out previously-stalled fix directions
@@ -842,7 +834,8 @@ class PlacementFixer:
                         )
                     else:
                         cumulative_moves[fix.component] = Point(
-                            fix.move_vector.x, fix.move_vector.y,
+                            fix.move_vector.x,
+                            fix.move_vector.y,
                         )
                     applied += 1
 
@@ -853,13 +846,15 @@ class PlacementFixer:
             new_conflicts = analyzer._find_conflicts_internal(rules)
             new_count = len(new_conflicts)
 
-            pass_results.append(PassResult(
-                pass_number=pass_num,
-                conflicts_before=conflict_count,
-                conflicts_after=new_count,
-                fixes_applied=applied,
-                escalation_factor=current_escalation,
-            ))
+            pass_results.append(
+                PassResult(
+                    pass_number=pass_num,
+                    conflicts_before=conflict_count,
+                    conflicts_after=new_count,
+                    fixes_applied=applied,
+                    escalation_factor=current_escalation,
+                )
+            )
 
             elapsed = time.monotonic() - start_time
             _progress(
@@ -971,9 +966,7 @@ class PlacementFixer:
                 continue
 
             # Step 2: Find and update the first (at X Y [R]) in this footprint
-            at_pattern = re.compile(
-                r'(\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\))'
-            )
+            at_pattern = re.compile(r"(\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\))")
             at_match = at_pattern.search(fp_block)
             if not at_match:
                 continue

@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from kicad_tools.export.bom_spec_overlay import (
     SpecOverlayReport,
@@ -16,7 +13,6 @@ from kicad_tools.export.bom_spec_overlay import (
 )
 from kicad_tools.schema.bom import BOMItem
 from kicad_tools.spec.schema import BOMEntry
-
 
 # ---------------------------------------------------------------------------
 # Helpers

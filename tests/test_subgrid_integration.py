@@ -9,11 +9,8 @@ Tests verify that:
 4. All route_all variants (interleaved, parallel, negotiated) include pre-pass
 """
 
-import pytest
-
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.failure_analysis import FailureCause
-from kicad_tools.router.layers import Layer
 from kicad_tools.router.rules import DesignRules
 
 
@@ -126,8 +123,15 @@ class TestSubgridPrepass:
         # Check that escape routes were generated (they have single segments
         # with very short length connecting off-grid pad to grid point)
         escape_segments = [
-            r for r in routes
-            if len(r.segments) == 1 and ((r.segments[0].x2 - r.segments[0].x1) ** 2 + (r.segments[0].y2 - r.segments[0].y1) ** 2) ** 0.5 < 0.5
+            r
+            for r in routes
+            if len(r.segments) == 1
+            and (
+                (r.segments[0].x2 - r.segments[0].x1) ** 2
+                + (r.segments[0].y2 - r.segments[0].y1) ** 2
+            )
+            ** 0.5
+            < 0.5
         ]
         # We should have at least some escape segments for the off-grid pads
         # (10.65 and 11.30 are off-grid on 0.1mm grid)
@@ -168,8 +172,15 @@ class TestSubgridPrepass:
 
         # Check that escape routes are in self.routes
         escape_routes_in_self = [
-            r for r in router.routes
-            if len(r.segments) == 1 and ((r.segments[0].x2 - r.segments[0].x1) ** 2 + (r.segments[0].y2 - r.segments[0].y1) ** 2) ** 0.5 < 0.5
+            r
+            for r in router.routes
+            if len(r.segments) == 1
+            and (
+                (r.segments[0].x2 - r.segments[0].x1) ** 2
+                + (r.segments[0].y2 - r.segments[0].y1) ** 2
+            )
+            ** 0.5
+            < 0.5
         ]
         assert len(escape_routes_in_self) >= 1
 
@@ -212,7 +223,8 @@ class TestSubgridRetryOnPinAccess:
         # there should be no PIN_ACCESS failure remaining for this net
         if routes:
             pin_access_failures = [
-                f for f in router.routing_failures
+                f
+                for f in router.routing_failures
                 if f.net == 1 and f.failure_cause == FailureCause.PIN_ACCESS
             ]
             assert len(pin_access_failures) == 0, (

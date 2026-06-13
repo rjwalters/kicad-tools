@@ -16,7 +16,7 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
 
@@ -228,9 +228,7 @@ def compute_wirelength(
     if not nets:
         return 0.0
 
-    pos_map: dict[str, tuple[float, float]] = {
-        p.reference: (p.x, p.y) for p in placements
-    }
+    pos_map: dict[str, tuple[float, float]] = {p.reference: (p.x, p.y) for p in placements}
 
     total = 0.0
     for net in nets:
@@ -272,12 +270,8 @@ def compute_overlap(
     n = len(boxes)
     for i in range(n):
         for j in range(i + 1, n):
-            x_overlap = max(
-                0.0, min(boxes[i][2], boxes[j][2]) - max(boxes[i][0], boxes[j][0])
-            )
-            y_overlap = max(
-                0.0, min(boxes[i][3], boxes[j][3]) - max(boxes[i][1], boxes[j][1])
-            )
+            x_overlap = max(0.0, min(boxes[i][2], boxes[j][2]) - max(boxes[i][0], boxes[j][0]))
+            y_overlap = max(0.0, min(boxes[i][3], boxes[j][3]) - max(boxes[i][1], boxes[j][1]))
             total_overlap += x_overlap * y_overlap
     return total_overlap
 
@@ -590,12 +584,7 @@ def evaluate_placement(
         inter_block=inter_block,
     )
 
-    is_feasible = (
-        overlap == 0.0
-        and drc == 0.0
-        and boundary == 0.0
-        and block_boundary == 0.0
-    )
+    is_feasible = overlap == 0.0 and drc == 0.0 and boundary == 0.0 and block_boundary == 0.0
 
     if config.mode == CostMode.LEXICOGRAPHIC:
         total = _lexicographic_score(breakdown, config, is_feasible)
@@ -647,7 +636,4 @@ def _lexicographic_score(
             + config.boundary_weight * breakdown.boundary
         )
     else:
-        return (
-            config.wirelength_weight * breakdown.wirelength
-            + config.area_weight * breakdown.area
-        )
+        return config.wirelength_weight * breakdown.wirelength + config.area_weight * breakdown.area

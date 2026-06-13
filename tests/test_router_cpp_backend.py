@@ -567,12 +567,22 @@ class TestAvoidanceCost:
         pf = CppPathfinder(cpp_grid, rules)
 
         start = Pad(
-            x=2.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=2.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
         end = Pad(
-            x=18.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=18.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
 
         # Route without avoidance
@@ -705,12 +715,22 @@ class TestResumableRouting:
         pf = CppPathfinder(cpp_grid, rules)
 
         start = Pad(
-            x=5.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=5.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
         end = Pad(
-            x=15.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=15.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
 
         # route() should work as before (backward compatible)
@@ -784,9 +804,13 @@ class TestResumableRouting:
 
         # Route from (1,1) to (10,10) on layer 0
         result1 = pf.route_resumable(
-            0.254, 0.254, 0,  # start
-            2.54, 2.54, 0,    # end
-            1,                 # net
+            0.254,
+            0.254,
+            0,  # start
+            2.54,
+            2.54,
+            0,  # end
+            1,  # net
         )
         assert result1.success, "Initial resumable route should succeed"
         nodes_after_first = pf.nodes_explored
@@ -838,8 +862,12 @@ class TestResumableRouting:
 
         # Run a resumable search
         result = pf.route_resumable(
-            0.254, 0.254, 0,
-            5.08, 5.08, 0,
+            0.254,
+            0.254,
+            0,
+            5.08,
+            5.08,
+            0,
             1,
         )
         assert result.success
@@ -883,8 +911,12 @@ class TestResumableRouting:
 
         # Run a resumable search and clear
         result1 = pf.route_resumable(
-            0.254, 0.254, 0,
-            5.08, 5.08, 0,
+            0.254,
+            0.254,
+            0,
+            5.08,
+            5.08,
+            0,
             1,
         )
         assert result1.success
@@ -892,8 +924,12 @@ class TestResumableRouting:
 
         # Non-resumable route should still work fine
         result2 = pf.route(
-            0.254, 0.254, 0,
-            5.08, 5.08, 0,
+            0.254,
+            0.254,
+            0,
+            5.08,
+            5.08,
+            0,
             1,
         )
         assert result2.success
@@ -924,12 +960,22 @@ class TestResumableRouting:
         pf = CppPathfinder(cpp_grid, rules)
 
         start = Pad(
-            x=5.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=5.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
         end = Pad(
-            x=15.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=15.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
 
         # The Python wrapper now uses route_resumable internally
@@ -963,12 +1009,22 @@ class TestResumableRouting:
         pf = CppPathfinder(cpp_grid, rules)
 
         start = Pad(
-            x=5.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=5.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
         end = Pad(
-            x=15.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU,
+            x=15.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
         )
 
         # Route should work (exercises try/finally in the wrapper)
@@ -1302,9 +1358,7 @@ class TestCppPathfinderPythonFallback:
                 x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=i, net_name=net_name
             )
             mock_route = Route(net=i, net_name=net_name)
-            with patch(
-                "kicad_tools.router.pathfinder.Router.route", return_value=mock_route
-            ):
+            with patch("kicad_tools.router.pathfinder.Router.route", return_value=mock_route):
                 result = pf.route(start, end)
             assert result is not None
 
@@ -1419,9 +1473,7 @@ class TestCppBuildVersionGuard:
             pytest.skip("C++ backend not available - guard already engaged")
 
         # Force BUILD_VERSION to a mismatched value before re-importing
-        monkeypatch.setattr(
-            router_cpp_mod, "BUILD_VERSION", 999_999, raising=False
-        )
+        monkeypatch.setattr(router_cpp_mod, "BUILD_VERSION", 999_999, raising=False)
 
         # Drop the cached cpp_backend so the module-level guard re-runs
         sys.modules.pop("kicad_tools.router.cpp_backend", None)

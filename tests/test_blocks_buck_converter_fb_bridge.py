@@ -24,11 +24,10 @@ from __future__ import annotations
 from kicad_tools.schematic.blocks import BuckConverter
 from kicad_tools.schematic.models.schematic import Schematic
 
-
 # Board-05 coordinates (verbatim from boards/05-bldc-motor-controller/design.py).
 BUCK_X = 80.01
 BUCK_Y = 100.33
-C2_X = 95.25         # X_POWER_IN (25) + 70
+C2_X = 95.25  # X_POWER_IN (25) + 70
 RAIL_VMOTOR_Y = 25.4
 C2_Y = 114.3
 
@@ -149,12 +148,8 @@ class TestBuckConverterFbBridge:
             for w in sch.wires:
                 yield (w.x1, w.y1), (w.x2, w.y2)
 
-        has_fb_to_corner = any(
-            ({a, b} == {fb_pos, corner}) for a, b in _wire_endpoints()
-        )
-        has_corner_to_vout = any(
-            ({a, b} == {corner, vout_node}) for a, b in _wire_endpoints()
-        )
+        has_fb_to_corner = any(({a, b} == {fb_pos, corner}) for a, b in _wire_endpoints())
+        has_corner_to_vout = any(({a, b} == {corner, vout_node}) for a, b in _wire_endpoints())
         assert has_fb_to_corner, (
             f"Expected a wire from FB pin {fb_pos} to corner {corner}; "
             f"got wires: {list(_wire_endpoints())}"

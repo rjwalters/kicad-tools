@@ -1,6 +1,5 @@
 """Tests for fine-pitch component detection and routing compatibility analysis."""
 
-
 from kicad_tools.router.fine_pitch import (
     ComponentGridAnalysis,
     FinePitchReport,

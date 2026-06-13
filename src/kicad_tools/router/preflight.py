@@ -323,10 +323,7 @@ def compute_pad_grid_tolerance(
         return floor
 
     x_off, y_off = grid_origin
-    offsets = [
-        _l2_distance_to_grid(pad.x, pad.y, grid_resolution, x_off, y_off)
-        for pad in pads
-    ]
+    offsets = [_l2_distance_to_grid(pad.x, pad.y, grid_resolution, x_off, y_off) for pad in pads]
 
     raw = _percentile(offsets, percentile) + margin
     bounded = min(cap, max(floor, raw))

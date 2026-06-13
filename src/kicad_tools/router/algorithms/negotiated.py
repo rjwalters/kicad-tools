@@ -207,7 +207,7 @@ def run_initial_pass_grace(
                     flush=True,
                 )
                 aborted = True
-                still_failing.extend(remaining[idx + 1:])
+                still_failing.extend(remaining[idx + 1 :])
                 break
         remaining = still_failing
         # No-progress tier exit (issue #3474 R1): if this tier attempted
@@ -249,9 +249,7 @@ def select_seg_seg_demotion_nets(
     Returns:
         Sorted list of net ids to demote (may be empty).
     """
-    pending = [
-        (a, b) for a, b in overlap_pairs if a in demotable or b in demotable
-    ]
+    pending = [(a, b) for a, b in overlap_pairs if a in demotable or b in demotable]
     demoted: set[int] = set()
     while pending:
         counts: dict[int, int] = {}
@@ -357,9 +355,11 @@ def detect_oscillation(overflow_history: list[int], window: int = 4) -> bool:
     # means the router found a better configuration even if it bounced back.
     best_overall = min(overflow_history)
     window_min = min(recent)
-    window_has_new_minimum = window_min <= best_overall and window_min < min(
-        overflow_history[:-window]
-    ) if len(overflow_history) > window else False
+    window_has_new_minimum = (
+        window_min <= best_overall and window_min < min(overflow_history[:-window])
+        if len(overflow_history) > window
+        else False
+    )
 
     if window_has_new_minimum:
         return False
@@ -668,7 +668,7 @@ def calculate_present_cost(
     """
     if exponential:
         # OrthoRoute-style: base * mult^iteration, capped to prevent runaway
-        raw = base_cost * (pres_fac_mult ** iteration)
+        raw = base_cost * (pres_fac_mult**iteration)
         return min(raw, pres_fac_cap)
 
     # Linear mode (original behaviour)
@@ -793,10 +793,7 @@ def _dedupe_sibling_route_vias(
                     via.layers[0].value,
                     via.layers[1].value,
                 )
-                if (
-                    min_layer != existing.layers[0].value
-                    or max_layer != existing.layers[1].value
-                ):
+                if min_layer != existing.layers[0].value or max_layer != existing.layers[1].value:
                     existing.layers = (Layer(min_layer), Layer(max_layer))
                 removed += 1
 
@@ -956,19 +953,14 @@ class NegotiatedRouter:
             # Build congestion-aware cost function for Steiner tree
             # construction when a RUDY estimator is available.
             congestion_fn = None
-            if (
-                self.congestion_estimator is not None
-                and self.congestion_weight > 0
-            ):
+            if self.congestion_estimator is not None and self.congestion_weight > 0:
                 est = self.congestion_estimator
                 tile_area = est.grid.tile_w * est.grid.tile_h
                 # Scale weight by tile area so demand and Manhattan
                 # distance are in comparable units (mm).
                 scaled_weight = self.congestion_weight * tile_area
 
-                def congestion_fn(
-                    x1: float, y1: float, x2: float, y2: float
-                ) -> float:
+                def congestion_fn(x1: float, y1: float, x2: float, y2: float) -> float:
                     manhattan = abs(x1 - x2) + abs(y1 - y2)
                     mid_x = (x1 + x2) / 2
                     mid_y = (y1 + y2) / 2
@@ -996,9 +988,7 @@ class NegotiatedRouter:
             # the margin rationale.  ``None`` (fixture/mock grids
             # without occupancy APIs) preserves legacy snapping
             # behaviour byte-for-byte.
-            _point_blocked = make_blocked_cell_predicate(
-                self.grid, self.rules, pad_objs[0].net
-            )
+            _point_blocked = make_blocked_cell_predicate(self.grid, self.rules, pad_objs[0].net)
 
             def _snap_to_grid(x: float, y: float) -> tuple[float, float]:
                 gx, gy = self.grid.world_to_grid(x, y)
@@ -1030,9 +1020,7 @@ class NegotiatedRouter:
             # skipped edge still surfaces via ``failure_callback`` for the
             # rip-up / retry layer (Issue #2476).
             net_deadline = (
-                time.monotonic() + per_net_timeout
-                if per_net_timeout is not None
-                else None
+                time.monotonic() + per_net_timeout if per_net_timeout is not None else None
             )
 
             for i, j in rsmt_edges:
@@ -1110,6 +1098,7 @@ class NegotiatedRouter:
                 routes.append(route)
             else:
                 import os as _os
+
                 if _os.environ.get("KCT_RELIEF_DEBUG"):
                     print(
                         f"    [relief-debug] 2-pin route fail net={pad_objs[0].net}: "
@@ -1391,14 +1380,16 @@ class NegotiatedRouter:
             if src not in stranded_nets:
                 continue
             try:
-                relevant_rects.append((
-                    int(b.gx1),
-                    int(b.gy1),
-                    int(b.gx2),
-                    int(b.gy2),
-                    int(getattr(b, "layer", -1)),
-                    src,
-                ))
+                relevant_rects.append(
+                    (
+                        int(b.gx1),
+                        int(b.gy1),
+                        int(b.gx2),
+                        int(b.gy2),
+                        int(getattr(b, "layer", -1)),
+                        src,
+                    )
+                )
             except (AttributeError, TypeError):
                 continue
 
@@ -1455,7 +1446,7 @@ class NegotiatedRouter:
         net_routes: dict[int, list[Route]],
         trace_clearance: float,
         cache_key: object | None = None,
-        extra_routes: list["Route"] | None = None,
+        extra_routes: list[Route] | None = None,
     ) -> list[int]:
         """Find nets whose committed segments clip foreign-net vias.
 
@@ -1595,7 +1586,7 @@ class NegotiatedRouter:
         # ``vias_on_layer[L]`` is the list of ``(net, via)`` tuples
         # whose layer span includes layer L.  Layer values are read
         # from ``via.layers[0/1].value`` so they're plain ints.
-        vias_on_layer: dict[int, list[tuple[int, "Via"]]] = {}
+        vias_on_layer: dict[int, list[tuple[int, Via]]] = {}
         total_vias = 0
         for net_id, routes in net_routes.items():
             for route in routes:
@@ -1604,9 +1595,7 @@ class NegotiatedRouter:
                     v_lo = min(via.layers[0].value, via.layers[1].value)
                     v_hi = max(via.layers[0].value, via.layers[1].value)
                     for layer_val in range(v_lo, v_hi + 1):
-                        vias_on_layer.setdefault(layer_val, []).append(
-                            (net_id, via)
-                        )
+                        vias_on_layer.setdefault(layer_val, []).append((net_id, via))
 
         # Issue #3077: Fold in vias from ``extra_routes`` (typically
         # escape-phase routes) so segment-vs-foreign-via detection
@@ -1623,9 +1612,7 @@ class NegotiatedRouter:
                     v_lo = min(via.layers[0].value, via.layers[1].value)
                     v_hi = max(via.layers[0].value, via.layers[1].value)
                     for layer_val in range(v_lo, v_hi + 1):
-                        vias_on_layer.setdefault(layer_val, []).append(
-                            (route.net, via)
-                        )
+                        vias_on_layer.setdefault(layer_val, []).append((route.net, via))
 
         # Fast path: no vias at all -> no violations possible.
         if total_vias == 0:
@@ -1681,7 +1668,9 @@ class NegotiatedRouter:
                             continue
 
                         if not segment_clears_foreign_via(
-                            seg, via, trace_clearance,
+                            seg,
+                            via,
+                            trace_clearance,
                             hard_intersection_only=False,
                         ):
                             violators.add(net)
@@ -1700,7 +1689,7 @@ class NegotiatedRouter:
         net_routes: dict[int, list[Route]],
         trace_clearance: float,
         cache_key: object | None = None,
-        extra_routes: list["Route"] | None = None,
+        extra_routes: list[Route] | None = None,
     ) -> list[int]:
         """Find nets whose committed vias clip foreign-net segments.
 
@@ -1806,7 +1795,6 @@ class NegotiatedRouter:
         else:
             effective_cache_key = None
 
-
         # Import here to avoid a top-level circular dependency between
         # algorithms.negotiated -> via_clearance -> primitives.
         from ..via_clearance import via_clears_foreign_segment
@@ -1815,15 +1803,13 @@ class NegotiatedRouter:
         # inner loop only consults segments on a layer the via's span
         # covers.  Mirror of the via-bucket strategy in
         # :meth:`find_nets_with_segment_via_violations`.
-        segs_on_layer: dict[int, list[tuple[int, "Segment"]]] = {}
+        segs_on_layer: dict[int, list[tuple[int, Segment]]] = {}
         total_segs = 0
         for net_id, routes in net_routes.items():
             for route in routes:
                 for seg in route.segments:
                     total_segs += 1
-                    segs_on_layer.setdefault(seg.layer.value, []).append(
-                        (net_id, seg)
-                    )
+                    segs_on_layer.setdefault(seg.layer.value, []).append((net_id, seg))
 
         # Issue #3077: extend the foreign-segment universe with
         # ``extra_routes`` (typically escape-phase routes).  Their
@@ -1834,9 +1820,7 @@ class NegotiatedRouter:
             for route in extra_routes:
                 for seg in route.segments:
                     total_segs += 1
-                    segs_on_layer.setdefault(seg.layer.value, []).append(
-                        (route.net, seg)
-                    )
+                    segs_on_layer.setdefault(seg.layer.value, []).append((route.net, seg))
 
         # Fast path: no segments at all -> no violations possible.
         if total_segs == 0:
@@ -1876,9 +1860,7 @@ class NegotiatedRouter:
                             seg_max_x = max(seg.x1, seg.x2)
                             seg_min_y = min(seg.y1, seg.y2)
                             seg_max_y = max(seg.y1, seg.y2)
-                            envelope = (
-                                via_radius + seg.width / 2 + trace_clearance
-                            )
+                            envelope = via_radius + seg.width / 2 + trace_clearance
                             if (
                                 via.x < seg_min_x - envelope
                                 or via.x > seg_max_x + envelope
@@ -1888,7 +1870,9 @@ class NegotiatedRouter:
                                 continue
 
                             if not via_clears_foreign_segment(
-                                via, seg, trace_clearance,
+                                via,
+                                seg,
+                                trace_clearance,
                                 hard_intersection_only=False,
                             ):
                                 # Per PR #3019 judge's invariant: the
@@ -1974,17 +1958,13 @@ class NegotiatedRouter:
         for net_id, routes in net_routes.items():
             for route in routes:
                 for seg in route.segments:
-                    segs_on_layer.setdefault(seg.layer.value, []).append(
-                        (net_id, seg, True)
-                    )
+                    segs_on_layer.setdefault(seg.layer.value, []).append((net_id, seg, True))
                     if seg.width / 2 > max_half_width:
                         max_half_width = seg.width / 2
         if extra_routes:
             for route in extra_routes:
                 for seg in route.segments:
-                    segs_on_layer.setdefault(seg.layer.value, []).append(
-                        (route.net, seg, False)
-                    )
+                    segs_on_layer.setdefault(seg.layer.value, []).append((route.net, seg, False))
                     if seg.width / 2 > max_half_width:
                         max_half_width = seg.width / 2
 
@@ -2000,16 +1980,18 @@ class NegotiatedRouter:
             # Sweep preparation: sort by min_x; precompute bboxes.
             prepared = []
             for net_id, seg, rippable in layer_entries:
-                prepared.append((
-                    min(seg.x1, seg.x2),  # 0: min_x (sort key)
-                    max(seg.x1, seg.x2),  # 1: max_x
-                    min(seg.y1, seg.y2),  # 2: min_y
-                    max(seg.y1, seg.y2),  # 3: max_y
-                    seg.width / 2,        # 4: half width
-                    net_id,               # 5
-                    seg,                  # 6
-                    rippable,             # 7
-                ))
+                prepared.append(
+                    (
+                        min(seg.x1, seg.x2),  # 0: min_x (sort key)
+                        max(seg.x1, seg.x2),  # 1: max_x
+                        min(seg.y1, seg.y2),  # 2: min_y
+                        max(seg.y1, seg.y2),  # 3: max_y
+                        seg.width / 2,  # 4: half width
+                        net_id,  # 5
+                        seg,  # 6
+                        rippable,  # 7
+                    )
+                )
             prepared.sort(key=lambda e: e[0])
 
             for i, a in enumerate(prepared):
@@ -2036,8 +2018,14 @@ class NegotiatedRouter:
                         continue
                     sa, sb = a[6], b[6]
                     dist = segment_to_segment_distance(
-                        sa.x1, sa.y1, sa.x2, sa.y2,
-                        sb.x1, sb.y1, sb.x2, sb.y2,
+                        sa.x1,
+                        sa.y1,
+                        sa.x2,
+                        sa.y2,
+                        sb.x1,
+                        sb.y1,
+                        sb.x2,
+                        sb.y2,
                     )
                     if dist < required - eps:
                         pairs.add(pair_key)
@@ -2220,7 +2208,9 @@ class NegotiatedRouter:
             failed_net_success = False
             if failed_pads and len(failed_pads) >= 2:
                 routes = self.route_net_negotiated(
-                    failed_pads, present_cost_factor, mark_route_callback,
+                    failed_pads,
+                    present_cost_factor,
+                    mark_route_callback,
                     per_net_timeout=per_net_timeout,
                 )
                 if routes:
@@ -2237,7 +2227,9 @@ class NegotiatedRouter:
                 net_pads = pads_by_net.get(net, [])
                 if net_pads and len(net_pads) >= 2:
                     routes = self.route_net_negotiated(
-                        net_pads, present_cost_factor, mark_route_callback,
+                        net_pads,
+                        present_cost_factor,
+                        mark_route_callback,
                         per_net_timeout=per_net_timeout,
                     )
                     if routes:
@@ -2445,7 +2437,9 @@ class NegotiatedRouter:
         if failed_pads and len(failed_pads) >= 2:
             _emit_progress("failed_net", failed_net, 1)
             routes = self.route_net_negotiated(
-                failed_pads, present_cost_factor, mark_route_callback,
+                failed_pads,
+                present_cost_factor,
+                mark_route_callback,
                 per_net_timeout=per_net_timeout,
                 failure_callback=_count_failed_edge,
             )
@@ -2480,7 +2474,9 @@ class NegotiatedRouter:
             if net_pads and len(net_pads) >= 2:
                 _emit_progress("sibling", net, sibling_index)
                 routes = self.route_net_negotiated(
-                    net_pads, present_cost_factor, mark_route_callback,
+                    net_pads,
+                    present_cost_factor,
+                    mark_route_callback,
                     per_net_timeout=per_net_timeout,
                 )
                 if routes and len(routes) >= len(original_routes.get(net, [])):
@@ -2616,7 +2612,7 @@ class NegotiatedRouter:
             score = camping in more foreign escape channels.
         """
         if not pad_channel_budgets or not candidate_nets:
-            return {n: 0 for n in candidate_nets}
+            return dict.fromkeys(candidate_nets, 0)
 
         # Pre-extract budget rectangles into plain tuples to avoid
         # attribute lookups in the inner loop.  Layer = -1 means "all
@@ -2626,21 +2622,23 @@ class NegotiatedRouter:
         budget_rects: list[tuple[int, int, int, int, int, int]] = []
         for b in pad_channel_budgets:
             try:
-                budget_rects.append((
-                    int(b.gx1),
-                    int(b.gy1),
-                    int(b.gx2),
-                    int(b.gy2),
-                    int(getattr(b, "layer", -1)),
-                    int(b.source_net),
-                ))
+                budget_rects.append(
+                    (
+                        int(b.gx1),
+                        int(b.gy1),
+                        int(b.gx2),
+                        int(b.gy2),
+                        int(getattr(b, "layer", -1)),
+                        int(b.source_net),
+                    )
+                )
             except (AttributeError, TypeError):
                 continue
 
         if not budget_rects:
-            return {n: 0 for n in candidate_nets}
+            return dict.fromkeys(candidate_nets, 0)
 
-        scores: dict[int, int] = {n: 0 for n in candidate_nets}
+        scores: dict[int, int] = dict.fromkeys(candidate_nets, 0)
 
         for net_id in candidate_nets:
             routes = net_routes.get(net_id, [])
@@ -2665,34 +2663,25 @@ class NegotiatedRouter:
                         continue
 
                     try:
-                        seg_layer_idx = self.grid.layer_to_index(
-                            seg.layer.value
-                        )
+                        seg_layer_idx = self.grid.layer_to_index(seg.layer.value)
                     except (AttributeError, TypeError, ValueError):
                         seg_layer_idx = -1
 
                     # Sample three cells: both endpoints and the midpoint.
                     sample_cells = (
                         (int(gx1), int(gy1)),
-                        ((int(gx1) + int(gx2)) // 2,
-                         (int(gy1) + int(gy2)) // 2),
+                        ((int(gx1) + int(gx2)) // 2, (int(gy1) + int(gy2)) // 2),
                         (int(gx2), int(gy2)),
                     )
                     for sx, sy in sample_cells:
-                        for bgx1, bgy1, bgx2, bgy2, b_layer, b_src in (
-                            budget_rects
-                        ):
+                        for bgx1, bgy1, bgx2, bgy2, b_layer, b_src in budget_rects:
                             # Skip budgets owned by this net -- the
                             # rip-up should NOT penalise a net for
                             # occupying its OWN escape strip.
                             if b_src == net_id:
                                 continue
                             # Layer match: -1 means any layer.
-                            if (
-                                b_layer != -1
-                                and seg_layer_idx != -1
-                                and b_layer != seg_layer_idx
-                            ):
+                            if b_layer != -1 and seg_layer_idx != -1 and b_layer != seg_layer_idx:
                                 continue
                             if bgx1 <= sx <= bgx2 and bgy1 <= sy <= bgy2:
                                 cell_count += 1
@@ -2759,12 +2748,14 @@ class NegotiatedRouter:
             return sum(1 for routes in net_routes.values() if routes)
 
         initial_routed = _count_routed()
-        radius_factor = initial_radius_factor * (escalation_factor ** stall_count)
+        radius_factor = initial_radius_factor * (escalation_factor**stall_count)
         attempts = 0
 
         # Step 1: Find true blockers via relaxed A*
         blocker_scores = self.find_blocking_nets_relaxed(
-            failed_nets, pads_by_net, per_net_timeout=per_net_timeout,
+            failed_nets,
+            pads_by_net,
+            per_net_timeout=per_net_timeout,
         )
 
         if not blocker_scores:
@@ -2781,9 +2772,7 @@ class NegotiatedRouter:
         # When ``KCT_DISABLE_PAD_BUDGETS=1`` was set at the pre-pass, the
         # backend's budget list will be empty and ``foreign_overlap``
         # below collapses to all-zero -- this is the A/B knob (AC #5).
-        pad_channel_budgets = getattr(
-            self.router, "_pad_channel_budgets", []
-        ) or []
+        pad_channel_budgets = getattr(self.router, "_pad_channel_budgets", []) or []
         foreign_overlap = self.score_foreign_budget_overlap(
             list(blocker_scores.keys()),
             net_routes,
@@ -2866,8 +2855,7 @@ class NegotiatedRouter:
 
             # Identify which failed nets could benefit from this rip-up
             affected_failed = [
-                n for n in failed_nets
-                if n not in net_routes or not net_routes.get(n)
+                n for n in failed_nets if n not in net_routes or not net_routes.get(n)
             ]
 
             # Rip up the neighborhood
@@ -2878,7 +2866,9 @@ class NegotiatedRouter:
                 fn_pads = pads_by_net.get(fn, [])
                 if fn_pads and len(fn_pads) >= 2:
                     routes = self.route_net_negotiated(
-                        fn_pads, present_cost_factor, mark_route_callback,
+                        fn_pads,
+                        present_cost_factor,
+                        mark_route_callback,
                         per_net_timeout=per_net_timeout,
                     )
                     if routes:
@@ -2894,7 +2884,9 @@ class NegotiatedRouter:
                 net_pads = pads_by_net.get(net_id, [])
                 if net_pads and len(net_pads) >= 2:
                     routes = self.route_net_negotiated(
-                        net_pads, present_cost_factor, mark_route_callback,
+                        net_pads,
+                        present_cost_factor,
+                        mark_route_callback,
                         per_net_timeout=per_net_timeout,
                     )
                     if routes:
@@ -3040,7 +3032,9 @@ class NegotiatedRouter:
             if net_pads and len(net_pads) >= 2:
                 expected_count += 1
                 routes = self.route_net_negotiated(
-                    net_pads, boosted_cost, mark_route_callback,
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
                     per_net_timeout=per_net_timeout,
                 )
                 if routes:
@@ -3102,7 +3096,9 @@ class NegotiatedRouter:
             if net_pads and len(net_pads) >= 2:
                 expected_count += 1
                 routes = self.route_net_negotiated(
-                    net_pads, boosted_cost, mark_route_callback,
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
                     per_net_timeout=per_net_timeout,
                 )
                 if routes:
@@ -3167,7 +3163,9 @@ class NegotiatedRouter:
             if net_pads and len(net_pads) >= 2:
                 expected_count += 1
                 routes = self.route_net_negotiated(
-                    net_pads, boosted_cost, mark_route_callback,
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
                     per_net_timeout=per_net_timeout,
                 )
                 if routes:
@@ -3237,7 +3235,9 @@ class NegotiatedRouter:
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
                 routes = self.route_net_negotiated(
-                    net_pads, boosted_cost, mark_route_callback,
+                    net_pads,
+                    boosted_cost,
+                    mark_route_callback,
                     per_net_timeout=per_net_timeout,
                 )
                 if routes:

@@ -112,9 +112,7 @@ class TestComputeTolerance:
         assert tol == AUTO_DERIVED_TOLERANCE_FLOOR_MM
         assert tol >= DEFAULT_PAD_GRID_TOLERANCE_MM
 
-    def test_fine_pitch_intrinsic_offset_lifts_tolerance(
-        self, tmp_path: Path
-    ) -> None:
+    def test_fine_pitch_intrinsic_offset_lifts_tolerance(self, tmp_path: Path) -> None:
         """Fine-pitch package with intrinsic 0.07mm L2 offset lifts threshold.
 
         On a 0.1 mm grid the per-axis distance-to-grid is bounded by
@@ -130,9 +128,7 @@ class TestComputeTolerance:
         # offset by 0.05 mm -> L2 = 0.0707 mm intrinsic offset.
         # Pads at multiples of 0.5 mm (a grid divisor of 0.1) + the
         # (0.05, 0.05) component offset.
-        pads = [
-            (str(i), 0.5 * i + 0.05, 0.05) for i in range(10)
-        ] + [
+        pads = [(str(i), 0.5 * i + 0.05, 0.05) for i in range(10)] + [
             (str(i + 10), 0.5 * i + 0.05, 1.05) for i in range(10)
         ]
         text = _pcb_with_pads(
@@ -152,10 +148,9 @@ class TestComputeTolerance:
 
         # Threshold should sit just above the 0.0707 mm intrinsic offset
         # (with the safety margin) so the intrinsic pads clear.
-        intrinsic_l2 = (0.05 ** 2 + 0.05 ** 2) ** 0.5
+        intrinsic_l2 = (0.05**2 + 0.05**2) ** 0.5
         assert tol >= intrinsic_l2 + AUTO_DERIVED_TOLERANCE_MARGIN_MM * 0.5, (
-            f"Auto-derived tolerance {tol} too tight for "
-            f"{intrinsic_l2:.4f} mm intrinsic offset"
+            f"Auto-derived tolerance {tol} too tight for {intrinsic_l2:.4f} mm intrinsic offset"
         )
         # But still well below the hard cap.
         assert tol <= AUTO_DERIVED_TOLERANCE_HARD_CAP_MM
@@ -171,9 +166,7 @@ class TestComputeTolerance:
         # Every pad sits at +0.2 mm in both axes from the nearest 0.5
         # mm grid point -> L2 = 0.283 mm, well above the 0.15 mm cap.
         pads = [(str(i), i * 1.0 + 0.2, 0.2) for i in range(10)]
-        text = _pcb_with_pads(
-            [("Test:FP", "U1", 100.0, 100.0, 0.0, pads)]
-        )
+        text = _pcb_with_pads([("Test:FP", "U1", 100.0, 100.0, 0.0, pads)])
         pcb = _write_pcb(tmp_path, text)
         tol = compute_pad_grid_tolerance(pcb, grid_resolution=0.5)
         assert tol == AUTO_DERIVED_TOLERANCE_HARD_CAP_MM
@@ -185,9 +178,7 @@ class TestComputeTolerance:
         # flags as a violation.
         pads = [(str(i), 0.1 * i, 0.0) for i in range(99)]
         pads.append(("99", 5.0 + 0.3, 0.0))  # 0.3 mm off
-        text = _pcb_with_pads(
-            [("Test:FP", "U1", 100.0, 100.0, 0.0, pads)]
-        )
+        text = _pcb_with_pads([("Test:FP", "U1", 100.0, 100.0, 0.0, pads)])
         pcb = _write_pcb(tmp_path, text)
         tol = compute_pad_grid_tolerance(pcb, grid_resolution=0.1)
         # p99 of 99 zeros and one 0.3 lands between them -> with margin
@@ -203,9 +194,7 @@ class TestComputeTolerance:
 class TestAutoDeriveIntegration:
     """End-to-end: the rule should respect the auto-derived threshold."""
 
-    def test_on_grid_plus_placement_error_flags_only_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_on_grid_plus_placement_error_flags_only_error(self, tmp_path: Path) -> None:
         """On-grid pads + 1 placement error -> only the error flags.
 
         AC: board with all pads on-grid AND a placement error pad at
@@ -221,9 +210,7 @@ class TestAutoDeriveIntegration:
         # the auto-derived threshold stays at the floor (0.05 mm).  One
         # additional pad sits 0.4 mm off in both axes -> L2 ~ 0.566 mm,
         # well above the 0.15 mm cap.
-        on_grid_pads = [
-            (str(i), 0.5 * (i % 10), 0.5 * (i // 10)) for i in range(100)
-        ]
+        on_grid_pads = [(str(i), 0.5 * (i % 10), 0.5 * (i // 10)) for i in range(100)]
         text = _pcb_with_pads(
             [
                 (
@@ -247,9 +234,7 @@ class TestAutoDeriveIntegration:
             ]
         )
         pcb = _write_pcb(tmp_path, text)
-        report = check_pad_grid_alignment(
-            pcb, grid_resolution=0.5, auto_derive_threshold=True
-        )
+        report = check_pad_grid_alignment(pcb, grid_resolution=0.5, auto_derive_threshold=True)
         assert not report.passed
         # Exactly one violation -- and it must be U2
         refs = [pad.ref for pad in report.off_grid_pads]
@@ -283,9 +268,7 @@ class TestAutoDeriveIntegration:
             ]
         )
         pcb = _write_pcb(tmp_path, text)
-        report = check_pad_grid_alignment(
-            pcb, grid_resolution=0.1, auto_derive_threshold=True
-        )
+        report = check_pad_grid_alignment(pcb, grid_resolution=0.1, auto_derive_threshold=True)
         assert report.passed, (
             f"Fine-pitch intrinsic offset should clear auto-derived "
             f"threshold; got {len(report.off_grid_pads)} warnings."
@@ -323,18 +306,14 @@ class TestAutoDeriveIntegration:
             ]
         )
         pcb = _write_pcb(tmp_path, text)
-        report = check_pad_grid_alignment(
-            pcb, grid_resolution=0.1, auto_derive_threshold=True
-        )
+        report = check_pad_grid_alignment(pcb, grid_resolution=0.1, auto_derive_threshold=True)
         assert not report.passed
         # The single violation must be U2 (the placement error), not any
         # of the fine-pitch intrinsic pads.
         assert len(report.off_grid_pads) == 1
         assert report.off_grid_pads[0].ref == "U2"
 
-    def test_explicit_threshold_wins_over_auto_derive(
-        self, tmp_path: Path
-    ) -> None:
+    def test_explicit_threshold_wins_over_auto_derive(self, tmp_path: Path) -> None:
         """An explicit threshold argument always wins over auto-derive."""
         pads = [(str(i), 0.5 * i + 0.07, 0.0) for i in range(10)]
         text = _pcb_with_pads(
@@ -407,9 +386,7 @@ class TestBackwardCompat:
             ]
         )
         pcb = _write_pcb(tmp_path, text)
-        report = check_pad_grid_alignment(
-            pcb, grid_resolution=0.1, auto_derive_threshold=False
-        )
+        report = check_pad_grid_alignment(pcb, grid_resolution=0.1, auto_derive_threshold=False)
         assert report.passed
         assert report.threshold == DEFAULT_PAD_GRID_TOLERANCE_MM
 
@@ -425,11 +402,10 @@ class TestCLIDefaults:
         """The --pad-grid-strict flag is registered with the argparser."""
         import argparse
 
-        from kicad_tools.cli.check_cmd import main as _main  # noqa: F401
-
         # Recreate the parser by introspecting the module: easier to
         # smoke-test from the help text.
         from kicad_tools.cli import check_cmd
+        from kicad_tools.cli.check_cmd import main as _main  # noqa: F401
 
         parser = argparse.ArgumentParser()
         # Just verify the symbols exist in the module
@@ -452,9 +428,7 @@ class TestCLIDefaults:
         the p99 of the offset distribution so all pads clear.
         """
         # 20 pads, all at (0.05, 0.05) intrinsic offset -> L2 = 0.0707 mm.
-        pads = [
-            (str(i), 0.5 * i + 0.05, 0.05) for i in range(10)
-        ] + [
+        pads = [(str(i), 0.5 * i + 0.05, 0.05) for i in range(10)] + [
             (str(i + 10), 0.5 * i + 0.05, 1.05) for i in range(10)
         ]
         text = _pcb_with_pads(
@@ -485,8 +459,7 @@ class TestCLIDefaults:
         )
         default_output = capsys.readouterr().out
         assert "DRC PASSED" in default_output, (
-            f"Auto-derive default should pass for intrinsic-offset board; "
-            f"got: {default_output}"
+            f"Auto-derive default should pass for intrinsic-offset board; got: {default_output}"
         )
 
         # --pad-grid-strict: should produce pad_grid warnings.
@@ -503,8 +476,7 @@ class TestCLIDefaults:
         strict_output = capsys.readouterr().out
         # Strict mode flagged at least one pad.
         assert "pad_grid" in strict_output, (
-            f"Strict mode should flag intrinsic-offset board; "
-            f"got: {strict_output}"
+            f"Strict mode should flag intrinsic-offset board; got: {strict_output}"
         )
 
     def test_pad_grid_tolerance_explicit_via_cli(

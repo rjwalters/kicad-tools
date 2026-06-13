@@ -83,8 +83,11 @@ class TestOvercurrentComparator:
     def test_threshold_value_drives_divider_resistors(self, mock_schematic):
         """A 2.0 V threshold (default) with R_TH_LO=10k gives R_TH_HI = (3.3/2.0 - 1)*10k ≈ 6.5k."""
         OvercurrentComparator(
-            mock_schematic, x=200, y=80,
-            threshold_value_v=2.0, vcc_voltage=3.3,
+            mock_schematic,
+            x=200,
+            y=80,
+            threshold_value_v=2.0,
+            vcc_voltage=3.3,
         )
         # R_TH_HI is the second add_symbol (after the comparator).
         r_th_hi_call = mock_schematic.add_symbol.call_args_list[1]
@@ -96,7 +99,9 @@ class TestOvercurrentComparator:
     def test_threshold_value_metadata_recorded(self, mock_schematic):
         """The threshold setpoint is stored as block metadata."""
         oc = OvercurrentComparator(
-            mock_schematic, x=200, y=80,
+            mock_schematic,
+            x=200,
+            y=80,
             threshold_value_v=1.5,
         )
         assert oc.threshold_value_v == pytest.approx(1.5)
@@ -104,7 +109,9 @@ class TestOvercurrentComparator:
     def test_irq_label_emits_when_requested(self, mock_schematic):
         """When ``irq_output_pin`` is provided, a label is added at the output."""
         OvercurrentComparator(
-            mock_schematic, x=200, y=80,
+            mock_schematic,
+            x=200,
+            y=80,
             irq_output_pin="OC_TRIP",
         )
         labels = [c.args[0] for c in mock_schematic.add_label.call_args_list]
@@ -183,8 +190,7 @@ class TestLM393MultiUnitPlacement:
         lm_units = sorted(
             inst.unit
             for inst in sch.symbols
-            if inst.symbol_def.lib_id == "Comparator:LM393"
-            and inst.reference == "U7"
+            if inst.symbol_def.lib_id == "Comparator:LM393" and inst.reference == "U7"
         )
         assert lm_units == [1, 2, 3], (
             f"Expected channel A + channel B + power units; got {lm_units}"

@@ -907,69 +907,75 @@ _ESCAPE_MAP = {"n": "\n", "t": "\t", "r": "\r"}
 # =============================================================================
 
 # Base set of structural elements common to both formatting rules
-_STRUCTURAL_ELEMENTS = frozenset({
-    # Top-level containers
-    "kicad_sch",
-    "kicad_pcb",
-    "lib_symbols",
-    "symbol",
-    "footprint",
-    "title_block",
-    "sheet",
-    "sheet_instances",
-    "instances",
-    "project",
-    # Common structural elements
-    "effects",
-    "font",
-    "property",
-    "wire",
-    "junction",
-    "label",
-    "hierarchical_label",
-    "stroke",
-    # PCB-specific structural elements
-    "general",
-    "layers",
-    "layer",
-    "stackup",
-    "setup",
-    "pcbplotparams",
-    "net",
-    "gr_rect",
-    "gr_circle",
-    "gr_line",
-    "gr_text",
-    "zone",
-    "segment",
-    "via",
-    "pad",
-    "fp_text",
-    "fp_line",
-    "fp_circle",
-})
+_STRUCTURAL_ELEMENTS = frozenset(
+    {
+        # Top-level containers
+        "kicad_sch",
+        "kicad_pcb",
+        "lib_symbols",
+        "symbol",
+        "footprint",
+        "title_block",
+        "sheet",
+        "sheet_instances",
+        "instances",
+        "project",
+        # Common structural elements
+        "effects",
+        "font",
+        "property",
+        "wire",
+        "junction",
+        "label",
+        "hierarchical_label",
+        "stroke",
+        # PCB-specific structural elements
+        "general",
+        "layers",
+        "layer",
+        "stackup",
+        "setup",
+        "pcbplotparams",
+        "net",
+        "gr_rect",
+        "gr_circle",
+        "gr_line",
+        "gr_text",
+        "zone",
+        "segment",
+        "via",
+        "pad",
+        "fp_text",
+        "fp_line",
+        "fp_circle",
+    }
+)
 
 # Elements that force structured children on separate lines (used in to_string())
 # Includes all structural elements plus graphic primitives that need line breaks
-_FORCE_STRUCTURED_ON_LINES = _STRUCTURAL_ELEMENTS | frozenset({
-    "gr_arc",
-    "gr_poly",
-})
+_FORCE_STRUCTURED_ON_LINES = _STRUCTURAL_ELEMENTS | frozenset(
+    {
+        "gr_arc",
+        "gr_poly",
+    }
+)
 
 # Elements that should never be rendered inline (used in _should_inline())
 # Includes all structural elements plus symbol/schematic primitives
-_NEVER_INLINE = _STRUCTURAL_ELEMENTS | frozenset({
-    "path",
-    "pin",
-    "rectangle",
-    "fill",
-    "polyline",
-    "arc",
-    "circle",
-    "text",
-    "global_label",
-    "no_connect",
-})
+_NEVER_INLINE = _STRUCTURAL_ELEMENTS | frozenset(
+    {
+        "path",
+        "pin",
+        "rectangle",
+        "fill",
+        "polyline",
+        "arc",
+        "circle",
+        "text",
+        "global_label",
+        "no_connect",
+    }
+)
 
 
 class Parser:
@@ -1292,15 +1298,17 @@ class SExpSerializer:
 
 
 # KiCad file extensions that trigger the file-path guard in parse_string()
-_KICAD_FILE_EXTENSIONS = frozenset({
-    ".kicad_sch",
-    ".kicad_pcb",
-    ".kicad_sym",
-    ".kicad_mod",
-    ".kicad_pro",
-    ".kicad_dru",
-    ".kicad_wks",
-})
+_KICAD_FILE_EXTENSIONS = frozenset(
+    {
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".kicad_sym",
+        ".kicad_mod",
+        ".kicad_pro",
+        ".kicad_dru",
+        ".kicad_wks",
+    }
+)
 
 
 def _looks_like_file_path(text: str) -> bool:
@@ -1314,10 +1322,7 @@ def _looks_like_file_path(text: str) -> bool:
     if stripped.startswith("("):
         return False
     # Check for common KiCad file extensions
-    for ext in _KICAD_FILE_EXTENSIONS:
-        if stripped.endswith(ext):
-            return True
-    return False
+    return any(stripped.endswith(ext) for ext in _KICAD_FILE_EXTENSIONS)
 
 
 def parse_string(text: str, track_positions: bool = False) -> SExp:

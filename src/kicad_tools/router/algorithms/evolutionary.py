@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 # Chromosome
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RoutingChromosome:
     """Encodes per-net routing parameters for the evolutionary optimizer.
@@ -69,6 +70,7 @@ class RoutingChromosome:
 # ---------------------------------------------------------------------------
 # Genetic operators
 # ---------------------------------------------------------------------------
+
 
 def order_crossover(parent1: RoutingChromosome, parent2: RoutingChromosome) -> RoutingChromosome:
     """Order crossover (OX) for the net-order permutation.
@@ -162,6 +164,7 @@ def tournament_select(
 # Fitness evaluation helpers
 # ---------------------------------------------------------------------------
 
+
 def _score_routes(routes: list, total_nets: int) -> float:
     """Score a set of routes (mirrors ``MonteCarloRouter.evaluate_solution``).
 
@@ -175,9 +178,7 @@ def _score_routes(routes: list, total_nets: int) -> float:
 
     total_vias = sum(len(r.vias) for r in routes)
     total_length = sum(
-        math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2)
-        for r in routes
-        for s in r.segments
+        math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) for r in routes for s in r.segments
     )
 
     score = completion_rate * 1000 - total_vias * 0.1 - total_length * 0.01
@@ -192,6 +193,7 @@ def _score_routes(routes: list, total_nets: int) -> float:
 # ---------------------------------------------------------------------------
 # Worker function (module-level for pickling)
 # ---------------------------------------------------------------------------
+
 
 def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     """Evaluate a single chromosome in a worker process.
@@ -285,6 +287,7 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
 
 class EvolutionaryRoutingOptimizer:
     """Population-based evolutionary routing optimizer.
@@ -453,9 +456,7 @@ def run_evolutionary(
     total_nets = len(base_order)
 
     # Initialise population
-    population = optimizer._init_population(
-        base_order, autorouter._get_net_priority, base_seed
-    )
+    population = optimizer._init_population(base_order, autorouter._get_net_priority, base_seed)
 
     best_routes: list[Route] | None = None
     best_score = float("-inf")
@@ -476,13 +477,9 @@ def run_evolutionary(
 
         # ----- evaluate population -----
         if num_workers > 1:
-            routes_scores = _evaluate_parallel(
-                autorouter, population, base_seed, gen, num_workers
-            )
+            routes_scores = _evaluate_parallel(autorouter, population, base_seed, gen, num_workers)
         else:
-            routes_scores = _evaluate_sequential(
-                autorouter, population, base_seed, gen, total_nets
-            )
+            routes_scores = _evaluate_sequential(autorouter, population, base_seed, gen, total_nets)
 
         # Assign fitness and track best
         gen_best_score = float("-inf")
@@ -539,6 +536,7 @@ def run_evolutionary(
 # Evaluation helpers
 # ---------------------------------------------------------------------------
 
+
 def _evaluate_sequential(
     autorouter,
     population: list[RoutingChromosome],
@@ -584,8 +582,7 @@ def _evaluate_parallel(
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {
-            executor.submit(_run_evolutionary_trial, cfg): cfg["chrom_idx"]
-            for cfg in trial_configs
+            executor.submit(_run_evolutionary_trial, cfg): cfg["chrom_idx"] for cfg in trial_configs
         }
         for future in as_completed(futures):
             chrom_idx = futures[future]

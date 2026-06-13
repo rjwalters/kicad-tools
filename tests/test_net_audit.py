@@ -4,8 +4,6 @@ import json
 import shutil
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.audit.net_audit import find_stale_nets, fix_stale_nets
 from kicad_tools.schema.pcb import PCB
 

@@ -8,17 +8,15 @@ no-op detection, and error cases.
 from __future__ import annotations
 
 import json
-import shutil
-from pathlib import Path
 
 from kicad_tools.cli.sch_move_component import (
-    MoveComponentResult,
     main as move_component_main,
+)
+from kicad_tools.cli.sch_move_component import (
     move_component,
     preview_move_component,
 )
 from kicad_tools.schema import LibraryManager, Schematic
-from kicad_tools.sexp import SExp
 from kicad_tools.sexp.parser import parse_string
 
 # ---------------------------------------------------------------------------
@@ -283,9 +281,7 @@ class TestMoveComponentCLI:
         sch_file.write_text(SCHEMATIC_NO_WIRES)
         original_content = sch_file.read_text()
 
-        ret = move_component_main([
-            str(sch_file), "--ref", "R2", "--to", "120", "60", "--dry-run"
-        ])
+        ret = move_component_main([str(sch_file), "--ref", "R2", "--to", "120", "60", "--dry-run"])
 
         assert ret == 0
         assert sch_file.read_text() == original_content
@@ -295,9 +291,7 @@ class TestMoveComponentCLI:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_NO_WIRES)
 
-        ret = move_component_main([
-            str(sch_file), "--ref", "R2", "--to", "120", "60", "--backup"
-        ])
+        ret = move_component_main([str(sch_file), "--ref", "R2", "--to", "120", "60", "--backup"])
 
         assert ret == 0
         backups = list(tmp_path.glob("*.backup-*"))
@@ -308,9 +302,9 @@ class TestMoveComponentCLI:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_NO_WIRES)
 
-        ret = move_component_main([
-            str(sch_file), "--ref", "R2", "--to", "120", "60", "--format", "json"
-        ])
+        ret = move_component_main(
+            [str(sch_file), "--ref", "R2", "--to", "120", "60", "--format", "json"]
+        )
 
         assert ret == 0
         output = capsys.readouterr().out
@@ -323,9 +317,7 @@ class TestMoveComponentCLI:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_NO_WIRES)
 
-        ret = move_component_main([
-            str(sch_file), "--ref", "U99", "--to", "120", "60"
-        ])
+        ret = move_component_main([str(sch_file), "--ref", "U99", "--to", "120", "60"])
 
         assert ret == 1
 
@@ -335,9 +327,7 @@ class TestMoveComponentCLI:
         sch_file.write_text(SCHEMATIC_NO_WIRES)
 
         # 110.5 should snap to nearest 1.27 multiple
-        ret = move_component_main([
-            str(sch_file), "--ref", "R2", "--to", "110.5", "60.3"
-        ])
+        ret = move_component_main([str(sch_file), "--ref", "R2", "--to", "110.5", "60.3"])
 
         assert ret == 0
 
@@ -354,10 +344,9 @@ class TestMoveComponentCLI:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_WITH_WIRES)
 
-        ret = move_component_main([
-            str(sch_file), "--ref", "R1", "--to", "120", "50",
-            "--dry-run", "--format", "json"
-        ])
+        ret = move_component_main(
+            [str(sch_file), "--ref", "R1", "--to", "120", "50", "--dry-run", "--format", "json"]
+        )
 
         assert ret == 0
         output = capsys.readouterr().out
@@ -368,8 +357,8 @@ class TestMoveComponentCLI:
 
     def test_file_not_found(self, tmp_path, capsys):
         """Error exit when schematic file doesn't exist."""
-        ret = move_component_main([
-            str(tmp_path / "nonexistent.kicad_sch"), "--ref", "R1", "--to", "120", "50"
-        ])
+        ret = move_component_main(
+            [str(tmp_path / "nonexistent.kicad_sch"), "--ref", "R1", "--to", "120", "50"]
+        )
 
         assert ret == 1

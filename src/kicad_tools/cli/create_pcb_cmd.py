@@ -147,7 +147,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             console.print(
                 f"[green]Placed {result.success_count} components[/green]"
-                + (f", [yellow]{result.failure_count} failed[/yellow]" if result.failure_count else "")
+                + (
+                    f", [yellow]{result.failure_count} failed[/yellow]"
+                    if result.failure_count
+                    else ""
+                )
             )
 
             if result.failed:

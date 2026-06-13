@@ -246,10 +246,7 @@ def match_ports(
             if s_port.interface is not None and s_port.interface == t_port.interface:
                 score += 2
             # Prefer same interface_type
-            if (
-                s_port.interface_type is not None
-                and s_port.interface_type == t_port.interface_type
-            ):
+            if s_port.interface_type is not None and s_port.interface_type == t_port.interface_type:
                 score += 1
             if score > best_score:
                 best_score = score

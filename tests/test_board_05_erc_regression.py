@@ -160,11 +160,7 @@ class TestBoard05ERCRegression:
             f"Board 05 has {len(mcu_pin_errors)} pin_not_connected error(s) "
             f"on STM32G431K8 GPIO pins (PR #3004 NC-marker loop regressed). "
             f"Items: "
-            + ", ".join(
-                str(it.get("pos", {}))
-                for v in mcu_pin_errors
-                for it in v.get("items", [])
-            )
+            + ", ".join(str(it.get("pos", {})) for v in mcu_pin_errors for it in v.get("items", []))
         )
 
     def test_no_c19_pin_not_connected_error(self, schematic_path: Path) -> None:

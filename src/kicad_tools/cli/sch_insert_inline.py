@@ -173,7 +173,8 @@ def _auto_rotation_for_wire(
 
     # Compute pin axis at rotation 0
     positions_0 = lib_sym.get_all_pin_positions(
-        instance_pos=(0, 0), instance_rot=0,
+        instance_pos=(0, 0),
+        instance_rot=0,
     )
     pa = positions_0.get(pin_a)
     pb = positions_0.get(pin_b)
@@ -457,9 +458,7 @@ def run_insert_inline(args) -> int:
     )
 
     if need_embed:
-        planned.append(
-            PlannedAction("embed", f"Embed library definition for {args.lib_id}")
-        )
+        planned.append(PlannedAction("embed", f"Embed library definition for {args.lib_id}"))
 
     planned.append(
         PlannedAction(
@@ -484,10 +483,7 @@ def run_insert_inline(args) -> int:
         )
 
     # Wire from pin_b to downstream (wire end / effective_end)
-    if (
-        abs(pin_b_pos[0] - effective_end[0]) > 0.01
-        or abs(pin_b_pos[1] - effective_end[1]) > 0.01
-    ):
+    if abs(pin_b_pos[0] - effective_end[0]) > 0.01 or abs(pin_b_pos[1] - effective_end[1]) > 0.01:
         planned.append(
             PlannedAction(
                 "wire",
@@ -510,9 +506,7 @@ def run_insert_inline(args) -> int:
 
     # --- Create backup if requested ---
     if args.backup:
-        backup_path = (
-            f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
         print(f"Backup created: {backup_path}")
 
@@ -521,7 +515,10 @@ def run_insert_inline(args) -> int:
     # 1. Gap expansion: shift downstream endpoints
     if gap_deficit > 0.01:
         _shift_downstream_wires(
-            sch, wire_end, (dir_x, dir_y), gap_deficit,
+            sch,
+            wire_end,
+            (dir_x, dir_y),
+            gap_deficit,
         )
 
     # 2. Remove the original wire
@@ -550,16 +547,13 @@ def run_insert_inline(args) -> int:
     ):
         sch.add_wire(effective_start, pin_a_pos)
 
-    if (
-        abs(pin_b_pos[0] - effective_end[0]) > 0.01
-        or abs(pin_b_pos[1] - effective_end[1]) > 0.01
-    ):
+    if abs(pin_b_pos[0] - effective_end[0]) > 0.01 or abs(pin_b_pos[1] - effective_end[1]) > 0.01:
         sch.add_wire(pin_b_pos, effective_end)
 
     # 6. Save
     sch.save()
 
-    print(f"\nComponent inserted inline successfully:")
+    print("\nComponent inserted inline successfully:")
     print(f"  Reference: {reference}")
     print(f"  Value: {args.value}")
     print(f"  Position: ({comp_pos[0]:.2f}, {comp_pos[1]:.2f})")
@@ -577,14 +571,10 @@ def main(argv=None):
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument(
-        "--lib-id", required=True, help="Library symbol ID (e.g., Device:D)"
-    )
+    parser.add_argument("--lib-id", required=True, help="Library symbol ID (e.g., Device:D)")
     parser.add_argument("--reference", help="Symbol reference (e.g., D1)")
     parser.add_argument("--value", default="", help="Component value (e.g., BAT54)")
-    parser.add_argument(
-        "--footprint", default="", help="Footprint name"
-    )
+    parser.add_argument("--footprint", default="", help="Footprint name")
     parser.add_argument(
         "--from",
         nargs=2,
@@ -608,32 +598,23 @@ def main(argv=None):
         metavar=("X", "Y"),
         help="Find target wire nearest to this point",
     )
+    parser.add_argument("--pin-a", default="1", help="Upstream pin number (default: 1)")
+    parser.add_argument("--pin-b", default="2", help="Downstream pin number (default: 2)")
     parser.add_argument(
-        "--pin-a", default="1", help="Upstream pin number (default: 1)"
-    )
-    parser.add_argument(
-        "--pin-b", default="2", help="Downstream pin number (default: 2)"
-    )
-    parser.add_argument(
-        "--rotation", type=float, default=None,
+        "--rotation",
+        type=float,
+        default=None,
         help="Symbol rotation in degrees (auto-detected if omitted)",
     )
     parser.add_argument(
-        "--expand-gap", action="store_true",
+        "--expand-gap",
+        action="store_true",
         help="Shift downstream geometry if wire is too short for the component",
     )
-    parser.add_argument(
-        "--lib-path", action="append", dest="lib_paths", help="Library search path"
-    )
-    parser.add_argument(
-        "--lib", action="append", dest="libs", help="Specific library file"
-    )
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    parser.add_argument("--lib-path", action="append", dest="lib_paths", help="Library search path")
+    parser.add_argument("--lib", action="append", dest="libs", help="Specific library file")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     args = parser.parse_args(argv)
     return run_insert_inline(args)

@@ -128,9 +128,7 @@ class TestHalfBridgeConnectToRailsInlineShunt:
         hb = HalfBridge(mock_schematic, x=100, y=100)
         ls_source = hb.ports["GND"]
 
-        shunt = CurrentSenseShunt(
-            mock_schematic, x=120, y=180, shunt_value="5mR", ref_start=10
-        )
+        shunt = CurrentSenseShunt(mock_schematic, x=120, y=180, shunt_value="5mR", ref_start=10)
 
         mock_schematic.add_wire.reset_mock()
         mock_schematic.add_junction.reset_mock()
@@ -157,9 +155,7 @@ class TestHalfBridgeConnectToRailsInlineShunt:
         hb = HalfBridge(mock_schematic, x=100, y=100)
         hs_drain = hb.ports["VIN"]
 
-        shunt = CurrentSenseShunt(
-            mock_schematic, x=120, y=180, shunt_value="5mR", ref_start=10
-        )
+        shunt = CurrentSenseShunt(mock_schematic, x=120, y=180, shunt_value="5mR", ref_start=10)
 
         mock_schematic.add_wire.reset_mock()
         mock_schematic.add_junction.reset_mock()
@@ -235,12 +231,8 @@ class TestThreePhaseInverterConnectToRailsInlineShunts:
         ls_positions = [hb.ports["GND"] for hb in inv.half_bridges]
 
         # Phase A and C get in-line shunts; phase B does not.
-        shunt_a = CurrentSenseShunt(
-            mock_schematic, x=100, y=180, shunt_value="5mR", ref_start=10
-        )
-        shunt_c = CurrentSenseShunt(
-            mock_schematic, x=250, y=180, shunt_value="5mR", ref_start=12
-        )
+        shunt_a = CurrentSenseShunt(mock_schematic, x=100, y=180, shunt_value="5mR", ref_start=10)
+        shunt_c = CurrentSenseShunt(mock_schematic, x=250, y=180, shunt_value="5mR", ref_start=12)
 
         mock_schematic.add_wire.reset_mock()
         inv.connect_to_rails(
@@ -259,9 +251,7 @@ class TestThreePhaseInverterConnectToRailsInlineShunts:
     def test_inline_shunts_wrong_length_raises(self, mock_schematic):
         """Length mismatch with phase count must raise ``ValueError``."""
         inv = ThreePhaseInverter(mock_schematic, x=100, y=100)
-        shunt = CurrentSenseShunt(
-            mock_schematic, x=100, y=180, shunt_value="5mR", ref_start=10
-        )
+        shunt = CurrentSenseShunt(mock_schematic, x=100, y=180, shunt_value="5mR", ref_start=10)
 
         with pytest.raises(ValueError, match="inline_shunts length"):
             inv.connect_to_rails(

@@ -186,9 +186,7 @@ class TestNarrowChannelHaloEngages:
             "routed board 04 before this fix)."
         )
 
-    def test_same_component_own_net_passable_through_channel(
-        self, lqfp48_jlcpcb_tier1_rules
-    ):
+    def test_same_component_own_net_passable_through_channel(self, lqfp48_jlcpcb_tier1_rules):
         """Same fixture -- the channel cells must remain PASSABLE for
         each same-component pad's own net.  This preserves the chip's
         escape routing (board 04 NRST escape between U2.7 NRST and
@@ -350,13 +348,9 @@ class TestNarrowChannelHaloDoesNotEngage:
         """
         grid = _make_grid(lqfp48_jlcpcb_tier1_rules)
         # 2.0 mm pitch is well above the 0.65 mm threshold.
-        sibling = _make_lqfp_pad(
-            x=-5.0, y=0.0, net=9, ref="U3", pin="1", width=0.6, height=0.6
-        )
+        sibling = _make_lqfp_pad(x=-5.0, y=0.0, net=9, ref="U3", pin="1", width=0.6, height=0.6)
         grid.add_pad(sibling, pin_pitch=2.0)
-        other = _make_lqfp_pad(
-            x=-5.0, y=2.0, net=11, ref="U3", pin="2", width=0.6, height=0.6
-        )
+        other = _make_lqfp_pad(x=-5.0, y=2.0, net=11, ref="U3", pin="2", width=0.6, height=0.6)
         grid.add_pad(other, pin_pitch=2.0)
 
         # Channel midpoint at y=1.0.  The standard envelope spans
@@ -414,9 +408,7 @@ class TestNarrowChannelHaloDoesNotEngage:
             f"supposed to leave foreign-net cells alone."
         )
 
-    def test_non_adjacent_same_component_pads_not_blocked(
-        self, lqfp48_jlcpcb_tier1_rules
-    ):
+    def test_non_adjacent_same_component_pads_not_blocked(self, lqfp48_jlcpcb_tier1_rules):
         """Two same-component pads far apart on the chip (e.g. pin 1
         and pin 7 on an LQFP-48 edge -- 3.0 mm separation) MUST NOT
         trigger the narrow-channel halo.  Without the adjacency guard

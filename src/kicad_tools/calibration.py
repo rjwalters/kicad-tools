@@ -529,9 +529,7 @@ def _get_backend_info(backend_type: str) -> GpuBackendInfo:
             device = cp.cuda.Device(0)
             props = cp.cuda.runtime.getDeviceProperties(device.id)
             device_name = (
-                props["name"].decode()
-                if isinstance(props["name"], bytes)
-                else props["name"]
+                props["name"].decode() if isinstance(props["name"], bytes) else props["name"]
             )
             memory_mb = props["totalGlobalMem"] // (1024 * 1024)
             return GpuBackendInfo(
@@ -770,9 +768,7 @@ def determine_gpu_thresholds(
         GpuThresholds with calibrated values.
     """
     # Get CPU and best GPU benchmarks
-    cpu_info = next(
-        (b for b in benchmark_result.backends if b.backend_type == "cpu"), None
-    )
+    cpu_info = next((b for b in benchmark_result.backends if b.backend_type == "cpu"), None)
     gpu_info = next(
         (b for b in benchmark_result.backends if b.backend_type == benchmark_result.best_backend),
         None,

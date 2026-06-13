@@ -6,8 +6,6 @@ import math
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
-import pytest
-
 from kicad_tools.router.drc_nudge import (
     COINCIDENT_THRESHOLD,
     DRCNudgeResult,
@@ -27,15 +25,14 @@ from kicad_tools.router.drc_nudge import (
     _via_drill_inside_bbox,
     drc_verify_and_nudge,
 )
-from kicad_tools.router.primitives import Pad
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Route, Segment, Via
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
-
 
 # ---------------------------------------------------------------------------
 # Lightweight stub for Autorouter -- just the attributes drc_nudge touches.
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _StubAutorouter:
@@ -53,6 +50,7 @@ class _StubAutorouter:
 # ---------------------------------------------------------------------------
 # Geometry helper tests
 # ---------------------------------------------------------------------------
+
 
 class TestSegmentLength:
     def test_horizontal(self):
@@ -106,10 +104,15 @@ class TestNudgeSegment:
 # Same-net via merge tests
 # ---------------------------------------------------------------------------
 
+
 class TestMergeSameNetVias:
     def test_coincident_vias_merged(self):
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=10.005, y=10.005, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=10.005, y=10.005, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
         seg = Segment(x1=5.0, y1=5.0, x2=10.005, y2=10.005, width=0.2, layer=Layer.F_CU, net=1)
         route = Route(net=1, net_name="Net1", segments=[seg], vias=[via_a, via_b])
         router = _StubAutorouter(routes=[route])
@@ -122,8 +125,12 @@ class TestMergeSameNetVias:
         assert math.isclose(seg.y2, 10.0)
 
     def test_distant_vias_not_merged(self):
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=15.0, y=15.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=15.0, y=15.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
         route = Route(net=1, net_name="Net1", segments=[], vias=[via_a, via_b])
         router = _StubAutorouter(routes=[route])
 
@@ -180,12 +187,13 @@ class TestMergeSameNetViasWithDrillThreshold:
         # Default rules: via_diameter=0.7, min_drill_clearance=0.102
         # merge threshold = 0.802mm
         # Place two vias 0.5mm apart (< 0.802)
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=10.5, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        seg = Segment(x1=5.0, y1=5.0, x2=10.5, y2=10.0,
-                      width=0.2, layer=Layer.F_CU, net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=10.5, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        seg = Segment(x1=5.0, y1=5.0, x2=10.5, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
         route = Route(net=1, net_name="Net1", segments=[seg], vias=[via_a, via_b])
         router = _StubAutorouter(routes=[route])
 
@@ -199,10 +207,12 @@ class TestMergeSameNetViasWithDrillThreshold:
     def test_vias_beyond_drill_overlap_not_merged(self):
         """Vias farther than the threshold should NOT be merged."""
         # merge threshold = 0.802mm; place vias 1.0mm apart
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=11.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=11.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
         route = Route(net=1, net_name="Net1", segments=[], vias=[via_a, via_b])
         router = _StubAutorouter(routes=[route])
 
@@ -216,12 +226,13 @@ class TestCrossRouteMerge:
 
     def test_cross_route_vias_merged(self):
         """Vias on different routes of the same net should be merged."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        seg_b = Segment(x1=5.0, y1=5.0, x2=10.3, y2=10.0,
-                        width=0.2, layer=Layer.F_CU, net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=10.3, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        seg_b = Segment(x1=5.0, y1=5.0, x2=10.3, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
         route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
         route_b = Route(net=1, net_name="Net1", segments=[seg_b], vias=[via_b])
         router = _StubAutorouter(routes=[route_a, route_b])
@@ -237,10 +248,12 @@ class TestCrossRouteMerge:
 
     def test_cross_route_different_nets_not_merged(self):
         """Vias on different nets should NOT be merged even if close."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=2)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=10.3, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=2
+        )
         route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
         route_b = Route(net=2, net_name="Net2", segments=[], vias=[via_b])
         router = _StubAutorouter(routes=[route_a, route_b])
@@ -252,8 +265,9 @@ class TestCrossRouteMerge:
 
     def test_cross_route_only_one_has_vias(self):
         """No crash when only one route on a net has vias."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
         route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
         route_b = Route(net=1, net_name="Net1", segments=[], vias=[])
         router = _StubAutorouter(routes=[route_a, route_b])
@@ -266,34 +280,41 @@ class TestCrossRouteMerge:
 # Cross-layer-pair via merge tests (Issue #1802)
 # ---------------------------------------------------------------------------
 
+
 class TestExpandViaLayers:
     """Unit tests for _expand_via_layers helper."""
 
     def test_same_layers_no_change(self):
         """Vias with identical layers should not be modified."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=10.3, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
         _expand_via_layers(via_a, via_b)
         assert via_a.layers == (Layer.F_CU, Layer.B_CU)
 
     def test_different_layers_expanded(self):
         """Surviving via should span all layers from both vias."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.IN1_CU), net=1)
-        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.B_CU, Layer.F_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.IN1_CU), net=1
+        )
+        via_b = Via(
+            x=10.3, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.B_CU, Layer.F_CU), net=1
+        )
         _expand_via_layers(via_a, via_b)
         assert via_a.layers[0] == Layer.F_CU
         assert via_a.layers[1] == Layer.B_CU
 
     def test_inner_layers_expanded(self):
         """Merge of two inner-layer vias expands to cover both spans."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.IN1_CU), net=1)
-        via_b = Via(x=10.3, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.IN1_CU, Layer.IN2_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.IN1_CU), net=1
+        )
+        via_b = Via(
+            x=10.3, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.IN1_CU, Layer.IN2_CU), net=1
+        )
         _expand_via_layers(via_a, via_b)
         assert via_a.layers[0] == Layer.F_CU
         assert via_a.layers[1] == Layer.IN2_CU
@@ -304,12 +325,13 @@ class TestCrossLayerPairMerge:
 
     def test_intra_route_different_layers_merged(self):
         """Vias within one route with different layer pairs should be merged."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.IN1_CU), net=1)
-        via_b = Via(x=10.15, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.B_CU, Layer.F_CU), net=1)
-        seg = Segment(x1=5.0, y1=5.0, x2=10.15, y2=10.0,
-                      width=0.2, layer=Layer.F_CU, net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.IN1_CU), net=1
+        )
+        via_b = Via(
+            x=10.15, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.B_CU, Layer.F_CU), net=1
+        )
+        seg = Segment(x1=5.0, y1=5.0, x2=10.15, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
         route = Route(net=1, net_name="Net1", segments=[seg], vias=[via_a, via_b])
         router = _StubAutorouter(routes=[route])
 
@@ -322,12 +344,13 @@ class TestCrossLayerPairMerge:
 
     def test_cross_route_different_layers_merged(self):
         """Cross-route vias with different layer pairs should be merged."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.IN1_CU, Layer.F_CU), net=1)
-        via_b = Via(x=10.15, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.B_CU, Layer.F_CU), net=1)
-        seg_b = Segment(x1=5.0, y1=5.0, x2=10.15, y2=10.0,
-                        width=0.2, layer=Layer.F_CU, net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.IN1_CU, Layer.F_CU), net=1
+        )
+        via_b = Via(
+            x=10.15, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.B_CU, Layer.F_CU), net=1
+        )
+        seg_b = Segment(x1=5.0, y1=5.0, x2=10.15, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
         route_a = Route(net=1, net_name="Net1", segments=[], vias=[via_a])
         route_b = Route(net=1, net_name="Net1", segments=[seg_b], vias=[via_b])
         router = _StubAutorouter(routes=[route_a, route_b])
@@ -342,10 +365,12 @@ class TestCrossLayerPairMerge:
 
     def test_same_layer_pair_still_works(self):
         """Same layer pair merges still work as before (no regression)."""
-        via_a = Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
-        via_b = Via(x=10.15, y=10.0, drill=0.35, diameter=0.7,
-                    layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via_a = Via(
+            x=10.0, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        via_b = Via(
+            x=10.15, y=10.0, drill=0.35, diameter=0.7, layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
         route = Route(net=1, net_name="Net1", segments=[], vias=[via_a, via_b])
         router = _StubAutorouter(routes=[route])
 
@@ -358,6 +383,7 @@ class TestCrossLayerPairMerge:
 # ---------------------------------------------------------------------------
 # Full drc_verify_and_nudge integration tests
 # ---------------------------------------------------------------------------
+
 
 class TestDRCVerifyAndNudge:
     def test_no_violations_is_noop(self):
@@ -398,7 +424,6 @@ class TestDRCVerifyAndNudge:
         result = drc_verify_and_nudge(router)
         assert result.initial_violations > 0
         assert result.segments_nudged > 0
-
 
     def test_inner_layer_segment_violation_nudged(self):
         """Segments violating clearance on an inner layer should be nudged (Issue #1798)."""
@@ -516,20 +541,36 @@ class TestMergeExistingRouteVias:
     def test_new_via_merged_into_existing(self):
         """A new via within threshold of an existing via is removed."""
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         existing_route = Route(
-            net=1, net_name="Net1", segments=[], vias=[existing_via],
+            net=1,
+            net_name="Net1",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_via = Via(
-            x=10.3, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.3,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.3, y2=10.0,
-            width=0.2, layer=Layer.F_CU, net=1,
+            x1=5.0,
+            y1=5.0,
+            x2=10.3,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
         )
         new_route = Route(net=1, net_name="Net1", segments=[seg], vias=[new_via])
 
@@ -552,16 +593,27 @@ class TestMergeExistingRouteVias:
     def test_existing_via_survives_merge(self):
         """The pre-existing via is kept, not the new via."""
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         existing_route = Route(
-            net=1, net_name="Net1", segments=[], vias=[existing_via],
+            net=1,
+            net_name="Net1",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_via = Via(
-            x=10.0, y=10.005, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.005,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
 
@@ -579,16 +631,27 @@ class TestMergeExistingRouteVias:
     def test_distant_existing_via_not_merged(self):
         """Vias beyond the threshold should not be merged."""
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         existing_route = Route(
-            net=1, net_name="Net1", segments=[], vias=[existing_via],
+            net=1,
+            net_name="Net1",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_via = Via(
-            x=15.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=15.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
 
@@ -604,16 +667,27 @@ class TestMergeExistingRouteVias:
     def test_different_net_existing_via_not_merged(self):
         """Existing vias on a different net should not be merged."""
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         existing_route = Route(
-            net=2, net_name="Net2", segments=[], vias=[existing_via],
+            net=2,
+            net_name="Net2",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_via = Via(
-            x=10.005, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.005,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
 
@@ -629,8 +703,12 @@ class TestMergeExistingRouteVias:
     def test_empty_existing_routes_no_change(self):
         """With no existing routes, Phase 3 is a no-op."""
         via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(net=1, net_name="Net1", segments=[], vias=[via])
         router = _StubAutorouter(routes=[route], existing_routes=[])
@@ -642,20 +720,36 @@ class TestMergeExistingRouteVias:
     def test_exact_same_location_existing_via(self):
         """New via at exactly the same location as existing merges cleanly."""
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         existing_route = Route(
-            net=1, net_name="Net1", segments=[], vias=[existing_via],
+            net=1,
+            net_name="Net1",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=10.0,
-            width=0.2, layer=Layer.F_CU, net=1,
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
         )
         new_route = Route(net=1, net_name="Net1", segments=[seg], vias=[new_via])
 
@@ -679,16 +773,27 @@ class TestValidateRoutesWithExistingRoutes:
         from kicad_tools.router.io import validate_routes
 
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         existing_route = Route(
-            net=2, net_name="Net2", segments=[], vias=[existing_via],
+            net=2,
+            net_name="Net2",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_via = Via(
-            x=10.3, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.3,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
 
@@ -708,16 +813,27 @@ class TestValidateRoutesWithExistingRoutes:
         from kicad_tools.router.io import validate_routes
 
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         existing_route = Route(
-            net=2, net_name="Net2", segments=[], vias=[existing_via],
+            net=2,
+            net_name="Net2",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_via = Via(
-            x=20.0, y=20.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=20.0,
+            y=20.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         new_route = Route(net=1, net_name="Net1", segments=[], vias=[new_via])
 
@@ -733,16 +849,28 @@ class TestValidateRoutesWithExistingRoutes:
     def test_existing_routes_not_in_to_sexp(self):
         """Existing routes must not appear in to_sexp() output."""
         existing_via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         existing_route = Route(
-            net=1, net_name="Net1", segments=[], vias=[existing_via],
+            net=1,
+            net_name="Net1",
+            segments=[],
+            vias=[existing_via],
         )
 
         new_seg = Segment(
-            x1=1.0, y1=1.0, x2=5.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=2,
+            x1=1.0,
+            y1=1.0,
+            x2=5.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
         )
         new_route = Route(net=2, net_name="Net2", segments=[new_seg], vias=[])
 
@@ -770,9 +898,15 @@ class TestSegmentEndpointsAnchoredToNetPads:
 
     def _make_pad(self, ref: str, pin: str, x: float, y: float, net: int = 1) -> Pad:
         return Pad(
-            x=x, y=y, width=1.0, height=1.0,
-            net=net, net_name="N",
-            layer=Layer.F_CU, ref=ref, pin=pin,
+            x=x,
+            y=y,
+            width=1.0,
+            height=1.0,
+            net=net,
+            net_name="N",
+            layer=Layer.F_CU,
+            ref=ref,
+            pin=pin,
         )
 
     def test_segment_with_endpoint_on_pad_is_detected(self):
@@ -849,9 +983,15 @@ class TestNudgeSegmentWithChain:
     def test_pad_anchored_segment_not_nudged(self):
         """A segment with an endpoint on a same-net pad must not be moved."""
         pad = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=1, net_name="N", layer=Layer.F_CU,
-            ref="J1", pin="1",
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
         )
         seg = Segment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1)
         route = Route(net=1, net_name="N", segments=[seg], vias=[])
@@ -921,12 +1061,26 @@ class TestNoSilentDisconnectFromNudge:
 
         # Pin pads on net 1 at the ends of the chain.
         p_start = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=1, net_name="PHASE_B", layer=Layer.F_CU, ref="J1", pin="1",
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="PHASE_B",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
         )
         p_end = Pad(
-            x=20.0, y=5.0, width=1.0, height=1.0,
-            net=1, net_name="PHASE_B", layer=Layer.F_CU, ref="J2", pin="2",
+            x=20.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="PHASE_B",
+            layer=Layer.F_CU,
+            ref="J2",
+            pin="2",
         )
         router = _StubAutorouter(
             routes=[route],
@@ -982,8 +1136,12 @@ class TestSegmentEndpointsAnchoredToNetVias:
     def test_segment_with_endpoint_on_via_is_detected(self):
         """A segment endpoint coincident with a via centre is detected as anchored."""
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(net=1, net_name="N", segments=[], vias=[via])
         router = _StubAutorouter(routes=[route])
@@ -993,8 +1151,12 @@ class TestSegmentEndpointsAnchoredToNetVias:
     def test_segment_with_second_endpoint_on_via_is_detected(self):
         """The helper checks both endpoints, not just the first."""
         via = Via(
-            x=15.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=15.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(net=1, net_name="N", segments=[], vias=[via])
         router = _StubAutorouter(routes=[route])
@@ -1004,8 +1166,12 @@ class TestSegmentEndpointsAnchoredToNetVias:
     def test_segment_close_but_not_at_via_is_not_detected(self):
         """Endpoints outside the 0.02mm tolerance are not treated as anchored."""
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(net=1, net_name="N", segments=[], vias=[via])
         router = _StubAutorouter(routes=[route])
@@ -1016,8 +1182,12 @@ class TestSegmentEndpointsAnchoredToNetVias:
     def test_segment_with_no_via_endpoint_returns_false(self):
         """Segments far from any via on the net are not anchored."""
         via = Via(
-            x=0.0, y=0.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=0.0,
+            y=0.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(net=1, net_name="N", segments=[], vias=[via])
         router = _StubAutorouter(routes=[route])
@@ -1027,8 +1197,12 @@ class TestSegmentEndpointsAnchoredToNetVias:
     def test_via_of_different_net_does_not_match(self):
         """Vias on a different net should not anchor segments of this net."""
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         route = Route(net=2, net_name="Other", segments=[], vias=[via])
         router = _StubAutorouter(routes=[route])
@@ -1049,8 +1223,12 @@ class TestSegmentEndpointsAnchoredToNetVias:
         # the segment under inspection is on the first.  We must still
         # consider the via because it's on the same net.
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route_with_seg = Route(net=1, net_name="N", segments=[], vias=[])
         route_with_via = Route(net=1, net_name="N", segments=[], vias=[via])
@@ -1075,20 +1253,45 @@ class TestNudgeSegmentWithChainViaAnchor:
         # Route: P1 --seg_a(top)--> via --seg_b(bottom)--> P3
         #        P1 --seg_c(top)--> P2
         p1 = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=1, net_name="N", layer=Layer.F_CU, ref="J1", pin="1",
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
         )
         p2 = Pad(
-            x=0.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="N", layer=Layer.F_CU, ref="J1", pin="2",
+            x=0.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="2",
         )
         p3 = Pad(
-            x=10.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="N", layer=Layer.B_CU, ref="J1", pin="3",
+            x=10.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N",
+            layer=Layer.B_CU,
+            ref="J1",
+            pin="3",
         )
         via = Via(
-            x=10.0, y=0.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=0.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         # seg_a runs top-layer from P1 to the via centre
         seg_a = Segment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1)
@@ -1098,7 +1301,8 @@ class TestNudgeSegmentWithChainViaAnchor:
         seg_c = Segment(x1=0.0, y1=0.0, x2=0.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
 
         route = Route(
-            net=1, net_name="N",
+            net=1,
+            net_name="N",
             segments=[seg_a, seg_b, seg_c],
             vias=[via],
         )
@@ -1142,8 +1346,12 @@ class TestNudgeSegmentWithChainViaAnchor:
         """
         # No pads on this net at the segment endpoints; only a via.
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         # seg has its x2/y2 endpoint coincident with the via centre, but its
         # x1/y1 endpoint is in free space (not a pad and not a via).
@@ -1170,8 +1378,12 @@ class TestNudgeSegmentWithChainViaAnchor:
         """
         # A via exists on this net but is far from the segment we'll nudge.
         via = Via(
-            x=50.0, y=50.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=50.0,
+            y=50.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         seg = Segment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1)
         route = Route(net=1, net_name="N", segments=[seg], vias=[via])
@@ -1217,28 +1429,44 @@ class TestViaViaNudgeDispatch:
         centre-to-centre distance along the x-axis.
         """
         via_a = Via(
-            x=0.0, y=0.0, drill=0.35, diameter=via_diameter,
-            layers=(Layer.F_CU, Layer.B_CU), net=net_a,
+            x=0.0,
+            y=0.0,
+            drill=0.35,
+            diameter=via_diameter,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=net_a,
         )
         via_b = Via(
-            x=center_distance, y=0.0, drill=0.35, diameter=via_diameter,
-            layers=(Layer.F_CU, Layer.B_CU), net=net_b,
+            x=center_distance,
+            y=0.0,
+            drill=0.35,
+            diameter=via_diameter,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=net_b,
         )
         # Add stub segments so the routes are non-trivial, terminating
         # at the via centres.  These should remain connected after the
         # via-via nudge.
         seg_a = Segment(
-            x1=-1.0, y1=0.0, x2=0.0, y2=0.0,
-            width=0.2, layer=Layer.F_CU, net=net_a,
+            x1=-1.0,
+            y1=0.0,
+            x2=0.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net_a,
         )
         seg_b = Segment(
-            x1=center_distance + 1.0, y1=0.0, x2=center_distance, y2=0.0,
-            width=0.2, layer=Layer.F_CU, net=net_b,
+            x1=center_distance + 1.0,
+            y1=0.0,
+            x2=center_distance,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net_b,
         )
-        route_a = Route(net=net_a, net_name=f"N{net_a}",
-                        segments=[seg_a], vias=[via_a])
-        route_b = Route(net=net_b, net_name=f"N{net_b}",
-                        segments=[seg_b], vias=[via_b])
+        route_a = Route(net=net_a, net_name=f"N{net_a}", segments=[seg_a], vias=[via_a])
+        route_b = Route(net=net_b, net_name=f"N{net_b}", segments=[seg_b], vias=[via_b])
         return route_a, route_b, via_a, via_b
 
     def test_via_via_violation_resolved_by_dispatch(self):
@@ -1282,14 +1510,26 @@ class TestViaViaNudgeDispatch:
         )
         # Pads at via_a and via_b centres on their respective nets.
         pad_a = Pad(
-            x=via_a.x, y=via_a.y, width=0.7, height=0.7,
-            net=via_a.net, net_name="Na", layer=Layer.F_CU,
-            ref="J1", pin="1",
+            x=via_a.x,
+            y=via_a.y,
+            width=0.7,
+            height=0.7,
+            net=via_a.net,
+            net_name="Na",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
         )
         pad_b = Pad(
-            x=via_b.x, y=via_b.y, width=0.7, height=0.7,
-            net=via_b.net, net_name="Nb", layer=Layer.F_CU,
-            ref="J2", pin="1",
+            x=via_b.x,
+            y=via_b.y,
+            width=0.7,
+            height=0.7,
+            net=via_b.net,
+            net_name="Nb",
+            layer=Layer.F_CU,
+            ref="J2",
+            pin="1",
         )
         rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
         router = _StubAutorouter(
@@ -1355,10 +1595,7 @@ class TestViaViaNudgeDispatch:
         router = _StubAutorouter(routes=[route_a, route_b], rules=rules)
 
         violations = validate_routes(router)
-        via_via = [
-            v for v in violations
-            if v.obstacle_type == "via" and v.segment_index == -1
-        ]
+        via_via = [v for v in violations if v.obstacle_type == "via" and v.segment_index == -1]
         assert via_via, "Need at least one via-via violation for repro."
 
         # The legacy handler cannot find a zero-length segment and bails.
@@ -1387,7 +1624,7 @@ class TestEdgeClearanceNudge:
         edge_clearance: float = 0.3,
         bottom_edge_y: float = 0.0,
         right_edge_x: float = 50.0,
-    ) -> "_StubAutorouter":
+    ) -> _StubAutorouter:
         """Build a router with a rectangular board outline and one route.
 
         The outline is the rectangle (0,0)-(right_edge_x, 50.0) so the
@@ -1395,7 +1632,8 @@ class TestEdgeClearanceNudge:
         """
         route = Route(net=seg.net, net_name="N", segments=[seg])
         rules = DesignRules(
-            trace_clearance=0.2, via_clearance=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
         )
         router = _StubAutorouter(routes=[route], rules=rules)
         # Rectangular outline.
@@ -1414,12 +1652,18 @@ class TestEdgeClearanceNudge:
         a real violation that validate_routes must emit.
         """
         seg = Segment(
-            x1=10.0, y1=0.35, x2=20.0, y2=0.35,
-            width=0.2, layer=Layer.F_CU, net=1,
+            x1=10.0,
+            y1=0.35,
+            x2=20.0,
+            y2=0.35,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
         )
         router = self._make_router_with_edge(seg=seg)
 
         from kicad_tools.router.io import validate_routes
+
         violations = validate_routes(router)
         edge_violations = [v for v in violations if v.obstacle_type == "edge"]
         assert edge_violations, (
@@ -1445,21 +1689,22 @@ class TestEdgeClearanceNudge:
         Well within the default 0.2mm max_displacement budget.
         """
         seg = Segment(
-            x1=10.0, y1=0.35, x2=20.0, y2=0.35,
-            width=0.2, layer=Layer.F_CU, net=1,
+            x1=10.0,
+            y1=0.35,
+            x2=20.0,
+            y2=0.35,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
         )
         router = self._make_router_with_edge(seg=seg)
 
         result = drc_verify_and_nudge(router)
         assert result.initial_violations >= 1
-        assert result.segments_nudged >= 1, (
-            f"Expected segment nudge; got result={result!r}"
-        )
+        assert result.segments_nudged >= 1, f"Expected segment nudge; got result={result!r}"
         # Post-nudge: the segment must be ≥ (0 + 0.3 + 0.1) = 0.4mm from y=0.
         # (edge_y + edge_clearance + half_width)
-        assert seg.y1 >= 0.4 - 1e-6, (
-            f"Expected seg.y1 ≥ 0.4 after inward nudge; got {seg.y1!r}"
-        )
+        assert seg.y1 >= 0.4 - 1e-6, f"Expected seg.y1 ≥ 0.4 after inward nudge; got {seg.y1!r}"
         assert seg.y2 >= 0.4 - 1e-6
         assert result.remaining_violations == 0
 
@@ -1471,8 +1716,13 @@ class TestEdgeClearanceNudge:
         violations.
         """
         seg = Segment(
-            x1=10.0, y1=0.2, x2=20.0, y2=0.2,
-            width=0.2, layer=Layer.F_CU, net=1,
+            x1=10.0,
+            y1=0.2,
+            x2=20.0,
+            y2=0.2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
         )
         route = Route(net=1, net_name="N", segments=[seg])
         rules = DesignRules(trace_clearance=0.2, via_clearance=0.2)
@@ -1502,22 +1752,26 @@ def test_dispatch_records_unsupported_obstacle_type():
     # monkey-patching validate_routes to return it.
     fake = ClearanceViolation(
         segment_index=0,
-        x1=0.0, y1=0.0, x2=10.0, y2=0.0,
-        net=1, obstacle_type="quasar", obstacle_net=0,
-        distance=0.0, required=0.2,
+        x1=0.0,
+        y1=0.0,
+        x2=10.0,
+        y2=0.0,
+        net=1,
+        obstacle_type="quasar",
+        obstacle_net=0,
+        distance=0.0,
+        required=0.2,
         location=(5.0, 0.0),
     )
-    with patch("kicad_tools.router.drc_nudge.validate_routes",
-               return_value=[fake]):
+    with patch("kicad_tools.router.drc_nudge.validate_routes", return_value=[fake]):
         result = drc_verify_and_nudge(router)
     assert result.initial_violations == 1
     # The dispatch should not have nudged anything, but should have
     # recorded a structured skip reason.
     assert result.segments_nudged == 0
-    assert any(
-        reason.startswith("unsupported_obstacle:")
-        for reason in result.skipped
-    ), f"Expected unsupported_obstacle skip; got {result.skipped!r}"
+    assert any(reason.startswith("unsupported_obstacle:") for reason in result.skipped), (
+        f"Expected unsupported_obstacle skip; got {result.skipped!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1526,7 +1780,13 @@ def test_dispatch_records_unsupported_obstacle_type():
 
 
 def _make_smd_pad(
-    *, x: float, y: float, width: float, height: float, net: int, ref: str = "U1",
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    net: int,
+    ref: str = "U1",
     pin: str = "1",
 ) -> Pad:
     """Build a router primitive Pad for the via-in-pad tests."""
@@ -1567,19 +1827,34 @@ class TestNudgeViaPad:
         # centre (mirrors the real D2-1 case at (124.3, 109.9) vs the
         # pad centre at (124.0, 110.0)).
         via = Via(
-            x=10.3, y=10.2, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.3,
+            y=10.2,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         seg_a = Segment(
-            x1=5.0, y1=10.2, x2=10.3, y2=10.2,
-            width=0.2, layer=Layer.F_CU, net=1,
+            x1=5.0,
+            y1=10.2,
+            x2=10.3,
+            y2=10.2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
         )
         seg_b = Segment(
-            x1=10.3, y1=10.2, x2=10.3, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=10.3,
+            y1=10.2,
+            x2=10.3,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         route = Route(
-            net=1, net_name="Net1",
+            net=1,
+            net_name="Net1",
             segments=[seg_a, seg_b],
             vias=[via],
         )
@@ -1592,7 +1867,9 @@ class TestNudgeViaPad:
         )
 
         nudged = _scan_and_repair_via_in_pad(
-            router, max_displacement=2.0, result=DRCNudgeResult(),
+            router,
+            max_displacement=2.0,
+            result=DRCNudgeResult(),
         )
         assert nudged == 1
         # Via must no longer be inside the pad bbox.
@@ -1617,11 +1894,16 @@ class TestNudgeViaPad:
         # such that the drill circle is fully OUTSIDE the bbox (centre at
         # (11.0, 10.0), drill_r=0.175 -> drill_left = 10.825 > 10.5).
         via = Via(
-            x=11.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=11.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(
-            net=1, net_name="Net1",
+            net=1,
+            net_name="Net1",
             segments=[],
             vias=[via],
         )
@@ -1634,7 +1916,9 @@ class TestNudgeViaPad:
         )
 
         nudged = _scan_and_repair_via_in_pad(
-            router, max_displacement=2.0, result=DRCNudgeResult(),
+            router,
+            max_displacement=2.0,
+            result=DRCNudgeResult(),
         )
         # Via outside the pad bbox -- no nudge.
         assert nudged == 0
@@ -1650,11 +1934,16 @@ class TestNudgeViaPad:
         pad = _make_smd_pad(x=10.0, y=10.0, width=4.0, height=4.0, net=1)
         # Via dead-centre.
         via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(
-            net=1, net_name="Net1",
+            net=1,
+            net_name="Net1",
             segments=[],
             vias=[via],
         )
@@ -1669,8 +1958,11 @@ class TestNudgeViaPad:
         result = DRCNudgeResult()
         # 0.1 mm budget << 2 mm exit distance.
         moved = _try_nudge_via_pad(
-            via, _router_pad_bbox(pad), router,
-            max_displacement=0.1, required_clearance=0.2,
+            via,
+            _router_pad_bbox(pad),
+            router,
+            max_displacement=0.1,
+            required_clearance=0.2,
             result=result,
         )
         assert moved is False
@@ -1694,11 +1986,16 @@ class TestNudgeViaPad:
         """
         pad = _make_smd_pad(x=10.0, y=10.0, width=1.5, height=1.5, net=1)
         via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(
-            net=1, net_name="Net1",
+            net=1,
+            net_name="Net1",
             segments=[],
             vias=[via],
         )
@@ -1712,7 +2009,9 @@ class TestNudgeViaPad:
 
         result = DRCNudgeResult()
         nudged = _scan_and_repair_via_in_pad(
-            router, max_displacement=2.0, result=result,
+            router,
+            max_displacement=2.0,
+            result=result,
         )
         assert nudged == 0
         # Position unchanged -- structured skip recorded.
@@ -1726,11 +2025,16 @@ class TestNudgeViaPad:
         same-net pad."""
         pad = _make_smd_pad(x=10.0, y=10.0, width=1.5, height=1.5, net=1)
         via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         route = Route(
-            net=1, net_name="Net1",
+            net=1,
+            net_name="Net1",
             segments=[],
             vias=[via],
         )
@@ -1744,7 +2048,9 @@ class TestNudgeViaPad:
         )
 
         nudged = _scan_and_repair_via_in_pad(
-            router, max_displacement=2.0, result=DRCNudgeResult(),
+            router,
+            max_displacement=2.0,
+            result=DRCNudgeResult(),
         )
         # Profile supports via-in-pad -- nothing to do.
         assert nudged == 0

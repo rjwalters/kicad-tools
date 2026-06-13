@@ -43,9 +43,6 @@ from kicad_tools.library.generators import (
 )
 from kicad_tools.library.generators.standards import (
     CHIP_SIZES,
-    LQFP_STANDARDS,
-    QFN_STANDARDS,
-    SOT_STANDARDS,
 )
 
 # Maps DSL SOT names to SOT_STANDARDS keys
@@ -108,9 +105,7 @@ def _build_chip(spec: str) -> Footprint:
     size = spec.split("_")[0]
     if size not in CHIP_SIZES:
         available = ", ".join(sorted(CHIP_SIZES.keys()))
-        raise ValueError(
-            f"Unknown chip size '{size}'. Valid sizes: {available}"
-        )
+        raise ValueError(f"Unknown chip size '{size}'. Valid sizes: {available}")
     return create_chip(size=size)
 
 
@@ -120,9 +115,7 @@ def _build_sot(spec_lower: str) -> Footprint:
     variant_key = _SOT_ALIASES.get(base)
     if variant_key is None:
         available = ", ".join(sorted(_SOT_ALIASES.keys()))
-        raise ValueError(
-            f"Unknown SOT variant '{base}'. Valid DSL names: {available}"
-        )
+        raise ValueError(f"Unknown SOT variant '{base}'. Valid DSL names: {available}")
     return create_sot(variant=variant_key)
 
 
@@ -256,14 +249,11 @@ def parse_footprint_dsl(spec: str) -> Footprint:
         pins = int(pin_str)
     except ValueError:
         raise ValueError(
-            f"Invalid pin count '{pin_str}' in spec '{spec}'. "
-            f"Pin count must be a positive integer."
+            f"Invalid pin count '{pin_str}' in spec '{spec}'. Pin count must be a positive integer."
         )
 
     if pins <= 0:
-        raise ValueError(
-            f"Pin count must be positive, got {pins} in spec '{spec}'."
-        )
+        raise ValueError(f"Pin count must be positive, got {pins} in spec '{spec}'.")
 
     mods = _parse_modifiers(modifier_str)
 

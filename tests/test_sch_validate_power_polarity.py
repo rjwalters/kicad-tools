@@ -4,13 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     check_power_pin_polarity,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics
@@ -58,12 +54,14 @@ def _make_ic_lib_symbol(
 
 
 def _make_symbol_instance(
-    ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    ref: str,
+    lib_id: str,
+    pins: list[tuple[str, str, str]],
+    x: float,
+    y: float,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -76,7 +74,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -154,7 +152,7 @@ def _make_power_symbol_schematic(
     lib_sym = _make_ic_lib_symbol(lib_id, pins)
     sym_inst = _make_symbol_instance("#PWR01", lib_id, pins, 100.0, 50.0)
 
-    wire = f"""(wire
+    wire = """(wire
         (pts (xy 100.00 50.00) (xy 110.00 50.00))
         (stroke (width 0) (type default))
         (uuid "wire-pwr-1")
@@ -259,7 +257,11 @@ def _make_ic_with_power_symbols_schematic(
     """
     ic_lib_sym = _make_ic_lib_symbol(ic_lib_id, ic_pins)
     ic_sym_inst = _make_symbol_instance(
-        ic_ref, ic_lib_id, ic_pins, 100.0, 50.0,
+        ic_ref,
+        ic_lib_id,
+        ic_pins,
+        100.0,
+        50.0,
     )
 
     power_lib_syms = []
@@ -279,7 +281,11 @@ def _make_ic_with_power_symbols_schematic(
         pwr_x = pin_x + 10.0
 
         pwr_lib, pwr_inst = _make_power_symbol_entry(
-            pwr_lib_id, pwr_value, pwr_ref, pwr_x, pin_y,
+            pwr_lib_id,
+            pwr_value,
+            pwr_ref,
+            pwr_x,
+            pin_y,
         )
         power_lib_syms.append(pwr_lib)
         power_sym_insts.append(pwr_inst)
@@ -322,7 +328,11 @@ def _make_ic_with_unresolved_pins_schematic(
     """
     ic_lib_sym = _make_ic_lib_symbol(ic_lib_id, ic_pins)
     ic_sym_inst = _make_symbol_instance(
-        ic_ref, ic_lib_id, ic_pins, 100.0, 50.0,
+        ic_ref,
+        ic_lib_id,
+        ic_pins,
+        100.0,
+        50.0,
     )
 
     return f"""(kicad_sch
@@ -354,8 +364,8 @@ class TestCheckPowerPinPolarity:
             ("3", "SDA", "bidirectional"),
         ]
         pin_nets = {
-            "1": "GNDD",   # VDD pin on a ground net -- polarity error
-            "2": "GND",    # GND pin on GND net -- correct
+            "1": "GNDD",  # VDD pin on a ground net -- polarity error
+            "2": "GND",  # GND pin on GND net -- correct
             "3": "I2C_SDA",
         }
         sch_text = _make_single_ic_schematic("IC:Oscillator", pins, pin_nets)
@@ -364,8 +374,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 1
         assert "VDD" in polarity_errors[0].message
@@ -388,8 +397,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 1
         assert "GND" in polarity_errors[0].message
@@ -414,8 +422,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert polarity_errors == []
 
@@ -435,8 +442,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert polarity_errors == []
 
@@ -448,8 +454,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert polarity_errors == []
 
@@ -462,10 +467,10 @@ class TestCheckPowerPinPolarity:
             ("4", "DGND", "power_in"),
         ]
         pin_nets = {
-            "1": "+3.3V",    # Correct
-            "2": "GNDD",     # Swapped -- positive pin on negative net
-            "3": "GND",      # Correct
-            "4": "+5V",      # Swapped -- negative pin on positive net
+            "1": "+3.3V",  # Correct
+            "2": "GNDD",  # Swapped -- positive pin on negative net
+            "3": "GND",  # Correct
+            "4": "+5V",  # Swapped -- negative pin on positive net
         }
         sch_text = _make_single_ic_schematic("IC:MultiPower", pins, pin_nets)
         sch_path = tmp_path / "multi_power.kicad_sch"
@@ -473,8 +478,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 2
         messages = [e.message for e in polarity_errors]
@@ -493,8 +497,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 1
         assert "VCC" in polarity_errors[0].message
@@ -510,8 +513,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 1
         assert "VSS" in polarity_errors[0].message
@@ -520,12 +522,12 @@ class TestCheckPowerPinPolarity:
     def test_non_power_pin_type_ignored(self, tmp_path: Path):
         """Non-power pin types should not be checked even if names match."""
         pins = [
-            ("1", "VCC", "input"),     # Not power_in
-            ("2", "GND", "passive"),   # Not power_in
+            ("1", "VCC", "input"),  # Not power_in
+            ("2", "GND", "passive"),  # Not power_in
         ]
         pin_nets = {
-            "1": "GND",     # Would be a polarity error if power pin
-            "2": "+3.3V",   # Would be a polarity error if power pin
+            "1": "GND",  # Would be a polarity error if power pin
+            "2": "+3.3V",  # Would be a polarity error if power pin
         }
         sch_text = _make_single_ic_schematic("IC:Weird", pins, pin_nets)
         sch_path = tmp_path / "non_power_type.kicad_sch"
@@ -533,8 +535,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert polarity_errors == []
 
@@ -548,8 +549,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert polarity_errors == []
 
@@ -563,8 +563,7 @@ class TestCheckPowerPinPolarity:
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 1
         assert "GND" in polarity_errors[0].message
@@ -586,15 +585,16 @@ class TestPowerSymbolFixtures:
             "2": ("power:GND", "GND"),
         }
         sch_text = _make_ic_with_power_symbols_schematic(
-            "IC:NormalChip", ic_pins, pin_power,
+            "IC:NormalChip",
+            ic_pins,
+            pin_power,
         )
         sch_path = tmp_path / "correct_power_sym.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert polarity_errors == []
 
@@ -605,19 +605,20 @@ class TestPowerSymbolFixtures:
             ("2", "GND", "power_in"),
         ]
         pin_power = {
-            "1": ("power:GND", "GND"),       # Reversed -- VDD on GND
-            "2": ("power:+3V3", "+3.3V"),     # Reversed -- GND on +3.3V
+            "1": ("power:GND", "GND"),  # Reversed -- VDD on GND
+            "2": ("power:+3V3", "+3.3V"),  # Reversed -- GND on +3.3V
         }
         sch_text = _make_ic_with_power_symbols_schematic(
-            "IC:Oscillator", ic_pins, pin_power,
+            "IC:Oscillator",
+            ic_pins,
+            pin_power,
         )
         sch_path = tmp_path / "reversed_power_sym.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 2
         messages = [e.message for e in polarity_errors]
@@ -632,19 +633,20 @@ class TestPowerSymbolFixtures:
             ("3", "SDA", "bidirectional"),
         ]
         pin_power = {
-            "1": ("power:GNDD", "GNDD"),   # Reversed -- VCC on GNDD
-            "2": ("power:GND", "GND"),      # Correct
+            "1": ("power:GNDD", "GNDD"),  # Reversed -- VCC on GNDD
+            "2": ("power:GND", "GND"),  # Correct
         }
         sch_text = _make_ic_with_power_symbols_schematic(
-            "IC:I2CChip", ic_pins, pin_power,
+            "IC:I2CChip",
+            ic_pins,
+            pin_power,
         )
         sch_path = tmp_path / "single_reversed_power_sym.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 1
         assert "VCC" in polarity_errors[0].message
@@ -660,21 +662,22 @@ class TestPowerSymbolFixtures:
             ("4", "DGND", "power_in"),
         ]
         pin_power = {
-            "1": ("power:+3V3", "+3.3V"),    # Correct
-            "2": ("power:GNDD", "GNDD"),      # Swapped
-            "3": ("power:GND", "GND"),        # Correct
-            "4": ("power:+5V", "+5V"),        # Swapped
+            "1": ("power:+3V3", "+3.3V"),  # Correct
+            "2": ("power:GNDD", "GNDD"),  # Swapped
+            "3": ("power:GND", "GND"),  # Correct
+            "4": ("power:+5V", "+5V"),  # Swapped
         }
         sch_text = _make_ic_with_power_symbols_schematic(
-            "IC:MultiPower", ic_pins, pin_power,
+            "IC:MultiPower",
+            ic_pins,
+            pin_power,
         )
         sch_path = tmp_path / "multi_power_sym.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_pin_polarity(str(sch_path))
         polarity_errors = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "error"
+            i for i in issues if i.category == "power_polarity" and i.severity == "error"
         ]
         assert len(polarity_errors) == 2
         messages = [e.message for e in polarity_errors]
@@ -693,15 +696,18 @@ class TestUnresolvedPowerPinWarning:
             ("3", "OUT", "output"),
         ]
         sch_text = _make_ic_with_unresolved_pins_schematic(
-            "IC:Floating", ic_pins,
+            "IC:Floating",
+            ic_pins,
         )
         sch_path = tmp_path / "unresolved_power.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_pin_polarity(str(sch_path))
         warnings = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "warning"
+            i
+            for i in issues
+            if i.category == "power_polarity"
+            and i.severity == "warning"
             and "no resolved net" in i.message
         ]
         # Both VDD and GND should get warnings
@@ -717,15 +723,18 @@ class TestUnresolvedPowerPinWarning:
             ("2", "SCL", "bidirectional"),
         ]
         sch_text = _make_ic_with_unresolved_pins_schematic(
-            "IC:I2C", ic_pins,
+            "IC:I2C",
+            ic_pins,
         )
         sch_path = tmp_path / "unresolved_signal.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_pin_polarity(str(sch_path))
         warnings = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "warning"
+            i
+            for i in issues
+            if i.category == "power_polarity"
+            and i.severity == "warning"
             and "no resolved net" in i.message
         ]
         assert warnings == []
@@ -737,15 +746,18 @@ class TestUnresolvedPowerPinWarning:
             ("2", "NC", "power_in"),
         ]
         sch_text = _make_ic_with_unresolved_pins_schematic(
-            "IC:QFN", ic_pins,
+            "IC:QFN",
+            ic_pins,
         )
         sch_path = tmp_path / "unresolved_ambiguous.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_pin_polarity(str(sch_path))
         warnings = [
-            i for i in issues
-            if i.category == "power_polarity" and i.severity == "warning"
+            i
+            for i in issues
+            if i.category == "power_polarity"
+            and i.severity == "warning"
             and "no resolved net" in i.message
         ]
         assert warnings == []

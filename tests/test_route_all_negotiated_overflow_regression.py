@@ -230,6 +230,7 @@ class TestRouteAllNegotiatedOverflowRegression:
         if "iter " in out:
             # At least one canonical log line must match the format.
             import re
+
             pattern = re.compile(r"iter \d+ \| routed=\d+/\d+ \| overflow=\d+")
             matches = pattern.findall(out)
             # If any iter line was printed it must match our format.
@@ -244,6 +245,7 @@ class TestRouteAllNegotiatedOverflowRegression:
         ``kicad_tools.router.core`` (smoke check on the public surface
         downstream code can import for its own analytics)."""
         from kicad_tools.router.core import IterationMetrics
+
         m = IterationMetrics(iteration=0, routed_count=5, overflow=2)
         assert m.iteration == 0
         assert m.routed_count == 5
@@ -303,9 +305,7 @@ class TestOverflowRegressionRollback:
                 f"Expected iter-0 overflow=16 in restore log, got:\n{out[-800:]}"
             )
 
-    def test_iter1_kept_when_routed_count_strictly_increases(
-        self, trivial_autorouter, capsys
-    ):
+    def test_iter1_kept_when_routed_count_strictly_increases(self, trivial_autorouter, capsys):
         """Even if iteration 1 has worse overflow, a strictly better
         routed_count wins (primary key dominates).
 

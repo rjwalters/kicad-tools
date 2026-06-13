@@ -223,9 +223,7 @@ class TestAutoPourIfMissing:
         pcb_path = tmp_path / "test.kicad_pcb"
         pcb_path.write_text(pcb)
 
-        count, names = auto_pour_if_missing(
-            pcb_path, force_pour_nets=["DOES_NOT_EXIST"]
-        )
+        count, names = auto_pour_if_missing(pcb_path, force_pour_nets=["DOES_NOT_EXIST"])
 
         # No matching pour candidate -> guard still trips, no zones.
         assert count == 0
@@ -810,9 +808,7 @@ class TestErcMarkerNetExclusion:
         assert set(names) == {"+3.3V", "GND"}
         assert count == 2
 
-    def test_pwr_flag_only_does_not_count_as_power_only_board(
-        self, tmp_path: Path
-    ):
+    def test_pwr_flag_only_does_not_count_as_power_only_board(self, tmp_path: Path):
         """A board whose only power-classified net is ``PWR_FLAG`` runs normally.
 
         Without the filter, the all-power-board guard would treat the

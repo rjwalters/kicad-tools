@@ -265,7 +265,7 @@ class TestEscapeStrategyCycling:
 
     def test_escape_tries_all_strategies_on_failure(self):
         """escape_local_minimum should cycle through all 4 strategies before giving up."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 
@@ -374,7 +374,7 @@ class TestEscapeFullReorder:
 
     def test_full_reorder_rips_up_all_nets(self):
         """Full reorder should rip up ALL nets, not just conflicting ones."""
-        from unittest.mock import MagicMock, call
+        from unittest.mock import MagicMock
 
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 
@@ -427,7 +427,7 @@ class TestEscapeFullReorder:
 
     def test_full_reorder_reverses_net_order(self):
         """Full reorder should route nets in reversed priority order."""
-        from unittest.mock import MagicMock, call
+        from unittest.mock import MagicMock
 
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 
@@ -528,7 +528,7 @@ class TestStallRecoveryFallback:
     def test_targeted_ripup_called_for_stalled_nets(self):
         """When overflow is 0 and nets remain unrouted, targeted_ripup
         should be invoked for each failed net that has identified blockers."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 
@@ -902,7 +902,7 @@ class TestEscapeBudgetEnforcement:
 
     def test_per_net_timeout_propagated_to_route_net_negotiated(self):
         """per_net_timeout should be passed through to route_net_negotiated."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 
@@ -1051,9 +1051,7 @@ class TestEmptyNetsToRerouteTermination:
     def test_non_empty_nets_to_reroute_continues(self):
         """A non-empty nets_to_reroute list should NOT trigger termination."""
         nets_to_reroute = [1, 2, 3]
-        assert nets_to_reroute, (
-            "Non-empty nets_to_reroute must be truthy to continue iteration"
-        )
+        assert nets_to_reroute, "Non-empty nets_to_reroute must be truthy to continue iteration"
 
     def test_stall_filtering_can_produce_empty_list(self):
         """Filtering all nets as stalled produces an empty reroute list.
@@ -1065,29 +1063,19 @@ class TestEmptyNetsToRerouteTermination:
         stalled_nets = {1, 2, 3}
 
         # Apply stall filtering (mirrors core.py lines 3124-3127)
-        nets_to_reroute = [
-            n for n in nets_to_reroute if n not in stalled_nets
-        ]
+        nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
 
-        assert not nets_to_reroute, (
-            "All-stalled filtering must produce empty list"
-        )
+        assert not nets_to_reroute, "All-stalled filtering must produce empty list"
 
     def test_partial_stall_does_not_trigger_termination(self):
         """When only some nets are stalled, termination must NOT trigger."""
         nets_to_reroute = [1, 2, 3]
         stalled_nets = {1, 3}
 
-        nets_to_reroute = [
-            n for n in nets_to_reroute if n not in stalled_nets
-        ]
+        nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
 
-        assert nets_to_reroute == [2], (
-            "Partial stall must leave remaining nets for reroute"
-        )
-        assert nets_to_reroute, (
-            "Partial stall must not trigger early termination"
-        )
+        assert nets_to_reroute == [2], "Partial stall must leave remaining nets for reroute"
+        assert nets_to_reroute, "Partial stall must not trigger early termination"
 
     def test_re_enabled_stalled_nets_prevent_empty_list(self):
         """After stalled nets are re-enabled (overflow improved), the
@@ -1107,13 +1095,9 @@ class TestEmptyNetsToRerouteTermination:
             stalled_nets.clear()
 
         # Re-apply filter with cleared stalled set
-        nets_to_reroute = [
-            n for n in nets_to_reroute if n not in stalled_nets
-        ]
+        nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
 
-        assert nets_to_reroute == [1, 2, 3], (
-            "Re-enabled nets must remain in reroute list"
-        )
+        assert nets_to_reroute == [1, 2, 3], "Re-enabled nets must remain in reroute list"
 
 
 # =========================================================================
@@ -1139,48 +1123,56 @@ class TestDetectMatrixConflicts:
 
     def test_no_conflicts_disjoint_nets(self):
         """Nets with no shared components should produce no conflict groups."""
-        ar = self._make_autorouter_with_nets({
-            1: [("R1", "1"), ("R1", "2")],
-            2: [("R2", "1"), ("R2", "2")],
-            3: [("C1", "1"), ("C1", "2")],
-        })
+        ar = self._make_autorouter_with_nets(
+            {
+                1: [("R1", "1"), ("R1", "2")],
+                2: [("R2", "1"), ("R2", "2")],
+                3: [("C1", "1"), ("C1", "2")],
+            }
+        )
         groups = ar._detect_matrix_conflicts([1, 2, 3])
         assert groups == []
 
     def test_no_conflicts_single_shared_component(self):
         """Two nets sharing only 1 component should NOT conflict (threshold=2)."""
-        ar = self._make_autorouter_with_nets({
-            1: [("D1", "A"), ("D1", "K"), ("R1", "1")],
-            2: [("D1", "A"), ("D2", "K"), ("R2", "1")],
-        })
+        ar = self._make_autorouter_with_nets(
+            {
+                1: [("D1", "A"), ("D1", "K"), ("R1", "1")],
+                2: [("D1", "A"), ("D2", "K"), ("R2", "1")],
+            }
+        )
         groups = ar._detect_matrix_conflicts([1, 2], threshold=2)
         assert groups == []
 
     def test_charlieplex_four_nets(self):
         """Four nets sharing 3+ LEDs should form one conflict group."""
         # Simulates NODE_A..NODE_D each connecting to pads on D1..D6
-        ar = self._make_autorouter_with_nets({
-            1: [("D1", "A"), ("D2", "K"), ("D3", "A"), ("D5", "K")],
-            2: [("D1", "K"), ("D2", "A"), ("D4", "A"), ("D6", "K")],
-            3: [("D3", "K"), ("D4", "K"), ("D5", "A"), ("D6", "A")],
-            4: [("D1", "A"), ("D3", "K"), ("D5", "A"), ("D6", "K")],
-        })
+        ar = self._make_autorouter_with_nets(
+            {
+                1: [("D1", "A"), ("D2", "K"), ("D3", "A"), ("D5", "K")],
+                2: [("D1", "K"), ("D2", "A"), ("D4", "A"), ("D6", "K")],
+                3: [("D3", "K"), ("D4", "K"), ("D5", "A"), ("D6", "A")],
+                4: [("D1", "A"), ("D3", "K"), ("D5", "A"), ("D6", "K")],
+            }
+        )
         groups = ar._detect_matrix_conflicts([1, 2, 3, 4])
         assert len(groups) == 1
         assert groups[0] == {1, 2, 3, 4}
 
     def test_two_independent_groups(self):
         """Two separate matrix groups should produce two conflict sets."""
-        ar = self._make_autorouter_with_nets({
-            # Group 1: nets 1, 2 share D1, D2, D3
-            1: [("D1", "A"), ("D2", "K"), ("D3", "A")],
-            2: [("D1", "K"), ("D2", "A"), ("D3", "K")],
-            # Group 2: nets 3, 4 share U1, U2 (different components)
-            3: [("U1", "1"), ("U2", "2"), ("U3", "1")],
-            4: [("U1", "2"), ("U2", "1"), ("U3", "2")],
-            # Net 5: no conflicts
-            5: [("R1", "1"), ("R1", "2")],
-        })
+        ar = self._make_autorouter_with_nets(
+            {
+                # Group 1: nets 1, 2 share D1, D2, D3
+                1: [("D1", "A"), ("D2", "K"), ("D3", "A")],
+                2: [("D1", "K"), ("D2", "A"), ("D3", "K")],
+                # Group 2: nets 3, 4 share U1, U2 (different components)
+                3: [("U1", "1"), ("U2", "2"), ("U3", "1")],
+                4: [("U1", "2"), ("U2", "1"), ("U3", "2")],
+                # Net 5: no conflicts
+                5: [("R1", "1"), ("R1", "2")],
+            }
+        )
         groups = ar._detect_matrix_conflicts([1, 2, 3, 4, 5])
         assert len(groups) == 2
         group_sets = [frozenset(g) for g in groups]
@@ -1189,10 +1181,12 @@ class TestDetectMatrixConflicts:
 
     def test_custom_threshold(self):
         """Higher threshold should require more shared components."""
-        ar = self._make_autorouter_with_nets({
-            1: [("D1", "A"), ("D2", "K")],
-            2: [("D1", "K"), ("D2", "A")],
-        })
+        ar = self._make_autorouter_with_nets(
+            {
+                1: [("D1", "A"), ("D2", "K")],
+                2: [("D1", "K"), ("D2", "A")],
+            }
+        )
         # threshold=2: should conflict (share D1, D2)
         groups_t2 = ar._detect_matrix_conflicts([1, 2], threshold=2)
         assert len(groups_t2) == 1
@@ -1219,12 +1213,14 @@ class TestAssignMatrixLayerPreferences:
         layers = []
         for i in range(num_layers):
             name = "F.Cu" if i == 0 else ("B.Cu" if i == num_layers - 1 else f"In{i}.Cu")
-            layers.append(LayerDefinition(
-                name=name,
-                index=i,
-                layer_type=LayerType.SIGNAL,
-                is_outer=(i == 0 or i == num_layers - 1),
-            ))
+            layers.append(
+                LayerDefinition(
+                    name=name,
+                    index=i,
+                    layer_type=LayerType.SIGNAL,
+                    is_outer=(i == 0 or i == num_layers - 1),
+                )
+            )
         stack = LayerStack(layers=layers, name="Test")
         ar = Autorouter(width=50, height=50, layer_stack=stack)
         return ar
@@ -1287,7 +1283,6 @@ class TestInjectMatrixLayerPreferences:
 
     def test_creates_net_class_entries(self):
         """Should create NetClassRouting entries with preferred_layers."""
-        from kicad_tools.router.rules import NetClassRouting
 
         ar = self._make_autorouter_with_nets(
             {1: [], 2: []},
@@ -1310,9 +1305,7 @@ class TestInjectMatrixLayerPreferences:
             net_names={1: "MCLK"},
         )
         # Pre-existing net class for MCLK
-        ar.net_class_map["MCLK"] = NetClassRouting(
-            name="Clock", priority=2, trace_width=0.15
-        )
+        ar.net_class_map["MCLK"] = NetClassRouting(name="Clock", priority=2, trace_width=0.15)
         prefs = {1: [0]}
         ar._inject_matrix_layer_preferences(prefs)
 
@@ -1347,10 +1340,14 @@ class TestMatrixConstraintBoost:
             pad_key = (f"R{net_id}", "1")
             ar.nets[net_id] = [pad_key]
             ar.pads[pad_key] = Pad(
-                x=10.0, y=10.0,
-                width=1.0, height=1.0,
-                net=net_id, net_name=f"NET_{net_id}",
-                ref=f"R{net_id}", pin="1",
+                x=10.0,
+                y=10.0,
+                width=1.0,
+                height=1.0,
+                net=net_id,
+                net_name=f"NET_{net_id}",
+                ref=f"R{net_id}",
+                pin="1",
             )
             ar.net_names[net_id] = f"NET_{net_id}"
         return ar
@@ -1361,32 +1358,40 @@ class TestMatrixConstraintBoost:
         # Also add a non-matrix net
         pad_key = ("R99", "1")
         from kicad_tools.router.primitives import Pad
+
         ar.nets[99] = [pad_key]
         ar.pads[pad_key] = Pad(
-            x=20.0, y=20.0,
-            width=1.0, height=1.0,
-            net=99, net_name="NET_99",
-            ref="R99", pin="1",
+            x=20.0,
+            y=20.0,
+            width=1.0,
+            height=1.0,
+            net=99,
+            net_name="NET_99",
+            ref="R99",
+            pin="1",
         )
         ar.net_names[99] = "NET_99"
 
         matrix_score = ar._calculate_constraint_score(1)
         normal_score = ar._calculate_constraint_score(99)
-        assert matrix_score > normal_score, (
-            "Matrix net should have higher constraint score"
-        )
+        assert matrix_score > normal_score, "Matrix net should have higher constraint score"
 
     def test_non_matrix_net_unaffected(self):
         """Non-matrix nets should not get the matrix boost."""
         ar = self._make_autorouter_with_matrix_nets([])
         pad_key = ("R1", "1")
         from kicad_tools.router.primitives import Pad
+
         ar.nets[1] = [pad_key]
         ar.pads[pad_key] = Pad(
-            x=10.0, y=10.0,
-            width=1.0, height=1.0,
-            net=1, net_name="NET_1",
-            ref="R1", pin="1",
+            x=10.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET_1",
+            ref="R1",
+            pin="1",
         )
         ar.net_names[1] = "NET_1"
 
@@ -1431,22 +1436,28 @@ class TestFindLowerPrioritySiblingsOnComponents:
         for net_id, pad_keys in nets_data.items():
             ar.nets[net_id] = list(pad_keys)
             ar.net_names[net_id] = f"NET_{net_id}"
-            for (ref, pin) in pad_keys:
+            for ref, pin in pad_keys:
                 ar.pads[(ref, pin)] = Pad(
-                    x=x, y=10.0,
-                    width=1.0, height=1.0,
-                    net=net_id, net_name=f"NET_{net_id}",
-                    ref=ref, pin=pin,
+                    x=x,
+                    y=10.0,
+                    width=1.0,
+                    height=1.0,
+                    net=net_id,
+                    net_name=f"NET_{net_id}",
+                    ref=ref,
+                    pin=pin,
                 )
                 x += 2.0
         return ar
 
     def test_returns_empty_when_no_blocking_components(self):
         """Helper returns empty when called with no blocking components."""
-        ar = self._make_autorouter_with_pads({
-            1: [("D1", "A")],
-            2: [("D1", "K")],
-        })
+        ar = self._make_autorouter_with_pads(
+            {
+                1: [("D1", "A")],
+                2: [("D1", "K")],
+            }
+        )
         result = ar._find_lower_priority_siblings_on_components(
             failed_net=1,
             blocking_components=[],
@@ -1456,9 +1467,11 @@ class TestFindLowerPrioritySiblingsOnComponents:
 
     def test_returns_empty_when_failed_net_excluded(self):
         """Helper never returns the failed_net itself."""
-        ar = self._make_autorouter_with_pads({
-            1: [("D1", "A"), ("D2", "K")],
-        })
+        ar = self._make_autorouter_with_pads(
+            {
+                1: [("D1", "A"), ("D2", "K")],
+            }
+        )
         result = ar._find_lower_priority_siblings_on_components(
             failed_net=1,
             blocking_components=["D1", "D2"],
@@ -1468,10 +1481,12 @@ class TestFindLowerPrioritySiblingsOnComponents:
 
     def test_excludes_candidates_with_no_overlap(self):
         """Candidates that don't touch the blocking components are excluded."""
-        ar = self._make_autorouter_with_pads({
-            1: [("D1", "A"), ("D2", "K")],
-            2: [("R1", "1"), ("R2", "1")],  # disjoint
-        })
+        ar = self._make_autorouter_with_pads(
+            {
+                1: [("D1", "A"), ("D2", "K")],
+                2: [("R1", "1"), ("R2", "1")],  # disjoint
+            }
+        )
         result = ar._find_lower_priority_siblings_on_components(
             failed_net=1,
             blocking_components=["D1", "D2"],
@@ -1487,10 +1502,12 @@ class TestFindLowerPrioritySiblingsOnComponents:
         bounding box so its full priority tuple compares strictly greater
         than the failed net's tuple.
         """
-        ar = self._make_autorouter_with_pads({
-            1: [("D5", "A"), ("D5", "K")],  # Failed net: 2 pads, short
-            2: [("D5", "A"), ("R2", "1"), ("R3", "1"), ("R4", "1")],  # 4 pads
-        })
+        ar = self._make_autorouter_with_pads(
+            {
+                1: [("D5", "A"), ("D5", "K")],  # Failed net: 2 pads, short
+                2: [("D5", "A"), ("R2", "1"), ("R3", "1"), ("R4", "1")],  # 4 pads
+            }
+        )
         result = ar._find_lower_priority_siblings_on_components(
             failed_net=1,
             blocking_components=["D5"],
@@ -1501,10 +1518,12 @@ class TestFindLowerPrioritySiblingsOnComponents:
     def test_excludes_equal_priority_candidate(self):
         """Equal-priority candidate is excluded to avoid oscillation."""
         # Two nets with identical structure -> identical priority tuple.
-        ar = self._make_autorouter_with_pads({
-            1: [("D5", "A"), ("D6", "K")],
-            2: [("D5", "K"), ("D6", "A")],
-        })
+        ar = self._make_autorouter_with_pads(
+            {
+                1: [("D5", "A"), ("D6", "K")],
+                2: [("D5", "K"), ("D6", "A")],
+            }
+        )
         # Force identical net classes so their priority tuples are equal.
         result = ar._find_lower_priority_siblings_on_components(
             failed_net=1,
@@ -2102,7 +2121,10 @@ class TestAttemptBlockedComponentRipupNegotiated:
         from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 
         return NegotiatedRouter(
-            ar.grid, ar.router, ar.rules, ar.net_class_map,
+            ar.grid,
+            ar.router,
+            ar.rules,
+            ar.net_class_map,
         )
 
     def test_skips_when_failure_cause_is_not_blocked_path(self):
@@ -2342,8 +2364,7 @@ class TestAttemptBlockedComponentRipupNegotiated:
 
         def fake_targeted_ripup(*, blocking_nets, **kwargs):
             captured_blocking_nets.append(set(blocking_nets))
-            new_route = Route(net=kwargs["failed_net"], net_name="DAC_CLK",
-                              segments=[], vias=[])
+            new_route = Route(net=kwargs["failed_net"], net_name="DAC_CLK", segments=[], vias=[])
             kwargs["net_routes"].setdefault(kwargs["failed_net"], []).append(new_route)
             kwargs["routes_list"].append(new_route)
             return True
@@ -2430,12 +2451,24 @@ class TestNegotiatedStallFallbackInvokesComponentRipup:
         # on triggering an actual stall (which is hard to do in a unit
         # test without realistic congestion).
         ar.pads[("R1", "1")] = Pad(
-            x=5.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="N1", ref="R1", pin="1",
+            x=5.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N1",
+            ref="R1",
+            pin="1",
         )
         ar.pads[("R1", "2")] = Pad(
-            x=15.0, y=10.0, width=1.0, height=1.0,
-            net=1, net_name="N1", ref="R1", pin="2",
+            x=15.0,
+            y=10.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N1",
+            ref="R1",
+            pin="2",
         )
         ar.nets[1] = [("R1", "1"), ("R1", "2")]
         ar.net_names = {1: "N1"}
@@ -2456,7 +2489,9 @@ class TestNegotiatedStallFallbackInvokesComponentRipup:
         # contract we need to verify is that the helper is *wired in*,
         # which we'll do via static check below in the broader test.
         with patch.object(
-            ar, "_attempt_blocked_component_ripup_negotiated", side_effect=spy,
+            ar,
+            "_attempt_blocked_component_ripup_negotiated",
+            side_effect=spy,
         ):
             ar.route_all_negotiated(max_iterations=1, timeout=10.0)
 

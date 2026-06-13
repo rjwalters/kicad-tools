@@ -415,9 +415,7 @@ class TestTwoPassCollisionAvoidance:
 
 class TestReferenceNotFound:
     def test_nonexistent_ref_error(self, tmp_schematic: Path):
-        result = run_set_reference(
-            tmp_schematic, ref="X99", new_ref="X100", backup=False
-        )
+        result = run_set_reference(tmp_schematic, ref="X99", new_ref="X100", backup=False)
         assert result == 1
 
     def test_file_not_found(self, tmp_path: Path):

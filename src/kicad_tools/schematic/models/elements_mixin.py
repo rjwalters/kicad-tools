@@ -77,10 +77,7 @@ class SchematicElementsMixin:
         Returns:
             True if point is on any wire segment within tolerance
         """
-        for wire in self.wires:
-            if self._point_on_wire(x, y, wire, tolerance):
-                return True
-        return False
+        return any(self._point_on_wire(x, y, wire, tolerance) for wire in self.wires)
 
     def _point_on_wire_segment_interior(
         self, x: float, y: float, wire: Wire, tolerance: float = POINT_TOLERANCE

@@ -147,9 +147,7 @@ class MSTRouter:
                 # is the path the auto-layers two-phase flow actually
                 # executes, so it needs the relocation too.
                 grid = self.grid
-                blocked_fn = make_blocked_cell_predicate(
-                    grid, self.rules, pad_objs[0].net
-                )
+                blocked_fn = make_blocked_cell_predicate(grid, self.rules, pad_objs[0].net)
 
                 def snap_fn(x: float, y: float) -> tuple[float, float]:
                     gx, gy = grid.world_to_grid(x, y)
@@ -173,9 +171,7 @@ class MSTRouter:
             # bounded by ``per_net_timeout`` and a single grindy edge can
             # no longer consume ``per_net_timeout * len(edges)`` seconds.
             net_deadline = (
-                time.monotonic() + per_net_timeout
-                if per_net_timeout is not None
-                else None
+                time.monotonic() + per_net_timeout if per_net_timeout is not None else None
             )
 
             for i, j in edges:
@@ -195,9 +191,7 @@ class MSTRouter:
                 else:
                     edge_timeout = None
 
-                route = self.router.route(
-                    source_pad, target_pad, per_net_timeout=edge_timeout
-                )
+                route = self.router.route(source_pad, target_pad, per_net_timeout=edge_timeout)
 
                 if route:
                     mark_route_callback(route)
@@ -206,9 +200,7 @@ class MSTRouter:
                     failure_callback(source_pad, target_pad)
         else:
             # Simple 2-pin net: the whole budget bounds the single A* search.
-            route = self.router.route(
-                pad_objs[0], pad_objs[1], per_net_timeout=per_net_timeout
-            )
+            route = self.router.route(pad_objs[0], pad_objs[1], per_net_timeout=per_net_timeout)
             if route:
                 mark_route_callback(route)
                 routes.append(route)
@@ -246,11 +238,7 @@ class MSTRouter:
         first_pad = pad_objs[0]
 
         # Issue #3485: cumulative per-net deadline (see route_net above).
-        net_deadline = (
-            time.monotonic() + per_net_timeout
-            if per_net_timeout is not None
-            else None
-        )
+        net_deadline = time.monotonic() + per_net_timeout if per_net_timeout is not None else None
 
         for i in range(1, len(pad_objs)):
             target_pad = pad_objs[i]
@@ -265,9 +253,7 @@ class MSTRouter:
             else:
                 edge_timeout = None
 
-            route = self.router.route(
-                first_pad, target_pad, per_net_timeout=edge_timeout
-            )
+            route = self.router.route(first_pad, target_pad, per_net_timeout=edge_timeout)
 
             if route:
                 mark_route_callback(route)

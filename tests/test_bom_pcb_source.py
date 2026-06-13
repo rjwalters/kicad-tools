@@ -10,7 +10,6 @@ import pytest
 
 from kicad_tools.schema.bom import BOM, BOMItem, extract_bom_from_pcb
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -98,7 +97,7 @@ class TestExtractBomFromPcb:
 
     def test_warns_on_empty_value(self, caplog):
         """Should warn when a footprint has an empty value field."""
-        from kicad_tools.schema.pcb import Footprint, PCB
+        from kicad_tools.schema.pcb import Footprint
 
         mock_fp = Footprint(
             name="R_0402",
@@ -400,15 +399,10 @@ class TestCliBomSourceArg:
     """Tests for the --bom-source CLI argument parsing."""
 
     def test_parser_accepts_bom_source_pcb(self):
-        from kicad_tools.cli.export_cmd import main
         import argparse
 
-        # Just test argument parsing, not execution
-        from kicad_tools.cli.export_cmd import main as _main
-
         # Create parser to test argument parsing
-        import importlib
-        import kicad_tools.cli.export_cmd as export_mod
+        # Just test argument parsing, not execution
 
         parser = argparse.ArgumentParser()
         parser.add_argument("pcb")

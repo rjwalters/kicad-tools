@@ -357,12 +357,8 @@ def find_smallest_admitting_tier(
     ladder = get_mfr_size_tier_ladder(manufacturer)
     for tier in ladder:
         # Tier admits the board if it fits in either orientation
-        fits_natural = (
-            width_mm <= tier.max_width_mm and height_mm <= tier.max_height_mm
-        )
-        fits_rotated = (
-            width_mm <= tier.max_height_mm and height_mm <= tier.max_width_mm
-        )
+        fits_natural = width_mm <= tier.max_width_mm and height_mm <= tier.max_height_mm
+        fits_rotated = width_mm <= tier.max_height_mm and height_mm <= tier.max_width_mm
         if fits_natural or fits_rotated:
             return tier
     return None

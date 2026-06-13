@@ -29,8 +29,6 @@ Coverage:
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from kicad_tools.router.escape import EscapeRouter
@@ -38,7 +36,6 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
-
 
 # ----------------------------------------------------------------------------
 # Fixtures: TQFP-32 at 0.8 mm pitch (mirrors board-03 U1)
@@ -71,7 +68,7 @@ def _make_tqfp32_pads(ref: str = "U1") -> list[Pad]:
     south_names = ["GND", "JOY_X", "JOY_Y", "JOY_BTN", "BTN1", "BTN2", "BTN3", "BTN4"]
     # Pin positions on the south edge: 8 pads, pitch 0.8mm centred on origin.
     south_xs = [(-3.5 + i * pitch) for i in range(8)]
-    for i, (x, net, name) in enumerate(zip(south_xs, south_nets, south_names)):
+    for i, (x, net, name) in enumerate(zip(south_xs, south_nets, south_names, strict=False)):
         pads.append(
             Pad(
                 x=x,
@@ -89,7 +86,7 @@ def _make_tqfp32_pads(ref: str = "U1") -> list[Pad]:
     # North edge: USB_CC1, USB_CC2 adjacent at positions 26, 27.
     north_nets = [3, 11, 12, 13, 14, 15, 3, 3]
     north_names = ["GND", "USB_CC2", "USB_CC1", "USB_D-", "USB_D+", "VBUS", "GND", "GND"]
-    for i, (x, net, name) in enumerate(zip(south_xs, north_nets, north_names)):
+    for i, (x, net, name) in enumerate(zip(south_xs, north_nets, north_names, strict=False)):
         pads.append(
             Pad(
                 x=x,
@@ -172,9 +169,7 @@ class TestExtendedPitchInPadGate:
 
     def test_default_gate_blocks_0p8mm_pitch(self, monkeypatch):
         """Without the env var set, 0.8mm pitch packages get NO rescue."""
-        monkeypatch.delenv(
-            "KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", raising=False
-        )
+        monkeypatch.delenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", raising=False)
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
         er = EscapeRouter(grid, rules)
@@ -188,8 +183,7 @@ class TestExtendedPitchInPadGate:
 
         rescues = er.generate_in_pad_rescues_only(pkg)
         assert rescues == [], (
-            "Default gate should block 0.8mm-pitch rescue without the "
-            "extended-pitch opt-in flag."
+            "Default gate should block 0.8mm-pitch rescue without the extended-pitch opt-in flag."
         )
 
     def test_extended_gate_rescues_0p8mm_pitch(self, monkeypatch):
@@ -270,9 +264,7 @@ class TestPinFilter:
         pkg = er.analyze_package(pads)
 
         rescues = er.generate_in_pad_rescues_only(pkg, pin_filter=[])
-        assert rescues == [], (
-            "An empty pin_filter list should produce no rescues."
-        )
+        assert rescues == [], "An empty pin_filter list should produce no rescues."
 
 
 class TestMissedRescueCounterWidening:

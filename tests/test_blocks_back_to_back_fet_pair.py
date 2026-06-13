@@ -52,8 +52,11 @@ class TestBackToBackFETPair:
     def test_places_two_fets(self, mock_schematic):
         """Default construction places exactly two MOSFETs."""
         pair = BackToBackFETPair(
-            mock_schematic, x=100, y=80,
-            ref_a="Q1A", ref_b="Q1B",
+            mock_schematic,
+            x=100,
+            y=80,
+            ref_a="Q1A",
+            ref_b="Q1B",
         )
         # Two add_symbol calls for the FETs (any Kelvin-related junction
         # uses add_junction, not add_symbol).
@@ -83,8 +86,7 @@ class TestBackToBackFETPair:
         BackToBackFETPair(mock_schematic, x=100, y=80)
         # add_symbol(symbol, x, y, ref, value, rotation=..., ...)
         rotations = [
-            call.kwargs.get("rotation", 0)
-            for call in mock_schematic.add_symbol.call_args_list
+            call.kwargs.get("rotation", 0) for call in mock_schematic.add_symbol.call_args_list
         ]
         assert rotations[0] == 0
         assert rotations[1] == 180
@@ -106,7 +108,9 @@ class TestBackToBackFETPair:
     def test_kelvin_label_emits_when_requested(self, mock_schematic):
         """When ``kelvin_label`` is provided, exactly one label is added at SOURCE."""
         pair = BackToBackFETPair(
-            mock_schematic, x=100, y=80,
+            mock_schematic,
+            x=100,
+            y=80,
             kelvin_label="SRC_POS",
         )
         labels = mock_schematic.add_label.call_args_list
@@ -130,7 +134,9 @@ class TestBackToBackFETPair:
     def test_metadata_includes_mosfet_value(self, mock_schematic):
         """Block metadata records the mosfet value for downstream tools."""
         pair = BackToBackFETPair(
-            mock_schematic, x=100, y=80,
+            mock_schematic,
+            x=100,
+            y=80,
             mosfet_value="IRFB4110",
         )
         assert pair.mosfet_value == "IRFB4110"
@@ -214,6 +220,6 @@ class TestBackToBackFETPair:
         assert pair.kelvin_node[1] == pytest.approx(110.0)
         # Junction is added exactly at the Kelvin node.
         junction_calls = mock_schematic.add_junction.call_args_list
-        assert any(
-            call.args[:2] == pair.kelvin_node for call in junction_calls
-        ), "Kelvin junction must sit at kelvin_node coordinates"
+        assert any(call.args[:2] == pair.kelvin_node for call in junction_calls), (
+            "Kelvin junction must sit at kelvin_node coordinates"
+        )

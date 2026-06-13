@@ -12,7 +12,7 @@ from typing import NamedTuple
 import pytest
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available, get_backend_info
+from kicad_tools.router.cpp_backend import get_backend_info, is_cpp_available
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.rules import DesignRules
 
@@ -267,7 +267,7 @@ class TestCppPerformance:
         assert result.time_seconds < 60.0, f"Routing took too long: {result.time_seconds:.1f}s"
         assert result.nets_routed > 0, "No nets were routed"
 
-        print(f"\nLarge board (200x120mm) results:")
+        print("\nLarge board (200x120mm) results:")
         print(f"  Grid cells: {result.grid_cells:,}")
         print(f"  Nets routed: {result.nets_routed}/{result.num_nets}")
         print(f"  Time: {result.time_seconds:.2f}s")
@@ -330,7 +330,9 @@ if __name__ == "__main__":
         if is_cpp_available():
             cpp_result = run_routing_benchmark(width, height, nets, force_python=False)
             speedup = py_result.time_seconds / max(cpp_result.time_seconds, 0.001)
-            print(f"  C++:    {cpp_result.time_seconds:.3f}s, {cpp_result.nets_routed}/{nets} routed")
+            print(
+                f"  C++:    {cpp_result.time_seconds:.3f}s, {cpp_result.nets_routed}/{nets} routed"
+            )
             print(f"  Speedup: {speedup:.1f}x")
         else:
             print("  C++: Not available")

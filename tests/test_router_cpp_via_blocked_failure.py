@@ -139,7 +139,9 @@ class TestRouteResultFailureReason:
             grid_resolution=0.1,
         )
         grid = RoutingGrid(
-            width=2.0, height=2.0, rules=rules,
+            width=2.0,
+            height=2.0,
+            rules=rules,
             layer_stack=LayerStack.four_layer_all_signal(),
         )
         cpp_grid = CppGrid.from_routing_grid(grid)
@@ -153,7 +155,11 @@ class TestRouteResultFailureReason:
                 x = i * 0.4
                 y = j * 0.4
                 cpp_grid._impl.add_stored_via(
-                    x, y, 0.3, rules.via_diameter, net2,
+                    x,
+                    y,
+                    0.3,
+                    rules.via_diameter,
+                    net2,
                 )
 
         pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
@@ -161,12 +167,22 @@ class TestRouteResultFailureReason:
 
         # Force the search to attempt a via: start on F_CU, end on B_CU.
         start = Pad(
-            x=0.2, y=0.2, width=0.2, height=0.2,
-            layer=Layer.F_CU, net=1, net_name="N1",
+            x=0.2,
+            y=0.2,
+            width=0.2,
+            height=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="N1",
         )
         end = Pad(
-            x=1.8, y=1.8, width=0.2, height=0.2,
-            layer=Layer.B_CU, net=1, net_name="N1",
+            x=1.8,
+            y=1.8,
+            width=0.2,
+            height=0.2,
+            layer=Layer.B_CU,
+            net=1,
+            net_name="N1",
         )
 
         # The Python fallback may still find a path -- we don't assert on
@@ -184,8 +200,7 @@ class TestRouteResultFailureReason:
             f"got {info['failure_reason']}"
         )
         assert info["blocking_via_net"] == net2, (
-            f"Expected blocking_via_net == {net2}, "
-            f"got {info['blocking_via_net']}"
+            f"Expected blocking_via_net == {net2}, got {info['blocking_via_net']}"
         )
         # Failure coordinates should be non-zero (a real candidate was
         # rejected somewhere on the board).
@@ -203,12 +218,22 @@ class TestRouteResultFailureReason:
 
         # Trivial 2-pad route that should succeed without vias.
         start = Pad(
-            x=1.0, y=1.0, width=0.4, height=0.4,
-            layer=Layer.F_CU, net=1, net_name="N1",
+            x=1.0,
+            y=1.0,
+            width=0.4,
+            height=0.4,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="N1",
         )
         end = Pad(
-            x=3.0, y=1.0, width=0.4, height=0.4,
-            layer=Layer.F_CU, net=1, net_name="N1",
+            x=3.0,
+            y=1.0,
+            width=0.4,
+            height=0.4,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="N1",
         )
 
         route = pathfinder.route(start, end)
@@ -449,9 +474,7 @@ class TestNegotiatedRouterViaBlockedRetry:
         # The pair was attempted but no rip-up occurred (budget exhausted).
         assert attempted == 1
         assert resolved == 0
-        assert ripped == [], (
-            "When all blockers are over-budget no rip-up should occur"
-        )
+        assert ripped == [], "When all blockers are over-budget no rip-up should occur"
 
     def test_via_blocked_ripup_no_pairs_returns_zero(self):
         """When no via-blocked pairs have been recorded, the method is a no-op."""
@@ -506,8 +529,13 @@ class TestUnmarkRouteInvalidatesStoredVias:
         route = Route(net=7, net_name="N7")
         route.vias.append(
             Via(
-                x=1.0, y=1.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=7, net_name="N7",
+                x=1.0,
+                y=1.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=7,
+                net_name="N7",
             )
         )
         grid.routes.append(route)
@@ -546,7 +574,9 @@ class TestUnmarkRouteInvalidatesStoredVias:
             grid_resolution=0.1,
         )
         grid = RoutingGrid(
-            width=2.0, height=2.0, rules=rules,
+            width=2.0,
+            height=2.0,
+            rules=rules,
             layer_stack=LayerStack.four_layer_all_signal(),
         )
         cpp_grid = CppGrid.from_routing_grid(grid)
@@ -561,8 +591,13 @@ class TestUnmarkRouteInvalidatesStoredVias:
         route = Route(net=2, net_name="N2")
         route.vias.append(
             Via(
-                x=0.8, y=0.8, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="N2",
+                x=0.8,
+                y=0.8,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=2,
+                net_name="N2",
             )
         )
         grid.routes.append(route)
@@ -576,7 +611,11 @@ class TestUnmarkRouteInvalidatesStoredVias:
         # the geometric stored-via clearance check.  This relies on the
         # candidate net (3) being different from the stored via's net (2).
         assert pathfinder._impl.is_via_blocked(
-            gx, gy, 3, False, 0,
+            gx,
+            gy,
+            3,
+            False,
+            0,
         ), "Setup expectation: stored via on net 2 blocks net 3 candidate."
 
         # Rip up the Python-side route -- this must clear cpp stored_vias_.
@@ -589,7 +628,11 @@ class TestUnmarkRouteInvalidatesStoredVias:
         # (Grid cells around (0.8, 0.8) were never marked, so this checks
         # the stored-via path specifically.)
         assert not pathfinder._impl.is_via_blocked(
-            gx, gy, 3, False, 0,
+            gx,
+            gy,
+            3,
+            False,
+            0,
         ), "After unmark_route, is_via_blocked must not reject against the freed via."
 
     def test_invalidate_stored_routes_method_exists_and_works(self):
@@ -645,16 +688,26 @@ class TestRsmtSubRouteViaDedup:
         r0 = Route(net=1, net_name="N1")
         r0.vias.append(
             Via(
-                x=1.5, y=2.5, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.IN1_CU), net=1, net_name="N1",
+                x=1.5,
+                y=2.5,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.IN1_CU),
+                net=1,
+                net_name="N1",
             )
         )
 
         r1 = Route(net=1, net_name="N1")
         r1.vias.append(
             Via(
-                x=1.5, y=2.5, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.IN1_CU), net=1, net_name="N1",
+                x=1.5,
+                y=2.5,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.IN1_CU),
+                net=1,
+                net_name="N1",
             )
         )
 
@@ -662,23 +715,31 @@ class TestRsmtSubRouteViaDedup:
         r2.vias.append(
             Via(
                 # Different layer span -- forces a layer expansion.
-                x=1.5, y=2.5, drill=0.3, diameter=0.6,
-                layers=(Layer.IN1_CU, Layer.B_CU), net=1, net_name="N1",
+                x=1.5,
+                y=2.5,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.IN1_CU, Layer.B_CU),
+                net=1,
+                net_name="N1",
             )
         )
         # Plus a second via on a different coordinate -- must NOT be deduped.
         r2.vias.append(
             Via(
-                x=4.0, y=4.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+                x=4.0,
+                y=4.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="N1",
             )
         )
 
         removed = _dedupe_sibling_route_vias([r0, r1, r2])
 
-        assert removed == 2, (
-            "Two duplicates at (1.5, 2.5) must be collapsed; one occurrence kept."
-        )
+        assert removed == 2, "Two duplicates at (1.5, 2.5) must be collapsed; one occurrence kept."
         # r0 keeps its via; r1 loses it; r2 loses the (1.5, 2.5) but keeps (4.0, 4.0).
         assert len(r0.vias) == 1
         assert len(r1.vias) == 0
@@ -703,15 +764,25 @@ class TestRsmtSubRouteViaDedup:
         r0 = Route(net=1, net_name="N1")
         r0.vias.append(
             Via(
-                x=1.5, y=2.5, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+                x=1.5,
+                y=2.5,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="N1",
             )
         )
         r1 = Route(net=1, net_name="N1")
         r1.vias.append(
             Via(
-                x=4.5, y=2.5, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+                x=4.5,
+                y=2.5,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="N1",
             )
         )
 
@@ -731,8 +802,13 @@ class TestRsmtSubRouteViaDedup:
         r0 = Route(net=1, net_name="N1")
         r0.vias.append(
             Via(
-                x=1.5, y=2.5, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+                x=1.5,
+                y=2.5,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="N1",
             )
         )
         # Two vias on the same route at the same coord -- intra-route
@@ -740,8 +816,13 @@ class TestRsmtSubRouteViaDedup:
         # helper, so the helper must leave them alone.
         r0.vias.append(
             Via(
-                x=1.5, y=2.5, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N1",
+                x=1.5,
+                y=2.5,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="N1",
             )
         )
 

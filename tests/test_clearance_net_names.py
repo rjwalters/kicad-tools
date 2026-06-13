@@ -6,15 +6,11 @@ validate-layer DRCViolation, the compat bridge, and into CLI output.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from kicad_tools.validate.rules.clearance import CopperElement
 from kicad_tools.validate.violations import DRCViolation
-
 
 # ---------------------------------------------------------------------------
 # CopperElement carries net_name

@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _split_cap_value,
     check_value_consistency,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for _split_cap_value helper
@@ -236,116 +232,138 @@ class TestCheckValueConsistency:
 
     def test_mixed_group_produces_warning(self, tmp_sch):
         """Some caps '100nF', some '100nF 25V' -> 1 warning."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF"},
-            {"ref": "C3", "lib_id": "Device:C", "value": "100nF 25V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF"},
+                {"ref": "C3", "lib_id": "Device:C", "value": "100nF 25V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 1
         assert "100nF" in warnings[0].message
         assert "C3" in warnings[0].message
         assert "C1" in warnings[0].message
-        assert "value_consistency" == warnings[0].category
+        assert warnings[0].category == "value_consistency"
 
     def test_uniform_no_voltage_no_warning(self, tmp_sch):
         """All caps '100nF' -> 0 warnings."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_uniform_with_voltage_no_warning(self, tmp_sch):
         """All caps '100nF 25V' -> 0 warnings."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF 25V"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF 25V"},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_different_voltages_no_warning(self, tmp_sch):
         """'100nF 25V' vs '100nF 50V' -> 0 warnings (both have qualifiers)."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF 25V"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 50V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF 25V"},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF 50V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_dnp_excluded(self, tmp_sch):
         """DNP cap with voltage, active cap without -> 0 warnings."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V", "dnp": True},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V", "dnp": True},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_non_capacitor_ignored(self, tmp_sch):
         """Resistors with mixed formatting -> 0 warnings."""
-        sch = _make_schematic([
-            {"ref": "R1", "lib_id": "Device:R", "value": "10k"},
-            {"ref": "R2", "lib_id": "Device:R", "value": "10k 0.25W"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "R1", "lib_id": "Device:R", "value": "10k"},
+                {"ref": "R2", "lib_id": "Device:R", "value": "10k 0.25W"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_multiple_base_values_multiple_warnings(self, tmp_sch):
         """Both '100nF' and '10uF' have mixed groups -> 2 warnings."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
-            {"ref": "C3", "lib_id": "Device:C", "value": "10uF"},
-            {"ref": "C4", "lib_id": "Device:C", "value": "10uF 16V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
+                {"ref": "C3", "lib_id": "Device:C", "value": "10uF"},
+                {"ref": "C4", "lib_id": "Device:C", "value": "10uF 16V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 2
 
     def test_single_component_no_warning(self, tmp_sch):
         """Single component -> 0 warnings."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_tilde_value_ignored(self, tmp_sch):
         """Value '~' is skipped."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "~"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "~"},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_missing_footprint_ignored(self, tmp_sch):
         """Component with empty footprint is skipped."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": ""},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": ""},
+                {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 0
 
     def test_warning_message_format(self, tmp_sch):
         """Verify the warning message contains expected substrings."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
-            {"ref": "C3", "lib_id": "Device:C", "value": "100nF 25V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "100nF"},
+                {"ref": "C3", "lib_id": "Device:C", "value": "100nF 25V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 1
@@ -356,10 +374,12 @@ class TestCheckValueConsistency:
 
     def test_polarized_capacitor_included(self, tmp_sch):
         """C_Polarized is also a capacitor and should be checked."""
-        sch = _make_schematic([
-            {"ref": "C1", "lib_id": "Device:C", "value": "10uF"},
-            {"ref": "C2", "lib_id": "Device:C_Polarized", "value": "10uF 25V"},
-        ])
+        sch = _make_schematic(
+            [
+                {"ref": "C1", "lib_id": "Device:C", "value": "10uF"},
+                {"ref": "C2", "lib_id": "Device:C_Polarized", "value": "10uF 25V"},
+            ]
+        )
         issues = check_value_consistency(tmp_sch(sch))
         warnings = [i for i in issues if i.severity == "warning"]
         assert len(warnings) == 1

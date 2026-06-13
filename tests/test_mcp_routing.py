@@ -825,8 +825,7 @@ class TestBuildPadsForNetRotationSignConvention:
 
         pads = _build_pads_for_net(pcb, net_number=1, net_name="SIG1")
         assert len(pads) == 1, (
-            f"rotation={rotation}°: expected exactly 1 pad on SIG1, got "
-            f"{len(pads)}"
+            f"rotation={rotation}°: expected exactly 1 pad on SIG1, got {len(pads)}"
         )
 
         actual = (pads[0].x, pads[0].y)

@@ -105,27 +105,19 @@ def _segments_intersect(
     # Collinear / endpoint-on-segment cases
     eps = 1e-9
     if abs(d1) < eps and _on_segment(p3, p1, p4):
-        if exclude_endpoints and (
-            _pt_eq(p1, p3) or _pt_eq(p1, p4)
-        ):
+        if exclude_endpoints and (_pt_eq(p1, p3) or _pt_eq(p1, p4)):
             return False
         return True
     if abs(d2) < eps and _on_segment(p3, p2, p4):
-        if exclude_endpoints and (
-            _pt_eq(p2, p3) or _pt_eq(p2, p4)
-        ):
+        if exclude_endpoints and (_pt_eq(p2, p3) or _pt_eq(p2, p4)):
             return False
         return True
     if abs(d3) < eps and _on_segment(p1, p3, p2):
-        if exclude_endpoints and (
-            _pt_eq(p3, p1) or _pt_eq(p3, p2)
-        ):
+        if exclude_endpoints and (_pt_eq(p3, p1) or _pt_eq(p3, p2)):
             return False
         return True
     if abs(d4) < eps and _on_segment(p1, p4, p2):
-        if exclude_endpoints and (
-            _pt_eq(p4, p1) or _pt_eq(p4, p2)
-        ):
+        if exclude_endpoints and (_pt_eq(p4, p1) or _pt_eq(p4, p2)):
             return False
         return True
 
@@ -151,9 +143,7 @@ def _check_wire_path_crossings(
 
     # Check wire-to-wire crossings
     for existing in sch.wires:
-        if _segments_intersect(
-            wire_start, wire_end, existing.start, existing.end
-        ):
+        if _segments_intersect(wire_start, wire_end, existing.start, existing.end):
             warnings.append(
                 f"Wire path ({wire_start[0]:.2f},{wire_start[1]:.2f})->"
                 f"({wire_end[0]:.2f},{wire_end[1]:.2f}) crosses existing wire "
@@ -571,9 +561,7 @@ def run_add_pull_resistor(args) -> int:
         wire_segments.append((ic_pin_snapped, ic_side_snapped))
 
     # Check the power-side wire for crossings (always straight -- shorter segment)
-    power_wire_crossings = _check_wire_path_crossings(
-        sch, power_side_snapped, power_pos_snapped
-    )
+    power_wire_crossings = _check_wire_path_crossings(sch, power_side_snapped, power_pos_snapped)
     if power_wire_crossings and not force:
         for warning in power_wire_crossings:
             print(f"Warning: {warning}", file=sys.stderr)
@@ -688,10 +676,7 @@ def run_add_pull_resistor(args) -> int:
 
     # 4. Add wires
     for seg_start, seg_end in wire_segments:
-        if (
-            abs(seg_start[0] - seg_end[0]) > 0.01
-            or abs(seg_start[1] - seg_end[1]) > 0.01
-        ):
+        if abs(seg_start[0] - seg_end[0]) > 0.01 or abs(seg_start[1] - seg_end[1]) > 0.01:
             sch.add_wire(seg_start, seg_end)
 
     # 5. Save

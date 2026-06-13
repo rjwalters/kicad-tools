@@ -22,7 +22,6 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 
-
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
@@ -128,10 +127,8 @@ def _make_lqfp_west_corner_geometry(grid: RoutingGrid, target_net: int = 1):
     # north/south wedges is what the predicate keys on; the predicate
     # does not require them to be co-linear with the target on the
     # escape axis.
-    north_flank = _make_pad(x=5.3, y=9.5, net=flank_net, net_name="N1",
-                            ref="CHIP", pin="6")
-    south_flank = _make_pad(x=5.3, y=10.5, net=flank_net, net_name="N1",
-                            ref="CHIP", pin="8")
+    north_flank = _make_pad(x=5.3, y=9.5, net=flank_net, net_name="N1", ref="CHIP", pin="6")
+    south_flank = _make_pad(x=5.3, y=10.5, net=flank_net, net_name="N1", ref="CHIP", pin="8")
     grid.add_pad(north_flank)
     grid.add_pad(south_flank)
     # Wall of foreign-net pads east of the target representing the rest
@@ -153,8 +150,7 @@ def _make_lqfp_west_corner_geometry(grid: RoutingGrid, target_net: int = 1):
                 )
             )
 
-    target = _make_pad(x=5.0, y=10.0, net=target_net, net_name="NRST",
-                       ref="U1", pin="7")
+    target = _make_pad(x=5.0, y=10.0, net=target_net, net_name="NRST", ref="U1", pin="7")
     grid.add_pad(target)
     return target
 
@@ -177,9 +173,7 @@ class TestEscapeHintDetection:
         escape_dir = router._detect_escape_hint(target, [grid.layer_to_index(Layer.F_CU.value)])
 
         assert escape_dir is not None, "Expected escape hint for LQFP-style corner pad"
-        assert escape_dir == (-1, 0), (
-            f"Expected westward escape (-1, 0), got {escape_dir}"
-        )
+        assert escape_dir == (-1, 0), f"Expected westward escape (-1, 0), got {escape_dir}"
 
     def test_no_hint_for_isolated_pad(self):
         """A pad with no surrounding blockers does not trigger the hint."""
@@ -228,10 +222,15 @@ class TestEscapeHintDetection:
         # side is dramatically clearer than the other.
         for dy in (-1.0, -0.5, 0.0, 0.5, 1.0):
             for west_offset in (-0.5, -0.8, -1.1):
-                grid.add_pad(_make_pad(
-                    x=5.0 + west_offset, y=10.0 + dy,
-                    net=200, ref="WEST_CHIP", pin=f"w_{west_offset}_{dy}",
-                ))
+                grid.add_pad(
+                    _make_pad(
+                        x=5.0 + west_offset,
+                        y=10.0 + dy,
+                        net=200,
+                        ref="WEST_CHIP",
+                        pin=f"w_{west_offset}_{dy}",
+                    )
+                )
         # Then build the eastern chip body and the target on top so
         # both axes show similar blocker density.
         target = _make_lqfp_west_corner_geometry(grid)
@@ -260,9 +259,7 @@ class TestEscapeHintCells:
         assert seeds, "Expected at least one escape-hint cell"
         pad_gx, _pad_gy = grid.world_to_grid(target.x, target.y)
         for cx, _cy, _cl, edge_cost in seeds:
-            assert cx < pad_gx, (
-                f"Escape-hint cell ({cx},_) should be west of pad ({pad_gx},_)"
-            )
+            assert cx < pad_gx, f"Escape-hint cell ({cx},_) should be west of pad ({pad_gx},_)"
             assert edge_cost > 0
 
     def test_no_cells_when_escape_corridor_blocked(self):
@@ -273,8 +270,9 @@ class TestEscapeHintCells:
         target = _make_lqfp_west_corner_geometry(grid)
         # Block the entire western corridor.
         for west_offset in (0.2, 0.3, 0.4, 0.5):
-            grid.add_pad(_make_pad(x=5.0 - west_offset, y=10.0, net=42,
-                                    ref="X", pin=f"w_{west_offset}"))
+            grid.add_pad(
+                _make_pad(x=5.0 - west_offset, y=10.0, net=42, ref="X", pin=f"w_{west_offset}")
+            )
 
         layers = [grid.layer_to_index(Layer.F_CU.value)]
         seeds = router._escape_hint_cells(target, (-1, 0), target.net, layers)
@@ -311,8 +309,7 @@ class TestLqfpCornerRouting:
         # the chip body so the trace has to escape west and then loop
         # around (the chip-body pads make a direct east route impossible
         # without a layer transition).
-        dest = _make_pad(x=18.0, y=10.0, net=target.net, net_name="NRST",
-                         ref="J1", pin="5")
+        dest = _make_pad(x=18.0, y=10.0, net=target.net, net_name="NRST", ref="J1", pin="5")
         grid.add_pad(dest)
 
         # Issue #2974: the escape-hint multiplier (``_ESCAPE_HINT_DEADLINE_MULT``)

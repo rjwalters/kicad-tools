@@ -202,9 +202,7 @@ class AdaptiveAutorouter:
         Single-pad nets are excluded because they have no endpoints to
         connect and can never produce routes.
         """
-        nets_requested = len(
-            [n for n, pads in router.nets.items() if n != 0 and len(pads) >= 2]
-        )
+        nets_requested = len([n for n, pads in router.nets.items() if n != 0 and len(pads) >= 2])
         nets_routed = len({r.net for r in router.routes if r.net != 0})
 
         return nets_routed >= nets_requested and overflow == 0
@@ -233,9 +231,7 @@ class AdaptiveAutorouter:
 
             # Count nets to route (exclude single-pad nets that can never be routed)
             all_nonzero = [n for n in router.nets if n != 0]
-            single_pad_nets = [
-                n for n in all_nonzero if len(router.nets.get(n, [])) < 2
-            ]
+            single_pad_nets = [n for n in all_nonzero if len(router.nets.get(n, [])) < 2]
             nets_requested = len(all_nonzero) - len(single_pad_nets)
             single_pad_count = len(single_pad_nets)
 

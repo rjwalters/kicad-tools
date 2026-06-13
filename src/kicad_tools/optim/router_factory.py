@@ -299,9 +299,7 @@ def _build_factory_from_router(
         else:
             cx = sum(p[1] for p in pads) / len(pads)
             cy = sum(p[2] for p in pads) / len(pads)
-            component_refs[ref] = _ComponentRef(
-                ref=ref, base_x=cx, base_y=cy, base_rotation=0.0
-            )
+            component_refs[ref] = _ComponentRef(ref=ref, base_x=cx, base_y=cy, base_rotation=0.0)
 
     pad_offsets: list[_PadOffset] = []
     for ref, pads in pads_by_ref.items():

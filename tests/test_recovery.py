@@ -766,8 +766,7 @@ class TestStrategyGenerator:
         move_strategies = [
             s
             for s in strategies
-            if s.type == StrategyType.MOVE_COMPONENT
-            or s.type == StrategyType.MOVE_MULTIPLE
+            if s.type == StrategyType.MOVE_COMPONENT or s.type == StrategyType.MOVE_MULTIPLE
         ]
         assert move_strategies, (
             "Issue #2604 regression: generator dropped every move strategy "
@@ -816,25 +815,15 @@ class TestStrategyGenerator:
             net="DAC_CLK",
         )
         generator = StrategyGenerator()
-        strategies = generator.generate_strategies(
-            MockPCB(), analysis, max_movement=3.0
-        )
-        move_strategies = [
-            s
-            for s in strategies
-            if s.type == StrategyType.MOVE_COMPONENT
-        ]
+        strategies = generator.generate_strategies(MockPCB(), analysis, max_movement=3.0)
+        move_strategies = [s for s in strategies if s.type == StrategyType.MOVE_COMPONENT]
         assert move_strategies
         for s in move_strategies:
             for action in s.actions:
                 if action.type != "move":
                     continue
-                d = math.hypot(
-                    action.params["x"] - 50.0, action.params["y"] - 50.0
-                )
-                assert d <= 3.0 + 1e-6, (
-                    f"Candidate at {d:.3f}mm exceeds max_movement=3.0mm"
-                )
+                d = math.hypot(action.params["x"] - 50.0, action.params["y"] - 50.0)
+                assert d <= 3.0 + 1e-6, f"Candidate at {d:.3f}mm exceeds max_movement=3.0mm"
 
 
 class TestModuleExports:

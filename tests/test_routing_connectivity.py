@@ -16,16 +16,26 @@ from kicad_tools.router.primitives import Layer, Pad, Route, Segment
 def _pad(x: float, y: float, net: int, ref: str = "U1", pin: str = "1") -> Pad:
     """Create a minimal Pad for testing."""
     return Pad(
-        x=x, y=y, width=0.5, height=0.5,
-        net=net, net_name=f"NET{net}", ref=ref, pin=pin,
+        x=x,
+        y=y,
+        width=0.5,
+        height=0.5,
+        net=net,
+        net_name=f"NET{net}",
+        ref=ref,
+        pin=pin,
     )
 
 
 def _seg(x1: float, y1: float, x2: float, y2: float) -> Segment:
     """Create a minimal Segment for testing."""
     return Segment(
-        x1=x1, y1=y1, x2=x2, y2=y2,
-        width=0.2, layer=Layer.F_CU,
+        x1=x1,
+        y1=y1,
+        x2=x2,
+        y2=y2,
+        width=0.2,
+        layer=Layer.F_CU,
     )
 
 
@@ -91,7 +101,8 @@ class TestValidateNetConnectivity:
         ]
         routes = [
             Route(
-                net=1, net_name="NET1",
+                net=1,
+                net_name="NET1",
                 segments=[_seg(0.0, 0.0, 5.0, 0.0), _seg(5.0, 0.0, 10.0, 0.0)],
             ),
         ]
@@ -215,7 +226,7 @@ class TestOffGridWarning:
 
     def test_warning_above_threshold(self):
         """Warning emitted when >50% of pads are off-grid."""
-        from kicad_tools.router.fine_pitch import ComponentGridAnalysis, OffGridPad
+        from kicad_tools.router.fine_pitch import ComponentGridAnalysis
 
         comp = ComponentGridAnalysis(
             ref="U1",
@@ -257,12 +268,21 @@ class TestOffGridWarning:
         for i in range(10):
             x = i * 0.65
             pads[("U1", str(i + 1))] = Pad(
-                x=x, y=0.0, width=0.3, height=0.8,
-                net=i + 1, net_name=f"NET{i + 1}", ref="U1", pin=str(i + 1),
+                x=x,
+                y=0.0,
+                width=0.3,
+                height=0.8,
+                net=i + 1,
+                net_name=f"NET{i + 1}",
+                ref="U1",
+                pin=str(i + 1),
             )
 
         report = analyze_fine_pitch_components(
-            pads=pads, grid_resolution=0.5, trace_width=0.2, clearance=0.2,
+            pads=pads,
+            grid_resolution=0.5,
+            trace_width=0.2,
+            clearance=0.2,
         )
 
         # Most pads should be off-grid at 0.5mm resolution

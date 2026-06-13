@@ -223,8 +223,7 @@ class TestBoard01NoRegression:
         real_items = [it for it in items if not it.is_virtual]
         assert real_items, "Precondition: board 01 must have non-virtual BOM items"
         assert all((it.footprint or "").strip() for it in real_items), (
-            "Precondition: board 01 schematic should populate all footprints "
-            "for non-virtual items"
+            "Precondition: board 01 schematic should populate all footprints for non-virtual items"
         )
 
         snapshot = [(it.reference, it.footprint) for it in items]

@@ -127,7 +127,8 @@ def _build_doomed_pcb_sexp() -> str:
         parts.append(_quad_pad_footprint_sexp(f"U{i}", f"uu-{i}", 25.0, 25.0))
     footprints = "\n".join(parts)
     nets = "\n".join(f'  (net {i} "SIG_{i}")' for i in range(1, 36))
-    return textwrap.dedent("""\
+    return (
+        textwrap.dedent("""\
         (kicad_pcb
           (version 20240108)
           (generator "test")
@@ -137,7 +138,9 @@ def _build_doomed_pcb_sexp() -> str:
             (44 "Edge.Cuts" user)
           )
           (net 0 "")
-        """) + nets + textwrap.dedent("""
+        """)
+        + nets
+        + textwrap.dedent("""
           (gr_rect
             (start 100 100)
             (end 150 150)
@@ -146,7 +149,10 @@ def _build_doomed_pcb_sexp() -> str:
             (layer "Edge.Cuts")
             (uuid "outline-doomed")
           )
-        """) + footprints + ")\n"
+        """)
+        + footprints
+        + ")\n"
+    )
 
 
 def _build_loose_pcb_sexp() -> str:
@@ -170,7 +176,8 @@ def _build_loose_pcb_sexp() -> str:
         _quad_pad_footprint_sexp("U1", "uu-loose-1", 25.0, 25.0),
         _quad_pad_footprint_sexp("U2", "uu-loose-2", 75.0, 75.0),
     ]
-    return textwrap.dedent("""\
+    return (
+        textwrap.dedent("""\
         (kicad_pcb
           (version 20240108)
           (generator "test")
@@ -190,7 +197,10 @@ def _build_loose_pcb_sexp() -> str:
             (layer "Edge.Cuts")
             (uuid "outline-loose")
           )
-        """) + "\n".join(parts) + ")\n"
+        """)
+        + "\n".join(parts)
+        + ")\n"
+    )
 
 
 _PCB_50x50_DOOMED = _build_doomed_pcb_sexp()
@@ -622,9 +632,7 @@ class TestPinnedRatios:
         """Doomed fixture estimate matches the documented hand-computed value."""
         pcb = _doomed_stub_pcb()
         est = estimate_required_area(pcb, MFR_JLCPCB, packing_overhead=2.5)
-        assert est.total_mm2 == pytest.approx(
-            self.EXPECTED_DOOMED_TOTAL_MM2, rel=1e-3
-        )
+        assert est.total_mm2 == pytest.approx(self.EXPECTED_DOOMED_TOTAL_MM2, rel=1e-3)
         # Component count + signal-net count sanity (catches stub regressions).
         assert est.footprint_count == 35
         assert est.signal_net_count == 35
@@ -643,17 +651,14 @@ class TestPinnedRatios:
         ratio = envelope_mm2 / est.total_mm2
         assert ratio == pytest.approx(self.EXPECTED_DOOMED_RATIO, rel=1e-3)
         assert ratio < 1.0, (
-            f"doomed fixture ratio {ratio:.3f} should be < 1.0 to exercise "
-            f"the pre-route skip path"
+            f"doomed fixture ratio {ratio:.3f} should be < 1.0 to exercise the pre-route skip path"
         )
 
     def test_loose_fixture_total_matches_hand_math(self):
         """Loose fixture estimate matches the documented hand-computed value."""
         pcb = _loose_stub_pcb()
         est = estimate_required_area(pcb, MFR_JLCPCB, packing_overhead=2.5)
-        assert est.total_mm2 == pytest.approx(
-            self.EXPECTED_LOOSE_TOTAL_MM2, rel=1e-3
-        )
+        assert est.total_mm2 == pytest.approx(self.EXPECTED_LOOSE_TOTAL_MM2, rel=1e-3)
         assert est.footprint_count == 2
         assert est.signal_net_count == 2
 

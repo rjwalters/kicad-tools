@@ -77,8 +77,12 @@ class TestForeignContextWiringMSTEdges:
         # MST edges for our 2-pad net: a single edge 0 -> 1.
         edges = [
             MSTEdgeInfo(
-                net_id=1, edge_index=0, source_idx=0, target_idx=1,
-                distance=5.0, is_first=True,
+                net_id=1,
+                edge_index=0,
+                source_idx=0,
+                target_idx=1,
+                distance=5.0,
+                is_first=True,
             ),
         ]
         with patch.object(
@@ -155,10 +159,16 @@ class TestForeignContextSetterReceivesNetArg:
             router._route_net_with_corridor(1, present_cost_factor=0.5)
             router._route_net_with_mst_edges(
                 1,
-                [MSTEdgeInfo(
-                    net_id=1, edge_index=0, source_idx=0, target_idx=1,
-                    distance=5.0, is_first=True,
-                )],
+                [
+                    MSTEdgeInfo(
+                        net_id=1,
+                        edge_index=0,
+                        source_idx=0,
+                        target_idx=1,
+                        distance=5.0,
+                        is_first=True,
+                    )
+                ],
             )
             # Three calls, one per entry point.  Each must include the
             # current_net's foreign context (here: empty, since net=1 is

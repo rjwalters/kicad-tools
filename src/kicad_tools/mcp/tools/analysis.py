@@ -15,12 +15,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.core.geometry import (
     point_to_segment_distance as _point_to_segment_distance,
+)
+from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
-
-from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.mcp.types import (
@@ -1028,7 +1029,6 @@ def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, floa
     abs_y = footprint.position[1] + rotated_y
 
     return abs_x, abs_y
-
 
 
 # _point_to_segment_distance and _segment_to_segment_distance are imported

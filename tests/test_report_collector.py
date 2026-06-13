@@ -1110,7 +1110,10 @@ class TestCollectNetStatusClassification:
         assert status["signal_incomplete_auto_count"] == 2
         # signal_incomplete_net_names (backward compat) should contain all four
         assert status["signal_incomplete_net_names"] == [
-            "MISO", "Net-(U1-1)", "SDA", "unconnected-(C40-2)"
+            "MISO",
+            "Net-(U1-1)",
+            "SDA",
+            "unconnected-(C40-2)",
         ]
 
     def test_signal_incomplete_all_auto_generated(self, tmp_path):
@@ -1228,8 +1231,9 @@ class TestCollectNarrative:
 
     def test_narrative_from_title_block(self, tmp_path):
         """Design narrative is extracted from title-block comments."""
-        from kicad_tools.schema.schematic import TitleBlock
         from unittest.mock import MagicMock
+
+        from kicad_tools.schema.schematic import TitleBlock
 
         collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
 
@@ -1250,8 +1254,9 @@ class TestCollectNarrative:
 
     def test_narrative_returns_none_when_empty(self, tmp_path):
         """Design narrative is None when title block has no text."""
-        from kicad_tools.schema.schematic import TitleBlock
         from unittest.mock import MagicMock
+
+        from kicad_tools.schema.schematic import TitleBlock
 
         collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
 
@@ -1265,8 +1270,9 @@ class TestCollectNarrative:
 
     def test_functional_blocks_from_sheets(self, tmp_path):
         """Functional blocks are extracted from hierarchical sheets."""
-        from kicad_tools.schema.schematic import SheetInstance
         from unittest.mock import MagicMock
+
+        from kicad_tools.schema.schematic import SheetInstance
 
         collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
 
@@ -1367,14 +1373,10 @@ class TestCollectNarrative:
         results = []
         for ordering in (names, list(reversed(names)), sorted(names)):
             mock_sch = _make_mock_schematic_with_labels(ordering)
-            results.append(
-                collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
-            )
+            results.append(collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch"))
         # Also re-run on the same ordering.
         mock_sch = _make_mock_schematic_with_labels(names)
-        results.append(
-            collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch")
-        )
+        results.append(collector._detect_interfaces(mock_sch, tmp_path / "test.kicad_sch"))
 
         assert all(r == results[0] for r in results[1:])
 
@@ -1463,11 +1465,13 @@ class TestCollectNarrative:
         """Assembly notes detect fine-pitch packages."""
         collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
 
-        mock_pcb = _make_mock_pcb_with_footprints([
-            ("U1", "Package_QFP:LQFP-48"),
-            ("U2", "Package_BGA:BGA-256"),
-            ("R1", "Resistor_SMD:R_0402"),
-        ])
+        mock_pcb = _make_mock_pcb_with_footprints(
+            [
+                ("U1", "Package_QFP:LQFP-48"),
+                ("U2", "Package_BGA:BGA-256"),
+                ("R1", "Resistor_SMD:R_0402"),
+            ]
+        )
         result = collector._extract_assembly_notes(mock_pcb)
 
         assert result is not None
@@ -1479,10 +1483,12 @@ class TestCollectNarrative:
         """Assembly notes returns None for simple boards with no special components."""
         collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
 
-        mock_pcb = _make_mock_pcb_with_footprints([
-            ("R1", "Resistor_SMD:R_0402"),
-            ("C1", "Capacitor_SMD:C_0402"),
-        ])
+        mock_pcb = _make_mock_pcb_with_footprints(
+            [
+                ("R1", "Resistor_SMD:R_0402"),
+                ("C1", "Capacitor_SMD:C_0402"),
+            ]
+        )
         result = collector._extract_assembly_notes(mock_pcb)
 
         assert result is None
@@ -1498,7 +1504,9 @@ class TestCollectNarrative:
         # Create a mock schematic where title_block raises
         mock_sch = MagicMock()
         mock_sch.title_block = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
-        type(mock_sch).title_block = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        type(mock_sch).title_block = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
         mock_sch.sheets = []
         mock_sch.global_labels = []
         mock_sch.labels = []

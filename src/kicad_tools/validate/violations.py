@@ -181,9 +181,7 @@ class DRCResults:
         self.violations.extend(other.violations)
         self.rules_checked += other.rules_checked
         for rule_id, count in other.rules_checked_by_rule.items():
-            self.rules_checked_by_rule[rule_id] = (
-                self.rules_checked_by_rule.get(rule_id, 0) + count
-            )
+            self.rules_checked_by_rule[rule_id] = self.rules_checked_by_rule.get(rule_id, 0) + count
         self.suppressed_count += other.suppressed_count
 
     def filter_by_rule(self, rule_id: str) -> list[DRCViolation]:

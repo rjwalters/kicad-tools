@@ -8,7 +8,6 @@ Verifies that:
 5. RSMT decomposition is disabled for nets with off-grid pads
 """
 
-
 from kicad_tools.router.core import Autorouter, _format_pad_ref
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
@@ -20,7 +19,9 @@ def _make_router(grid_resolution: float = 0.5) -> Autorouter:
     return Autorouter(width=30.0, height=30.0, origin_x=100.0, origin_y=100.0, rules=rules)
 
 
-def _add_pad(router: Autorouter, ref: str, pin: str, x: float, y: float, net: int, net_name: str = "") -> None:
+def _add_pad(
+    router: Autorouter, ref: str, pin: str, x: float, y: float, net: int, net_name: str = ""
+) -> None:
     """Add a single pad to the router via add_component."""
     router.add_component(ref, [{"number": pin, "x": x, "y": y, "net": net, "net_name": net_name}])
 
@@ -140,8 +141,7 @@ class TestComplexityTierPromotion:
         # VOUT (net 2) should sort before VIN (net 1) because it has a
         # higher constraint score from the off-grid boost
         assert pri2 < pri1, (
-            f"Off-grid net priority {pri2} should sort before "
-            f"on-grid net priority {pri1}"
+            f"Off-grid net priority {pri2} should sort before on-grid net priority {pri1}"
         )
 
 
@@ -156,8 +156,15 @@ class TestFormatPadRef:
     def test_steiner_point(self):
         """Steiner point with empty ref/pin should show coordinates."""
         pad = Pad(
-            x=116.0, y=111.23, width=0, height=0,
-            net=1, net_name="", ref="", pin="", steiner_point=True,
+            x=116.0,
+            y=111.23,
+            width=0,
+            height=0,
+            net=1,
+            net_name="",
+            ref="",
+            pin="",
+            steiner_point=True,
         )
         result = _format_pad_ref(pad)
         assert "steiner" in result

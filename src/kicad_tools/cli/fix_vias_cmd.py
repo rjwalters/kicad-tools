@@ -481,9 +481,7 @@ def fix_vias(
         # When skip_on_clearance is enabled, do not resize vias that would
         # cause clearance violations -- keep the original size instead.
         if skip_on_clearance and via_warnings:
-            reasons = [
-                f"{w.clearance_mm:.3f}mm to {w.nearby_item}" for w in via_warnings
-            ]
+            reasons = [f"{w.clearance_mm:.3f}mm to {w.nearby_item}" for w in via_warnings]
             skips.append(
                 ViaSkip(
                     x=x,
@@ -643,8 +641,7 @@ def print_fix_results(
             print(f"  {sl_action} {len(same_layer_fixes)} same-layer via(s)")
         if same_layer_warnings:
             print(
-                f"  {len(same_layer_warnings)} same-layer via(s) need manual repair "
-                f"(blind/micro)"
+                f"  {len(same_layer_warnings)} same-layer via(s) need manual repair (blind/micro)"
             )
         return
 
@@ -841,9 +838,7 @@ Examples:
         return 1
 
     # Fix same-layer vias first (layer correction before size fixes)
-    same_layer_fixes, same_layer_warnings = fix_same_layer_vias(
-        doc, dry_run=args.dry_run
-    )
+    same_layer_fixes, same_layer_warnings = fix_same_layer_vias(doc, dry_run=args.dry_run)
 
     # Fix undersized vias
     fixes, warnings, skips = fix_vias(

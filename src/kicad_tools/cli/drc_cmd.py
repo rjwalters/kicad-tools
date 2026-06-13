@@ -238,13 +238,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output
     if args.format == "json":
-        output_json(violations, report, show_suggestions=args.suggest,
-                     filtered_count=filter_ignored_count)
+        output_json(
+            violations, report, show_suggestions=args.suggest, filtered_count=filter_ignored_count
+        )
     elif args.format == "summary":
         output_summary(violations, report, filtered_count=filter_ignored_count)
     else:
         output_table(
-            violations, report, args.verbose, show_suggestions=args.suggest, layers=args.layers,
+            violations,
+            report,
+            args.verbose,
+            show_suggestions=args.suggest,
+            layers=args.layers,
             filtered_count=filter_ignored_count,
         )
 
@@ -477,8 +482,9 @@ def output_json(
     print(json.dumps(data, indent=2))
 
 
-def output_summary(violations: list[DRCViolation], report: DRCReport,
-                    filtered_count: int = 0) -> None:
+def output_summary(
+    violations: list[DRCViolation], report: DRCReport, filtered_count: int = 0
+) -> None:
     """Output violation summary by type."""
     if not violations:
         if filtered_count > 0:

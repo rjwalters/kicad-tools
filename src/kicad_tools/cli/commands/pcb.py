@@ -11,7 +11,9 @@ def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
-        print("Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses")
+        print(
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
+        )
         return 1
 
     pcb_path = Path(args.pcb)
@@ -179,7 +181,9 @@ def _run_zones_command(args, pcb_path: Path) -> int:
             if zone.polygon:
                 xs = [p[0] for p in zone.polygon]
                 ys = [p[1] for p in zone.polygon]
-                print(f"  Bounds:    ({min(xs):.2f}, {min(ys):.2f}) to ({max(xs):.2f}, {max(ys):.2f})")
+                print(
+                    f"  Bounds:    ({min(xs):.2f}, {min(ys):.2f}) to ({max(xs):.2f}, {max(ys):.2f})"
+                )
             print()
 
     return 0
@@ -934,12 +938,16 @@ def _run_snap_rotation_command(args, pcb_path: Path) -> int:
         if tolerance is not None and delta > tolerance:
             continue
 
-        if abs(old_rotation - snapped) > 1e-6 or (abs(old_rotation - 360.0) < 1e-6 and snapped == 0.0):
-            changes.append({
-                "reference": ref,
-                "old_rotation": old_rotation,
-                "new_rotation": snapped,
-            })
+        if abs(old_rotation - snapped) > 1e-6 or (
+            abs(old_rotation - 360.0) < 1e-6 and snapped == 0.0
+        ):
+            changes.append(
+                {
+                    "reference": ref,
+                    "old_rotation": old_rotation,
+                    "new_rotation": snapped,
+                }
+            )
             if not dry_run:
                 fp.rotation = snapped
                 # When snapping to 0, remove the third child from the (at ...)
@@ -1025,20 +1033,22 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
         if output_format == "json":
             data = []
             for c in contours:
-                data.append({
-                    "index": c.index,
-                    "elements": c.element_count,
-                    "bbox": {
-                        "min_x": round(c.bbox[0], 2),
-                        "min_y": round(c.bbox[1], 2),
-                        "max_x": round(c.bbox[2], 2),
-                        "max_y": round(c.bbox[3], 2),
-                    },
-                    "width_mm": round(c.bbox_width, 2),
-                    "height_mm": round(c.bbox_height, 2),
-                    "area_mm2": round(c.bbox_area, 2),
-                    "is_mounting_hole": c.is_mounting_hole,
-                })
+                data.append(
+                    {
+                        "index": c.index,
+                        "elements": c.element_count,
+                        "bbox": {
+                            "min_x": round(c.bbox[0], 2),
+                            "min_y": round(c.bbox[1], 2),
+                            "max_x": round(c.bbox[2], 2),
+                            "max_y": round(c.bbox[3], 2),
+                        },
+                        "width_mm": round(c.bbox_width, 2),
+                        "height_mm": round(c.bbox_height, 2),
+                        "area_mm2": round(c.bbox_area, 2),
+                        "is_mounting_hole": c.is_mounting_hole,
+                    }
+                )
             print(json.dumps({"contours": data}, indent=2))
         else:
             print(f"Found {len(contours)} Edge.Cuts contour(s):\n")
@@ -1083,7 +1093,9 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
         output = getattr(args, "output", None)
         save_path = Path(output) if output else pcb_path
         pcb.save(save_path)
-        print(f"Removed contour [{remove_idx}] ({target.element_count} element(s)). Saved to {save_path}")
+        print(
+            f"Removed contour [{remove_idx}] ({target.element_count} element(s)). Saved to {save_path}"
+        )
         return 0
 
     # --keep-only INDEX
@@ -1099,10 +1111,7 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
             print(f"Error: No contour with index {keep_idx}", file=sys.stderr)
             return 1
 
-        to_remove = [
-            c for c in contours
-            if c.index != keep_idx and not c.is_mounting_hole
-        ]
+        to_remove = [c for c in contours if c.index != keep_idx and not c.is_mounting_hole]
 
         if dry_run:
             print(f"Would keep contour [{keep_idx}] and remove {len(to_remove)} other outline(s).")
@@ -1122,8 +1131,7 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
         save_path = Path(output) if output else pcb_path
         pcb.save(save_path)
         print(
-            f"Kept contour [{keep_idx}], removed {len(to_remove)} outline(s). "
-            f"Saved to {save_path}"
+            f"Kept contour [{keep_idx}], removed {len(to_remove)} outline(s). Saved to {save_path}"
         )
         return 0
 
@@ -1163,7 +1171,10 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
         )
         return 0
 
-    print("Error: No action specified. Use --list, --remove-outline, --keep-only, or --set-outline.", file=sys.stderr)
+    print(
+        "Error: No action specified. Use --list, --remove-outline, --keep-only, or --set-outline.",
+        file=sys.stderr,
+    )
     return 1
 
 

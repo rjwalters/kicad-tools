@@ -11,7 +11,6 @@ import pytest
 from kicad_tools.sexp.builders import gr_text_node
 from kicad_tools.sexp.parser import SExp, parse_string
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -228,8 +227,14 @@ class TestBoardMarkings:
         assert result.markings_skipped == 0
 
         # Check gr_text nodes were added
-        gr_texts = [n for n in gen.doc.find_all("gr_text")]
-        marking_texts = [n for n in gr_texts if str(n.get_first_atom() or "").startswith(("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-"))]
+        gr_texts = list(gen.doc.find_all("gr_text"))
+        marking_texts = [
+            n
+            for n in gr_texts
+            if str(n.get_first_atom() or "").startswith(
+                ("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-")
+            )
+        ]
         assert len(marking_texts) == 2
 
     def test_idempotent(self, tmp_path):
@@ -278,7 +283,13 @@ class TestBoardMarkings:
         gen = SilkscreenGenerator(pcb_path)
         gen.add_board_markings(name="PosTest", revision="A")
 
-        marking_texts = [n for n in gen.doc.find_all("gr_text") if str(n.get_first_atom() or "").startswith(("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-"))]
+        marking_texts = [
+            n
+            for n in gen.doc.find_all("gr_text")
+            if str(n.get_first_atom() or "").startswith(
+                ("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-")
+            )
+        ]
         assert len(marking_texts) == 1
 
         at_node = marking_texts[0].find("at")
@@ -298,7 +309,13 @@ class TestBoardMarkings:
         gen = SilkscreenGenerator(pcb_path)
         gen.add_board_markings(name="Fallback")
 
-        marking_texts = [n for n in gen.doc.find_all("gr_text") if str(n.get_first_atom() or "").startswith(("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-"))]
+        marking_texts = [
+            n
+            for n in gen.doc.find_all("gr_text")
+            if str(n.get_first_atom() or "").startswith(
+                ("TestBoard", "MyBoard", "PosTest", "Fallback", "2026-")
+            )
+        ]
         assert len(marking_texts) == 1
 
         at_node = marking_texts[0].find("at")
@@ -401,9 +418,7 @@ class TestMarkingSidecar:
         assert r2.markings_added == 1
         assert r2.markings_skipped == 0
 
-        gr_text_atoms = [
-            str(n.get_first_atom() or "") for n in gen2.doc.find_all("gr_text")
-        ]
+        gr_text_atoms = [str(n.get_first_atom() or "") for n in gen2.doc.find_all("gr_text")]
         name_markings = [t for t in gr_text_atoms if t.startswith("Foo")]
         assert len(name_markings) == 1
         assert name_markings[0] == "Foo Rev B"
@@ -448,9 +463,7 @@ class TestMarkingSidecar:
         assert tags == ["kct:date", "kct:name"]
         # Each entry has a UUID matching a gr_text in the PCB.
         gen2 = SilkscreenGenerator(pcb_path)
-        r2 = gen2.add_board_markings(
-            name="Persist", revision="1", date="2026-05-04"
-        )
+        r2 = gen2.add_board_markings(name="Persist", revision="1", date="2026-05-04")
         assert r2.markings_added == 0
         assert r2.markings_skipped == 2
 
@@ -482,9 +495,7 @@ class TestMarkingSidecar:
         result = gen.add_board_markings(name="AfterCorrupt")
         assert result.markings_added == 1
 
-    def test_user_edited_gr_text_with_colliding_text_not_treated_as_marking(
-        self, tmp_path
-    ):
+    def test_user_edited_gr_text_with_colliding_text_not_treated_as_marking(self, tmp_path):
         """User-added gr_text whose visible text matches must not be skipped.
 
         Sidecar disambiguates by UUID — even if a user puts a gr_text on the
@@ -548,10 +559,10 @@ class TestMarkingSidecar:
 
         # Remove the gr_text from the PCB, but leave the sidecar in place.
         gen.doc.children = [
-            c for c in gen.doc.children
-            if not (not c.is_atom and c.name == "gr_text")
+            c for c in gen.doc.children if not (not c.is_atom and c.name == "gr_text")
         ]
         from kicad_tools.core.sexp_file import save_pcb
+
         save_pcb(gen.doc, pcb_path)
 
         gen2 = SilkscreenGenerator(pcb_path)

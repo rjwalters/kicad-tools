@@ -20,7 +20,6 @@ from kicad_tools.router.algorithms.evolutionary import (
     tournament_select,
 )
 
-
 # ---------------------------------------------------------------------------
 # Chromosome basics
 # ---------------------------------------------------------------------------
@@ -64,14 +63,14 @@ class TestOrderCrossover:
         nets = list(range(1, 11))
         p1 = RoutingChromosome(
             net_order=list(nets),
-            astar_weights={n: 1.0 for n in nets},
-            preferred_layers={n: 0 for n in nets},
+            astar_weights=dict.fromkeys(nets, 1.0),
+            preferred_layers=dict.fromkeys(nets, 0),
         )
         random.shuffle(nets)
         p2 = RoutingChromosome(
             net_order=list(nets),
-            astar_weights={n: 1.5 for n in nets},
-            preferred_layers={n: 1 for n in nets},
+            astar_weights=dict.fromkeys(nets, 1.5),
+            preferred_layers=dict.fromkeys(nets, 1),
         )
 
         for _ in range(50):
@@ -120,9 +119,9 @@ class TestMutation:
         nets = list(range(1, 21))
         c = RoutingChromosome(
             net_order=list(nets),
-            astar_weights={n: 1.0 for n in nets},
-            preferred_layers={n: 0 for n in nets},
-            strategy_flags={n: False for n in nets},
+            astar_weights=dict.fromkeys(nets, 1.0),
+            preferred_layers=dict.fromkeys(nets, 0),
+            strategy_flags=dict.fromkeys(nets, False),
         )
         for _ in range(100):
             mutate(c, mutation_rate=0.5)
@@ -134,7 +133,7 @@ class TestMutation:
         nets = list(range(1, 6))
         c = RoutingChromosome(
             net_order=nets,
-            astar_weights={n: 1.0 for n in nets},
+            astar_weights=dict.fromkeys(nets, 1.0),
         )
         for _ in range(200):
             mutate(c, mutation_rate=1.0)
@@ -230,8 +229,12 @@ class TestEvolutionaryRoutingOptimizer:
 
     def test_custom_params(self):
         opt = EvolutionaryRoutingOptimizer(
-            pop_size=10, generations=5, elitism=1,
-            crossover_rate=0.9, mutation_rate=0.2, tournament_size=4,
+            pop_size=10,
+            generations=5,
+            elitism=1,
+            crossover_rate=0.9,
+            mutation_rate=0.2,
+            tournament_size=4,
         )
         assert opt.pop_size == 10
         assert opt.tournament_size == 4
@@ -245,9 +248,9 @@ class TestEvolutionaryRoutingOptimizer:
         for i in range(8):
             c = RoutingChromosome(
                 net_order=list(nets),
-                astar_weights={n: 1.0 for n in nets},
-                preferred_layers={n: 0 for n in nets},
-                strategy_flags={n: False for n in nets},
+                astar_weights=dict.fromkeys(nets, 1.0),
+                preferred_layers=dict.fromkeys(nets, 0),
+                strategy_flags=dict.fromkeys(nets, False),
                 fitness=float(i),
             )
             pop.append(c)
@@ -264,9 +267,9 @@ class TestEvolutionaryRoutingOptimizer:
         for i in range(5):
             c = RoutingChromosome(
                 net_order=list(nets),
-                astar_weights={n: 1.0 for n in nets},
-                preferred_layers={n: 0 for n in nets},
-                strategy_flags={n: False for n in nets},
+                astar_weights=dict.fromkeys(nets, 1.0),
+                preferred_layers=dict.fromkeys(nets, 0),
+                strategy_flags=dict.fromkeys(nets, False),
                 fitness=float(i * 10),
             )
             pop.append(c)
@@ -343,9 +346,7 @@ class TestEvolutionaryTimeout:
         )
         elapsed = time.monotonic() - start
 
-        assert elapsed < 2.0, (
-            f"Expected GA to exit within 2 s on timeout=0.5, took {elapsed:.2f}s"
-        )
+        assert elapsed < 2.0, f"Expected GA to exit within 2 s on timeout=0.5, took {elapsed:.2f}s"
         # ``routes`` is a list (possibly empty) — it must never be None.
         assert isinstance(routes, list)
 
@@ -404,8 +405,7 @@ class TestEvolutionaryTimeout:
         )
 
         assert gen_count["n"] == 4, (
-            f"Expected 4 generations to complete with timeout=None; "
-            f"got {gen_count['n']}"
+            f"Expected 4 generations to complete with timeout=None; got {gen_count['n']}"
         )
 
 

@@ -1120,7 +1120,6 @@ class TestValidateRoutes:
         seg_violations = [v for v in violations if v.obstacle_type == "segment"]
         assert len(seg_violations) == 0
 
-
     def test_inner_layer_segment_violation_has_layer(self):
         """Segment violations on inner layers should include layer info (Issue #1798)."""
         rules = DesignRules(

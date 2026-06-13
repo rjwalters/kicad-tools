@@ -87,7 +87,9 @@ class TestLDOBlockPinNets:
     def test_pin_nets_left_edge_pin_stubs_left(self, mock_schematic):
         """Pins to the left of the symbol center stub leftward."""
         block = LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"VI": "+5V"},
         )
 
@@ -105,7 +107,9 @@ class TestLDOBlockPinNets:
     def test_pin_nets_right_edge_pin_stubs_right(self, mock_schematic):
         """Pins to the right of the symbol center stub rightward."""
         LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"VO": "+3.3V"},
         )
 
@@ -122,7 +126,9 @@ class TestLDOBlockPinNets:
         """``pin_nets`` keys may be pin numbers, not just pin names."""
         # Our mock advertises "2" as an alias for VO.
         LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"2": "+3.3V"},
         )
         labels = [c.args[0] for c in mock_schematic.add_label.call_args_list]
@@ -136,7 +142,9 @@ class TestLDOBlockPinNets:
             "GND": "GND_NET",
         }
         LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets=pin_nets,
         )
 
@@ -147,7 +155,9 @@ class TestLDOBlockPinNets:
     def test_alias_ports_added_for_each_pin_net(self, mock_schematic):
         """Each ``pin_nets`` entry adds a port keyed by the net name."""
         block = LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"VI": "+5V", "VO": "+3.3V"},
         )
         assert "+5V" in block.ports
@@ -159,7 +169,9 @@ class TestLDOBlockPinNets:
         original_gnd = block_no_nets.ports["GND"]
 
         block = LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"GND": "GND"},  # try to overwrite
         )
         # Original port survives.
@@ -172,7 +184,9 @@ class TestLDOBlockPinNets:
         KiCad's label-only connectivity treats it as floating.
         """
         LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={
                 "VI": "+5V",
                 "VO": "+3.3V",
@@ -199,7 +213,9 @@ class TestLDOBlockPinNets:
         """Block ports unchanged when ``pin_nets`` is ``None`` (back-compat)."""
         b1 = LDOBlock(mock_schematic, x=100, y=100)
         b2 = LDOBlock(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"VI": "+5V"},
         )
         # Original placeholder ports survive in both blocks.

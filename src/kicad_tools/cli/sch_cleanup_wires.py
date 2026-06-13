@@ -231,9 +231,7 @@ def _collect_strong_anchors(
     for tag in ("directive_label", "netclass_flag"):
         for node in schematic.sexp.find_all(tag):
             if at := node.find("at"):
-                anchors.append(
-                    (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
-                )
+                anchors.append((at.get_float(0) or 0.0, at.get_float(1) or 0.0))
 
     # No-connect markers
     for nc_node in schematic.sexp.find_all("no_connect"):
@@ -248,18 +246,14 @@ def _collect_strong_anchors(
     for sheet_node in schematic.sexp.find_all("sheet"):
         for pin_node in sheet_node.find_all("pin"):
             if at := pin_node.find("at"):
-                anchors.append(
-                    (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
-                )
+                anchors.append((at.get_float(0) or 0.0, at.get_float(1) or 0.0))
 
     # Symbol pin positions -- use library data for accurate pin locations
     for sym in schematic.symbols:
         lib_sexp = schematic.get_lib_symbol(sym.lib_id)
         if lib_sexp is not None:
             lib_sym = LibrarySymbol.from_sexp(lib_sexp)
-            pin_positions = lib_sym.get_all_pin_positions(
-                sym.position, sym.rotation, sym.mirror
-            )
+            pin_positions = lib_sym.get_all_pin_positions(sym.position, sym.rotation, sym.mirror)
             for pos in pin_positions.values():
                 anchors.append((pos[0], pos[1]))
         else:
@@ -286,10 +280,7 @@ def _endpoint_at_strong_anchor(
     anchor and let the stub heuristic remove a load-bearing wire.
     """
     px, py = point
-    return any(
-        abs(px - ax) <= tolerance and abs(py - ay) <= tolerance
-        for ax, ay in strong_anchors
-    )
+    return any(abs(px - ax) <= tolerance and abs(py - ay) <= tolerance for ax, ay in strong_anchors)
 
 
 def _wire_endpoint_counts(
@@ -484,9 +475,7 @@ def find_cleanup_candidates(
 
         dangling_ends = 0
         for pt in [start, end]:
-            if not _is_endpoint_connected(
-                pt, ws, connection_points, endpoint_counts, unique_wires
-            ):
+            if not _is_endpoint_connected(pt, ws, connection_points, endpoint_counts, unique_wires):
                 dangling_ends += 1
 
         # Only flag wires where BOTH ends are dangling (fully isolated)
@@ -555,9 +544,9 @@ def find_cleanup_candidates(
             # L-shape into a label, where the wire endpoint is exactly on
             # the label position but the quantization bucket misses it
             # because of sub-um float drift introduced by repair tools.
-            if _endpoint_at_strong_anchor(
-                start, strong_anchors
-            ) or _endpoint_at_strong_anchor(end, strong_anchors):
+            if _endpoint_at_strong_anchor(start, strong_anchors) or _endpoint_at_strong_anchor(
+                end, strong_anchors
+            ):
                 continue
 
             electrically_dangling = 0

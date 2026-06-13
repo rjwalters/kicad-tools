@@ -88,16 +88,11 @@ def run_lock_footprints(
     # Resolve target reference list
     target_refs: list[str]
     if all_perimeter:
-        tol = (
-            perimeter_margin
-            if perimeter_margin is not None
-            else _PERIMETER_TOUCH_TOLERANCE_MM
-        )
+        tol = perimeter_margin if perimeter_margin is not None else _PERIMETER_TOUCH_TOLERANCE_MM
         target_refs = _find_perimeter_footprints(pcb, tolerance_mm=tol)
         if not target_refs:
             _print_error(
-                "No footprints found touching the board edge "
-                "(is there an Edge.Cuts outline?)",
+                "No footprints found touching the board edge (is there an Edge.Cuts outline?)",
                 output_format,
             )
             return 1
@@ -123,13 +118,15 @@ def run_lock_footprints(
         fp = pcb.get_footprint(ref)
         assert fp is not None  # validated above
         old_state = bool(getattr(fp, "locked", False))
-        changes.append({
-            "reference": ref,
-            "footprint": fp.name,
-            "was_locked": old_state,
-            "now_locked": new_state,
-            "changed": old_state != new_state,
-        })
+        changes.append(
+            {
+                "reference": ref,
+                "footprint": fp.name,
+                "was_locked": old_state,
+                "now_locked": new_state,
+                "changed": old_state != new_state,
+            }
+        )
 
     n_changed = sum(1 for c in changes if c["changed"])
 
@@ -165,10 +162,7 @@ def run_lock_footprints(
     if output_format == "json":
         print(json.dumps(result, indent=2))
     else:
-        label = (
-            f"PCB {'Unlock' if unlock else 'Lock'} Footprints"
-            f"{' (dry run)' if dry_run else ''}"
-        )
+        label = f"PCB {'Unlock' if unlock else 'Lock'} Footprints{' (dry run)' if dry_run else ''}"
         print(label)
         print(f"  PCB: {pcb_path}")
         print(f"  Selection: {result['selection']}")

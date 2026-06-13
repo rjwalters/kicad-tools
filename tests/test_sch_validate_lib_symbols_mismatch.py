@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     check_lib_symbols_mismatch,
     validate_schematic,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers: synthetic KiCad schematic generation
@@ -67,9 +62,7 @@ def _make_symbol_instance(
     y: float = 50.0,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -82,7 +75,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -171,9 +164,7 @@ class TestLibSymbolsMismatch:
         ]
         lib_id = "Regulator_Linear:AP2204K-1.5"
         lib_sym = _make_lib_symbol(lib_id, pins)
-        inst = _make_symbol_instance(
-            "U1", lib_id, "Package_TO_SOT_SMD:SOT-23-5", pins
-        )
+        inst = _make_symbol_instance("U1", lib_id, "Package_TO_SOT_SMD:SOT-23-5", pins)
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 
@@ -184,9 +175,7 @@ class TestLibSymbolsMismatch:
         """Power symbols with no lib_symbols entry should not be flagged."""
         pins = [("1", "GND", "power_in")]
         # No lib_symbols entry for power:GND
-        inst = _make_symbol_instance(
-            "PWR1", "power:GND", "~", pins
-        )
+        inst = _make_symbol_instance("PWR1", "power:GND", "~", pins)
         content = _make_schematic(inst, lib_symbols="")
         sch_path = _write_sch(tmp_path, content)
 
@@ -237,7 +226,7 @@ class TestLibSymbolsMismatch:
         sub_path.write_text(sub_content)
 
         # Root sheet with a sheet reference to sub
-        root_content = f"""(kicad_sch
+        root_content = """(kicad_sch
     (version 20231120)
     (generator "kicadtools_test")
     (uuid "root-uuid")
@@ -274,9 +263,7 @@ class TestLibSymbolsMismatch:
     def test_error_message_includes_sheet_location(self, tmp_path):
         """Error message should include the sheet location."""
         pins = [("1", "A", "passive")]
-        inst = _make_symbol_instance(
-            "U1", "IC:Missing", "Package_SO:SOIC-8_3.9x4.9mm", pins
-        )
+        inst = _make_symbol_instance("U1", "IC:Missing", "Package_SO:SOIC-8_3.9x4.9mm", pins)
         content = _make_schematic(inst, lib_symbols="")
         sch_path = _write_sch(tmp_path, content)
 
@@ -309,18 +296,12 @@ class TestValidateSchematicIntegration:
     def test_check_skippable(self, tmp_path):
         """lib_symbols_mismatch can be skipped via skip_checks."""
         pins = [("1", "A", "passive")]
-        inst = _make_symbol_instance(
-            "U1", "IC:Missing", "Package_SO:SOIC-8_3.9x4.9mm", pins
-        )
+        inst = _make_symbol_instance("U1", "IC:Missing", "Package_SO:SOIC-8_3.9x4.9mm", pins)
         content = _make_schematic(inst, lib_symbols="")
         sch_path = _write_sch(tmp_path, content)
 
-        result = validate_schematic(
-            sch_path, skip_checks={"lib_symbols_mismatch"}
-        )
+        result = validate_schematic(sch_path, skip_checks={"lib_symbols_mismatch"})
         assert "lib_symbols_mismatch" not in result.checks_run
         # Should have no lib_symbols_mismatch errors since check was skipped
-        mismatch_errors = [
-            i for i in result.issues if i.category == "lib_symbols_mismatch"
-        ]
+        mismatch_errors = [i for i in result.issues if i.category == "lib_symbols_mismatch"]
         assert len(mismatch_errors) == 0

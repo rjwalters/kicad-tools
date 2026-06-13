@@ -69,19 +69,39 @@ def test_diffpair_config_per_pair_timeout_accepts_float():
 def _make_simple_pair_pads() -> tuple[Pad, Pad, Pad, Pad]:
     """Two-pad fixture that the coupled pathfinder routes in well under 1 s."""
     p_start = Pad(
-        x=2.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+",
+        x=2.0,
+        y=5.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="DP+",
         layer=Layer.F_CU,
     )
     p_end = Pad(
-        x=10.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+",
+        x=10.0,
+        y=5.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="DP+",
         layer=Layer.F_CU,
     )
     n_start = Pad(
-        x=2.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-",
+        x=2.0,
+        y=5.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="DP-",
         layer=Layer.F_CU,
     )
     n_end = Pad(
-        x=10.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-",
+        x=10.0,
+        y=5.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="DP-",
         layer=Layer.F_CU,
     )
     return p_start, p_end, n_start, n_end
@@ -98,19 +118,39 @@ def _make_unreachable_pair_pads() -> tuple[Pad, Pad, Pad, Pad]:
     (and will reach it eventually, but not within a 1 ms budget).
     """
     p_start = Pad(
-        x=1.0, y=1.0, width=0.2, height=0.2, net=1, net_name="LONG+",
+        x=1.0,
+        y=1.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="LONG+",
         layer=Layer.F_CU,
     )
     p_end = Pad(
-        x=11.0, y=11.0, width=0.2, height=0.2, net=1, net_name="LONG+",
+        x=11.0,
+        y=11.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="LONG+",
         layer=Layer.F_CU,
     )
     n_start = Pad(
-        x=1.0, y=1.4, width=0.2, height=0.2, net=2, net_name="LONG-",
+        x=1.0,
+        y=1.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="LONG-",
         layer=Layer.F_CU,
     )
     n_end = Pad(
-        x=11.0, y=11.4, width=0.2, height=0.2, net=2, net_name="LONG-",
+        x=11.0,
+        y=11.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="LONG-",
         layer=Layer.F_CU,
     )
     return p_start, p_end, n_start, n_end
@@ -132,9 +172,7 @@ def test_route_coupled_default_timeout_preserves_legacy_behaviour():
     # No timeout
     result_default = pf.route_coupled(p_start, p_end, n_start, n_end)
     # Explicit None
-    result_none = pf.route_coupled(
-        p_start, p_end, n_start, n_end, timeout_seconds=None
-    )
+    result_none = pf.route_coupled(p_start, p_end, n_start, n_end, timeout_seconds=None)
     assert result_default is not None
     assert result_none is not None
 
@@ -153,9 +191,7 @@ def test_route_coupled_generous_timeout_allows_clean_fixture():
     p_start, p_end, n_start, n_end = _make_simple_pair_pads()
 
     # 60 seconds is enormous for a 12.7x12.7 mm two-pad fixture.
-    result = pf.route_coupled(
-        p_start, p_end, n_start, n_end, timeout_seconds=60.0
-    )
+    result = pf.route_coupled(p_start, p_end, n_start, n_end, timeout_seconds=60.0)
     assert result is not None
 
 
@@ -191,14 +227,10 @@ def test_route_coupled_tiny_timeout_returns_none_under_budget():
     # while still proving the timeout fires (the unbounded run on
     # the same fixture is much slower than this).
     t0 = time.monotonic()
-    result = pf.route_coupled(
-        p_start, p_end, n_start, n_end, timeout_seconds=0.001
-    )
+    result = pf.route_coupled(p_start, p_end, n_start, n_end, timeout_seconds=0.001)
     elapsed = time.monotonic() - t0
 
-    assert result is None, (
-        "Microscopic timeout must abort the search; result is non-None"
-    )
+    assert result is None, "Microscopic timeout must abort the search; result is non-None"
     assert elapsed < 30.0, (
         f"Microscopic timeout must abort within one check interval "
         f"after deadline; took {elapsed:.3f}s"
@@ -229,9 +261,7 @@ def test_route_coupled_timeout_does_not_change_result_on_clean_fixture():
         target_spacing_cells=2,
         min_spacing_cells=2,
     )
-    result_bounded = pf2.route_coupled(
-        p_start, p_end, n_start, n_end, timeout_seconds=10.0
-    )
+    result_bounded = pf2.route_coupled(p_start, p_end, n_start, n_end, timeout_seconds=10.0)
 
     assert result_unbounded is not None
     assert result_bounded is not None

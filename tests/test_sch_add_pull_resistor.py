@@ -793,9 +793,7 @@ class TestWireCrossingDetection:
 
         # The planned wire goes vertically through x=100, y=74.92 to y~73.66
         # The existing wire goes from (98,74.3) to (102,74.3) -- crosses at x=100
-        crossings = _check_wire_path_crossings(
-            sch, (100.0, 74.92), (100.0, 71.12)
-        )
+        crossings = _check_wire_path_crossings(sch, (100.0, 74.92), (100.0, 71.12))
         assert len(crossings) >= 1
         assert "crosses existing wire" in crossings[0]
 
@@ -804,9 +802,7 @@ class TestWireCrossingDetection:
         sch_path = _write_sch(tmp_path)  # No extra wires
         sch = Schematic.load(sch_path)
 
-        crossings = _check_wire_path_crossings(
-            sch, (100.0, 74.92), (100.0, 71.12)
-        )
+        crossings = _check_wire_path_crossings(sch, (100.0, 74.92), (100.0, 71.12))
         assert len(crossings) == 0
 
     def test_global_label_on_path_detected(self, tmp_path):
@@ -816,9 +812,7 @@ class TestWireCrossingDetection:
 
         # Vertical wire through (100, 74.92) to (100, 71.12) passes
         # through the global label at (100, 73)
-        crossings = _check_wire_path_crossings(
-            sch, (100.0, 74.92), (100.0, 71.12)
-        )
+        crossings = _check_wire_path_crossings(sch, (100.0, 74.92), (100.0, 71.12))
         assert len(crossings) >= 1
         assert "global label" in crossings[0].lower()
 
@@ -836,10 +830,14 @@ class TestLShapedReroute:
         rc = add_pull_main(
             [
                 str(sch_path),
-                "--ref", "U1",
-                "--pin", "3",
-                "--direction", "up",
-                "--value", "10k",
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
             ]
         )
         assert rc == 0
@@ -858,10 +856,14 @@ class TestLShapedReroute:
         rc = add_pull_main(
             [
                 str(sch_path),
-                "--ref", "U1",
-                "--pin", "3",
-                "--direction", "up",
-                "--value", "10k",
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
                 "--force",
             ]
         )
@@ -879,10 +881,14 @@ class TestLShapedReroute:
         rc = add_pull_main(
             [
                 str(sch_path),
-                "--ref", "U1",
-                "--pin", "3",
-                "--direction", "up",
-                "--value", "10k",
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
             ]
         )
         assert rc == 0
@@ -913,10 +919,14 @@ class TestInstancesBlock:
         rc = add_pull_main(
             [
                 str(sch_path),
-                "--ref", "U1",
-                "--pin", "3",
-                "--direction", "up",
-                "--value", "10k",
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
             ]
         )
         assert rc == 0
@@ -936,10 +946,14 @@ class TestInstancesBlock:
         rc = add_pull_main(
             [
                 str(sch_path),
-                "--ref", "U1",
-                "--pin", "3",
-                "--direction", "up",
-                "--value", "10k",
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
             ]
         )
         assert rc == 0
@@ -959,10 +973,14 @@ class TestInstancesBlock:
         rc = add_pull_main(
             [
                 str(sch_path),
-                "--ref", "U1",
-                "--pin", "3",
-                "--direction", "up",
-                "--value", "10k",
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
             ]
         )
         assert rc == 0
@@ -979,11 +997,16 @@ class TestInstancesBlock:
         rc = add_pull_main(
             [
                 str(sch_path),
-                "--ref", "U1",
-                "--pin", "3",
-                "--direction", "up",
-                "--value", "10k",
-                "--reference", "R42",
+                "--ref",
+                "U1",
+                "--pin",
+                "3",
+                "--direction",
+                "up",
+                "--value",
+                "10k",
+                "--reference",
+                "R42",
             ]
         )
         assert rc == 0

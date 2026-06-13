@@ -195,9 +195,7 @@ def _resolve_pin_positions(
     return results
 
 
-def _wires_at_point(
-    wires: Iterable, point: tuple[float, float]
-) -> list[object]:
+def _wires_at_point(wires: Iterable, point: tuple[float, float]) -> list[object]:
     """Return the wires that have an endpoint at ``point``."""
     hits = []
     px, py = point
@@ -279,9 +277,7 @@ def find_orphan_labels(
     # Pool global-label positions across all sheets; local and
     # hierarchical labels stay per-sheet (single-sheet scope).
     global_positions: dict[str, list[tuple[float, float, str]]] = {}
-    per_sheet_label_positions: list[
-        tuple[str, dict[str, list[tuple[float, float, str]]]]
-    ] = []
+    per_sheet_label_positions: list[tuple[str, dict[str, list[tuple[float, float, str]]]]] = []
     per_sheet_pins: dict[str, list[tuple[str, str, float, float]]] = {}
     per_sheet_wires: dict[str, list] = {}
     per_sheet_no_connects: dict[str, list[tuple[float, float]]] = {}
@@ -370,9 +366,7 @@ def find_orphan_labels(
             if len(unique_pins) == 1:
                 ref, pin_num, px, py = unique_pins[0]
                 no_connects = per_sheet_no_connects.get(sheet_path, [])
-                if any(
-                    _approx_eq(nx, px) and _approx_eq(ny, py) for nx, ny in no_connects
-                ):
+                if any(_approx_eq(nx, px) and _approx_eq(ny, py) for nx, ny in no_connects):
                     continue
                 findings.append(
                     OrphanLabelFinding(

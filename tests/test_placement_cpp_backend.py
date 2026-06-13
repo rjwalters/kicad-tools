@@ -48,7 +48,7 @@ def _make_footprint_sizes(
     sizes: list[tuple[float, float]],
 ) -> dict[str, tuple[float, float]]:
     """Create footprint_sizes dict from parallel lists."""
-    return dict(zip(refs, sizes))
+    return dict(zip(refs, sizes, strict=False))
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +104,12 @@ class TestPythonFallback:
 
         assert evaluator.backend == "python"
 
-        placements = _make_placements([
-            ("U1", 10, 10),
-            ("U2", 12, 10),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 10),
+                ("U2", 12, 10),
+            ]
+        )
         sizes = {"U1": (5.0, 5.0), "U2": (5.0, 5.0)}
 
         overlap, boundary, drc = evaluator.evaluate(placements, sizes)
@@ -163,10 +165,12 @@ class TestPythonFallback:
         rules = DesignRuleSet(min_clearance=0.2)
         evaluator = BatchCostEvaluatorWrapper(board, rules, force_python=True)
 
-        placements = _make_placements([
-            ("U1", 10, 10),
-            ("U2", 12, 10),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 10),
+                ("U2", 12, 10),
+            ]
+        )
         sizes = {"U1": (5.0, 5.0), "U2": (5.0, 5.0)}
 
         overlap = evaluator.evaluate_overlap(placements, sizes)
@@ -194,11 +198,13 @@ class TestCrossCheckOverlap:
 
     def test_no_overlap(self):
         """Non-overlapping boxes produce identical zero results."""
-        placements = _make_placements([
-            ("U1", 0, 0),
-            ("U2", 20, 0),
-            ("U3", 0, 20),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 0, 0),
+                ("U2", 20, 0),
+                ("U3", 0, 20),
+            ]
+        )
         sizes = {"U1": (5, 5), "U2": (5, 5), "U3": (5, 5)}
 
         py_result = compute_overlap(placements, sizes)
@@ -214,10 +220,12 @@ class TestCrossCheckOverlap:
 
     def test_full_overlap(self):
         """Identical positions produce identical overlap areas."""
-        placements = _make_placements([
-            ("U1", 10, 10),
-            ("U2", 10, 10),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 10),
+                ("U2", 10, 10),
+            ]
+        )
         sizes = {"U1": (4, 6), "U2": (4, 6)}
 
         py_result = compute_overlap(placements, sizes)
@@ -234,10 +242,12 @@ class TestCrossCheckOverlap:
 
     def test_partial_overlap(self):
         """Partially overlapping boxes produce identical results."""
-        placements = _make_placements([
-            ("U1", 10, 10),
-            ("U2", 12, 11),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 10),
+                ("U2", 12, 11),
+            ]
+        )
         sizes = {"U1": (6, 6), "U2": (6, 6)}
 
         py_result = compute_overlap(placements, sizes)
@@ -259,7 +269,7 @@ class TestCrossCheckOverlap:
         refs = [f"C{i}" for i in range(50)]
         positions = [(ref, random.uniform(0, 30), random.uniform(0, 30)) for ref in refs]
         placements = _make_placements(positions)
-        sizes = {ref: (2.0, 1.0) for ref in refs}
+        sizes = dict.fromkeys(refs, (2.0, 1.0))
 
         py_result = compute_overlap(placements, sizes)
         cpp_evaluator = BatchCostEvaluatorWrapper(
@@ -273,10 +283,12 @@ class TestCrossCheckOverlap:
 
     def test_default_sizes(self):
         """Default 1x1mm sizes when footprint_sizes is None."""
-        placements = _make_placements([
-            ("U1", 10, 10),
-            ("U2", 10.5, 10),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 10),
+                ("U2", 10.5, 10),
+            ]
+        )
 
         py_result = compute_overlap(placements, None)
         cpp_evaluator = BatchCostEvaluatorWrapper(
@@ -296,10 +308,12 @@ class TestCrossCheckBoundary:
     def test_all_inside(self):
         """Components inside board produce zero violation."""
         board = BoardOutline(0, 0, 100, 100)
-        placements = _make_placements([
-            ("U1", 50, 50),
-            ("U2", 25, 75),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 50, 50),
+                ("U2", 25, 75),
+            ]
+        )
         sizes = {"U1": (10, 10), "U2": (10, 10)}
 
         py_result = compute_boundary_violation(placements, board, sizes)
@@ -352,7 +366,7 @@ class TestCrossCheckBoundary:
         # Some positions deliberately outside
         positions = [(ref, random.uniform(-5, 55), random.uniform(-5, 55)) for ref in refs]
         placements = _make_placements(positions)
-        sizes = {ref: (3.0, 2.0) for ref in refs}
+        sizes = dict.fromkeys(refs, (3.0, 2.0))
 
         py_result = compute_boundary_violation(placements, board, sizes)
         cpp_evaluator = BatchCostEvaluatorWrapper(
@@ -369,10 +383,12 @@ class TestCrossCheckDRC:
 
     def test_well_spaced(self):
         """Well-spaced components produce zero violations."""
-        placements = _make_placements([
-            ("U1", 0, 0),
-            ("U2", 20, 0),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 0, 0),
+                ("U2", 20, 0),
+            ]
+        )
         sizes = {"U1": (5, 5), "U2": (5, 5)}
         rules = DesignRuleSet(min_clearance=0.2)
 
@@ -387,10 +403,12 @@ class TestCrossCheckDRC:
 
     def test_overlapping_boxes(self):
         """Overlapping boxes are always DRC violations."""
-        placements = _make_placements([
-            ("U1", 10, 10),
-            ("U2", 10, 10),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 10),
+                ("U2", 10, 10),
+            ]
+        )
         sizes = {"U1": (5, 5), "U2": (5, 5)}
         rules = DesignRuleSet(min_clearance=0.2)
 
@@ -406,10 +424,12 @@ class TestCrossCheckDRC:
     def test_corner_to_corner(self):
         """Corner-to-corner distance uses Euclidean calculation."""
         # Boxes separated on both axes, corner-to-corner < min_clearance
-        placements = _make_placements([
-            ("U1", 0, 0),
-            ("U2", 5.1, 5.1),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 0, 0),
+                ("U2", 5.1, 5.1),
+            ]
+        )
         sizes = {"U1": (5, 5), "U2": (5, 5)}
         # gap_x = 0.1, gap_y = 0.1, corner distance = sqrt(0.01+0.01) ~ 0.1414
         rules = DesignRuleSet(min_clearance=0.2)
@@ -426,10 +446,12 @@ class TestCrossCheckDRC:
     def test_edge_to_edge(self):
         """Edge-to-edge gap on one axis."""
         # Boxes separated on X axis but overlapping on Y axis
-        placements = _make_placements([
-            ("U1", 0, 0),
-            ("U2", 5.1, 0),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 0, 0),
+                ("U2", 5.1, 0),
+            ]
+        )
         sizes = {"U1": (5, 5), "U2": (5, 5)}
         rules = DesignRuleSet(min_clearance=0.2)
 
@@ -451,7 +473,7 @@ class TestCrossCheckDRC:
         refs = [f"Q{i}" for i in range(50)]
         positions = [(ref, random.uniform(0, 20), random.uniform(0, 20)) for ref in refs]
         placements = _make_placements(positions)
-        sizes = {ref: (2.0, 2.0) for ref in refs}
+        sizes = dict.fromkeys(refs, (2.0, 2.0))
         rules = DesignRuleSet(min_clearance=0.5)
 
         py_result = compute_drc_violations(placements, rules, sizes)
@@ -472,11 +494,13 @@ class TestCrossCheckBatch:
         board = BoardOutline(0, 0, 50, 50)
         rules = DesignRuleSet(min_clearance=0.3)
 
-        placements = _make_placements([
-            ("U1", 5, 5),
-            ("U2", 7, 5),
-            ("U3", 48, 48),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 5, 5),
+                ("U2", 7, 5),
+                ("U3", 48, 48),
+            ]
+        )
         sizes = {"U1": (4, 4), "U2": (4, 4), "U3": (6, 6)}
 
         # Python reference
@@ -561,10 +585,12 @@ class TestEdgeCases:
         """Components with different widths and heights."""
         board = BoardOutline(0, 0, 100, 100)
         rules = DesignRuleSet(min_clearance=0.2)
-        placements = _make_placements([
-            ("U1", 10, 10),
-            ("U2", 12, 10),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 10),
+                ("U2", 12, 10),
+            ]
+        )
         sizes = {"U1": (8, 2), "U2": (2, 8)}
 
         py_eval = BatchCostEvaluatorWrapper(board, rules, force_python=True)
@@ -573,7 +599,7 @@ class TestEdgeCases:
         if is_cpp_available():
             cpp_eval = BatchCostEvaluatorWrapper(board, rules, force_python=False)
             cpp_result = cpp_eval.evaluate(placements, sizes)
-            for py_val, cpp_val in zip(py_result, cpp_result):
+            for py_val, cpp_val in zip(py_result, cpp_result, strict=False):
                 assert abs(py_val - cpp_val) < TOLERANCE
 
 
@@ -581,10 +607,12 @@ class TestBuildBoxesHelper:
     """Test the _build_boxes_from_placements helper function."""
 
     def test_basic_conversion(self):
-        placements = _make_placements([
-            ("U1", 10, 20),
-            ("U2", 30, 40),
-        ])
+        placements = _make_placements(
+            [
+                ("U1", 10, 20),
+                ("U2", 30, 40),
+            ]
+        )
         sizes = {"U1": (5.0, 3.0), "U2": (2.0, 4.0)}
 
         xs, ys, widths, heights = _build_boxes_from_placements(placements, sizes)

@@ -1488,8 +1488,7 @@ class TestOptimizerConvergence:
         # Place three components very close together (near-overlap, worst realistic case)
         for i in range(3):
             # Offset by 0.1mm to avoid exact overlap degenerate case
-            comp = Component(ref=f"U{i}", x=50.0 + i * 0.1, y=50.0 + i * 0.1,
-                             width=5.0, height=5.0)
+            comp = Component(ref=f"U{i}", x=50.0 + i * 0.1, y=50.0 + i * 0.1, width=5.0, height=5.0)
             optimizer.add_component(comp)
 
         optimizer.run(iterations=500, dt=0.01)
@@ -1686,12 +1685,10 @@ class TestBoundaryDensityScaling:
 
         for comp in optimizer.components:
             assert comp.x >= min_x and comp.x <= max_x, (
-                f"{comp.ref} escaped horizontally: x={comp.x:.2f}, "
-                f"board=[{min_x:.1f}, {max_x:.1f}]"
+                f"{comp.ref} escaped horizontally: x={comp.x:.2f}, board=[{min_x:.1f}, {max_x:.1f}]"
             )
             assert comp.y >= min_y and comp.y <= max_y, (
-                f"{comp.ref} escaped vertically: y={comp.y:.2f}, "
-                f"board=[{min_y:.1f}, {max_y:.1f}]"
+                f"{comp.ref} escaped vertically: y={comp.y:.2f}, board=[{min_y:.1f}, {max_y:.1f}]"
             )
 
     def test_auto_scale_disabled_uses_raw_charge(self):
@@ -1739,9 +1736,7 @@ class TestBoundaryDensityScaling:
             comp = Component(ref=f"R{i}", x=50.0, y=50.0, width=2.0, height=1.0)
             optimizer.add_component(comp)
         for i in range(25):
-            comp = Component(
-                ref=f"J{i}", x=50.0, y=50.0, width=2.0, height=1.0, fixed=True
-            )
+            comp = Component(ref=f"J{i}", x=50.0, y=50.0, width=2.0, height=1.0, fixed=True)
             optimizer.add_component(comp)
 
         # Only 5 movable -> max(1, 5/20) = 1.0 -> no scaling
@@ -1753,15 +1748,19 @@ class TestArcLinearization:
 
     def test_linearize_arc_produces_segments(self):
         """_linearize_arc should produce connected line segments."""
+
         # Create a mock SExp-like object for a 90-degree arc
         class MockNode:
             def __init__(self, tag, values):
                 self.tag = tag
                 self._values = values
+
             def find(self, name):
                 return self._children.get(name)
+
             def get_float(self, idx):
                 return self._values[idx] if idx < len(self._values) else None
+
             def get_string(self, idx):
                 return self._values[idx] if idx < len(self._values) else None
 
@@ -1771,6 +1770,7 @@ class TestArcLinearization:
                 self._start = type("N", (), {"get_float": lambda _, i: [sx, sy][i]})()
                 self._mid = type("N", (), {"get_float": lambda _, i: [mx, my][i]})()
                 self._end = type("N", (), {"get_float": lambda _, i: [ex, ey][i]})()
+
             def find(self, name):
                 if name == "start":
                     return self._start
@@ -1783,6 +1783,7 @@ class TestArcLinearization:
         # Quarter circle: centre (0,0), radius 10
         # start (10, 0), mid ~(7.07, 7.07), end (0, 10)
         import math as _m
+
         mid_x = 10 * _m.cos(_m.pi / 4)
         mid_y = 10 * _m.sin(_m.pi / 4)
         arc = MockArc(10.0, 0.0, mid_x, mid_y, 0.0, 10.0)
@@ -1805,7 +1806,11 @@ class TestPlacementOptimizerCancelFlag:
         board = Polygon.rectangle(50, 40, 100, 80)
         optimizer = PlacementOptimizer(board)
         comp = Component(
-            ref="R1", x=50, y=40, width=3, height=1.5,
+            ref="R1",
+            x=50,
+            y=40,
+            width=3,
+            height=1.5,
             pins=[Pin(number="1", x=49, y=40, net=1)],
         )
         optimizer.add_component(comp)
@@ -1826,7 +1831,11 @@ class TestPlacementOptimizerCancelFlag:
         config = PlacementConfig(energy_threshold=1e-20, velocity_threshold=1e-20)
         optimizer = PlacementOptimizer(board, config=config)
         comp = Component(
-            ref="R1", x=50, y=40, width=3, height=1.5,
+            ref="R1",
+            x=50,
+            y=40,
+            width=3,
+            height=1.5,
             pins=[Pin(number="1", x=49, y=40, net=1)],
         )
         optimizer.add_component(comp)

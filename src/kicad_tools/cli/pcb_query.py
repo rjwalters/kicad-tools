@@ -212,9 +212,7 @@ def cmd_nets(pcb: PCB, args):
                     island_map[net.number] = []
             else:
                 graph = analyzer._build_connectivity_graph(net.number, pad_infos)
-                islands = analyzer._find_islands(
-                    graph, [p.full_name for p in pad_infos]
-                )
+                islands = analyzer._find_islands(graph, [p.full_name for p in pad_infos])
                 island_map[net.number] = islands
 
     if args.format == "json":
@@ -241,9 +239,7 @@ def cmd_nets(pcb: PCB, args):
         return
 
     if check_connectivity:
-        print(
-            f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias':<6} {'Zone':<12} {'Islands'}"
-        )
+        print(f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias':<6} {'Zone':<12} {'Islands'}")
         print("-" * 80)
     else:
         print(f"{'Net':<25} {'#':<6} {'Segs':<8} {'Vias':<6} {'Zone'}")
@@ -271,9 +267,7 @@ def cmd_nets(pcb: PCB, args):
                 f"{len(vias):<6} {zone_col:<12} {island_str}"
             )
         else:
-            print(
-                f"{net.name:<25} {net.number:<6} {len(segments):<8} {len(vias):<6} {zone_col}"
-            )
+            print(f"{net.name:<25} {net.number:<6} {len(segments):<8} {len(vias):<6} {zone_col}")
 
     print(f"\nTotal: {len(nets)} nets")
 

@@ -6,8 +6,6 @@ when creating segments, rather than always using the global rules.trace_width.
 
 from __future__ import annotations
 
-import pytest
-
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.path import _get_trace_width_for_net, create_intra_ic_routes
@@ -17,7 +15,6 @@ from kicad_tools.router.rules import (
     NET_CLASS_DIGITAL,
     NET_CLASS_POWER,
     DesignRules,
-    NetClassRouting,
 )
 
 
@@ -77,12 +74,26 @@ class TestRouterNetClassWidth:
 
         # Create two pads on the +5V net
         pad1 = Pad(
-            ref="C1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C1",
+            pin="1",
+            x=2.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
         pad2 = Pad(
-            ref="C2", pin="1", x=8.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C2",
+            pin="1",
+            x=8.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
 
         grid.add_pad(pad1)
@@ -108,12 +119,26 @@ class TestRouterNetClassWidth:
 
         # Create two pads on a signal net (not in net_class_map)
         pad1 = Pad(
-            ref="U1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=2, net_name="DATA",
+            ref="U1",
+            pin="1",
+            x=2.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="DATA",
         )
         pad2 = Pad(
-            ref="U2", pin="1", x=8.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=2, net_name="DATA",
+            ref="U2",
+            pin="1",
+            x=8.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="DATA",
         )
 
         grid.add_pad(pad1)
@@ -125,9 +150,7 @@ class TestRouterNetClassWidth:
 
         # All segments should use the default trace width (0.2mm)
         for seg in route.segments:
-            assert seg.width == 0.2, (
-                f"Segment width should be 0.2mm (default), got {seg.width}mm"
-            )
+            assert seg.width == 0.2, f"Segment width should be 0.2mm (default), got {seg.width}mm"
 
 
 class TestPerNetClearanceDuringPathfinding:
@@ -161,12 +184,26 @@ class TestPerNetClearanceDuringPathfinding:
 
         # Create two pads for a POWER net
         pad1 = Pad(
-            ref="C1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C1",
+            pin="1",
+            x=2.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
         pad2 = Pad(
-            ref="C2", pin="1", x=8.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C2",
+            pin="1",
+            x=8.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
 
         grid.add_pad(pad1)
@@ -198,12 +235,26 @@ class TestPerNetClearanceDuringPathfinding:
         router = Router(grid, rules, net_class_map=net_class_map)
 
         pad1 = Pad(
-            ref="C1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C1",
+            pin="1",
+            x=2.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
         pad2 = Pad(
-            ref="C2", pin="1", x=8.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C2",
+            pin="1",
+            x=8.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
 
         grid.add_pad(pad1)
@@ -242,19 +293,36 @@ class TestIntraIcNetClassWidth:
 
         # Create two pads on the same IC, same power net
         pad1 = Pad(
-            ref="U1", pin="1", x=1.0, y=1.0, width=0.5, height=0.5,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="U1",
+            pin="1",
+            x=1.0,
+            y=1.0,
+            width=0.5,
+            height=0.5,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
         pad2 = Pad(
-            ref="U1", pin="2", x=1.5, y=1.0, width=0.5, height=0.5,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="U1",
+            pin="2",
+            x=1.5,
+            y=1.0,
+            width=0.5,
+            height=0.5,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
 
         pad_lookup = {("U1", "1"): pad1, ("U1", "2"): pad2}
         pads = [("U1", "1"), ("U1", "2")]
 
         routes, connected = create_intra_ic_routes(
-            net=1, pads=pads, pad_lookup=pad_lookup, rules=rules,
+            net=1,
+            pads=pads,
+            pad_lookup=pad_lookup,
+            rules=rules,
             net_class_map=net_class_map,
         )
 
@@ -267,19 +335,36 @@ class TestIntraIcNetClassWidth:
         net_class_map = {"+5V": NET_CLASS_POWER}
 
         pad1 = Pad(
-            ref="U1", pin="3", x=1.0, y=2.0, width=0.5, height=0.5,
-            layer=Layer.F_CU, net=2, net_name="SIG",
+            ref="U1",
+            pin="3",
+            x=1.0,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="SIG",
         )
         pad2 = Pad(
-            ref="U1", pin="4", x=1.5, y=2.0, width=0.5, height=0.5,
-            layer=Layer.F_CU, net=2, net_name="SIG",
+            ref="U1",
+            pin="4",
+            x=1.5,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="SIG",
         )
 
         pad_lookup = {("U1", "3"): pad1, ("U1", "4"): pad2}
         pads = [("U1", "3"), ("U1", "4")]
 
         routes, connected = create_intra_ic_routes(
-            net=2, pads=pads, pad_lookup=pad_lookup, rules=rules,
+            net=2,
+            pads=pads,
+            pad_lookup=pad_lookup,
+            rules=rules,
             net_class_map=net_class_map,
         )
 
@@ -298,12 +383,26 @@ class TestBidirectionalPerNetClearance:
         router = Router(grid, rules, net_class_map=net_class_map)
 
         pad1 = Pad(
-            ref="C1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C1",
+            pin="1",
+            x=2.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
         pad2 = Pad(
-            ref="C2", pin="1", x=15.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, net=1, net_name="+5V",
+            ref="C2",
+            pin="1",
+            x=15.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="+5V",
         )
 
         grid.add_pad(pad1)
@@ -336,41 +435,53 @@ class TestViaBlockingPerNetClass:
     def test_mark_via_uses_per_net_trace_width(self):
         """Verify _mark_via via blocking accounts for max trace width."""
         rules = DesignRules(
-            trace_width=0.2, trace_clearance=0.2, via_clearance=0.2,
-            via_diameter=0.6, grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+            via_diameter=0.6,
+            grid_resolution=0.1,
         )
         grid = RoutingGrid(10, 10, rules)
         from kicad_tools.router.primitives import Via
 
         via = Via(
-            x=5.0, y=5.0, drill=0.35, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="+5V",
+            x=5.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="+5V",
         )
 
         # Mark with wider max_trace_width -- should block more cells
         grid._mark_via(via, max_trace_width=0.5)
 
         # Calculate expected radius
-        radius_wide = int(
-            (0.6 / 2 + 0.2 + 0.5 / 2) / 0.1
-        )
-        radius_narrow = int(
-            (0.6 / 2 + 0.2 + 0.2 / 2) / 0.1
-        )
+        radius_wide = int((0.6 / 2 + 0.2 + 0.5 / 2) / 0.1)
+        radius_narrow = int((0.6 / 2 + 0.2 + 0.2 / 2) / 0.1)
         assert radius_wide > radius_narrow
 
     def test_mark_unmark_via_symmetry(self):
         """Verify _unmark_via clears the same cells _mark_via blocked."""
         rules = DesignRules(
-            trace_width=0.2, trace_clearance=0.2, via_clearance=0.2,
-            via_diameter=0.6, grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+            via_diameter=0.6,
+            grid_resolution=0.1,
         )
         grid = RoutingGrid(10, 10, rules)
-        from kicad_tools.router.primitives import Via, Route
+        from kicad_tools.router.primitives import Via
 
         via = Via(
-            x=5.0, y=5.0, drill=0.35, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="+5V",
+            x=5.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="+5V",
         )
 
         # Mark with wide trace width
@@ -391,10 +502,11 @@ class TestCppBackendPerNetWidth:
     def test_find_blocking_nets_accepts_net_class(self):
         """Verify the net_class parameter is accepted by find_blocking_nets."""
         # This is a signature-level test; the C++ backend may not be available.
-        from kicad_tools.router.cpp_backend import CppPathfinder
-
         # Inspect the method signature to confirm it accepts net_class
         import inspect
+
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
         sig = inspect.signature(CppPathfinder.find_blocking_nets)
         assert "net_class" in sig.parameters, (
             "CppPathfinder.find_blocking_nets should accept a 'net_class' parameter"

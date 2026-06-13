@@ -756,8 +756,7 @@ def resolve_clearance_with_escape_region(
     # would be a silent regression.  Architect Q7 + P_FP1 builder
     # decision #5: gate on both impedance fields being ``None``.
     if net_class is not None and (
-        net_class.target_diff_impedance is not None
-        or net_class.target_single_impedance is not None
+        net_class.target_diff_impedance is not None or net_class.target_single_impedance is not None
     ):
         # Fall through to the standard lookup -- trace_clearance (or
         # the global ``fine_pitch_clearance`` shrink, which has its
@@ -812,9 +811,7 @@ def resolve_clearance_with_escape_region(
                 for pitch_for_guard in (region.pin_pitch, pin_pitch):
                     if not pitch_for_guard:
                         continue
-                    effective_channel = (
-                        pitch_for_guard - 2.0 * candidate - rules.trace_width
-                    )
+                    effective_channel = pitch_for_guard - 2.0 * candidate - rules.trace_width
                     if effective_channel < required_channel:
                         # Channel too narrow at candidate clearance --
                         # decline the shrink for this in-region pad.

@@ -6,17 +6,15 @@ from kicad_tools.exceptions import RoutingError
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.heuristics import (
     DEFAULT_HEURISTIC,
-    DIAGONAL_COST,
     CongestionAwareHeuristic,
     DirectionBiasHeuristic,
     GreedyHeuristic,
     HeuristicContext,
     ManhattanHeuristic,
     WeightedCongestionHeuristic,
-    octile_distance,
 )
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
+from kicad_tools.router.primitives import Obstacle, Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 
@@ -366,16 +364,19 @@ class TestRoutingGridRoutes:
         must be blocked.
         """
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         route = Route(net=2, net_name="NET2", segments=[], vias=[via])
         grid.mark_route(route)
 
         gx, gy = grid.world_to_grid(5.0, 5.0)
         geometric_radius = int(
-            (0.7 / 2 + grid.rules.via_clearance + grid.rules.trace_width / 2)
-            / grid.resolution
+            (0.7 / 2 + grid.rules.via_clearance + grid.rules.trace_width / 2) / grid.resolution
         )
         expected_radius = geometric_radius + 1  # safety margin
 
@@ -393,15 +394,18 @@ class TestRoutingGridRoutes:
         if nx_beyond < grid.cols:
             cell_beyond = grid.grid[0][gy][nx_beyond]
             assert not cell_beyond.blocked, (
-                f"Cell at +{expected_radius + 1} cells from via centre should "
-                f"NOT be blocked"
+                f"Cell at +{expected_radius + 1} cells from via centre should NOT be blocked"
             )
 
     def test_mark_unmark_via_symmetric(self, grid):
         """Unmark_via clears the same cells that mark_via blocked (Issue #1797)."""
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         route = Route(net=2, net_name="NET2", segments=[], vias=[via])
         grid.mark_route(route)
@@ -414,8 +418,7 @@ class TestRoutingGridRoutes:
 
         # All cells around the via should be unblocked
         geometric_radius = int(
-            (0.7 / 2 + grid.rules.via_clearance + grid.rules.trace_width / 2)
-            / grid.resolution
+            (0.7 / 2 + grid.rules.via_clearance + grid.rules.trace_width / 2) / grid.resolution
         )
         check_radius = geometric_radius + 1  # includes safety margin
         for dy in range(-check_radius, check_radius + 1):
@@ -423,9 +426,7 @@ class TestRoutingGridRoutes:
                 nx, ny = gx + dx, gy + dy
                 if 0 <= nx < grid.cols and 0 <= ny < grid.rows:
                     cell = grid.grid[0][ny][nx]
-                    assert not cell.blocked, (
-                        f"Cell ({nx}, {ny}) still blocked after unmark_via"
-                    )
+                    assert not cell.blocked, f"Cell ({nx}, {ny}) still blocked after unmark_via"
 
     def test_mark_and_unmark_route(self, grid):
         """Test marking and unmarking a complete route."""
@@ -1284,14 +1285,28 @@ class TestViaClearanceValidation:
         # Add an existing route with a segment on F.Cu
         other_route = Route(net=1, net_name="NET1")
         other_route.segments.append(
-            Segment(x1=2.0, y1=10.0, x2=18.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1")
+            Segment(
+                x1=2.0,
+                y1=10.0,
+                x2=18.0,
+                y2=10.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(other_route)
 
         # Place a via far from the segment (at y=5.0, segment at y=10.0)
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_clearance(via, exclude_net=2)
@@ -1306,7 +1321,9 @@ class TestViaClearanceValidation:
         # Add an existing route with a horizontal segment on F.Cu at y=5.0
         other_route = Route(net=1, net_name="NET1")
         other_route.segments.append(
-            Segment(x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1")
+            Segment(
+                x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+            )
         )
         grid.routes.append(other_route)
 
@@ -1315,8 +1332,13 @@ class TestViaClearanceValidation:
         # Edge clearance = 0.5 - 0.35 (via radius) - 0.1 (seg half width) = 0.05
         # Required via_clearance = 0.2, so this is a violation
         via = Via(
-            x=10.0, y=5.5, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.0,
+            y=5.5,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_clearance(via, exclude_net=2)
@@ -1331,14 +1353,21 @@ class TestViaClearanceValidation:
         # Add a route on the same net as the via
         same_net_route = Route(net=2, net_name="NET2")
         same_net_route.segments.append(
-            Segment(x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2")
+            Segment(
+                x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+            )
         )
         grid.routes.append(same_net_route)
 
         # Place a via overlapping the same-net segment
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_clearance(via, exclude_net=2)
@@ -1351,7 +1380,9 @@ class TestViaClearanceValidation:
         # Add a segment on B.Cu
         other_route = Route(net=1, net_name="NET1")
         other_route.segments.append(
-            Segment(x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.B_CU, net=1, net_name="NET1")
+            Segment(
+                x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.B_CU, net=1, net_name="NET1"
+            )
         )
         grid.routes.append(other_route)
 
@@ -1359,8 +1390,13 @@ class TestViaClearanceValidation:
         # Standard vias span both layers, so this should still catch it.
         # Use a standard via spanning F.Cu and B.Cu
         via = Via(
-            x=10.0, y=5.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.0,
+            y=5.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_clearance(via, exclude_net=2)
@@ -1375,14 +1411,21 @@ class TestViaClearanceValidation:
         # Need: distance - 0.35 - 0.1 = 0.2  =>  distance = 0.65
         other_route = Route(net=1, net_name="NET1")
         other_route.segments.append(
-            Segment(x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1")
+            Segment(
+                x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+            )
         )
         grid.routes.append(other_route)
 
         # Via at distance = 0.65 from segment (center y = 5.65)
         via = Via(
-            x=10.0, y=5.65, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.0,
+            y=5.65,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_clearance(via, exclude_net=2)
@@ -1396,7 +1439,16 @@ class TestViaClearanceValidation:
         # Add a diagonal segment from (2,2) to (18,18)
         other_route = Route(net=1, net_name="NET1")
         other_route.segments.append(
-            Segment(x1=2.0, y1=2.0, x2=18.0, y2=18.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1")
+            Segment(
+                x1=2.0,
+                y1=2.0,
+                x2=18.0,
+                y2=18.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(other_route)
 
@@ -1405,8 +1457,13 @@ class TestViaClearanceValidation:
         # Distance from (10.0, 10.3) to line y=x: |10.3 - 10.0| / sqrt(2) ~ 0.212
         # Edge clearance = 0.212 - 0.35 - 0.1 = -0.238 (violation)
         via = Via(
-            x=10.0, y=10.3, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.0,
+            y=10.3,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_clearance(via, exclude_net=2)
@@ -1423,20 +1480,36 @@ class TestViaClearanceValidation:
         # Add an existing route
         other_route = Route(net=1, net_name="NET1")
         other_route.segments.append(
-            Segment(x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1")
+            Segment(
+                x1=2.0, y1=5.0, x2=18.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+            )
         )
         grid.routes.append(other_route)
 
         # Create a new route that has a via violating clearance
         new_route = Route(net=2, net_name="NET2")
         new_route.segments.append(
-            Segment(x1=10.0, y1=15.0, x2=10.0, y2=6.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2")
+            Segment(
+                x1=10.0,
+                y1=15.0,
+                x2=10.0,
+                y2=6.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=2,
+                net_name="NET2",
+            )
         )
         # Via placed too close to NET1's segment
         new_route.vias.append(
             Via(
-                x=10.0, y=5.5, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+                x=10.0,
+                y=5.5,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=2,
+                net_name="NET2",
             )
         )
 
@@ -1473,15 +1546,27 @@ class TestViaToViaClearanceValidation:
         """Test via far from other-net via passes validation."""
         other_route = Route(net=1, net_name="NET1")
         other_route.vias.append(
-            Via(x=5.0, y=5.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=5.0,
+                y=5.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(other_route)
 
         # Place a via far away (at 15.0, 15.0)
         via = Via(
-            x=15.0, y=15.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=15.0,
+            y=15.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
@@ -1495,16 +1580,28 @@ class TestViaToViaClearanceValidation:
         """Test via too close to other-net via is detected as violation."""
         other_route = Route(net=1, net_name="NET1")
         other_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(other_route)
 
         # Place a via very close: center distance = 0.8
         # Edge clearance = 0.8 - 0.35 - 0.35 = 0.1, required = 0.2 => violation
         via = Via(
-            x=10.8, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.8,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
@@ -1518,15 +1615,27 @@ class TestViaToViaClearanceValidation:
         """Test that same-net vias are ignored in clearance check."""
         same_net_route = Route(net=2, net_name="NET2")
         same_net_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=2,
+                net_name="NET2",
+            )
         )
         grid.routes.append(same_net_route)
 
         # Place a via overlapping the same-net via
         via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
@@ -1537,8 +1646,15 @@ class TestViaToViaClearanceValidation:
         """Test via exactly at clearance boundary passes validation."""
         other_route = Route(net=1, net_name="NET1")
         other_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(other_route)
 
@@ -1546,8 +1662,13 @@ class TestViaToViaClearanceValidation:
         # Required clearance = 0.2, via radius = 0.35 each
         # Need: distance - 0.35 - 0.35 = 0.2 => distance = 0.9
         via = Via(
-            x=10.9, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.9,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
@@ -1559,15 +1680,27 @@ class TestViaToViaClearanceValidation:
         """Test via 0.001mm below clearance boundary is detected as violation."""
         other_route = Route(net=1, net_name="NET1")
         other_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(other_route)
 
         # Edge clearance = 0.899 - 0.35 - 0.35 = 0.199, just below 0.2
         via = Via(
-            x=10.899, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.899,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
@@ -1580,16 +1713,28 @@ class TestViaToViaClearanceValidation:
         other_route = Route(net=1, net_name="NET1")
         # Larger via with diameter 1.0
         other_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.5, diameter=1.0,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.5,
+                diameter=1.0,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(other_route)
 
         # Standard via (diameter 0.7) placed too close
         # Center distance = 0.9, edge clearance = 0.9 - 0.5 - 0.35 = 0.05 < 0.2
         via = Via(
-            x=10.9, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.9,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
@@ -1602,23 +1747,42 @@ class TestViaToViaClearanceValidation:
         # Add vias on two different nets
         route1 = Route(net=1, net_name="NET1")
         route1.vias.append(
-            Via(x=5.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=5.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(route1)
 
         route3 = Route(net=3, net_name="NET3")
         route3.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=3, net_name="NET3")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=3,
+                net_name="NET3",
+            )
         )
         grid.routes.append(route3)
 
         # Place via close to NET3's via but far from NET1's via
         # Distance to NET3 via = 0.8, edge clearance = 0.8 - 0.35 - 0.35 = 0.1 < 0.2
         via = Via(
-            x=10.8, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2",
+            x=10.8,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="NET2",
         )
 
         is_valid, clearance, location = grid.validate_via_to_via_clearance(via, exclude_net=2)
@@ -1656,14 +1820,26 @@ class TestSameNetDrillSpacing:
         """
         same_net_route = Route(net=1, net_name="NET1")
         same_net_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(same_net_route)
 
         via = Via(
-            x=10.347, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+            x=10.347,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="NET1",
         )
 
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
@@ -1676,14 +1852,26 @@ class TestSameNetDrillSpacing:
         """Test that well-separated same-net vias pass validation."""
         same_net_route = Route(net=1, net_name="NET1")
         same_net_route.vias.append(
-            Via(x=5.0, y=5.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=5.0,
+                y=5.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(same_net_route)
 
         via = Via(
-            x=15.0, y=15.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+            x=15.0,
+            y=15.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="NET1",
         )
 
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
@@ -1696,15 +1884,27 @@ class TestSameNetDrillSpacing:
         """Test that different-net vias are not checked by same-net drill spacing."""
         other_net_route = Route(net=2, net_name="NET2")
         other_net_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="NET2")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=2,
+                net_name="NET2",
+            )
         )
         grid.routes.append(other_net_route)
 
         # Place a via very close but on a different net -- should be ignored
         via = Via(
-            x=10.1, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+            x=10.1,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="NET1",
         )
 
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
@@ -1716,15 +1916,27 @@ class TestSameNetDrillSpacing:
         """Test that a via is not checked against itself (same position)."""
         same_net_route = Route(net=1, net_name="NET1")
         same_net_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(same_net_route)
 
         # Exact same position -- should be skipped (self-check)
         via = Via(
-            x=10.0, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+            x=10.0,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="NET1",
         )
 
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
@@ -1735,15 +1947,27 @@ class TestSameNetDrillSpacing:
         """Test same-net vias just below min_drill_clearance threshold."""
         same_net_route = Route(net=1, net_name="NET1")
         same_net_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(same_net_route)
 
         # Drill edge-to-edge = 0.45 - 0.175 - 0.175 = 0.1 < 0.102
         via = Via(
-            x=10.45, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+            x=10.45,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="NET1",
         )
 
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
@@ -1755,15 +1979,27 @@ class TestSameNetDrillSpacing:
         """Test same-net vias at exactly min_drill_clearance pass."""
         same_net_route = Route(net=1, net_name="NET1")
         same_net_route.vias.append(
-            Via(x=10.0, y=10.0, drill=0.35, diameter=0.7,
-                layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1")
+            Via(
+                x=10.0,
+                y=10.0,
+                drill=0.35,
+                diameter=0.7,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="NET1",
+            )
         )
         grid.routes.append(same_net_route)
 
         # Drill edge-to-edge = 0.453 - 0.175 - 0.175 = 0.103 > min_drill_clearance
         via = Via(
-            x=10.453, y=10.0, drill=0.35, diameter=0.7,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="NET1",
+            x=10.453,
+            y=10.0,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="NET1",
         )
 
         is_valid, clearance, location = grid.validate_same_net_drill_spacing(via, same_net=1)
@@ -2189,8 +2425,14 @@ class TestGridQuantizationClearance:
         """
         # Route 1 at x=5.0
         seg1 = Segment(
-            x1=5.0, y1=0.0, x2=5.0, y2=10.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=0.0,
+            x2=5.0,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
         tight_grid.mark_route(route1)
@@ -2198,13 +2440,17 @@ class TestGridQuantizationClearance:
         # Route 2 at x=5.3 -- only 0.3mm apart (center-to-center).
         # Edge-to-edge clearance = 0.3 - 0.1 - 0.1 = 0.1mm < 0.102mm required.
         seg2 = Segment(
-            x1=5.3, y1=0.0, x2=5.3, y2=10.0,
-            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+            x1=5.3,
+            y1=0.0,
+            x2=5.3,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NET2",
         )
 
-        is_valid, clearance, _ = tight_grid.validate_segment_clearance(
-            seg2, exclude_net=2
-        )
+        is_valid, clearance, _ = tight_grid.validate_segment_clearance(seg2, exclude_net=2)
         assert is_valid is False, (
             f"Parallel segments 0.3mm apart should violate 0.102mm clearance "
             f"(actual clearance={clearance:.4f}mm)"
@@ -2218,8 +2464,14 @@ class TestGridQuantizationClearance:
         a second route from being placed there.
         """
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
         tight_grid.mark_route(route)
@@ -2247,8 +2499,14 @@ class TestGridQuantizationClearance:
     def test_sufficient_spacing_still_valid(self, tight_grid):
         """Segments with clearly sufficient spacing must still pass validation."""
         seg1 = Segment(
-            x1=5.0, y1=0.0, x2=5.0, y2=10.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=0.0,
+            x2=5.0,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
         tight_grid.mark_route(route1)
@@ -2256,16 +2514,19 @@ class TestGridQuantizationClearance:
         # Route 2 at x=5.6 -- center-to-center 0.6mm.
         # Edge-to-edge = 0.6 - 0.1 - 0.1 = 0.4mm >> 0.102mm.
         seg2 = Segment(
-            x1=5.6, y1=0.0, x2=5.6, y2=10.0,
-            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+            x1=5.6,
+            y1=0.0,
+            x2=5.6,
+            y2=10.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NET2",
         )
 
-        is_valid, clearance, _ = tight_grid.validate_segment_clearance(
-            seg2, exclude_net=2
-        )
+        is_valid, clearance, _ = tight_grid.validate_segment_clearance(seg2, exclude_net=2)
         assert is_valid is True, (
-            f"Segments 0.6mm apart should pass clearance validation "
-            f"(clearance={clearance:.4f}mm)"
+            f"Segments 0.6mm apart should pass clearance validation (clearance={clearance:.4f}mm)"
         )
 
 
@@ -2295,13 +2556,17 @@ class TestClearanceCompensatedSpatialIndex:
     def test_inflated_envelope_wider_than_segment(self, grid):
         """Verify inflated envelope is wider than the non-inflated one."""
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         plain = RoutingGrid._segment_envelope(seg, clearance_inflation=0.0)
-        inflated = RoutingGrid._segment_envelope(
-            seg, clearance_inflation=grid.rules.max_clearance
-        )
+        inflated = RoutingGrid._segment_envelope(seg, clearance_inflation=grid.rules.max_clearance)
         # Inflated envelope must be strictly larger on all sides.
         assert inflated[0] < plain[0]
         assert inflated[1] < plain[1]
@@ -2311,8 +2576,14 @@ class TestClearanceCompensatedSpatialIndex:
     def test_inflated_envelope_expansion_amount(self, grid):
         """Verify envelope is expanded by exactly max_clearance beyond half-width."""
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         mc = grid.rules.max_clearance
         inflated = RoutingGrid._segment_envelope(seg, clearance_inflation=mc)
@@ -2333,8 +2604,14 @@ class TestClearanceCompensatedSpatialIndex:
             pytest.skip("rtree library not installed")
 
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         grid._rtree_insert_segment(seg, layer_idx)
@@ -2353,8 +2630,14 @@ class TestClearanceCompensatedSpatialIndex:
             pytest.skip("rtree library not installed")
 
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         grid._rtree_insert_segment(seg, layer_idx)
@@ -2368,16 +2651,28 @@ class TestClearanceCompensatedSpatialIndex:
     def test_same_net_excluded_with_inflated_envelopes(self, grid):
         """Same-net segments are excluded from clearance validation results."""
         seg1 = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         route = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
         grid.mark_route(route)
 
         # A second segment from the same net, right next to the first.
         seg2 = Segment(
-            x1=5.0, y1=5.1, x2=10.0, y2=5.1,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.1,
+            x2=10.0,
+            y2=5.1,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         is_valid, _, _ = grid.validate_segment_clearance(seg2, exclude_net=1)
         assert is_valid is True, "Same-net segments should not cause violations"
@@ -2388,8 +2683,14 @@ class TestClearanceCompensatedSpatialIndex:
             pytest.skip("rtree library not installed")
 
         seg = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
         grid.mark_route(route)
@@ -2412,12 +2713,24 @@ class TestClearanceCompensatedSpatialIndex:
             pytest.skip("rtree library not installed")
 
         seg1 = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         seg2 = Segment(
-            x1=5.0, y1=8.0, x2=10.0, y2=8.0,
-            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+            x1=5.0,
+            y1=8.0,
+            x2=10.0,
+            y2=8.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NET2",
         )
         route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
         route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
@@ -2435,20 +2748,30 @@ class TestClearanceCompensatedSpatialIndex:
     def test_clearance_validation_with_inflated_index(self, grid):
         """Integration: validate_segment_clearance gives correct results with inflated R-tree."""
         seg1 = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         route = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
         grid.mark_route(route)
 
         # Segment too close -- should violate.
         seg_close = Segment(
-            x1=5.0, y1=5.25, x2=10.0, y2=5.25,
-            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+            x1=5.0,
+            y1=5.25,
+            x2=10.0,
+            y2=5.25,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NET2",
         )
-        is_valid, clearance, loc = grid.validate_segment_clearance(
-            seg_close, exclude_net=2
-        )
+        is_valid, clearance, loc = grid.validate_segment_clearance(seg_close, exclude_net=2)
         assert is_valid is False, (
             f"Segments 0.25mm apart center-to-center should violate "
             f"0.2mm clearance (actual clearance={clearance:.4f}mm)"
@@ -2456,15 +2779,18 @@ class TestClearanceCompensatedSpatialIndex:
 
         # Segment far away -- should pass.
         seg_far = Segment(
-            x1=5.0, y1=8.0, x2=10.0, y2=8.0,
-            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+            x1=5.0,
+            y1=8.0,
+            x2=10.0,
+            y2=8.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NET2",
         )
-        is_valid, clearance, loc = grid.validate_segment_clearance(
-            seg_far, exclude_net=2
-        )
+        is_valid, clearance, loc = grid.validate_segment_clearance(seg_far, exclude_net=2)
         assert is_valid is True, (
-            f"Segments 3mm apart should pass clearance validation "
-            f"(clearance={clearance:.4f}mm)"
+            f"Segments 3mm apart should pass clearance validation (clearance={clearance:.4f}mm)"
         )
 
     def test_expanded_obstacles_and_inflated_rtree_coexist(self):
@@ -2474,28 +2800,35 @@ class TestClearanceCompensatedSpatialIndex:
             trace_width=0.2,
             trace_clearance=0.2,
         )
-        grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules, expanded_obstacles=True
-        )
+        grid = RoutingGrid(width=20.0, height=20.0, rules=rules, expanded_obstacles=True)
 
         seg1 = Segment(
-            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=5.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
         route = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
         grid.mark_route(route)
 
         # A segment with generous clearance should pass even in expanded mode.
         seg2 = Segment(
-            x1=5.0, y1=6.0, x2=10.0, y2=6.0,
-            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+            x1=5.0,
+            y1=6.0,
+            x2=10.0,
+            y2=6.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NET2",
         )
-        is_valid, clearance, _ = grid.validate_segment_clearance(
-            seg2, exclude_net=2
-        )
+        is_valid, clearance, _ = grid.validate_segment_clearance(seg2, exclude_net=2)
         assert is_valid is True, (
-            f"1mm separation should pass even with expanded_obstacles "
-            f"(clearance={clearance:.4f}mm)"
+            f"1mm separation should pass even with expanded_obstacles (clearance={clearance:.4f}mm)"
         )
 
     def test_mixed_net_class_clearances(self):

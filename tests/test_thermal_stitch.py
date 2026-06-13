@@ -300,13 +300,23 @@ class TestGenerateThermalViaPositions:
         # but tight, see min_under_pad = 2 * (0.6 + 0.2) = 1.6mm so it
         # passes the threshold).  Force halo mode by raising clearance.
         pad = PadInfo(
-            reference="Q1", pad_number="2", net_number=2, net_name="VMOTOR",
-            x=110.0, y=120.0, layer="F.Cu", width=1.8, height=1.8,
+            reference="Q1",
+            pad_number="2",
+            net_number=2,
+            net_name="VMOTOR",
+            x=110.0,
+            y=120.0,
+            layer="F.Cu",
+            width=1.8,
+            height=1.8,
             pad_type="thru_hole",
         )
         positions = generate_thermal_via_positions(
-            pad, vias_per_pad=4, thermal_radius=2.5,
-            via_size=0.6, clearance=0.3,  # min_under_pad = 1.8 -> halo
+            pad,
+            vias_per_pad=4,
+            thermal_radius=2.5,
+            via_size=0.6,
+            clearance=0.3,  # min_under_pad = 1.8 -> halo
         )
         # Halo mode generates the requested 4 primary candidates plus
         # fallback candidates (intermediate angles + wider ring) so the
@@ -317,6 +327,7 @@ class TestGenerateThermalViaPositions:
         # The first ``vias_per_pad`` positions should sit on the base
         # ring at radius ≥ pad_half + via_size/2 + clearance.
         import math
+
         for x, y in positions[:4]:
             r = math.hypot(x - pad.x, y - pad.y)
             assert r >= 0.9 + 0.3 + 0.3 - 0.001
@@ -324,13 +335,23 @@ class TestGenerateThermalViaPositions:
     def test_large_pad_uses_under_pad_grid(self) -> None:
         # 5x5 mm exposed pad -- under-pad grid mode.
         pad = PadInfo(
-            reference="U1", pad_number="33", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=5.0, height=5.0,
+            reference="U1",
+            pad_number="33",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=5.0,
+            height=5.0,
             pad_type="smd",
         )
         positions = generate_thermal_via_positions(
-            pad, vias_per_pad=4, thermal_radius=2.5,
-            via_size=0.45, clearance=0.2,
+            pad,
+            vias_per_pad=4,
+            thermal_radius=2.5,
+            via_size=0.45,
+            clearance=0.2,
         )
         # Should produce at least 4 positions, all inside the pad
         # bounding box.
@@ -341,13 +362,23 @@ class TestGenerateThermalViaPositions:
 
     def test_zero_count_returns_empty(self) -> None:
         pad = PadInfo(
-            reference="Q1", pad_number="2", net_number=2, net_name="VMOTOR",
-            x=0.0, y=0.0, layer="F.Cu", width=2.0, height=2.0,
+            reference="Q1",
+            pad_number="2",
+            net_number=2,
+            net_name="VMOTOR",
+            x=0.0,
+            y=0.0,
+            layer="F.Cu",
+            width=2.0,
+            height=2.0,
             pad_type="smd",
         )
         positions = generate_thermal_via_positions(
-            pad, vias_per_pad=0, thermal_radius=2.5,
-            via_size=0.45, clearance=0.2,
+            pad,
+            vias_per_pad=0,
+            thermal_radius=2.5,
+            via_size=0.45,
+            clearance=0.2,
         )
         assert positions == []
 
@@ -442,9 +473,7 @@ class TestRunThermalStitch:
         text = no_mosfet_pcb.read_text()
         assert "(via " not in text and "(via\n" not in text
 
-    def test_under_pad_mode_for_large_exposed_pad(
-        self, large_ep_pcb: Path
-    ) -> None:
+    def test_under_pad_mode_for_large_exposed_pad(self, large_ep_pcb: Path) -> None:
         """A 3.45x3.45 mm QFN exposed pad should get under-pad vias."""
         result = run_thermal_stitch(
             pcb_path=large_ep_pcb,
@@ -471,9 +500,7 @@ class TestRunThermalStitch:
 class TestCLIThermalFlag:
     """`kct stitch --thermal` end-to-end via the CLI entry point."""
 
-    def test_thermal_flag_invokes_thermal_stitch(
-        self, two_fet_pcb: Path, capsys
-    ) -> None:
+    def test_thermal_flag_invokes_thermal_stitch(self, two_fet_pcb: Path, capsys) -> None:
         argv = [str(two_fet_pcb), "--thermal", "--net", "VMOTOR"]
         rc = main(argv)
         assert rc == 0
@@ -483,9 +510,7 @@ class TestCLIThermalFlag:
         via_count = content.count("(via\n") + content.count("(via ")
         assert via_count >= 8
 
-    def test_thermal_dry_run_does_not_modify(
-        self, two_fet_pcb: Path
-    ) -> None:
+    def test_thermal_dry_run_does_not_modify(self, two_fet_pcb: Path) -> None:
         original = two_fet_pcb.read_text()
         argv = [str(two_fet_pcb), "--thermal", "--net", "VMOTOR", "--dry-run"]
         rc = main(argv)
@@ -494,9 +519,7 @@ class TestCLIThermalFlag:
         assert rc in (0, 1)
         assert two_fet_pcb.read_text() == original
 
-    def test_thermal_no_mosfets_returns_no_vias(
-        self, no_mosfet_pcb: Path
-    ) -> None:
+    def test_thermal_no_mosfets_returns_no_vias(self, no_mosfet_pcb: Path) -> None:
         argv = [str(no_mosfet_pcb), "--thermal", "--net", "GND"]
         rc = main(argv)
         # Exit code 1 because no vias were added and no pads already

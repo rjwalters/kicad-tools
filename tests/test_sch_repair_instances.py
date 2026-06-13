@@ -8,8 +8,6 @@ and hierarchical schematic support.
 import json
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_repair_instances import (
     _collect_existing_refs,
     _extract_symbols_with_instance_info,
@@ -169,17 +167,13 @@ class TestExtractSymbolsWithInstanceInfo:
     """Tests for _extract_symbols_with_instance_info."""
 
     def test_symbol_with_instances(self):
-        symbols = _extract_symbols_with_instance_info(
-            ROOT_SCHEMATIC, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(ROOT_SCHEMATIC, "test_project")
         assert len(symbols) == 1
         assert symbols[0]["reference"] == "R1"
         assert symbols[0]["has_project_instance"] is True
 
     def test_symbol_missing_instances(self):
-        symbols = _extract_symbols_with_instance_info(
-            SUB_SCHEMATIC_MISSING, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(SUB_SCHEMATIC_MISSING, "test_project")
         assert len(symbols) == 2
         # Both should be missing instances
         assert all(not s["has_project_instance"] for s in symbols)
@@ -188,9 +182,7 @@ class TestExtractSymbolsWithInstanceInfo:
 
     def test_symbol_with_wrong_project(self):
         """Symbols with instances for a different project are flagged."""
-        symbols = _extract_symbols_with_instance_info(
-            ROOT_SCHEMATIC, "other_project"
-        )
+        symbols = _extract_symbols_with_instance_info(ROOT_SCHEMATIC, "other_project")
         assert len(symbols) == 1
         # Has instances but not for "other_project"
         assert symbols[0]["has_project_instance"] is False
@@ -286,9 +278,7 @@ class TestRunRepairInstances:
         root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
         sub.write_text(SUB_SCHEMATIC_MISSING, encoding="utf-8")
 
-        result = run_repair_instances(
-            root, dry_run=True, backup=False, format="json"
-        )
+        result = run_repair_instances(root, dry_run=True, backup=False, format="json")
         assert result == 0
 
         captured = capsys.readouterr()
@@ -308,7 +298,7 @@ class TestRunRepairInstances:
 
         # Verify the sub-sheet was modified
         modified_text = sub.read_text(encoding="utf-8")
-        assert '(instances' in modified_text
+        assert "(instances" in modified_text
         assert '(project "test_project"' in modified_text
 
         # R2 should keep its reference
@@ -464,10 +454,7 @@ class TestRunRepairInstances:
 
         modified_text = sub.read_text(encoding="utf-8")
         # The instance path should be /root-uuid/sheet-uuid
-        expected_path = (
-            "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-            "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        )
+        expected_path = "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
         assert f'(path "{expected_path}"' in modified_text
 
 
@@ -558,9 +545,7 @@ class TestWrongProjectDetection:
 
     def test_extract_detects_wrong_project(self):
         """Symbol with instances for wrong project is flagged."""
-        symbols = _extract_symbols_with_instance_info(
-            SUB_SCHEMATIC_WRONG_PROJECT, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(SUB_SCHEMATIC_WRONG_PROJECT, "test_project")
         assert len(symbols) == 1
         assert symbols[0]["has_project_instance"] is False
         assert symbols[0]["has_wrong_project"] is True
@@ -594,10 +579,7 @@ class TestWrongProjectDetection:
         assert result == 0
 
         modified_text = sub.read_text(encoding="utf-8")
-        expected_path = (
-            "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-            "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        )
+        expected_path = "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
         assert f'(path "{expected_path}"' in modified_text
         assert '(reference "R2")' in modified_text
 
@@ -621,9 +603,7 @@ class TestWrongProjectDetection:
         root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
         sub.write_text(SUB_SCHEMATIC_WRONG_PROJECT, encoding="utf-8")
 
-        result = run_repair_instances(
-            root, dry_run=True, backup=False, format="json"
-        )
+        result = run_repair_instances(root, dry_run=True, backup=False, format="json")
         assert result == 0
 
         captured = capsys.readouterr()
@@ -877,9 +857,7 @@ class TestLooseProjectBlocksDetection:
 
     def test_loose_project_detected(self):
         """Symbol with loose (project) siblings of empty (instances)."""
-        symbols = _extract_symbols_with_instance_info(
-            SUB_SCHEMATIC_LOOSE_PROJECT, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(SUB_SCHEMATIC_LOOSE_PROJECT, "test_project")
         assert len(symbols) == 1
         s = symbols[0]
         assert s["reference"] == "R2"
@@ -897,26 +875,20 @@ class TestLooseProjectBlocksDetection:
 
     def test_well_formed_does_not_report_loose(self):
         """Properly nested (project) inside (instances) is NOT flagged loose."""
-        symbols = _extract_symbols_with_instance_info(
-            SUB_SCHEMATIC_OK, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(SUB_SCHEMATIC_OK, "test_project")
         assert len(symbols) == 1
         assert symbols[0]["has_loose_project_blocks"] is False
 
     def test_wrong_project_does_not_report_loose(self):
         """Wrong-project (still inside instances) is NOT flagged loose."""
-        symbols = _extract_symbols_with_instance_info(
-            SUB_SCHEMATIC_WRONG_PROJECT, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(SUB_SCHEMATIC_WRONG_PROJECT, "test_project")
         assert len(symbols) == 1
         assert symbols[0]["has_loose_project_blocks"] is False
         assert symbols[0]["has_wrong_project"] is True
 
     def test_missing_instances_does_not_report_loose(self):
         """Symbol with no instances at all is NOT flagged loose."""
-        symbols = _extract_symbols_with_instance_info(
-            SUB_SCHEMATIC_MISSING, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(SUB_SCHEMATIC_MISSING, "test_project")
         # Two symbols, both have no instances and no loose blocks
         assert len(symbols) == 2
         assert all(not s["has_loose_project_blocks"] for s in symbols)
@@ -977,9 +949,7 @@ class TestLooseProjectBlocksRepair:
         root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
         sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT, encoding="utf-8")
 
-        result = run_repair_instances(
-            root, dry_run=True, backup=False, format="json"
-        )
+        result = run_repair_instances(root, dry_run=True, backup=False, format="json")
         assert result == 0
 
         captured = capsys.readouterr()
@@ -1010,10 +980,7 @@ class TestLooseProjectBlocksRepair:
         # Reference must be preserved (R2 -> R2, no re-annotation).
         assert '(reference "R2")' in modified_text
         # The path inside (instances) is the canonical hierarchical path.
-        expected_path = (
-            "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-            "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        )
+        expected_path = "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
         assert f'(path "{expected_path}"' in modified_text
 
     def test_repair_removes_loose_blocks_from_symbol(self, tmp_path, capsys):
@@ -1029,9 +996,7 @@ class TestLooseProjectBlocksRepair:
         modified_text = sub.read_text(encoding="utf-8")
         # Re-run extraction on the repaired text: no loose blocks should
         # remain, and the project instance is correctly nested.
-        symbols = _extract_symbols_with_instance_info(
-            modified_text, "test_project"
-        )
+        symbols = _extract_symbols_with_instance_info(modified_text, "test_project")
         assert len(symbols) == 1
         assert symbols[0]["has_loose_project_blocks"] is False
         assert symbols[0]["has_project_instance"] is True
@@ -1050,9 +1015,7 @@ class TestLooseProjectBlocksRepair:
         # The Reference *property* on the symbol must remain "R2".
         assert '(property "Reference" "R2"' in modified_text
 
-    def test_backup_created_for_loose_project_repair(
-        self, tmp_path, capsys
-    ):
+    def test_backup_created_for_loose_project_repair(self, tmp_path, capsys):
         """Backup files are created when backup=True for loose-project repair."""
         root = tmp_path / "test_project.kicad_sch"
         sub = tmp_path / "sub.kicad_sch"
@@ -1065,16 +1028,12 @@ class TestLooseProjectBlocksRepair:
         backups = list(tmp_path.glob("*_backup_*.kicad_sch"))
         assert len(backups) >= 1
 
-    def test_repair_drops_stale_sibling_with_correct_instances(
-        self, tmp_path, capsys
-    ):
+    def test_repair_drops_stale_sibling_with_correct_instances(self, tmp_path, capsys):
         """Stray sibling project gets dropped even when instances is correct."""
         root = tmp_path / "test_project.kicad_sch"
         sub = tmp_path / "sub.kicad_sch"
         root.write_text(ROOT_SCHEMATIC, encoding="utf-8")
-        sub.write_text(
-            SUB_SCHEMATIC_LOOSE_PROJECT_PARTIAL, encoding="utf-8"
-        )
+        sub.write_text(SUB_SCHEMATIC_LOOSE_PROJECT_PARTIAL, encoding="utf-8")
 
         result = run_repair_instances(root, dry_run=False, backup=False)
         assert result == 0

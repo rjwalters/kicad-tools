@@ -345,9 +345,7 @@ def main(argv=None):
     # Check connections across all sheets
     results: list[PinStatus] = []
     for sch, sheet_path in all_schematics:
-        results.extend(
-            check_symbol_connections(sch, lib_manager, args.pattern, sheet_path)
-        )
+        results.extend(check_symbol_connections(sch, lib_manager, args.pattern, sheet_path))
 
     # Filter if not verbose
     if not args.verbose:

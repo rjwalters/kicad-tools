@@ -46,29 +46,32 @@ def main() -> None:
     pathfinder = router_cpp.Pathfinder(grid, rules, True)
 
     # 10 net pairs scattered around the obstacle field.
-    pairs = [
-        ((20 + 5 * i) * res, 20 * res, (380 - 5 * i) * res, 380 * res)
-        for i in range(10)
-    ]
+    pairs = [((20 + 5 * i) * res, 20 * res, (380 - 5 * i) * res, 380 * res) for i in range(10)]
 
     total_iters = 0
     t0 = time.monotonic()
     for i, (sx, sy, ex, ey) in enumerate(pairs):
         result = pathfinder.route(
-            start_x=sx, start_y=sy, start_layer=0,
-            end_x=ex, end_y=ey, end_layer=0,
+            start_x=sx,
+            start_y=sy,
+            start_layer=0,
+            end_x=ex,
+            end_y=ey,
+            end_layer=0,
             net=i + 1,
         )
         total_iters += pathfinder.iterations
         status = "OK" if result.success else "FAIL"
         print(
-            f"  net {i+1:02d}: iters={pathfinder.iterations:6d} "
+            f"  net {i + 1:02d}: iters={pathfinder.iterations:6d} "
             f"explored={pathfinder.nodes_explored:6d} {status}"
         )
     elapsed = time.monotonic() - t0
     print()
-    print(f"Total: {elapsed*1000:.1f}ms across {len(pairs)} nets "
-          f"({total_iters} cells visited, {total_iters/max(elapsed,1e-6):.0f} cells/sec)")
+    print(
+        f"Total: {elapsed * 1000:.1f}ms across {len(pairs)} nets "
+        f"({total_iters} cells visited, {total_iters / max(elapsed, 1e-6):.0f} cells/sec)"
+    )
 
 
 if __name__ == "__main__":

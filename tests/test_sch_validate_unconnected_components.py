@@ -4,14 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from kicad_tools.cli.sch_pin_map import _snap_coord, _to_coord
+from kicad_tools.cli.sch_pin_map import _snap_coord
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     check_fully_unconnected_components,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics
@@ -69,9 +65,7 @@ def _make_symbol_instance(
     rotation: float = 0,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     dnp_str = "yes" if dnp else "no"
     in_bom_str = "yes" if in_bom else "no"
     on_board_str = "yes" if on_board else "no"
@@ -87,7 +81,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -150,9 +144,7 @@ def _build_schematic(
 
         rotation = comp.get("rotation", 0)
         symbol_instances.append(
-            _make_symbol_instance(
-                ref, lib_id, pins, x, y, dnp, in_bom, on_board, rotation
-            )
+            _make_symbol_instance(ref, lib_id, pins, x, y, dnp, in_bom, on_board, rotation)
         )
 
         for pin_idx, (pin_num, _, _) in enumerate(pins):
@@ -237,8 +229,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert len(errors) == 1
         assert "R1" in errors[0].message
@@ -266,8 +257,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == []
 
@@ -299,8 +289,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == []
 
@@ -322,8 +311,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == []
 
@@ -347,8 +335,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == []
 
@@ -372,8 +359,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == []
 
@@ -395,8 +381,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == []
 
@@ -419,8 +404,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert len(errors) == 1
         assert "C5" in errors[0].message
@@ -444,8 +428,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert len(errors) == 1
         assert errors[0].location != ""
@@ -489,8 +472,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         # Extract ref from "Fully unconnected component: R1 (..."
         refs_flagged = set()
@@ -572,13 +554,10 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         # With the fix, the rotated C1 should NOT be flagged.
-        assert len(errors) == 0, (
-            f"Rotated component C1 should not be flagged; got: {errors}"
-        )
+        assert len(errors) == 0, f"Rotated component C1 should not be flagged; got: {errors}"
 
     def test_subgrid_component_connected_via_snap(self, tmp_path: Path):
         """Component at sub-grid position should resolve as connected when
@@ -615,8 +594,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == [], (
             f"Sub-grid component R1 should not be flagged as unconnected, "
@@ -644,8 +622,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert len(errors) == 1
         assert "R1" in errors[0].message
@@ -699,8 +676,7 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert errors == [], (
             f"Component R1 with wires at pins should not be flagged; "
@@ -751,12 +727,10 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component" and i.severity == "error"
+            i for i in issues if i.category == "unconnected_component" and i.severity == "error"
         ]
         assert len(errors) == 1, (
-            f"Component R1 with wires 0.5mm away should be flagged; "
-            f"got {len(errors)} errors"
+            f"Component R1 with wires 0.5mm away should be flagged; got {len(errors)} errors"
         )
         assert "R1" in errors[0].message
 
@@ -799,10 +773,9 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component"
-            and i.severity == "error"
-            and "R1" in i.message
+            i
+            for i in issues
+            if i.category == "unconnected_component" and i.severity == "error" and "R1" in i.message
         ]
         assert len(errors) == 1
         # The message should contain near-miss pin distance info
@@ -815,7 +788,6 @@ class TestFullyUnconnectedComponent:
         # so pin 1 is at (100.00, 50.00) and pin 2 at (100.00, 47.46).
         assert "at (100.00, 50.00)" in errors[0].message
         assert "at (100.00, 47.46)" in errors[0].message
-
 
     def test_near_miss_coordinates_rotated_component(self, tmp_path: Path):
         """Pin coordinates in near-miss diagnostic should reflect rotation.
@@ -885,10 +857,9 @@ class TestFullyUnconnectedComponent:
 
         issues = check_fully_unconnected_components(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "unconnected_component"
-            and i.severity == "error"
-            and "R1" in i.message
+            i
+            for i in issues
+            if i.category == "unconnected_component" and i.severity == "error" and "R1" in i.message
         ]
         assert len(errors) == 1
         msg = errors[0].message

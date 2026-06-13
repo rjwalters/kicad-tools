@@ -5,23 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
-import pytest
-
 from kicad_tools.validate.rules.zone_fill import ZoneFillRule
-
 
 # ---------------------------------------------------------------------------
 # Minimal Zone stub -- mirrors the fields the rule reads
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _FakeZone:
     net_number: int = 1
     net_name: str = "GND"
     layer: str = "F.Cu"
-    polygon: list[tuple[float, float]] = field(default_factory=lambda: [
-        (0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0),
-    ])
+    polygon: list[tuple[float, float]] = field(
+        default_factory=lambda: [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 100.0),
+            (0.0, 100.0),
+        ]
+    )
     filled_polygons: list[list[tuple[float, float]]] = field(default_factory=list)
     is_filled: bool = True
 
@@ -29,6 +32,7 @@ class _FakeZone:
 # ---------------------------------------------------------------------------
 # Helper to build a fake PCB with specific zones
 # ---------------------------------------------------------------------------
+
 
 def _make_pcb(zones: list[_FakeZone]) -> MagicMock:
     pcb = MagicMock()
@@ -43,6 +47,7 @@ def _make_design_rules() -> MagicMock:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestZoneFillRule:
     """Tests for the ZoneFillRule check."""
@@ -59,8 +64,7 @@ class TestZoneFillRule:
 
         # No zone_unfilled or zone_fill_disabled violations expected
         fill_violations = [
-            v for v in results.violations
-            if v.rule_id in ("zone_unfilled", "zone_fill_disabled")
+            v for v in results.violations if v.rule_id in ("zone_unfilled", "zone_fill_disabled")
         ]
         assert len(fill_violations) == 0
 
@@ -95,9 +99,14 @@ class TestZoneFillRule:
 
     def test_unassigned_net_produces_warning(self):
         """A zone with net_number=0 and empty net_name is flagged."""
-        zone = _FakeZone(net_number=0, net_name="", is_filled=True, filled_polygons=[
-            [(0, 0), (10, 0), (10, 10), (0, 10)],
-        ])
+        zone = _FakeZone(
+            net_number=0,
+            net_name="",
+            is_filled=True,
+            filled_polygons=[
+                [(0, 0), (10, 0), (10, 10), (0, 10)],
+            ],
+        )
         pcb = _make_pcb([zone])
         rule = ZoneFillRule()
         results = rule.check(pcb, _make_design_rules())

@@ -14,13 +14,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.placement import PlacementAnalyzer, PlacementFixer
 from kicad_tools.placement.analyzer import DesignRules
 from kicad_tools.placement.conflict import ConflictType
 from kicad_tools.placement.fixer import FixStrategy
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures: PCB content with pad clearance violations
@@ -182,7 +179,8 @@ class TestNudgePadClearance:
 
         fixer = PlacementFixer(strategy=FixStrategy.SPREAD)
         result = fixer.nudge_pad_clearance(
-            pcb_path, output_path=output_path,
+            pcb_path,
+            output_path=output_path,
         )
 
         assert result.fixes_applied > 0
@@ -233,7 +231,8 @@ class TestNudgePadClearance:
             anchored={"R2"},
         )
         result = fixer.nudge_pad_clearance(
-            pcb_path, output_path=output_path,
+            pcb_path,
+            output_path=output_path,
         )
 
         assert result.fixes_applied > 0
@@ -245,7 +244,8 @@ class TestNudgePadClearance:
 
         fixer = PlacementFixer(strategy=FixStrategy.SPREAD)
         result = fixer.nudge_pad_clearance(
-            pcb_path, output_path=output_path,
+            pcb_path,
+            output_path=output_path,
         )
 
         # Should apply at least one fix
@@ -259,7 +259,8 @@ class TestNudgePadClearance:
         # R2 is at x=100.8, R1 at x=100.0 -- R2 is to the right of R1
         fixer = PlacementFixer(strategy=FixStrategy.SPREAD)
         result = fixer.nudge_pad_clearance(
-            pcb_path, output_path=output_path,
+            pcb_path,
+            output_path=output_path,
         )
 
         if result.fixes_applied > 0:
@@ -276,7 +277,9 @@ class TestNudgePadClearance:
         rules = DesignRules(min_pad_clearance=0.2)
         fixer = PlacementFixer(strategy=FixStrategy.SPREAD)
         result = fixer.nudge_pad_clearance(
-            pcb_path, rules=rules, output_path=output_path,
+            pcb_path,
+            rules=rules,
+            output_path=output_path,
         )
 
         assert result.fixes_applied > 0
@@ -296,9 +299,14 @@ class TestNudgeCLI:
 
         pcb_path = _write_pcb(tmp_path, TWO_COMPONENT_PAD_OVERLAP)
 
-        exit_code = placement_main([
-            "nudge", str(pcb_path), "--dry-run", "--quiet",
-        ])
+        exit_code = placement_main(
+            [
+                "nudge",
+                str(pcb_path),
+                "--dry-run",
+                "--quiet",
+            ]
+        )
 
         assert exit_code == 0
 
@@ -309,9 +317,15 @@ class TestNudgeCLI:
         pcb_path = _write_pcb(tmp_path, TWO_COMPONENT_PAD_OVERLAP)
         output_path = tmp_path / "fixed.kicad_pcb"
 
-        exit_code = placement_main([
-            "nudge", str(pcb_path), "-o", str(output_path), "--quiet",
-        ])
+        exit_code = placement_main(
+            [
+                "nudge",
+                str(pcb_path),
+                "-o",
+                str(output_path),
+                "--quiet",
+            ]
+        )
 
         assert exit_code == 0
         assert output_path.exists()
@@ -322,9 +336,13 @@ class TestNudgeCLI:
 
         pcb_path = _write_pcb(tmp_path, NO_VIOLATIONS_PCB)
 
-        exit_code = placement_main([
-            "nudge", str(pcb_path), "--quiet",
-        ])
+        exit_code = placement_main(
+            [
+                "nudge",
+                str(pcb_path),
+                "--quiet",
+            ]
+        )
 
         assert exit_code == 0
 
@@ -335,12 +353,17 @@ class TestNudgeCLI:
         pcb_path = _write_pcb(tmp_path, TWO_COMPONENT_PAD_OVERLAP)
         output_path = tmp_path / "fixed.kicad_pcb"
 
-        exit_code = placement_main([
-            "fix", str(pcb_path),
-            "-o", str(output_path),
-            "--only", "pad_clearance",
-            "--quiet",
-        ])
+        exit_code = placement_main(
+            [
+                "fix",
+                str(pcb_path),
+                "-o",
+                str(output_path),
+                "--only",
+                "pad_clearance",
+                "--quiet",
+            ]
+        )
 
         assert exit_code == 0
         assert output_path.exists()
@@ -351,12 +374,16 @@ class TestNudgeCLI:
 
         pcb_path = _write_pcb(tmp_path, TWO_COMPONENT_PAD_OVERLAP)
 
-        exit_code = placement_main([
-            "fix", str(pcb_path),
-            "--only", "pad_clearance",
-            "--dry-run",
-            "--quiet",
-        ])
+        exit_code = placement_main(
+            [
+                "fix",
+                str(pcb_path),
+                "--only",
+                "pad_clearance",
+                "--dry-run",
+                "--quiet",
+            ]
+        )
 
         assert exit_code == 0
 

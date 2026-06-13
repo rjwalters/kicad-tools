@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -159,8 +159,9 @@ class TestExportGerbers:
                 with zipfile.ZipFile(result) as zf:
                     names = zf.namelist()
                 gerber_files = [
-                    n for n in names if n.lower().endswith((".gbr", ".gtl", ".gbl", ".gko"))
-                    or ".g" in n.lower()
+                    n
+                    for n in names
+                    if n.lower().endswith((".gbr", ".gtl", ".gbl", ".gko")) or ".g" in n.lower()
                 ]
                 assert len(gerber_files) > 0, f"no gerber layers in {result}: {names}"
             except ExportError as e:
@@ -321,12 +322,15 @@ class TestGenerateReport:
             # sufficient because the pandoc fallback was suppressed by the
             # OSError leak; post-fix the fallback runs whenever pandoc is
             # on PATH, producing report.pdf instead of report.md.)
-            with patch(
-                "kicad_tools.report.renderers._weasyprint_available",
-                return_value=False,
-            ), patch(
-                "kicad_tools.report.renderers._pandoc_available",
-                return_value=False,
+            with (
+                patch(
+                    "kicad_tools.report.renderers._weasyprint_available",
+                    return_value=False,
+                ),
+                patch(
+                    "kicad_tools.report.renderers._pandoc_available",
+                    return_value=False,
+                ),
             ):
                 pkg._generate_report(out_dir, result)
 
@@ -356,9 +360,7 @@ class TestGenerateReport:
 
             # Patch logger to capture warnings -- ImportError would produce
             # "report module not available" warning
-            with patch(
-                "kicad_tools.export.manufacturing.logger"
-            ) as mock_logger:
+            with patch("kicad_tools.export.manufacturing.logger") as mock_logger:
                 pkg._generate_report(out_dir, result)
 
                 # Verify the old misleading message does NOT appear
@@ -390,12 +392,15 @@ class TestGenerateReport:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir)
             result = ManufacturingResult(output_dir=out_dir)
-            with patch(
-                "kicad_tools.report.renderers._weasyprint_available",
-                return_value=False,
-            ), patch(
-                "kicad_tools.report.renderers._pandoc_available",
-                return_value=False,
+            with (
+                patch(
+                    "kicad_tools.report.renderers._weasyprint_available",
+                    return_value=False,
+                ),
+                patch(
+                    "kicad_tools.report.renderers._pandoc_available",
+                    return_value=False,
+                ),
             ):
                 pkg._generate_report(out_dir, result)
 
@@ -448,12 +453,15 @@ class TestRenderReportPdf:
             assert md_path.suffix == ".md"
 
             # Simulate what _render_report_pdf does with mocked renderers
-            with patch(
-                "kicad_tools.report.renderers.render_html",
-                side_effect=fake_render_html,
-            ), patch(
-                "kicad_tools.report.renderers.render_pdf",
-                side_effect=fake_render_pdf,
+            with (
+                patch(
+                    "kicad_tools.report.renderers.render_html",
+                    side_effect=fake_render_html,
+                ),
+                patch(
+                    "kicad_tools.report.renderers.render_pdf",
+                    side_effect=fake_render_pdf,
+                ),
             ):
                 from kicad_tools.export.manufacturing import ManufacturingPackage as MP
 
@@ -480,12 +488,15 @@ class TestRenderReportPdf:
             out_dir = Path(tmpdir)
             result = ManufacturingResult(output_dir=out_dir)
 
-            with patch(
-                "kicad_tools.report.renderers._weasyprint_available",
-                return_value=False,
-            ), patch(
-                "kicad_tools.report.renderers._pandoc_available",
-                return_value=False,
+            with (
+                patch(
+                    "kicad_tools.report.renderers._weasyprint_available",
+                    return_value=False,
+                ),
+                patch(
+                    "kicad_tools.report.renderers._pandoc_available",
+                    return_value=False,
+                ),
             ):
                 pkg._generate_report(out_dir, result)
 
@@ -535,12 +546,15 @@ class TestRenderReportPdf:
                 # _weasyprint_available and turned into False.
                 return False
 
-            with patch(
-                "kicad_tools.report.renderers._weasyprint_available",
-                side_effect=fake_weasy_available,
-            ), patch(
-                "kicad_tools.report.renderers._pandoc_available",
-                return_value=False,
+            with (
+                patch(
+                    "kicad_tools.report.renderers._weasyprint_available",
+                    side_effect=fake_weasy_available,
+                ),
+                patch(
+                    "kicad_tools.report.renderers._pandoc_available",
+                    return_value=False,
+                ),
             ):
                 pkg._generate_report(out_dir, result)
 
@@ -548,9 +562,7 @@ class TestRenderReportPdf:
             # so the per-board generators won't fold a False into their
             # exit-code AND-gate.
             report_errors = [e for e in result.errors if "report" in e.lower()]
-            assert len(report_errors) == 0, (
-                f"Expected no report errors; got: {report_errors}"
-            )
+            assert len(report_errors) == 0, f"Expected no report errors; got: {report_errors}"
 
             # Acceptance criterion #2: the Markdown report is present (the
             # PDF is the only missing artifact, by design).
@@ -560,9 +572,7 @@ class TestRenderReportPdf:
             pdf_sibling = result.report_path.with_suffix(".pdf")
             assert not pdf_sibling.exists()
 
-    def test_render_pdf_manufacturing_outer_guard_catches_oserror(
-        self, test_project_pcb
-    ):
+    def test_render_pdf_manufacturing_outer_guard_catches_oserror(self, test_project_pcb):
         """Defense-in-depth: the outer guard in _render_report_pdf catches OSError.
 
         Even if a future regression caused ``from ..report.renderers import
@@ -586,12 +596,15 @@ class TestRenderReportPdf:
 
             # Generate the .md first so we have a report_path to feed into
             # the standalone _render_report_pdf call.
-            with patch(
-                "kicad_tools.report.renderers._weasyprint_available",
-                return_value=False,
-            ), patch(
-                "kicad_tools.report.renderers._pandoc_available",
-                return_value=False,
+            with (
+                patch(
+                    "kicad_tools.report.renderers._weasyprint_available",
+                    return_value=False,
+                ),
+                patch(
+                    "kicad_tools.report.renderers._pandoc_available",
+                    return_value=False,
+                ),
             ):
                 pkg._generate_report(out_dir, result)
             assert result.report_path is not None
@@ -669,7 +682,9 @@ class TestFlattenLatestReportPdf:
             assert result.report_path == out_dir / "report.pdf"
 
             # Markdown source should also be preserved alongside PDF
-            assert (out_dir / "report.md").exists(), "report.md should be preserved alongside report.pdf"
+            assert (out_dir / "report.md").exists(), (
+                "report.md should be preserved alongside report.pdf"
+            )
             assert result.report_md_path == out_dir / "report.md"
 
     def test_flatten_falls_back_to_md(self, test_project_pcb):
@@ -694,12 +709,15 @@ class TestFlattenLatestReportPdf:
             out_dir = Path(tmpdir)
             result = ManufacturingResult(output_dir=out_dir)
 
-            with patch(
-                "kicad_tools.report.renderers._weasyprint_available",
-                return_value=False,
-            ), patch(
-                "kicad_tools.report.renderers._pandoc_available",
-                return_value=False,
+            with (
+                patch(
+                    "kicad_tools.report.renderers._weasyprint_available",
+                    return_value=False,
+                ),
+                patch(
+                    "kicad_tools.report.renderers._pandoc_available",
+                    return_value=False,
+                ),
             ):
                 pkg._generate_report(out_dir, result)
                 pkg._flatten_latest_report(out_dir, result)

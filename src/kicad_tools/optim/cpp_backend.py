@@ -115,9 +115,7 @@ def compute_repulsion_cpp(
     if n == 0:
         return {}, {}
 
-    positions_x, positions_y, edges_flat, edge_offsets, fixed_mask = _marshal_components(
-        components
-    )
+    positions_x, positions_y, edges_flat, edge_offsets, fixed_mask = _marshal_components(components)
 
     # Build ForceConfig
     cpp_config = placement_cpp.ForceConfig()
@@ -127,9 +125,13 @@ def compute_repulsion_cpp(
     cpp_config.boundary_charge = config.boundary_charge
 
     result = placement_cpp.compute_all_repulsion(
-        positions_x, positions_y,
-        edges_flat, edge_offsets,
-        n, cpp_config, fixed_mask,
+        positions_x,
+        positions_y,
+        edges_flat,
+        edge_offsets,
+        n,
+        cpp_config,
+        fixed_mask,
     )
 
     # Convert back to dicts
@@ -174,9 +176,7 @@ def compute_boundary_forces_cpp(
     if n == 0:
         return {}, {}
 
-    positions_x, positions_y, edges_flat, edge_offsets, fixed_mask = _marshal_components(
-        components
-    )
+    positions_x, positions_y, edges_flat, edge_offsets, fixed_mask = _marshal_components(components)
     board_edges, n_board_edges = _marshal_board_edges(board_outline)
 
     # Compute inside flags
@@ -198,11 +198,16 @@ def compute_boundary_forces_cpp(
     cpp_config.boundary_charge = boundary_charge
 
     result = placement_cpp.compute_boundary_forces(
-        positions_x, positions_y,
-        edges_flat, edge_offsets,
-        board_edges, n_board_edges,
-        n, cpp_config,
-        fixed_mask, inside_flags,
+        positions_x,
+        positions_y,
+        edges_flat,
+        edge_offsets,
+        board_edges,
+        n_board_edges,
+        n,
+        cpp_config,
+        fixed_mask,
+        inside_flags,
     )
 
     # Convert back to dicts

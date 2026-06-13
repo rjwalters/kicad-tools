@@ -1010,10 +1010,7 @@ class CppPathfinder:
         # Use list comprehension; the budget list is bounded by the
         # number of dense-package escape pads (typically < 30) so even
         # the O(N) scan is cheap relative to the surrounding A* cost.
-        return [
-            b for b in self._pad_channel_budgets
-            if getattr(b, "source_net", 0) != net
-        ]
+        return [b for b in self._pad_channel_budgets if getattr(b, "source_net", 0) != net]
 
     def set_pad_channel_budgets(self, budgets: list | None) -> None:
         """Inject the per-pad lateral-channel budget list (Issue #3143).
@@ -1179,7 +1176,7 @@ class CppPathfinder:
         layer = Layer(layer_value)
         return layer.kicad_name in self._rules.allowed_layers
 
-    def _compute_pad_bounds(self, pad: Pad) -> "router_cpp.PadBounds":
+    def _compute_pad_bounds(self, pad: Pad) -> router_cpp.PadBounds:
         """Compute pad metal area and approach zone bounds in grid coordinates.
 
         This mirrors the Python pathfinder's ``_get_pad_metal_bounds()`` logic
@@ -1517,9 +1514,7 @@ class CppPathfinder:
         # consumed its own, so one ``route()`` call could legally spend
         # 2x the cap (and the 10-100x-slower Python A* is exactly where
         # capped searches go to die).  ``None`` => unbudgeted (legacy).
-        route_deadline = (
-            time.monotonic() + float(per_net_timeout) if per_net_timeout else None
-        )
+        route_deadline = time.monotonic() + float(per_net_timeout) if per_net_timeout else None
 
         try:
             result = self._impl.route_resumable(
@@ -1690,7 +1685,7 @@ class CppPathfinder:
             # Always clear search state to release memory (Issue #2447 risk).
             self._impl.clear_search_state()
 
-    def _capture_failure_info(self, result: "router_cpp.RouteResult") -> None:
+    def _capture_failure_info(self, result: router_cpp.RouteResult) -> None:
         """Record structured failure diagnostics from a failed C++ route.
 
         Issue #2476: When the C++ A* search fails (open set exhausted or
@@ -1750,15 +1745,11 @@ class CppPathfinder:
 
         reason = int(getattr(result, "failure_reason", router_cpp.FAILURE_NONE))
         descriptions = {
-            int(router_cpp.FAILURE_NO_PATH): (
-                "no path (C++ A* open set exhausted)"
-            ),
+            int(router_cpp.FAILURE_NO_PATH): ("no path (C++ A* open set exhausted)"),
             int(router_cpp.FAILURE_ITERATION_LIMIT): (
                 "iteration limit reached (memory backstop cap)"
             ),
-            int(router_cpp.FAILURE_TIMEOUT): (
-                "per-net wall-clock deadline exceeded"
-            ),
+            int(router_cpp.FAILURE_TIMEOUT): ("per-net wall-clock deadline exceeded"),
             int(router_cpp.FAILURE_VIA_VIA_BLOCKED): (
                 "all via candidates blocked by stored-via geometry"
             ),
@@ -1811,11 +1802,11 @@ class CppPathfinder:
 
     def _convert_result_to_route(
         self,
-        result: "router_cpp.RouteResult",
-        start: "Pad",
-        end: "Pad",
-        net_class: "NetClassRouting | None",
-    ) -> "Route":
+        result: router_cpp.RouteResult,
+        start: Pad,
+        end: Pad,
+        net_class: NetClassRouting | None,
+    ) -> Route:
         """Convert a C++ RouteResult to a Python Route object.
 
         Args:
@@ -1995,11 +1986,11 @@ class CppPathfinder:
 
     def _validate_route_clearance(
         self,
-        route: "Route",
-        start: "Pad",
-        end: "Pad",
+        route: Route,
+        start: Pad,
+        end: Pad,
         trace_radius_cells: int,
-        net_class: "NetClassRouting | None" = None,
+        net_class: NetClassRouting | None = None,
     ) -> tuple[float, float] | None:
         """Validate post-route geometric clearance using C++ validation.
 
@@ -2237,9 +2228,7 @@ class CppPathfinder:
                 )
                 return None
             per_net_timeout = (
-                min(per_net_timeout, remaining)
-                if per_net_timeout is not None
-                else remaining
+                min(per_net_timeout, remaining) if per_net_timeout is not None else remaining
             )
 
         # The fallback is actually going to run -- make it LOUD.  This
@@ -2398,7 +2387,7 @@ class CppPathfinder:
         start: Pad,
         end: Pad,
         layer: int | None = None,
-        net_class: "NetClassRouting | None" = None,
+        net_class: NetClassRouting | None = None,
     ) -> set[int]:
         """Find which nets block the direct path from start to end.
 

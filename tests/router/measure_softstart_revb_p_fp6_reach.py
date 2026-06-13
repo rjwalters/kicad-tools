@@ -107,9 +107,16 @@ def main(per_net_timeout: float = 30.0, total_timeout: float = 300.0) -> int:
         manufacturer="jlcpcb-tier1",
     )
     skip_nets = [
-        "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-        "+3.3V", "VRECT",
-        "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+        "AC_LINE",
+        "AC_NEUTRAL",
+        "FUSED_LINE",
+        "GND",
+        "+3.3V",
+        "VRECT",
+        "SCAP_POS+",
+        "SCAP_POS_GND",
+        "SCAP_NEG+",
+        "SCAP_NEG_GND",
         "ISENSE_POS",
     ]
 
@@ -117,7 +124,9 @@ def main(per_net_timeout: float = 30.0, total_timeout: float = 300.0) -> int:
 
     t1 = time.time()
     router, _ = load_pcb_for_routing(
-        str(pcb_path), skip_nets=skip_nets, rules=rules,
+        str(pcb_path),
+        skip_nets=skip_nets,
+        rules=rules,
     )
     router.rules.manufacturer = "jlcpcb-tier1"
     print(f"Load: {time.time() - t1:.1f}s", flush=True)
@@ -126,8 +135,10 @@ def main(per_net_timeout: float = 30.0, total_timeout: float = 300.0) -> int:
     dense_packages = router.detect_dense_packages()
     print(f"\nDense packages detected: {len(dense_packages)}")
     for pkg in dense_packages:
-        print(f"  {pkg.ref}: {pkg.package_type.name} ({pkg.pin_count} pins, "
-              f"pitch={pkg.pin_pitch:.3f} mm)")
+        print(
+            f"  {pkg.ref}: {pkg.package_type.name} ({pkg.pin_count} pins, "
+            f"pitch={pkg.pin_pitch:.3f} mm)"
+        )
 
     t2 = time.time()
     router.route_with_escape(
@@ -146,18 +157,12 @@ def main(per_net_timeout: float = 30.0, total_timeout: float = 300.0) -> int:
 
     # Inspect log buffer for rescue lines.
     log_text = log_buf.getvalue()
-    sop_lines = [
-        l for l in log_text.splitlines()
-        if "SOP in-pad rescue" in l
-    ]
+    sop_lines = [l for l in log_text.splitlines() if "SOP in-pad rescue" in l]
     print(f"\nP_FP6 SOP in-pad rescues fired: {len(sop_lines)}", flush=True)
     for l in sop_lines:
         print(f"  {l}", flush=True)
 
-    u1_rescue_lines = [
-        l for l in log_text.splitlines()
-        if "in-pad" in l and "U1" in l
-    ]
+    u1_rescue_lines = [l for l in log_text.splitlines() if "in-pad" in l and "U1" in l]
     print(f"\nPR #3386 U1 LQFP-32 rescue mentions: {len(u1_rescue_lines)}", flush=True)
     for l in u1_rescue_lines[:5]:
         print(f"  {l}", flush=True)

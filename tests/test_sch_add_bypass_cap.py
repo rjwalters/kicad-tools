@@ -15,6 +15,8 @@ from kicad_tools.cli.sch_add_bypass_cap import (
     _compute_cap_offset,
     _make_default_cap_lib_sym,
     _snap,
+)
+from kicad_tools.cli.sch_add_bypass_cap import (
     main as add_bypass_main,
 )
 from kicad_tools.schema import Schematic
@@ -334,13 +336,19 @@ class TestBasicPlacement:
     def test_place_bypass_cap(self, tmp_path: Path):
         """Place a bypass cap on U1 pin 4 and verify symbols and wires appear."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--value", "100nF",
-            "--ground-net", "GND",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--value",
+                "100nF",
+                "--ground-net",
+                "GND",
+            ]
+        )
         assert result == 0
 
         # Reload and verify
@@ -361,13 +369,19 @@ class TestBasicPlacement:
     def test_custom_reference(self, tmp_path: Path):
         """Explicitly provide --reference."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--reference", "C42",
-            "--value", "22nF",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--reference",
+                "C42",
+                "--value",
+                "22nF",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -377,12 +391,17 @@ class TestBasicPlacement:
     def test_custom_ground_net(self, tmp_path: Path):
         """Use --ground-net GNDD."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--ground-net", "GNDD",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--ground-net",
+                "GNDD",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -425,30 +444,17 @@ def _check_no_short(
     """
     for wire in sch.wires:
         starts_at_ic = _wire_distance(wire.start, wire.end, ic_pin_pos, tol) or (
-            abs(wire.start[0] - ic_pin_pos[0]) < tol
-            and abs(wire.start[1] - ic_pin_pos[1]) < tol
+            abs(wire.start[0] - ic_pin_pos[0]) < tol and abs(wire.start[1] - ic_pin_pos[1]) < tol
         )
         ends_at_gnd = (
-            abs(wire.end[0] - gnd_pos[0]) < tol
-            and abs(wire.end[1] - gnd_pos[1]) < tol
-        ) or (
-            abs(wire.start[0] - gnd_pos[0]) < tol
-            and abs(wire.start[1] - gnd_pos[1]) < tol
-        )
+            abs(wire.end[0] - gnd_pos[0]) < tol and abs(wire.end[1] - gnd_pos[1]) < tol
+        ) or (abs(wire.start[0] - gnd_pos[0]) < tol and abs(wire.start[1] - gnd_pos[1]) < tol)
         starts_at_gnd = (
-            abs(wire.start[0] - gnd_pos[0]) < tol
-            and abs(wire.start[1] - gnd_pos[1]) < tol
-        ) or (
-            abs(wire.end[0] - gnd_pos[0]) < tol
-            and abs(wire.end[1] - gnd_pos[1]) < tol
-        )
+            abs(wire.start[0] - gnd_pos[0]) < tol and abs(wire.start[1] - gnd_pos[1]) < tol
+        ) or (abs(wire.end[0] - gnd_pos[0]) < tol and abs(wire.end[1] - gnd_pos[1]) < tol)
         ends_at_ic = (
-            abs(wire.end[0] - ic_pin_pos[0]) < tol
-            and abs(wire.end[1] - ic_pin_pos[1]) < tol
-        ) or (
-            abs(wire.start[0] - ic_pin_pos[0]) < tol
-            and abs(wire.start[1] - ic_pin_pos[1]) < tol
-        )
+            abs(wire.end[0] - ic_pin_pos[0]) < tol and abs(wire.end[1] - ic_pin_pos[1]) < tol
+        ) or (abs(wire.start[0] - ic_pin_pos[0]) < tol and abs(wire.start[1] - ic_pin_pos[1]) < tol)
         # A single wire from IC pin to GND (or GND to IC pin) is a short circuit
         if (starts_at_ic and ends_at_gnd) or (starts_at_gnd and ends_at_ic):
             raise AssertionError(
@@ -472,13 +478,19 @@ class TestPinOrientations:
         pin 1 to VDD, which would short VDD→GND.
         """
         sch_path = _write_sch(tmp_path, SCHEMATIC_LEFT_PIN)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U2",
-            "--pin", "5",
-            "--value", "100nF",
-            "--ground-net", "GND",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U2",
+                "--pin",
+                "5",
+                "--value",
+                "100nF",
+                "--ground-net",
+                "GND",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -513,13 +525,19 @@ class TestPinOrientations:
         this was correct already; this test guards against regression.
         """
         sch_path = _write_sch(tmp_path, SCHEMATIC_UP_PIN)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U3",
-            "--pin", "6",
-            "--value", "100nF",
-            "--ground-net", "GND",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U3",
+                "--pin",
+                "6",
+                "--value",
+                "100nF",
+                "--ground-net",
+                "GND",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -552,11 +570,15 @@ class TestJunctionInsertion:
         """When the target pin coordinate is on an existing wire midpoint,
         a junction should be inserted."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_WITH_BUS)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -576,12 +598,16 @@ class TestDryRun:
         sch_path = _write_sch(tmp_path)
         original_content = sch_path.read_text()
 
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--dry-run",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--dry-run",
+            ]
+        )
         assert result == 0
 
         # File should be unchanged
@@ -598,12 +624,16 @@ class TestBackup:
         """--backup should create a backup file before modifying."""
         sch_path = _write_sch(tmp_path)
 
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--backup",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--backup",
+            ]
+        )
         assert result == 0
 
         # A backup file should exist
@@ -620,30 +650,42 @@ class TestErrors:
     def test_unknown_ref(self, tmp_path: Path):
         """Error when --ref symbol doesn't exist."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U99",
-            "--pin", "4",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U99",
+                "--pin",
+                "4",
+            ]
+        )
         assert result == 1
 
     def test_unknown_pin(self, tmp_path: Path):
         """Error when --pin doesn't exist on the symbol."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "99",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "99",
+            ]
+        )
         assert result == 1
 
     def test_missing_schematic(self, tmp_path: Path):
         """Error when schematic file doesn't exist."""
-        result = add_bypass_main([
-            str(tmp_path / "nonexistent.kicad_sch"),
-            "--ref", "U1",
-            "--pin", "4",
-        ])
+        result = add_bypass_main(
+            [
+                str(tmp_path / "nonexistent.kicad_sch"),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+            ]
+        )
         assert result == 1
 
 
@@ -658,13 +700,19 @@ class TestInstancesBlock:
     def test_capacitor_has_instances_block(self, tmp_path: Path):
         """The capacitor placed by add-bypass-cap must have an instances block."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--value", "100nF",
-            "--ground-net", "GND",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--value",
+                "100nF",
+                "--ground-net",
+                "GND",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -687,13 +735,19 @@ class TestInstancesBlock:
     def test_ground_symbol_has_instances_block(self, tmp_path: Path):
         """The ground power symbol placed by add-bypass-cap must have an instances block."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-            "--value", "100nF",
-            "--ground-net", "GND",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+                "--value",
+                "100nF",
+                "--ground-net",
+                "GND",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -708,11 +762,15 @@ class TestInstancesBlock:
     def test_instances_use_schematic_stem_as_project(self, tmp_path: Path):
         """Without .kicad_pro, project name should be the schematic stem."""
         sch_path = _write_sch(tmp_path)
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)
@@ -730,11 +788,15 @@ class TestInstancesBlock:
         pro_path = tmp_path / "my-board.kicad_pro"
         pro_path.write_text("{}")
 
-        result = add_bypass_main([
-            str(sch_path),
-            "--ref", "U1",
-            "--pin", "4",
-        ])
+        result = add_bypass_main(
+            [
+                str(sch_path),
+                "--ref",
+                "U1",
+                "--pin",
+                "4",
+            ]
+        )
         assert result == 0
 
         sch = Schematic.load(sch_path)

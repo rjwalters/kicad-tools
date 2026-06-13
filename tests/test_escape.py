@@ -758,8 +758,7 @@ class TestEscapeRouter:
         # should survive clipping (perpendicular launches don't run along
         # the same-edge pads).  4 edges * 4 even pins = 16 minimum.
         assert len(escapes) >= 16, (
-            f"Expected at least 16 perpendicular-axis escapes for QFP-32, "
-            f"got {len(escapes)}"
+            f"Expected at least 16 perpendicular-axis escapes for QFP-32, got {len(escapes)}"
         )
         # Upper bound is one-per-edge-pad (32) -- no escape should be added
         # spuriously by the clipping path.
@@ -861,9 +860,7 @@ class TestStaggeredViaFanout:
         pads = create_bga_pads(2, 2, pitch=0.8)
         # Issue #2948: pass empty foreign-copper lists explicitly to
         # preserve the legacy grid-cell-only behavior under test.
-        vias = router.staggered_via_fanout(
-            pads, foreign_pads=[], foreign_tracks=[]
-        )
+        vias = router.staggered_via_fanout(pads, foreign_pads=[], foreign_tracks=[])
 
         # Should have up to 4 vias
         assert len(vias) <= 4
@@ -913,21 +910,28 @@ class TestStaggeredViaFanout:
         # Place the foreign pad 0.5 mm away -> below the threshold ->
         # rejection expected.
         own_pad = Pad(
-            x=10.0, y=10.0, width=0.4, height=0.4,
-            net=5, net_name="OWN", layer=Layer.F_CU,
+            x=10.0,
+            y=10.0,
+            width=0.4,
+            height=0.4,
+            net=5,
+            net_name="OWN",
+            layer=Layer.F_CU,
         )
         foreign = Pad(
-            x=10.5, y=10.0, width=0.4, height=0.4,
-            net=99, net_name="OTHER", layer=Layer.F_CU,
+            x=10.5,
+            y=10.0,
+            width=0.4,
+            height=0.4,
+            net=99,
+            net_name="OTHER",
+            layer=Layer.F_CU,
         )
 
         # Baseline: with no foreign context the legacy path emits the via.
-        baseline_vias = router.staggered_via_fanout(
-            [own_pad], stagger_distance=0.0
-        )
+        baseline_vias = router.staggered_via_fanout([own_pad], stagger_distance=0.0)
         assert len(baseline_vias) == 1, (
-            "Sanity check: legacy path (no foreign context) should emit "
-            "the candidate via."
+            "Sanity check: legacy path (no foreign context) should emit the candidate via."
         )
 
         # Wired path: foreign pad inside the envelope rejects the via.
@@ -950,16 +954,27 @@ class TestStaggeredViaFanout:
         router = EscapeRouter(grid, rules)
 
         own_pad = Pad(
-            x=10.0, y=10.0, width=0.4, height=0.4,
-            net=5, net_name="OWN", layer=Layer.F_CU,
+            x=10.0,
+            y=10.0,
+            width=0.4,
+            height=0.4,
+            net=5,
+            net_name="OWN",
+            layer=Layer.F_CU,
         )
         # Horizontal foreign-net trace passing 0.4 mm above the via center.
         # Required clearance:
         #   via_radius (0.35) + trace_half_width (0.1) + via_clearance (0.2)
         #   = 0.65 mm; actual 0.4 mm -> reject.
         foreign_seg = Segment(
-            x1=9.0, y1=10.4, x2=11.0, y2=10.4,
-            width=0.2, layer=Layer.F_CU, net=99, net_name="OTHER",
+            x1=9.0,
+            y1=10.4,
+            x2=11.0,
+            y2=10.4,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=99,
+            net_name="OTHER",
         )
 
         wired_vias = router.staggered_via_fanout(
@@ -983,14 +998,24 @@ class TestStaggeredViaFanout:
         router = EscapeRouter(grid, rules)
 
         own_pad = Pad(
-            x=10.0, y=10.0, width=0.4, height=0.4,
-            net=5, net_name="OWN", layer=Layer.F_CU,
+            x=10.0,
+            y=10.0,
+            width=0.4,
+            height=0.4,
+            net=5,
+            net_name="OWN",
+            layer=Layer.F_CU,
         )
         # Same-net "foreign" pad close enough to violate clearance if
         # treated as foreign.  Must be filtered out by net=5.
         same_net = Pad(
-            x=10.3, y=10.0, width=0.4, height=0.4,
-            net=5, net_name="OWN", layer=Layer.F_CU,
+            x=10.3,
+            y=10.0,
+            width=0.4,
+            height=0.4,
+            net=5,
+            net_name="OWN",
+            layer=Layer.F_CU,
         )
 
         vias = router.staggered_via_fanout(
@@ -1396,20 +1421,14 @@ class TestSOPStaggeredEscape:
             if escape.via is None:
                 # Even pad: escape point moves outward along direction
                 # Project displacement onto direction vector
-                disp_along_dir = (
-                    (escape_x - escape.pad.x) * dx
-                    + (escape_y - escape.pad.y) * dy
-                )
+                disp_along_dir = (escape_x - escape.pad.x) * dx + (escape_y - escape.pad.y) * dy
                 assert disp_along_dir > 0, (
                     f"Even pad escape should move outward: disp={disp_along_dir:.4f}"
                 )
             else:
                 # Odd pad: via is placed inward (opposite to direction)
                 via_x, via_y = escape.via_pos
-                via_disp_along_dir = (
-                    (via_x - escape.pad.x) * dx
-                    + (via_y - escape.pad.y) * dy
-                )
+                via_disp_along_dir = (via_x - escape.pad.x) * dx + (via_y - escape.pad.y) * dy
                 assert via_disp_along_dir < 0, (
                     f"Odd pad via should move inward (opposite to direction): "
                     f"disp={via_disp_along_dir:.4f}"
@@ -1482,12 +1501,8 @@ class TestFinePitchEscapeClearance:
         assert len(escapes) == 20
 
         # Group escapes by side (left/right column)
-        left_escapes = sorted(
-            [e for e in escapes if e.pad.x < 0], key=lambda e: e.pad.y
-        )
-        right_escapes = sorted(
-            [e for e in escapes if e.pad.x > 0], key=lambda e: e.pad.y
-        )
+        left_escapes = sorted([e for e in escapes if e.pad.x < 0], key=lambda e: e.pad.y)
+        right_escapes = sorted([e for e in escapes if e.pad.x > 0], key=lambda e: e.pad.y)
 
         for side_escapes in [left_escapes, right_escapes]:
             for idx in range(len(side_escapes) - 1):
@@ -1508,11 +1523,11 @@ class TestFinePitchEscapeClearance:
     @pytest.mark.parametrize(
         "pitch,clearance",
         [
-            (0.5, 0.1),   # TSSOP, tight clearance
+            (0.5, 0.1),  # TSSOP, tight clearance
             (0.5, 0.15),  # TSSOP, moderate clearance
-            (0.5, 0.2),   # TSSOP, generous clearance
+            (0.5, 0.2),  # TSSOP, generous clearance
             (0.65, 0.1),  # SSOP, tight clearance
-            (0.65, 0.15), # SSOP, moderate clearance
+            (0.65, 0.15),  # SSOP, moderate clearance
             (0.65, 0.2),  # SSOP, generous clearance
         ],
     )
@@ -1584,9 +1599,7 @@ class TestFinePitchEscapeClearance:
         # In either case, lateral offset shifts along the row axis.
         # With sufficient clearance, the via should stay inline with the
         # pad in the row-direction coordinate.
-        left_escapes = sorted(
-            [e for e in escapes if e.pad.x < 0], key=lambda e: e.pad.y
-        )
+        left_escapes = sorted([e for e in escapes if e.pad.x < 0], key=lambda e: e.pad.y)
         for e in left_escapes:
             if e.via_pos is None:
                 continue
@@ -1667,8 +1680,7 @@ class TestInwardViaStrategy:
                 ex, ey = escape.escape_point
                 disp = (ex - escape.pad.x) * dx + (ey - escape.pad.y) * dy
                 assert disp > 0, (
-                    f"Even pad {escape.pad.net_name} escape should be outward: "
-                    f"disp={disp:.4f}"
+                    f"Even pad {escape.pad.net_name} escape should be outward: disp={disp:.4f}"
                 )
 
     def test_inner_layer_selection_signal(self, fine_pitch_rules):
@@ -1677,7 +1689,11 @@ class TestInwardViaStrategy:
 
         layer_stack = LayerStack.four_layer_sig_sig_gnd_pwr()
         grid = RoutingGrid(
-            50, 50, fine_pitch_rules, origin_x=0, origin_y=0,
+            50,
+            50,
+            fine_pitch_rules,
+            origin_x=0,
+            origin_y=0,
             layer_stack=layer_stack,
         )
         router = EscapeRouter(grid, fine_pitch_rules)
@@ -1699,7 +1715,11 @@ class TestInwardViaStrategy:
         # sig_gnd_pwr_sig has In1.Cu=GND plane, In2.Cu=PWR plane
         layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         grid = RoutingGrid(
-            50, 50, fine_pitch_rules, origin_x=0, origin_y=0,
+            50,
+            50,
+            fine_pitch_rules,
+            origin_x=0,
+            origin_y=0,
             layer_stack=layer_stack,
         )
         router = EscapeRouter(grid, fine_pitch_rules)
@@ -1721,7 +1741,11 @@ class TestInwardViaStrategy:
 
         layer_stack = LayerStack.two_layer()
         grid = RoutingGrid(
-            50, 50, fine_pitch_rules, origin_x=0, origin_y=0,
+            50,
+            50,
+            fine_pitch_rules,
+            origin_x=0,
+            origin_y=0,
             layer_stack=layer_stack,
         )
         router = EscapeRouter(grid, fine_pitch_rules)
@@ -1777,9 +1801,9 @@ class TestInwardViaStrategy:
             escapes = router.generate_escapes(info)
             handler.flush()
             warnings = [
-                r for r in handler.buffer
-                if r.levelno >= logging.WARNING
-                and "clearance violation" in r.getMessage().lower()
+                r
+                for r in handler.buffer
+                if r.levelno >= logging.WARNING and "clearance violation" in r.getMessage().lower()
             ]
             assert len(warnings) == 0, (
                 f"Expected 0 clearance warnings, got {len(warnings)}: "
@@ -1794,9 +1818,7 @@ class TestInwardViaStrategy:
 # ==============================================================================
 
 
-def create_connector_pads(
-    pins: int, pitch: float = 2.54, ref: str = "J1"
-) -> list[Pad]:
+def create_connector_pads(pins: int, pitch: float = 2.54, ref: str = "J1") -> list[Pad]:
     """Create pads simulating a dual-row through-hole connector (e.g., 2x20 header).
 
     Args:
@@ -2346,9 +2368,7 @@ class TestMultiRowEdgeAlignedEscape:
             grid._pads.append(p)
         return translated
 
-    def test_edge_aligned_both_rows_escape_toward_populated_side(
-        self, grid_and_rules
-    ):
+    def test_edge_aligned_both_rows_escape_toward_populated_side(self, grid_and_rules):
         """Issue #3310: For an edge-aligned 40-pin connector with all
         destinations west, BOTH rows must escape WEST (not opposite
         directions as the original symmetric strategy did)."""
@@ -2371,13 +2391,10 @@ class TestMultiRowEdgeAlignedEscape:
         # ALL inner-row escapes must also point WEST (the populated side).
         inner = [e for e in escapes if e.via is not None]
         assert all(e.direction == EscapeDirection.WEST for e in inner), (
-            "Inner-row escapes should also go WEST under board-edge "
-            "detection (Issue #3310)"
+            "Inner-row escapes should also go WEST under board-edge detection (Issue #3310)"
         )
 
-    def test_edge_aligned_inner_endpoints_on_empty_side(
-        self, grid_and_rules
-    ):
+    def test_edge_aligned_inner_endpoints_on_empty_side(self, grid_and_rules):
         """Issue #3310: The inner-row escape endpoints must sit on the
         EMPTY side of the connector (the side opposite the populated
         routing area).  This is the short-trace strategy: vias go
@@ -2436,9 +2453,7 @@ class TestMultiRowEdgeAlignedEscape:
                 f"intersecting peer vias"
             )
 
-    def test_edge_aligned_via_positions_perpendicular_staggered(
-        self, grid_and_rules
-    ):
+    def test_edge_aligned_via_positions_perpendicular_staggered(self, grid_and_rules):
         """Issue #3310: Adjacent inner-row vias should have at least
         two distinct perpendicular (X) positions to break up the via
         wall that previously blocked cross-traffic."""
@@ -2475,8 +2490,7 @@ class TestMultiRowEdgeAlignedEscape:
             for p2 in positions[i + 1 :]:
                 d = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
                 assert d >= min_dist - 1e-6, (
-                    f"Via centers too close: {d:.3f}mm < required "
-                    f"{min_dist:.3f}mm"
+                    f"Via centers too close: {d:.3f}mm < required {min_dist:.3f}mm"
                 )
 
     def test_symmetric_board_keeps_original_strategy(self, grid_and_rules):
@@ -2487,9 +2501,7 @@ class TestMultiRowEdgeAlignedEscape:
         router = EscapeRouter(grid, rules)
 
         # Equal foreign pads on both sides.
-        pads = self._make_j2_like_connector(
-            grid, n_foreign_west=50, n_foreign_east=50
-        )
+        pads = self._make_j2_like_connector(grid, n_foreign_west=50, n_foreign_east=50)
         info = router.analyze_package(pads)
         escapes = router.generate_escapes(info)
 
@@ -2506,9 +2518,7 @@ class TestMultiRowEdgeAlignedEscape:
         router = EscapeRouter(grid, rules)
 
         # No foreign pads injected.
-        pads = self._make_j2_like_connector(
-            grid, n_foreign_west=0, n_foreign_east=0
-        )
+        pads = self._make_j2_like_connector(grid, n_foreign_west=0, n_foreign_east=0)
         info = router.analyze_package(pads)
         escapes = router.generate_escapes(info)
 
@@ -2524,9 +2534,7 @@ class TestMultiRowEdgeAlignedEscape:
 # ==============================================================================
 
 
-def create_ssop28_pads(
-    pad_width: float = 0.42, pitch: float = 0.65, ref: str = "U5"
-) -> list[Pad]:
+def create_ssop28_pads(pad_width: float = 0.42, pitch: float = 0.65, ref: str = "U5") -> list[Pad]:
     """Create pads simulating an SSOP-28 package with realistic pad dimensions.
 
     Models a PCM5122PW-style SSOP-28: 0.42mm pad width at 0.65mm pitch.
@@ -2551,8 +2559,8 @@ def create_ssop28_pads(
             Pad(
                 x=-row_spacing / 2,
                 y=-half_length + i * pitch,
-                width=1.5,           # pad extent perpendicular to row (lead length)
-                height=pad_width,    # pad extent along row axis
+                width=1.5,  # pad extent perpendicular to row (lead length)
+                height=pad_width,  # pad extent along row axis
                 net=net,
                 net_name=f"NET_{net}",
                 layer=Layer.F_CU,
@@ -2619,9 +2627,9 @@ class TestSegmentToPadClearance:
             escapes = router.generate_escapes(info)
             handler.flush()
             warnings = [
-                r for r in handler.buffer
-                if r.levelno >= logging.WARNING
-                and "clearance violation" in r.getMessage().lower()
+                r
+                for r in handler.buffer
+                if r.levelno >= logging.WARNING and "clearance violation" in r.getMessage().lower()
             ]
             assert len(warnings) == 0, (
                 f"Expected 0 clearance warnings, got {len(warnings)}: "
@@ -2681,12 +2689,24 @@ class TestSegmentToPadClearance:
 
         # Two pads at 0.65mm pitch
         pad0 = Pad(
-            x=0.0, y=0.0, width=1.5, height=0.42,
-            net=1, net_name="NET_1", layer=Layer.F_CU, ref="U5",
+            x=0.0,
+            y=0.0,
+            width=1.5,
+            height=0.42,
+            net=1,
+            net_name="NET_1",
+            layer=Layer.F_CU,
+            ref="U5",
         )
         pad1 = Pad(
-            x=0.0, y=0.65, width=1.5, height=0.42,
-            net=2, net_name="NET_2", layer=Layer.F_CU, ref="U5",
+            x=0.0,
+            y=0.65,
+            width=1.5,
+            height=0.42,
+            net=2,
+            net_name="NET_2",
+            layer=Layer.F_CU,
+            ref="U5",
         )
         row_pads = [pad0, pad1]
 
@@ -2694,8 +2714,14 @@ class TestSegmentToPadClearance:
         # to pad1.  The segment runs from pad0 outward (WEST), right
         # next to pad1's copper.
         violating_seg = Segment(
-            x1=0.0, y1=0.0, x2=-1.0, y2=0.0,
-            width=0.1, layer=Layer.F_CU, net=1, net_name="NET_1",
+            x1=0.0,
+            y1=0.0,
+            x2=-1.0,
+            y2=0.0,
+            width=0.1,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET_1",
         )
         escape = EscapeRoute(
             pad=pad0,
@@ -2714,13 +2740,15 @@ class TestSegmentToPadClearance:
         try:
             # Validate with segment-to-pad checking enabled
             router._validate_escape_clearances(
-                [escape], ssop28_rules.trace_clearance, row_pads,
+                [escape],
+                ssop28_rules.trace_clearance,
+                row_pads,
             )
             handler.flush()
             pad_warnings = [
-                r for r in handler.buffer
-                if r.levelno >= logging.WARNING
-                and "segment-to-pad" in r.getMessage().lower()
+                r
+                for r in handler.buffer
+                if r.levelno >= logging.WARNING and "segment-to-pad" in r.getMessage().lower()
             ]
             # The segment at y=0 is within 0.65 - 0.42/2 - 0.1/2 = 0.39mm
             # of pad1's edge, which is > 0.15mm clearance, so this particular
@@ -2790,14 +2818,25 @@ class TestSegmentToPadClearance:
 
         # Pad centered at (0, 1.0) with height=0.42mm
         pad = Pad(
-            x=0.0, y=1.0, width=1.5, height=0.42,
-            net=1, net_name="NET_1", layer=Layer.F_CU,
+            x=0.0,
+            y=1.0,
+            width=1.5,
+            height=0.42,
+            net=1,
+            net_name="NET_1",
+            layer=Layer.F_CU,
         )
 
         # Segment running along x-axis at y=0, width=0.1
         seg = Segment(
-            x1=-1.0, y1=0.0, x2=1.0, y2=0.0,
-            width=0.1, layer=Layer.F_CU, net=2, net_name="NET_2",
+            x1=-1.0,
+            y1=0.0,
+            x2=1.0,
+            y2=0.0,
+            width=0.1,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="NET_2",
         )
 
         # Distance from segment center-line (y=0) to pad edge:
@@ -2824,16 +2863,22 @@ def create_sot23_5_pads(cx: float = 25.0, cy: float = 25.0, ref: str = "U3") -> 
     """
     coords = [
         (cx - 1.1, cy + 0.95, 1),  # pin 1 (west bottom)
-        (cx - 1.1, cy, 2),         # pin 2 (west middle)
+        (cx - 1.1, cy, 2),  # pin 2 (west middle)
         (cx - 1.1, cy - 0.95, 3),  # pin 3 (west top)
         (cx + 1.1, cy - 0.95, 4),  # pin 4 (east top)
         (cx + 1.1, cy + 0.95, 5),  # pin 5 (east bottom)
     ]
     return [
         Pad(
-            x=x, y=y, width=1.06, height=0.65,
-            net=net, net_name=f"NET_{net}", layer=Layer.F_CU,
-            ref=ref, through_hole=False,
+            x=x,
+            y=y,
+            width=1.06,
+            height=0.65,
+            net=net,
+            net_name=f"NET_{net}",
+            layer=Layer.F_CU,
+            ref=ref,
+            through_hole=False,
         )
         for x, y, net in coords
     ]
@@ -2892,16 +2937,22 @@ class TestSot235ColumnOrientation:
         pads = []
         for i in range(3):
             for col, x in ((1, -1.1), (2, 1.1)):
-                pads.append(Pad(
-                    x=x, y=(i - 1) * 0.65, width=1.0, height=0.4,
-                    net=i * 2 + col, net_name=f"N{i}{col}", layer=Layer.F_CU,
-                    ref="U9", through_hole=False,
-                ))
+                pads.append(
+                    Pad(
+                        x=x,
+                        y=(i - 1) * 0.65,
+                        width=1.0,
+                        height=0.4,
+                        net=i * 2 + col,
+                        net_name=f"N{i}{col}",
+                        layer=Layer.F_CU,
+                        ref="U9",
+                        through_hole=False,
+                    )
+                )
         assert is_dense_package(pads, trace_width=0.3, clearance=0.2)
 
-    def test_sot23_5_escape_stubs_do_not_cross_column_neighbours(
-        self, grid_and_rules
-    ):
+    def test_sot23_5_escape_stubs_do_not_cross_column_neighbours(self, grid_and_rules):
         """No escape stub may pass over another pad of the same package."""
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
@@ -2926,9 +2977,7 @@ class TestSot235ColumnOrientation:
             px_hi = pad.x + pad.width / 2
             py_lo = pad.y - pad.height / 2
             py_hi = pad.y + pad.height / 2
-            return not (
-                hi_x < px_lo or lo_x > px_hi or hi_y < py_lo or lo_y > py_hi
-            )
+            return not (hi_x < px_lo or lo_x > px_hi or hi_y < py_lo or lo_y > py_hi)
 
         for route in escapes:
             for seg in route.segments:
@@ -2941,9 +2990,7 @@ class TestSot235ColumnOrientation:
                     # be touched by its own follow-up segments.
                     if (seg.x1, seg.y1) == (pad.x, pad.y):
                         continue
-                    assert not crosses_pad(
-                        seg.x1, seg.y1, seg.x2, seg.y2, pad
-                    ), (
+                    assert not crosses_pad(seg.x1, seg.y1, seg.x2, seg.y2, pad), (
                         f"Escape stub ({seg.x1},{seg.y1})->({seg.x2},{seg.y2}) "
                         f"crosses same-package pad net={pad.net_name} at "
                         f"({pad.x},{pad.y}) — SOT-23-5 column orientation "

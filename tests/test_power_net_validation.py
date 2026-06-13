@@ -6,8 +6,6 @@ Tests for the validate_power_nets() method that checks:
 - Multiple power outputs on the same net are detected
 """
 
-import pytest
-
 from kicad_tools.schematic.models import PowerNetIssue, Schematic
 from kicad_tools.schematic.models.elements import PowerSymbol
 from kicad_tools.schematic.models.pin import Pin
@@ -92,7 +90,7 @@ class TestValidatePowerNetsBasic:
         """Single isolated power symbol is detected."""
         sch = Schematic("Test")
         # Add a power symbol not connected to anything
-        add_power_symbol(sch,"power:+3.3V", 100, 50)
+        add_power_symbol(sch, "power:+3.3V", 100, 50)
         issues = sch.validate_power_nets()
 
         assert len(issues) == 1
@@ -104,8 +102,8 @@ class TestValidatePowerNetsBasic:
         """Multiple power symbols connected together but no power output."""
         sch = Schematic("Test")
         # Add power symbols connected by wire
-        add_power_symbol(sch,"power:+3.3V", 100, 50)
-        add_power_symbol(sch,"power:+3.3V", 100, 100)
+        add_power_symbol(sch, "power:+3.3V", 100, 50)
+        add_power_symbol(sch, "power:+3.3V", 100, 100)
         sch.add_wire((100, 50), (100, 100))
 
         issues = sch.validate_power_nets()
@@ -125,9 +123,13 @@ class TestValidatePowerNetsBasic:
             name="AMS1117-3.3",
             raw_sexp="",
             pins=[
-                Pin(name="GND", number="1", x=0, y=5.08, angle=90, length=2.54, pin_type="power_in"),
+                Pin(
+                    name="GND", number="1", x=0, y=5.08, angle=90, length=2.54, pin_type="power_in"
+                ),
                 Pin(name="VO", number="2", x=5.08, y=0, angle=0, length=2.54, pin_type="power_out"),
-                Pin(name="VI", number="3", x=-5.08, y=0, angle=180, length=2.54, pin_type="power_in"),
+                Pin(
+                    name="VI", number="3", x=-5.08, y=0, angle=180, length=2.54, pin_type="power_in"
+                ),
             ],
         )
 
@@ -147,7 +149,7 @@ class TestValidatePowerNetsBasic:
         vo_pos = reg.pin_position("VO")  # Should be (105.08, 50)
 
         # Add power symbol at same position as VO pin
-        add_power_symbol(sch,"power:+3.3V", vo_pos[0], vo_pos[1])
+        add_power_symbol(sch, "power:+3.3V", vo_pos[0], vo_pos[1])
 
         # Connect them with wire (though they're at same point)
         issues = sch.validate_power_nets()
@@ -170,7 +172,15 @@ class TestValidatePowerNetsMultipleOutputs:
                 name="AMS1117-3.3",
                 raw_sexp="",
                 pins=[
-                    Pin(name="VO", number="2", x=5.08, y=0, angle=0, length=2.54, pin_type="power_out"),
+                    Pin(
+                        name="VO",
+                        number="2",
+                        x=5.08,
+                        y=0,
+                        angle=0,
+                        length=2.54,
+                        pin_type="power_out",
+                    ),
                 ],
             )
             reg = SymbolInstance(
@@ -178,15 +188,15 @@ class TestValidatePowerNetsMultipleOutputs:
                 x=x_pos,
                 y=50,
                 rotation=0,
-                reference=f"U{i+1}",
+                reference=f"U{i + 1}",
                 value="AMS1117-3.3",
             )
             sch.symbols.append(reg)
             sch._symbol_defs[regulator_def.lib_id] = regulator_def
 
         # Add power symbols connected to both outputs
-        add_power_symbol(sch,"power:+3.3V", 105.08, 50)
-        add_power_symbol(sch,"power:+3.3V", 205.08, 50)
+        add_power_symbol(sch, "power:+3.3V", 105.08, 50)
+        add_power_symbol(sch, "power:+3.3V", 205.08, 50)
 
         # Connect both outputs together
         sch.add_wire((105.08, 50), (205.08, 50))
@@ -213,9 +223,27 @@ class TestValidatePowerNetsUnconnected:
             name="ATmega328P",
             raw_sexp="",
             pins=[
-                Pin(name="VCC", number="7", x=-10.16, y=0, angle=0, length=2.54, pin_type="power_in"),
-                Pin(name="GND", number="8", x=10.16, y=0, angle=180, length=2.54, pin_type="power_in"),
-                Pin(name="PB0", number="14", x=0, y=-10.16, angle=90, length=2.54, pin_type="bidirectional"),
+                Pin(
+                    name="VCC", number="7", x=-10.16, y=0, angle=0, length=2.54, pin_type="power_in"
+                ),
+                Pin(
+                    name="GND",
+                    number="8",
+                    x=10.16,
+                    y=0,
+                    angle=180,
+                    length=2.54,
+                    pin_type="power_in",
+                ),
+                Pin(
+                    name="PB0",
+                    number="14",
+                    x=0,
+                    y=-10.16,
+                    angle=90,
+                    length=2.54,
+                    pin_type="bidirectional",
+                ),
             ],
         )
         ic = SymbolInstance(
@@ -250,11 +278,11 @@ class TestValidatePowerNetsMixed:
         sch = Schematic("Test")
 
         # Add +3.3V power symbol (isolated - should fail)
-        add_power_symbol(sch,"power:+3.3V", 100, 50)
+        add_power_symbol(sch, "power:+3.3V", 100, 50)
 
         # Add GND power symbols connected (no output - should fail)
-        add_power_symbol(sch,"power:GND", 100, 100)
-        add_power_symbol(sch,"power:GND", 150, 100)
+        add_power_symbol(sch, "power:GND", 100, 100)
+        add_power_symbol(sch, "power:GND", 150, 100)
         sch.add_wire((100, 100), (150, 100))
 
         issues = sch.validate_power_nets()
@@ -286,8 +314,8 @@ class TestValidatePowerNetsConnectivity:
         #      |
         #   +3.3V (100, 150)
 
-        add_power_symbol(sch,"power:+3.3V", 100, 50)
-        add_power_symbol(sch,"power:+3.3V", 100, 150)
+        add_power_symbol(sch, "power:+3.3V", 100, 50)
+        add_power_symbol(sch, "power:+3.3V", 100, 150)
         sch.add_wire((100, 50), (100, 100))  # Vertical top
         sch.add_wire((100, 100), (100, 150))  # Vertical bottom
         sch.add_wire((50, 100), (150, 100))  # Horizontal
@@ -312,7 +340,9 @@ class TestValidatePowerNetsConnectivity:
             name="LM7805",
             raw_sexp="",
             pins=[
-                Pin(name="OUT", number="3", x=7.62, y=0, angle=0, length=2.54, pin_type="power_out"),
+                Pin(
+                    name="OUT", number="3", x=7.62, y=0, angle=0, length=2.54, pin_type="power_out"
+                ),
             ],
         )
         reg = SymbolInstance(
@@ -331,7 +361,7 @@ class TestValidatePowerNetsConnectivity:
 
         # Add power symbol far away but connected by wire
         pwr_pos = (200, 50)
-        add_power_symbol(sch,"power:+5V", pwr_pos[0], pwr_pos[1])
+        add_power_symbol(sch, "power:+5V", pwr_pos[0], pwr_pos[1])
         sch.add_wire(out_pos, pwr_pos)
 
         issues = sch.validate_power_nets()
@@ -353,10 +383,10 @@ class TestValidatePowerNetsPWRFLAG:
         sch = Schematic("Test")
 
         # Add GND power symbol
-        add_power_symbol(sch,"power:GND", 100, 100)
+        add_power_symbol(sch, "power:GND", 100, 100)
 
         # Add PWR_FLAG connected to it
-        add_power_symbol(sch,"power:PWR_FLAG", 100, 80)
+        add_power_symbol(sch, "power:PWR_FLAG", 100, 80)
         sch.add_wire((100, 80), (100, 100))
 
         issues = sch.validate_power_nets()
@@ -396,14 +426,14 @@ class TestPowerNetValidationIntegration:
                 x=100 + i * 20,
                 y=50,
                 rotation=0,
-                reference=f"C{i+1}",
+                reference=f"C{i + 1}",
                 value="100nF",
             )
             sch.symbols.append(cap)
 
             # Add +3.3V power symbol at capacitor pin 1
             pin1_pos = cap.pin_position("1")
-            add_power_symbol(sch,"power:+3.3V", pin1_pos[0], pin1_pos[1])
+            add_power_symbol(sch, "power:+3.3V", pin1_pos[0], pin1_pos[1])
 
         # Connect all capacitors to a horizontal bus
         sch.add_wire((100, 47.46), (140, 47.46))  # Horizontal bus

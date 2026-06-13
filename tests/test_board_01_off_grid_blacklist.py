@@ -39,7 +39,7 @@ BOARD_PCB = REPO_ROOT / "boards" / "01-voltage-divider" / "output" / "voltage_di
 @pytest.fixture(scope="module")
 def loaded_router():
     """Load board 01 with the same multi-resolution grid plan the CLI uses."""
-    from kicad_tools.router.io import load_pcb_for_routing, compute_multi_resolution_plan
+    from kicad_tools.router.io import compute_multi_resolution_plan, load_pcb_for_routing
     from kicad_tools.router.layers import LayerStack
 
     router, _ = load_pcb_for_routing(
@@ -142,13 +142,14 @@ def test_no_pads_off_grid_failures_for_2p54mm_connector_nets(loaded_router):
 
     # Collect any PADS_OFF_GRID failures involving J1/J2 pad refs
     off_grid_failures_for_connectors = [
-        f for f in router.routing_failures
+        f
+        for f in router.routing_failures
         if f.reason.startswith("PADS_OFF_GRID")
         and (
-            (f.source_pad and "J1" in str(f.source_pad)) or
-            (f.source_pad and "J2" in str(f.source_pad)) or
-            (f.target_pad and "J1" in str(f.target_pad)) or
-            (f.target_pad and "J2" in str(f.target_pad))
+            (f.source_pad and "J1" in str(f.source_pad))
+            or (f.source_pad and "J2" in str(f.source_pad))
+            or (f.target_pad and "J1" in str(f.target_pad))
+            or (f.target_pad and "J2" in str(f.target_pad))
         )
     ]
 

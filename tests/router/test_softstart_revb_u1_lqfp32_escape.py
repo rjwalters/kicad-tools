@@ -80,9 +80,16 @@ def test_softstart_revb_u1_lqfp32_escape_floor(tmp_path: Path) -> None:
         str(pcb_path),
         rules=rules,
         skip_nets=[
-            "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-            "+3.3V", "VRECT",
-            "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+            "AC_LINE",
+            "AC_NEUTRAL",
+            "FUSED_LINE",
+            "GND",
+            "+3.3V",
+            "VRECT",
+            "SCAP_POS+",
+            "SCAP_POS_GND",
+            "SCAP_NEG+",
+            "SCAP_NEG_GND",
             "ISENSE_POS",
         ],
     )
@@ -92,9 +99,7 @@ def test_softstart_revb_u1_lqfp32_escape_floor(tmp_path: Path) -> None:
     router.rules.manufacturer = "jlcpcb-tier1"
 
     u1_pads = [p for p in router.pads.values() if p.ref == "U1"]
-    assert len(u1_pads) == 32, (
-        f"Expected 32 U1 LQFP-32 pads, got {len(u1_pads)}"
-    )
+    assert len(u1_pads) == 32, f"Expected 32 U1 LQFP-32 pads, got {len(u1_pads)}"
 
     subgrid = SubGridRouter(router.grid, rules)
     analysis = subgrid.analyze_pads(u1_pads)
@@ -139,9 +144,16 @@ def test_softstart_revb_u1_rescues_are_micro_via_in_pad(tmp_path: Path) -> None:
         str(pcb_path),
         rules=rules,
         skip_nets=[
-            "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-            "+3.3V", "VRECT",
-            "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+            "AC_LINE",
+            "AC_NEUTRAL",
+            "FUSED_LINE",
+            "GND",
+            "+3.3V",
+            "VRECT",
+            "SCAP_POS+",
+            "SCAP_POS_GND",
+            "SCAP_NEG+",
+            "SCAP_NEG_GND",
             "ISENSE_POS",
         ],
     )
@@ -153,14 +165,10 @@ def test_softstart_revb_u1_rescues_are_micro_via_in_pad(tmp_path: Path) -> None:
     result = subgrid.generate_escape_segments(analysis)
 
     rescues = [e for e in result.escapes if e.via is not None]
-    assert len(rescues) > 0, (
-        "Expected at least one Phase 5 in-pad rescue for U1 LQFP-32"
-    )
+    assert len(rescues) > 0, "Expected at least one Phase 5 in-pad rescue for U1 LQFP-32"
     for e in rescues:
         assert e.via is not None
-        assert e.via.in_pad is True, (
-            f"U1.{e.pad.pin} rescue via must be tagged in_pad=True"
-        )
+        assert e.via.in_pad is True, f"U1.{e.pad.pin} rescue via must be tagged in_pad=True"
         assert e.via.is_micro is True, (
             f"U1.{e.pad.pin} rescue via must be tagged is_micro=True "
             f"(0.60 mm tier-1 via clips LQFP-32 0.8 mm pitch neighbour)"
@@ -203,9 +211,16 @@ def test_softstart_revb_u1_plane_pads_not_rescued(tmp_path: Path) -> None:
         str(pcb_path),
         rules=rules,
         skip_nets=[
-            "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-            "+3.3V", "VRECT",
-            "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+            "AC_LINE",
+            "AC_NEUTRAL",
+            "FUSED_LINE",
+            "GND",
+            "+3.3V",
+            "VRECT",
+            "SCAP_POS+",
+            "SCAP_POS_GND",
+            "SCAP_NEG+",
+            "SCAP_NEG_GND",
             "ISENSE_POS",
         ],
     )

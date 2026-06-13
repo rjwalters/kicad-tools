@@ -16,10 +16,8 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.placement import (
-    PlacementAnalyzer,
     PlacementFixer,
 )
-from kicad_tools.placement.analyzer import DesignRules
 from kicad_tools.placement.conflict import (
     Conflict,
     ConflictSeverity,
@@ -28,12 +26,9 @@ from kicad_tools.placement.conflict import (
     Point,
 )
 from kicad_tools.placement.fixer import (
-    FixStrategy,
-    IterativeFixResult,
     _escalate_fixes,
     _fix_direction_key,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures: PCB content
@@ -237,8 +232,10 @@ class TestEscalateFixes:
         """Escalation preserves non-vector fields."""
         conflict = _make_conflict("R1", "R2")
         fix = PlacementFix(
-            conflict=conflict, component="R2",
-            move_vector=Point(1.0, 0.5), confidence=0.8,
+            conflict=conflict,
+            component="R2",
+            move_vector=Point(1.0, 0.5),
+            confidence=0.8,
         )
         escalated = _escalate_fixes([fix], 1.5)
         assert escalated[0].component == "R2"
@@ -322,10 +319,7 @@ class TestIterativeFixDenseCluster:
         result = fixer.iterative_fix(dense_pcb, output_path=output)
 
         # If there are stalled passes, at least one should have escalation > 1.0
-        stalled_passes = [
-            pr for pr in result.pass_results
-            if pr.escalation_factor > 1.0
-        ]
+        stalled_passes = [pr for pr in result.pass_results if pr.escalation_factor > 1.0]
         # We may or may not have stalled passes depending on geometry,
         # but the total_passes should be > 1 for a dense cluster
         assert result.total_passes >= 1
@@ -338,7 +332,9 @@ class TestIterativeFixDryRun:
         fixer = PlacementFixer()
         output = tmp_path / "should_not_exist.kicad_pcb"
         result = fixer.iterative_fix(
-            simple_overlap_pcb, output_path=output, dry_run=True,
+            simple_overlap_pcb,
+            output_path=output,
+            dry_run=True,
         )
 
         assert "dry run" in result.message
@@ -348,7 +344,9 @@ class TestIterativeFixDryRun:
         fixer = PlacementFixer()
         output = tmp_path / "should_not_exist.kicad_pcb"
         result = fixer.iterative_fix(
-            simple_overlap_pcb, output_path=output, dry_run=True,
+            simple_overlap_pcb,
+            output_path=output,
+            dry_run=True,
         )
 
         assert result.total_fixes_applied >= 1
@@ -370,7 +368,9 @@ class TestIterativeFixMaxPasses:
         fixer = PlacementFixer()
         output = tmp_path / "out.kicad_pcb"
         result = fixer.iterative_fix(
-            simple_overlap_pcb, output_path=output, max_passes=1,
+            simple_overlap_pcb,
+            output_path=output,
+            max_passes=1,
         )
 
         assert result.total_passes == 1
@@ -400,11 +400,15 @@ class TestIterativeFixCLI:
         from kicad_tools.cli.placement_cmd import main
 
         output = tmp_path / "cli_fixed.kicad_pcb"
-        result = main([
-            "fix", str(simple_overlap_pcb),
-            "-o", str(output),
-            "--quiet",
-        ])
+        result = main(
+            [
+                "fix",
+                str(simple_overlap_pcb),
+                "-o",
+                str(output),
+                "--quiet",
+            ]
+        )
 
         # Should succeed (return 0) for simple overlap
         assert output.exists()
@@ -417,11 +421,16 @@ class TestIterativeFixCLI:
         from kicad_tools.cli.placement_cmd import main
 
         output = tmp_path / "should_not_exist.kicad_pcb"
-        result = main([
-            "fix", str(simple_overlap_pcb),
-            "-o", str(output),
-            "--dry-run", "--quiet",
-        ])
+        result = main(
+            [
+                "fix",
+                str(simple_overlap_pcb),
+                "-o",
+                str(output),
+                "--dry-run",
+                "--quiet",
+            ]
+        )
         assert result == 0
 
     def test_cli_fix_max_passes(self, dense_pcb: Path, tmp_path: Path):
@@ -429,12 +438,17 @@ class TestIterativeFixCLI:
         from kicad_tools.cli.placement_cmd import main
 
         output = tmp_path / "cli_fixed.kicad_pcb"
-        result = main([
-            "fix", str(dense_pcb),
-            "-o", str(output),
-            "--max-passes", "2",
-            "--quiet",
-        ])
+        result = main(
+            [
+                "fix",
+                str(dense_pcb),
+                "-o",
+                str(output),
+                "--max-passes",
+                "2",
+                "--quiet",
+            ]
+        )
         # Should not crash
         assert result in (0, 1)
 
@@ -443,11 +457,15 @@ class TestIterativeFixCLI:
         from kicad_tools.cli.placement_cmd import main
 
         output = tmp_path / "cli_fixed.kicad_pcb"
-        main([
-            "fix", str(simple_overlap_pcb),
-            "-o", str(output),
-            "--verbose",
-        ])
+        main(
+            [
+                "fix",
+                str(simple_overlap_pcb),
+                "-o",
+                str(output),
+                "--verbose",
+            ]
+        )
 
         captured = capsys.readouterr()
         # Verbose output should mention pass progress
@@ -482,12 +500,17 @@ class TestIterativeFixTimeout:
         from kicad_tools.cli.placement_cmd import main
 
         output = tmp_path / "cli_timeout.kicad_pcb"
-        result = main([
-            "fix", str(simple_overlap_pcb),
-            "-o", str(output),
-            "--timeout", "30",
-            "--quiet",
-        ])
+        result = main(
+            [
+                "fix",
+                str(simple_overlap_pcb),
+                "-o",
+                str(output),
+                "--timeout",
+                "30",
+                "--quiet",
+            ]
+        )
         assert result == 0
 
 

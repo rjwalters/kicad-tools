@@ -1,10 +1,6 @@
 """Tests for pcb remove-footprint command (pcb_remove_footprint module)."""
 
 import json
-from pathlib import Path
-
-import pytest
-
 
 # Reuse PCB fixtures from sync-netlist tests
 MINIMAL_PCB = """(kicad_pcb
@@ -184,11 +180,15 @@ class TestRemoveFootprintCLIParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "remove-footprint",
-            "--ref", "C1",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "remove-footprint",
+                "--ref",
+                "C1",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.pcb_command == "remove-footprint"
         assert args.ref == "C1"
 
@@ -197,12 +197,16 @@ class TestRemoveFootprintCLIParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "remove-footprint",
-            "--ref", "C1",
-            "--force",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "remove-footprint",
+                "--ref",
+                "C1",
+                "--force",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.force is True
 
     def test_parser_dry_run_flag(self):
@@ -210,12 +214,16 @@ class TestRemoveFootprintCLIParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "remove-footprint",
-            "--ref", "C1",
-            "--dry-run",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "remove-footprint",
+                "--ref",
+                "C1",
+                "--dry-run",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.dry_run is True
 
     def test_dispatcher_integration(self, tmp_path):

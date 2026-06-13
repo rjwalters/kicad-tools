@@ -11,10 +11,9 @@ These tests verify:
 8. RoutedNetsUnblocker context manager
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 from kicad_tools.router.grid import RoutedNetsUnblocker
@@ -37,12 +36,12 @@ class TestRoutedNetsUnblocker:
 
         with unblocker:
             # Cell (0,0,0): blocked=True, pad_blocked=False, net=5 -> should be unblocked
-            assert grid._blocked[0, 0, 0] == False
+            assert not grid._blocked[0, 0, 0]
             assert grid._net[0, 0, 0] == 0
             # Cell (0,0,1): blocked=False -> unchanged
-            assert grid._blocked[0, 0, 1] == False
+            assert not grid._blocked[0, 0, 1]
             # Cell (0,0,2): blocked=True but pad_blocked=True -> unchanged (static obstacle)
-            assert grid._blocked[0, 0, 2] == True
+            assert grid._blocked[0, 0, 2]
 
         # After exit, arrays should be fully restored
         np.testing.assert_array_equal(grid._blocked, original_blocked)
@@ -57,7 +56,7 @@ class TestRoutedNetsUnblocker:
         grid._net = np.array([[[3]]], dtype=np.int32)
 
         with RoutedNetsUnblocker(grid):
-            assert grid._blocked[0, 0, 0] == True
+            assert grid._blocked[0, 0, 0]
             assert grid._net[0, 0, 0] == 3
 
     def test_unblocks_only_routed_net_cells(self):
@@ -69,13 +68,13 @@ class TestRoutedNetsUnblocker:
 
         with RoutedNetsUnblocker(grid):
             # (0,0,0): blocked + !pad_blocked + net=2 -> unblocked
-            assert grid._blocked[0, 0, 0] == False
+            assert not grid._blocked[0, 0, 0]
             # (0,0,1): blocked + pad_blocked -> stays blocked
-            assert grid._blocked[0, 0, 1] == True
+            assert grid._blocked[0, 0, 1]
             # (0,0,2): not blocked -> stays
-            assert grid._blocked[0, 0, 2] == False
+            assert not grid._blocked[0, 0, 2]
             # (0,0,3): blocked + !pad_blocked + net=0 -> stays (no net)
-            assert grid._blocked[0, 0, 3] == True
+            assert grid._blocked[0, 0, 3]
 
 
 class TestFindBlockingNetsRelaxed:
@@ -128,6 +127,7 @@ class TestFindBlockingNetsRelaxed:
         # Net 20 is blocked by nets {2, 3}
         # Net 30 is blocked by net {2}
         call_count = [0]
+
         def mock_find_relaxed(*args, **kwargs):
             call_count[0] += 1
             # Return different blockers for different calls
@@ -236,8 +236,11 @@ class TestNeighborhoodRipup:
         neg.grid.world_to_grid.return_value = (5, 5)
 
         net_routes = {
-            100: [mock_route], 200: [mock_route], 300: [mock_route],
-            400: [mock_route], 500: [mock_route],
+            100: [mock_route],
+            200: [mock_route],
+            300: [mock_route],
+            400: [mock_route],
+            500: [mock_route],
         }
 
         improved, count = neg.neighborhood_ripup(
@@ -327,7 +330,7 @@ class TestNeighborhoodRipup:
         # Run with stall_count=0 (radius_factor=1.0)
         net_routes_0 = {
             100: [make_route(0, 0, 10, 10)],  # The blocker
-            200: [make_route(5, 5, 6, 6)],     # Close neighbor
+            200: [make_route(5, 5, 6, 6)],  # Close neighbor
             300: [make_route(50, 50, 60, 60)],  # Far away
         }
 
@@ -355,9 +358,11 @@ class TestNeighborhoodRipup:
         neg.find_blocking_nets_relaxed = MagicMock(return_value={100: 1})
 
         call_count = [0]
+
         def mock_rip_up(nets, net_routes, routes_list):
             for n in nets:
                 net_routes[n] = []
+
         neg.rip_up_nets = MagicMock(side_effect=mock_rip_up)
 
         mock_seg = MagicMock()
@@ -400,6 +405,7 @@ class TestNeighborhoodRipup:
         def mock_rip_up(nets, net_routes, routes_list):
             for n in nets:
                 net_routes[n] = []
+
         neg.rip_up_nets = MagicMock(side_effect=mock_rip_up)
 
         mock_seg = MagicMock()
@@ -518,12 +524,11 @@ class TestGridTemporarilyUnblockRoutedNets:
         grid._net = np.zeros((1, 5, 5), dtype=np.int32)
 
         # Import the actual method
-        from kicad_tools.router.grid import RoutingGrid
 
         # Use the class method via a real-ish approach
         unblocker = RoutedNetsUnblocker(grid)
-        assert hasattr(unblocker, '__enter__')
-        assert hasattr(unblocker, '__exit__')
+        assert hasattr(unblocker, "__enter__")
+        assert hasattr(unblocker, "__exit__")
 
 
 class TestAcceptanceCriterion:
@@ -539,6 +544,7 @@ class TestAcceptanceCriterion:
         def mock_rip_up(nets, net_routes, routes_list):
             for n in nets:
                 net_routes[n] = []
+
         neg.rip_up_nets = MagicMock(side_effect=mock_rip_up)
 
         mock_seg = MagicMock()

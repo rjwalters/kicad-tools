@@ -78,8 +78,8 @@ def _write_pcb_with_attr(tmp_path: Path, attr_inner: str) -> Path:
     The block is inserted immediately after the footprint's ``(at ...)``
     line.
     """
-    needle = '\t\t(at 125 125)\n'
-    replacement = needle + f'\t\t(attr {attr_inner})\n'
+    needle = "\t\t(at 125 125)\n"
+    replacement = needle + f"\t\t(attr {attr_inner})\n"
     text = _BASE_PCB.replace(needle, replacement, 1)
     path = tmp_path / "attr_roundtrip_seeded.kicad_pcb"
     path.write_text(text)
@@ -251,9 +251,7 @@ def test_attr_unknown_tokens_preserved(tmp_path: Path):
     block is rebuilt — otherwise mutating any other attr field would
     silently strip them.
     """
-    src = _write_pcb_with_attr(
-        tmp_path, "smd board_only allow_missing_courtyard"
-    )
+    src = _write_pcb_with_attr(tmp_path, "smd board_only allow_missing_courtyard")
 
     pcb = PCB.load(str(src))
     fp = pcb.get_footprint("R1")
@@ -274,9 +272,7 @@ def test_attr_unknown_tokens_preserved(tmp_path: Path):
 
     text = _file_text(out)
     assert "board_only" in text, "unknown token board_only was dropped"
-    assert "allow_missing_courtyard" in text, (
-        "unknown token allow_missing_courtyard was dropped"
-    )
+    assert "allow_missing_courtyard" in text, "unknown token allow_missing_courtyard was dropped"
     assert "locked" in text, "newly-set locked token did not appear"
 
     # Round-trip back through the parser to confirm tokens are still
@@ -357,9 +353,7 @@ def test_no_attr_block_when_all_default(tmp_path: Path):
     # ``(attr ...)`` text accidentally appearing in property values.)
     # The base PCB has no other (attr substrings, so a blanket check
     # is safe here.
-    assert "(attr" not in text, (
-        "(attr ...) block should be omitted when no flags set"
-    )
+    assert "(attr" not in text, "(attr ...) block should be omitted when no flags set"
 
     reloaded = PCB.load(str(out))
     fp2 = reloaded.get_footprint("R1")

@@ -255,10 +255,7 @@ class TestComputeTargetDirection:
         assert self._direction_for_target(5.0, 1.0) is None
 
     def test_dominant_positive_x_allowed_with_into_package_flag(self):
-        assert (
-            self._direction_for_target(5.0, 1.0, allow_into_package=True)
-            == EscapeDirection.EAST
-        )
+        assert self._direction_for_target(5.0, 1.0, allow_into_package=True) == EscapeDirection.EAST
 
     def test_exact_tie_precedence_north_beats_east(self):
         # |dx| == |dy|, dx > 0, dy > 0: candidates {NORTH, EAST}; the
@@ -271,8 +268,7 @@ class TestComputeTargetDirection:
         # into-package for the west edge, so assert via the unguarded
         # variant.
         assert (
-            self._direction_for_target(3.0, -3.0, allow_into_package=True)
-            == EscapeDirection.EAST
+            self._direction_for_target(3.0, -3.0, allow_into_package=True) == EscapeDirection.EAST
         )
         # With the guard active EAST is rejected -> None (NOT silently
         # SOUTH: the tie-break picks first, the guard then rejects).
@@ -311,9 +307,7 @@ class TestComputeTargetDirection:
     def test_nearest_candidate_wins(self):
         pad = _west_edge_pad(net=7)
         # Far candidate to the south, near candidate to the west.
-        router = _make_router(
-            net_target_positions={7: [(0.0, -10.0, "C1"), (-2.0, 0.0, "Y1")]}
-        )
+        router = _make_router(net_target_positions={7: [(0.0, -10.0, "C1"), (-2.0, 0.0, "Y1")]})
         package = _make_package([pad])
         assert (
             router._compute_target_direction(
@@ -326,9 +320,7 @@ class TestComputeTargetDirection:
         pad = _west_edge_pad(net=7)
         # Two candidates at identical distance: (-3, 0) and (3, 0).
         # (x, y) ascending picks (-3, 0) -> WEST, deterministically.
-        router = _make_router(
-            net_target_positions={7: [(3.0, 0.0, "B"), (-3.0, 0.0, "A")]}
-        )
+        router = _make_router(net_target_positions={7: [(3.0, 0.0, "B"), (-3.0, 0.0, "A")]})
         package = _make_package([pad])
         assert (
             router._compute_target_direction(
@@ -346,9 +338,7 @@ class TestComputeTargetDirection:
 class TestTryInPadEscapeTargetDirection:
     """``target_direction`` redirects ONLY the inner stub."""
 
-    def _rescue(
-        self, target_direction: EscapeDirection | None
-    ) -> EscapeRoute | None:
+    def _rescue(self, target_direction: EscapeDirection | None) -> EscapeRoute | None:
         router = _make_router()
         pad = _west_edge_pad(net=7)
         package = _make_package([pad])
@@ -508,13 +498,9 @@ class TestPocketEscapeRescue:
             positions.setdefault(102, []).append((tx, ty, "J1"))
         return positions
 
-    def _run_dispatch(
-        self, with_east_target: bool
-    ) -> tuple[list[EscapeRoute], list[Pad]]:
+    def _run_dispatch(self, with_east_target: bool) -> tuple[list[EscapeRoute], list[Pad]]:
         pads = _make_lqfp_west_signal_row()
-        net_target_positions = self._net_positions(
-            pads, (20.0, 0.0) if with_east_target else None
-        )
+        net_target_positions = self._net_positions(pads, (20.0, 0.0) if with_east_target else None)
         router = _make_router(net_target_positions=net_target_positions)
         package = router.analyze_package(pads)
         assert package.package_type in (
@@ -537,9 +523,9 @@ class TestPocketEscapeRescue:
         # Pin j=2 (net 102, even index): pocket-escape rescue fires.
         rescue_102 = next((e for e in escapes if e.pad.net == 102), None)
         assert rescue_102 is not None, "pocket pin must still produce an escape"
-        assert rescue_102.via is not None and getattr(
-            rescue_102.via, "in_pad", False
-        ), "pocket pin must be rescued with an in-pad via"
+        assert rescue_102.via is not None and getattr(rescue_102.via, "in_pad", False), (
+            "pocket pin must be rescued with an in-pad via"
+        )
         pad_102 = next(p for p in pads if p.net == 102)
         ex, _ey = rescue_102.escape_point
         assert ex > pad_102.x, (
@@ -594,16 +580,34 @@ class TestNetPadPositionPlumbing:
         class _PcbLike:
             pads = {
                 ("U1", "1"): Pad(
-                    x=1.0, y=2.0, width=0.3, height=1.5, net=5,
-                    net_name="A", ref="U1", pin="1",
+                    x=1.0,
+                    y=2.0,
+                    width=0.3,
+                    height=1.5,
+                    net=5,
+                    net_name="A",
+                    ref="U1",
+                    pin="1",
                 ),
                 ("C1", "1"): Pad(
-                    x=4.0, y=2.0, width=0.5, height=0.5, net=5,
-                    net_name="A", ref="C1", pin="1",
+                    x=4.0,
+                    y=2.0,
+                    width=0.5,
+                    height=0.5,
+                    net=5,
+                    net_name="A",
+                    ref="C1",
+                    pin="1",
                 ),
                 ("U1", "2"): Pad(
-                    x=1.0, y=3.0, width=0.3, height=1.5, net=0,
-                    net_name="", ref="U1", pin="2",
+                    x=1.0,
+                    y=3.0,
+                    width=0.3,
+                    height=1.5,
+                    net=0,
+                    net_name="",
+                    ref="U1",
+                    pin="2",
                 ),
             }
 
@@ -628,16 +632,34 @@ class TestNetPadPositionPlumbing:
         rules = _make_rules(manufacturer=None)
         router = Autorouter(width=20.0, height=20.0, rules=rules)
         router.pads[("R1", "2")] = Pad(
-            x=3.0, y=1.0, width=0.5, height=0.5, net=9,
-            net_name="N9", ref="R1", pin="2",
+            x=3.0,
+            y=1.0,
+            width=0.5,
+            height=0.5,
+            net=9,
+            net_name="N9",
+            ref="R1",
+            pin="2",
         )
         router.pads[("R1", "1")] = Pad(
-            x=1.0, y=1.0, width=0.5, height=0.5, net=9,
-            net_name="N9", ref="R1", pin="1",
+            x=1.0,
+            y=1.0,
+            width=0.5,
+            height=0.5,
+            net=9,
+            net_name="N9",
+            ref="R1",
+            pin="1",
         )
         router.pads[("J1", "1")] = Pad(
-            x=5.0, y=5.0, width=0.5, height=0.5, net=0,
-            net_name="", ref="J1", pin="1",
+            x=5.0,
+            y=5.0,
+            width=0.5,
+            height=0.5,
+            net=0,
+            net_name="",
+            ref="J1",
+            pin="1",
         )
         result = router._build_net_target_positions()
         assert result == {9: [(1.0, 1.0, "R1"), (3.0, 1.0, "R1")]}

@@ -63,7 +63,7 @@ def _make_pad(x: float, y: float, net: int, name: str, pin: str = "1") -> Pad:
     return Pad(
         x=x,
         y=y,
-        width=1.5,   # long axis along X
+        width=1.5,  # long axis along X
         height=0.3,  # short axis along Y
         net=net,
         net_name=name,
@@ -91,15 +91,25 @@ def _foreign_escape_with_inner_stub(
         via_pos=(x1, y1),
         segments=[
             Segment(
-                x1=x1, y1=y1, x2=x2, y2=y2,
-                width=width, layer=Layer.IN1_CU, net=net,
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                width=width,
+                layer=Layer.IN1_CU,
+                net=net,
                 net_name=f"NET_{net}",
             ),
         ],
         via=Via(
-            x=x1, y=y1, drill=0.15, diameter=0.3,
-            layers=(Layer.F_CU, Layer.IN1_CU), net=net,
-            net_name=f"NET_{net}", in_pad=True,
+            x=x1,
+            y=y1,
+            drill=0.15,
+            diameter=0.3,
+            layers=(Layer.F_CU, Layer.IN1_CU),
+            net=net,
+            net_name=f"NET_{net}",
+            in_pad=True,
         ),
         ring_index=0,
     )
@@ -113,21 +123,39 @@ class TestInPadStubConflictDetection:
         er = EscapeRouter(_make_grid(rules), rules)
         # Foreign stub runs WEST->EAST through the probe area.
         foreign = _foreign_escape_with_inner_stub(-1.0, 0.0, -0.2, 0.0)
-        assert er._in_pad_stub_conflicts(
-            0.0, 0.0, -0.6, 0.0,  # proposed stub points WEST into the foreign stub
-            0.2, Layer.IN1_CU, net=1, clearance=0.15,
-            existing_escapes=[foreign],
-        ) is True
+        assert (
+            er._in_pad_stub_conflicts(
+                0.0,
+                0.0,
+                -0.6,
+                0.0,  # proposed stub points WEST into the foreign stub
+                0.2,
+                Layer.IN1_CU,
+                net=1,
+                clearance=0.15,
+                existing_escapes=[foreign],
+            )
+            is True
+        )
 
     def test_same_net_stub_is_not_a_conflict(self):
         rules = _make_rules()
         er = EscapeRouter(_make_grid(rules), rules)
         same_net = _foreign_escape_with_inner_stub(-1.0, 0.0, -0.2, 0.0, net=1)
-        assert er._in_pad_stub_conflicts(
-            0.0, 0.0, -0.6, 0.0,
-            0.2, Layer.IN1_CU, net=1, clearance=0.15,
-            existing_escapes=[same_net],
-        ) is False
+        assert (
+            er._in_pad_stub_conflicts(
+                0.0,
+                0.0,
+                -0.6,
+                0.0,
+                0.2,
+                Layer.IN1_CU,
+                net=1,
+                clearance=0.15,
+                existing_escapes=[same_net],
+            )
+            is False
+        )
 
     def test_different_layer_stub_is_not_a_conflict(self):
         rules = _make_rules()
@@ -135,21 +163,39 @@ class TestInPadStubConflictDetection:
         foreign = _foreign_escape_with_inner_stub(-1.0, 0.0, -0.2, 0.0)
         # Same XY corridor but probing on F.Cu -- segments don't collide.
         # (The foreign In1 via barrel is >0.4mm clear of the probe stub.)
-        assert er._in_pad_stub_conflicts(
-            0.0, 0.0, -0.6, 0.0,
-            0.2, Layer.F_CU, net=1, clearance=0.15,
-            existing_escapes=[foreign],
-        ) is False
+        assert (
+            er._in_pad_stub_conflicts(
+                0.0,
+                0.0,
+                -0.6,
+                0.0,
+                0.2,
+                Layer.F_CU,
+                net=1,
+                clearance=0.15,
+                existing_escapes=[foreign],
+            )
+            is False
+        )
 
     def test_clear_geometry_is_not_a_conflict(self):
         rules = _make_rules()
         er = EscapeRouter(_make_grid(rules), rules)
         foreign = _foreign_escape_with_inner_stub(-5.0, 5.0, -4.0, 5.0)
-        assert er._in_pad_stub_conflicts(
-            0.0, 0.0, -0.6, 0.0,
-            0.2, Layer.IN1_CU, net=1, clearance=0.15,
-            existing_escapes=[foreign],
-        ) is False
+        assert (
+            er._in_pad_stub_conflicts(
+                0.0,
+                0.0,
+                -0.6,
+                0.0,
+                0.2,
+                Layer.IN1_CU,
+                net=1,
+                clearance=0.15,
+                existing_escapes=[foreign],
+            )
+            is False
+        )
 
 
 class TestInPadStubDirectionRetry:

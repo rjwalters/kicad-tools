@@ -27,7 +27,9 @@ from kicad_tools.cli.progress import flush_print
 
 logger = logging.getLogger(__name__)
 
+from . import via_conflict as _via_conflict_module
 from .adaptive import AdaptiveAutorouter, RoutingResult
+from .adaptive_grid import AdaptiveGridRouter
 from .algorithms import (
     GRACE_PASS_BUDGET_S,
     GRACE_PASS_TIER_CAPS_S,
@@ -47,22 +49,20 @@ from .algorithms import (
     should_terminate_early,
 )
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
+from .bus_routing import BusRouter
 from .cache import (
     RoutingCache,
     SubProblemSignature,
     normalize_routes_to_origin,
     transform_routes,
 )
-from .bus_routing import BusRouter
+from .congestion_estimator import CongestionEstimator
 from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
 from .diffpair_routing import DiffPairRouter, IntraPairClearanceViolation
-from .match_group_length import MatchGroup, MatchGroupTracker
 from .escape import EscapeRouter, PackageInfo, is_dense_package
-from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
-from .subgrid import SubGridResult, SubGridRouter, compute_subgrid_resolution
 from .failure_analysis import (
     CongestionMap,
     FailureAnalysis,
@@ -71,8 +71,9 @@ from .failure_analysis import (
 )
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
-from .net_class import NetClass, classify_from_name
 from .length import LengthTracker, LengthViolation
+from .match_group_length import MatchGroup, MatchGroupTracker
+from .net_class import NetClass, classify_from_name
 from .output import format_failed_nets_summary
 from .parallel import (
     ParallelRouter,
@@ -90,6 +91,7 @@ from .rules import (
     NetClassRouting,
 )
 from .sparse import Corridor, SparseRouter, Waypoint
+from .subgrid import SubGridResult, SubGridRouter, compute_subgrid_resolution
 from .tuning import (
     COST_PROFILES,
     CostProfile,
@@ -98,8 +100,6 @@ from .tuning import (
     quick_tune,
     tune_parameters,
 )
-from .congestion_estimator import CongestionEstimator
-from . import via_conflict as _via_conflict_module
 from .via_conflict import ViaConflictManager
 from .zones import ZoneManager
 
@@ -335,7 +335,7 @@ __all__ = [
 ]
 
 
-def _format_pad_ref(pad: "Pad") -> str:
+def _format_pad_ref(pad: Pad) -> str:
     """Return a human-readable identifier for *pad*.
 
     Issue #2329: Steiner-tree branch points have empty ``ref`` and ``pin``
@@ -575,7 +575,7 @@ class _TraceResolverTransaction:
         return []  # restored to pre-begin state
     """
 
-    def __init__(self, router: "Autorouter") -> None:
+    def __init__(self, router: Autorouter) -> None:
         self._router = router
         self._snapshot_route_ids: frozenset[int] = frozenset()
         self._snapshot_routes: list[Route] = []
@@ -665,11 +665,9 @@ class _TraceResolverTransaction:
                 )
                 if not is_valid:
                     return False
-                is_valid_v2v, _actual_v2v, _loc_v2v = (
-                    grid.validate_via_to_via_clearance(
-                        via=via,
-                        exclude_net=new_route.net,
-                    )
+                is_valid_v2v, _actual_v2v, _loc_v2v = grid.validate_via_to_via_clearance(
+                    via=via,
+                    exclude_net=new_route.net,
                 )
                 if not is_valid_v2v:
                     return False
@@ -917,9 +915,7 @@ class Autorouter:
         # ``validate_routes`` to emit ``obstacle_type="edge"`` violations
         # so the post-route nudge pass can repair traces that violate the
         # edge keepout (Issue #2743).
-        self._edge_segments: list[
-            tuple[tuple[float, float], tuple[float, float]]
-        ] | None = None
+        self._edge_segments: list[tuple[tuple[float, float], tuple[float, float]]] | None = None
 
         # Shapely-based board geometry for accurate non-rectangular edge
         # clearance (Issue #2340).  Set by load_pcb_for_routing() when
@@ -1055,7 +1051,7 @@ class Autorouter:
         self._congestion_estimator: CongestionEstimator | None = None
 
         # Registered PCB blocks for protected-zone routing (Issue #1586)
-        self.registered_blocks: dict[str, "PCBBlock"] = {}
+        self.registered_blocks: dict[str, PCBBlock] = {}
 
         # Block-internal connectivity: net_name -> list of (pad_key_set, trace_data)
         # Each entry is a group of pad keys connected by block-internal traces.
@@ -1413,7 +1409,7 @@ class Autorouter:
         min_pitch = float("inf")
         positions = [(p["x"], p["y"]) for p in pads]
         for i, (x1, y1) in enumerate(positions):
-            for x2, y2 in positions[i + 1:]:
+            for x2, y2 in positions[i + 1 :]:
                 dist = math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
                 if dist > 0.01:  # Ignore overlapping pads
                     min_pitch = min(min_pitch, dist)
@@ -1427,7 +1423,7 @@ class Autorouter:
         obs = Obstacle(x, y, width, height, layer)
         self.grid.add_obstacle(obs)
 
-    def register_block(self, block: "PCBBlock") -> None:
+    def register_block(self, block: PCBBlock) -> None:
         """Register a PCBBlock as a protected zone on the routing grid.
 
         This marks the block's bounding box as blocked for external routing,
@@ -1444,7 +1440,6 @@ class Autorouter:
         Raises:
             ValueError: If the block has not been placed yet.
         """
-        from kicad_tools.pcb.blocks.base import PCBBlock  # noqa: F811
 
         if not block.placed:
             raise ValueError(
@@ -1508,7 +1503,7 @@ class Autorouter:
         # Step 3: Index block-internal traces for auto-routing skip (Issue #1587)
         self._index_block_internal_traces(block)
 
-    def _index_block_internal_traces(self, block: "PCBBlock") -> None:
+    def _index_block_internal_traces(self, block: PCBBlock) -> None:
         """Build internal-connectivity map from a block's internal traces.
 
         For each internal trace, match its start/end positions to router pads
@@ -1566,9 +1561,7 @@ class Autorouter:
                 }
             )
 
-    def _find_pads_near(
-        self, x: float, y: float, epsilon: float
-    ) -> set[tuple[str, str]]:
+    def _find_pads_near(self, x: float, y: float, epsilon: float) -> set[tuple[str, str]]:
         """Find all router pad keys within epsilon distance of (x, y).
 
         Args:
@@ -1687,10 +1680,7 @@ class Autorouter:
         existing copper.
         """
         obstacle_segments = [
-            seg
-            for route in self.routes
-            if route.net != net
-            for seg in route.segments
+            seg for route in self.routes if route.net != net for seg in route.segments
         ]
         return create_intra_ic_routes(
             net,
@@ -1784,9 +1774,7 @@ class Autorouter:
         # ``set_via_foreign_context`` filters same-net per-call too, but
         # filtering here keeps the list bounded for boards with large
         # pad counts.
-        foreign_pads = [
-            p for p in self.pads.values() if p.net != current_net
-        ]
+        foreign_pads = [p for p in self.pads.values() if p.net != current_net]
 
         # Foreign tracks: all committed Segment objects from ``self.routes``
         # whose net differs from ``current_net``.  Routes for the current
@@ -1852,10 +1840,7 @@ class Autorouter:
         # by ``len(self.routes)`` so any route append/clear/extend
         # invalidates implicitly on the next call (cheap O(1) check).
         cache_signature = (id(self.routes), len(self.routes))
-        if (
-            self._all_vias_by_net_cache is None
-            or self._all_vias_by_net_cache[0] != cache_signature
-        ):
+        if self._all_vias_by_net_cache is None or self._all_vias_by_net_cache[0] != cache_signature:
             vias_by_net: dict[int, list] = {}
             for route in self.routes:
                 if route.vias:
@@ -2003,10 +1988,7 @@ class Autorouter:
         # Issue #2401: Substitute escaped pads with virtual pads at escape
         # endpoints so RSMT + A* route between escape endpoints, not original
         # pad centers.
-        pad_objs = [
-            self._escape_pad_overrides.get(p, self.pads[p])
-            for p in pads_for_routing
-        ]
+        pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
 
         # Issue #2336: Try sub-problem pattern cache before A* search.
         # Compute a position/rotation-invariant signature and check for a
@@ -2054,9 +2036,7 @@ class Autorouter:
             # per-net cached, issue #3474 R1 -- see
             # ``_analyze_failure_budgeted``).
             net_name = self.net_names.get(net, f"Net_{net}")
-            analysis = self._analyze_failure_budgeted(
-                net, net_name, source_coords, target_coords
-            )
+            analysis = self._analyze_failure_budgeted(net, net_name, source_coords, target_coords)
             failure_cause = analysis.root_cause if analysis else FailureCause.UNKNOWN
 
             # Check for pad accessibility issues (pad not on grid)
@@ -2222,13 +2202,17 @@ class Autorouter:
             # medians the same way it handles the terminals themselves.
             has_off_grid = self._net_has_off_grid_pads(net)
             new_routes = mst_router.route_net(
-                pad_objs, mark_route, record_failure,
+                pad_objs,
+                mark_route,
+                record_failure,
                 use_steiner=not has_off_grid,
                 per_net_timeout=per_net_timeout,
             )
         else:
             new_routes = mst_router.route_net_star(
-                pad_objs, mark_route, record_failure,
+                pad_objs,
+                mark_route,
+                record_failure,
                 per_net_timeout=per_net_timeout,
             )
 
@@ -2374,7 +2358,6 @@ class Autorouter:
         Returns:
             True if all cells are available or belong to this net.
         """
-        from .layers import Layer
 
         for route in routes:
             for seg in route.segments:
@@ -2680,7 +2663,7 @@ class Autorouter:
         snap_x, snap_y = self.grid.grid_to_world(gx, gy)
         return max(abs(pad.x - snap_x), abs(pad.y - snap_y))
 
-    def _pad_has_adaptive_grid_coverage(self, pad: "Pad") -> bool:
+    def _pad_has_adaptive_grid_coverage(self, pad: Pad) -> bool:
         """Return True if *pad* is reachable via the adaptive-grid prepass.
 
         Issue #2910: The per-edge ``PADS_OFF_GRID`` emit historically used
@@ -2738,10 +2721,7 @@ class Autorouter:
                 continue
             dx = (pad.x - zone.x_offset) / res
             dy = (pad.y - zone.y_offset) / res
-            if (
-                abs(dx - round(dx)) <= tol_factor
-                and abs(dy - round(dy)) <= tol_factor
-            ):
+            if abs(dx - round(dx)) <= tol_factor and abs(dy - round(dy)) <= tol_factor:
                 return True
 
         # Case 2: implicit coverage via the pad's component pitch.  Even
@@ -3252,9 +3232,7 @@ class Autorouter:
             return
 
         try:
-            num_layers = (
-                len(self.layer_stack.layers) if self.layer_stack is not None else None
-            )
+            num_layers = len(self.layer_stack.layers) if self.layer_stack is not None else None
         except AttributeError:
             num_layers = None
 
@@ -4072,9 +4050,7 @@ class Autorouter:
     # Matrix-conflict detection and layer preference assignment (Issue #2432)
     # ------------------------------------------------------------------
 
-    def _detect_matrix_conflicts(
-        self, net_ids: list[int], threshold: int = 2
-    ) -> list[set[int]]:
+    def _detect_matrix_conflicts(self, net_ids: list[int], threshold: int = 2) -> list[set[int]]:
         """Detect groups of nets sharing multiple components (matrix topology).
 
         In a charlieplex LED matrix, nets like NODE_A through NODE_D each
@@ -4216,9 +4192,7 @@ class Autorouter:
         for net_id in group:
             # ``self.nets`` holds pad KEYS; resolve through ``self.pads``
             # (same pattern as ``_route_net_negotiated``).
-            pad_objs = [
-                self.pads[k] for k in self.nets.get(net_id, []) if k in self.pads
-            ]
+            pad_objs = [self.pads[k] for k in self.nets.get(net_id, []) if k in self.pads]
             if pad_objs:
                 cx = sum(p.x for p in pad_objs) / len(pad_objs)
                 cy = sum(p.y for p in pad_objs) / len(pad_objs)
@@ -4232,16 +4206,17 @@ class Autorouter:
         spread_y = (max(ys) - min(ys)) if ys else 0.0
 
         if spread_y > spread_x:
+
             def key(n: int) -> tuple[float, float, int]:
                 return (centroids[n][1], centroids[n][0], n)
         else:
+
             def key(n: int) -> tuple[float, float, int]:
                 return (centroids[n][0], centroids[n][1], n)
+
         return sorted(group, key=key)
 
-    def _inject_matrix_layer_preferences(
-        self, net_layer_prefs: dict[int, list[int]]
-    ) -> None:
+    def _inject_matrix_layer_preferences(self, net_layer_prefs: dict[int, list[int]]) -> None:
         """Inject per-net layer preferences into net_class_map overrides.
 
         Creates per-net NetClassRouting entries with ``preferred_layers``
@@ -4274,9 +4249,7 @@ class Autorouter:
             self.net_class_map[net_name] = override
 
         if net_layer_prefs:
-            names = [
-                self.net_names.get(n, f"Net {n}") for n in net_layer_prefs
-            ]
+            names = [self.net_names.get(n, f"Net {n}") for n in net_layer_prefs]
             flush_print(
                 f"  Matrix conflict: assigned layer preferences for {len(names)} net(s): {names}"
             )
@@ -4286,9 +4259,7 @@ class Autorouter:
     # _calculate_constraint_score() can boost priority for these nets.
     _matrix_conflict_nets: set[int]
 
-    def _detect_and_apply_matrix_preferences(
-        self, net_order: list[int]
-    ) -> None:
+    def _detect_and_apply_matrix_preferences(self, net_order: list[int]) -> None:
         """Detect matrix-conflicting nets and inject layer preferences.
 
         Convenience method that chains :meth:`_detect_matrix_conflicts`,
@@ -4415,7 +4386,14 @@ class Autorouter:
             noise = self._perturbation_rng.gauss(0, self._perturbation_magnitude)
             congestion_score += noise
 
-        return (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
+        return (
+            priority,
+            complexity_tier,
+            -constraint_score,
+            pad_count,
+            distance,
+            -congestion_score,
+        )
 
     def _interleave_match_groups(self, net_order: list[int]) -> list[int]:
         """Reserve a front-loaded representative for each *starvable* match group.
@@ -4611,9 +4589,7 @@ class Autorouter:
         # groups (#2914 root cause).  Leaders already in the head class
         # keep their priority-sorted position; they aren't starvable.
         promote_ids: set[int] = {
-            nid
-            for grp, nid in leader_for_group.items()
-            if leader_class[grp] > head_priority_class
+            nid for grp, nid in leader_for_group.items() if leader_class[grp] > head_priority_class
         }
         if not promote_ids:
             return net_order
@@ -4924,11 +4900,7 @@ class Autorouter:
                 # the primary component's pad table.
                 pad_obj = None
                 for pkey, p in self.pads.items():
-                    if (
-                        p.ref == primary_ref
-                        and p.net is not None
-                        and int(p.net) == nid
-                    ):
+                    if p.ref == primary_ref and p.net is not None and int(p.net) == nid:
                         pad_obj = p
                         break
                 if pad_obj is None:
@@ -5235,11 +5207,7 @@ class Autorouter:
         # explicit opt-out.  This is the regression-prevention guard that
         # makes future bare ``router.route_all()`` calls discoverable in
         # logs/CI rather than rediscovered via 22-minute hangs.
-        if (
-            per_net_timeout is None
-            and timeout is None
-            and not suppress_no_timeout_warning
-        ):
+        if per_net_timeout is None and timeout is None and not suppress_no_timeout_warning:
             warnings.warn(
                 "Router.route_all() called without per_net_timeout or timeout; "
                 "dense boards can hang indefinitely in A* heap-key churn. "
@@ -5314,9 +5282,7 @@ class Autorouter:
             dense_packages = self.detect_dense_packages()
             if in_pad_escape_rescue_pins is not None:
                 ref_filter = set(in_pad_escape_rescue_pins.keys())
-                dense_packages = [
-                    pkg for pkg in dense_packages if pkg.ref in ref_filter
-                ]
+                dense_packages = [pkg for pkg in dense_packages if pkg.ref in ref_filter]
             if dense_packages:
                 in_pad_rescue_routes = self._apply_in_pad_escape_rescues(
                     dense_packages,
@@ -5682,8 +5648,7 @@ class Autorouter:
         # Identify lower-priority siblings whose pads sit on the blocking
         # components.  Restrict candidates to nets that currently have
         # routes in ``net_routes``.
-        routed_net_ids = {n for n, routes in net_routes.items()
-                          if routes and n != failed_net}
+        routed_net_ids = {n for n, routes in net_routes.items() if routes and n != failed_net}
         siblings = self._find_lower_priority_siblings_on_components(
             failed_net=failed_net,
             blocking_components=blocking_components,
@@ -5745,8 +5710,7 @@ class Autorouter:
             else:
                 action = f"routing sibling {net_name_info}"
             flush_print(
-                f"    rip-up [{idx}/{total}] for {failed_name}: "
-                f"{action} (elapsed {elapsed:.1f}s)"
+                f"    rip-up [{idx}/{total}] for {failed_name}: {action} (elapsed {elapsed:.1f}s)"
             )
 
         import time
@@ -5769,8 +5733,7 @@ class Autorouter:
             )
         except Exception as exc:  # pragma: no cover - defensive
             flush_print(
-                f"  BLOCKED_BY_COMPONENT rip-up (negotiated) raised "
-                f"{type(exc).__name__}: {exc}"
+                f"  BLOCKED_BY_COMPONENT rip-up (negotiated) raised {type(exc).__name__}: {exc}"
             )
             return False
 
@@ -5783,9 +5746,7 @@ class Autorouter:
         if rescued:
             # Drop any stale failure entries for the rescued net so the
             # summary output reflects the rescued state.
-            self.routing_failures = [
-                f for f in self.routing_failures if f.net != failed_net
-            ]
+            self.routing_failures = [f for f in self.routing_failures if f.net != failed_net]
             flush_print(
                 f"  BLOCKED_BY_COMPONENT rip-up (negotiated) for {failed_name}: "
                 f"rescued in {total_elapsed:.1f}s"
@@ -5969,10 +5930,7 @@ class Autorouter:
 
         # Issue #2401: Substitute escaped pads with virtual pads at escape
         # endpoints.
-        pad_objs = [
-            self._escape_pad_overrides.get(p, self.pads[p])
-            for p in pads_for_routing
-        ]
+        pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
 
         # Route MST edges in order (shortest first)
         # The mst_edges contain indices into the original pad list
@@ -5987,9 +5945,7 @@ class Autorouter:
             # multi-terminal Steiner net (softstart's VGATE) can no longer
             # grind past ``--per-net-timeout`` here.
             net_deadline = (
-                time.monotonic() + per_net_timeout
-                if per_net_timeout is not None
-                else None
+                time.monotonic() + per_net_timeout if per_net_timeout is not None else None
             )
             for edge in mst_edges:
                 if edge.source_idx < len(pad_objs) and edge.target_idx < len(pad_objs):
@@ -6005,9 +5961,7 @@ class Autorouter:
                     else:
                         edge_timeout = None
 
-                    route = self.router.route(
-                        source_pad, target_pad, per_net_timeout=edge_timeout
-                    )
+                    route = self.router.route(source_pad, target_pad, per_net_timeout=edge_timeout)
 
                     if route:
                         self._mark_route(route)
@@ -6027,7 +5981,9 @@ class Autorouter:
                 self._record_routing_failure(net, source_pad, target_pad)
 
             mst_routes = mst_router.route_net(
-                pad_objs, mark_route, record_failure,
+                pad_objs,
+                mark_route,
+                record_failure,
                 per_net_timeout=per_net_timeout,
             )
             routes.extend(mst_routes)
@@ -6078,9 +6034,7 @@ class Autorouter:
 
         # Run root cause analysis (budgeted + per-net cached, #3474 R1).
         net_name = self.net_names.get(net, f"Net_{net}")
-        analysis = self._analyze_failure_budgeted(
-            net, net_name, source_coords, target_coords
-        )
+        analysis = self._analyze_failure_budgeted(net, net_name, source_coords, target_coords)
 
         failure = RoutingFailure(
             net=net,
@@ -6402,7 +6356,7 @@ class Autorouter:
         hotset_only: bool = False,
         perturbation: bool = True,
         seed: int | None = None,
-        checkpoint_callback: "Callable[[list[Route], IterationMetrics], None] | None" = None,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
         best_stall_patience: int | None = 2,
         best_stall_min_iterations: int = 2,
     ) -> list[Route]:
@@ -6647,6 +6601,7 @@ class Autorouter:
             # ``primitives.reset_deterministic_uuids()`` to restore
             # the default ``uuid.uuid4()`` behaviour.
             from .primitives import enable_deterministic_uuids
+
             enable_deterministic_uuids(True)
 
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
@@ -6786,7 +6741,10 @@ class Autorouter:
                 region_parallel = False
 
         neg_router = NegotiatedRouter(
-            self.grid, self.router, self.rules, self.net_class_map,
+            self.grid,
+            self.router,
+            self.rules,
+            self.net_class_map,
             congestion_estimator=self._ensure_congestion_estimator(),
         )
 
@@ -6821,7 +6779,10 @@ class Autorouter:
                 # Update router to use new grid
                 self.router.grid = self.grid
                 neg_router = NegotiatedRouter(
-                    self.grid, self.router, self.rules, self.net_class_map,
+                    self.grid,
+                    self.router,
+                    self.rules,
+                    self.net_class_map,
                     congestion_estimator=self._ensure_congestion_estimator(),
                 )
 
@@ -6915,8 +6876,7 @@ class Autorouter:
                     # Issue #2401: Substitute escaped pads with virtual pads
                     # at escape endpoints.
                     pads_by_net[net] = [
-                        self._escape_pad_overrides.get(p, self.pads[p])
-                        for p in pads_for_routing
+                        self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing
                     ]
                 else:
                     single_pad_nets.add(net)
@@ -7036,9 +6996,7 @@ class Autorouter:
                 grace_start = time.time()
 
                 def _grace_route(net: int, cap: float) -> list[Route]:
-                    return self._route_net_negotiated(
-                        net, present_factor, per_net_timeout=cap
-                    )
+                    return self._route_net_negotiated(net, present_factor, per_net_timeout=cap)
 
                 def _grace_commit(net: int, routes: list[Route]) -> None:
                     net_routes[net] = routes
@@ -7047,7 +7005,10 @@ class Autorouter:
                         self.routes.append(route)
 
                 graced, attempted, skipped = run_initial_pass_grace(
-                    grace_nets, _grace_route, _grace_commit, per_net_timeout,
+                    grace_nets,
+                    _grace_route,
+                    _grace_commit,
+                    per_net_timeout,
                     budget_s=grace_fund,
                 )
                 flush_print(
@@ -7080,11 +7041,7 @@ class Autorouter:
         # its MST edges), so verify full per-net pad connectivity before
         # declaring the initial pass complete.
         initial_partial: set[int] = set()
-        if (
-            not timed_out
-            and overflow == 0
-            and len(net_routes) == total_nets - len(single_pad_nets)
-        ):
+        if not timed_out and overflow == 0 and len(net_routes) == total_nets - len(single_pad_nets):
             initial_partial = self._get_partially_routed_nets(net_routes, pads_by_net)
 
         if timed_out:
@@ -7112,9 +7069,7 @@ class Autorouter:
             self._finalize_routing()
             return list(self.routes)
         elif initial_partial:
-            partial_names = sorted(
-                self.net_names.get(n, f"Net_{n}") for n in initial_partial
-            )
+            partial_names = sorted(self.net_names.get(n, f"Net_{n}") for n in initial_partial)
             print(
                 f"  ⚠ {len(initial_partial)} net(s) partially routed despite "
                 f"zero overflow - attempting recovery (Issue #3448): "
@@ -7203,12 +7158,14 @@ class Autorouter:
         # top of escape via halos.
         _extra_init = self._collect_extra_routes_for_revalidation(net_routes)
         initial_seg_via = neg_router.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("init",),
             extra_routes=_extra_init,
         )
         initial_via_seg = neg_router.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("init",),
             extra_routes=_extra_init,
         )
@@ -7217,13 +7174,12 @@ class Autorouter:
         # (board-04 SWCLK/SWO, actuals to -0.200 mm) ties a clean one
         # in the lex tuple and can win the post-loop restore.
         initial_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("init",),
             extra_routes=_extra_init,
         )
-        initial_violations = (
-            len(initial_seg_via) + len(initial_via_seg) + len(initial_seg_seg)
-        )
+        initial_violations = len(initial_seg_via) + len(initial_via_seg) + len(initial_seg_seg)
 
         # Issue #3117: compute ``nets_fully_connected`` for the lex tuple.
         # ``validate_net_connectivity`` is already called once per
@@ -7331,11 +7287,7 @@ class Autorouter:
             for routes_list_local in net_routes.values():
                 all_routes.extend(routes_list_local)
             conn = _validate_conn(all_routes, candidate_pads)
-            return [
-                n
-                for n in candidate_pads
-                if not conn.get(n, {}).get("connected", False)
-            ]
+            return [n for n in candidate_pads if not conn.get(n, {}).get("connected", False)]
 
         initial_connected = _compute_nets_fully_connected()
         initial_demotable = _compute_demotable_connected(0)
@@ -7389,12 +7341,14 @@ class Autorouter:
             # escape-phase routes; see _collect_extra_routes_for_revalidation.
             _extra_post = self._collect_extra_routes_for_revalidation(net_routes)
             post_seg_via = neg_router.find_nets_with_segment_via_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
+                net_routes,
+                trace_clearance=self.rules.trace_clearance,
                 cache_key=("post", iter_index),
                 extra_routes=_extra_post,
             )
             post_via_seg = neg_router.find_nets_with_via_segment_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
+                net_routes,
+                trace_clearance=self.rules.trace_clearance,
                 cache_key=("post", iter_index),
                 extra_routes=_extra_post,
             )
@@ -7403,13 +7357,12 @@ class Autorouter:
             # separation) beats an overlapping iteration with the same
             # routed count in the best-snapshot comparator.
             post_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
+                net_routes,
+                trace_clearance=self.rules.trace_clearance,
                 cache_key=("post", iter_index),
                 extra_routes=_extra_post,
             )
-            violations_now = (
-                len(post_seg_via) + len(post_via_seg) + len(post_seg_seg)
-            )
+            violations_now = len(post_seg_via) + len(post_via_seg) + len(post_seg_seg)
             # Issue #3117: compute ``nets_fully_connected`` so the lex
             # tuple primary key can reward iterations that closed more
             # pad-to-pad paths (not just iterations that produced more
@@ -7528,19 +7481,22 @@ class Autorouter:
                     # escape-phase routes.
                     _extra_top = self._collect_extra_routes_for_revalidation(net_routes)
                     current_seg_via = neg_router.find_nets_with_segment_via_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        net_routes,
+                        trace_clearance=self.rules.trace_clearance,
                         cache_key=("post", iteration - 1),
                         extra_routes=_extra_top,
                     )
                     current_via_seg = neg_router.find_nets_with_via_segment_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        net_routes,
+                        trace_clearance=self.rules.trace_clearance,
                         cache_key=("post", iteration - 1),
                         extra_routes=_extra_top,
                     )
                     # Issue #3433: seg-seg parity at the top-of-iteration
                     # snapshot site (matches the end-of-iteration capture).
                     current_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        net_routes,
+                        trace_clearance=self.rules.trace_clearance,
                         cache_key=("post", iteration - 1),
                         extra_routes=_extra_top,
                     )
@@ -7587,9 +7543,7 @@ class Autorouter:
                             try:
                                 checkpoint_callback(best_routes, best_metrics)
                             except Exception as exc:  # noqa: BLE001
-                                flush_print(
-                                    f"  checkpoint: write failed ({exc!r}); continuing"
-                                )
+                                flush_print(f"  checkpoint: write failed ({exc!r}); continuing")
 
                     # Adaptive early termination check (Issue #633)
                     # Issue #2334: When perturbation is enabled, activate it
@@ -7602,7 +7556,9 @@ class Autorouter:
                     # "keep going at overflow==0 with unrouted nets" guard
                     # inside ``should_terminate_early``.
                     unrouted = total_nets - sum(1 for r in net_routes.values() if r)
-                    if adaptive and should_terminate_early(overflow_history, iteration, unrouted_count=unrouted):
+                    if adaptive and should_terminate_early(
+                        overflow_history, iteration, unrouted_count=unrouted
+                    ):
                         if perturbation and perturbation_stagnation_count < 3:
                             # Activate perturbation instead of terminating
                             perturbation_stagnation_count += 1
@@ -7627,10 +7583,11 @@ class Autorouter:
                                 self.net_names.get(n, f"Net_{n}") for n in partial_at_term
                             )
                             full_routed = sum(
-                                1 for n, r in net_routes.items()
-                                if r and n not in partial_at_term
+                                1 for n, r in net_routes.items() if r and n not in partial_at_term
                             )
-                            print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
+                            print(
+                                f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})"
+                            )
                             print(f"    Overflow history: {overflow_history[-5:]}")
                             print(
                                 f"    Routed: {full_routed}/{total_nets}, "
@@ -7716,7 +7673,10 @@ class Autorouter:
                         )
                         # Adaptive present cost based on iteration and congestion
                         present_factor = calculate_present_cost(
-                            iteration, max_iterations, overflow_ratio, initial_present_factor,
+                            iteration,
+                            max_iterations,
+                            overflow_ratio,
+                            initial_present_factor,
                             exponential=exponential_cost,
                             pres_fac_mult=iter_pres_fac_mult,
                             pres_fac_cap=pres_fac_cap,
@@ -7740,11 +7700,11 @@ class Autorouter:
                     # Issue #2334: Re-sort net order when perturbation is active
                     # so the rip-up iterations explore different orderings.
                     if self._perturbation_magnitude > 0:
-                        net_order = sorted(
-                            net_order, key=lambda n: self._get_net_priority(n)
-                        )
+                        net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
 
-                    nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
+                    nets_to_reroute = neg_router.find_nets_through_overused_cells(
+                        net_routes, overused
+                    )
 
                     # Issue #858: Also include nets that completely failed to route
                     # (not in net_routes) - these need recovery via targeted rip-up
@@ -7770,7 +7730,9 @@ class Autorouter:
                         for failed_net in failed_nets_to_recover:
                             if failed_net not in nets_to_reroute:
                                 nets_to_reroute.append(failed_net)
-                        print(f"  Including {len(failed_nets_to_recover)} failed net(s) in recovery")
+                        print(
+                            f"  Including {len(failed_nets_to_recover)} failed net(s) in recovery"
+                        )
 
                     # Issue #2475: Also include partially routed nets — nets that
                     # appear in ``net_routes`` but failed to connect all of their
@@ -7781,15 +7743,14 @@ class Autorouter:
                     partial_nets = self._get_partially_routed_nets(net_routes, pads_by_net)
                     if partial_nets:
                         new_partial = [
-                            n for n in partial_nets
+                            n
+                            for n in partial_nets
                             if n not in nets_to_reroute and n not in off_grid_nets
                         ]
                         if new_partial:
                             for partial_net in new_partial:
                                 nets_to_reroute.append(partial_net)
-                            partial_names = [
-                                self.net_names.get(n, f"Net_{n}") for n in new_partial
-                            ]
+                            partial_names = [self.net_names.get(n, f"Net_{n}") for n in new_partial]
                             flush_print(
                                 f"  Including {len(new_partial)} partially routed net(s) "
                                 f"in recovery: {', '.join(partial_names)}"
@@ -7820,13 +7781,15 @@ class Autorouter:
                     # routes (lateral / in-pad helpers from PR #3070 etc).
                     _extra_mid = self._collect_extra_routes_for_revalidation(net_routes)
                     seg_via_violators = neg_router.find_nets_with_segment_via_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        net_routes,
+                        trace_clearance=self.rules.trace_clearance,
                         cache_key=("post", iteration - 1),
                         extra_routes=_extra_mid,
                     )
                     if seg_via_violators:
                         new_violators = [
-                            n for n in seg_via_violators
+                            n
+                            for n in seg_via_violators
                             if n not in nets_to_reroute and n not in off_grid_nets
                         ]
                         if new_violators:
@@ -7860,13 +7823,15 @@ class Autorouter:
                     # gates on SEGMENT commit; this hook gates on VIA
                     # commit (post-iteration).
                     via_seg_violators = neg_router.find_nets_with_via_segment_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        net_routes,
+                        trace_clearance=self.rules.trace_clearance,
                         cache_key=("post", iteration - 1),
                         extra_routes=_extra_mid,
                     )
                     if via_seg_violators:
                         new_via_violators = [
-                            n for n in via_seg_violators
+                            n
+                            for n in via_seg_violators
                             if n not in nets_to_reroute and n not in off_grid_nets
                         ]
                         if new_via_violators:
@@ -7891,21 +7856,22 @@ class Autorouter:
                     # Feed BOTH nets of each violating pair back so the
                     # next iteration can separate them (typically by layer).
                     seg_seg_violators = neg_router.find_nets_with_segment_segment_violations(
-                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        net_routes,
+                        trace_clearance=self.rules.trace_clearance,
                         cache_key=("post", iteration - 1),
                         extra_routes=_extra_mid,
                     )
                     if seg_seg_violators:
                         new_seg_seg_violators = [
-                            n for n in seg_seg_violators
+                            n
+                            for n in seg_seg_violators
                             if n not in nets_to_reroute and n not in off_grid_nets
                         ]
                         if new_seg_seg_violators:
                             for v_net in new_seg_seg_violators:
                                 nets_to_reroute.append(v_net)
                             violator_names = [
-                                self.net_names.get(n, f"Net_{n}")
-                                for n in new_seg_seg_violators
+                                self.net_names.get(n, f"Net_{n}") for n in new_seg_seg_violators
                             ]
                             flush_print(
                                 f"  Including {len(new_seg_seg_violators)} segment-vs-foreign-"
@@ -7944,15 +7910,14 @@ class Autorouter:
 
                     # Filter out stalled nets
                     newly_stalled = [
-                        n for n in nets_to_reroute
+                        n
+                        for n in nets_to_reroute
                         if net_ripup_stall.get(n, 0) >= max_net_stall_iterations
                         and n not in stalled_nets
                     ]
                     if newly_stalled:
                         stalled_nets.update(newly_stalled)
-                        stalled_names = [
-                            self.net_names.get(n, f"Net_{n}") for n in newly_stalled
-                        ]
+                        stalled_names = [self.net_names.get(n, f"Net_{n}") for n in newly_stalled]
                         flush_print(
                             f"  Excluding {len(newly_stalled)} stalled net(s) from rip-up: "
                             f"{', '.join(stalled_names)}"
@@ -7998,9 +7963,8 @@ class Autorouter:
                         # Same set OR subsequent cohorts are a subset of base
                         # (handles the case where some nets get marked stalled
                         # mid-window but the active subset stabilises).
-                        cohorts_stable = (
-                            bool(base_cohort)
-                            and all(c <= base_cohort and c for c in recent_cohorts)
+                        cohorts_stable = bool(base_cohort) and all(
+                            c <= base_cohort and c for c in recent_cohorts
                         )
                         overflow_stable = False
                         if len(overflow_history) >= cohort_stagnation_window:
@@ -8061,9 +8025,13 @@ class Autorouter:
                             if ripup_targets:
                                 neg_router.rip_up_nets(ripup_targets, net_routes, self.routes)
                             # Re-route each cohort member fresh with elevated cost
-                            recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
+                            recovery_factor = max(
+                                present_factor * 2.0, initial_present_factor * 4.0
+                            )
                             recovered_count = 0
-                            for rn in sorted(recovery_cohort, key=lambda n: self._get_net_priority(n)):
+                            for rn in sorted(
+                                recovery_cohort, key=lambda n: self._get_net_priority(n)
+                            ):
                                 if check_timeout():
                                     timed_out = True
                                     break
@@ -8129,9 +8097,7 @@ class Autorouter:
                                     nets_to_reroute.append(fn)
 
                     if stalled_nets:
-                        nets_to_reroute = [
-                            n for n in nets_to_reroute if n not in stalled_nets
-                        ]
+                        nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
 
                     # Issue #2396: When overflow is 0 but nets remain unrouted,
                     # the rip-up loop has no overflow signal to act on.  Force
@@ -8139,11 +8105,7 @@ class Autorouter:
                     # present_factor to encourage exploration of alternative
                     # paths.  This directly addresses the 4L 3/8 plateau
                     # observed in board 04.
-                    if (
-                        current_overflow == 0
-                        and failed_net_ids
-                        and not timed_out
-                    ):
+                    if current_overflow == 0 and failed_net_ids and not timed_out:
                         recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
                         recovered = 0
                         attempted = 0
@@ -8221,11 +8183,11 @@ class Autorouter:
                         # "remaining unrouted nets are all structurally
                         # unroutable" so the operator understands why the loop
                         # exited at iteration 1 with nets still missing.
-                        remaining_unrouted = [
-                            n for n in net_order if not net_routes.get(n)
-                        ]
+                        remaining_unrouted = [n for n in net_order if not net_routes.get(n)]
                         structurally_unroutable = [
-                            n for n in remaining_unrouted if n in single_pad_nets or n in off_grid_nets
+                            n
+                            for n in remaining_unrouted
+                            if n in single_pad_nets or n in off_grid_nets
                         ]
                         if remaining_unrouted and len(structurally_unroutable) == len(
                             remaining_unrouted
@@ -8255,9 +8217,7 @@ class Autorouter:
                                 f"{iteration}/{max_iterations} ({elapsed_str()})"
                             )
                             if unrouted_names:
-                                flush_print(
-                                    f"    Unrouted nets: {', '.join(unrouted_names)}"
-                                )
+                                flush_print(f"    Unrouted nets: {', '.join(unrouted_names)}")
                             if partial_names:
                                 flush_print(
                                     f"    Partially routed nets: {', '.join(partial_names)}"
@@ -8292,9 +8252,7 @@ class Autorouter:
                             f"net(s) are all power/pour nets and overflow has plateaued "
                             f"at {overflow_history[-1]}."
                         )
-                        flush_print(
-                            f"  Stalled nets: {', '.join(stall_names)}"
-                        )
+                        flush_print(f"  Stalled nets: {', '.join(stall_names)}")
                         flush_print(
                             "  Aborting iteration loop to avoid spin-wait. "
                             "Try --auto-layers (dedicated planes) or "
@@ -8336,9 +8294,7 @@ class Autorouter:
                             # are still marked, and ``_route_net_negotiated`` will
                             # build a duplicate Steiner tree on top of stale routes.
                             if failed_net in net_routes and net_routes[failed_net]:
-                                neg_router.rip_up_nets(
-                                    [failed_net], net_routes, self.routes
-                                )
+                                neg_router.rip_up_nets([failed_net], net_routes, self.routes)
 
                             # Find which nets are blocking by checking pad connections
                             blocking_nets: set[int] = set()
@@ -8397,7 +8353,12 @@ class Autorouter:
                                 # direct path but still prevent routing via clearance/congestion.
                                 # Try ripping up ALL routed nets and re-routing failed net first.
                                 routed_nets = list(net_routes.keys())
-                                if routed_nets and iteration <= 2 and not full_reorder_used_this_iter and not hotset_only:  # Try in first few iterations
+                                if (
+                                    routed_nets
+                                    and iteration <= 2
+                                    and not full_reorder_used_this_iter
+                                    and not hotset_only
+                                ):  # Try in first few iterations
                                     print(
                                         f"    No direct blockers found - trying full reorder for net {failed_net}"
                                     )
@@ -8482,7 +8443,10 @@ class Autorouter:
                             # Update best even when perturbation is inactive
                             elif overflow == perturbation_best_overflow:
                                 pass  # No change
-                        if perturbation_best_overflow is None or overflow < perturbation_best_overflow:
+                        if (
+                            perturbation_best_overflow is None
+                            or overflow < perturbation_best_overflow
+                        ):
                             perturbation_best_overflow = overflow
 
                         flush_print(
@@ -8505,8 +8469,7 @@ class Autorouter:
                                 print(f"  Convergence achieved at iteration {iteration}!")
                                 break
                             stranded_names = sorted(
-                                self.net_names.get(n, f"Net_{n}")
-                                for n in stranded_targeted
+                                self.net_names.get(n, f"Net_{n}") for n in stranded_targeted
                             )
                             flush_print(
                                 f"  Overflow clean but {len(stranded_targeted)} "
@@ -8517,12 +8480,18 @@ class Autorouter:
                         # Issue #2274: Neighborhood rip-up when stalled with 0
                         # overflow but unrouted nets remain.
                         still_unrouted_targeted = [
-                            n for n in net_order
+                            n
+                            for n in net_order
                             if (n not in net_routes or not net_routes.get(n))
                             and n in pads_by_net
                             and n not in off_grid_nets
                         ]
-                        if overflow == 0 and still_unrouted_targeted and not timed_out and not hotset_only:
+                        if (
+                            overflow == 0
+                            and still_unrouted_targeted
+                            and not timed_out
+                            and not hotset_only
+                        ):
                             # Track stall progression
                             current_routed = len(net_routes)
                             if current_routed <= prev_routed_count:
@@ -8548,7 +8517,8 @@ class Autorouter:
                                     pads_by_net=pads_by_net,
                                     present_cost_factor=present_factor,
                                     mark_route_callback=_mark_route_neighborhood,
-                                    stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
+                                    stall_count=neighborhood_stall_count
+                                    - neighborhood_stall_threshold,
                                     per_net_timeout=per_net_timeout,
                                     max_attempts=neighborhood_max_attempts,
                                     initial_radius_factor=neighborhood_initial_radius,
@@ -8593,7 +8563,9 @@ class Autorouter:
                                 )
 
                             print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
-                            print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
+                            print(
+                                f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
+                            )
 
                             def mark_route_targeted(route: Route) -> None:
                                 self._mark_route(route)
@@ -8621,12 +8593,16 @@ class Autorouter:
                             escape_strategy_index += tried
 
                             if success:
-                                print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
+                                print(
+                                    f"    Escape successful! Overflow: {overflow} → {new_overflow}"
+                                )
                                 overflow = new_overflow
                                 overflow_history[-1] = new_overflow
                                 overused = self.grid.find_overused_cells()
                             else:
-                                print(f"    All {tried} escape strategies exhausted without improvement")
+                                print(
+                                    f"    All {tried} escape strategies exhausted without improvement"
+                                )
 
                         # Skip common code since targeted ripup handles everything
                         # (convergence and oscillation already checked above)
@@ -8719,9 +8695,7 @@ class Autorouter:
                         flush_print(
                             f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
                         )
-                        flush_print(
-                            f"  Progress: {len(net_routes)}/{total_nets} nets routed total"
-                        )
+                        flush_print(f"  Progress: {len(net_routes)}/{total_nets} nets routed total")
 
                         # Issue #2265: When overflow is 0 but nets remain unrouted,
                         # the standard rip-up path only re-attempts failed nets without
@@ -8736,7 +8710,8 @@ class Autorouter:
                         # entries (ripped up above, then failed re-route) also
                         # qualify for the targeted fallback.
                         still_failed = [
-                            n for n in net_order
+                            n
+                            for n in net_order
                             if (
                                 (not net_routes.get(n) or n in partial_failed)
                                 and n in pads_by_net
@@ -8793,8 +8768,10 @@ class Autorouter:
                                 # blocker rip-up.  (Issue #3448: empty-list
                                 # entries count as failed.)
                                 still_failed = [
-                                    n for n in net_order
-                                    if not net_routes.get(n) and n in pads_by_net
+                                    n
+                                    for n in net_order
+                                    if not net_routes.get(n)
+                                    and n in pads_by_net
                                     and n not in off_grid_nets
                                 ]
 
@@ -8842,8 +8819,10 @@ class Autorouter:
                                     # fallback below.  (Issue #3448: empty-list
                                     # entries count as failed.)
                                     still_failed = [
-                                        n for n in net_order
-                                        if not net_routes.get(n) and n in pads_by_net
+                                        n
+                                        for n in net_order
+                                        if not net_routes.get(n)
+                                        and n in pads_by_net
                                         and n not in off_grid_nets
                                     ]
 
@@ -8934,8 +8913,10 @@ class Autorouter:
                             # geometry cannot burn the wall budget every
                             # iteration.
                             still_failed = [
-                                n for n in net_order
-                                if not net_routes.get(n) and n in pads_by_net
+                                n
+                                for n in net_order
+                                if not net_routes.get(n)
+                                and n in pads_by_net
                                 and n not in off_grid_nets
                             ]
                             relief_resolved = 0
@@ -8993,7 +8974,8 @@ class Autorouter:
                         # cannot burn the wall budget every iteration.
                         if overflow > 0 and still_failed and not timed_out and not hotset_only:
                             silent_failed = [
-                                n for n in still_failed
+                                n
+                                for n in still_failed
                                 if not net_routes.get(n)
                                 and hard_fail_iterations.get(n, 0) >= hard_fail_rescue_threshold
                                 and len(pads_by_net.get(n, [])) >= 2
@@ -9081,12 +9063,18 @@ class Autorouter:
                         # targeted fallback was insufficient and nets remain stalled.
                         # Issue #2333: Skip in hotset-only mode.
                         still_unrouted_std = [
-                            n for n in net_order
+                            n
+                            for n in net_order
                             if (n not in net_routes or not net_routes.get(n))
                             and n in pads_by_net
                             and n not in off_grid_nets
                         ]
-                        if overflow == 0 and still_unrouted_std and not timed_out and not hotset_only:
+                        if (
+                            overflow == 0
+                            and still_unrouted_std
+                            and not timed_out
+                            and not hotset_only
+                        ):
                             # Track stall progression
                             current_routed = len(net_routes)
                             if current_routed <= prev_routed_count:
@@ -9112,7 +9100,8 @@ class Autorouter:
                                     pads_by_net=pads_by_net,
                                     present_cost_factor=present_factor,
                                     mark_route_callback=_mark_route_neighborhood_std,
-                                    stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
+                                    stall_count=neighborhood_stall_count
+                                    - neighborhood_stall_threshold,
                                     per_net_timeout=per_net_timeout,
                                     max_attempts=neighborhood_max_attempts,
                                     initial_radius_factor=neighborhood_initial_radius,
@@ -9209,7 +9198,9 @@ class Autorouter:
                             )
 
                         print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
-                        print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
+                        print(
+                            f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
+                        )
 
                         def mark_route(route: Route) -> None:
                             self._mark_route(route)
@@ -9242,7 +9233,9 @@ class Autorouter:
                             overflow_history[-1] = new_overflow  # Update last entry
                             overused = self.grid.find_overused_cells()
                         else:
-                            print(f"    All {tried} escape strategies exhausted without improvement")
+                            print(
+                                f"    All {tried} escape strategies exhausted without improvement"
+                            )
                             # Continue to next iteration with different parameters
 
             # Issue #2334: Always reset perturbation at end of routing
@@ -9271,9 +9264,7 @@ class Autorouter:
             # index isn't readily available here.
             final_route_count = sum(len(r) for r in net_routes.values())
             final_via_count = sum(
-                len(route.vias)
-                for routes in net_routes.values()
-                for route in routes
+                len(route.vias) for routes in net_routes.values() for route in routes
             )
             # Issue #3020: combine both directions of the clearance
             # matrix in the final lex-tuple comparator so a best snapshot
@@ -9283,12 +9274,14 @@ class Autorouter:
             # escape-phase routes for the post-loop best-vs-final compare.
             _extra_final = self._collect_extra_routes_for_revalidation(net_routes)
             final_seg_via = neg_router.find_nets_with_segment_via_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
+                net_routes,
+                trace_clearance=self.rules.trace_clearance,
                 cache_key=("final", final_route_count, final_via_count),
                 extra_routes=_extra_final,
             )
             final_via_seg = neg_router.find_nets_with_via_segment_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
+                net_routes,
+                trace_clearance=self.rules.trace_clearance,
                 cache_key=("final", final_route_count, final_via_count),
                 extra_routes=_extra_final,
             )
@@ -9297,13 +9290,12 @@ class Autorouter:
             # separation is never overwritten by an overlapping final
             # state with equal routed count.
             final_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-                net_routes, trace_clearance=self.rules.trace_clearance,
+                net_routes,
+                trace_clearance=self.rules.trace_clearance,
                 cache_key=("final", final_route_count, final_via_count),
                 extra_routes=_extra_final,
             )
-            final_violations = (
-                len(final_seg_via) + len(final_via_seg) + len(final_seg_seg)
-            )
+            final_violations = len(final_seg_via) + len(final_via_seg) + len(final_seg_seg)
             # Issue #3117: include ``nets_fully_connected`` in the final
             # lex-tuple comparator so the post-loop restore preserves a
             # best snapshot whose pad-to-pad paths are more thoroughly
@@ -9315,9 +9307,7 @@ class Autorouter:
             # connectivity.  A final state with more connected-but-
             # overlapping nets must not overwrite a best snapshot whose
             # connectivity actually survives demotion.
-            final_iter_idx = (
-                iteration_trajectory[-1].iteration if iteration_trajectory else 0
-            )
+            final_iter_idx = iteration_trajectory[-1].iteration if iteration_trajectory else 0
             final_demotable = _compute_demotable_connected(final_iter_idx)
             final_metrics = IterationMetrics(
                 iteration=final_iter_idx,
@@ -9528,9 +9518,7 @@ class Autorouter:
 
         return list(self.routes)
 
-    def _flush_corridor_reservation(
-        self, net_routes: dict[int, list[Route]]
-    ) -> None:
+    def _flush_corridor_reservation(self, net_routes: dict[int, list[Route]]) -> None:
         """Close the iteration-scoped corridor-reservation window (#3438).
 
         Flushes the deferred C++ unmarks queued by every rip-up that ran
@@ -9574,18 +9562,13 @@ class Autorouter:
         if getter is not None:
             info = getter()
         flush_print(
-            f"    [relief-debug] probe for net {net} returned no routes; "
-            f"failure_info={info}"
+            f"    [relief-debug] probe for net {net} returned no routes; failure_info={info}"
         )
         g = self.grid
         for p_ in self.nets.get(net, []):
             pad = self._escape_pad_overrides.get(p_, self.pads[p_])
             gx, gy = g.world_to_grid(pad.x, pad.y)
-            li = (
-                g.layer_to_index(pad.layer.value)
-                if hasattr(pad.layer, "value")
-                else 0
-            )
+            li = g.layer_to_index(pad.layer.value) if hasattr(pad.layer, "value") else 0
             flush_print(
                 f"    [relief-debug] pad {pad.ref} at ({pad.x:.2f},{pad.y:.2f}) "
                 f"grid ({gx},{gy},L{li})"
@@ -9677,6 +9660,7 @@ class Autorouter:
             setter(False)
 
         import os as _os
+
         if _os.environ.get("KCT_RELIEF_DEBUG"):
             self._relief_debug_dump(net, probe_routes)
         if not probe_routes:
@@ -9739,9 +9723,7 @@ class Autorouter:
 
         max_rounds = 4
         snapshot_nets: set[int] = {failed_net}
-        original_routes: dict[int, list[Route]] = {
-            failed_net: list(net_routes.get(failed_net, []))
-        }
+        original_routes: dict[int, list[Route]] = {failed_net: list(net_routes.get(failed_net, []))}
         ripped: list[int] = []
         failed_name = self.net_names.get(failed_net, f"Net_{failed_net}")
 
@@ -9818,17 +9800,13 @@ class Autorouter:
                     committed_routes = probe_routes
                 break
 
-            rippable = {
-                v for v in victims if v not in snapshot_nets and net_routes.get(v)
-            }
+            rippable = {v for v in victims if v not in snapshot_nets and net_routes.get(v)}
             # Roll back the probe copper before deciding.
             for route in probe_routes:
                 self.grid.unmark_route(route)
 
             if not rippable:
-                blocker_names = sorted(
-                    self.net_names.get(v, f"Net_{v}") for v in victims
-                )
+                blocker_names = sorted(self.net_names.get(v, f"Net_{v}") for v in victims)
                 flush_print_fn(
                     f"  Relief rescue: {failed_name} blocked only by "
                     f"non-rippable copper of {', '.join(blocker_names)} "
@@ -9842,9 +9820,7 @@ class Autorouter:
                 original_routes[v] = list(net_routes.get(v, []))
                 ripped.append(v)
             neg_router.rip_up_nets(list(rippable), net_routes, self.routes)
-            rippable_names = sorted(
-                self.net_names.get(v, f"Net_{v}") for v in rippable
-            )
+            rippable_names = sorted(self.net_names.get(v, f"Net_{v}") for v in rippable)
             flush_print_fn(
                 f"  Relief rescue: {failed_name} round {round_idx + 1} -- "
                 f"ripped {len(rippable)} blocker(s): "
@@ -9869,9 +9845,7 @@ class Autorouter:
         # Re-land the displaced victims.  Reduced per-net budget: any
         # member that fails here is retried by the normal recovery flow
         # with the full budget on the next iteration (if we commit).
-        restart_timeout = (
-            min(10.0, per_net_timeout) if per_net_timeout else 10.0
-        )
+        restart_timeout = min(10.0, per_net_timeout) if per_net_timeout else 10.0
         # Multi-pass re-land: a victim that fails while its displaced
         # siblings are still unplaced often lands cleanly once they have
         # settled (the run-5 measurements: rescues failed at exactly
@@ -10011,12 +9985,12 @@ class Autorouter:
         # Issue #2401: Substitute escaped pads with virtual pads at escape
         # endpoints so RSMT + A* route between escape endpoints, not original
         # pad centers.
-        pad_objs = [
-            self._escape_pad_overrides.get(p, self.pads[p])
-            for p in pads_for_routing
-        ]
+        pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
         neg_router = NegotiatedRouter(
-            self.grid, self.router, self.rules, self.net_class_map,
+            self.grid,
+            self.router,
+            self.rules,
+            self.net_class_map,
             congestion_estimator=self._ensure_congestion_estimator(),
         )
 
@@ -10157,11 +10131,7 @@ class Autorouter:
                         worst_deficit = deficit
                         worst_loc = loc
             if worst_deficit > nudge_reach:
-                loc_str = (
-                    f" at ({worst_loc[0]:.3f}, {worst_loc[1]:.3f})"
-                    if worst_loc
-                    else ""
-                )
+                loc_str = f" at ({worst_loc[0]:.3f}, {worst_loc[1]:.3f})" if worst_loc else ""
                 flush_print(
                     f"    Net {net} ({self.net_names.get(net, '?')}): "
                     f"foreign-pad clearance deficit {worst_deficit:.3f}mm"
@@ -10306,11 +10276,7 @@ class Autorouter:
                         worst_deficit = deficit
                         worst_loc = loc
             if worst_deficit > nudge_reach:
-                loc_str = (
-                    f" at ({worst_loc[0]:.3f}, {worst_loc[1]:.3f})"
-                    if worst_loc
-                    else ""
-                )
+                loc_str = f" at ({worst_loc[0]:.3f}, {worst_loc[1]:.3f})" if worst_loc else ""
                 flush_print(
                     f"    Net {net} ({self.net_names.get(net, '?')}): "
                     f"via-vs-foreign-segment clearance deficit "
@@ -10392,9 +10358,9 @@ class Autorouter:
             # Issue #1798: Categorise violations by layer to identify
             # inner-layer congestion that needs stronger repulsion.
             inner_layer_violations = [
-                v for v in seg_violations
-                if getattr(v, "layer", None) is not None
-                and v.layer not in (Layer.F_CU, Layer.B_CU)
+                v
+                for v in seg_violations
+                if getattr(v, "layer", None) is not None and v.layer not in (Layer.F_CU, Layer.B_CU)
             ]
 
             # Collect the distinct layer names for the log message.
@@ -10421,7 +10387,10 @@ class Autorouter:
                 inner_violating_nets.add(v.obstacle_net)
 
             neg_router = NegotiatedRouter(
-                self.grid, self.router, self.rules, self.net_class_map,
+                self.grid,
+                self.router,
+                self.rules,
+                self.net_class_map,
                 congestion_estimator=self._ensure_congestion_estimator(),
             )
 
@@ -10473,9 +10442,7 @@ class Autorouter:
                 # Issue #1798: Use a higher present_factor for nets that had
                 # inner-layer violations, encouraging wider spacing.
                 net_pf = present_factor * 2.0 if net in inner_violating_nets else present_factor
-                routes = self._route_net_negotiated(
-                    net, net_pf, per_net_timeout=per_net_timeout
-                )
+                routes = self._route_net_negotiated(net, net_pf, per_net_timeout=per_net_timeout)
                 if routes:
                     net_routes[net] = routes
                     rerouted_count += 1
@@ -10514,9 +10481,7 @@ class Autorouter:
                             # ``rip_up_nets`` (which would also call
                             # ``unmark_route_usage`` on usage that was
                             # never marked).
-                            self._unwind_correction_pass_net(
-                                net, net_routes, pass_marked_route_ids
-                            )
+                            self._unwind_correction_pass_net(net, net_routes, pass_marked_route_ids)
                             retry_routes = self._route_net_negotiated(
                                 net, retry_pf, per_net_timeout=per_net_timeout
                             )
@@ -10544,17 +10509,13 @@ class Autorouter:
             # near-miss (overlaps never reach this pass on the loop's
             # best snapshot), which the DRC nudge pass can still repair
             # -- strictly better than either failure shape.
-            failed_to_reland = [
-                n for n in nets_to_reroute if not net_routes.get(n)
-            ]
+            failed_to_reland = [n for n in nets_to_reroute if not net_routes.get(n)]
             if failed_to_reland:
                 for net in nets_to_reroute:
                     # Unwind any copper this pass placed (committed via
                     # ``mark_route`` above -- NO usage was marked, so
                     # only ``unmark_route`` is applied; Issue #3501).
-                    self._unwind_correction_pass_net(
-                        net, net_routes, pass_marked_route_ids
-                    )
+                    self._unwind_correction_pass_net(net, net_routes, pass_marked_route_ids)
                 # Issue #3501 tripwire: after unwinding every rerouted
                 # net the ledger must be empty -- every route this pass
                 # marked was unmarked exactly once.  A leftover means
@@ -10575,9 +10536,7 @@ class Autorouter:
                         self.grid.mark_route_usage(route)
                         if route not in self.routes:
                             self.routes.append(route)
-                failed_names = sorted(
-                    self.net_names.get(n, f"Net_{n}") for n in failed_to_reland
-                )
+                failed_names = sorted(self.net_names.get(n, f"Net_{n}") for n in failed_to_reland)
                 flush_print(
                     f"  Correction pass rolled back: {len(failed_to_reland)} "
                     f"net(s) failed to re-land ({', '.join(failed_names)}) "
@@ -10586,9 +10545,7 @@ class Autorouter:
                 break
 
             total_corrected += rerouted_count
-            flush_print(
-                f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} net(s)"
-            )
+            flush_print(f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} net(s)")
 
             if rerouted_count == 0:
                 # No progress -- stop trying
@@ -10602,6 +10559,7 @@ class Autorouter:
 
     def _create_two_phase_router(self) -> TwoPhaseRouter:
         """Create a TwoPhaseRouter with access to Autorouter state."""
+
         # Issue #2527: Provide a builder for ``pads_by_net`` that honours
         # ``_escape_pad_overrides`` so the two-phase router's stall-recovery
         # path sees the same virtual escape-endpoint pads the negotiated
@@ -10620,8 +10578,7 @@ class Autorouter:
                 if len(pads_for_routing) < 2:
                     continue
                 mapping[net] = [
-                    self._escape_pad_overrides.get(p, self.pads[p])
-                    for p in pads_for_routing
+                    self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing
                 ]
             return mapping
 
@@ -10724,7 +10681,10 @@ class Autorouter:
         return result
 
     def _route_net_with_corridor(
-        self, net: int, present_cost_factor: float, per_net_timeout: float | None = None,
+        self,
+        net: int,
+        present_cost_factor: float,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route a single net with corridor-aware costs.
 
@@ -10790,12 +10750,12 @@ class Autorouter:
         # Issue #2401: Substitute escaped pads with virtual pads at escape
         # endpoints so RSMT + A* route between escape endpoints, not original
         # pad centers.
-        pad_objs = [
-            self._escape_pad_overrides.get(p, self.pads[p])
-            for p in pads_for_routing
-        ]
+        pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
         neg_router = NegotiatedRouter(
-            self.grid, self.router, self.rules, self.net_class_map,
+            self.grid,
+            self.router,
+            self.rules,
+            self.net_class_map,
             congestion_estimator=self._ensure_congestion_estimator(),
         )
 
@@ -10807,7 +10767,9 @@ class Autorouter:
 
         # Route with corridor-aware costs (negotiated router will pick up corridor costs)
         new_routes = neg_router.route_net_negotiated(
-            pad_objs, present_cost_factor, mark_route,
+            pad_objs,
+            present_cost_factor,
+            mark_route,
             per_net_timeout=per_net_timeout,
             failure_callback=record_failure,
         )
@@ -10904,9 +10866,7 @@ class Autorouter:
             self.grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
         self.routes = []
 
-    def _shuffle_within_tiers(
-        self, net_order: list[int], promotion_rate: float = 0.0
-    ) -> list[int]:
+    def _shuffle_within_tiers(self, net_order: list[int], promotion_rate: float = 0.0) -> list[int]:
         """Shuffle nets but keep priority ordering.
 
         Args:
@@ -11201,9 +11161,7 @@ class Autorouter:
             )
 
             # Feed pads from main router into block router
-            block_router.add_pads_from_autorouter(
-                self.pads, self.nets, self.net_names
-            )
+            block_router.add_pads_from_autorouter(self.pads, self.nets, self.net_names)
 
             result = block_router.route_block()
             block_results.append(result)
@@ -11221,7 +11179,10 @@ class Autorouter:
             # global routing avoids block interiors.
             min_x, min_y, max_x, max_y = block_router.bounds
             region_graph.register_block_occupancy(
-                min_x, min_y, max_x, max_y,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
                 trace_count=len(result.routes),
             )
 
@@ -11244,23 +11205,14 @@ class Autorouter:
                 if pad_keys and all(k in globally_connected for k in pad_keys):
                     fully_routed_nets.add(net_id)
 
-        net_order = sorted(
-            self.nets.keys(), key=lambda n: self._get_net_priority(n)
-        )
+        net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         net_order = self._filter_pour_nets(net_order)
-        nets_to_route = [
-            n for n in net_order if n != 0 and n not in fully_routed_nets
-        ]
+        nets_to_route = [n for n in net_order if n != 0 and n not in fully_routed_nets]
 
-        flush_print(
-            f"    Skipping {len(fully_routed_nets)} fully block-routed nets"
-        )
+        flush_print(f"    Skipping {len(fully_routed_nets)} fully block-routed nets")
         flush_print(f"    Routing {len(nets_to_route)} remaining nets")
         if all_inter_block_nets:
-            flush_print(
-                f"    Inter-block nets (corridor routing): "
-                f"{len(all_inter_block_nets)}"
-            )
+            flush_print(f"    Inter-block nets (corridor routing): {len(all_inter_block_nets)}")
 
         # Issue #1654: Wire RegionGraph corridor costs into inter-block routing.
         # Use GlobalRouter to assign corridors for inter-block nets so that
@@ -11285,9 +11237,7 @@ class Autorouter:
                     pad_positions.append((pad_obj.x, pad_obj.y))
             assignment = global_router.route_net(net, pad_positions)
             if assignment is not None:
-                self.grid.set_corridor_preference(
-                    assignment.corridor, net, corridor_penalty
-                )
+                self.grid.set_corridor_preference(assignment.corridor, net, corridor_penalty)
                 corridor_assigned_nets.add(net)
 
         if corridor_assigned_nets:
@@ -11303,13 +11253,9 @@ class Autorouter:
         total_remaining = len(nets_to_route)
         for i, net in enumerate(nets_to_route):
             if progress_callback is not None:
-                progress = (len(block_list) + i) / (
-                    len(block_list) + total_remaining
-                )
+                progress = (len(block_list) + i) / (len(block_list) + total_remaining)
                 net_name = self.net_names.get(net, f"Net {net}")
-                if not progress_callback(
-                    progress, f"Routing {net_name}", True
-                ):
+                if not progress_callback(progress, f"Routing {net_name}", True):
                     break
 
             if net in all_inter_block_nets:
@@ -11427,7 +11373,9 @@ class Autorouter:
             # skip the unified pass below to avoid double-correction.
             return self.route_all_negotiated(progress_callback=progress_callback)
         else:
-            result = self.route_all(progress_callback=progress_callback, suppress_no_timeout_warning=True)
+            result = self.route_all(
+                progress_callback=progress_callback, suppress_no_timeout_warning=True
+            )
 
         # Issue #1783: Run post-route clearance correction for ALL strategies.
         # Previously this only ran inside route_all_negotiated, leaving
@@ -11467,7 +11415,7 @@ class Autorouter:
         Returns a mapping of net_id -> number of connected components
         formed by segment endpoints and via positions.
         """
-        from .observability import _UnionFind, _pt
+        from .observability import _pt, _UnionFind
 
         routes_by_net: dict[int, list[Route]] = {}
         for r in routes:
@@ -11562,9 +11510,7 @@ class Autorouter:
         # on the board.  Remove escape-stub routes for nets that have no
         # real (non-escape) route.  Runs before the connectivity snapshot
         # so the restore guard below doesn't resurrect them.
-        nets_with_real_routes = {
-            r.net for r in self.routes if not getattr(r, "is_escape", False)
-        }
+        nets_with_real_routes = {r.net for r in self.routes if not getattr(r, "is_escape", False)}
         orphan_escapes = [
             r
             for r in self.routes
@@ -11600,8 +11546,8 @@ class Autorouter:
 
         # -- Step 2: Strip individual net-0 segments/vias inside valid routes --
         # Track removed items per route so we can restore them if needed.
-        removed_net0_segs: dict[int, list[Segment]] = {}  # route index -> segs
-        removed_net0_vias: dict[int, list[Via]] = {}
+        removed_net0_segs: dict[int, list[Segment]] = {}  # noqa: F821  # Segment imported func-locally; route index -> segs
+        removed_net0_vias: dict[int, list[Via]] = {}  # noqa: F821  # Via imported func-locally
         for idx, route in enumerate(self.routes):
             orig_segs = route.segments[:]
             orig_vias = route.vias[:]
@@ -11633,8 +11579,8 @@ class Autorouter:
         max_x = bb_max_x + oob_margin
         max_y = bb_max_y + oob_margin
 
-        removed_oob_segs: dict[int, list[Segment]] = {}
-        removed_oob_vias: dict[int, list[Via]] = {}
+        removed_oob_segs: dict[int, list[Segment]] = {}  # noqa: F821  # Segment imported func-locally
+        removed_oob_vias: dict[int, list[Via]] = {}  # noqa: F821  # Via imported func-locally
         for idx, route in enumerate(self.routes):
             orig_seg_count = len(route.segments)
             orig_via_count = len(route.vias)
@@ -11804,12 +11750,8 @@ class Autorouter:
                 # separately so demos / tests can distinguish trace resolution
                 # from via resolution.  ``total_resolved`` already sums both.
                 "trace_conflicts_found": vc_stats.trace_conflicts_found,
-                "trace_rip_reroutes_attempted": (
-                    vc_stats.trace_rip_reroutes_attempted
-                ),
-                "trace_rip_reroutes_succeeded": (
-                    vc_stats.trace_rip_reroutes_succeeded
-                ),
+                "trace_rip_reroutes_attempted": (vc_stats.trace_rip_reroutes_attempted),
+                "trace_rip_reroutes_succeeded": (vc_stats.trace_rip_reroutes_succeeded),
                 "total_resolved": vc_stats.total_resolved,
             }
 
@@ -12344,9 +12286,7 @@ class Autorouter:
             # ``1.0mm < 8.425mm``).  Within-pair clearance is by
             # definition the TIGHTER floor, so clamp it to the
             # intra-group floor.
-            intra_pair_clearance_mm = min(
-                intra_pair_clearance_mm, intra_group_clearance_mm
-            )
+            intra_pair_clearance_mm = min(intra_pair_clearance_mm, intra_group_clearance_mm)
 
             # Phase 2F (#2701) requires intra_pair_clearance_mm
             # unconditionally for groups whose pair_ids is non-empty.  The
@@ -12424,9 +12364,7 @@ class Autorouter:
                 for member_net_id in sorted(group_results):
                     res = group_results[member_net_id][1]
                     if res.reason in _diagnostic_reasons and res.message:
-                        member_name = self.net_names.get(
-                            member_net_id, f"net {member_net_id}"
-                        )
+                        member_name = self.net_names.get(member_net_id, f"net {member_net_id}")
                         print(f"    {member_name}: {res.reason} -- {res.message}")
 
         # Refresh the skew tracker after tuning so downstream consumers
@@ -12627,9 +12565,7 @@ class Autorouter:
         # ``getattr`` guards: some unit tests construct partially
         # initialised Autorouter doubles (``__new__`` without
         # ``__init__``); the flag flip must not crash on them.
-        self.paired_escape_coupling = bool(
-            diffpair_config is not None and diffpair_config.enabled
-        )
+        self.paired_escape_coupling = bool(diffpair_config is not None and diffpair_config.enabled)
         if getattr(self, "_escape_router", None) is not None:
             self._escape_router.diff_pair_map = (
                 self.get_diff_pair_map() if self.paired_escape_coupling else {}
@@ -12689,9 +12625,7 @@ class Autorouter:
                 if diffpair_config.per_pair_timeout is not None
                 else (derived_per_pair_timeout or 0.0)
             )
-            derived_aggregate_timeout = max(
-                float(per_pair_floor), float(timeout) * 0.25
-            )
+            derived_aggregate_timeout = max(float(per_pair_floor), float(timeout) * 0.25)
             logger.info(
                 "DIFFPAIR_AGGREGATE_TIMEOUT_AUTODERIVED: --timeout=%.1fs; "
                 "capping the aggregate coupled diff-pair phase at %.1fs so "
@@ -12850,9 +12784,7 @@ class Autorouter:
         """
         # Issue #3441: escape stubs (#1603) are pad-access aids, not full
         # routes -- a net whose only copper is an escape stub is failed.
-        routed_nets = {
-            r.net for r in self.routes if not getattr(r, "is_escape", False)
-        }
+        routed_nets = {r.net for r in self.routes if not getattr(r, "is_escape", False)}
         all_nets = {n for n in self.nets.keys() if n != 0}
         return list(all_nets - routed_nets)
 
@@ -13046,7 +12978,9 @@ class Autorouter:
                 if pad.net_name:
                     net_pad_positions.setdefault(pad.net_name, []).append((pad.x, pad.y))
             self._escape_router = EscapeRouter(
-                self.grid, self.rules, net_class_map=self.net_class_map,
+                self.grid,
+                self.rules,
+                net_class_map=self.net_class_map,
                 edge_clearance=self._edge_clearance,
                 board_bounds=self._board_bbox,
                 manufacturer=getattr(self.rules, "manufacturer", None),
@@ -13063,9 +12997,7 @@ class Autorouter:
                 # and are unroutable by the plain per-net A* -- threading
                 # the map unconditionally regressed board 06 from 41% to
                 # 27% reach once the BGA-49 detection fix landed.
-                diff_pair_map=(
-                    self.get_diff_pair_map() if self.paired_escape_coupling else {}
-                ),
+                diff_pair_map=(self.get_diff_pair_map() if self.paired_escape_coupling else {}),
                 net_pad_positions=net_pad_positions,
                 # Issue #3428: board-wide net-id -> pad-position map so the
                 # fine-pitch QFP in-pad rescue can aim its inner stub at
@@ -13251,9 +13183,7 @@ class Autorouter:
         rescue_count = 0
         for package in packages:
             pin_filter = pin_map.get(package.ref) if pin_map else None
-            rescues = self._escape.generate_in_pad_rescues_only(
-                package, pin_filter=pin_filter
-            )
+            rescues = self._escape.generate_in_pad_rescues_only(package, pin_filter=pin_filter)
             if not rescues:
                 continue
             routes = self._escape.apply_escape_routes(rescues)
@@ -13312,8 +13242,7 @@ class Autorouter:
 
         if rescue_count:
             flush_print(
-                f"  In-pad escape rescue pre-pass: "
-                f"{rescue_count} via-in-pad rescue(s) generated"
+                f"  In-pad escape rescue pre-pass: {rescue_count} via-in-pad rescue(s) generated"
             )
 
         return all_routes
@@ -13595,9 +13524,7 @@ class Autorouter:
         # see Issue #3201 diagnostic).  The original pad position
         # relative to the package bbox is the only reliable signal for
         # which edge the pad sits on.
-        dense_pad_info: dict[
-            tuple[str, str], tuple[PackageInfo, Pad]
-        ] = {}
+        dense_pad_info: dict[tuple[str, str], tuple[PackageInfo, Pad]] = {}
         for package in dense_packages:
             for pad in package.pads:
                 dense_pad_info[(pad.ref, pad.pin)] = (package, pad)
@@ -13650,9 +13577,7 @@ class Autorouter:
             # stagnation to this gap: the strip lived adjacent to the
             # package edge while the contested column was further out.
             try:
-                end_gx, end_gy = self.grid.world_to_grid(
-                    virtual_pad.x, virtual_pad.y
-                )
+                end_gx, end_gy = self.grid.world_to_grid(virtual_pad.x, virtual_pad.y)
             except (AttributeError, TypeError):
                 end_gx = end_gy = None
 
@@ -13692,9 +13617,7 @@ class Autorouter:
             else:
                 try:
                     if pad_dy >= 0:
-                        _gx_dummy, edge_gy = self.grid.world_to_grid(
-                            center_x, max_y
-                        )
+                        _gx_dummy, edge_gy = self.grid.world_to_grid(center_x, max_y)
                         gy1 = edge_gy + 1
                         gy2_min = gy1 + escape_strip_thickness_cells - 1
                         if end_gy is not None and end_gy > edge_gy:
@@ -13703,9 +13626,7 @@ class Autorouter:
                         else:
                             gy2 = gy2_min
                     else:
-                        _gx_dummy, edge_gy = self.grid.world_to_grid(
-                            center_x, min_y
-                        )
+                        _gx_dummy, edge_gy = self.grid.world_to_grid(center_x, min_y)
                         gy2 = edge_gy - 1
                         gy1_min = gy2 - escape_strip_thickness_cells + 1
                         if end_gy is not None and end_gy < edge_gy:
@@ -13827,9 +13748,7 @@ class Autorouter:
         # confirmed board 05 does not invoke this code path).
         if dense_packages and not os.environ.get("KCT_DISABLE_PAD_BUDGETS"):
             pad_channel_budgets = self._build_pad_channel_budgets(dense_packages)
-            if pad_channel_budgets and hasattr(
-                self.router, "set_pad_channel_budgets"
-            ):
+            if pad_channel_budgets and hasattr(self.router, "set_pad_channel_budgets"):
                 self.router.set_pad_channel_budgets(pad_channel_budgets)
                 print(
                     f"  Pad-channel budgets: {len(pad_channel_budgets)} "
@@ -13924,7 +13843,7 @@ class Autorouter:
         pad_list = list(self.pads.values())
         return self._subgrid.route_with_subgrid(pad_list)
 
-    def _pad_metal_covers_grid_cell(self, pad: "Pad") -> bool:
+    def _pad_metal_covers_grid_cell(self, pad: Pad) -> bool:
         """Return True if the grid cell nearest *pad* lies within its metal.
 
         Issue #3441: the A* pathfinder seeds start nodes from EVERY grid
@@ -13943,10 +13862,7 @@ class Autorouter:
         gx, gy = self.grid.world_to_grid(pad.x, pad.y)
         snap_x, snap_y = self.grid.grid_to_world(gx, gy)
         half_extent = min(pad.width, pad.height) / 2
-        return (
-            abs(pad.x - snap_x) <= half_extent
-            and abs(pad.y - snap_y) <= half_extent
-        )
+        return abs(pad.x - snap_x) <= half_extent and abs(pad.y - snap_y) <= half_extent
 
     def _run_subgrid_prepass(self) -> list[Route]:
         """Run sub-grid escape pre-pass for off-grid pads.
@@ -13982,9 +13898,7 @@ class Autorouter:
         if self.use_waypoint_injection:
             return []
 
-        uncovered = [
-            p for p in self.pads.values() if not self._pad_metal_covers_grid_cell(p)
-        ]
+        uncovered = [p for p in self.pads.values() if not self._pad_metal_covers_grid_cell(p)]
         if not uncovered:
             return []
 
@@ -14145,12 +14059,10 @@ class Autorouter:
         if analysis is None:
             return []
         has_via_blocker = any(
-            blocker.blocking_type == "via"
-            for blocker in analysis.pad_access_blockers
+            blocker.blocking_type == "via" for blocker in analysis.pad_access_blockers
         )
         has_trace_blocker = any(
-            blocker.blocking_type == "trace"
-            for blocker in analysis.pad_access_blockers
+            blocker.blocking_type == "trace" for blocker in analysis.pad_access_blockers
         )
         if not has_via_blocker and not has_trace_blocker:
             return []
@@ -14275,9 +14187,7 @@ class Autorouter:
 
             # Dedup by (route id, segment endpoints) to avoid trying to rip
             # the same segment twice when iterated from multiple pads.
-            seen_segments: set[
-                tuple[int, tuple[float, float, float, float]]
-            ] = set()
+            seen_segments: set[tuple[int, tuple[float, float, float, float]]] = set()
             unique_trace_conflicts = []
             for conflict in all_trace_conflicts:
                 seg = conflict.segment
@@ -14340,17 +14250,13 @@ class Autorouter:
                     # defensive).  Roll the transaction back; do not
                     # set ``any_resolved`` so the post-loop early
                     # return at the bottom of this method fires.
-                    transaction.rollback(
-                        reason=f"trace resolver did not succeed for {net_name}"
-                    )
+                    transaction.rollback(reason=f"trace resolver did not succeed for {net_name}")
                 else:
                     # Helper succeeded.  Now run the post-success
                     # ``route_net`` retry inside the same transaction
                     # window so any DRC regression it introduces also
                     # triggers rollback.
-                    self.routing_failures = [
-                        f for f in self.routing_failures if f.net != net
-                    ]
+                    self.routing_failures = [f for f in self.routing_failures if f.net != net]
                     retry_routes = self.route_net(net, _subgrid_retry=True)
 
                     # Validate the full delta of new geometry committed
@@ -14375,8 +14281,7 @@ class Autorouter:
                     # success count, not the attempt count.
                     transaction.rollback(
                         reason=(
-                            f"post-rip DRC validator rejected committed "
-                            f"geometry for {net_name}"
+                            f"post-rip DRC validator rejected committed geometry for {net_name}"
                         )
                     )
                     if manager._stats.trace_rip_reroutes_succeeded > 0:
@@ -14566,7 +14471,7 @@ class Autorouter:
         flush_print(f"\n{result.format_summary()}")
 
         stats = self.get_statistics()
-        flush_print(f"\n=== Adaptive Grid Routing Complete ===")
+        flush_print("\n=== Adaptive Grid Routing Complete ===")
         flush_print(f"  Total nets routed: {stats['nets_routed']}")
         flush_print(f"  Total segments: {stats['segments']}")
         flush_print(f"  Total vias: {stats['vias']}")
@@ -14801,8 +14706,7 @@ class Autorouter:
             # Issue #2401: Substitute escaped pads with virtual pads at
             # escape endpoints.
             pad_objs = [
-                self._escape_pad_overrides.get(p, self.pads[p])
-                for p in pads_keys if p in self.pads
+                self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_keys if p in self.pads
             ]
             if len(pad_objs) < 2:
                 continue
@@ -15044,14 +14948,14 @@ class Autorouter:
 
                 # Issue #2401: Substitute escaped pads with virtual pads at
                 # escape endpoints.
-                pad_objs = [
-                    self._escape_pad_overrides.get(p, self.pads[p])
-                    for p in pads
-                ]
+                pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads]
 
                 # Create negotiated router with relaxed rules
                 neg_router = NegotiatedRouter(
-                    self.grid, relaxed_router, relaxed_rules, self.net_class_map,
+                    self.grid,
+                    relaxed_router,
+                    relaxed_rules,
+                    self.net_class_map,
                     congestion_estimator=self._ensure_congestion_estimator(),
                 )
 

@@ -27,11 +27,6 @@ per the negative-results note in
 
 from __future__ import annotations
 
-import os
-from unittest import mock
-
-import pytest
-
 from kicad_tools.core.types import CopperLayer as Layer
 from kicad_tools.router.escape import EscapeRouter
 from kicad_tools.router.grid import RoutingGrid

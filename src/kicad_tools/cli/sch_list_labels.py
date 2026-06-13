@@ -181,9 +181,7 @@ def _collect_labels_recursive(node, label_type, labels):
 
         sheet_name = child.get_path_string()
         sheet_file = Path(child.path).name
-        labels.extend(
-            _collect_labels_from_schematic(child_sch, label_type, sheet_name, sheet_file)
-        )
+        labels.extend(_collect_labels_from_schematic(child_sch, label_type, sheet_name, sheet_file))
 
         # Recurse into grandchildren
         _collect_labels_recursive(child, label_type, labels)

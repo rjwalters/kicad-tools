@@ -5,9 +5,6 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.fix_vias_cmd import (
-    SameLayerViaFix,
-    SameLayerViaWarning,
-    ViaSkip,
     _closest_point_on_segment,
     find_all_vias,
     find_nearby_items,
@@ -1127,17 +1124,22 @@ class TestSelectiveViaSkip:
         pcb_file = tmp_path / "cli_skip.kicad_pcb"
         pcb_file.write_text(pcb_content)
 
-        result = main([
-            str(pcb_file),
-            "--mfr", "jlcpcb",
-            "--dry-run",
-            "--format", "json",
-            "--skip-if-clearance-violation",
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--mfr",
+                "jlcpcb",
+                "--dry-run",
+                "--format",
+                "json",
+                "--skip-if-clearance-violation",
+            ]
+        )
 
         assert result == 0  # No warnings (via was skipped, not warned)
 
         import json
+
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert len(data["fixes"]) == 0
@@ -1164,6 +1166,7 @@ class TestSelectiveViaSkip:
         main([str(pcb_file), "--dry-run", "--format", "json"])
 
         import json
+
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert "skipped" in data
@@ -1200,15 +1203,20 @@ class TestLayerAutoDetection:
         # 0.2 + 2*0.10 = 0.40, so the 0.45mm via is already compliant
         # and no fixes are emitted -- but the 4-layer targets prove the
         # auto-detection picked the right rule set.
-        result = main([
-            str(pcb_file),
-            "--mfr", "jlcpcb",
-            "--dry-run",
-            "--format", "json",
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--mfr",
+                "jlcpcb",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
 
         assert result == 0
         import json
+
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert len(data["fixes"]) == 0
@@ -1235,15 +1243,20 @@ class TestLayerAutoDetection:
         pcb_file = tmp_path / "2layer_auto.kicad_pcb"
         pcb_file.write_text(pcb_content)
 
-        result = main([
-            str(pcb_file),
-            "--mfr", "jlcpcb",
-            "--dry-run",
-            "--format", "json",
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--mfr",
+                "jlcpcb",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
 
         assert result == 0
         import json
+
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         # 2-layer rules: min_via_drill=0.3, min_via_diameter=0.6
@@ -1272,16 +1285,22 @@ class TestLayerAutoDetection:
         pcb_file = tmp_path / "override.kicad_pcb"
         pcb_file.write_text(pcb_content)
 
-        result = main([
-            str(pcb_file),
-            "--mfr", "jlcpcb",
-            "--layers", "2",
-            "--dry-run",
-            "--format", "json",
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--mfr",
+                "jlcpcb",
+                "--layers",
+                "2",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
 
         assert result == 0
         import json
+
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         # 2-layer rules forced despite 4-layer PCB

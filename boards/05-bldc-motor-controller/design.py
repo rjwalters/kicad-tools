@@ -83,9 +83,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # HTSSOP-56 footprint.  Registering the local lib lets ``add_symbol``
     # resolve ``board05_custom:DRV8301`` against this file.  See issues
     # #3384 / #3387.
-    _BOARD05_SYMBOL_LIB = (
-        Path(__file__).resolve().parent / "symbols" / "board05_custom.kicad_sym"
-    )
+    _BOARD05_SYMBOL_LIB = Path(__file__).resolve().parent / "symbols" / "board05_custom.kicad_sym"
 
     # Create schematic with title block
     sch = Schematic(
@@ -791,70 +789,70 @@ def create_bldc_controller(output_dir: Path) -> Path:
     #     we emit a vertical stub + GND label manually.
     DRV8301_SCHEMATIC_PIN_NETS: dict[str, str] = {
         # Pins 1-7: Buck regulator support.
-        "1": "GND",          # RT_CLK   (buck timing R)
-        "2": "GND",          # COMP     (buck error amp output)
-        "3": "+5V",          # VSENSE   (buck output FB = +5V rail)
-        "4": "+3V3",        # PWRGD    (open-drain, pull-up)
-        "5": "+3V3",        # nOCTW    (open-drain, pull-up)
-        "6": "+3V3",        # nFAULT   (open-drain, pull-up)
-        "7": "GND",          # DTC      (dead-time, R to GND)
+        "1": "GND",  # RT_CLK   (buck timing R)
+        "2": "GND",  # COMP     (buck error amp output)
+        "3": "+5V",  # VSENSE   (buck output FB = +5V rail)
+        "4": "+3V3",  # PWRGD    (open-drain, pull-up)
+        "5": "+3V3",  # nOCTW    (open-drain, pull-up)
+        "6": "+3V3",  # nFAULT   (open-drain, pull-up)
+        "7": "GND",  # DTC      (dead-time, R to GND)
         # Pins 8-16: SPI / control / charge pump / GVDD.
-        "8": "+3V3",        # nSCS     (idle high)
-        "9": "+3V3",        # SDI
-        "10": "+3V3",       # SDO      (open-drain, pull-up)
-        "11": "+3V3",       # SCLK
-        "12": "GND",         # DC_CAL   (normal operation)
-        "13": "+5V",         # GVDD
-        "14": "+5V",         # CP1      (charge pump cap 1)
-        "15": "+5V",         # CP2      (charge pump cap 2)
-        "16": "+3V3",       # EN_GATE  (always-on)
+        "8": "+3V3",  # nSCS     (idle high)
+        "9": "+3V3",  # SDI
+        "10": "+3V3",  # SDO      (open-drain, pull-up)
+        "11": "+3V3",  # SCLK
+        "12": "GND",  # DC_CAL   (normal operation)
+        "13": "+5V",  # GVDD
+        "14": "+5V",  # CP1      (charge pump cap 1)
+        "15": "+5V",  # CP2      (charge pump cap 2)
+        "16": "+3V3",  # EN_GATE  (always-on)
         # Pins 17-22: PWM logic inputs (driven by the MCU).
-        "17": "PWM_AH",      # INH_A
-        "18": "PWM_AL",      # INL_A
-        "19": "PWM_BH",      # INH_B
-        "20": "PWM_BL",      # INL_B
-        "21": "PWM_CH",      # INH_C
-        "22": "PWM_CL",      # INL_C
+        "17": "PWM_AH",  # INH_A
+        "18": "PWM_AL",  # INL_A
+        "19": "PWM_BH",  # INH_B
+        "20": "PWM_BL",  # INL_B
+        "21": "PWM_CH",  # INH_C
+        "22": "PWM_CL",  # INL_C
         # Pins 23-28: Analog supplies / current-sense amps (left-edge).
-        "23": "+3V3",       # DVDD
-        "24": "+3V3",       # REF
-        "25": "ISENSE_A+",   # SO1      (op-amp 1 output)
-        "26": "ISENSE_B+",   # SO2      (op-amp 2 output)
-        "27": "+5V",         # AVDD
-        "28": "GND",         # AGND
+        "23": "+3V3",  # DVDD
+        "24": "+3V3",  # REF
+        "25": "ISENSE_A+",  # SO1      (op-amp 1 output)
+        "26": "ISENSE_B+",  # SO2      (op-amp 2 output)
+        "27": "+5V",  # AVDD
+        "28": "GND",  # AGND
         # Pins 29-33: PVDD / current-sense diff inputs (right edge top).
-        "29": "+24V",      # PVDD1
-        "30": "ISENSE_B+",   # SP2
-        "31": "ISENSE_B-",   # SN2
-        "32": "ISENSE_A+",   # SP1
-        "33": "ISENSE_A-",   # SN1
+        "29": "+24V",  # PVDD1
+        "30": "ISENSE_B+",  # SP2
+        "31": "ISENSE_B-",  # SN2
+        "32": "ISENSE_A+",  # SP1
+        "33": "ISENSE_A-",  # SN1
         # Pins 34-38: Half-bridge C (low-side/gate/high-side/gate/bootstrap).
-        "34": "ISENSE_C-",   # SL_C
-        "35": "GATE_CL",     # GL_C
-        "36": "PHASE_C",     # SH_C
-        "37": "GATE_DRV_CH", # GH_C
-        "38": "BST_C",       # BST_C (bootstrap cap C12 to PHASE_C; #3397)
+        "34": "ISENSE_C-",  # SL_C
+        "35": "GATE_CL",  # GL_C
+        "36": "PHASE_C",  # SH_C
+        "37": "GATE_DRV_CH",  # GH_C
+        "38": "BST_C",  # BST_C (bootstrap cap C12 to PHASE_C; #3397)
         # Pins 39-43: Half-bridge B.
-        "39": "ISENSE_B-",   # SL_B
-        "40": "GATE_BL",     # GL_B
-        "41": "PHASE_B",     # SH_B
-        "42": "GATE_DRV_BH", # GH_B
-        "43": "BST_B",       # BST_B (bootstrap cap C13 to PHASE_B; #3397)
+        "39": "ISENSE_B-",  # SL_B
+        "40": "GATE_BL",  # GL_B
+        "41": "PHASE_B",  # SH_B
+        "42": "GATE_DRV_BH",  # GH_B
+        "43": "BST_B",  # BST_B (bootstrap cap C13 to PHASE_B; #3397)
         # Pins 44-48: Half-bridge A.
-        "44": "ISENSE_A-",   # SL_A
-        "45": "GATE_AL",     # GL_A
-        "46": "PHASE_A",     # SH_A
-        "47": "GATE_DRV_AH", # GH_A
-        "48": "BST_A",       # BST_A (bootstrap cap C14 to PHASE_A; #3397)
+        "44": "ISENSE_A-",  # SL_A
+        "45": "GATE_AL",  # GL_A
+        "46": "PHASE_A",  # SH_A
+        "47": "GATE_DRV_AH",  # GH_A
+        "48": "BST_A",  # BST_A (bootstrap cap C14 to PHASE_A; #3397)
         # Pins 49-56: SPI / buck pins (right edge bottom).
-        "49": "+3V3",       # VDD_SPI
-        "50": "SW_OUT",      # PH (buck switch node)
-        "51": "SW_OUT",      # PH (buck switch node, 2nd pin)
-        "52": "+24V",      # BST_BK (buck bootstrap)
-        "53": "+24V",      # PVDD2_1
-        "54": "+24V",      # PVDD2_2
-        "55": "+3V3",       # EN_BUCK
-        "56": "GND",         # SS_TR (cap to GND)
+        "49": "+3V3",  # VDD_SPI
+        "50": "SW_OUT",  # PH (buck switch node)
+        "51": "SW_OUT",  # PH (buck switch node, 2nd pin)
+        "52": "+24V",  # BST_BK (buck bootstrap)
+        "53": "+24V",  # PVDD2_1
+        "54": "+24V",  # PVDD2_2
+        "55": "+3V3",  # EN_BUCK
+        "56": "GND",  # SS_TR (cap to GND)
         # Pin 57 is handled separately below (vertical pin orientation).
     }
 
@@ -864,7 +862,11 @@ def create_bldc_controller(output_dir: Path) -> Path:
     for _pin_num, _net_name in DRV8301_SCHEMATIC_PIN_NETS.items():
         _pin_pos = u3.pin_position(_pin_num)
         _emit_pin_net_stub(
-            sch, _pin_pos, X_U3, _net_name, None,
+            sch,
+            _pin_pos,
+            X_U3,
+            _net_name,
+            None,
             block_label="U3 DRV8301 ",
         )
 
@@ -907,11 +909,19 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # (299.72 and 309.88) so the PCB-side cap layout does not need to
     # move; the schematic-side x is purely cosmetic.
     c15 = sch.add_symbol(
-        "Device:C", 300, 81, "C15", "100nF",
+        "Device:C",
+        300,
+        81,
+        "C15",
+        "100nF",
         footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     c16 = sch.add_symbol(
-        "Device:C", 310, 81, "C16", "10uF",
+        "Device:C",
+        310,
+        81,
+        "C16",
+        "10uF",
         footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     sch.wire_decoupling_cap(c15, RAIL_5V, RAIL_GND)
@@ -2345,7 +2355,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     print("\n1. Adding mounting holes...")
     for i, mh_pos in enumerate(MH_POSITIONS):
         parts.append(generate_mounting_hole(mh_pos, f"MH{i + 1}"))
-    print(f"   4x M3 mounting holes at corners")
+    print("   4x M3 mounting holes at corners")
 
     print("\n2. Adding power input section...")
     # J1: Power input connector (2-pin).  Pin 1 is the raw pre-fuse VIN
@@ -2422,7 +2432,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     # Bypass caps
     parts.append(generate_cap_0805("C15", C15_POS, "100nF", "+5V", "GND"))
     parts.append(generate_cap_0805("C16", C16_POS, "10uF", "+5V", "GND"))
-    print(f"   C12-C14 (bootstrap), C15-C16 (bypass)")
+    print("   C12-C14 (bootstrap), C15-C16 (bypass)")
 
     print("\n7b. Adding MCU (STM32G431K8Tx)...")
     parts.append(generate_lqfp32("U10", U10_POS, "STM32G431K8Tx"))
@@ -2449,7 +2459,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     parts.append(generate_resistor_2512("R10", R10_POS, "5mR", "ISENSE_C+", "ISENSE_C-"))
     parts.append(generate_resistor_2512("R11", R11_POS, "5mR", "ISENSE_B+", "ISENSE_B-"))
     parts.append(generate_resistor_2512("R12", R12_POS, "5mR", "ISENSE_A+", "ISENSE_A-"))
-    print(f"   R10, R11, R12 (5mOhm shunts)")
+    print("   R10, R11, R12 (5mOhm shunts)")
 
     print("\n9b. Adding gate-drive (slew-rate) resistors...")
     # Series 22-ohm resistors between DRV8301 HS outputs and the MOSFET gates.
@@ -2496,7 +2506,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     parts.append(generate_led_0805("D3", D3_POS, "PWR", "+3V3", "PWR_LED"))
     parts.append(generate_resistor_0805("R4", R4_POS, "1k", "STATUS_LED", "GND"))
     parts.append(generate_led_0805("D4", D4_POS, "STATUS", "+3V3", "STATUS_LED"))
-    print(f"   D3 (PWR), D4 (STATUS) with resistors R3, R4")
+    print("   D3 (PWR), D4 (STATUS) with resistors R3, R4")
 
     print("\n11b. Adding Hall sensor filter network...")
     # Pull-up resistors: +3.3V to each HALL_x signal
@@ -2521,7 +2531,7 @@ def create_bldc_pcb(output_dir: Path) -> Path:
     print(f"   PCB: {pcb_path}")
 
     print(f"\n   Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
-    print(f"   Mounting holes: 4x M3")
+    print("   Mounting holes: 4x M3")
     component_count = (
         4  # mounting holes
         + 6  # MOSFETs
@@ -2834,7 +2844,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     for the mechanism and bounds.
     """
     print("\n" + "=" * 60)
-    print("Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111, #3425, #3470, #3471)...")
+    print(
+        "Routing PCB (via ``kct route`` flag recipe -- Issues #3096, #3111, #3425, #3470, #3471)..."
+    )
     print("=" * 60)
 
     # Skip power and high-current nets (route manually or use copper pour zones)

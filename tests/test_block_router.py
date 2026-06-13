@@ -13,10 +13,10 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.region_graph import RegionGraph
 from kicad_tools.router.rules import DesignRules
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_two_component_block(
     name: str = "ldo",
@@ -25,11 +25,17 @@ def _make_two_component_block(
     """Block with 2 components sharing a net, plus ports."""
     block = PCBBlock(name=name, block_id=name)
     block.add_component(
-        "U1", "SOT-23", 0, 0,
+        "U1",
+        "SOT-23",
+        0,
+        0,
         pads={"1": (-1.0, 0.0), "2": (1.0, 0.0)},
     )
     block.add_component(
-        "C1", "C_0805", 3, 0,
+        "C1",
+        "C_0805",
+        3,
+        0,
         pads={"1": (2.5, 0.0), "2": (3.5, 0.0)},
     )
     block.add_port("VIN", -4.0, 0.0, direction="in")
@@ -51,24 +57,59 @@ def _make_router_with_block_pads(
     # C1 pad 1 at (2.5, 0) relative -> (origin.x + 2.5, origin.y) absolute
     # C1 pad 2 at (3.5, 0) relative -> (origin.x + 3.5, origin.y) absolute
     ox, oy = block.origin.x, block.origin.y
-    router.add_component("U1", [
-        {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
-         "width": 0.5, "height": 0.5},
-        {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
-         "width": 0.5, "height": 0.5},
-    ])
-    router.add_component("C1", [
-        {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
-         "width": 0.5, "height": 0.5},
-        {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
-         "width": 0.5, "height": 0.5},
-    ])
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": ox - 1.0,
+                "y": oy,
+                "net": 1,
+                "net_name": "VIN",
+                "width": 0.5,
+                "height": 0.5,
+            },
+            {
+                "number": "2",
+                "x": ox + 1.0,
+                "y": oy,
+                "net": 2,
+                "net_name": "VOUT",
+                "width": 0.5,
+                "height": 0.5,
+            },
+        ],
+    )
+    router.add_component(
+        "C1",
+        [
+            {
+                "number": "1",
+                "x": ox + 2.5,
+                "y": oy,
+                "net": 2,
+                "net_name": "VOUT",
+                "width": 0.5,
+                "height": 0.5,
+            },
+            {
+                "number": "2",
+                "x": ox + 3.5,
+                "y": oy,
+                "net": 3,
+                "net_name": "GND",
+                "width": 0.5,
+                "height": 0.5,
+            },
+        ],
+    )
     return router
 
 
 # ===========================================================================
 # Unit: BlockRouter sub-grid creation
 # ===========================================================================
+
 
 class TestBlockRouterSubGrid:
     """BlockRouter creates valid sub-grids from PCBBlock definitions."""
@@ -117,6 +158,7 @@ class TestBlockRouterSubGrid:
 # Unit: Block-internal routing
 # ===========================================================================
 
+
 class TestBlockInternalRouting:
     """BlockRouter routes block-internal nets within block boundaries."""
 
@@ -164,6 +206,7 @@ class TestBlockInternalRouting:
 # Unit: Coordinate transform
 # ===========================================================================
 
+
 class TestCoordinateTransform:
     """Route coordinates are in board (absolute) space."""
 
@@ -190,6 +233,7 @@ class TestCoordinateTransform:
 # ===========================================================================
 # Unit: Port boundary enforcement
 # ===========================================================================
+
 
 class TestPortBoundaryEnforcement:
     """Sub-grid boundary cells are blocked except at port locations."""
@@ -221,6 +265,7 @@ class TestPortBoundaryEnforcement:
 # Integration: route_all_block_aware end-to-end
 # ===========================================================================
 
+
 class TestRouteAllBlockAware:
     """End-to-end block-aware routing via Autorouter."""
 
@@ -231,51 +276,115 @@ class TestRouteAllBlockAware:
 
         # Block A at (15, 30) -- LDO with VIN/VOUT
         block_a = PCBBlock(name="block_a", block_id="block_a")
-        block_a.add_component("U1A", "SOT-23", 0, 0,
-                              pads={"1": (-1, 0), "2": (1, 0)})
-        block_a.add_component("C1A", "C_0805", 3, 0,
-                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_a.add_component("U1A", "SOT-23", 0, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        block_a.add_component("C1A", "C_0805", 3, 0, pads={"1": (2.5, 0), "2": (3.5, 0)})
         block_a.add_port("VIN_A", -4, 0, direction="in")
         block_a.add_port("VOUT_A", 6, 0, direction="out")
         block_a.place(15, 30)
 
         # Block B at (50, 30) -- Another LDO
         block_b = PCBBlock(name="block_b", block_id="block_b")
-        block_b.add_component("U1B", "SOT-23", 0, 0,
-                              pads={"1": (-1, 0), "2": (1, 0)})
-        block_b.add_component("C1B", "C_0805", 3, 0,
-                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_b.add_component("U1B", "SOT-23", 0, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        block_b.add_component("C1B", "C_0805", 3, 0, pads={"1": (2.5, 0), "2": (3.5, 0)})
         block_b.add_port("VIN_B", -4, 0, direction="in")
         block_b.add_port("VOUT_B", 6, 0, direction="out")
         block_b.place(50, 30)
 
         # Add component pads matching block positions
         # Block A
-        router.add_component("U1A", [
-            {"number": "1", "x": 14.0, "y": 30.0, "net": 1, "net_name": "NET_A1",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 16.0, "y": 30.0, "net": 2, "net_name": "NET_A2",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1A", [
-            {"number": "1", "x": 17.5, "y": 30.0, "net": 2, "net_name": "NET_A2",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 18.5, "y": 30.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1A",
+            [
+                {
+                    "number": "1",
+                    "x": 14.0,
+                    "y": 30.0,
+                    "net": 1,
+                    "net_name": "NET_A1",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 16.0,
+                    "y": 30.0,
+                    "net": 2,
+                    "net_name": "NET_A2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1A",
+            [
+                {
+                    "number": "1",
+                    "x": 17.5,
+                    "y": 30.0,
+                    "net": 2,
+                    "net_name": "NET_A2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 18.5,
+                    "y": 30.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         # Block B
-        router.add_component("U1B", [
-            {"number": "1", "x": 49.0, "y": 30.0, "net": 4, "net_name": "NET_B1",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 51.0, "y": 30.0, "net": 5, "net_name": "NET_B2",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1B", [
-            {"number": "1", "x": 52.5, "y": 30.0, "net": 5, "net_name": "NET_B2",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 53.5, "y": 30.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1B",
+            [
+                {
+                    "number": "1",
+                    "x": 49.0,
+                    "y": 30.0,
+                    "net": 4,
+                    "net_name": "NET_B1",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 51.0,
+                    "y": 30.0,
+                    "net": 5,
+                    "net_name": "NET_B2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1B",
+            [
+                {
+                    "number": "1",
+                    "x": 52.5,
+                    "y": 30.0,
+                    "net": 5,
+                    "net_name": "NET_B2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 53.5,
+                    "y": 30.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         # Inter-block net: GND shared between C1A.2 and C1B.2
         # (net 3 already has pads in both blocks)
@@ -302,6 +411,7 @@ class TestRouteAllBlockAware:
 # Integration: fallback to flat routing
 # ===========================================================================
 
+
 class TestFallbackToFlatRouting:
     """route_all_block_aware with no blocks falls back to route_all."""
 
@@ -309,12 +419,29 @@ class TestFallbackToFlatRouting:
         """When no blocks are defined, behavior matches route_all."""
         rules = DesignRules()
         router = Autorouter(50, 50, force_python=True, rules=rules)
-        router.add_component("R1", [
-            {"number": "1", "x": 10.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 40.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 40.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         routes = router.route_all_block_aware()
         assert len(routes) > 0
 
@@ -322,12 +449,29 @@ class TestFallbackToFlatRouting:
         """Explicit empty list falls back to flat routing."""
         rules = DesignRules()
         router = Autorouter(50, 50, force_python=True, rules=rules)
-        router.add_component("R1", [
-            {"number": "1", "x": 10.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 40.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 40.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         routes = router.route_all_block_aware(blocks=[])
         assert len(routes) > 0
 
@@ -335,6 +479,7 @@ class TestFallbackToFlatRouting:
 # ===========================================================================
 # Integration: GlobalRouter with block occupancy
 # ===========================================================================
+
 
 class TestRegionGraphBlockOccupancy:
     """RegionGraph.register_block_occupancy updates utilization."""
@@ -380,13 +525,13 @@ class TestRegionGraphBlockOccupancy:
 # Edge case: single-component block
 # ===========================================================================
 
+
 class TestSingleComponentBlock:
     """Block with one component should handle gracefully."""
 
     def test_single_component_no_crash(self):
         block = PCBBlock(name="single")
-        block.add_component("R1", "R_0805", 0, 0,
-                            pads={"1": (-0.5, 0), "2": (0.5, 0)})
+        block.add_component("R1", "R_0805", 0, 0, pads={"1": (-0.5, 0), "2": (0.5, 0)})
         block.add_port("A", -2, 0)
         block.add_port("B", 2, 0)
         block.place(20, 20)
@@ -401,6 +546,7 @@ class TestSingleComponentBlock:
 # ===========================================================================
 # Edge case: overlapping block bounding boxes
 # ===========================================================================
+
 
 class TestOverlappingBlockBoundingBoxes:
     """Two blocks with overlapping bounding boxes handle gracefully."""
@@ -424,6 +570,7 @@ class TestOverlappingBlockBoundingBoxes:
 # Integration: route_all_advanced with use_block_aware flag
 # ===========================================================================
 
+
 class TestRouteAllAdvancedBlockAware:
     """route_all_advanced with use_block_aware=True delegates correctly."""
 
@@ -436,18 +583,52 @@ class TestRouteAllAdvancedBlockAware:
 
         # Add matching pads
         ox, oy = 25.0, 25.0
-        router.add_component("U1", [
-            {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1", [
-            {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": ox - 1.0,
+                    "y": oy,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 1.0,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": ox + 2.5,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 3.5,
+                    "y": oy,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         routes = router.route_all_advanced(use_block_aware=True)
         assert len(routes) > 0
@@ -456,12 +637,29 @@ class TestRouteAllAdvancedBlockAware:
         """With no registered blocks, use_block_aware falls back to standard."""
         rules = DesignRules()
         router = Autorouter(50, 50, force_python=True, rules=rules)
-        router.add_component("R1", [
-            {"number": "1", "x": 10.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 40.0, "y": 25.0, "net": 1, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 10.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 40.0,
+                    "y": 25.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         routes = router.route_all_advanced(use_block_aware=True)
         assert len(routes) > 0
 
@@ -469,6 +667,7 @@ class TestRouteAllAdvancedBlockAware:
 # ===========================================================================
 # Unit: Inter-block net classification
 # ===========================================================================
+
 
 class TestInterBlockNetClassification:
     """_classify_nets correctly distinguishes internal vs inter-block nets."""
@@ -494,25 +693,76 @@ class TestInterBlockNetClassification:
         rules = DesignRules()
         router = Autorouter(60, 60, force_python=True, rules=rules)
         ox, oy = 20.0, 20.0
-        router.add_component("U1", [
-            {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1", [
-            {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": ox - 1.0,
+                    "y": oy,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 1.0,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": ox + 2.5,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 3.5,
+                    "y": oy,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         # Extra component far away, sharing net 2 (VOUT)
-        router.add_component("R_EXT", [
-            {"number": "1", "x": 55.0, "y": 55.0, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 55.0, "y": 50.0, "net": 4, "net_name": "OTHER",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R_EXT",
+            [
+                {
+                    "number": "1",
+                    "x": 55.0,
+                    "y": 55.0,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 55.0,
+                    "y": 50.0,
+                    "net": 4,
+                    "net_name": "OTHER",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         br = BlockRouter(block, rules, force_python=True, margin=2.0)
         br.add_pads_from_autorouter(router.pads, router.nets, router.net_names)
@@ -530,19 +780,53 @@ class TestInterBlockNetClassification:
         router = Autorouter(60, 60, force_python=True, rules=rules)
         ox, oy = 20.0, 20.0
         # Only U1.1 is inside the block for net 10
-        router.add_component("U1", [
-            {"number": "1", "x": ox - 1.0, "y": oy, "net": 10, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 1.0, "y": oy, "net": 20, "net_name": "OTHER",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": ox - 1.0,
+                    "y": oy,
+                    "net": 10,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 1.0,
+                    "y": oy,
+                    "net": 20,
+                    "net_name": "OTHER",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         # R_EXT.1 is outside the block for net 10
-        router.add_component("R_EXT", [
-            {"number": "1", "x": 55.0, "y": 55.0, "net": 10, "net_name": "SIG",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 55.0, "y": 50.0, "net": 30, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R_EXT",
+            [
+                {
+                    "number": "1",
+                    "x": 55.0,
+                    "y": 55.0,
+                    "net": 10,
+                    "net_name": "SIG",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 55.0,
+                    "y": 50.0,
+                    "net": 30,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         br = BlockRouter(block, rules, force_python=True, margin=2.0)
         br.add_pads_from_autorouter(router.pads, router.nets, router.net_names)
@@ -559,25 +843,76 @@ class TestInterBlockNetClassification:
         rules = DesignRules()
         router = Autorouter(60, 60, force_python=True, rules=rules)
         ox, oy = 20.0, 20.0
-        router.add_component("U1", [
-            {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1", [
-            {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": ox - 1.0,
+                    "y": oy,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 1.0,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": ox + 2.5,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 3.5,
+                    "y": oy,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         # Extra pad outside for net 3
-        router.add_component("R_EXT", [
-            {"number": "1", "x": 55.0, "y": 55.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 55.0, "y": 50.0, "net": 4, "net_name": "X",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "R_EXT",
+            [
+                {
+                    "number": "1",
+                    "x": 55.0,
+                    "y": 55.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 55.0,
+                    "y": 50.0,
+                    "net": 4,
+                    "net_name": "X",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         br = BlockRouter(block, rules, force_python=True, margin=2.0)
         br.add_pads_from_autorouter(router.pads, router.nets, router.net_names)
@@ -604,6 +939,7 @@ class TestInterBlockNetClassification:
 # Integration: register_block_occupancy called during block-aware routing
 # ===========================================================================
 
+
 class TestBlockOccupancyIntegration:
     """register_block_occupancy is called during route_all_block_aware."""
 
@@ -616,18 +952,52 @@ class TestBlockOccupancyIntegration:
         router.register_block(block)
 
         ox, oy = 20.0, 20.0
-        router.add_component("U1", [
-            {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1", [
-            {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": ox - 1.0,
+                    "y": oy,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 1.0,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": ox + 2.5,
+                    "y": oy,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": ox + 3.5,
+                    "y": oy,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         # Route and verify it completes without error
         routes = router.route_all_block_aware()
@@ -639,47 +1009,111 @@ class TestBlockOccupancyIntegration:
         router = Autorouter(80, 60, force_python=True, rules=rules)
 
         block_a = PCBBlock(name="block_a", block_id="block_a")
-        block_a.add_component("U1A", "SOT-23", 0, 0,
-                              pads={"1": (-1, 0), "2": (1, 0)})
-        block_a.add_component("C1A", "C_0805", 3, 0,
-                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_a.add_component("U1A", "SOT-23", 0, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        block_a.add_component("C1A", "C_0805", 3, 0, pads={"1": (2.5, 0), "2": (3.5, 0)})
         block_a.add_port("VIN_A", -4, 0, direction="in")
         block_a.add_port("VOUT_A", 6, 0, direction="out")
         block_a.place(15, 30)
 
         block_b = PCBBlock(name="block_b", block_id="block_b")
-        block_b.add_component("U1B", "SOT-23", 0, 0,
-                              pads={"1": (-1, 0), "2": (1, 0)})
-        block_b.add_component("C1B", "C_0805", 3, 0,
-                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_b.add_component("U1B", "SOT-23", 0, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        block_b.add_component("C1B", "C_0805", 3, 0, pads={"1": (2.5, 0), "2": (3.5, 0)})
         block_b.add_port("VIN_B", -4, 0, direction="in")
         block_b.add_port("VOUT_B", 6, 0, direction="out")
         block_b.place(50, 30)
 
-        router.add_component("U1A", [
-            {"number": "1", "x": 14.0, "y": 30.0, "net": 1, "net_name": "NET_A1",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 16.0, "y": 30.0, "net": 2, "net_name": "NET_A2",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1A", [
-            {"number": "1", "x": 17.5, "y": 30.0, "net": 2, "net_name": "NET_A2",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 18.5, "y": 30.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("U1B", [
-            {"number": "1", "x": 49.0, "y": 30.0, "net": 4, "net_name": "NET_B1",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 51.0, "y": 30.0, "net": 5, "net_name": "NET_B2",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1B", [
-            {"number": "1", "x": 52.5, "y": 30.0, "net": 5, "net_name": "NET_B2",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 53.5, "y": 30.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1A",
+            [
+                {
+                    "number": "1",
+                    "x": 14.0,
+                    "y": 30.0,
+                    "net": 1,
+                    "net_name": "NET_A1",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 16.0,
+                    "y": 30.0,
+                    "net": 2,
+                    "net_name": "NET_A2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1A",
+            [
+                {
+                    "number": "1",
+                    "x": 17.5,
+                    "y": 30.0,
+                    "net": 2,
+                    "net_name": "NET_A2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 18.5,
+                    "y": 30.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "U1B",
+            [
+                {
+                    "number": "1",
+                    "x": 49.0,
+                    "y": 30.0,
+                    "net": 4,
+                    "net_name": "NET_B1",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 51.0,
+                    "y": 30.0,
+                    "net": 5,
+                    "net_name": "NET_B2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1B",
+            [
+                {
+                    "number": "1",
+                    "x": 52.5,
+                    "y": 30.0,
+                    "net": 5,
+                    "net_name": "NET_B2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 53.5,
+                    "y": 30.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         router.register_block(block_a)
         router.register_block(block_b)
@@ -692,6 +1126,7 @@ class TestBlockOccupancyIntegration:
 # Issue #1654: RegionGraph corridor costs wired into inter-block routing
 # ===========================================================================
 
+
 class TestCorridorCostsInterBlockRouting:
     """Verify that route_all_block_aware sets corridor preferences for inter-block nets."""
 
@@ -702,50 +1137,114 @@ class TestCorridorCostsInterBlockRouting:
 
         # Block A at (15, 30)
         block_a = PCBBlock(name="block_a", block_id="block_a")
-        block_a.add_component("U1A", "SOT-23", 0, 0,
-                              pads={"1": (-1, 0), "2": (1, 0)})
-        block_a.add_component("C1A", "C_0805", 3, 0,
-                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_a.add_component("U1A", "SOT-23", 0, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        block_a.add_component("C1A", "C_0805", 3, 0, pads={"1": (2.5, 0), "2": (3.5, 0)})
         block_a.add_port("VIN_A", -4, 0, direction="in")
         block_a.add_port("VOUT_A", 6, 0, direction="out")
         block_a.place(15, 30)
 
         # Block B at (50, 30)
         block_b = PCBBlock(name="block_b", block_id="block_b")
-        block_b.add_component("U1B", "SOT-23", 0, 0,
-                              pads={"1": (-1, 0), "2": (1, 0)})
-        block_b.add_component("C1B", "C_0805", 3, 0,
-                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_b.add_component("U1B", "SOT-23", 0, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        block_b.add_component("C1B", "C_0805", 3, 0, pads={"1": (2.5, 0), "2": (3.5, 0)})
         block_b.add_port("VIN_B", -4, 0, direction="in")
         block_b.add_port("VOUT_B", 6, 0, direction="out")
         block_b.place(50, 30)
 
         # Block A pads
-        router.add_component("U1A", [
-            {"number": "1", "x": 14.0, "y": 30.0, "net": 1, "net_name": "NET_A1",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 16.0, "y": 30.0, "net": 2, "net_name": "NET_A2",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1A", [
-            {"number": "1", "x": 17.5, "y": 30.0, "net": 2, "net_name": "NET_A2",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 18.5, "y": 30.0, "net": 3, "net_name": "INTER_AB",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1A",
+            [
+                {
+                    "number": "1",
+                    "x": 14.0,
+                    "y": 30.0,
+                    "net": 1,
+                    "net_name": "NET_A1",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 16.0,
+                    "y": 30.0,
+                    "net": 2,
+                    "net_name": "NET_A2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1A",
+            [
+                {
+                    "number": "1",
+                    "x": 17.5,
+                    "y": 30.0,
+                    "net": 2,
+                    "net_name": "NET_A2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 18.5,
+                    "y": 30.0,
+                    "net": 3,
+                    "net_name": "INTER_AB",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
         # Block B pads
-        router.add_component("U1B", [
-            {"number": "1", "x": 49.0, "y": 30.0, "net": 4, "net_name": "NET_B1",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 51.0, "y": 30.0, "net": 5, "net_name": "NET_B2",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1B", [
-            {"number": "1", "x": 52.5, "y": 30.0, "net": 5, "net_name": "NET_B2",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 53.5, "y": 30.0, "net": 3, "net_name": "INTER_AB",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1B",
+            [
+                {
+                    "number": "1",
+                    "x": 49.0,
+                    "y": 30.0,
+                    "net": 4,
+                    "net_name": "NET_B1",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 51.0,
+                    "y": 30.0,
+                    "net": 5,
+                    "net_name": "NET_B2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1B",
+            [
+                {
+                    "number": "1",
+                    "x": 52.5,
+                    "y": 30.0,
+                    "net": 5,
+                    "net_name": "NET_B2",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 53.5,
+                    "y": 30.0,
+                    "net": 3,
+                    "net_name": "INTER_AB",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         router.register_block(block_a)
         router.register_block(block_b)
@@ -793,12 +1292,12 @@ class TestCorridorCostsInterBlockRouting:
             clear_calls.append(True)
             return original_clear()
 
-        with patch.object(router.grid, "clear_all_corridor_preferences", side_effect=tracking_clear):
+        with patch.object(
+            router.grid, "clear_all_corridor_preferences", side_effect=tracking_clear
+        ):
             router.route_all_block_aware()
 
-        assert len(clear_calls) > 0, (
-            "clear_all_corridor_preferences should be called after Phase B"
-        )
+        assert len(clear_calls) > 0, "clear_all_corridor_preferences should be called after Phase B"
 
     def test_no_corridor_for_non_inter_block_nets(self):
         """Block-internal-only nets should not receive corridor preferences."""
@@ -847,24 +1346,56 @@ class TestCorridorCostsInterBlockRouting:
         router = Autorouter(60, 40, force_python=True, rules=rules)
 
         block = PCBBlock(name="only_block", block_id="only_block")
-        block.add_component("U1", "SOT-23", 0, 0,
-                            pads={"1": (-1, 0), "2": (1, 0)})
-        block.add_component("C1", "C_0805", 3, 0,
-                            pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block.add_component("U1", "SOT-23", 0, 0, pads={"1": (-1, 0), "2": (1, 0)})
+        block.add_component("C1", "C_0805", 3, 0, pads={"1": (2.5, 0), "2": (3.5, 0)})
         block.place(20, 20)
 
-        router.add_component("U1", [
-            {"number": "1", "x": 19.0, "y": 20.0, "net": 1, "net_name": "VIN",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 21.0, "y": 20.0, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-        ])
-        router.add_component("C1", [
-            {"number": "1", "x": 22.5, "y": 20.0, "net": 2, "net_name": "VOUT",
-             "width": 0.5, "height": 0.5},
-            {"number": "2", "x": 23.5, "y": 20.0, "net": 3, "net_name": "GND",
-             "width": 0.5, "height": 0.5},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 19.0,
+                    "y": 20.0,
+                    "net": 1,
+                    "net_name": "VIN",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 21.0,
+                    "y": 20.0,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": 22.5,
+                    "y": 20.0,
+                    "net": 2,
+                    "net_name": "VOUT",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+                {
+                    "number": "2",
+                    "x": 23.5,
+                    "y": 20.0,
+                    "net": 3,
+                    "net_name": "GND",
+                    "width": 0.5,
+                    "height": 0.5,
+                },
+            ],
+        )
 
         router.register_block(block)
 

@@ -113,7 +113,9 @@ def main(argv=None):
 
     if result.wires_adjusted > 0:
         print()
-        print(f"Wire adjustments: {result.wires_adjusted} endpoint(s) moved to match new pin positions")
+        print(
+            f"Wire adjustments: {result.wires_adjusted} endpoint(s) moved to match new pin positions"
+        )
 
     if result.preserved_properties:
         print()

@@ -73,15 +73,17 @@ class ValidationResult:
 
 
 # Violation types whose messages benefit from label/net name enrichment.
-_LABEL_TYPES: frozenset[str] = frozenset({
-    "isolated_pin_label",
-    "single_global_label",
-    "label_dangling",
-    "global_label_dangling",
-    "similar_labels",
-    "multiple_net_names",
-    "hier_label_mismatch",
-})
+_LABEL_TYPES: frozenset[str] = frozenset(
+    {
+        "isolated_pin_label",
+        "single_global_label",
+        "label_dangling",
+        "global_label_dangling",
+        "similar_labels",
+        "multiple_net_names",
+        "hier_label_mismatch",
+    }
+)
 
 
 def run_erc(schematic_path: str) -> list[ValidationIssue]:
@@ -195,9 +197,7 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                             # description does not already contain the item
                             # text (some KiCad versions inline it).
                             if vtype in _LABEL_TYPES and item_descs:
-                                new_parts = [
-                                    d for d in item_descs if d not in desc
-                                ]
+                                new_parts = [d for d in item_descs if d not in desc]
                                 if new_parts:
                                     desc = f"{desc} [{'; '.join(new_parts)}]"
 
@@ -523,10 +523,7 @@ def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
                     ValidationIssue(
                         severity="error",
                         category="global_label",
-                        message=(
-                            f"Global label '{net_name}' has no driver "
-                            f"(shapes: {shapes_str})"
-                        ),
+                        message=(f"Global label '{net_name}' has no driver (shapes: {shapes_str})"),
                         location=", ".join(sheets),
                     )
                 )
@@ -538,8 +535,7 @@ def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
                         severity="warning",
                         category="global_label",
                         message=(
-                            f"Global label '{net_name}' has no receiver "
-                            f"(shapes: {shapes_str})"
+                            f"Global label '{net_name}' has no receiver (shapes: {shapes_str})"
                         ),
                         location=", ".join(sheets),
                     )
@@ -567,8 +563,7 @@ def check_global_label_directions(schematic_path: str) -> list[ValidationIssue]:
                             severity="warning",
                             category="global_label",
                             message=(
-                                f"Global label '{net_name}' has conflicting "
-                                f"driver shapes: {detail}"
+                                f"Global label '{net_name}' has conflicting driver shapes: {detail}"
                             ),
                             location=", ".join(sheets),
                         )
@@ -641,9 +636,7 @@ def _normalise_signal(net_name: str | None) -> str | None:
     return _POWER_ALIASES.get(net_name, net_name)
 
 
-def _match_interface(
-    signal_set: set[str], pin_count: int
-) -> dict | None:
+def _match_interface(signal_set: set[str], pin_count: int) -> dict | None:
     """Find the best matching interface standard for a set of signals.
 
     Returns the catalog entry or ``None`` if no standard matches.
@@ -813,9 +806,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
     try:
         root = Path(schematic_path)
         all_files = _collect_schematic_files(root)
-        project_name, _root_uuid, _paths = _detect_project_info(
-            root, all_files
-        )
+        project_name, _root_uuid, _paths = _detect_project_info(root, all_files)
 
         # Deduplicate multi-unit ICs per-sheet, mirroring the legacy
         # implementation's (reference, lib_id) dedup.
@@ -831,26 +822,20 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
                     ValidationIssue(
                         severity="info",
                         category="project_instances",
-                        message=(
-                            f"Skipped sheet {sch_file.name}: {e}"
-                        ),
+                        message=(f"Skipped sheet {sch_file.name}: {e}"),
                         location=sch_file.name,
                     )
                 )
                 continue
 
             try:
-                syms = _extract_symbols_with_instance_info(
-                    text, project_name
-                )
+                syms = _extract_symbols_with_instance_info(text, project_name)
             except Exception as e:
                 issues.append(
                     ValidationIssue(
                         severity="info",
                         category="project_instances",
-                        message=(
-                            f"Skipped sheet {sch_file.name}: {e}"
-                        ),
+                        message=(f"Skipped sheet {sch_file.name}: {e}"),
                         location=sch_file.name,
                     )
                 )
@@ -872,9 +857,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
                 # power symbols for the missing-instances case, but does
                 # *not* apply the graphical-only filter — we do it here so
                 # the filter is consistent across all three variants.
-                if not sym.get("in_bom", True) and not sym.get(
-                    "on_board", True
-                ):
+                if not sym.get("in_bom", True) and not sym.get("on_board", True):
                     continue
 
                 dedup_key = (ref, lib_id)
@@ -882,9 +865,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
                     continue
                 seen.add(dedup_key)
 
-                fix_hint = (
-                    f"Fix with: kct sch repair-instances {root.name}"
-                )
+                fix_hint = f"Fix with: kct sch repair-instances {root.name}"
 
                 if sym.get("has_loose_project_blocks"):
                     issues.append(
@@ -985,9 +966,7 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
 
                     if ref not in ref_map:
                         ref_map[ref] = []
-                    ref_map[ref].append(
-                        (sym.uuid, sym.lib_id, sym.value, sym.unit, sheet_path)
-                    )
+                    ref_map[ref].append((sym.uuid, sym.lib_id, sym.value, sym.unit, sheet_path))
             except Exception as e:
                 issues.append(
                     ValidationIssue(
@@ -1014,10 +993,7 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
                     ValidationIssue(
                         severity="error",
                         category="duplicate_reference",
-                        message=(
-                            f"Duplicate reference {ref} across sheets"
-                            f"{val_str}"
-                        ),
+                        message=(f"Duplicate reference {ref} across sheets{val_str}"),
                         location=", ".join(sheets),
                     )
                 )
@@ -1031,15 +1007,9 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
                         unit_counts[unit] = []
                     unit_counts[unit].append(sheet_path)
 
-                dup_units = {
-                    u: sheets
-                    for u, sheets in unit_counts.items()
-                    if len(sheets) > 1
-                }
+                dup_units = {u: sheets for u, sheets in unit_counts.items() if len(sheets) > 1}
                 if dup_units:
-                    all_sheets = sorted(
-                        {s for sheets in dup_units.values() for s in sheets}
-                    )
+                    all_sheets = sorted({s for sheets in dup_units.values() for s in sheets})
                     value = entries[0][2]
                     val_str = f" ({value})" if value else ""
                     issues.append(
@@ -1071,15 +1041,34 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
 # ---------------------------------------------------------------------------
 
 # Power-positive keywords (case-insensitive matching)
-_POWER_POSITIVE_KEYWORDS: frozenset[str] = frozenset({
-    "VCC", "VDD", "VBUS", "3V3", "5V", "AVCC", "DVCC", "AVDD", "DVDD",
-    "PVDD", "IOVDD",
-})
+_POWER_POSITIVE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "VCC",
+        "VDD",
+        "VBUS",
+        "3V3",
+        "5V",
+        "AVCC",
+        "DVCC",
+        "AVDD",
+        "DVDD",
+        "PVDD",
+        "IOVDD",
+    }
+)
 
 # Power-negative keywords
-_POWER_NEGATIVE_KEYWORDS: frozenset[str] = frozenset({
-    "GND", "VSS", "AGND", "DGND", "PGND", "GNDA", "GNDD",
-})
+_POWER_NEGATIVE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "GND",
+        "VSS",
+        "AGND",
+        "DGND",
+        "PGND",
+        "GNDA",
+        "GNDD",
+    }
+)
 
 # Bus protocol keyword groups: protocol -> set of signal keywords
 _BUS_PROTOCOLS: dict[str, set[str]] = {
@@ -1176,10 +1165,7 @@ def _is_passive_component(lib_id: str) -> bool:
     part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
     passive_prefixes = ("R", "C", "L", "D", "FB", "Ferrite")
     # Match R, R_Small, C, C_Polarized, L, etc.
-    for prefix in passive_prefixes:
-        if part == prefix or part.startswith(prefix + "_"):
-            return True
-    return False
+    return any(part == prefix or part.startswith(prefix + "_") for prefix in passive_prefixes)
 
 
 def _is_resistor(lib_id: str) -> bool:
@@ -1208,8 +1194,19 @@ def _is_mcu(lib_id: str) -> bool:
     if "MCU_" in upper:
         return True
     # Custom libraries that use family names directly
-    for prefix in ("STM32", "ESP32", "ESP8266", "RP2040", "RP2350",
-                   "ATSAM", "NRF52", "NRF53", "PIC", "ATMEGA", "ATTINY"):
+    for prefix in (
+        "STM32",
+        "ESP32",
+        "ESP8266",
+        "RP2040",
+        "RP2350",
+        "ATSAM",
+        "NRF52",
+        "NRF53",
+        "PIC",
+        "ATMEGA",
+        "ATTINY",
+    ):
         if prefix in upper:
             return True
     return False
@@ -1407,10 +1404,7 @@ def check_i2c_pullups(schematic_path: str) -> list[ValidationIssue]:
                 ValidationIssue(
                     severity="warning",
                     category="i2c_pullups",
-                    message=(
-                        f"I2C net '{net_name}' has no pull-up resistor to a "
-                        f"power rail"
-                    ),
+                    message=(f"I2C net '{net_name}' has no pull-up resistor to a power rail"),
                     location=sheet_str,
                 )
             )
@@ -1432,10 +1426,22 @@ def check_i2c_pullups(schematic_path: str) -> list[ValidationIssue]:
 # ---------------------------------------------------------------------------
 
 # SWD / debug signal keywords used to detect unrelated signal contamination
-_SWD_KEYWORDS: frozenset[str] = frozenset({
-    "SWCLK", "SWDIO", "SWO", "JTAG", "TDI", "TDO", "TMS", "TCK", "NRST",
-    "NTRST", "TRACECLK", "TRACEDATA",
-})
+_SWD_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "SWCLK",
+        "SWDIO",
+        "SWO",
+        "JTAG",
+        "TDI",
+        "TDO",
+        "TMS",
+        "TCK",
+        "NRST",
+        "NTRST",
+        "TRACECLK",
+        "TRACEDATA",
+    }
+)
 
 # Combined set of all bus + debug keywords for signal contamination checks
 _SIGNAL_CONTAMINATION_KEYWORDS: frozenset[str] = _ALL_BUS_KEYWORDS | _SWD_KEYWORDS
@@ -1465,10 +1471,7 @@ def _is_switch_or_button(lib_id: str) -> bool:
     """Return True if *lib_id* refers to a switch or button symbol."""
     part = lib_id.split(":")[-1] if ":" in lib_id else lib_id
     switch_prefixes = ("SW", "BTN", "Button", "Key")
-    for prefix in switch_prefixes:
-        if part == prefix or part.startswith(prefix + "_"):
-            return True
-    return False
+    return any(part == prefix or part.startswith(prefix + "_") for prefix in switch_prefixes)
 
 
 def check_boot0_pulldown(schematic_path: str) -> list[ValidationIssue]:
@@ -1524,9 +1527,7 @@ def check_boot0_pulldown(schematic_path: str) -> list[ValidationIssue]:
                         net_to_sheets.setdefault(net_name, set()).add(sheet_path)
 
                         # Track all connections per net
-                        net_connections.setdefault(net_name, []).append(
-                            (ref, lib_id, pin_name)
-                        )
+                        net_connections.setdefault(net_name, []).append((ref, lib_id, pin_name))
 
                         # Identify BOOT0 nets on STM32 symbols
                         if _is_stm32_symbol(lib_id) and _is_boot0_pin(pin_name):
@@ -1752,10 +1753,7 @@ def check_pin_net_semantic_mismatch(schematic_path: str) -> list[ValidationIssue
                         for _, pin_name, net_name, pin_proto, net_proto in mismatches:
                             proto_info = ""
                             if pin_proto and net_proto and pin_proto != net_proto:
-                                proto_info = (
-                                    f" (pin expects {pin_proto}, "
-                                    f"net is {net_proto})"
-                                )
+                                proto_info = f" (pin expects {pin_proto}, net is {net_proto})"
                             issues.append(
                                 ValidationIssue(
                                     severity="warning",
@@ -1842,6 +1840,7 @@ def _detect_systematic_offset(
 
     # Check if most offsets are the same
     from collections import Counter
+
     offset_counts = Counter(offsets)
     most_common_offset, count = offset_counts.most_common(1)[0]
 
@@ -2233,8 +2232,7 @@ def check_power_pin_polarity(schematic_path: str) -> list[ValidationIssue]:
                             if pin_type in ("power_in", "power_out"):
                                 _pin_tokens = _tokenize_name(pin_name)
                                 if _pin_tokens & (
-                                    _POWER_POSITIVE_KEYWORDS
-                                    | _POWER_NEGATIVE_KEYWORDS
+                                    _POWER_POSITIVE_KEYWORDS | _POWER_NEGATIVE_KEYWORDS
                                 ):
                                     issues.append(
                                         ValidationIssue(
@@ -2468,14 +2466,11 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
                                 continue
                             pc = _to_coord(pos[0], pos[1])
                             min_dist = min(
-                                abs(pc[0] - wp[0]) + abs(pc[1] - wp[1])
-                                for wp in wire_endpoints
+                                abs(pc[0] - wp[0]) + abs(pc[1] - wp[1]) for wp in wire_endpoints
                             )
                             # Convert integer units (0.1mm) to mm
                             dist_mm = min_dist * 0.1
-                            coord_str = (
-                                f"at ({pos[0]:.2f}, {pos[1]:.2f})"
-                            )
+                            coord_str = f"at ({pos[0]:.2f}, {pos[1]:.2f})"
                             if dist_mm <= 5.0:
                                 near_miss_parts.append(
                                     f"pin {pin_num} {coord_str}: {dist_mm:.1f}mm"
@@ -2485,14 +2480,9 @@ def check_fully_unconnected_components(schematic_path: str) -> list[ValidationIs
                                     f"pin {pin_num} {coord_str}: no wire within 5mm"
                                 )
 
-                    msg = (
-                        f"Fully unconnected component: {ref} ({value}) "
-                        f"-- all pins are floating"
-                    )
+                    msg = f"Fully unconnected component: {ref} ({value}) -- all pins are floating"
                     if near_miss_parts:
-                        msg += (
-                            f" (nearest wire: {', '.join(near_miss_parts)})"
-                        )
+                        msg += f" (nearest wire: {', '.join(near_miss_parts)})"
                     issues.append(
                         ValidationIssue(
                             severity="error",
@@ -2960,10 +2950,7 @@ class _ChannelFilterSignature:
     @property
     def total_passives(self) -> int:
         return (
-            self.shunt_caps
-            + self.bypass_caps
-            + self.shunt_resistors
-            + len(self.series_components)
+            self.shunt_caps + self.bypass_caps + self.shunt_resistors + len(self.series_components)
         )
 
     def describe_diff(self, other: "_ChannelFilterSignature") -> str | None:
@@ -2972,19 +2959,13 @@ class _ChannelFilterSignature:
         if self.shunt_caps != other.shunt_caps:
             diffs.append(f"shunt caps: {self.shunt_caps} vs {other.shunt_caps}")
         if self.bypass_caps != other.bypass_caps:
-            diffs.append(
-                f"bypass caps: {self.bypass_caps} vs {other.bypass_caps}"
-            )
+            diffs.append(f"bypass caps: {self.bypass_caps} vs {other.bypass_caps}")
         if self.shunt_resistors != other.shunt_resistors:
-            diffs.append(
-                f"shunt resistors: {self.shunt_resistors} vs {other.shunt_resistors}"
-            )
+            diffs.append(f"shunt resistors: {self.shunt_resistors} vs {other.shunt_resistors}")
         self_series_types = sorted(self.series_components)
         other_series_types = sorted(other.series_components)
         if self_series_types != other_series_types:
-            diffs.append(
-                f"series components: {self_series_types} vs {other_series_types}"
-            )
+            diffs.append(f"series components: {self_series_types} vs {other_series_types}")
         if not diffs:
             return None
         return "; ".join(diffs)
@@ -3135,10 +3116,7 @@ def check_matched_channel_symmetry(schematic_path: str) -> list[ValidationIssue]
                 ValidationIssue(
                     severity=severity,
                     category="matched_channel_symmetry",
-                    message=(
-                        f"Asymmetric filtering on matched pair "
-                        f"{net_a}/{net_b}: {diff}"
-                    ),
+                    message=(f"Asymmetric filtering on matched pair {net_a}/{net_b}: {diff}"),
                 )
             )
 
@@ -3228,7 +3206,13 @@ def check_bom_variety(schematic_path: str) -> list[ValidationIssue]:
             # Build descriptive message listing footprints and their references
             parts = []
             for fp_name, refs in sorted(fp_map.items()):
-                sorted_refs = sorted(refs, key=lambda r: (r.rstrip("0123456789"), int("".join(c for c in r if c.isdigit()) or "0")))
+                sorted_refs = sorted(
+                    refs,
+                    key=lambda r: (
+                        r.rstrip("0123456789"),
+                        int("".join(c for c in r if c.isdigit()) or "0"),
+                    ),
+                )
                 parts.append(f"{fp_name} ({', '.join(sorted_refs)})")
             detail = ", ".join(parts)
 

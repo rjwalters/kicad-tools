@@ -60,6 +60,7 @@ class TestStitchModuleImport:
     def test_import_does_not_crash(self) -> None:
         """Importing stitch_cmd must not raise NameError for ZonePolygon."""
         import importlib
+
         mod = importlib.import_module("kicad_tools.cli.stitch_cmd")
         assert hasattr(mod, "ZonePolygon")
         assert hasattr(mod, "is_pad_connected")
@@ -67,6 +68,7 @@ class TestStitchModuleImport:
     def test_type_hints_resolve(self) -> None:
         """typing.get_type_hints on is_pad_connected must resolve ZonePolygon."""
         import typing
+
         hints = typing.get_type_hints(is_pad_connected)
         # same_net_zone_polygons should resolve to list[ZonePolygon] | None
         assert "same_net_zone_polygons" in hints
@@ -477,9 +479,7 @@ class TestRunStitch:
         # The 3 +3.3V pads had no clearing placement, so they were rescued by
         # the connectivity fallback rather than dropped.
         assert len(result.connectivity_fallback) == 3
-        assert all(
-            pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback
-        )
+        assert all(pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback)
 
     def test_run_stitch_custom_via_size(self, stitch_test_pcb: Path):
         """Should use custom via size."""
@@ -532,7 +532,7 @@ class TestPadToViaTraces:
             dry_run=True,
         )
 
-        for trace, via in zip(result.traces_added, result.vias_added):
+        for trace, via in zip(result.traces_added, result.vias_added, strict=False):
             # Trace starts at pad center
             assert trace.pad.x == via.pad.x
             assert trace.pad.y == via.pad.y
@@ -3297,9 +3297,13 @@ class TestCheckViaClearance:
     def test_conflict_with_track(self):
         """A via near an other-net track should fail clearance."""
         track = TrackSegment(
-            start_x=49.5, start_y=50.0,
-            end_x=50.5, end_y=50.0,
-            width=0.25, layer="F.Cu", net_number=2,
+            start_x=49.5,
+            start_y=50.0,
+            end_x=50.5,
+            end_y=50.0,
+            width=0.25,
+            layer="F.Cu",
+            net_number=2,
         )
         result = check_via_clearance(
             x=50.0,
@@ -3358,9 +3362,13 @@ class TestCheckViaClearance:
     def test_far_away_copper_passes(self):
         """Copper far from the via position should not cause a conflict."""
         track = TrackSegment(
-            start_x=100.0, start_y=100.0,
-            end_x=110.0, end_y=100.0,
-            width=0.25, layer="F.Cu", net_number=2,
+            start_x=100.0,
+            start_y=100.0,
+            end_x=110.0,
+            end_y=100.0,
+            width=0.25,
+            layer="F.Cu",
+            net_number=2,
         )
         result = check_via_clearance(
             x=50.0,
@@ -3380,9 +3388,9 @@ class TestExtractZonePolygons:
 
     def test_extract_gnd_zone(self):
         """Should extract zone polygon for GND net."""
-        from kicad_tools.core.sexp_file import load_pcb as _load_pcb
-        from io import StringIO
         import tempfile
+
+        from kicad_tools.core.sexp_file import load_pcb as _load_pcb
 
         with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
             f.write(BLANKET_TEST_PCB)
@@ -3509,9 +3517,7 @@ class TestRunBlanketStitch:
         # The track runs from (105,105) to (110,105) on net 2
         # Vias should not be placed within clearance distance of this track
         for via in result.vias_added:
-            dist = point_to_segment_distance(
-                via.via_x, via.via_y, 105.0, 105.0, 110.0, 105.0
-            )
+            dist = point_to_segment_distance(via.via_x, via.via_y, 105.0, 105.0, 110.0, 105.0)
             min_required = 0.45 / 2 + 0.25 / 2 + 0.2  # via_r + track_w/2 + clearance
             assert dist >= min_required - 0.01, (
                 f"Via at ({via.via_x}, {via.via_y}) too close to track: {dist:.3f} < {min_required:.3f}"
@@ -3583,13 +3589,17 @@ class TestRunBlanketStitch:
         pcb_file.write_text(BLANKET_TEST_PCB)
 
         # Run with --blanket and --drc flags via main()
-        exit_code = main([
-            str(pcb_file),
-            "--net", "GND",
-            "--blanket",
-            "--spacing", "5.0",
-            "--dry-run",
-        ])
+        exit_code = main(
+            [
+                str(pcb_file),
+                "--net",
+                "GND",
+                "--blanket",
+                "--spacing",
+                "5.0",
+                "--dry-run",
+            ]
+        )
 
         assert exit_code == 0
         captured = capsys.readouterr()
@@ -3601,12 +3611,16 @@ class TestRunBlanketStitch:
         pcb_file = tmp_path / "blanket_cli.kicad_pcb"
         pcb_file.write_text(BLANKET_TEST_PCB)
 
-        exit_code = main([
-            str(pcb_file),
-            "--net", "GND",
-            "--blanket",
-            "--spacing", "5.0",
-        ])
+        exit_code = main(
+            [
+                str(pcb_file),
+                "--net",
+                "GND",
+                "--blanket",
+                "--spacing",
+                "5.0",
+            ]
+        )
 
         assert exit_code == 0
         captured = capsys.readouterr()
@@ -3713,10 +3727,10 @@ class TestExtendedEscapeRouting:
         # axes from pad center) so they block some via positions but leave
         # escape channels for traces.
         other_net_pads = [
-            (99.5, 99.5, 0.15, 3),   # upper-left diagonal
+            (99.5, 99.5, 0.15, 3),  # upper-left diagonal
             (100.5, 99.5, 0.15, 4),  # upper-right diagonal
             (99.5, 100.5, 0.15, 5),  # lower-left diagonal
-            (100.5, 100.5, 0.15, 6), # lower-right diagonal
+            (100.5, 100.5, 0.15, 6),  # lower-right diagonal
         ]
 
         result = calculate_extended_escape_position(
@@ -3761,10 +3775,16 @@ class TestExtendedEscapeRouting:
         ]
 
         result = calculate_extended_escape_position(
-            pad=pad, offset=0.5, via_size=0.45, existing_vias=[],
-            clearance=0.2, escape_distance=4.0,
-            other_net_tracks=[], other_net_vias=[],
-            other_net_pads=other_net_pads, trace_width=0.2,
+            pad=pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            escape_distance=4.0,
+            other_net_tracks=[],
+            other_net_vias=[],
+            other_net_pads=other_net_pads,
+            trace_width=0.2,
         )
 
         assert result is not None, "Should find a position"
@@ -3865,9 +3885,7 @@ class TestExtendedEscapeRouting:
         )
 
         # With such tight surroundings and short distance, we expect None
-        assert result is None, (
-            "Extended escape should fail when escape_distance is too short"
-        )
+        assert result is None, "Extended escape should fail when escape_distance is too short"
 
     def test_trace_segment_is_extended_escape_property(self):
         """TraceSegment.is_extended_escape should correctly identify multi-waypoint traces."""
@@ -3884,28 +3902,39 @@ class TestExtendedEscapeRouting:
         )
 
         # Straight trace
-        straight = TraceSegment(
-            pad=pad, via_x=101, via_y=100, width=0.2, layer="F.Cu"
-        )
+        straight = TraceSegment(pad=pad, via_x=101, via_y=100, width=0.2, layer="F.Cu")
         assert not straight.is_extended_escape
 
         # Dog-leg trace
         dogleg = TraceSegment(
-            pad=pad, via_x=101, via_y=101, width=0.2, layer="F.Cu",
-            intermediate_x=101, intermediate_y=100,
+            pad=pad,
+            via_x=101,
+            via_y=101,
+            width=0.2,
+            layer="F.Cu",
+            intermediate_x=101,
+            intermediate_y=100,
         )
         assert not dogleg.is_extended_escape
 
         # Extended escape trace
         extended = TraceSegment(
-            pad=pad, via_x=103, via_y=102, width=0.2, layer="F.Cu",
+            pad=pad,
+            via_x=103,
+            via_y=102,
+            width=0.2,
+            layer="F.Cu",
             waypoints=[(101, 100), (102, 101)],
         )
         assert extended.is_extended_escape
 
         # Empty waypoints
         empty_wp = TraceSegment(
-            pad=pad, via_x=101, via_y=100, width=0.2, layer="F.Cu",
+            pad=pad,
+            via_x=101,
+            via_y=100,
+            width=0.2,
+            layer="F.Cu",
             waypoints=[],
         )
         assert not empty_wp.is_extended_escape
@@ -3972,9 +4001,7 @@ class TestExtendedEscapeRouting:
         # None of the traces should be extended escape (simple components
         # should use straight-line or at most dog-leg)
         extended_traces = [t for t in result.traces_added if t.is_extended_escape]
-        assert len(extended_traces) == 0, (
-            "Simple components should not use extended escape routing"
-        )
+        assert len(extended_traces) == 0, "Simple components should not use extended escape routing"
 
     def test_dogleg_regression_fine_pitch(self, tmp_path: Path):
         """Dog-leg routing on SSOP-like components should still work without escalation."""
@@ -4001,12 +4028,16 @@ class TestExtendedEscapeRouting:
         pcb_file = tmp_path / "escape_cli.kicad_pcb"
         pcb_file.write_text(STITCH_TEST_PCB)
 
-        exit_code = main([
-            str(pcb_file),
-            "--net", "GND",
-            "--escape-distance", "5.0",
-            "--dry-run",
-        ])
+        exit_code = main(
+            [
+                str(pcb_file),
+                "--net",
+                "GND",
+                "--escape-distance",
+                "5.0",
+                "--dry-run",
+            ]
+        )
 
         assert exit_code == 0
 
@@ -4025,6 +4056,7 @@ class TestExtendedEscapeRouting:
         )
 
         from kicad_tools.cli.stitch_cmd import output_result
+
         output_result(result, dry_run=True)
 
         captured = capsys.readouterr()
@@ -4032,6 +4064,7 @@ class TestExtendedEscapeRouting:
         extended_traces = [t for t in result.traces_added if t.is_extended_escape]
         if extended_traces:
             assert "extended escape" in captured.out.lower()
+
 
 # --- Filled polygon clearance tests ---
 
@@ -4114,6 +4147,7 @@ class TestFindAllFilledPolygons:
     def test_extract_filled_polygons(self):
         """Should extract filled polygons from zones with filled_polygon nodes."""
         import tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
             f.write(FILLED_POLYGON_TEST_PCB)
             f.flush()
@@ -4130,6 +4164,7 @@ class TestFindAllFilledPolygons:
     def test_extract_all_filled_polygons(self):
         """Should extract all filled polygons when no nets excluded."""
         import tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
             f.write(FILLED_POLYGON_TEST_PCB)
             f.flush()
@@ -4141,6 +4176,7 @@ class TestFindAllFilledPolygons:
     def test_no_filled_polygons(self):
         """PCB with zones but no filled_polygon nodes should return empty."""
         import tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", mode="w", delete=False) as f:
             f.write(BLANKET_TEST_PCB)
             f.flush()
@@ -4163,9 +4199,7 @@ class TestCheckViaClearanceFilledPolygons:
 
     def test_via_inside_other_net_polygon_rejected(self):
         """A via placed inside an other-net filled polygon should be rejected."""
-        polygon = self._make_filled_polygon(
-            [(40, 40), (60, 40), (60, 60), (40, 60)]
-        )
+        polygon = self._make_filled_polygon([(40, 40), (60, 40), (60, 60), (40, 60)])
         result = check_via_clearance(
             x=50.0,
             y=50.0,
@@ -4184,9 +4218,7 @@ class TestCheckViaClearanceFilledPolygons:
         # Polygon edge runs from (40, 40) to (60, 40)
         # Via at (50, 39.8) with radius 0.225 + clearance 0.2 = 0.425
         # Distance from (50, 39.8) to edge y=40 is 0.2, which < 0.425
-        polygon = self._make_filled_polygon(
-            [(40, 40), (60, 40), (60, 60), (40, 60)]
-        )
+        polygon = self._make_filled_polygon([(40, 40), (60, 40), (60, 60), (40, 60)])
         result = check_via_clearance(
             x=50.0,
             y=39.8,
@@ -4202,9 +4234,7 @@ class TestCheckViaClearanceFilledPolygons:
 
     def test_via_far_from_polygon_passes(self):
         """A via far from all polygon edges should pass."""
-        polygon = self._make_filled_polygon(
-            [(40, 40), (60, 40), (60, 60), (40, 60)]
-        )
+        polygon = self._make_filled_polygon([(40, 40), (60, 40), (60, 60), (40, 60)])
         result = check_via_clearance(
             x=10.0,
             y=10.0,
@@ -4242,13 +4272,11 @@ class TestCheckViaClearanceFilledPolygons:
             same_net_vias=[],
             other_net_filled_polygons=[],
         )
-        assert result_without == result_with_empty == True
+        assert result_without == result_with_empty is True
 
     def test_via_exactly_on_polygon_edge(self):
         """Via center exactly on a polygon edge (boundary condition)."""
-        polygon = self._make_filled_polygon(
-            [(40, 40), (60, 40), (60, 60), (40, 60)]
-        )
+        polygon = self._make_filled_polygon([(40, 40), (60, 40), (60, 60), (40, 60)])
         # Point on the edge y=40: distance is 0, which < via_radius + clearance
         result = check_via_clearance(
             x=50.0,
@@ -4271,26 +4299,41 @@ class TestCalculateViaPositionFilledPolygons:
         """calculate_via_position should avoid placing vias near other-net fills."""
         # Create a polygon that surrounds the pad area except one escape direction
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=50.0, y=50.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=50.0,
+            y=50.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
         # Large polygon covering most directions from the pad
         polygon = FilledPolygon(
-            net_number=2, net_name="SIG", layer="F.Cu",
+            net_number=2,
+            net_name="SIG",
+            layer="F.Cu",
             points=[(49, 49), (55, 49), (55, 55), (49, 55)],
         )
         # Without polygon, a position should be found
         pos_without = calculate_via_position(
-            pad, offset=0.5, via_size=0.45,
-            existing_vias=[], clearance=0.2,
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
         )
         assert pos_without is not None
 
         # With polygon covering the area, the via should either be
         # placed farther away or in a direction not blocked
         pos_with = calculate_via_position(
-            pad, offset=0.5, via_size=0.45,
-            existing_vias=[], clearance=0.2,
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
             other_net_filled_polygons=[polygon],
         )
         # The polygon covers x=49-55, y=49-55. The pad is at (50, 50).
@@ -4300,8 +4343,9 @@ class TestCalculateViaPositionFilledPolygons:
         if pos_with is not None:
             vx, vy = pos_with
             # Verify the returned position is NOT inside the polygon
-            assert not (49 <= vx <= 55 and 49 <= vy <= 55), \
+            assert not (49 <= vx <= 55 and 49 <= vy <= 55), (
                 f"Via at ({vx}, {vy}) should not be inside the polygon"
+            )
 
 
 class TestBlanketStitchFilledPolygons:
@@ -4783,9 +4827,7 @@ class TestThruHoleStitchIntegration:
         # J1.1 (thru_hole) + C1.1 (smd) = 2 GND pads, both needing vias
         assert len(result.vias_added) == 2
 
-    def test_stitch_skips_thru_hole_in_filled_zone(
-        self, thru_hole_zone_filled_pcb: Path
-    ):
+    def test_stitch_skips_thru_hole_in_filled_zone(self, thru_hole_zone_filled_pcb: Path):
         """Through-hole pad inside filled zone should be skipped."""
         result = run_stitch(
             pcb_path=thru_hole_zone_filled_pcb,
@@ -4799,9 +4841,7 @@ class TestThruHoleStitchIntegration:
         via_refs = {v.pad.reference for v in result.vias_added}
         assert "J1" not in via_refs
 
-    def test_stitch_skips_thru_hole_in_unfilled_zone(
-        self, thru_hole_zone_unfilled_pcb: Path
-    ):
+    def test_stitch_skips_thru_hole_in_unfilled_zone(self, thru_hole_zone_unfilled_pcb: Path):
         """Through-hole pad inside zone boundary (unfilled) should be skipped."""
         result = run_stitch(
             pcb_path=thru_hole_zone_unfilled_pcb,
@@ -4842,9 +4882,7 @@ class TestThruHoleStitchIntegration:
         # C1.2 and C2.2 are SMD on +3.3V -- also need vias
         assert len(result.vias_added) == 3
 
-    def test_find_same_net_filled_polygons(
-        self, thru_hole_zone_filled_pcb: Path
-    ):
+    def test_find_same_net_filled_polygons(self, thru_hole_zone_filled_pcb: Path):
         """find_same_net_filled_polygons should return polys for specified nets."""
         sexp = load_pcb(thru_hole_zone_filled_pcb)
         polys = find_same_net_filled_polygons(sexp, {1})
@@ -4876,8 +4914,13 @@ class TestMicroViaNode:
         from kicad_tools.sexp.builders import via_node
 
         node = via_node(
-            x=100.0, y=100.0, size=0.45, drill=0.2,
-            layers=("F.Cu", "B.Cu"), net=1, uuid_str="test-uuid",
+            x=100.0,
+            y=100.0,
+            size=0.45,
+            drill=0.2,
+            layers=("F.Cu", "B.Cu"),
+            net=1,
+            uuid_str="test-uuid",
         )
         text = node.to_string()
         # The word "micro" should not appear in a standard via
@@ -4888,8 +4931,13 @@ class TestMicroViaNode:
         from kicad_tools.sexp.builders import via_node
 
         node = via_node(
-            x=100.0, y=100.0, size=0.3, drill=0.15,
-            layers=("F.Cu", "In1.Cu"), net=1, uuid_str="test-uuid",
+            x=100.0,
+            y=100.0,
+            size=0.3,
+            drill=0.15,
+            layers=("F.Cu", "In1.Cu"),
+            net=1,
+            uuid_str="test-uuid",
             via_type="micro",
         )
         text = node.to_string()
@@ -4900,8 +4948,13 @@ class TestMicroViaNode:
         from kicad_tools.sexp.builders import via_node
 
         node = via_node(
-            x=50.0, y=75.0, size=0.3, drill=0.15,
-            layers=("F.Cu", "In1.Cu"), net=5, uuid_str="micro-uuid",
+            x=50.0,
+            y=75.0,
+            size=0.3,
+            drill=0.15,
+            layers=("F.Cu", "In1.Cu"),
+            net=5,
+            uuid_str="micro-uuid",
             via_type="micro",
         )
         text = node.to_string()
@@ -4916,12 +4969,22 @@ class TestMicroViaNode:
         from kicad_tools.sexp.builders import via_node
 
         default_node = via_node(
-            x=10.0, y=20.0, size=0.45, drill=0.2,
-            layers=("F.Cu", "B.Cu"), net=1, uuid_str="same-uuid",
+            x=10.0,
+            y=20.0,
+            size=0.45,
+            drill=0.2,
+            layers=("F.Cu", "B.Cu"),
+            net=1,
+            uuid_str="same-uuid",
         )
         none_node = via_node(
-            x=10.0, y=20.0, size=0.45, drill=0.2,
-            layers=("F.Cu", "B.Cu"), net=1, uuid_str="same-uuid",
+            x=10.0,
+            y=20.0,
+            size=0.45,
+            drill=0.2,
+            layers=("F.Cu", "B.Cu"),
+            net=1,
+            uuid_str="same-uuid",
             via_type=None,
         )
         assert default_node.to_string() == none_node.to_string()
@@ -4932,7 +4995,6 @@ class TestSkipDetail:
 
     def test_skip_detail_creation(self):
         """SkipDetail should store obstacle information."""
-        from kicad_tools.cli.stitch_cmd import SkipDetail
 
         detail = SkipDetail(
             obstacle_type="track",
@@ -4948,7 +5010,6 @@ class TestSkipDetail:
 
     def test_skip_detail_defaults(self):
         """SkipDetail should have sensible defaults."""
-        from kicad_tools.cli.stitch_cmd import SkipDetail
 
         detail = SkipDetail(obstacle_type="unknown")
         assert detail.obstacle_x is None
@@ -4965,17 +5026,32 @@ class TestIdentifyNearestObstacle:
         from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
 
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
         track = TrackSegment(
-            start_x=100.2, start_y=99.0, end_x=100.2, end_y=101.0,
-            width=0.2, layer="F.Cu", net_number=3,
+            start_x=100.2,
+            start_y=99.0,
+            end_x=100.2,
+            end_y=101.0,
+            width=0.2,
+            layer="F.Cu",
+            net_number=3,
         )
 
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2,
-            existing_vias=[], other_net_tracks=[track],
+            pad,
+            via_size=0.45,
+            clearance=0.2,
+            existing_vias=[],
+            other_net_tracks=[track],
         )
         assert detail.obstacle_type == "track"
         assert detail.obstacle_net == 3
@@ -4985,12 +5061,21 @@ class TestIdentifyNearestObstacle:
         from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
 
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
 
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2,
+            pad,
+            via_size=0.45,
+            clearance=0.2,
             existing_vias=[],
             other_net_vias=[(100.3, 100.0, 0.45, 5)],
         )
@@ -5002,12 +5087,21 @@ class TestIdentifyNearestObstacle:
         from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
 
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
 
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2,
+            pad,
+            via_size=0.45,
+            clearance=0.2,
             existing_vias=[],
             other_net_pads=[(100.2, 100.0, 0.3, 4)],
         )
@@ -5019,16 +5113,27 @@ class TestIdentifyNearestObstacle:
         from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
 
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
         fp = FilledPolygon(
-            net_number=3, net_name="NET1", layer="F.Cu",
+            net_number=3,
+            net_name="NET1",
+            layer="F.Cu",
             points=[(99.0, 99.0), (101.0, 99.0), (101.0, 101.0), (99.0, 101.0)],
         )
 
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2,
+            pad,
+            via_size=0.45,
+            clearance=0.2,
             existing_vias=[],
             other_net_filled_polygons=[fp],
         )
@@ -5040,12 +5145,22 @@ class TestIdentifyNearestObstacle:
         from kicad_tools.cli.stitch_cmd import identify_nearest_obstacle
 
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
 
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2, existing_vias=[],
+            pad,
+            via_size=0.45,
+            clearance=0.2,
+            existing_vias=[],
         )
         assert detail.obstacle_type == "unknown"
 
@@ -5055,20 +5170,34 @@ class TestIdentifyNearestObstacle:
         stitch diagnostics name the offending signal (e.g. SWO) instead
         of forcing the operator to chase net numbers."""
         pad = PadInfo(
-            reference="U2", pad_number="35", net_number=3, net_name="GND",
-            x=135.162, y=119.75, layer="F.Cu", width=0.3, height=1.5,
+            reference="U2",
+            pad_number="35",
+            net_number=3,
+            net_name="GND",
+            x=135.162,
+            y=119.75,
+            layer="F.Cu",
+            width=0.3,
+            height=1.5,
         )
         # SWO trace passing very close to U2.35 (mirrors the board 04 case)
         track = TrackSegment(
-            start_x=133.0357, start_y=117.9143,
-            end_x=137.7357, end_y=122.6143,
-            width=0.2, layer="B.Cu", net_number=8,
+            start_x=133.0357,
+            start_y=117.9143,
+            end_x=137.7357,
+            end_y=122.6143,
+            width=0.2,
+            layer="B.Cu",
+            net_number=8,
         )
         net_map = {0: "", 1: "+5V", 2: "+3.3V", 3: "GND", 8: "SWO"}
 
         detail = identify_nearest_obstacle(
-            pad, via_size=0.3, clearance=0.2,
-            existing_vias=[], other_net_tracks=[track],
+            pad,
+            via_size=0.3,
+            clearance=0.2,
+            existing_vias=[],
+            other_net_tracks=[track],
             net_map=net_map,
         )
         assert detail.obstacle_type == "track"
@@ -5082,17 +5211,32 @@ class TestIdentifyNearestObstacle:
         """Without net_map, the reason string should still include the
         net number (legacy behaviour preserved)."""
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
         track = TrackSegment(
-            start_x=100.2, start_y=99.0, end_x=100.2, end_y=101.0,
-            width=0.2, layer="F.Cu", net_number=3,
+            start_x=100.2,
+            start_y=99.0,
+            end_x=100.2,
+            end_y=101.0,
+            width=0.2,
+            layer="F.Cu",
+            net_number=3,
         )
 
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2,
-            existing_vias=[], other_net_tracks=[track],
+            pad,
+            via_size=0.45,
+            clearance=0.2,
+            existing_vias=[],
+            other_net_tracks=[track],
         )
         assert detail.obstacle_type == "track"
         assert "net 3" in detail.reason
@@ -5102,14 +5246,23 @@ class TestIdentifyNearestObstacle:
     def test_via_and_pad_reasons_include_net_name(self):
         """Issue #3267: net name should appear for via and pad obstacles too."""
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100.0, y=100.0, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100.0,
+            y=100.0,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
         net_map = {1: "GND", 4: "+3.3V", 5: "SCK"}
 
         # via obstacle case
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2,
+            pad,
+            via_size=0.45,
+            clearance=0.2,
             existing_vias=[],
             other_net_vias=[(100.3, 100.0, 0.45, 5)],
             net_map=net_map,
@@ -5119,7 +5272,9 @@ class TestIdentifyNearestObstacle:
 
         # pad obstacle case
         detail = identify_nearest_obstacle(
-            pad, via_size=0.45, clearance=0.2,
+            pad,
+            via_size=0.45,
+            clearance=0.2,
             existing_vias=[],
             other_net_pads=[(100.2, 100.0, 0.3, 4)],
             net_map=net_map,
@@ -5276,7 +5431,12 @@ class TestMicroViaCongestedPlacement:
             assert len(result.skip_details) == len(result.pads_skipped)
             for _pad, detail in result.skip_details:
                 assert detail.obstacle_type in (
-                    "track", "via", "pad", "zone_fill", "same_net_via", "unknown",
+                    "track",
+                    "via",
+                    "pad",
+                    "zone_fill",
+                    "same_net_via",
+                    "unknown",
                 )
                 assert detail.reason != ""
 
@@ -5291,10 +5451,19 @@ class TestMicroViaCLI:
 
     def test_micro_via_custom_size_cli(self, stitch_test_pcb: Path):
         """CLI should accept --micro-via-size and --micro-via-drill."""
-        result = main([
-            str(stitch_test_pcb), "--net", "GND", "--dry-run",
-            "--micro-via", "--micro-via-size", "0.25", "--micro-via-drill", "0.1",
-        ])
+        result = main(
+            [
+                str(stitch_test_pcb),
+                "--net",
+                "GND",
+                "--dry-run",
+                "--micro-via",
+                "--micro-via-size",
+                "0.25",
+                "--micro-via-drill",
+                "0.1",
+            ]
+        )
         assert result == 0
 
 
@@ -5303,7 +5472,7 @@ class TestOutputResultDiagnostics:
 
     def test_output_includes_micro_via_count(self, capsys, stitch_test_pcb: Path):
         """output_result should show micro-via count when present."""
-        from kicad_tools.cli.stitch_cmd import output_result, StitchResult, SkipDetail
+        from kicad_tools.cli.stitch_cmd import StitchResult, output_result
 
         result = StitchResult(
             pcb_name="test.kicad_pcb",
@@ -5312,12 +5481,26 @@ class TestOutputResultDiagnostics:
         )
         # Add some dummy vias so summary line triggers
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100, y=100, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
         result.vias_added = [
-            ViaPlacement(pad=pad, via_x=100.5, via_y=100, size=0.3, drill=0.15,
-                         layers=("F.Cu", "In1.Cu"), via_type="micro"),
+            ViaPlacement(
+                pad=pad,
+                via_x=100.5,
+                via_y=100,
+                size=0.3,
+                drill=0.15,
+                layers=("F.Cu", "In1.Cu"),
+                via_type="micro",
+            ),
         ] * 5
 
         output_result(result, dry_run=True)
@@ -5326,11 +5509,18 @@ class TestOutputResultDiagnostics:
 
     def test_output_includes_obstacle_breakdown(self, capsys):
         """output_result should show obstacle type breakdown for skipped pads."""
-        from kicad_tools.cli.stitch_cmd import output_result, StitchResult, SkipDetail
+        from kicad_tools.cli.stitch_cmd import StitchResult, output_result
 
         pad = PadInfo(
-            reference="C1", pad_number="1", net_number=1, net_name="GND",
-            x=100, y=100, layer="F.Cu", width=0.54, height=0.64,
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
         )
         result = StitchResult(
             pcb_name="test.kicad_pcb",
@@ -5341,8 +5531,9 @@ class TestOutputResultDiagnostics:
             (pad, SkipDetail(obstacle_type="track", reason="track (net 3)")),
         ]
         result.vias_added = [
-            ViaPlacement(pad=pad, via_x=100.5, via_y=100, size=0.45, drill=0.2,
-                         layers=("F.Cu", "B.Cu")),
+            ViaPlacement(
+                pad=pad, via_x=100.5, via_y=100, size=0.45, drill=0.2, layers=("F.Cu", "B.Cu")
+            ),
         ]
 
         output_result(result, dry_run=True)
@@ -5553,9 +5744,9 @@ class TestAvoidPadOverlap:
         assert result.via_in_pad_filtered > 0
         # And the filtered count is reflected in pads_skipped with the
         # ``via_in_pad`` diagnostic.
-        assert any(
-            "via_in_pad" in reason for _pad, reason in result.pads_skipped
-        ), "via_in_pad reason should appear in pads_skipped diagnostics"
+        assert any("via_in_pad" in reason for _pad, reason in result.pads_skipped), (
+            "via_in_pad reason should appear in pads_skipped diagnostics"
+        )
 
     def test_avoid_pad_overlap_default_off(self, pad_overlap_test_pcb):
         """Default ``avoid_pad_overlap=False`` preserves existing behaviour.
@@ -5690,9 +5881,7 @@ class TestPourConnectivityFallback:
     has NO cross-net-clearing placement.
     """
 
-    def test_stranded_pour_pad_rescued_by_fallback(
-        self, stitch_test_pcb: Path
-    ) -> None:
+    def test_stranded_pour_pad_rescued_by_fallback(self, stitch_test_pcb: Path) -> None:
         result = run_stitch(
             pcb_path=stitch_test_pcb,
             net_names=["GND", "+3.3V"],
@@ -5704,9 +5893,9 @@ class TestPourConnectivityFallback:
         # the fallback must rescue every one of them.
         #
         # No pour pad is stranded.
-        assert not any(
-            pad.net_name == "+3.3V" for pad, _ in result.pads_skipped
-        ), "no +3.3V pour pad may be stranded"
+        assert not any(pad.net_name == "+3.3V" for pad, _ in result.pads_skipped), (
+            "no +3.3V pour pad may be stranded"
+        )
         assert len(result.pads_skipped) == 0
 
         # Each rescued +3.3V pad still receives a via via the fallback path
@@ -5714,13 +5903,9 @@ class TestPourConnectivityFallback:
         plus_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
         assert len(plus_vias) == 3, "every stranded pour pad must get a via"
         assert len(result.connectivity_fallback) == 3
-        assert all(
-            pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback
-        )
+        assert all(pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback)
 
-    def test_non_stranded_pad_still_uses_clearing_placement(
-        self, tmp_path: Path
-    ) -> None:
+    def test_non_stranded_pad_still_uses_clearing_placement(self, tmp_path: Path) -> None:
         """When a clearing placement DOES exist, the fallback must NOT fire --
         the cross-net DRC reduction is preserved (no over-broad rescue)."""
         pcb = tmp_path / "cross_net_trace.kicad_pcb"
@@ -5862,14 +6047,17 @@ class TestCrossNetTraceCoCheck:
         if pos_with_trace is not None:
             assert pos_with_trace != pos_without_trace
             # The new via clears the foreign trace.
-            assert point_to_segment_distance(
-                pos_with_trace[0],
-                pos_with_trace[1],
-                trace_a_segments[0].start_x,
-                trace_a_segments[0].start_y,
-                trace_a_segments[0].end_x,
-                trace_a_segments[0].end_y,
-            ) >= required
+            assert (
+                point_to_segment_distance(
+                    pos_with_trace[0],
+                    pos_with_trace[1],
+                    trace_a_segments[0].start_x,
+                    trace_a_segments[0].start_y,
+                    trace_a_segments[0].end_x,
+                    trace_a_segments[0].end_y,
+                )
+                >= required
+            )
 
     def test_run_stitch_co_checks_trace_in_same_pass(self, tmp_path: Path) -> None:
         """End-to-end: ``run_stitch`` must not place a NETB via on top of the
@@ -5893,9 +6081,7 @@ class TestCrossNetTraceCoCheck:
         # Reconstruct NETA's trace legs and assert every placed NETB via clears
         # them by the manufacturer clearance band.  Before #3633 a NETB via
         # would land straight on this trace.
-        neta_trace = next(
-            t for t in result.traces_added if t.pad.net_name == "NETA"
-        )
+        neta_trace = next(t for t in result.traces_added if t.pad.net_name == "NETA")
         neta_segments = trace_to_track_segments(neta_trace)
         required = neta.size / 2 + neta_trace.width / 2 + 0.2
 

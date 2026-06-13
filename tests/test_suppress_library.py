@@ -121,9 +121,7 @@ class TestSuppressLibraryLineWidth:
         pcb._footprints.append(_library_footprint("C1"))
         pcb._footprints.append(_custom_footprint("U1"))
 
-        results = check_silkscreen_line_width(
-            pcb, jlcpcb_rules, suppress_library=True
-        )
+        results = check_silkscreen_line_width(pcb, jlcpcb_rules, suppress_library=True)
 
         assert len(results.violations) == 1
         assert results.violations[0].items[0] == "U1"
@@ -160,9 +158,7 @@ class TestSuppressLibraryLineWidth:
         )
         pcb._footprints.append(fp)
 
-        results = check_silkscreen_line_width(
-            pcb, jlcpcb_rules, suppress_library=True
-        )
+        results = check_silkscreen_line_width(pcb, jlcpcb_rules, suppress_library=True)
 
         assert len(results.violations) == 0
         assert results.suppressed_count == 2
@@ -182,9 +178,7 @@ class TestSuppressLibraryLineWidth:
         )
         pcb._graphics.append(bg)
 
-        results = check_silkscreen_line_width(
-            pcb, jlcpcb_rules, suppress_library=True
-        )
+        results = check_silkscreen_line_width(pcb, jlcpcb_rules, suppress_library=True)
 
         assert len(results.violations) == 1
         assert results.suppressed_count == 0
@@ -258,9 +252,7 @@ class TestSuppressLibraryTextHeight:
         pcb._footprints.append(self._library_fp_with_text("C1"))
         pcb._footprints.append(self._custom_fp_with_text("U1"))
 
-        results = check_silkscreen_text_height(
-            pcb, jlcpcb_rules, suppress_library=True
-        )
+        results = check_silkscreen_text_height(pcb, jlcpcb_rules, suppress_library=True)
 
         assert len(results.violations) == 1
         assert "U1" in results.violations[0].message
@@ -279,9 +271,7 @@ class TestSuppressLibraryDRCChecker:
         checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
         results = checker.check_silkscreen()
 
-        silk_violations = [
-            v for v in results.violations if v.rule_id == "silkscreen_line_width"
-        ]
+        silk_violations = [v for v in results.violations if v.rule_id == "silkscreen_line_width"]
         assert len(silk_violations) == 2
 
     def test_checker_with_suppress(self, jlcpcb_rules):
@@ -290,14 +280,10 @@ class TestSuppressLibraryDRCChecker:
         pcb._footprints.append(_library_footprint("C1"))
         pcb._footprints.append(_custom_footprint("U1"))
 
-        checker = DRCChecker(
-            pcb, manufacturer="jlcpcb", layers=4, suppress_library=True
-        )
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, suppress_library=True)
         results = checker.check_silkscreen()
 
-        silk_violations = [
-            v for v in results.violations if v.rule_id == "silkscreen_line_width"
-        ]
+        silk_violations = [v for v in results.violations if v.rule_id == "silkscreen_line_width"]
         assert len(silk_violations) == 1
         assert silk_violations[0].items[0] == "U1"
         assert results.suppressed_count >= 1
@@ -326,9 +312,7 @@ class TestSuppressLibraryWithSkip:
         pcb = _make_pcb()
         pcb._footprints.append(_library_footprint("C1"))
 
-        checker = DRCChecker(
-            pcb, manufacturer="jlcpcb", layers=4, suppress_library=True
-        )
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, suppress_library=True)
         # Calling check_all still works -- silkscreen just reports suppressed
         results = checker.check_all()
         # No crash; suppressed count is tracked

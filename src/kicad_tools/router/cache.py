@@ -25,7 +25,7 @@ import sqlite3
 import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -344,7 +344,6 @@ def transform_routes(
     Returns:
         New list of Route objects with transformed coordinates.
     """
-    from .layers import Layer
     from .primitives import Route as RouteClass
     from .primitives import Segment, Via
 

@@ -216,28 +216,21 @@ def verify_pcb_write(
     if expected_zones > 0:
         actual = len(sexp.find_all("zone"))
         if actual < expected_zones:
-            errors.append(
-                f"Expected at least {expected_zones} zone(s), found {actual}"
-            )
+            errors.append(f"Expected at least {expected_zones} zone(s), found {actual}")
 
     if expected_vias > 0:
         actual = len(sexp.find_all("via"))
         if actual < expected_vias:
-            errors.append(
-                f"Expected at least {expected_vias} via(s), found {actual}"
-            )
+            errors.append(f"Expected at least {expected_vias} via(s), found {actual}")
 
     if expected_segments > 0:
         actual = len(sexp.find_all("segment"))
         if actual < expected_segments:
-            errors.append(
-                f"Expected at least {expected_segments} segment(s), found {actual}"
-            )
+            errors.append(f"Expected at least {expected_segments} segment(s), found {actual}")
 
     if errors:
         raise WriteVerificationError(
-            f"Post-write verification failed for {path}: "
-            + "; ".join(errors)
+            f"Post-write verification failed for {path}: " + "; ".join(errors)
         )
 
 

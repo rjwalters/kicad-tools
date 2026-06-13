@@ -48,18 +48,14 @@ def run_add_junction(args) -> int:
         return 0
 
     if args.backup:
-        backup_path = (
-            f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
         print(f"Backup created: {backup_path}")
 
     junc = sch.add_junction(position)
     sch.save()
 
-    print(
-        f"Junction added at ({junc.position[0]:.2f}, {junc.position[1]:.2f})"
-    )
+    print(f"Junction added at ({junc.position[0]:.2f}, {junc.position[1]:.2f})")
     return 0
 
 
@@ -78,12 +74,8 @@ def main(argv=None):
         metavar=("X", "Y"),
         help="Junction coordinates",
     )
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     args = parser.parse_args(argv)
     return run_add_junction(args)

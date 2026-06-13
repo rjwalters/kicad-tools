@@ -56,9 +56,7 @@ class TestThreePhaseInverterGateNets:
         """
         ThreePhaseInverter(mock_schematic, x=100, y=100)
 
-        labels = sorted(
-            call.args[0] for call in mock_schematic.add_label.call_args_list
-        )
+        labels = sorted(call.args[0] for call in mock_schematic.add_label.call_args_list)
         # Three phase-output labels (PHASE_A/B/C); zero gate-net labels.
         assert labels == ["PHASE_A", "PHASE_B", "PHASE_C"]
 
@@ -70,9 +68,7 @@ class TestThreePhaseInverterGateNets:
             y=100,
             gate_hs_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
         )
-        labels = sorted(
-            call.args[0] for call in mock_schematic.add_label.call_args_list
-        )
+        labels = sorted(call.args[0] for call in mock_schematic.add_label.call_args_list)
         assert "GATE_AH" in labels
         assert "GATE_BH" in labels
         assert "GATE_CH" in labels
@@ -89,9 +85,7 @@ class TestThreePhaseInverterGateNets:
             y=100,
             gate_ls_nets=["GATE_AL", "GATE_BL", "GATE_CL"],
         )
-        labels = sorted(
-            call.args[0] for call in mock_schematic.add_label.call_args_list
-        )
+        labels = sorted(call.args[0] for call in mock_schematic.add_label.call_args_list)
         for ls in ("GATE_AL", "GATE_BL", "GATE_CL"):
             assert ls in labels
 
@@ -104,9 +98,7 @@ class TestThreePhaseInverterGateNets:
             gate_hs_nets=["GATE_AH", "GATE_BH", "GATE_CH"],
             gate_ls_nets=["GATE_AL", "GATE_BL", "GATE_CL"],
         )
-        labels = sorted(
-            call.args[0] for call in mock_schematic.add_label.call_args_list
-        )
+        labels = sorted(call.args[0] for call in mock_schematic.add_label.call_args_list)
         # 3 phase + 3 HS gate + 3 LS gate = 9 labels.
         assert len(labels) == 9
         for gate in ("GATE_AH", "GATE_BH", "GATE_CH", "GATE_AL", "GATE_BL", "GATE_CL"):
@@ -138,9 +130,7 @@ class TestThreePhaseInverterGateNets:
             phase_labels=["U", "V", "W"],
             gate_hs_nets=["GATE_UH", "GATE_VH", "GATE_WH"],
         )
-        labels = sorted(
-            call.args[0] for call in mock_schematic.add_label.call_args_list
-        )
+        labels = sorted(call.args[0] for call in mock_schematic.add_label.call_args_list)
         for tag in ("PHASE_U", "PHASE_V", "PHASE_W", "GATE_UH", "GATE_VH", "GATE_WH"):
             assert tag in labels
 
@@ -169,8 +159,12 @@ class TestThreePhaseInverterGateNets:
         # labels were already wired prior to #2980 and aren't load-bearing
         # here, but we still check them for symmetry.
         gate_nets = {
-            "GATE_AH", "GATE_BH", "GATE_CH",
-            "GATE_AL", "GATE_BL", "GATE_CL",
+            "GATE_AH",
+            "GATE_BH",
+            "GATE_CH",
+            "GATE_AL",
+            "GATE_BL",
+            "GATE_CL",
         }
         for call in mock_schematic.add_label.call_args_list:
             net_name, lx, ly = call.args[0], call.args[1], call.args[2]

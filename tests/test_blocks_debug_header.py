@@ -50,9 +50,7 @@ def mock_schematic():
             pin_map = header_pin_map
 
         comp.pin_position.side_effect = lambda name, _x=x, _y=y, _pm=pin_map: (
-            (_x + _pm[name][0], _y + _pm[name][1])
-            if name in _pm
-            else (_x, _y)
+            (_x + _pm[name][0], _y + _pm[name][1]) if name in _pm else (_x, _y)
         )
         return comp
 
@@ -69,16 +67,22 @@ class TestDebugHeaderPinNets:
     def test_default_emits_no_pin_labels(self, mock_schematic):
         """Without ``pin_nets``, no pin-net labels are emitted."""
         DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
         )
         assert mock_schematic.add_label.call_count == 0
 
     def test_pin_nets_right_edge_pin_stubs_right(self, mock_schematic):
         """Pins to the right of the symbol center stub rightward."""
         block = DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
             pin_nets={"1": "+3.3V"},
         )
 
@@ -105,8 +109,11 @@ class TestDebugHeaderPinNets:
             "6": "NRST",
         }
         DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
             pin_nets=pin_nets,
         )
 
@@ -118,8 +125,11 @@ class TestDebugHeaderPinNets:
     def test_alias_ports_added_for_each_pin_net(self, mock_schematic):
         """Each ``pin_nets`` entry adds a port keyed by the net name."""
         block = DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
             pin_nets={"2": "SWDIO", "4": "SWCLK"},
         )
         assert "SWDIO" in block.ports
@@ -128,14 +138,20 @@ class TestDebugHeaderPinNets:
     def test_alias_port_does_not_clobber_existing(self, mock_schematic):
         """A net name colliding with an existing port (e.g. ``VCC``) keeps the old port."""
         block_no_nets = DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
         )
         original_vcc = block_no_nets.ports["VCC"]
 
         block = DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
             pin_nets={"1": "VCC"},  # try to overwrite
         )
         # Original port survives.
@@ -148,8 +164,11 @@ class TestDebugHeaderPinNets:
         KiCad's label-only connectivity treats it as floating.
         """
         DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
             pin_nets={
                 "1": "+3.3V",
                 "2": "SWDIO",
@@ -178,12 +197,18 @@ class TestDebugHeaderPinNets:
     def test_external_ports_unchanged_without_pin_nets(self, mock_schematic):
         """Block ports unchanged when ``pin_nets`` is ``None`` (back-compat)."""
         b1 = DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
         )
         b2 = DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
             pin_nets={"1": "+3.3V"},
         )
         # Original placeholder ports survive in both blocks.
@@ -195,8 +220,11 @@ class TestDebugHeaderPinNets:
         # Need to add JTAG header pins to the mock.  Reuse the same map
         # but only assert that emission works for whatever subset we ask.
         block = DebugHeader(
-            mock_schematic, x=100, y=100,
-            interface="swd", pins=6,
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=6,
             pin_nets={"6": "NRST_NET"},
         )
         # Should have at least one label call for NRST_NET.

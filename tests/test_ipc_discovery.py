@@ -39,8 +39,9 @@ class TestGetSearchDirs:
     """Tests for platform-specific search directory logic."""
 
     def test_linux_with_xdg(self):
-        with patch("sys.platform", "linux"), patch.dict(
-            os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"}, clear=False
+        with (
+            patch("sys.platform", "linux"),
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"}, clear=False),
         ):
             dirs = _get_search_dirs()
             assert Path("/run/user/1000/kicad") in dirs
@@ -54,18 +55,22 @@ class TestGetSearchDirs:
             assert Path("/tmp/kicad") in dirs
 
     def test_macos(self):
-        with patch("sys.platform", "darwin"), patch.dict(
-            os.environ, {"TMPDIR": "/var/folders/xx/T/"}, clear=False
+        with (
+            patch("sys.platform", "darwin"),
+            patch.dict(os.environ, {"TMPDIR": "/var/folders/xx/T/"}, clear=False),
         ):
             dirs = _get_search_dirs()
             assert Path("/var/folders/xx/T/kicad") in dirs
             assert Path("/tmp/kicad") in dirs
 
     def test_windows(self):
-        with patch("sys.platform", "win32"), patch.dict(
-            os.environ,
-            {"LOCALAPPDATA": "C:\\Users\\test\\AppData\\Local", "TEMP": "C:\\Temp"},
-            clear=False,
+        with (
+            patch("sys.platform", "win32"),
+            patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": "C:\\Users\\test\\AppData\\Local", "TEMP": "C:\\Temp"},
+                clear=False,
+            ),
         ):
             dirs = _get_search_dirs()
             assert any("kicad" in str(d) for d in dirs)
@@ -94,9 +99,7 @@ class TestDiscoverSocket:
     def test_env_variable_missing_file(self):
         with patch.dict(os.environ, {"KICAD_IPC_SOCKET": "/nonexistent/socket"}):
             # Should fall through to directory search
-            with patch(
-                "kicad_tools.ipc.discovery._get_search_dirs", return_value=[]
-            ):
+            with patch("kicad_tools.ipc.discovery._get_search_dirs", return_value=[]):
                 result = discover_socket()
         assert result is None
 
@@ -108,9 +111,12 @@ class TestDiscoverSocket:
 
         env = dict(os.environ)
         env.pop("KICAD_IPC_SOCKET", None)
-        with patch.dict(os.environ, env, clear=True), patch(
-            "kicad_tools.ipc.discovery._get_search_dirs",
-            return_value=[kicad_dir],
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(
+                "kicad_tools.ipc.discovery._get_search_dirs",
+                return_value=[kicad_dir],
+            ),
         ):
             result = discover_socket()
         assert result == sock
@@ -118,9 +124,12 @@ class TestDiscoverSocket:
     def test_no_sockets_found(self):
         env = dict(os.environ)
         env.pop("KICAD_IPC_SOCKET", None)
-        with patch.dict(os.environ, env, clear=True), patch(
-            "kicad_tools.ipc.discovery._get_search_dirs",
-            return_value=[],
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(
+                "kicad_tools.ipc.discovery._get_search_dirs",
+                return_value=[],
+            ),
         ):
             result = discover_socket()
         assert result is None
@@ -132,9 +141,12 @@ class TestDiscoverInstances:
     def test_no_instances(self):
         env = dict(os.environ)
         env.pop("KICAD_IPC_SOCKET", None)
-        with patch.dict(os.environ, env, clear=True), patch(
-            "kicad_tools.ipc.discovery._get_search_dirs",
-            return_value=[],
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(
+                "kicad_tools.ipc.discovery._get_search_dirs",
+                return_value=[],
+            ),
         ):
             instances = discover_instances()
         assert instances == []
@@ -142,9 +154,12 @@ class TestDiscoverInstances:
     def test_env_instance(self, tmp_path):
         sock = tmp_path / "kicad.sock"
         sock.touch()
-        with patch.dict(os.environ, {"KICAD_IPC_SOCKET": str(sock)}), patch(
-            "kicad_tools.ipc.discovery._get_search_dirs",
-            return_value=[],
+        with (
+            patch.dict(os.environ, {"KICAD_IPC_SOCKET": str(sock)}),
+            patch(
+                "kicad_tools.ipc.discovery._get_search_dirs",
+                return_value=[],
+            ),
         ):
             instances = discover_instances()
         assert len(instances) == 1
@@ -160,9 +175,12 @@ class TestDiscoverInstances:
 
         env = dict(os.environ)
         env.pop("KICAD_IPC_SOCKET", None)
-        with patch.dict(os.environ, env, clear=True), patch(
-            "kicad_tools.ipc.discovery._get_search_dirs",
-            return_value=[kicad_dir],
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(
+                "kicad_tools.ipc.discovery._get_search_dirs",
+                return_value=[kicad_dir],
+            ),
         ):
             instances = discover_instances()
         assert len(instances) == 2
@@ -170,9 +188,12 @@ class TestDiscoverInstances:
     def test_deduplication(self, tmp_path):
         sock = tmp_path / "kicad.sock"
         sock.touch()
-        with patch.dict(os.environ, {"KICAD_IPC_SOCKET": str(sock)}), patch(
-            "kicad_tools.ipc.discovery._get_search_dirs",
-            return_value=[tmp_path],
+        with (
+            patch.dict(os.environ, {"KICAD_IPC_SOCKET": str(sock)}),
+            patch(
+                "kicad_tools.ipc.discovery._get_search_dirs",
+                return_value=[tmp_path],
+            ),
         ):
             instances = discover_instances()
         # Same socket found via env and dir search should be deduplicated

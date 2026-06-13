@@ -190,9 +190,7 @@ class TestRunMoveFootprint:
         pcb = tmp_path / "test.kicad_pcb"
         pcb.write_text(MINIMAL_PCB)
 
-        rc = run_move_footprint(
-            pcb, reference="J2", to=(132.5, 98.25), output_format="json"
-        )
+        rc = run_move_footprint(pcb, reference="J2", to=(132.5, 98.25), output_format="json")
         assert rc == 0
 
         captured = capsys.readouterr()
@@ -210,9 +208,7 @@ class TestRunMoveFootprint:
         pcb = tmp_path / "test.kicad_pcb"
         pcb.write_text(MINIMAL_PCB)
 
-        rc = run_move_footprint(
-            pcb, reference="J2", to=(132.5, 98.25), output_format="text"
-        )
+        rc = run_move_footprint(pcb, reference="J2", to=(132.5, 98.25), output_format="text")
         assert rc == 0
 
         captured = capsys.readouterr()
@@ -260,12 +256,18 @@ class TestMoveFootprintCLIParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "move-footprint",
-            "--ref", "J2",
-            "--to", "132.5", "98.25",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "move-footprint",
+                "--ref",
+                "J2",
+                "--to",
+                "132.5",
+                "98.25",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.pcb_command == "move-footprint"
         assert args.ref == "J2"
         assert args.to == [132.5, 98.25]
@@ -275,13 +277,20 @@ class TestMoveFootprintCLIParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "move-footprint",
-            "--ref", "J2",
-            "--to", "132.5", "98.25",
-            "--rotation", "90",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "move-footprint",
+                "--ref",
+                "J2",
+                "--to",
+                "132.5",
+                "98.25",
+                "--rotation",
+                "90",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.rotation == 90.0
 
     def test_parser_dry_run_flag(self):
@@ -289,13 +298,19 @@ class TestMoveFootprintCLIParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "move-footprint",
-            "--ref", "J2",
-            "--to", "132.5", "98.25",
-            "--dry-run",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "move-footprint",
+                "--ref",
+                "J2",
+                "--to",
+                "132.5",
+                "98.25",
+                "--dry-run",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.dry_run is True
 
     def test_parser_map_flag(self):
@@ -303,11 +318,15 @@ class TestMoveFootprintCLIParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "move-footprint",
-            "--map", '{"J2": {"x": 132.5, "y": 98.25}}',
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "move-footprint",
+                "--map",
+                '{"J2": {"x": 132.5, "y": 98.25}}',
+                "test.kicad_pcb",
+            ]
+        )
         assert args.batch_map == '{"J2": {"x": 132.5, "y": 98.25}}'
 
     def test_dispatcher_integration(self, tmp_path):

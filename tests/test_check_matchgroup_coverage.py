@@ -96,9 +96,7 @@ class TestMeasurePourConnectivity:
     def test_all_connected_returns_empty(self, tmp_path):
         mod = _load_helper_module()
         recipe = _fake_recipe({"GND": _net_ok(), "+1V2": _net_ok()})
-        failures = mod.measure_pour_connectivity(
-            recipe, tmp_path / "x.kicad_pcb", {"GND", "+1V2"}
-        )
+        failures = mod.measure_pour_connectivity(recipe, tmp_path / "x.kicad_pcb", {"GND", "+1V2"})
         assert failures == []
 
     def test_disjoint_net_reported(self, tmp_path):
@@ -208,11 +206,7 @@ class TestMatchgroupJobContainer:
         assert steps, "matchgroup job must declare steps"
         # The prerequisites/probe step must come before the re-route step.
         probe_idx = next(
-            (
-                i
-                for i, s in enumerate(steps)
-                if "kicad-cli --version" in (s.get("run") or "")
-            ),
+            (i for i, s in enumerate(steps) if "kicad-cli --version" in (s.get("run") or "")),
             None,
         )
         assert probe_idx is not None, "no kicad-cli --version probe step found"

@@ -22,7 +22,6 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING

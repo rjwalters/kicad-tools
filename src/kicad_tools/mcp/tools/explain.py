@@ -7,17 +7,15 @@ explanations of design rules with spec references and fix suggestions.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any
 
 from kicad_tools.explain import (
-    ExplanationResult,
     explain,
     explain_net_constraints,
     explain_violations,
     list_rules,
     search_rules,
 )
-from kicad_tools.explain.models import ExplainedViolation
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +145,11 @@ def list_available_rules() -> dict[str, Any]:
     all_rules = list_rules()
 
     # Categorize rules
-    manufacturer_rules = [r for r in all_rules if not any(
-        x in r.lower() for x in ["usb", "i2c", "spi", "uart", "jtag"]
-    )]
+    manufacturer_rules = [
+        r
+        for r in all_rules
+        if not any(x in r.lower() for x in ["usb", "i2c", "spi", "uart", "jtag"])
+    ]
     interface_rules = [r for r in all_rules if r not in manufacturer_rules]
 
     return {
@@ -240,6 +240,7 @@ def explain_drc_violations(
         ... ]
         >>> explained = explain_drc_violations(violations)
     """
+
     # Convert dict violations to a simple object for the explain function
     class ViolationAdapter:
         def __init__(self, data: dict[str, Any]):
@@ -275,9 +276,11 @@ def explain_drc_violations(
             if not loc:
                 return None
             if isinstance(loc, dict):
+
                 class Loc:
                     x_mm = loc.get("x_mm", 0)
                     y_mm = loc.get("y_mm", 0)
+
                 return Loc()
             return None
 

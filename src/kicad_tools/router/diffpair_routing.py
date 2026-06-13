@@ -50,9 +50,7 @@ _COUPLED_TRACE = bool(os.environ.get("KCT_COUPLED_TRACE"))
 # when constructing the per-pair :class:`CoupledPathfinder`.  See the
 # ``heuristic_weight`` rationale in ``CoupledPathfinder.__init__``.
 # Env-overridable for experimentation (KCT_COUPLED_HEURISTIC_WEIGHT).
-COUPLED_HEURISTIC_WEIGHT: float = float(
-    os.environ.get("KCT_COUPLED_HEURISTIC_WEIGHT", "1.5")
-)
+COUPLED_HEURISTIC_WEIGHT: float = float(os.environ.get("KCT_COUPLED_HEURISTIC_WEIGHT", "1.5"))
 
 # Issue #3547: default per-pair ITERATION budget for the coupled search
 # when the shadow constructor is OFF (the default) and the caller plumbed
@@ -88,9 +86,7 @@ COUPLED_HEURISTIC_WEIGHT: float = float(
 # on the CI no-coverage path regardless.  40000 total (20000/phase) sits
 # in that wide window: ~1.7x above npad's convergence floor (npad passes
 # in ~1.3s) while DQS still bails comfortably under the 60s CI timeout.
-COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(
-    os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "40000")
-)
+COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "40000"))
 
 # Issue #3508: max joint remaining Manhattan distance (grid cells, max
 # over the two heads) at which a budget-exited coupled search qualifies
@@ -763,9 +759,7 @@ class CoupledPathfinder:
         overlaps continuous pad metal (#3233), so reject the via when
         any cell under its DRILL footprint is pad metal on any layer.
         """
-        drill_cells = max(
-            0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution))
-        )
+        drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution)))
         for layer in range(self.grid.num_layers):
             for dy in range(-self._via_extra_cells, self._via_extra_cells + 1):
                 for dx in range(-self._via_extra_cells, self._via_extra_cells + 1):
@@ -932,12 +926,16 @@ class CoupledPathfinder:
             if n_advances and not n_is_endpoint_cell and n_key in p_visited_set:
                 return True
             # Issue #3508: proximity variant of the cross-trail check.
-            if p_advances and not p_is_endpoint_cell and _too_close_to_trail(
-                p_key, n_trail_buckets
+            if (
+                p_advances
+                and not p_is_endpoint_cell
+                and _too_close_to_trail(p_key, n_trail_buckets)
             ):
                 return True
-            if n_advances and not n_is_endpoint_cell and _too_close_to_trail(
-                n_key, p_trail_buckets
+            if (
+                n_advances
+                and not n_is_endpoint_cell
+                and _too_close_to_trail(n_key, p_trail_buckets)
             ):
                 return True
             # Self-loop: the advancing trace re-enters a cell it has
@@ -1138,9 +1136,10 @@ class CoupledPathfinder:
                 p_is_endpoint = self._is_at_goal(cand_p, p_goal) or self._is_at_goal(
                     cand_p, p_start
                 )
-                if not (p_is_endpoint or not self._is_trace_blocked(
-                    cand_p.x, cand_p.y, cand_p.layer, p_net
-                )):
+                if not (
+                    p_is_endpoint
+                    or not self._is_trace_blocked(cand_p.x, cand_p.y, cand_p.layer, p_net)
+                ):
                     self.last_rejections["asym_blocked_p"] += 1
                 else:
                     spacing_dx = cand_p.x - cand_n.x
@@ -1562,9 +1561,7 @@ class CoupledPathfinder:
         # the pair can converge from the physical pad pitch down to
         # the coupled target one cell per step.
         start_spacing_delta = int(round(abs(actual_start_spacing - effective_target_spacing)))
-        effective_departure_radius = max(
-            effective_target_spacing, 6, start_spacing_delta * 2 + 4
-        )
+        effective_departure_radius = max(effective_target_spacing, 6, start_spacing_delta * 2 + 4)
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
@@ -2080,9 +2077,7 @@ def create_serpentine(
     added_per_bend = length_to_add / num_bends
     amplitude = max(
         min_amplitude,
-        math.sqrt(
-            max(0.0, ((added_per_bend + step_est) / 2.0) ** 2 - (step_est / 2.0) ** 2)
-        ),
+        math.sqrt(max(0.0, ((added_per_bend + step_est) / 2.0) ** 2 - (step_est / 2.0) ** 2)),
     )
 
     # Determine serpentine direction (perpendicular to segment)
@@ -2860,9 +2855,7 @@ class DiffPairRouter:
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
 
-    def _virtual_pad_at(
-        self, template: Pad, wx: float, wy: float, layer_idx: int
-    ) -> Pad:
+    def _virtual_pad_at(self, template: Pad, wx: float, wy: float, layer_idx: int) -> Pad:
         """Virtual pad at an arbitrary board position (issue #3508).
 
         Used as the start/end anchor for synthesized tail routes and as
@@ -3011,9 +3004,7 @@ class DiffPairRouter:
         return width + float(intra)
 
     @staticmethod
-    def _point_segment_distance(
-        px: float, py: float, seg: Segment
-    ) -> float:
+    def _point_segment_distance(px: float, py: float, seg: Segment) -> float:
         """Euclidean distance from a point to a segment's centerline."""
         vx = seg.x2 - seg.x1
         vy = seg.y2 - seg.y1
@@ -3049,9 +3040,7 @@ class DiffPairRouter:
                 continue
             for i in range(n_steps + 1):
                 t = i / n_steps
-                d = self._point_segment_distance(
-                    x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, ps
-                )
+                d = self._point_segment_distance(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, ps)
                 if d < best:
                     best = d
         return best
@@ -3073,25 +3062,17 @@ class DiffPairRouter:
             for via in a.vias:
                 bound_any = via.diameter / 2
                 for seg in b.segments:
-                    if (
-                        self._point_segment_distance(via.x, via.y, seg)
-                        < bound_any + seg.width / 2
-                    ):
+                    if self._point_segment_distance(via.x, via.y, seg) < bound_any + seg.width / 2:
                         return True
                 for w in b.vias:
-                    if (
-                        math.hypot(via.x - w.x, via.y - w.y)
-                        < bound_any + w.diameter / 2
-                    ):
+                    if math.hypot(via.x - w.x, via.y - w.y) < bound_any + w.diameter / 2:
                         return True
         for ps in p_route.segments:
             for ns in n_route.segments:
                 if ps.layer != ns.layer:
                     continue
                 if (
-                    self._min_distance_to_partner(
-                        ps.x1, ps.y1, ps.x2, ps.y2, [ns], ps.layer
-                    )
+                    self._min_distance_to_partner(ps.x1, ps.y1, ps.x2, ps.y2, [ns], ps.layer)
                     < (ps.width + ns.width) / 2
                 ):
                     return True
@@ -3127,16 +3108,12 @@ class DiffPairRouter:
         partner_width = max((ps.width for ps in partner_segments), default=width)
         # Via barrel vs partner trace clearance bound (vias are not
         # pair members; the standard manufacturer clearance applies).
-        via_clear = (
-            rules.via_diameter / 2 + rules.trace_clearance + partner_width / 2
-        )
+        via_clear = rules.via_diameter / 2 + rules.trace_clearance + partner_width / 2
         # Same-layer trace vs partner trace: the intra-pair bound.
         seg_clear = self._pair_seg_clearance(pathfinder, head.net_name)
 
         surface = Layer(grid.index_to_layer(layer_idx))
-        routable = [
-            li for li in grid.get_routable_indices() if li != layer_idx
-        ]
+        routable = [li for li in grid.get_routable_indices() if li != layer_idx]
         if not routable:
             return None
 
@@ -3155,9 +3132,7 @@ class DiffPairRouter:
             out = []
             for a in (0.0, 0.5, 1.0):
                 for b in (0.0, 0.6, -0.6, 1.2, -1.2):
-                    out.append(
-                        (cx + toward * ux * a + nxp * b, cy + toward * uy * a + nyp * b)
-                    )
+                    out.append((cx + toward * ux * a + nxp * b, cy + toward * uy * a + nyp * b))
             return out
 
         for v1 in _via_candidates(head.x, head.y, 1.0):
@@ -3233,40 +3208,61 @@ class DiffPairRouter:
                     if math.hypot(v1[0] - head.x, v1[1] - head.y) > 0.01:
                         route.segments.append(
                             Segment(
-                                x1=head.x, y1=head.y, x2=v1[0], y2=v1[1],
-                                width=width, layer=surface,
-                                net=head.net, net_name=head.net_name,
+                                x1=head.x,
+                                y1=head.y,
+                                x2=v1[0],
+                                y2=v1[1],
+                                width=width,
+                                layer=surface,
+                                net=head.net,
+                                net_name=head.net_name,
                             )
                         )
                     route.vias.append(
                         Via(
-                            x=v1[0], y=v1[1],
-                            drill=rules.via_drill, diameter=rules.via_diameter,
+                            x=v1[0],
+                            y=v1[1],
+                            drill=rules.via_drill,
+                            diameter=rules.via_diameter,
                             layers=(surface, alt_layer),
-                            net=head.net, net_name=head.net_name,
+                            net=head.net,
+                            net_name=head.net_name,
                         )
                     )
                     route.segments.append(
                         Segment(
-                            x1=v1[0], y1=v1[1], x2=v2[0], y2=v2[1],
-                            width=width, layer=alt_layer,
-                            net=head.net, net_name=head.net_name,
+                            x1=v1[0],
+                            y1=v1[1],
+                            x2=v2[0],
+                            y2=v2[1],
+                            width=width,
+                            layer=alt_layer,
+                            net=head.net,
+                            net_name=head.net_name,
                         )
                     )
                     route.vias.append(
                         Via(
-                            x=v2[0], y=v2[1],
-                            drill=rules.via_drill, diameter=rules.via_diameter,
+                            x=v2[0],
+                            y=v2[1],
+                            drill=rules.via_drill,
+                            diameter=rules.via_diameter,
                             layers=(alt_layer, surface),
-                            net=head.net, net_name=head.net_name,
+                            net=head.net,
+                            net_name=head.net_name,
                         )
                     )
                     if math.hypot(goal.x - v2[0], goal.y - v2[1]) > 0.01:
                         route.segments.append(
                             Segment(
-                                x1=v2[0], y1=v2[1], x2=goal.x, y2=goal.y,
-                                width=width, layer=surface,
-                                net=head.net, net_name=head.net_name,
+                                x1=v2[0],
+                                y1=v2[1],
+                                x2=goal.x,
+                                y2=goal.y,
+                                width=width,
+                                layer=surface,
+                                net=head.net,
+                                net_name=head.net_name,
                             )
                         )
                     return route
@@ -3481,8 +3477,7 @@ class DiffPairRouter:
                                     denom = d1x * d2y - d1y * d2x
                                     if abs(denom) > 1e-9:
                                         t = (
-                                            (a[0] - pseg[3]) * d2y
-                                            - (a[1] - pseg[4]) * d2x
+                                            (a[0] - pseg[3]) * d2y - (a[1] - pseg[4]) * d2x
                                         ) / denom
                                         cand = (
                                             pseg[3] + d1x * t,
@@ -3500,9 +3495,7 @@ class DiffPairRouter:
                                             mx = cand
                                 if mx is not None:
                                     pseg = elements[-1]
-                                    elements[-1] = (
-                                        "seg", pseg[1], pseg[2], mx[0], mx[1], pseg[5]
-                                    )
+                                    elements[-1] = ("seg", pseg[1], pseg[2], mx[0], mx[1], pseg[5])
                                     a = mx
                                 else:
                                     elements.append(
@@ -3528,9 +3521,7 @@ class DiffPairRouter:
             # any blockage in the interior (including via jogs) fails
             # this side.
             # ------------------------------------------------------------
-            arc_total = sum(
-                math.hypot(e[3] - e[1], e[4] - e[2]) for e in elements if e[0] == "seg"
-            )
+            arc_total = sum(math.hypot(e[3] - e[1], e[4] - e[2]) for e in elements if e[0] == "seg")
             arc = 0.0
             interior_block = False
             step = grid.resolution
@@ -3629,8 +3620,12 @@ class DiffPairRouter:
                 bh = (seg_probe[0][1], seg_probe[0][2], seg_probe[0][5])
                 anchor = self._virtual_pad_at(shadow_start, bh[0], bh[1], bh[2])
                 start_tail = self._tail_route(
-                    pathfinder, anchor, shadow_start, bh[2],
-                    "shadow-start", pair.name,
+                    pathfinder,
+                    anchor,
+                    shadow_start,
+                    bh[2],
+                    "shadow-start",
+                    pair.name,
                     partner_segments=partner_segs,
                 )
                 if start_tail is not None:
@@ -3650,8 +3645,12 @@ class DiffPairRouter:
                 bt = (seg_probe[-1][3], seg_probe[-1][4], seg_probe[-1][5])
                 anchor = self._virtual_pad_at(shadow_end, bt[0], bt[1], bt[2])
                 end_tail = self._tail_route(
-                    pathfinder, anchor, shadow_end, bt[2],
-                    "shadow-end", pair.name,
+                    pathfinder,
+                    anchor,
+                    shadow_end,
+                    bt[2],
+                    "shadow-end",
+                    pair.name,
                     partner_segments=partner_segs,
                 )
                 if end_tail is not None:
@@ -3667,8 +3666,14 @@ class DiffPairRouter:
             shadow_route = Route(net=s_net, net_name=s_net_name)
             shadow_route.segments.extend(
                 Segment(
-                    x1=s.x2, y1=s.y2, x2=s.x1, y2=s.y1,
-                    width=s.width, layer=s.layer, net=s.net, net_name=s.net_name,
+                    x1=s.x2,
+                    y1=s.y2,
+                    x2=s.x1,
+                    y2=s.y1,
+                    width=s.width,
+                    layer=s.layer,
+                    net=s.net,
+                    net_name=s.net_name,
                 )
                 for s in reversed(start_tail.segments)
             )
@@ -3678,13 +3683,16 @@ class DiffPairRouter:
                     _, vx, vy, l0, l1 = e
                     shadow_route.vias.append(
                         Via(
-                            x=vx, y=vy,
-                            drill=rules.via_drill, diameter=rules.via_diameter,
+                            x=vx,
+                            y=vy,
+                            drill=rules.via_drill,
+                            diameter=rules.via_diameter,
                             layers=(
                                 Layer(grid.index_to_layer(l0)),
                                 Layer(grid.index_to_layer(l1)),
                             ),
-                            net=s_net, net_name=s_net_name,
+                            net=s_net,
+                            net_name=s_net_name,
                         )
                     )
                     continue
@@ -3693,9 +3701,14 @@ class DiffPairRouter:
                     continue
                 shadow_route.segments.append(
                     Segment(
-                        x1=x1, y1=y1, x2=x2, y2=y2,
-                        width=s_width, layer=Layer(grid.index_to_layer(li)),
-                        net=s_net, net_name=s_net_name,
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        width=s_width,
+                        layer=Layer(grid.index_to_layer(li)),
+                        net=s_net,
+                        net_name=s_net_name,
                     )
                 )
             shadow_route.segments.extend(end_tail.segments)
@@ -3833,9 +3846,7 @@ class DiffPairRouter:
         unconstrained coupled search) or when the pathfinder raises.
         """
         try:
-            return self.autorouter.router.route(
-                start_pad, end_pad, per_net_timeout=per_net_timeout
-            )
+            return self.autorouter.router.route(start_pad, end_pad, per_net_timeout=per_net_timeout)
         except Exception as exc:  # pragma: no cover — defensive
             logger.debug(
                 "corridor guide route raised for %r -> %r: %s",
@@ -4153,9 +4164,7 @@ class DiffPairRouter:
             if per_pair_timeout is None:
                 probe_timeout = None
             elif self.enable_shadow_construction:
-                probe_timeout = min(
-                    max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5
-                )
+                probe_timeout = min(max(per_pair_timeout * 0.125, 45.0), per_pair_timeout * 0.5)
             else:
                 probe_timeout = per_pair_timeout * 0.125
             probe_t0 = time.monotonic()
@@ -4183,14 +4192,8 @@ class DiffPairRouter:
             # for the board 06 run-4 measurements (stranded shadow
             # tails, via-on-partner intersections, corridor
             # competition stranding later single-ended nets).
-            if (
-                self.enable_shadow_construction
-                and guide_route is not None
-                and guide_route.segments
-            ):
-                shadow = self._shadow_route_pair(
-                    pair, spec, pathfinder, guide_route, spacing_cells
-                )
+            if self.enable_shadow_construction and guide_route is not None and guide_route.segments:
+                shadow = self._shadow_route_pair(pair, spec, pathfinder, guide_route, spacing_cells)
                 if shadow is not None:
                     result = shadow
                     coupled_phase = "shadow"
@@ -4223,8 +4226,7 @@ class DiffPairRouter:
                         result = shadow
                         coupled_phase = "shadow-swapped"
                         print(
-                            "    [coupled-shadow] pair constructed as N guide "
-                            "+ parallel P shadow"
+                            "    [coupled-shadow] pair constructed as N guide + parallel P shadow"
                         )
 
             if result is None and guide_route is not None and guide_route.segments:
@@ -4299,9 +4301,7 @@ class DiffPairRouter:
             if result is None:
                 remaining_budget = per_pair_timeout
                 if per_pair_timeout is not None:
-                    remaining_budget = max(
-                        1.0, per_pair_timeout - (time.monotonic() - spec_t0)
-                    )
+                    remaining_budget = max(1.0, per_pair_timeout - (time.monotonic() - spec_t0))
                 # Issue #3473: the open fallback gets the REMAINDER of
                 # the shared iteration budget.  Because the corridor
                 # attempt was capped at half, the fallback always
@@ -4479,19 +4479,14 @@ class DiffPairRouter:
             # (clearance in ``[0, threshold)``) is logged but kept
             # because the trace-optimizer / serpentine shim can still
             # nudge it into compliance.
-            severe_violation = (
-                violation is not None
-                and violation.actual_clearance_mm < 0.0
-            )
+            severe_violation = violation is not None and violation.actual_clearance_mm < 0.0
             # Issue #3508 (second pass): the segments-only check above
             # cannot see via-vs-segment / via-vs-via physical overlap
             # (e.g. a crossing-tail via on the partner's inner-layer
             # copper).  Treat those as severe too -- the recipe's 6b
             # repair would otherwise rip one side and de-couple the
             # pair downstream.
-            if not severe_violation and self._pair_has_physical_overlap(
-                p_route, n_route
-            ):
+            if not severe_violation and self._pair_has_physical_overlap(p_route, n_route):
                 print(
                     "    WARNING: Coupled route has via-aware physical "
                     "P/N overlap; rejecting coupled route."
@@ -4505,9 +4500,7 @@ class DiffPairRouter:
                 # Issue #3508: ``violation`` may be ``None`` when the
                 # rejection came from the via-aware physical-overlap
                 # check (no same-layer segment pair under threshold).
-                worst = (
-                    violation.actual_clearance_mm if violation is not None else float("nan")
-                )
+                worst = violation.actual_clearance_mm if violation is not None else float("nan")
                 print(
                     f"    WARNING: Coupled route produced centerline overlap "
                     f"(worst={worst:+.3f}mm < 0); "
@@ -5543,9 +5536,7 @@ class DiffPairRouter:
                     # Issue #3508: see route_all_with_diffpairs -- a net
                     # with a failed stub edge stays routable for the
                     # main strategy.
-                    for incomplete in (
-                        getattr(self, "_last_stub_failed_nets", set()) & {p_id, n_id}
-                    ):
+                    for incomplete in getattr(self, "_last_stub_failed_nets", set()) & {p_id, n_id}:
                         routed_net_ids.discard(incomplete)
 
             all_routes.extend(pair_routes)

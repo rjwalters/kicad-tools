@@ -212,9 +212,7 @@ def test_ab_spacing_vs_routing_fitness(tmp_path):
     assert routing.routing_evaluator_active, (
         "Routing-fitness arm must have constructed a CppAstarRoutingEvaluator."
     )
-    assert not spacing.routing_evaluator_active, (
-        "Spacing arm must NOT carry a routing evaluator."
-    )
+    assert not spacing.routing_evaluator_active, "Spacing arm must NOT carry a routing evaluator."
 
     # Print a compact human-readable summary for the test log so reviewers
     # can scan the A/B numbers without opening the JSON artifact.

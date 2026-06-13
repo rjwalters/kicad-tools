@@ -291,9 +291,7 @@ class TestEnrichBomLcscCircuitBreaker:
         _make_suggester_mock(mock_instance)
 
         # First call raises LCSCForbiddenError
-        mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
-            "403 Forbidden"
-        )
+        mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
         MockSuggester.return_value = mock_instance
 
         items = [
@@ -322,9 +320,7 @@ class TestEnrichBomLcscCircuitBreaker:
         _make_suggester_mock(mock_instance)
 
         # The first group that needs a lookup will get 403
-        mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
-            "403 Forbidden"
-        )
+        mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
         MockSuggester.return_value = mock_instance
 
         items = [
@@ -396,12 +392,18 @@ class TestEnrichBomLcscCacheFallback:
         with tempfile.TemporaryDirectory() as tmp:
             cache = PartsCache(db_path=Path(tmp) / "test.db")
             cache.put_enrichment_match(
-                "10k", "Resistor_SMD:R_0402_1005Metric", "C25744",
-                confidence=0.85, part_type="Basic",
+                "10k",
+                "Resistor_SMD:R_0402_1005Metric",
+                "C25744",
+                confidence=0.85,
+                part_type="Basic",
             )
             cache.put_enrichment_match(
-                "100nF", "Capacitor_SMD:C_0402_1005Metric", "C1525",
-                confidence=0.9, part_type="Basic",
+                "100nF",
+                "Capacitor_SMD:C_0402_1005Metric",
+                "C1525",
+                confidence=0.9,
+                part_type="Basic",
             )
 
             mock_instance = MagicMock()
@@ -409,9 +411,7 @@ class TestEnrichBomLcscCacheFallback:
             # Wire up the real cache
             mock_instance._get_client.return_value.cache = cache
 
-            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
-                "403 Forbidden"
-            )
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
             MockSuggester.return_value = mock_instance
 
             items = [
@@ -440,17 +440,18 @@ class TestEnrichBomLcscCacheFallback:
             cache = PartsCache(db_path=Path(tmp) / "test.db")
             # Only cache the resistor, not the capacitor
             cache.put_enrichment_match(
-                "10k", "Resistor_SMD:R_0402_1005Metric", "C25744",
-                confidence=0.85, part_type="Basic",
+                "10k",
+                "Resistor_SMD:R_0402_1005Metric",
+                "C25744",
+                confidence=0.85,
+                part_type="Basic",
             )
 
             mock_instance = MagicMock()
             _make_suggester_mock(mock_instance)
             mock_instance._get_client.return_value.cache = cache
 
-            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
-                "403 Forbidden"
-            )
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
             MockSuggester.return_value = mock_instance
 
             items = [
@@ -486,9 +487,7 @@ class TestEnrichBomLcscCacheFallback:
             enrich_bom_lcsc(items)
 
             # Verify the match was stored in the enrichment cache
-            match = cache.get_enrichment_match(
-                "10k", "Resistor_SMD:R_0402_1005Metric"
-            )
+            match = cache.get_enrichment_match("10k", "Resistor_SMD:R_0402_1005Metric")
             assert match is not None
             assert match["lcsc_part"] == "C25744"
             assert match["confidence"] == 0.8
@@ -503,17 +502,18 @@ class TestEnrichBomLcscCacheFallback:
             # Create cache with very short TTL so entries expire immediately
             cache = PartsCache(db_path=Path(tmp) / "test.db", ttl_days=0)
             cache.put_enrichment_match(
-                "10k", "Resistor_SMD:R_0402_1005Metric", "C25744",
-                confidence=0.85, part_type="Basic",
+                "10k",
+                "Resistor_SMD:R_0402_1005Metric",
+                "C25744",
+                confidence=0.85,
+                part_type="Basic",
             )
 
             mock_instance = MagicMock()
             _make_suggester_mock(mock_instance)
             mock_instance._get_client.return_value.cache = cache
 
-            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
-                "403 Forbidden"
-            )
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
             MockSuggester.return_value = mock_instance
 
             items = [
@@ -539,9 +539,7 @@ class TestEnrichBomLcscCacheFallback:
             _make_suggester_mock(mock_instance)
             mock_instance._get_client.return_value.cache = cache
 
-            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
-                "403 Forbidden"
-            )
+            mock_instance.suggest_for_component.side_effect = LCSCForbiddenError("403 Forbidden")
             MockSuggester.return_value = mock_instance
 
             items = [

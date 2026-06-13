@@ -1489,7 +1489,6 @@ class TestPerSegmentRetry:
 
     def test_constant_is_three(self):
         """``MAX_SEGMENT_RETRY_CANDIDATES`` MUST be 3 by default."""
-        from kicad_tools.router.match_group_tuning import MAX_SEGMENT_RETRY_CANDIDATES
 
         assert MAX_SEGMENT_RETRY_CANDIDATES == 3
 

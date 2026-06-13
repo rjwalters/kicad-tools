@@ -193,7 +193,6 @@ def _compute_net_anchor_weight(
     return 1.0 + anchor_weight * fraction
 
 
-
 # _extract_board_outline is imported from kicad_tools.placement.geometry
 # (consolidated in #2349).
 
@@ -385,7 +384,8 @@ def optimize_placement(
     # Parse board data
     try:
         components, nets, board_outline, rules, board_origin = _read_board_data(
-            pcb_path, anchor_weight=anchor_weight,
+            pcb_path,
+            anchor_weight=anchor_weight,
         )
     except Exception as e:
         raise ParseError(f"Failed to parse PCB file: {e}") from e

@@ -11,7 +11,7 @@ import pytest
 from kicad_tools.router import DesignRules, RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
-from kicad_tools.router.primitives import Pad, Route, Segment
+from kicad_tools.router.primitives import Pad
 
 
 class TestLayerFillRatios:
@@ -202,12 +202,28 @@ class TestAStarLayerUtilizationCost:
         """Routing should still succeed with utilization cost enabled."""
         grid, router = self._make_grid_and_router(rules_enabled)
 
-        pad1 = Pad(x=2.0, y=2.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
-        pad2 = Pad(x=18.0, y=18.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
+        pad1 = Pad(
+            x=2.0,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
+        pad2 = Pad(
+            x=18.0,
+            y=18.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
 
         route = router.route(pad1, pad2)
         assert route is not None
@@ -221,12 +237,28 @@ class TestAStarLayerUtilizationCost:
         self._fill_layer(grid, 0, 0.8)
         router.update_layer_fill_ratios()
 
-        pad1 = Pad(x=2.0, y=2.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=True, drill=0.3)
-        pad2 = Pad(x=18.0, y=18.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=True, drill=0.3)
+        pad1 = Pad(
+            x=2.0,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.3,
+        )
+        pad2 = Pad(
+            x=18.0,
+            y=18.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.3,
+        )
 
         route = router.route(pad1, pad2)
         assert route is not None
@@ -246,12 +278,28 @@ class TestAStarLayerUtilizationCost:
         assert router._layer_fill_ratios[3] == 0.0  # B.Cu empty
 
         # Route with through-hole pads (can use any layer)
-        pad1 = Pad(x=2.0, y=2.0, width=0.8, height=0.8,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=True, drill=0.3)
-        pad2 = Pad(x=18.0, y=18.0, width=0.8, height=0.8,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=True, drill=0.3)
+        pad1 = Pad(
+            x=2.0,
+            y=2.0,
+            width=0.8,
+            height=0.8,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.3,
+        )
+        pad2 = Pad(
+            x=18.0,
+            y=18.0,
+            width=0.8,
+            height=0.8,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.3,
+        )
 
         route = router.route(pad1, pad2)
         assert route is not None
@@ -302,12 +350,28 @@ class TestTwoLayerNoRegression:
 
     def test_two_layer_route_succeeds(self, router):
         """Simple route on 2-layer board should still work with utilization cost."""
-        pad1 = Pad(x=2.0, y=2.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
-        pad2 = Pad(x=18.0, y=18.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
+        pad1 = Pad(
+            x=2.0,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
+        pad2 = Pad(
+            x=18.0,
+            y=18.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
 
         route = router.route(pad1, pad2)
         assert route is not None
@@ -361,12 +425,28 @@ class TestBidirectionalParity:
 
     def test_bidirectional_route_with_utilization(self, router):
         """Bidirectional A* should work with utilization cost enabled."""
-        pad1 = Pad(x=2.0, y=2.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
-        pad2 = Pad(x=28.0, y=28.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
+        pad1 = Pad(
+            x=2.0,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
+        pad2 = Pad(
+            x=28.0,
+            y=28.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
 
         route = router.route_bidirectional(pad1, pad2)
         assert route is not None
@@ -385,12 +465,28 @@ class TestBidirectionalParity:
         router.update_layer_fill_ratios()
         assert router._layer_fill_ratios[0] > 0.0
 
-        pad1 = Pad(x=2.0, y=2.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=True, drill=0.3)
-        pad2 = Pad(x=28.0, y=28.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=True, drill=0.3)
+        pad1 = Pad(
+            x=2.0,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.3,
+        )
+        pad2 = Pad(
+            x=28.0,
+            y=28.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.3,
+        )
 
         route = router.route_bidirectional(pad1, pad2)
         assert route is not None
@@ -427,12 +523,28 @@ class TestAllowedLayerConstraint:
 
     def test_single_layer_allowed_with_utilization(self, router):
         """With allowed_layers restricting to 1 layer, utilization should not cause failure."""
-        pad1 = Pad(x=2.0, y=2.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
-        pad2 = Pad(x=18.0, y=18.0, width=0.5, height=0.5,
-                    net=1, net_name="NET1", layer=Layer.F_CU,
-                    through_hole=False, drill=0)
+        pad1 = Pad(
+            x=2.0,
+            y=2.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
+        pad2 = Pad(
+            x=18.0,
+            y=18.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            through_hole=False,
+            drill=0,
+        )
 
         route = router.route(pad1, pad2)
         assert route is not None

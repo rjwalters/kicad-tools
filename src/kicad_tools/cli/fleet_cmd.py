@@ -779,9 +779,9 @@ def _extract_pcb_pad_net_numbers(pcb_text: str) -> set[int]:
         body_end = idx
         while j < n:
             c = pcb_text[j]
-            if c == '(':
+            if c == "(":
                 depth += 1
-            elif c == ')':
+            elif c == ")":
                 depth -= 1
                 if depth == 0:
                     body_end = j + 1

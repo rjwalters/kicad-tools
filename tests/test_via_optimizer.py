@@ -419,9 +419,7 @@ class TestViaConnectivityPreservation:
         result = optimizer.optimize_route(route)
 
         # The via MUST be retained -- removing it would disconnect the B.Cu pad.
-        assert len(result.vias) == 1, (
-            "Required via was removed, breaking layer connectivity"
-        )
+        assert len(result.vias) == 1, "Required via was removed, breaking layer connectivity"
 
     def test_redundant_via_still_removed_when_pads_on_same_layer(self):
         """A via between same-layer pads is redundant and should be removed.
@@ -442,9 +440,7 @@ class TestViaConnectivityPreservation:
         result = optimizer.optimize_route(route)
 
         # Both vias should be removable (via pair elimination).
-        assert len(result.vias) < 2, (
-            "Redundant via pair was not removed"
-        )
+        assert len(result.vias) < 2, "Redundant via pair was not removed"
 
     def test_partial_via_removal_with_three_vias(self):
         """In a route with 3 vias, only redundant ones should be removed.

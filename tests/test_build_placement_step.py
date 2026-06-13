@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
+from rich.console import Console
 
 from kicad_tools.cli.build_cmd import (
     BuildContext,
@@ -13,7 +13,6 @@ from kicad_tools.cli.build_cmd import (
     _run_step_placement,
     main,
 )
-from rich.console import Console
 
 
 class TestBuildStepEnum:
@@ -35,11 +34,11 @@ class TestRunStepPlacement:
 
     def _make_ctx(self, tmp_path: Path, **overrides) -> BuildContext:
         """Create a minimal BuildContext for testing."""
-        defaults = dict(
-            project_dir=tmp_path,
-            spec_file=None,
-            optimize_placement=False,
-        )
+        defaults = {
+            "project_dir": tmp_path,
+            "spec_file": None,
+            "optimize_placement": False,
+        }
         defaults.update(overrides)
         return BuildContext(**defaults)
 

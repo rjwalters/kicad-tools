@@ -84,7 +84,6 @@ def _point_on_wire_midpoint(
     return dist < tolerance
 
 
-
 def _auto_reference(sch: Schematic, prefix: str = "C") -> str:
     """Find the next available reference designator for a given prefix.
 
@@ -104,9 +103,7 @@ def _auto_reference(sch: Schematic, prefix: str = "C") -> str:
     return f"{prefix}{max_num + 1}"
 
 
-def _compute_cap_offset(
-    pin_rotation: float, offset_distance: float
-) -> tuple[float, float]:
+def _compute_cap_offset(pin_rotation: float, offset_distance: float) -> tuple[float, float]:
     """Compute the offset direction for cap placement from a pin.
 
     Pin rotation in KiCad library symbols:
@@ -312,12 +309,8 @@ def run_add_bypass_cap(args) -> int:
     # The cap pin closer to the IC pin connects to VDD; the other connects to GND.
     # This handles all orientations correctly: for left/down-pointing pins the
     # physical pin numbering would create a short if we always used pin 1 for VDD.
-    dist1 = (
-        (cap_pin1_pos[0] - pin_pos[0]) ** 2 + (cap_pin1_pos[1] - pin_pos[1]) ** 2
-    ) ** 0.5
-    dist2 = (
-        (cap_pin2_pos[0] - pin_pos[0]) ** 2 + (cap_pin2_pos[1] - pin_pos[1]) ** 2
-    ) ** 0.5
+    dist1 = ((cap_pin1_pos[0] - pin_pos[0]) ** 2 + (cap_pin1_pos[1] - pin_pos[1]) ** 2) ** 0.5
+    dist2 = ((cap_pin2_pos[0] - pin_pos[0]) ** 2 + (cap_pin2_pos[1] - pin_pos[1]) ** 2) ** 0.5
     if dist1 <= dist2:
         cap_vdd_pin_pos = cap_pin1_pos
         cap_gnd_pin_pos = cap_pin2_pos
@@ -333,13 +326,9 @@ def run_add_bypass_cap(args) -> int:
     planned: list[PlannedAction] = []
 
     if need_cap_embed:
-        planned.append(
-            PlannedAction("embed", f"Embed library definition for {cap_lib_id}")
-        )
+        planned.append(PlannedAction("embed", f"Embed library definition for {cap_lib_id}"))
     if need_gnd_embed:
-        planned.append(
-            PlannedAction("embed", f"Embed library definition for {gnd_lib_id}")
-        )
+        planned.append(PlannedAction("embed", f"Embed library definition for {gnd_lib_id}"))
 
     planned.append(
         PlannedAction(
@@ -353,16 +342,12 @@ def run_add_bypass_cap(args) -> int:
     planned.append(
         PlannedAction(
             "ground",
-            f"Place power symbol {args.ground_net} at"
-            f" ({gnd_pos[0]:.2f}, {gnd_pos[1]:.2f})",
+            f"Place power symbol {args.ground_net} at ({gnd_pos[0]:.2f}, {gnd_pos[1]:.2f})",
         )
     )
 
     # Wire from target pin to near (VDD) cap pin
-    if (
-        abs(pin_pos[0] - cap_vdd_pin_pos[0]) > 0.01
-        or abs(pin_pos[1] - cap_vdd_pin_pos[1]) > 0.01
-    ):
+    if abs(pin_pos[0] - cap_vdd_pin_pos[0]) > 0.01 or abs(pin_pos[1] - cap_vdd_pin_pos[1]) > 0.01:
         planned.append(
             PlannedAction(
                 "wire",
@@ -374,10 +359,7 @@ def run_add_bypass_cap(args) -> int:
         )
 
     # Wire from far (GND) cap pin to ground symbol
-    if (
-        abs(cap_gnd_pin_pos[0] - gnd_pos[0]) > 0.01
-        or abs(cap_gnd_pin_pos[1] - gnd_pos[1]) > 0.01
-    ):
+    if abs(cap_gnd_pin_pos[0] - gnd_pos[0]) > 0.01 or abs(cap_gnd_pin_pos[1] - gnd_pos[1]) > 0.01:
         planned.append(
             PlannedAction(
                 "wire",
@@ -415,9 +397,7 @@ def run_add_bypass_cap(args) -> int:
 
     # --- Create backup if requested ---
     if args.backup:
-        backup_path = (
-            f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
         print(f"Backup created: {backup_path}")
 
@@ -457,17 +437,11 @@ def run_add_bypass_cap(args) -> int:
 
     # 4. Add wires
     # Wire from target pin to near (VDD) cap pin
-    if (
-        abs(pin_pos[0] - cap_vdd_pin_pos[0]) > 0.01
-        or abs(pin_pos[1] - cap_vdd_pin_pos[1]) > 0.01
-    ):
+    if abs(pin_pos[0] - cap_vdd_pin_pos[0]) > 0.01 or abs(pin_pos[1] - cap_vdd_pin_pos[1]) > 0.01:
         sch.add_wire(pin_pos, cap_vdd_pin_pos)
 
     # Wire from far (GND) cap pin to ground
-    if (
-        abs(cap_gnd_pin_pos[0] - gnd_pos[0]) > 0.01
-        or abs(cap_gnd_pin_pos[1] - gnd_pos[1]) > 0.01
-    ):
+    if abs(cap_gnd_pin_pos[0] - gnd_pos[0]) > 0.01 or abs(cap_gnd_pin_pos[1] - gnd_pos[1]) > 0.01:
         sch.add_wire(cap_gnd_pin_pos, gnd_pos)
 
     # 5. Add junction if target pin lands on existing wire midpoint
@@ -477,7 +451,7 @@ def run_add_bypass_cap(args) -> int:
     # 6. Save
     sch.save()
 
-    print(f"\nBypass capacitor placed successfully:")
+    print("\nBypass capacitor placed successfully:")
     print(f"  Reference: {cap_reference}")
     print(f"  Value: {args.value}")
     print(f"  Target: {args.ref} pin {args.pin} at ({pin_pos[0]:.2f}, {pin_pos[1]:.2f})")
@@ -557,15 +531,9 @@ def main(argv=None):
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument(
-        "--ref", required=True, help="Target IC reference designator (e.g., U8)"
-    )
-    parser.add_argument(
-        "--pin", required=True, help="Target pin number on that IC (e.g., 4)"
-    )
-    parser.add_argument(
-        "--value", default="100nF", help="Capacitor value (default: 100nF)"
-    )
+    parser.add_argument("--ref", required=True, help="Target IC reference designator (e.g., U8)")
+    parser.add_argument("--pin", required=True, help="Target pin number on that IC (e.g., 4)")
+    parser.add_argument("--value", default="100nF", help="Capacitor value (default: 100nF)")
     parser.add_argument(
         "--ground-net",
         default="GND",
@@ -585,12 +553,8 @@ def main(argv=None):
         default=5.08,
         help="Distance from pin to cap body centre in mm (default: 5.08)",
     )
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     args = parser.parse_args(argv)
     return run_add_bypass_cap(args)

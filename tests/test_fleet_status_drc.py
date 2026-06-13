@@ -84,9 +84,7 @@ def _write_tolerance_file(path: Path, mapping: dict[str, int]) -> Path:
 
 
 class TestFleetStatusDRC:
-    def test_clean_board_with_zero_errors_is_ship_ready(
-        self, tmp_path: Path, capsys
-    ):
+    def test_clean_board_with_zero_errors_is_ship_ready(self, tmp_path: Path, capsys):
         """Board has all artifacts + drc_report.json with 0 errors -> YES."""
         boards = tmp_path / "boards"
         routed_pcb = make_fake_board(
@@ -124,9 +122,7 @@ class TestFleetStatusDRC:
         assert b["drc"]["errors"] == 0
         assert b["drc"]["over_tolerance"] is False
 
-    def test_board_with_drc_errors_blocks_ship_ready(
-        self, tmp_path: Path, capsys
-    ):
+    def test_board_with_drc_errors_blocks_ship_ready(self, tmp_path: Path, capsys):
         """Board with 182 DRC errors (mirrors board-02) reports NO with reason."""
         boards = tmp_path / "boards"
         routed_pcb = make_fake_board(
@@ -165,14 +161,11 @@ class TestFleetStatusDRC:
         assert b["drc"]["errors"] == 182
         assert b["drc"]["over_tolerance"] is True
         # The blocker text must cite the DRC count.
-        assert any(
-            "DRC errors" in blocker and "182" in blocker
-            for blocker in b["blockers"]
-        ), f"missing DRC-cited blocker in {b['blockers']!r}"
+        assert any("DRC errors" in blocker and "182" in blocker for blocker in b["blockers"]), (
+            f"missing DRC-cited blocker in {b['blockers']!r}"
+        )
 
-    def test_board_without_drc_report_keeps_pre_fix_classification(
-        self, tmp_path: Path, capsys
-    ):
+    def test_board_without_drc_report_keeps_pre_fix_classification(self, tmp_path: Path, capsys):
         """No drc_report.json -> board is treated as DRC-unknown.
 
         Backwards-compat invariant from issue #2932: do NOT block
@@ -237,10 +230,7 @@ class TestFleetStatusDRCTolerance:
         # Tolerance keyed by suffix that matches the routed PCB path.
         # The suffix lookup in ``_drc_tolerance_for`` accepts both
         # repo-relative and absolute matches.
-        suffix = (
-            "05-bldc-motor-controller/output/"
-            "05_bldc_motor_controller_routed.kicad_pcb"
-        )
+        suffix = "05-bldc-motor-controller/output/05_bldc_motor_controller_routed.kicad_pcb"
         tol = _write_tolerance_file(tmp_path / "tol.yml", {suffix: 53})
 
         rc = main(
@@ -275,10 +265,7 @@ class TestFleetStatusDRCTolerance:
             has_manifest=True,
         )
         _write_drc_report(routed_pcb, errors=60)
-        suffix = (
-            "05-bldc-motor-controller/output/"
-            "05_bldc_motor_controller_routed.kicad_pcb"
-        )
+        suffix = "05-bldc-motor-controller/output/05_bldc_motor_controller_routed.kicad_pcb"
         tol = _write_tolerance_file(tmp_path / "tol.yml", {suffix: 53})
 
         rc = main(
@@ -351,9 +338,7 @@ class TestFleetStatusDRCTableRendering:
                 return
         raise AssertionError("a-board row not found in table output")
 
-    def test_drc_cell_shows_count_with_bang_when_over_tolerance(
-        self, tmp_path: Path, capsys
-    ):
+    def test_drc_cell_shows_count_with_bang_when_over_tolerance(self, tmp_path: Path, capsys):
         boards = tmp_path / "boards"
         routed_pcb = make_fake_board(
             boards,
@@ -435,6 +420,4 @@ class TestFleetStatusDRCBackwardsCompat:
         assert by_name["a-no-drc"]["blockers"] == []
 
         assert by_name["b-drc-bad"]["ship_ready"] is False
-        assert any(
-            "DRC errors" in blk for blk in by_name["b-drc-bad"]["blockers"]
-        )
+        assert any("DRC errors" in blk for blk in by_name["b-drc-bad"]["blockers"])

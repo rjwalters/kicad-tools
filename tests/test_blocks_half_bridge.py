@@ -123,8 +123,11 @@ class TestHalfBridgeGateNets:
         same pin coordinates regardless of whether the labels were emitted.
         """
         hb_with = HalfBridge(
-            mock_schematic, x=100, y=100,
-            gate_hs_net="GATE_AH", gate_ls_net="GATE_AL",
+            mock_schematic,
+            x=100,
+            y=100,
+            gate_hs_net="GATE_AH",
+            gate_ls_net="GATE_AL",
         )
         hb_without = HalfBridge(mock_schematic, x=100, y=100)
 
@@ -170,7 +173,9 @@ class TestHalfBridgeGateNets:
         and the other goes through a series resistor (board 05 pattern).
         """
         HalfBridge(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             gate_hs_net="GATE_AH",  # gate_ls_net intentionally None
         )
         labels = [call.args[0] for call in mock_schematic.add_label.call_args_list]

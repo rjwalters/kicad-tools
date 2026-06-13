@@ -69,33 +69,41 @@ def compute_tooling_holes(
     holes: list[ToolingHole] = []
 
     # Bottom-left
-    holes.append(ToolingHole(
-        x=min_x + offset,
-        y=max_y - offset,
-        diameter=config.diameter,
-    ))
+    holes.append(
+        ToolingHole(
+            x=min_x + offset,
+            y=max_y - offset,
+            diameter=config.diameter,
+        )
+    )
 
     # Bottom-right
-    holes.append(ToolingHole(
-        x=max_x - offset,
-        y=max_y - offset,
-        diameter=config.diameter,
-    ))
+    holes.append(
+        ToolingHole(
+            x=max_x - offset,
+            y=max_y - offset,
+            diameter=config.diameter,
+        )
+    )
 
     # Top-left
-    holes.append(ToolingHole(
-        x=min_x + offset,
-        y=min_y + offset,
-        diameter=config.diameter,
-    ))
+    holes.append(
+        ToolingHole(
+            x=min_x + offset,
+            y=min_y + offset,
+            diameter=config.diameter,
+        )
+    )
 
     if config.pattern >= 4:
         # Top-right
-        holes.append(ToolingHole(
-            x=max_x - offset,
-            y=min_y + offset,
-            diameter=config.diameter,
-        ))
+        holes.append(
+            ToolingHole(
+                x=max_x - offset,
+                y=min_y + offset,
+                diameter=config.diameter,
+            )
+        )
 
     return holes
 
@@ -159,28 +167,34 @@ def compute_fiducials(
     fiducials: list[Fiducial] = []
 
     # Bottom-left
-    fiducials.append(Fiducial(
-        x=min_x + offset,
-        y=max_y - offset,
-        diameter=config.diameter,
-        mask_margin=config.mask_margin,
-    ))
+    fiducials.append(
+        Fiducial(
+            x=min_x + offset,
+            y=max_y - offset,
+            diameter=config.diameter,
+            mask_margin=config.mask_margin,
+        )
+    )
 
     # Bottom-right
-    fiducials.append(Fiducial(
-        x=max_x - offset,
-        y=max_y - offset,
-        diameter=config.diameter,
-        mask_margin=config.mask_margin,
-    ))
+    fiducials.append(
+        Fiducial(
+            x=max_x - offset,
+            y=max_y - offset,
+            diameter=config.diameter,
+            mask_margin=config.mask_margin,
+        )
+    )
 
     # Top-left
-    fiducials.append(Fiducial(
-        x=min_x + offset,
-        y=min_y + offset,
-        diameter=config.diameter,
-        mask_margin=config.mask_margin,
-    ))
+    fiducials.append(
+        Fiducial(
+            x=min_x + offset,
+            y=min_y + offset,
+            diameter=config.diameter,
+            mask_margin=config.mask_margin,
+        )
+    )
 
     return fiducials
 

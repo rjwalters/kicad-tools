@@ -149,9 +149,7 @@ class TestNetAwareSiblingEnvelopeCarveOut:
             f"cell.net={cell.net}."
         )
 
-    def test_same_net_escape_preserved_inside_sibling_envelope(
-        self, fine_pitch_rules
-    ):
+    def test_same_net_escape_preserved_inside_sibling_envelope(self, fine_pitch_rules):
         """A halo cell inside the sibling's own envelope must remain
         passable for the *sibling's net* -- this preserves the chip's
         escape routing (board 04 NRST escape between U2.7 NRST and U2.8
@@ -196,9 +194,7 @@ class TestNetAwareSiblingEnvelopeCarveOut:
                 f"test cannot exercise the same-net carve-out path."
             )
 
-    def test_unclaimed_halo_cell_outside_sibling_envelope_blocked(
-        self, fine_pitch_rules
-    ):
+    def test_unclaimed_halo_cell_outside_sibling_envelope_blocked(self, fine_pitch_rules):
         """A halo cell outside any sibling envelope (cell.net == 0) must
         still be blocked.  This is the baseline PR #2860 behaviour the
         net-aware carve-out must preserve.
@@ -217,9 +213,7 @@ class TestNetAwareSiblingEnvelopeCarveOut:
             "same-component sibling envelope is in play."
         )
 
-    def test_foreign_pad_in_sibling_envelope_position_not_carved_out(
-        self, fine_pitch_rules
-    ):
+    def test_foreign_pad_in_sibling_envelope_position_not_carved_out(self, fine_pitch_rules):
         """The carve-out only triggers for cells owned by the sibling's
         net.  A cell currently owned by a *foreign* component's pad
         (different ``ref``) must not be carved out by this chip's

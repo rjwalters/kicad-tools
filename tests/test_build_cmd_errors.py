@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.build_cmd import (
     BuildContext,
     _format_no_generator_message,
@@ -158,9 +156,7 @@ class TestRunStepPcbError:
 class TestSpecPathResolution:
     """Tests for spec path resolution in main() to prevent path doubling."""
 
-    def test_relative_file_spec_uses_parent_as_project_dir(
-        self, tmp_path: Path
-    ) -> None:
+    def test_relative_file_spec_uses_parent_as_project_dir(self, tmp_path: Path) -> None:
         """A relative .kct file path should use the parent directory, not the
         full path including the filename, as project_dir."""
         subdir = tmp_path / "boards" / "external" / "softstart"
@@ -234,6 +230,7 @@ class TestSpecPathResolution:
             os.chdir(saved_cwd)
 
         assert rc == 1  # Should report directory not found
+
 
 class TestOutputDirArgument:
     """Tests for -o/--output argument parsing and BuildContext.output_dir."""
@@ -321,9 +318,7 @@ class TestBuildRouteExitCode2:
             mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
             result = _run_step_route(ctx, console)
 
-        assert result.success is True, (
-            f"Route exit code 2 should be success, got: {result.message}"
-        )
+        assert result.success is True, f"Route exit code 2 should be success, got: {result.message}"
         assert "skipped" in result.message.lower() or "zone fill" in result.message.lower()
 
     def test_route_exit_code_0_is_success(self, tmp_path: Path) -> None:
@@ -383,9 +378,7 @@ class TestBuildRouteExitCode2:
         console = Console()
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1, stderr="routing failed", stdout=""
-            )
+            mock_run.return_value = MagicMock(returncode=1, stderr="routing failed", stdout="")
             result = _run_step_route(ctx, console)
 
         assert result.success is False
@@ -421,9 +414,7 @@ class TestBuildRouteExitCode2:
         console = Console()
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=3, stderr="DRC violations", stdout=""
-            )
+            mock_run.return_value = MagicMock(returncode=3, stderr="DRC violations", stdout="")
             result = _run_step_route(ctx, console)
 
         assert result.success is True

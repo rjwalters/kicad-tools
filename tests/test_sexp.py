@@ -352,7 +352,7 @@ class TestSExpSerialization:
         sexp.add("123")
         result = serialize_sexp(sexp)
         # Numeric strings must be unquoted so downstream KiCad parsers accept them
-        assert "(test 123)" == result.strip()
+        assert result.strip() == "(test 123)"
 
     def test_serialize_negative_float_string(self):
         """Negative float strings like '-0.5222' should not be quoted."""
@@ -360,7 +360,7 @@ class TestSExpSerialization:
         sexp.add("-0.5222")
         sexp.add("3.81")
         result = serialize_sexp(sexp)
-        assert "(at -0.5222 3.81)" == result.strip()
+        assert result.strip() == "(at -0.5222 3.81)"
 
     def test_needs_quoting_nan_inf(self):
         """Strings like 'nan' and 'inf' are valid floats but should not be unquoted."""

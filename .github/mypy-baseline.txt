@@ -797,7 +797,7 @@ src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, f
 src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, float] | None" is not indexable
 src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, float] | None" is not indexable
 src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, float] | None" is not indexable
-src/kicad_tools/recovery/strategy.py	assignment	Incompatible types in assignment (expression has type "def contains_point(self, _x: float, _y: float) -> bool", variable has type "def contains_point(self, x: float, y: float) -> bool")
+src/kicad_tools/recovery/strategy.py	assignment	Incompatible types in assignment (expression has type "def (_x: float, _y: float) -> bool", variable has type "def (x: float, y: float) -> bool")
 src/kicad_tools/recovery/strategy.py	unused-ignore	Unused "type: ignore" comment
 src/kicad_tools/recovery/strategy.py	unused-ignore	Unused "type: ignore" comment
 src/kicad_tools/report/interactive.py	import-not-found	Cannot find implementation or library stub for module named "kicad_tools.drc.runner"

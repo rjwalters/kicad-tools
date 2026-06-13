@@ -75,7 +75,6 @@ import pytest
 
 from kicad_tools.router.cpp_backend import is_cpp_available
 
-
 pytestmark = pytest.mark.skipif(
     not is_cpp_available(),
     reason="C++ backend not built; test exercises the C++ flat-array A* fast path",
@@ -145,8 +144,12 @@ def test_route_succeeds_with_flat_arrays() -> None:
     # Route from (5, 50) on layer 0 to (95, 50) on layer 0.
     # Empty grid: shortest path is a straight horizontal line.
     result = pathfinder.route(
-        start_x=5.0 * 0.5, start_y=50.0 * 0.5, start_layer=0,
-        end_x=95.0 * 0.5, end_y=50.0 * 0.5, end_layer=0,
+        start_x=5.0 * 0.5,
+        start_y=50.0 * 0.5,
+        start_layer=0,
+        end_x=95.0 * 0.5,
+        end_y=50.0 * 0.5,
+        end_layer=0,
         net=1,
     )
 
@@ -171,13 +174,21 @@ def test_repeated_routes_produce_identical_results() -> None:
     pathfinder, grid = _make_pathfinder()
 
     result_a = pathfinder.route(
-        start_x=5.0 * 0.5, start_y=50.0 * 0.5, start_layer=0,
-        end_x=95.0 * 0.5, end_y=50.0 * 0.5, end_layer=0,
+        start_x=5.0 * 0.5,
+        start_y=50.0 * 0.5,
+        start_layer=0,
+        end_x=95.0 * 0.5,
+        end_y=50.0 * 0.5,
+        end_layer=0,
         net=1,
     )
     result_b = pathfinder.route(
-        start_x=5.0 * 0.5, start_y=50.0 * 0.5, start_layer=0,
-        end_x=95.0 * 0.5, end_y=50.0 * 0.5, end_layer=0,
+        start_x=5.0 * 0.5,
+        start_y=50.0 * 0.5,
+        start_layer=0,
+        end_x=95.0 * 0.5,
+        end_y=50.0 * 0.5,
+        end_layer=0,
         net=1,
     )
 
@@ -207,8 +218,12 @@ def test_many_sequential_routes_no_crash() -> None:
     t0 = time.monotonic()
     for i in range(64):
         result = pathfinder.route(
-            start_x=5.0 * 0.5, start_y=(10 + i) * 0.5, start_layer=0,
-            end_x=75.0 * 0.5, end_y=(10 + i) * 0.5, end_layer=0,
+            start_x=5.0 * 0.5,
+            start_y=(10 + i) * 0.5,
+            start_layer=0,
+            end_x=75.0 * 0.5,
+            end_y=(10 + i) * 0.5,
+            end_layer=0,
             net=i + 1,
         )
         assert result.success, (
@@ -242,8 +257,12 @@ def test_resumable_route_succeeds_with_flat_arrays() -> None:
     pathfinder, grid = _make_pathfinder()
 
     result = pathfinder.route_resumable(
-        start_x=5.0 * 0.5, start_y=50.0 * 0.5, start_layer=0,
-        end_x=95.0 * 0.5, end_y=50.0 * 0.5, end_layer=0,
+        start_x=5.0 * 0.5,
+        start_y=50.0 * 0.5,
+        start_layer=0,
+        end_x=95.0 * 0.5,
+        end_y=50.0 * 0.5,
+        end_layer=0,
         net=1,
     )
 
@@ -270,8 +289,12 @@ def test_via_expansion_finds_layer_change() -> None:
 
     # Through-hole-style: start on layer 0, goal on layer 1.
     result = pathfinder.route(
-        start_x=5.0 * 0.5, start_y=50.0 * 0.5, start_layer=0,
-        end_x=10.0 * 0.5, end_y=50.0 * 0.5, end_layer=1,
+        start_x=5.0 * 0.5,
+        start_y=50.0 * 0.5,
+        start_layer=0,
+        end_x=10.0 * 0.5,
+        end_y=50.0 * 0.5,
+        end_layer=1,
         net=1,
     )
 

@@ -148,7 +148,15 @@ class TestFigureGenerationWiring:
 
         output_dir = tmp_path / "reports"
         result = report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
         assert result == 0
 
@@ -424,7 +432,15 @@ class TestFiguresInVersionDir:
 
         output_dir = tmp_path / "reports"
         report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
 
         # Both report.md and figures/ should be under v1/
@@ -446,13 +462,29 @@ class TestFiguresInVersionDir:
 
         # First report -> v1
         report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
         assert (output_dir / "v1" / "report.md").exists()
 
         # Second report -> v2
         report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
         assert (output_dir / "v2" / "report.md").exists()
 
@@ -473,7 +505,15 @@ class TestReportContentWithFigures:
 
         output_dir = tmp_path / "reports"
         report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
@@ -493,7 +533,15 @@ class TestReportContentWithFigures:
 
         output_dir = tmp_path / "reports"
         report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
@@ -508,7 +556,15 @@ class TestReportContentWithFigures:
 
         output_dir = tmp_path / "reports"
         report_main(
-            ["generate", "board.kicad_pcb", "--mfr", "jlcpcb", "-o", str(output_dir), "--skip-collect"]
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")

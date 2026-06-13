@@ -628,8 +628,7 @@ class TestIssue2465HighCurrentSignal:
         rules = classify_and_apply_rules(net_names)
         for name in net_names.values():
             assert rules[name].is_pour_net is False, (
-                f"{name} must NOT be a pour net (would couple switching "
-                "noise as a copper plane)"
+                f"{name} must NOT be a pour net (would couple switching noise as a copper plane)"
             )
 
     def test_high_current_signal_excluded_from_auto_pour(self):

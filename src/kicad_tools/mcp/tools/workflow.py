@@ -112,8 +112,7 @@ def create_pcb_from_schematic(
             result["failed_count"] = placement.failure_count
             if placement.failed:
                 result["failed_placements"] = [
-                    {"reference": ref, "reason": reason}
-                    for ref, reason in placement.failed
+                    {"reference": ref, "reason": reason} for ref, reason in placement.failed
                 ]
 
         # Assign nets

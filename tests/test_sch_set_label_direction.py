@@ -4,7 +4,6 @@ Covers shape replacement for global and hierarchical labels, name filtering,
 dry-run mode, hierarchy traversal, sheet filtering, and edge cases.
 """
 
-
 import pytest
 
 from kicad_tools.cli.sch_set_label_direction import (

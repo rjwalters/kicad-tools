@@ -224,16 +224,28 @@ class TestIdentityOnAllHeadClass:
         # Simulate the board-07 head-class pattern: multiple groups all
         # at priority=1.  The helper must NOT shuffle them.
         head_class_a = NetClassRouting(
-            name="CLASS_A", priority=1, trace_width=0.20, clearance=0.15,
-            length_critical=True, length_match_group="GROUP_A",
+            name="CLASS_A",
+            priority=1,
+            trace_width=0.20,
+            clearance=0.15,
+            length_critical=True,
+            length_match_group="GROUP_A",
         )
         head_class_b = NetClassRouting(
-            name="CLASS_B", priority=1, trace_width=0.20, clearance=0.15,
-            length_critical=True, length_match_group="GROUP_B",
+            name="CLASS_B",
+            priority=1,
+            trace_width=0.20,
+            clearance=0.15,
+            length_critical=True,
+            length_match_group="GROUP_B",
         )
         head_class_c = NetClassRouting(
-            name="CLASS_C", priority=1, trace_width=0.20, clearance=0.15,
-            length_critical=True, length_match_group="GROUP_C",
+            name="CLASS_C",
+            priority=1,
+            trace_width=0.20,
+            clearance=0.15,
+            length_critical=True,
+            length_match_group="GROUP_C",
         )
         net_class_map: dict[str, NetClassRouting] = {}
         router = Autorouter(width=200.0, height=200.0, net_class_map=net_class_map)
@@ -289,16 +301,13 @@ class TestStarvableOnlyPromotion:
         assert len(out) == 8
 
         # Head class (positions 0..4) preserved exactly in input order.
-        assert out[:5] == head_ids, (
-            f"Head-class run displaced: got {out[:5]}, expected {head_ids}"
-        )
+        assert out[:5] == head_ids, f"Head-class run displaced: got {out[:5]}, expected {head_ids}"
 
         # Position 5 = the promoted class-2 leader (first starvable
         # group member in priority order).  All starvable members
         # share the same group, so the leader == starv_ids[0].
         assert out[5] == starv_ids[0], (
-            f"Starvable leader should be at out[5]; got {out[5]} "
-            f"(starvable ids = {starv_ids})"
+            f"Starvable leader should be at out[5]; got {out[5]} (starvable ids = {starv_ids})"
         )
 
         # Remaining class-2 members keep input order.
@@ -376,12 +385,20 @@ class TestPairExtractedGroupsParticipate:
         # nets into pair_ids and leave net_ids empty.  Plus a class-1
         # head group with two scalar members.
         head_class = NetClassRouting(
-            name="HEAD_CLASS", priority=1, trace_width=0.20, clearance=0.15,
-            length_critical=True, length_match_group="HEAD_BUS",
+            name="HEAD_CLASS",
+            priority=1,
+            trace_width=0.20,
+            clearance=0.15,
+            length_critical=True,
+            length_match_group="HEAD_BUS",
         )
         pair_class = NetClassRouting(
-            name="PAIR_CLASS", priority=2, trace_width=0.20, clearance=0.15,
-            length_critical=True, length_match_group="PAIR_BUS",
+            name="PAIR_CLASS",
+            priority=2,
+            trace_width=0.20,
+            clearance=0.15,
+            length_critical=True,
+            length_match_group="PAIR_BUS",
         )
         net_class_map: dict[str, NetClassRouting] = {}
         router = Autorouter(width=200.0, height=200.0, net_class_map=net_class_map)
@@ -453,12 +470,20 @@ class TestRouteAllIntegrationGuard:
         # under the budget.  The integration check is: introducing the
         # helper must NOT drop a head-class net.
         head_class = NetClassRouting(
-            name="HC", priority=1, trace_width=0.15, clearance=0.15,
-            length_critical=True, length_match_group="HEAD_BUS",
+            name="HC",
+            priority=1,
+            trace_width=0.15,
+            clearance=0.15,
+            length_critical=True,
+            length_match_group="HEAD_BUS",
         )
         starv_class = NetClassRouting(
-            name="SC", priority=2, trace_width=0.15, clearance=0.15,
-            length_critical=True, length_match_group="STARV_BUS",
+            name="SC",
+            priority=2,
+            trace_width=0.15,
+            clearance=0.15,
+            length_critical=True,
+            length_match_group="STARV_BUS",
         )
         net_class_map: dict[str, NetClassRouting] = {}
         router = Autorouter(width=80.0, height=80.0, net_class_map=net_class_map)

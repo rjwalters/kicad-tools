@@ -604,9 +604,7 @@ class TestReconcilerAnalyze:
         ]
         footprints = [
             self._make_mock_footprint("R1", "10k", "R_0402"),
-            self._make_mock_footprint(
-                "NT2", "NetTie_2", "NetTie:NetTie-2_SMD_Pad0.5mm"
-            ),
+            self._make_mock_footprint("NT2", "NetTie_2", "NetTie:NetTie-2_SMD_Pad0.5mm"),
         ]
 
         reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
@@ -2175,9 +2173,7 @@ class TestReconcilerApplyRemoveOrphans:
         mock_pcb.remove_footprint.return_value = True
 
         with patch("kicad_tools.schema.pcb.PCB.load", return_value=mock_pcb):
-            changes = reconciler.apply(
-                analysis, dry_run=False, remove_orphans=True, force=True
-            )
+            changes = reconciler.apply(analysis, dry_run=False, remove_orphans=True, force=True)
 
         assert len(changes) == 1
         assert changes[0].applied is True
@@ -2340,20 +2336,32 @@ class TestSmartPlacement:
         # U1 and C1 share VCC net, U1 and R1 share SIG net
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="1"),
-                NetNode(reference="C1", pin="1"),
-                NetNode(reference="C2", pin="1"),
-            ]),
-            NetlistNet(code=2, name="GND", nodes=[
-                NetNode(reference="U1", pin="2"),
-                NetNode(reference="C1", pin="2"),
-                NetNode(reference="C2", pin="2"),
-            ]),
-            NetlistNet(code=3, name="SIG", nodes=[
-                NetNode(reference="U1", pin="3"),
-                NetNode(reference="R1", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                    NetNode(reference="C2", pin="1"),
+                ],
+            ),
+            NetlistNet(
+                code=2,
+                name="GND",
+                nodes=[
+                    NetNode(reference="U1", pin="2"),
+                    NetNode(reference="C1", pin="2"),
+                    NetNode(reference="C2", pin="2"),
+                ],
+            ),
+            NetlistNet(
+                code=3,
+                name="SIG",
+                nodes=[
+                    NetNode(reference="U1", pin="3"),
+                    NetNode(reference="R1", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2376,10 +2384,14 @@ class TestSmartPlacement:
 
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="C1", pin="1"),
-                NetNode(reference="C2", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="C1", pin="1"),
+                    NetNode(reference="C2", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2397,10 +2409,14 @@ class TestSmartPlacement:
 
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="1"),
-                NetNode(reference="C1", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2426,11 +2442,15 @@ class TestSmartPlacement:
 
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="1"),
-                NetNode(reference="U2", pin="1"),
-                NetNode(reference="C1", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="U2", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2456,9 +2476,13 @@ class TestSmartPlacement:
 
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2480,10 +2504,14 @@ class TestSmartPlacement:
 
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="1"),
-                NetNode(reference="C1", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2510,12 +2538,16 @@ class TestSmartPlacement:
 
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="1"),
-                NetNode(reference="C1", pin="1"),
-                NetNode(reference="C2", pin="1"),
-                NetNode(reference="C3", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                    NetNode(reference="C2", pin="1"),
+                    NetNode(reference="C3", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2533,8 +2565,7 @@ class TestSmartPlacement:
         for i in range(len(placed)):
             for j in range(i + 1, len(placed)):
                 dist = math.sqrt(
-                    (placed[i][0] - placed[j][0]) ** 2
-                    + (placed[i][1] - placed[j][1]) ** 2
+                    (placed[i][0] - placed[j][0]) ** 2 + (placed[i][1] - placed[j][1]) ** 2
                 )
                 assert dist >= 5.0, (
                     f"Components too close: {placed[i]} and {placed[j]}, dist={dist}"
@@ -2548,14 +2579,22 @@ class TestSmartPlacement:
         # IC U1 and decoupling cap C1 share VCC and GND nets
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="14"),
-                NetNode(reference="C1", pin="1"),
-            ]),
-            NetlistNet(code=2, name="GND", nodes=[
-                NetNode(reference="U1", pin="7"),
-                NetNode(reference="C1", pin="2"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="14"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
+            NetlistNet(
+                code=2,
+                name="GND",
+                nodes=[
+                    NetNode(reference="U1", pin="7"),
+                    NetNode(reference="C1", pin="2"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2581,10 +2620,14 @@ class TestSmartPlacement:
         # C1 shares a net with U1, C2 is isolated (no shared nets)
         mock_netlist = MagicMock()
         mock_netlist.nets = [
-            NetlistNet(code=1, name="VCC", nodes=[
-                NetNode(reference="U1", pin="1"),
-                NetNode(reference="C1", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="VCC",
+                nodes=[
+                    NetNode(reference="U1", pin="1"),
+                    NetNode(reference="C1", pin="1"),
+                ],
+            ),
         ]
         mock_export.return_value = mock_netlist
 
@@ -2615,7 +2658,10 @@ class TestComputePlacementStart:
         mock_pcb.board_origin = (100.0, 80.0)
         # Board-relative outline (already transformed by get_board_outline)
         mock_pcb.get_board_outline.return_value = [
-            (0, 0), (50, 0), (50, 30), (0, 30),
+            (0, 0),
+            (50, 0),
+            (50, 30),
+            (0, 30),
         ]
 
         # Create minimal files so Reconciler can be instantiated

@@ -597,6 +597,7 @@ class SymbolInstance:
             PinNotFoundError: If no pin matches the given name/number, with
                 suggestions for similar pin names
         """
+
         # Find the pin by exact match on name or number.  For multi-unit
         # symbols (e.g. LM393), the same pin name may appear on multiple
         # units (pin 3 = "+" on unit 1, pin 5 = "+" on unit 2).  Prefer

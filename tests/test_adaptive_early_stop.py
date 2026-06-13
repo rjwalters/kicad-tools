@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 @dataclass
 class FakeTier:
@@ -23,8 +21,7 @@ class FakeTier:
     via_diameter: float = 0.6
 
 
-def _make_fake_router(nets_routed: int, nets_total: int = 20,
-                      segments: int = 0, vias: int = 0):
+def _make_fake_router(nets_routed: int, nets_total: int = 20, segments: int = 0, vias: int = 0):
     """Create a mock router that reports the given routing stats."""
     router = MagicMock()
     router.nets = {i: [1, 2] for i in range(1, nets_total + 1)}
@@ -41,45 +38,45 @@ def _make_fake_router(nets_routed: int, nets_total: int = 20,
 
 def _make_args(**overrides):
     """Create a minimal args namespace for route_with_rule_relaxation."""
-    defaults = dict(
-        grid=0.1,
-        trace_width=0.2,
-        clearance=0.15,
-        via_drill=0.3,
-        via_diameter=0.6,
-        manufacturer="jlcpcb",
-        min_trace=None,
-        min_clearance_floor=None,
-        strategy="negotiated",
-        iterations=5,
-        timeout=60,
-        skip_nets=None,
-        edge_clearance=None,
-        force=False,
-        backend="python",
-        verbose=False,
-        min_completion=0.95,
-        no_optimize=True,
-        no_early_stop=False,
-        multi_resolution=False,
-        two_phase=False,
-        per_net_timeout=None,
-        two_phase_iterations=None,
-        batch_routing=False,
-        high_performance=False,
-        hierarchical=False,
-        perturbation=True,
-        mc_trials=10,
-        escape_routing=None,
-        skip_drc=True,
-        diagnostics=False,
-        layers="auto",
-        dry_run=True,
-        pcb="test.kicad_pcb",
-        max_layers=6,
-        auto_fix=False,
-        auto_fix_passes=None,
-    )
+    defaults = {
+        "grid": 0.1,
+        "trace_width": 0.2,
+        "clearance": 0.15,
+        "via_drill": 0.3,
+        "via_diameter": 0.6,
+        "manufacturer": "jlcpcb",
+        "min_trace": None,
+        "min_clearance_floor": None,
+        "strategy": "negotiated",
+        "iterations": 5,
+        "timeout": 60,
+        "skip_nets": None,
+        "edge_clearance": None,
+        "force": False,
+        "backend": "python",
+        "verbose": False,
+        "min_completion": 0.95,
+        "no_optimize": True,
+        "no_early_stop": False,
+        "multi_resolution": False,
+        "two_phase": False,
+        "per_net_timeout": None,
+        "two_phase_iterations": None,
+        "batch_routing": False,
+        "high_performance": False,
+        "hierarchical": False,
+        "perturbation": True,
+        "mc_trials": 10,
+        "escape_routing": None,
+        "skip_drc": True,
+        "diagnostics": False,
+        "layers": "auto",
+        "dry_run": True,
+        "pcb": "test.kicad_pcb",
+        "max_layers": 6,
+        "auto_fix": False,
+        "auto_fix_passes": None,
+    }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
@@ -92,15 +89,9 @@ def _patches_for_relaxation(tiers, fake_load_pcb):
 
     stack = ExitStack()
     # Patch at the source module since route_with_rule_relaxation uses lazy imports
-    stack.enter_context(
-        patch("kicad_tools.router.get_relaxation_tiers", return_value=tiers)
-    )
-    stack.enter_context(
-        patch("kicad_tools.router.load_pcb_for_routing", side_effect=fake_load_pcb)
-    )
-    stack.enter_context(
-        patch("kicad_tools.router.is_cpp_available", return_value=False)
-    )
+    stack.enter_context(patch("kicad_tools.router.get_relaxation_tiers", return_value=tiers))
+    stack.enter_context(patch("kicad_tools.router.load_pcb_for_routing", side_effect=fake_load_pcb))
+    stack.enter_context(patch("kicad_tools.router.is_cpp_available", return_value=False))
     stack.enter_context(
         patch(
             "kicad_tools.cli.route_cmd._auto_skip_pour_nets",
@@ -144,9 +135,7 @@ def _patches_for_relaxation(tiers, fake_load_pcb):
             return_value=LayerStack.two_layer(),
         )
     )
-    stack.enter_context(
-        patch("kicad_tools.router.show_routing_summary")
-    )
+    stack.enter_context(patch("kicad_tools.router.show_routing_summary"))
     stack.enter_context(
         patch(
             "kicad_tools.router.get_mfr_limits",
@@ -384,17 +373,35 @@ class TestIsBetterResult:
         )
 
         better = RuleRelaxationResult(
-            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
-            via_diameter=0.6, tier_description="user", router=None,
-            net_map={}, nets_routed=10, nets_to_route=20,
-            completion=0.5, success=False, layer_count=2,
+            tier=0,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="user",
+            router=None,
+            net_map={},
+            nets_routed=10,
+            nets_to_route=20,
+            completion=0.5,
+            success=False,
+            layer_count=2,
             stats={"segments": 5, "vias": 0},
         )
         worse = RuleRelaxationResult(
-            tier=1, trace_width=0.15, clearance=0.127, via_drill=0.3,
-            via_diameter=0.6, tier_description="moderate", router=None,
-            net_map={}, nets_routed=5, nets_to_route=20,
-            completion=0.25, success=False, layer_count=2,
+            tier=1,
+            trace_width=0.15,
+            clearance=0.127,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="moderate",
+            router=None,
+            net_map={},
+            nets_routed=5,
+            nets_to_route=20,
+            completion=0.25,
+            success=False,
+            layer_count=2,
             stats={"segments": 100, "vias": 20},
         )
 
@@ -409,17 +416,35 @@ class TestIsBetterResult:
         )
 
         more_segments = RuleRelaxationResult(
-            tier=1, trace_width=0.15, clearance=0.127, via_drill=0.3,
-            via_diameter=0.6, tier_description="moderate", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=2,
+            tier=1,
+            trace_width=0.15,
+            clearance=0.127,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="moderate",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=2,
             stats={"segments": 50, "vias": 3},
         )
         fewer_segments = RuleRelaxationResult(
-            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
-            via_diameter=0.6, tier_description="user", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=2,
+            tier=0,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="user",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=2,
             stats={"segments": 10, "vias": 1},
         )
 
@@ -434,17 +459,35 @@ class TestIsBetterResult:
         )
 
         more_vias = RuleRelaxationResult(
-            tier=1, trace_width=0.15, clearance=0.127, via_drill=0.3,
-            via_diameter=0.6, tier_description="moderate", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=2,
+            tier=1,
+            trace_width=0.15,
+            clearance=0.127,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="moderate",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=2,
             stats={"segments": 50, "vias": 10},
         )
         fewer_vias = RuleRelaxationResult(
-            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
-            via_diameter=0.6, tier_description="user", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=2,
+            tier=0,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="user",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=2,
             stats={"segments": 50, "vias": 2},
         )
 
@@ -459,17 +502,35 @@ class TestIsBetterResult:
         )
 
         fewer_layers = RuleRelaxationResult(
-            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
-            via_diameter=0.6, tier_description="user", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=2,
+            tier=0,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="user",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=2,
             stats={"segments": 50, "vias": 5},
         )
         more_layers = RuleRelaxationResult(
-            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
-            via_diameter=0.6, tier_description="user", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=4,
+            tier=0,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="user",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=4,
             stats={"segments": 50, "vias": 5},
         )
 
@@ -484,17 +545,35 @@ class TestIsBetterResult:
         )
 
         with_stats = RuleRelaxationResult(
-            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
-            via_diameter=0.6, tier_description="user", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=2,
+            tier=0,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="user",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=2,
             stats={"segments": 10, "vias": 1},
         )
         no_stats = RuleRelaxationResult(
-            tier=0, trace_width=0.2, clearance=0.15, via_drill=0.3,
-            via_diameter=0.6, tier_description="user", router=None,
-            net_map={}, nets_routed=0, nets_to_route=20,
-            completion=0.0, success=False, layer_count=2,
+            tier=0,
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            tier_description="user",
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
+            layer_count=2,
             stats=None,
         )
 
@@ -509,13 +588,25 @@ class TestIsBetterResult:
         )
 
         better = LayerEscalationResult(
-            layer_count=2, layer_stack=None, router=None, net_map={},
-            nets_routed=0, nets_to_route=20, completion=0.0, success=False,
+            layer_count=2,
+            layer_stack=None,
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
             stats={"segments": 30, "vias": 5},
         )
         worse = LayerEscalationResult(
-            layer_count=4, layer_stack=None, router=None, net_map={},
-            nets_routed=0, nets_to_route=20, completion=0.0, success=False,
+            layer_count=4,
+            layer_stack=None,
+            router=None,
+            net_map={},
+            nets_routed=0,
+            nets_to_route=20,
+            completion=0.0,
+            success=False,
             stats={"segments": 10, "vias": 1},
         )
 

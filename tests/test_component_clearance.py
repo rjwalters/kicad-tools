@@ -5,8 +5,6 @@ different components, enabling tighter clearance around fine-pitch ICs
 while maintaining standard clearance elsewhere.
 """
 
-import pytest
-
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer

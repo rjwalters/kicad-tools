@@ -296,6 +296,7 @@ class TestSnapRotationBasic:
         content = pcb_file.read_text()
         # Find the R1 footprint's at node -- it should be (at 100 100) not (at 100 100 0)
         import re
+
         # Find at nodes in the R1 footprint section
         # The first (at ...) after fp-r1 uuid should be the footprint position
         r1_match = re.search(r'uuid "fp-r1"\)\s*\(at ([^)]+)\)', content)

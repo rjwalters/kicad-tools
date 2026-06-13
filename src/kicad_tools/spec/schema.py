@@ -130,17 +130,14 @@ class Interface(BaseModel):
     part: str | None = Field(
         default=None, description="Part number for the off-board assembly cells"
     )
-    qty: int | None = Field(
-        default=None, description="Quantity of cells/parts in the assembly"
-    )
+    qty: int | None = Field(default=None, description="Quantity of cells/parts in the assembly")
     capacitance: str | None = Field(
         default=None, description="Capacitance for energy-storage interfaces"
     )
     assembly: str | None = Field(
         default=None,
         description=(
-            "Assembly method (e.g. 'hand_solder'); off-board parts are "
-            "DNP for fab assembly"
+            "Assembly method (e.g. 'hand_solder'); off-board parts are DNP for fab assembly"
         ),
     )
     wiring: str | None = Field(
@@ -274,9 +271,7 @@ class MountingHoleGroupSpec(BaseModel):
 
     @field_validator("holes")
     @classmethod
-    def validate_holes_nonempty(
-        cls, v: list[tuple[float, float]]
-    ) -> list[tuple[float, float]]:
+    def validate_holes_nonempty(cls, v: list[tuple[float, float]]) -> list[tuple[float, float]]:
         """Reject empty hole lists -- a group with zero holes is meaningless."""
         if not v:
             raise ValueError(
@@ -530,9 +525,7 @@ class EscalationPolicy(BaseModel):
     def validate_density_threshold(cls, v: float) -> float:
         """Density threshold must be positive (negative makes no physical sense)."""
         if v <= 0:
-            raise ValueError(
-                f"density_threshold_viols_per_cm2 must be positive, got {v}"
-            )
+            raise ValueError(f"density_threshold_viols_per_cm2 must be positive, got {v}")
         return v
 
     @field_validator("packing_overhead")

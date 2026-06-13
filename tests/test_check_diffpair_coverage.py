@@ -299,8 +299,7 @@ class TestWorkflowJob:
         run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
         joined = "\n".join(run_blocks)
         assert "--seed 42" in joined or "--seed=42" in joined, (
-            f"Expected ``--seed 42`` in {JOB_NAME} run step (Issue #2589 "
-            "/ Phase 3X.2 determinism)."
+            f"Expected ``--seed 42`` in {JOB_NAME} run step (Issue #2589 / Phase 3X.2 determinism)."
         )
 
     def test_job_has_no_diff_driven_short_circuit(self, workflow: dict) -> None:
@@ -562,9 +561,7 @@ class TestMeasurePourConnectivity:
     def test_all_connected_returns_empty(self, tmp_path):
         mod = _load_helper_module()
         recipe = _fake_recipe({"GND": _net_ok(), "+3V3": _net_ok()})
-        failures = mod.measure_pour_connectivity(
-            recipe, tmp_path / "x.kicad_pcb", {"GND", "+3V3"}
-        )
+        failures = mod.measure_pour_connectivity(recipe, tmp_path / "x.kicad_pcb", {"GND", "+3V3"})
         assert failures == []
 
     def test_disjoint_net_reported(self, tmp_path):

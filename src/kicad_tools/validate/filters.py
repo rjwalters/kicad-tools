@@ -345,9 +345,7 @@ def _extract_refs(items: list[str]) -> list[str]:
 
 def _get_type_str(v: AnyViolation) -> str:
     """Get the type string from any violation type."""
-    if isinstance(v, DRCReportViolation):
-        return v.type_str
-    elif isinstance(v, ERCViolation):
+    if isinstance(v, (DRCReportViolation, ERCViolation)):
         return v.type_str
     elif isinstance(v, ValidateViolation):
         return v.rule_id
@@ -367,20 +365,14 @@ def _get_message(v: AnyViolation) -> str:
 
 def _get_items(v: AnyViolation) -> list[str]:
     """Get the item list from any violation type."""
-    if isinstance(v, DRCReportViolation):
-        return list(v.items)
-    elif isinstance(v, ERCViolation):
-        return list(v.items)
-    elif isinstance(v, ValidateViolation):
+    if isinstance(v, (DRCReportViolation, ERCViolation, ValidateViolation)):
         return list(v.items)
     return []
 
 
 def _get_nets(v: AnyViolation) -> list[str]:
     """Get net names from any violation type."""
-    if isinstance(v, DRCReportViolation):
-        return list(v.nets)
-    elif isinstance(v, ValidateViolation):
+    if isinstance(v, (DRCReportViolation, ValidateViolation)):
         return list(v.nets)
     return []
 

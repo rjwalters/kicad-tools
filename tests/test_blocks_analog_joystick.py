@@ -34,7 +34,6 @@ from kicad_tools.schematic.blocks.interface.analog_input import (
 pytestmark = pytest.mark.timeout(600)
 
 
-
 def _make_mock_schematic() -> Mock:
     """Build a mock Schematic that returns mock symbols with deterministic pins.
 

@@ -25,7 +25,6 @@ from kicad_tools.validate.rules.single_pad_net import (
     _classify_net,
 )
 
-
 # ---------------------------------------------------------------------------
 # Pure unit tests for the classifier helper
 # ---------------------------------------------------------------------------
@@ -130,7 +129,8 @@ class TestRuleSeverityCategorization:
     def test_connector_nc_emits_info(self) -> None:
         """``Net-(J2-Pad11)`` on a J-prefixed footprint is info."""
         fp = _footprint(
-            "J2", [_pad("11", net_number=43, net_name="Net-(J2-Pad11)")],
+            "J2",
+            [_pad("11", net_number=43, net_name="Net-(J2-Pad11)")],
         )
         pcb = _make_synthetic_pcb([fp])
 
@@ -145,7 +145,8 @@ class TestRuleSeverityCategorization:
     def test_connector_nc_with_p_prefix_emits_info(self) -> None:
         """``Net-(P1-Pad5)`` on a P-prefixed footprint is info."""
         fp = _footprint(
-            "P1", [_pad("5", net_number=44, net_name="Net-(P1-Pad5)")],
+            "P1",
+            [_pad("5", net_number=44, net_name="Net-(P1-Pad5)")],
         )
         pcb = _make_synthetic_pcb([fp])
 
@@ -158,7 +159,8 @@ class TestRuleSeverityCategorization:
     def test_named_signal_emits_error(self) -> None:
         """A named-signal singleton (e.g., UART_TX) is a real defect."""
         fp = _footprint(
-            "U8", [_pad("10", net_number=45, net_name="UART_TX")],
+            "U8",
+            [_pad("10", net_number=45, net_name="UART_TX")],
         )
         pcb = _make_synthetic_pcb([fp])
 
@@ -173,7 +175,8 @@ class TestRuleSeverityCategorization:
     def test_ic_pin_default_name_emits_error(self) -> None:
         """``Net-(U3-1)`` on an IC footprint is a real defect."""
         fp = _footprint(
-            "U3", [_pad("1", net_number=46, net_name="Net-(U3-1)")],
+            "U3",
+            [_pad("1", net_number=46, net_name="Net-(U3-1)")],
         )
         pcb = _make_synthetic_pcb([fp])
 

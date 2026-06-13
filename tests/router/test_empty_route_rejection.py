@@ -59,18 +59,31 @@ class TestReconstructRouteRejectsEmpty:
         rules = DesignRules(grid_resolution=0.5)
         stack = LayerStack.two_layer()
         grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules, layer_stack=stack,
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=stack,
         )
         pathfinder = Router(grid, rules)
         layer_enum = stack.layers[0].layer_enum
         layer_idx = grid.layer_to_index(layer_enum.value)
         start = Pad(
-            x=5.0, y=5.0, width=1.0, height=1.0,
-            net=1, net_name="NET", layer=layer_enum,
+            x=5.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET",
+            layer=layer_enum,
         )
         end = Pad(
-            x=15.0, y=15.0, width=1.0, height=1.0,
-            net=1, net_name="NET", layer=layer_enum,
+            x=15.0,
+            y=15.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET",
+            layer=layer_enum,
         )
         return pathfinder, start, end, layer_idx
 
@@ -91,8 +104,11 @@ class TestReconstructRouteRejectsEmpty:
         # produced by Issue #2306's early-termination when ``current``
         # is the start node.
         end_node = AStarNode(
-            f_score=0.0, g_score=0.0,
-            x=sgx, y=sgy, layer=layer_idx,
+            f_score=0.0,
+            g_score=0.0,
+            x=sgx,
+            y=sgy,
+            layer=layer_idx,
             parent=None,
         )
         result = pathfinder._reconstruct_route(end_node, start, end)
@@ -116,7 +132,8 @@ class TestReconstructRouteRejectsEmpty:
         extra = {(sgx, sgy, layer_idx)}
 
         route = pathfinder.route(
-            start, end,
+            start,
+            end,
             negotiated_mode=True,
             present_cost_factor=0.0,
             extra_goal_cells=extra,
@@ -145,12 +162,33 @@ def _make_negotiated_router_with_3pad_net() -> tuple[Autorouter, NegotiatedRoute
     """
     router = Autorouter(width=40.0, height=40.0)
     pads_a = [
-        {"number": "1", "x": 5.0, "y": 5.0,  "width": 0.5, "height": 0.5,
-         "net": 1, "net_name": "VOUT"},
-        {"number": "2", "x": 20.0, "y": 5.0, "width": 0.5, "height": 0.5,
-         "net": 1, "net_name": "VOUT"},
-        {"number": "3", "x": 35.0, "y": 5.0, "width": 0.5, "height": 0.5,
-         "net": 1, "net_name": "VOUT"},
+        {
+            "number": "1",
+            "x": 5.0,
+            "y": 5.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "VOUT",
+        },
+        {
+            "number": "2",
+            "x": 20.0,
+            "y": 5.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "VOUT",
+        },
+        {
+            "number": "3",
+            "x": 35.0,
+            "y": 5.0,
+            "width": 0.5,
+            "height": 0.5,
+            "net": 1,
+            "net_name": "VOUT",
+        },
     ]
     router.add_component("U_A", pads_a)
     neg_router = NegotiatedRouter(
@@ -194,8 +232,7 @@ class TestNegotiatedRouterEmptyRouteGuard:
         # No empty Routes in the returned list.
         for r in routes:
             assert r.segments or r.vias, (
-                "Empty Route appended to routes list -- guard missing in "
-                "route_net_negotiated."
+                "Empty Route appended to routes list -- guard missing in route_net_negotiated."
             )
         # Failure callback fired for the failed edge(s).
         assert len(failures) > 0, (
@@ -218,23 +255,52 @@ class TestNegotiatedRouterEmptyRouteGuard:
         # 2-pin net: avoids RSMT decomposition and the sibling via-dedup
         # pass, so we can verify the guard in isolation.
         router = Autorouter(width=20.0, height=20.0)
-        router.add_component("U_A", [
-            {"number": "1", "x": 5.0, "y": 5.0,  "width": 0.5, "height": 0.5,
-             "net": 1, "net_name": "SIG"},
-            {"number": "2", "x": 15.0, "y": 5.0, "width": 0.5, "height": 0.5,
-             "net": 1, "net_name": "SIG"},
-        ])
+        router.add_component(
+            "U_A",
+            [
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 5.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                },
+                {
+                    "number": "2",
+                    "x": 15.0,
+                    "y": 5.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                },
+            ],
+        )
         neg_router = NegotiatedRouter(
-            grid=router.grid, router=router.router,
-            rules=router.rules, net_class_map={},
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
         )
         pad_objs = [router.pads[p] for p in router.nets[1]]
 
         via_only_route = Route(
-            net=1, net_name="SIG",
+            net=1,
+            net_name="SIG",
             segments=[],
-            vias=[Via(x=5.0, y=5.0, drill=0.35, diameter=0.7,
-                      layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="SIG")],
+            vias=[
+                Via(
+                    x=5.0,
+                    y=5.0,
+                    drill=0.35,
+                    diameter=0.7,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=1,
+                    net_name="SIG",
+                )
+            ],
         )
 
         failures: list[tuple[Pad, Pad]] = []
@@ -256,8 +322,7 @@ class TestNegotiatedRouterEmptyRouteGuard:
             "incorrectly rejected a Route with vias but no segments."
         )
         assert not failures, (
-            "Failure callback fired for a via-only Route: the empty-Route "
-            "guard is too aggressive."
+            "Failure callback fired for a via-only Route: the empty-Route guard is too aggressive."
         )
 
 
@@ -290,22 +355,29 @@ class TestNoEmptyRoutesAcrossBoards:
     where an empty Route slips into the result list.
     """
 
-    @pytest.mark.parametrize("board_id", [
-        "01-voltage-divider",
-        # Boards 02-07 take significantly longer to route and the
-        # invariant is identical -- the board-01 case is the smallest
-        # regression guard sufficient to catch the bug.  Full-fleet
-        # parity is verified via ``kct fleet status`` separately
-        # (see PR description).
-    ])
+    @pytest.mark.parametrize(
+        "board_id",
+        [
+            "01-voltage-divider",
+            # Boards 02-07 take significantly longer to route and the
+            # invariant is identical -- the board-01 case is the smallest
+            # regression guard sufficient to catch the bug.  Full-fleet
+            # parity is verified via ``kct fleet status`` separately
+            # (see PR description).
+        ],
+    )
     def test_no_empty_routes_in_output(self, board_id: str):
         """No Route returned by ``route_all_negotiated`` should be
         geometrically empty (segments=[] AND vias=[]).
         """
         import os
+
         repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         pcb = os.path.join(
-            repo_root, "boards", board_id, "output",
+            repo_root,
+            "boards",
+            board_id,
+            "output",
             f"{board_id.split('-', 1)[1].replace('-', '_')}.kicad_pcb",
         )
         if not os.path.exists(pcb):

@@ -63,9 +63,7 @@ class TestAutoMfrTierEscalationFlagPlumbing:
         seen: list[tuple[str, bool]] = []
 
         def fake_inner(*, pcb_path, output_path, args, quiet):
-            seen.append(
-                (args.manufacturer, getattr(args, "_auto_mfr_tier_in_progress", False))
-            )
+            seen.append((args.manufacturer, getattr(args, "_auto_mfr_tier_in_progress", False)))
             # Set missed_via_in_pad_rescues so escalation actually fires.
             mock_router = MagicMock()
             mock_router._escape_router = MagicMock()
@@ -138,9 +136,7 @@ class TestAutoMfrTierEscalationFlagPlumbing:
         seen: list[tuple[str, bool]] = []
 
         def fake_inner(*, pcb_path, output_path, args, quiet):
-            seen.append(
-                (args.manufacturer, getattr(args, "_auto_mfr_tier_in_progress", False))
-            )
+            seen.append((args.manufacturer, getattr(args, "_auto_mfr_tier_in_progress", False)))
             mock_router = MagicMock()
             mock_router._escape_router = MagicMock()
             mock_router._escape_router.missed_via_in_pad_rescues = 3
@@ -175,9 +171,7 @@ class TestAutoMfrTierEscalationFlagPlumbing:
         seen: list[tuple[str, bool]] = []
 
         def fake_inner(*, pcb_path, output_path, args, quiet):
-            seen.append(
-                (args.manufacturer, getattr(args, "_auto_mfr_tier_in_progress", False))
-            )
+            seen.append((args.manufacturer, getattr(args, "_auto_mfr_tier_in_progress", False)))
             return 0  # success
 
         with patch(

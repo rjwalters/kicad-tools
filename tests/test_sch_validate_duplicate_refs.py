@@ -14,7 +14,6 @@ from kicad_tools.cli.sch_validate import (
     check_duplicate_references,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -100,11 +99,7 @@ class TestDuplicateReferences:
             ),
             _make_node(
                 "Sync",
-                [
-                    _make_symbol(
-                        "R7", lib_id="Device:R_Small", value="4.7k", uuid="u2"
-                    )
-                ],
+                [_make_symbol("R7", lib_id="Device:R_Small", value="4.7k", uuid="u2")],
             ),
         ]
         issues = _run_check(nodes)
@@ -244,11 +239,7 @@ class TestDuplicateReferences:
             ),
             _make_node(
                 "SheetB",
-                [
-                    _make_symbol(
-                        "R1", lib_id="Device:R_Small", value="4.7k", uuid="u2"
-                    )
-                ],
+                [_make_symbol("R1", lib_id="Device:R_Small", value="4.7k", uuid="u2")],
             ),
         ]
         issues = _run_check(nodes)

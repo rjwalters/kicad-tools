@@ -512,9 +512,7 @@ class TestJlcpcbSizeTiers:
     def test_ladder_ascending_area(self):
         """Tiers are ordered by ascending envelope area."""
         areas = [t.area_cm2 for t in MFR_JLCPCB_SIZE_TIERS]
-        assert areas == sorted(areas), (
-            "MFR_JLCPCB_SIZE_TIERS must be ordered by ascending area"
-        )
+        assert areas == sorted(areas), "MFR_JLCPCB_SIZE_TIERS must be ordered by ascending area"
 
     def test_ladder_ascending_2l_price(self):
         """Prices are monotonically non-decreasing along the ladder."""

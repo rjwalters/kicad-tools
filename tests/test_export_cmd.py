@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from kicad_tools.cli.export_cmd import _find_pcb_for_export, main as export_main
+from kicad_tools.cli.export_cmd import _find_pcb_for_export
+from kicad_tools.cli.export_cmd import main as export_main
 
 
 class TestExportCmdParsing:

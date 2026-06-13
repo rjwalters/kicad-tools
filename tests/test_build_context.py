@@ -13,7 +13,6 @@ import pytest
 from kicad_tools.patterns.checks import CheckContext
 from kicad_tools.patterns.loader import PatternLoader, YAMLPattern
 
-
 # Minimal PCB with two footprints and a segment for testing
 PCB_TWO_COMPONENTS = """\
 (kicad_pcb

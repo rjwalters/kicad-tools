@@ -48,9 +48,7 @@ def test_kiprjmod_resolves_against_table_parent(tmp_path: Path) -> None:
     assert entries[0].resolved_path == sub.resolve() / "X.pretty"
 
 
-def test_kicad_env_var_resolves_from_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_kicad_env_var_resolves_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KICAD8_FOOTPRINT_DIR", "/opt/kicad/footprints")
     table = tmp_path / "fp-lib-table"
     table.write_text(
@@ -62,9 +60,7 @@ def test_kicad_env_var_resolves_from_env(
     assert entries[0].resolved_path == Path("/opt/kicad/footprints/Resistor_SMD.pretty")
 
 
-def test_unresolved_var_yields_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unresolved_var_yields_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Remove any inherited value so the lookup definitely fails.
     monkeypatch.delenv("KICAD9_FOOTPRINT_DIR", raising=False)
     table = tmp_path / "fp-lib-table"
@@ -140,9 +136,7 @@ def test_expand_kicad_vars_with_file_scheme(tmp_path: Path) -> None:
 
 def test_expand_kicad_vars_pure_literal() -> None:
     # No variables: passes through untouched.
-    assert expand_kicad_vars("/abs/path/Lib.pretty", kiprjmod=None) == Path(
-        "/abs/path/Lib.pretty"
-    )
+    assert expand_kicad_vars("/abs/path/Lib.pretty", kiprjmod=None) == Path("/abs/path/Lib.pretty")
 
 
 def test_expand_kicad_vars_missing_kiprjmod_when_required() -> None:
@@ -150,8 +144,6 @@ def test_expand_kicad_vars_missing_kiprjmod_when_required() -> None:
 
 
 def test_fp_lib_entry_dataclass_roundtrip() -> None:
-    entry = FpLibEntry(
-        name="X", type="KiCad", uri="${KIPRJMOD}/X.pretty", resolved_path=Path("/x")
-    )
+    entry = FpLibEntry(name="X", type="KiCad", uri="${KIPRJMOD}/X.pretty", resolved_path=Path("/x"))
     assert entry.name == "X"
     assert entry.resolved_path == Path("/x")

@@ -120,8 +120,7 @@ class HierarchicalRouter:
         if pour_nets:
             pour_names = [self.net_names.get(n, f"Net {n}") for n in pour_nets]
             flush_print(
-                f"  Skipping {len(pour_nets)} pour net(s) "
-                f"(use zone fill instead): {pour_names}"
+                f"  Skipping {len(pour_nets)} pour net(s) (use zone fill instead): {pour_names}"
             )
         net_order = signal_nets
 
@@ -209,9 +208,7 @@ class HierarchicalRouter:
         # Set corridor preferences on the grid for nets with assignments
         corridor_penalty = self.rules.cost_corridor_deviation
         for net, assignment in global_result.assignments.items():
-            self.grid.set_corridor_preference(
-                assignment.corridor, net, corridor_penalty
-            )
+            self.grid.set_corridor_preference(assignment.corridor, net, corridor_penalty)
 
         # Route all nets (corridor-assigned nets get guidance, others route freely)
         if use_negotiated:
@@ -238,9 +235,7 @@ class HierarchicalRouter:
         total_elapsed = time.time() - start_time
         flush_print("\n=== Hierarchical Routing Complete ===")
         flush_print(f"  Total nets: {total_nets}")
-        flush_print(
-            f"  Global routing: {len(global_result.assignments)} corridors assigned"
-        )
+        flush_print(f"  Global routing: {len(global_result.assignments)} corridors assigned")
         flush_print(f"  Detailed routing: {successful_nets} nets routed")
         flush_print(f"  Total time: {total_elapsed:.1f}s")
 
@@ -294,9 +289,7 @@ class HierarchicalRouter:
         # Initial routing pass
         for i, net in enumerate(net_order):
             if check_timeout():
-                flush_print(
-                    f"  Timeout during detailed routing at net {i}/{total_nets}"
-                )
+                flush_print(f"  Timeout during detailed routing at net {i}/{total_nets}")
                 timed_out = True
                 break
 
@@ -316,9 +309,7 @@ class HierarchicalRouter:
                     self.routes.append(route)
 
         overflow = self.grid.get_total_overflow()
-        flush_print(
-            f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}"
-        )
+        flush_print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
 
         # Issue #2540: Track best-of-iterations so a mid-iteration timeout
         # does not destroy successful routes from earlier iterations.
@@ -367,12 +358,8 @@ class HierarchicalRouter:
                 self.grid.update_history_costs(history_increment)
 
                 overused = self.grid.find_overused_cells()
-                nets_to_reroute = neg_router.find_nets_through_overused_cells(
-                    net_routes, overused
-                )
-                flush_print(
-                    f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets"
-                )
+                nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
+                flush_print(f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets")
 
                 neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
@@ -382,8 +369,7 @@ class HierarchicalRouter:
                         # don't run another round of overflow recompute and
                         # spawn a new iteration after the budget expires.
                         flush_print(
-                            f"    Timeout during reroute at net "
-                            f"{i_inner}/{len(nets_to_reroute)}"
+                            f"    Timeout during reroute at net {i_inner}/{len(nets_to_reroute)}"
                         )
                         timed_out = True
                         break

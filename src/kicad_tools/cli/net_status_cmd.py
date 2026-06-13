@@ -212,7 +212,9 @@ def _print_net_status(net: NetStatus, verbose: bool, indent: str = "") -> None:
     # Net type indicator
     type_info = ""
     if net.is_plane_net:
-        layers = net.plane_layers if net.plane_layers else ([net.plane_layer] if net.plane_layer else [])
+        layers = (
+            net.plane_layers if net.plane_layers else ([net.plane_layer] if net.plane_layer else [])
+        )
         layers_str = ", ".join(layers) if layers else "unknown"
         type_info = f" -- Plane net on {layers_str}"
 

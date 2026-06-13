@@ -11,8 +11,6 @@ segment_to_segment_distance, segments_intersect) and the FNV-1a hash function.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from kicad_tools.router.cpp_backend import (
@@ -23,9 +21,7 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import (
     Pad,
-    Route,
     Segment,
-    Via,
 )
 from kicad_tools.router.rules import DesignRules
 
@@ -126,27 +122,21 @@ class TestCppGeometryFunctions:
         """Intersecting segments should have distance 0."""
         from kicad_tools.router import router_cpp
 
-        dist = router_cpp.segment_to_segment_distance(
-            0, 0, 2, 2, 0, 2, 2, 0
-        )
+        dist = router_cpp.segment_to_segment_distance(0, 0, 2, 2, 0, 2, 2, 0)
         assert dist == pytest.approx(0.0, abs=1e-6)
 
     def test_segment_to_segment_distance_parallel(self):
         """Parallel horizontal segments distance apart."""
         from kicad_tools.router import router_cpp
 
-        dist = router_cpp.segment_to_segment_distance(
-            0, 0, 2, 0, 0, 1, 2, 1
-        )
+        dist = router_cpp.segment_to_segment_distance(0, 0, 2, 0, 0, 1, 2, 1)
         assert dist == pytest.approx(1.0, abs=1e-6)
 
     def test_segment_to_segment_distance_end_to_end(self):
         """End-to-end segments."""
         from kicad_tools.router import router_cpp
 
-        dist = router_cpp.segment_to_segment_distance(
-            0, 0, 1, 0, 2, 0, 3, 0
-        )
+        dist = router_cpp.segment_to_segment_distance(0, 0, 1, 0, 2, 0, 3, 0)
         assert dist == pytest.approx(1.0, abs=1e-6)
 
 
@@ -190,8 +180,9 @@ class TestValidationDataStorage:
         """Pads from RoutingGrid should be stored in C++ Grid3D."""
         grid, rules = _make_grid_and_rules()
         # Add a pad to the grid
-        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=1,
-                  net_name="VCC", layer=Layer.F_CU, ref="R1")
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0, net=1, net_name="VCC", layer=Layer.F_CU, ref="R1"
+        )
         grid.add_pad(pad)
 
         cpp_grid = CppGrid.from_routing_grid(grid)
@@ -233,8 +224,9 @@ class TestSegmentPadClearanceParity:
         from kicad_tools.router import router_cpp
 
         grid, rules = _make_grid_and_rules(trace_clearance=0.25)
-        pad = Pad(x=10.0, y=10.0, width=1.0, height=1.0, net=2,
-                  net_name="GND", layer=Layer.F_CU, ref="R1")
+        pad = Pad(
+            x=10.0, y=10.0, width=1.0, height=1.0, net=2, net_name="GND", layer=Layer.F_CU, ref="R1"
+        )
         grid.add_pad(pad)
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -245,9 +237,7 @@ class TestSegmentPadClearanceParity:
         cs.layer = 0
         cs.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is True
 
     def test_segment_too_close_to_pad_fails(self):
@@ -255,8 +245,9 @@ class TestSegmentPadClearanceParity:
         from kicad_tools.router import router_cpp
 
         grid, rules = _make_grid_and_rules(trace_clearance=0.25)
-        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=2,
-                  net_name="GND", layer=Layer.F_CU, ref="R1")
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0, net=2, net_name="GND", layer=Layer.F_CU, ref="R1"
+        )
         grid.add_pad(pad)
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -268,9 +259,7 @@ class TestSegmentPadClearanceParity:
         cs.layer = 0
         cs.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is False
         assert result.violation_type == 1  # seg-pad
 
@@ -279,8 +268,9 @@ class TestSegmentPadClearanceParity:
         from kicad_tools.router import router_cpp
 
         grid, rules = _make_grid_and_rules(trace_clearance=0.25)
-        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=1,
-                  net_name="VCC", layer=Layer.F_CU, ref="R1")
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0, net=1, net_name="VCC", layer=Layer.F_CU, ref="R1"
+        )
         grid.add_pad(pad)
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -292,7 +282,13 @@ class TestSegmentPadClearanceParity:
         cs.net = 1
 
         result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102  # exclude_net=1, same as pad
+            [cs],
+            [],
+            1,
+            [],
+            0.25,
+            0.25,
+            0.102,  # exclude_net=1, same as pad
         )
         assert result.valid is True
 
@@ -310,8 +306,9 @@ class TestSegmentPadClearanceParity:
         from kicad_tools.router import router_cpp
 
         grid, rules = _make_grid_and_rules(trace_clearance=0.25)
-        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=2,
-                  net_name="GND", layer=Layer.F_CU, ref="R1")
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0, net=2, net_name="GND", layer=Layer.F_CU, ref="R1"
+        )
         grid.add_pad(pad)
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -324,9 +321,7 @@ class TestSegmentPadClearanceParity:
 
         # Exclude R1's ref hash
         r1_hash = router_cpp.fnv1a_hash("R1")
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [r1_hash], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [r1_hash], 0.25, 0.25, 0.102)
         assert result.valid is True
 
     @pytest.mark.skip(
@@ -354,8 +349,9 @@ class TestSegmentPadClearanceParity:
         # Signal pad (net != 0) on R1 -- this is the path Issue #1764
         # protects: a signal-pin escape on the same component must
         # remain reachable when its ref is in the exclude set.
-        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=2,
-                  net_name="SIG", layer=Layer.F_CU, ref="R1")
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0, net=2, net_name="SIG", layer=Layer.F_CU, ref="R1"
+        )
         grid.add_pad(pad)
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -368,9 +364,7 @@ class TestSegmentPadClearanceParity:
 
         # Exclude R1's ref hash; signal pad is skipped, segment passes.
         r1_hash = router_cpp.fnv1a_hash("R1")
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [r1_hash], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [r1_hash], 0.25, 0.25, 0.102)
         assert result.valid is True
 
     def test_exclude_ref_hash_blocks_plane_net_pad(self):
@@ -391,8 +385,9 @@ class TestSegmentPadClearanceParity:
         # through cpp_backend.py:596-605) on U2 -- e.g. a GND or +3.3V
         # pad on an LQFP-48 chip whose signal traces are also being
         # routed.
-        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=0,
-                  net_name="GND", layer=Layer.F_CU, ref="U2")
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0, net=0, net_name="GND", layer=Layer.F_CU, ref="U2"
+        )
         grid.add_pad(pad)
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -408,9 +403,7 @@ class TestSegmentPadClearanceParity:
         # Exclude U2's ref hash (mirrors what _validate_route_clearance
         # does when routing a net rooted at U2).
         u2_hash = router_cpp.fnv1a_hash("U2")
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [u2_hash], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [u2_hash], 0.25, 0.25, 0.102)
         # The plane-net pad must be enforced even though U2 is in the
         # exclude set -- this is the bug Issue #2871 closes.
         assert result.valid is False
@@ -440,9 +433,7 @@ class TestSegmentSegmentClearanceParity:
         cs.layer = 0
         cs.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is False
         assert result.violation_type == 2  # seg-seg
 
@@ -463,9 +454,7 @@ class TestSegmentSegmentClearanceParity:
         cs.layer = 0
         cs.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is True
 
 
@@ -490,9 +479,7 @@ class TestViaClearanceParity:
         cv.layer_from, cv.layer_to = 0, 1
         cv.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [], [cv], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([], [cv], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is False
         assert result.violation_type == 4  # via-seg
 
@@ -511,9 +498,7 @@ class TestViaClearanceParity:
         cv.layer_from, cv.layer_to = 0, 1
         cv.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [], [cv], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([], [cv], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is True
 
     def test_via_to_via_too_close_fails(self):
@@ -534,9 +519,7 @@ class TestViaClearanceParity:
         cv.net = 1
 
         # Edge-to-edge: 0.5 - 0.3 - 0.3 = -0.1 < 0.25
-        result = cpp_grid._impl.validate_route(
-            [], [cv], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([], [cv], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is False
         assert result.violation_type == 5  # via-via
 
@@ -555,9 +538,7 @@ class TestViaClearanceParity:
         cv.layer_from, cv.layer_to = 0, 1
         cv.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [], [cv], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([], [cv], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is True
 
 
@@ -583,9 +564,7 @@ class TestSameNetDrillSpacingParity:
         cv.net = 1
 
         # Drill clearance: 0.3 - 0.15 - 0.15 = 0.0 < 0.102
-        result = cpp_grid._impl.validate_route(
-            [], [cv], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([], [cv], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is False
         assert result.violation_type == 6  # drill spacing
 
@@ -605,9 +584,7 @@ class TestSameNetDrillSpacingParity:
         cv.net = 1
 
         # Drill clearance: 1.0 - 0.15 - 0.15 = 0.7 > 0.102
-        result = cpp_grid._impl.validate_route(
-            [], [cv], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([], [cv], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is True
 
     def test_same_position_via_excluded(self):
@@ -626,9 +603,7 @@ class TestSameNetDrillSpacingParity:
         cv.layer_from, cv.layer_to = 0, 1
         cv.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [], [cv], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([], [cv], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is True
 
 
@@ -646,12 +621,12 @@ class TestPerComponentClearance:
             grid_resolution=0.25,
         )
         layer_stack = LayerStack.two_layer()
-        grid = RoutingGrid(width=20.0, height=20.0, rules=rules,
-                           layer_stack=layer_stack)
+        grid = RoutingGrid(width=20.0, height=20.0, rules=rules, layer_stack=layer_stack)
 
         # U1 pad with 0.08mm clearance override
-        pad = Pad(x=5.0, y=5.0, width=0.5, height=0.5, net=2,
-                  net_name="GND", layer=Layer.F_CU, ref="U1")
+        pad = Pad(
+            x=5.0, y=5.0, width=0.5, height=0.5, net=2, net_name="GND", layer=Layer.F_CU, ref="U1"
+        )
         grid.add_pad(pad)
 
         cpp_grid = CppGrid.from_routing_grid(grid)
@@ -670,9 +645,7 @@ class TestPerComponentClearance:
         cs.layer = 0
         cs.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
         # Should pass because U1's clearance is 0.08, and edge-to-edge is 0.125
         assert result.valid is True
 
@@ -699,9 +672,7 @@ class TestLayerFiltering:
         cs.layer = 0
         cs.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is True
 
     def test_through_hole_pad_checked_on_all_layers(self):
@@ -709,9 +680,17 @@ class TestLayerFiltering:
         from kicad_tools.router import router_cpp
 
         grid, rules = _make_grid_and_rules(trace_clearance=0.25)
-        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=2,
-                  net_name="GND", layer=Layer.F_CU, ref="R1",
-                  through_hole=True)
+        pad = Pad(
+            x=5.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="GND",
+            layer=Layer.F_CU,
+            ref="R1",
+            through_hole=True,
+        )
         grid.add_pad(pad)
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -723,9 +702,7 @@ class TestLayerFiltering:
         cs.layer = 1
         cs.net = 1
 
-        result = cpp_grid._impl.validate_route(
-            [cs], [], 1, [], 0.25, 0.25, 0.102
-        )
+        result = cpp_grid._impl.validate_route([cs], [], 1, [], 0.25, 0.25, 0.102)
         assert result.valid is False
         assert result.violation_type == 1  # seg-pad
 

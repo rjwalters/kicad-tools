@@ -174,8 +174,7 @@ def show_routing_summary(
         f"({partial_pct:.0f}%) -- have segments, not all pads connected"
     )
     print(
-        f"  Unrouted: {unrouted_count}/{nets_to_route} "
-        f"({unrouted_pct:.0f}%) -- no segments at all"
+        f"  Unrouted: {unrouted_count}/{nets_to_route} ({unrouted_pct:.0f}%) -- no segments at all"
     )
 
     # Show partially-connected nets (have segments but not all pads connected)
@@ -491,9 +490,7 @@ def show_routing_summary(
             # Issue #2634: Do not recommend --auto-layers when it already ran.
             # The escalation loop chose this layer count as the best result.
             if auto_layers_attempted:
-                print(
-                    "  Auto-layer escalation already ran; this was the best layer count."
-                )
+                print("  Auto-layer escalation already ran; this was the best layer count.")
                 print(
                     f"  Try: kct route{pcb_arg} --layers {max(num_layers + 2, 4)} "
                     "(force more layers)"
@@ -825,12 +822,8 @@ def get_routing_diagnostics_json(
         "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1)
         if nets_to_route > 0
         else 0,
-        "partial_rate": round(partial_count / nets_to_route * 100, 1)
-        if nets_to_route > 0
-        else 0,
-        "unrouted_rate": round(unrouted_count / nets_to_route * 100, 1)
-        if nets_to_route > 0
-        else 0,
+        "partial_rate": round(partial_count / nets_to_route * 100, 1) if nets_to_route > 0 else 0,
+        "unrouted_rate": round(unrouted_count / nets_to_route * 100, 1) if nets_to_route > 0 else 0,
         "has_disconnected_islands": has_disconnected_islands,
     }
     if single_pad_count:

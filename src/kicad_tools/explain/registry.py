@@ -147,7 +147,7 @@ class ExplanationRegistry:
             return
 
         try:
-            import yaml
+            import yaml  # noqa: F401  # availability probe; safe_load is called in _load_yaml_file
         except ImportError:
             logger.warning("PyYAML not installed, skipping YAML spec loading")
             return

@@ -613,9 +613,7 @@ class TestEscapeStubNotPrerouted:
             return Route(
                 net=net,
                 net_name=name,
-                segments=[
-                    Segment(x, 2.0, x + 0.05, 2.0, 0.15, Layer.F_CU, net, name)
-                ],
+                segments=[Segment(x, 2.0, x + 0.05, 2.0, 0.15, Layer.F_CU, net, name)],
                 is_escape=True,
             )
 
@@ -626,9 +624,7 @@ class TestEscapeStubNotPrerouted:
             Route(
                 net=2,
                 net_name="N2",
-                segments=[
-                    Segment(5.05, 2.0, 7.0, 2.0, 0.15, Layer.F_CU, 2, "N2")
-                ],
+                segments=[Segment(5.05, 2.0, 7.0, 2.0, 0.15, Layer.F_CU, 2, "N2")],
             )
         )
 

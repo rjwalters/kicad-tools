@@ -1003,7 +1003,7 @@ class TestApplyFixes:
                 if not ref_pattern.search(fp_block):
                     continue
                 # Step 2: Extract the first (at X Y) in this block (footprint position)
-                at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)', fp_block)
+                at_match = re.search(r"\(at\s+([\d.-]+)\s+([\d.-]+)", fp_block)
                 if at_match:
                     return float(at_match.group(1)), float(at_match.group(2))
             return None
@@ -1235,7 +1235,7 @@ class TestFpTextReferenceFormat:
                 if not ref_pattern.search(fp_block):
                     continue
                 # Step 2: Extract the first (at X Y) in this block (footprint position)
-                at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)', fp_block)
+                at_match = re.search(r"\(at\s+([\d.-]+)\s+([\d.-]+)", fp_block)
                 if at_match:
                     return float(at_match.group(1)), float(at_match.group(2))
             return None

@@ -672,8 +672,7 @@ class TestSubProblemSignature:
     def _make_pads(self, positions, layer=Layer.F_CU, width=0.6, height=0.6):
         """Helper to create Pad objects from (x, y) positions."""
         return [
-            Pad(x=x, y=y, width=width, height=height, net=1, net_name="N",
-                layer=layer)
+            Pad(x=x, y=y, width=width, height=height, net=1, net_name="N", layer=layer)
             for x, y in positions
         ]
 
@@ -777,14 +776,15 @@ class TestSubProblemTransform:
 
     def test_transform_identity(self):
         """Zero translation and rotation preserves coordinates."""
-        routes = [Route(
-            net=0, net_name="",
-            segments=[Segment(x1=0, y1=0, x2=5, y2=0, width=0.2,
-                              layer=Layer.F_CU, net=0)],
-            vias=[],
-        )]
-        result = transform_routes(routes, dx=0, dy=0, angle=0,
-                                  target_net=1, target_net_name="N1")
+        routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=0)],
+                vias=[],
+            )
+        ]
+        result = transform_routes(routes, dx=0, dy=0, angle=0, target_net=1, target_net_name="N1")
         assert result[0].segments[0].x1 == pytest.approx(0)
         assert result[0].segments[0].y1 == pytest.approx(0)
         assert result[0].segments[0].x2 == pytest.approx(5)
@@ -793,15 +793,19 @@ class TestSubProblemTransform:
 
     def test_transform_translation(self):
         """Translation shifts all coordinates."""
-        routes = [Route(
-            net=0, net_name="",
-            segments=[Segment(x1=0, y1=0, x2=5, y2=0, width=0.2,
-                              layer=Layer.F_CU, net=0)],
-            vias=[Via(x=2.5, y=0, drill=0.3, diameter=0.6,
-                      layers=(Layer.F_CU, Layer.B_CU), net=0)],
-        )]
-        result = transform_routes(routes, dx=10, dy=20, angle=0,
-                                  target_net=5, target_net_name="NET5")
+        routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=0)],
+                vias=[
+                    Via(x=2.5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=0)
+                ],
+            )
+        ]
+        result = transform_routes(
+            routes, dx=10, dy=20, angle=0, target_net=5, target_net_name="NET5"
+        )
         seg = result[0].segments[0]
         assert seg.x1 == pytest.approx(10)
         assert seg.y1 == pytest.approx(20)
@@ -812,14 +816,17 @@ class TestSubProblemTransform:
 
     def test_transform_rotation_90(self):
         """90-degree rotation transforms correctly."""
-        routes = [Route(
-            net=0, net_name="",
-            segments=[Segment(x1=5, y1=0, x2=0, y2=0, width=0.2,
-                              layer=Layer.F_CU, net=0)],
-            vias=[],
-        )]
-        result = transform_routes(routes, dx=0, dy=0, angle=math.pi / 2,
-                                  target_net=1, target_net_name="N")
+        routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[Segment(x1=5, y1=0, x2=0, y2=0, width=0.2, layer=Layer.F_CU, net=0)],
+                vias=[],
+            )
+        ]
+        result = transform_routes(
+            routes, dx=0, dy=0, angle=math.pi / 2, target_net=1, target_net_name="N"
+        )
         seg = result[0].segments[0]
         assert seg.x1 == pytest.approx(0, abs=1e-3)
         assert seg.y1 == pytest.approx(5, abs=1e-3)
@@ -828,18 +835,18 @@ class TestSubProblemTransform:
 
     def test_normalize_then_transform_roundtrip(self):
         """Normalizing then transforming recovers original coordinates."""
-        original = [Route(
-            net=1, net_name="NET1",
-            segments=[Segment(x1=10, y1=20, x2=15, y2=20, width=0.2,
-                              layer=Layer.F_CU, net=1)],
-            vias=[],
-        )]
+        original = [
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[Segment(x1=10, y1=20, x2=15, y2=20, width=0.2, layer=Layer.F_CU, net=1)],
+                vias=[],
+            )
+        ]
 
         pads = [
-            Pad(x=10, y=20, width=0.6, height=0.6, net=1, net_name="NET1",
-                layer=Layer.F_CU),
-            Pad(x=15, y=20, width=0.6, height=0.6, net=1, net_name="NET1",
-                layer=Layer.F_CU),
+            Pad(x=10, y=20, width=0.6, height=0.6, net=1, net_name="NET1", layer=Layer.F_CU),
+            Pad(x=15, y=20, width=0.6, height=0.6, net=1, net_name="NET1", layer=Layer.F_CU),
         ]
         sig = SubProblemSignature.compute(pads, DesignRules())
 
@@ -876,22 +883,22 @@ class TestSubProblemCache:
     def sample_sig(self):
         """Create a sample sub-problem signature."""
         pads = [
-            Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N",
-                layer=Layer.F_CU),
-            Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N",
-                layer=Layer.F_CU),
+            Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
+            Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
         ]
         return SubProblemSignature.compute(pads, DesignRules())
 
     @pytest.fixture
     def sample_normalized_routes(self):
         """Create sample routes in normalized (centroid-relative) coords."""
-        return [Route(
-            net=0, net_name="",
-            segments=[Segment(x1=-5, y1=0, x2=5, y2=0, width=0.2,
-                              layer=Layer.F_CU, net=0)],
-            vias=[],
-        )]
+        return [
+            Route(
+                net=0,
+                net_name="",
+                segments=[Segment(x1=-5, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=0)],
+                vias=[],
+            )
+        ]
 
     def test_put_and_get(self, temp_cache, sample_sig, sample_normalized_routes):
         """Store and retrieve a sub-problem solution."""
@@ -909,8 +916,7 @@ class TestSubProblemCache:
         result = temp_cache.get_sub_problem(sample_sig)
         assert result is None
 
-    def test_hit_count_increments(self, temp_cache, sample_sig,
-                                  sample_normalized_routes):
+    def test_hit_count_increments(self, temp_cache, sample_sig, sample_normalized_routes):
         """Hit count increases on each get."""
         temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
 
@@ -922,8 +928,7 @@ class TestSubProblemCache:
         assert r2 is not None
         assert r2.hit_count == 2
 
-    def test_version_mismatch_miss(self, temp_cache, sample_sig,
-                                   sample_normalized_routes):
+    def test_version_mismatch_miss(self, temp_cache, sample_sig, sample_normalized_routes):
         """Different CACHE_VERSION causes cache miss."""
         temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
 
@@ -932,8 +937,7 @@ class TestSubProblemCache:
 
         assert result is None
 
-    def test_deserialized_routes_match(self, temp_cache, sample_sig,
-                                      sample_normalized_routes):
+    def test_deserialized_routes_match(self, temp_cache, sample_sig, sample_normalized_routes):
         """Deserialized routes from cache match the originals."""
         temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
 
@@ -945,8 +949,7 @@ class TestSubProblemCache:
         assert seg.x1 == pytest.approx(-5)
         assert seg.x2 == pytest.approx(5)
 
-    def test_clear_includes_sub_problems(self, temp_cache, sample_sig,
-                                         sample_normalized_routes):
+    def test_clear_includes_sub_problems(self, temp_cache, sample_sig, sample_normalized_routes):
         """clear() removes sub-problem entries."""
         temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
         count = temp_cache.clear()
@@ -955,8 +958,7 @@ class TestSubProblemCache:
         result = temp_cache.get_sub_problem(sample_sig)
         assert result is None
 
-    def test_stats_include_sub_problems(self, temp_cache, sample_sig,
-                                        sample_normalized_routes):
+    def test_stats_include_sub_problems(self, temp_cache, sample_sig, sample_normalized_routes):
         """stats() includes sub-problem counts."""
         temp_cache.put_sub_problem(sample_sig, sample_normalized_routes)
         stats = temp_cache.stats()
@@ -964,8 +966,7 @@ class TestSubProblemCache:
         assert stats["sub_problem_count"] == 1
         assert stats["sub_problem_size_bytes"] > 0
 
-    def test_expired_sub_problem_not_returned(self, tmp_path, sample_sig,
-                                              sample_normalized_routes):
+    def test_expired_sub_problem_not_returned(self, tmp_path, sample_sig, sample_normalized_routes):
         """Sub-problems respect TTL expiry."""
         cache = RoutingCache(cache_dir=tmp_path / "exp_cache", ttl_days=0)
         cache.put_sub_problem(sample_sig, sample_normalized_routes)
@@ -1031,18 +1032,18 @@ class TestSchemaMigrationV2toV3:
 
         # Verify sub_problem_solutions table exists and is usable
         pads = [
-            Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N",
-                layer=Layer.F_CU),
-            Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N",
-                layer=Layer.F_CU),
+            Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
+            Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
         ]
         sig = SubProblemSignature.compute(pads, DesignRules())
-        routes = [Route(
-            net=0, net_name="",
-            segments=[Segment(x1=-5, y1=0, x2=5, y2=0, width=0.2,
-                              layer=Layer.F_CU, net=0)],
-            vias=[],
-        )]
+        routes = [
+            Route(
+                net=0,
+                net_name="",
+                segments=[Segment(x1=-5, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=0)],
+                vias=[],
+            )
+        ]
         cache.put_sub_problem(sig, routes)
         result = cache.get_sub_problem(sig)
         assert result is not None
@@ -1057,8 +1058,6 @@ class TestSchemaMigrationV2toV3:
         RoutingCache(cache_dir=cache_dir)
 
         conn = sqlite3.connect(str(db_path))
-        version = conn.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone()[0]
+        version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         conn.close()
         assert version == "3"

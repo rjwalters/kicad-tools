@@ -582,9 +582,7 @@ class TestCheckNets:
         assert net_issues[0].schematic_value == "VCC"
         assert net_issues[0].pcb_value == "GND"
 
-    def test_component_only_in_schematic_no_crash(
-        self, minimal_schematic: Path, minimal_pcb: Path
-    ):
+    def test_component_only_in_schematic_no_crash(self, minimal_schematic: Path, minimal_pcb: Path):
         """Component in schematic but not PCB is handled gracefully by _check_nets."""
         checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
         # U99 does not exist in the PCB

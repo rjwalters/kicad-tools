@@ -19,7 +19,6 @@ from .geometry import (
     segment_length,
     shorten_segment_end,
     shorten_segment_start,
-    total_length,
     translate_segment,
 )
 
@@ -574,9 +573,7 @@ def _restore_terminal_endpoints(
             orig_start, pad_positions, pad_match_tolerance
         )
         if should_restore_start:
-            segments[0:1] = _make_legs(
-                first, orig_start[0], orig_start[1], first.x2, first.y2
-            )
+            segments[0:1] = _make_legs(first, orig_start[0], orig_start[1], first.x2, first.y2)
 
     # --- Restore end of last segment ---
     last = segments[-1]
@@ -586,9 +583,7 @@ def _restore_terminal_endpoints(
             orig_end, pad_positions, pad_match_tolerance
         )
         if should_restore_end:
-            segments[-1:] = _make_legs(
-                last, last.x1, last.y1, orig_end[0], orig_end[1]
-            )
+            segments[-1:] = _make_legs(last, last.x1, last.y1, orig_end[0], orig_end[1])
 
     return segments
 
@@ -681,9 +676,7 @@ def pull_tight_pass(
             # prev to the end of nxt (the "ideal" straight-line path).
             mid_x = (curr.x1 + curr.x2) / 2
             mid_y = (curr.y1 + curr.y2) / 2
-            proj_x, proj_y = project_point_onto_line(
-                mid_x, mid_y, prev.x1, prev.y1, nxt.x2, nxt.y2
-            )
+            proj_x, proj_y = project_point_onto_line(mid_x, mid_y, prev.x1, prev.y1, nxt.x2, nxt.y2)
 
             # Desired displacement vector (toward the projected point)
             disp_x = proj_x - mid_x
@@ -711,16 +704,24 @@ def pull_tight_pass(
                 cand_curr = translate_segment(curr, dx, dy)
 
                 cand_prev = Segment(
-                    x1=prev.x1, y1=prev.y1,
-                    x2=cand_curr.x1, y2=cand_curr.y1,
-                    width=prev.width, layer=prev.layer,
-                    net=prev.net, net_name=prev.net_name,
+                    x1=prev.x1,
+                    y1=prev.y1,
+                    x2=cand_curr.x1,
+                    y2=cand_curr.y1,
+                    width=prev.width,
+                    layer=prev.layer,
+                    net=prev.net,
+                    net_name=prev.net_name,
                 )
                 cand_nxt = Segment(
-                    x1=cand_curr.x2, y1=cand_curr.y2,
-                    x2=nxt.x2, y2=nxt.y2,
-                    width=nxt.width, layer=nxt.layer,
-                    net=nxt.net, net_name=nxt.net_name,
+                    x1=cand_curr.x2,
+                    y1=cand_curr.y2,
+                    x2=nxt.x2,
+                    y2=nxt.y2,
+                    width=nxt.width,
+                    layer=nxt.layer,
+                    net=nxt.net,
+                    net_name=nxt.net_name,
                 )
 
                 # Check clearance of all three candidate segments
@@ -749,29 +750,29 @@ def pull_tight_pass(
             new_curr = translate_segment(curr, dx, dy)
 
             # Compute old and new total length for the three-segment window
-            old_len = (
-                segment_length(prev)
-                + segment_length(curr)
-                + segment_length(nxt)
-            )
+            old_len = segment_length(prev) + segment_length(curr) + segment_length(nxt)
 
             new_prev = Segment(
-                x1=prev.x1, y1=prev.y1,
-                x2=new_curr.x1, y2=new_curr.y1,
-                width=prev.width, layer=prev.layer,
-                net=prev.net, net_name=prev.net_name,
+                x1=prev.x1,
+                y1=prev.y1,
+                x2=new_curr.x1,
+                y2=new_curr.y1,
+                width=prev.width,
+                layer=prev.layer,
+                net=prev.net,
+                net_name=prev.net_name,
             )
             new_nxt = Segment(
-                x1=new_curr.x2, y1=new_curr.y2,
-                x2=nxt.x2, y2=nxt.y2,
-                width=nxt.width, layer=nxt.layer,
-                net=nxt.net, net_name=nxt.net_name,
+                x1=new_curr.x2,
+                y1=new_curr.y2,
+                x2=nxt.x2,
+                y2=nxt.y2,
+                width=nxt.width,
+                layer=nxt.layer,
+                net=nxt.net,
+                net_name=nxt.net_name,
             )
-            new_len = (
-                segment_length(new_prev)
-                + segment_length(new_curr)
-                + segment_length(new_nxt)
-            )
+            new_len = segment_length(new_prev) + segment_length(new_curr) + segment_length(new_nxt)
 
             if new_len < old_len - tol:
                 result[i - 1] = new_prev

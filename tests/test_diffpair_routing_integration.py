@@ -183,9 +183,7 @@ def test_route_all_with_diffpairs_invokes_custom_strategy():
         invocations["count"] += 1
         return []
 
-    routes, warnings = router.route_all_with_diffpairs(
-        config, non_diffpair_strategy=fake_strategy
-    )
+    routes, warnings = router.route_all_with_diffpairs(config, non_diffpair_strategy=fake_strategy)
 
     assert invocations["count"] == 1, (
         "non_diffpair_strategy callable must be invoked once per route_all_with_diffpairs call"
@@ -262,30 +260,77 @@ def _diffpair_with_connector_sibling_router() -> Autorouter:
         "USB_D-": hs_coupled,
         "USB_CC1": hs_coupled,
     }
-    router = Autorouter(width=30.0, height=10.0, rules=rules,
-                       net_class_map=net_class_map)
+    router = Autorouter(width=30.0, height=10.0, rules=rules, net_class_map=net_class_map)
 
     # Diff pair pads
     p_y = 5.0 - 0.4
     n_y = 5.0 + 0.4
     cc_y = 1.5  # USB_CC1 routes above the diff pair
 
-    router.add_component("U1", [
-        {"number": "1", "x": 5.0, "y": p_y, "width": 0.4, "height": 0.4,
-         "net": 1, "net_name": "USB_D+"},
-        {"number": "2", "x": 5.0, "y": n_y, "width": 0.4, "height": 0.4,
-         "net": 2, "net_name": "USB_D-"},
-        {"number": "3", "x": 5.0, "y": cc_y, "width": 0.4, "height": 0.4,
-         "net": 3, "net_name": "USB_CC1"},
-    ])
-    router.add_component("J1", [
-        {"number": "1", "x": 25.0, "y": p_y, "width": 0.4, "height": 0.4,
-         "net": 1, "net_name": "USB_D+"},
-        {"number": "2", "x": 25.0, "y": n_y, "width": 0.4, "height": 0.4,
-         "net": 2, "net_name": "USB_D-"},
-        {"number": "3", "x": 25.0, "y": cc_y, "width": 0.4, "height": 0.4,
-         "net": 3, "net_name": "USB_CC1"},
-    ])
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 5.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
+            {
+                "number": "3",
+                "x": 5.0,
+                "y": cc_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 3,
+                "net_name": "USB_CC1",
+            },
+        ],
+    )
+    router.add_component(
+        "J1",
+        [
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
+            {
+                "number": "3",
+                "x": 25.0,
+                "y": cc_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 3,
+                "net_name": "USB_CC1",
+            },
+        ],
+    )
     return router
 
 

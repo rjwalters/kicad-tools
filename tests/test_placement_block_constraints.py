@@ -35,10 +35,8 @@ from kicad_tools.placement.cost import (
 from kicad_tools.placement.vector import (
     FIELDS_PER_BLOCK,
     FIELDS_PER_COMPONENT,
-    ROTATION_STEPS,
     BlockGroupDef,
     ComponentDef,
-    PadDef,
     PlacedComponent,
     PlacementVector,
     RelativeOffset,
@@ -53,10 +51,10 @@ from kicad_tools.placement.vector import (
     swap_blocks,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _close(a: float, b: float, tol: float = 1e-6) -> bool:
     return abs(a - b) < tol
@@ -86,6 +84,7 @@ def _make_block_with_3_members() -> BlockGroupDef:
 # BlockGroupDef dataclass tests
 # ---------------------------------------------------------------------------
 
+
 class TestBlockGroupDef:
     def test_member_refs(self):
         bg = _make_block_with_3_members()
@@ -100,6 +99,7 @@ class TestBlockGroupDef:
 # ---------------------------------------------------------------------------
 # Block vector encoding tests
 # ---------------------------------------------------------------------------
+
 
 class TestBlockVectorEncoding:
     def test_vector_length_reduced(self):
@@ -152,7 +152,7 @@ class TestBlockVectorEncoding:
         decoded = decode_with_blocks(vec, components, [block])
 
         assert len(decoded) == 4
-        for orig, dec in zip(placements, decoded):
+        for orig, dec in zip(placements, decoded, strict=False):
             assert orig.reference == dec.reference
             assert _close(orig.x, dec.x), f"{orig.reference}: x {orig.x} != {dec.x}"
             assert _close(orig.y, dec.y), f"{orig.reference}: y {orig.y} != {dec.y}"
@@ -170,6 +170,7 @@ class TestBlockVectorEncoding:
 # ---------------------------------------------------------------------------
 # Block rotation tests
 # ---------------------------------------------------------------------------
+
 
 class TestBlockRotation:
     @pytest.mark.parametrize("rot_deg,rot_idx", [(0, 0), (90, 1), (180, 2), (270, 3)])
@@ -227,6 +228,7 @@ class TestBlockRotation:
 # Block boundary violation tests
 # ---------------------------------------------------------------------------
 
+
 class TestBlockBoundaryViolation:
     def test_no_violation_when_inside(self):
         """Components inside their block region should have zero penalty."""
@@ -271,6 +273,7 @@ class TestBlockBoundaryViolation:
 # Inter-block spacing violation tests
 # ---------------------------------------------------------------------------
 
+
 class TestInterBlockSpacingViolation:
     def test_no_violation_when_far_apart(self):
         placements = [
@@ -310,17 +313,28 @@ class TestInterBlockSpacingViolation:
 # Block move/rotate/swap utility tests
 # ---------------------------------------------------------------------------
 
+
 class TestBlockMoveOperations:
     def _make_simple_vec(self):
         """1 free component + 2 blocks => 4 + 3 + 3 = 10 fields."""
-        data = np.array([
-            # Free: R1 at (10, 20, rot=0, side=0)
-            10.0, 20.0, 0.0, 0.0,
-            # Block 0 at (30, 40, rot=0)
-            30.0, 40.0, 0.0,
-            # Block 1 at (60, 70, rot=1)
-            60.0, 70.0, 1.0,
-        ], dtype=np.float64)
+        data = np.array(
+            [
+                # Free: R1 at (10, 20, rot=0, side=0)
+                10.0,
+                20.0,
+                0.0,
+                0.0,
+                # Block 0 at (30, 40, rot=0)
+                30.0,
+                40.0,
+                0.0,
+                # Block 1 at (60, 70, rot=1)
+                60.0,
+                70.0,
+                1.0,
+            ],
+            dtype=np.float64,
+        )
         return PlacementVector(data=data)
 
     def test_move_block(self):
@@ -364,6 +378,7 @@ class TestBlockMoveOperations:
 # Regression: no blocks => identical behavior
 # ---------------------------------------------------------------------------
 
+
 class TestNoBlocksRegression:
     def test_encode_no_blocks_matches_standard(self):
         """With no block groups, encode_with_blocks should match encode."""
@@ -385,7 +400,7 @@ class TestNoBlocksRegression:
         dec_standard = decode(vec, components)
         dec_block = decode_with_blocks(vec, components, [])
 
-        for s, b in zip(dec_standard, dec_block):
+        for s, b in zip(dec_standard, dec_block, strict=False):
             assert s.reference == b.reference
             assert _close(s.x, b.x)
             assert _close(s.y, b.y)
@@ -403,8 +418,13 @@ class TestNoBlocksRegression:
 
         score_no_blocks = evaluate_placement(placements, nets, rules, board, config)
         score_with_none = evaluate_placement(
-            placements, nets, rules, board, config,
-            block_regions=None, block_membership=None,
+            placements,
+            nets,
+            rules,
+            board,
+            config,
+            block_regions=None,
+            block_membership=None,
         )
         assert _close(score_no_blocks.total, score_with_none.total)
         assert score_no_blocks.breakdown.block_boundary == 0.0
@@ -414,6 +434,7 @@ class TestNoBlocksRegression:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     def test_single_component_block(self):
@@ -487,6 +508,7 @@ class TestEdgeCases:
 # Bounds tests
 # ---------------------------------------------------------------------------
 
+
 class TestBoundsWithBlocks:
     def test_bounds_length(self):
         board = _make_board()
@@ -519,6 +541,7 @@ class TestBoundsWithBlocks:
 # evaluate_placement with block arguments
 # ---------------------------------------------------------------------------
 
+
 class TestEvaluatePlacementWithBlocks:
     def test_block_boundary_violation_in_score(self):
         """Block boundary violation should be reflected in the total score."""
@@ -532,8 +555,12 @@ class TestEvaluatePlacementWithBlocks:
         rules = DesignRuleSet()
 
         score = evaluate_placement(
-            placements, nets, rules, board,
-            block_regions=regions, block_membership=membership,
+            placements,
+            nets,
+            rules,
+            board,
+            block_regions=regions,
+            block_membership=membership,
         )
         assert score.breakdown.block_boundary > 0.0
         assert not score.is_feasible
@@ -551,8 +578,12 @@ class TestEvaluatePlacementWithBlocks:
         rules = DesignRuleSet()
 
         score = evaluate_placement(
-            placements, nets, rules, board,
-            block_regions=regions, block_membership=membership,
+            placements,
+            nets,
+            rules,
+            board,
+            block_regions=regions,
+            block_membership=membership,
         )
         assert score.breakdown.block_boundary == 0.0
         assert score.is_feasible
@@ -562,10 +593,11 @@ class TestEvaluatePlacementWithBlocks:
 # PCBLayout.to_block_groups() bridge test
 # ---------------------------------------------------------------------------
 
+
 class TestPCBLayoutBridge:
     def test_to_block_groups(self):
-        from kicad_tools.pcb.layout import PCBLayout
         from kicad_tools.pcb.blocks.base import PCBBlock
+        from kicad_tools.pcb.layout import PCBLayout
 
         layout = PCBLayout("test")
         block = PCBBlock("mcu")
@@ -592,6 +624,7 @@ class TestPCBLayoutBridge:
 # ---------------------------------------------------------------------------
 # PCBBlock.relative_offsets() helper test
 # ---------------------------------------------------------------------------
+
 
 class TestPCBBlockRelativeOffsets:
     def test_relative_offsets(self):

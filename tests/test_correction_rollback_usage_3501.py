@@ -59,17 +59,13 @@ def router(rules: DesignRules) -> Autorouter:
 
 def _route(net: int, x1: float, y1: float, x2: float, y2: float) -> Route:
     r = Route(net=net, net_name=f"NET{net}")
-    r.segments.append(
-        Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=net)
-    )
+    r.segments.append(Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=net))
     return r
 
 
 def _seg_violation(net_a: int, net_b: int):
     """Minimal seg-seg violation record (duck-typed like io.validate_routes)."""
-    return type(
-        "V", (), {"net": net_a, "obstacle_net": net_b, "obstacle_type": "segment"}
-    )()
+    return type("V", (), {"net": net_a, "obstacle_net": net_b, "obstacle_type": "segment"})()
 
 
 def _usage_snapshot(router: Autorouter) -> np.ndarray:
@@ -118,11 +114,11 @@ class TestUsageConservationAcrossRollback:
             # Net 1 re-lands; net 2 fails => all-or-nothing rollback.
             return [route_new] if net == 1 else []
 
-        with patch("kicad_tools.router.io.validate_routes", mock_validate), \
-             patch.object(router, "_route_net_negotiated", mock_route_net):
-            router._post_route_clearance_correction(
-                net_routes=net_routes, present_factor=0.5
-            )
+        with (
+            patch("kicad_tools.router.io.validate_routes", mock_validate),
+            patch.object(router, "_route_net_negotiated", mock_route_net),
+        ):
+            router._post_route_clearance_correction(net_routes=net_routes, present_factor=0.5)
 
         # Rollback restored the pre-pass state verbatim.
         assert net_routes[1] == [orig1]
@@ -138,17 +134,14 @@ class TestUsageConservationAcrossRollback:
         )
         # Aggregate conservation: bit-identical usage before vs after.
         assert np.array_equal(_usage_snapshot(router), snapshot), (
-            "usage counts were not conserved across a rolled-back "
-            "correction pass"
+            "usage counts were not conserved across a rolled-back correction pass"
         )
 
         # The exact-tracking ledger balanced: no tripwire warnings.
         out = capsys.readouterr().out
         assert "WARNING (Issue #3501)" not in out
 
-    def test_failure_before_marking_no_unmark_no_warning(
-        self, router: Autorouter, capsys
-    ) -> None:
+    def test_failure_before_marking_no_unmark_no_warning(self, router: Autorouter, capsys) -> None:
         """A net whose reroute fails before ANY copper is marked must not
         produce extra unmark_route_usage calls nor tripwire warnings."""
         orig1 = _route(1, 5.0, 10.0, 15.0, 10.0)
@@ -175,14 +168,12 @@ class TestUsageConservationAcrossRollback:
             unmark_usage_calls.append(route)
             return real_unmark_usage(route, net_cells)
 
-        with patch("kicad_tools.router.io.validate_routes", mock_validate), \
-             patch.object(router, "_route_net_negotiated", mock_route_net), \
-             patch.object(
-                 router.grid, "unmark_route_usage", tracking_unmark_usage
-             ):
-            router._post_route_clearance_correction(
-                net_routes=net_routes, present_factor=0.5
-            )
+        with (
+            patch("kicad_tools.router.io.validate_routes", mock_validate),
+            patch.object(router, "_route_net_negotiated", mock_route_net),
+            patch.object(router.grid, "unmark_route_usage", tracking_unmark_usage),
+        ):
+            router._post_route_clearance_correction(net_routes=net_routes, present_factor=0.5)
 
         # Exactly ONE legitimate unmark: rip_up_nets removing the
         # original (which HAD usage marked).  The rollback unwind adds
@@ -203,9 +194,7 @@ class TestUsageConservationAcrossRollback:
 class TestUnwindHelperLedger:
     """Direct tests of Autorouter._unwind_correction_pass_net."""
 
-    def test_ledgered_route_unwound_copper_only(
-        self, router: Autorouter, capsys
-    ) -> None:
+    def test_ledgered_route_unwound_copper_only(self, router: Autorouter, capsys) -> None:
         """A pass-marked route is unmarked (copper) without touching usage."""
         bystander = _route(3, 5.0, 15.0, 15.0, 15.0)
         router.grid.mark_route_usage(bystander)
@@ -249,9 +238,7 @@ class TestUnwindHelperLedger:
         router._unwind_correction_pass_net(1, net_routes, set())
 
         out = capsys.readouterr().out
-        assert "WARNING (Issue #3501)" in out, (
-            "unbalanced unwind must trip the #3501 warning"
-        )
+        assert "WARNING (Issue #3501)" in out, "unbalanced unwind must trip the #3501 warning"
         # Copper unmarked; usage untouched either way.
         assert net_routes[1] == []
         assert foreign not in router.routes

@@ -9,7 +9,6 @@ from kicad_tools.export.ses import (
     _build_net_map,
     _extract_balanced,
     _merge_sexp_into_pcb,
-    um_to_mm,
 )
 
 # Path to the voltage divider test board
@@ -112,22 +111,22 @@ class TestMergeSexpIntoPcb:
     """Test the PCB merge helper."""
 
     def test_basic_merge(self):
-        pcb = "(kicad_pcb\n  (net 0 \"\")\n)\n"
+        pcb = '(kicad_pcb\n  (net 0 "")\n)\n'
         route = '  (segment (start 1 2) (end 3 4) (width 0.25) (layer "F.Cu") (net 1))'
         merged = _merge_sexp_into_pcb(pcb, route)
         assert "(segment" in merged
         assert merged.rstrip().endswith(")")
 
     def test_empty_routes(self):
-        pcb = "(kicad_pcb\n  (net 0 \"\")\n)\n"
+        pcb = '(kicad_pcb\n  (net 0 "")\n)\n'
         merged = _merge_sexp_into_pcb(pcb, "")
         assert merged == pcb
 
     def test_preserves_pcb_content(self):
-        pcb = "(kicad_pcb\n  (net 0 \"\")\n  (net 1 \"VIN\")\n)\n"
+        pcb = '(kicad_pcb\n  (net 0 "")\n  (net 1 "VIN")\n)\n'
         route = '  (segment (start 1 2) (end 3 4) (width 0.25) (layer "F.Cu") (net 1))'
         merged = _merge_sexp_into_pcb(pcb, route)
-        assert "(net 1 \"VIN\")" in merged
+        assert '(net 1 "VIN")' in merged
 
 
 class TestSESParser:
@@ -201,7 +200,7 @@ class TestSESMerge:
 
         # Original content preserved
         assert "(kicad_pcb" in content
-        assert "(net 1 \"VIN\")" in content
+        assert '(net 1 "VIN")' in content
 
         # New routes added
         assert "(segment" in content
@@ -244,9 +243,7 @@ class TestSESMerge:
 
         open_count = result.count("(")
         close_count = result.count(")")
-        assert open_count == close_count, (
-            f"Unbalanced: {open_count} open vs {close_count} close"
-        )
+        assert open_count == close_count, f"Unbalanced: {open_count} open vs {close_count} close"
 
 
 class TestSESEmptyRoutes:

@@ -170,9 +170,7 @@ class TestCarveoutRespectsObstacle:
         see those cells as blocked.
         """
         grid = RoutingGrid(width=20.0, height=20.0, rules=jlcpcb_rules)
-        pad_a, pad_b = _make_thtpin_header_pair(
-            net_a=1, net_b=2, center_x=10.0, center_y=10.0
-        )
+        pad_a, pad_b = _make_thtpin_header_pair(net_a=1, net_b=2, center_x=10.0, center_y=10.0)
         grid.add_pad(pad_a)
         grid.add_pad(pad_b)
 
@@ -221,9 +219,7 @@ class TestCarveoutRespectsObstacle:
         the Python-level ``is_blocked`` mirror.
         """
         grid = RoutingGrid(width=20.0, height=20.0, rules=jlcpcb_rules)
-        pad_a, pad_b = _make_thtpin_header_pair(
-            net_a=1, net_b=2, center_x=10.0, center_y=10.0
-        )
+        pad_a, pad_b = _make_thtpin_header_pair(net_a=1, net_b=2, center_x=10.0, center_y=10.0)
         grid.add_pad(pad_a)
         grid.add_pad(pad_b)
 
@@ -275,9 +271,7 @@ class TestCarveoutRespectsObstacle:
         assert grid._blocked[layer_idx, intruder_gy, intruder_gx]
 
         # Now add the J2 pair which triggers the carve-out.
-        pad_a, pad_b = _make_thtpin_header_pair(
-            net_a=1, net_b=2, center_x=10.0, center_y=10.0
-        )
+        pad_a, pad_b = _make_thtpin_header_pair(net_a=1, net_b=2, center_x=10.0, center_y=10.0)
         grid.add_pad(pad_a)
         grid.add_pad(pad_b)
 

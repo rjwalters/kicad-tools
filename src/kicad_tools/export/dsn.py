@@ -471,10 +471,14 @@ class KiCadToDSNExporter:
             for layer in self._layers:
                 dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
                 if pad.shape in ("rect",):
-                    lines.append(f"      (shape (rect {_dsn_quote(dsn_layer)} {-w/2:.1f} {-h/2:.1f} {w/2:.1f} {h/2:.1f}))")
+                    lines.append(
+                        f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
+                    )
                 else:
                     # oval/circle -> use rect approximation for DSN
-                    lines.append(f"      (shape (rect {_dsn_quote(dsn_layer)} {-w/2:.1f} {-h/2:.1f} {w/2:.1f} {h/2:.1f}))")
+                    lines.append(
+                        f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
+                    )
             lines.append("      (attach off)")
         else:
             # SMD pad: shape on one layer only
@@ -489,7 +493,9 @@ class KiCadToDSNExporter:
             else:
                 dsn_layer = pad_layer
             dsn_layer = KICAD_TO_DSN_LAYER.get(dsn_layer, dsn_layer)
-            lines.append(f"      (shape (rect {_dsn_quote(dsn_layer)} {-w/2:.1f} {-h/2:.1f} {w/2:.1f} {h/2:.1f}))")
+            lines.append(
+                f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
+            )
             lines.append("      (attach off)")
 
         lines.append("    )")
@@ -498,7 +504,7 @@ class KiCadToDSNExporter:
     def _build_via_padstack(self) -> str:
         """Build the default via padstack."""
         size = mm_to_um(self._default_via_size)
-        name = f"Via[0-{len(self._layers)-1}]_Pad{size:.0f}_um"
+        name = f"Via[0-{len(self._layers) - 1}]_Pad{size:.0f}_um"
 
         lines: list[str] = []
         lines.append(f"    (padstack {_dsn_quote(name)}")
@@ -544,7 +550,7 @@ class KiCadToDSNExporter:
         parts.append("  (parser")
         parts.append('    (string_quote ")')
         parts.append("    (space_in_quoted_tokens on)")
-        parts.append("    (host_cad \"KiCad's Pcbnew\")")
+        parts.append('    (host_cad "KiCad\'s Pcbnew")')
         parts.append('    (host_version "kicad-tools")')
         parts.append("  )")
         parts.append("  (resolution um 10)")
@@ -601,12 +607,12 @@ class KiCadToDSNExporter:
         # Design rules
         clearance_um = mm_to_um(self._default_clearance)
         trace_um = mm_to_um(self._default_trace_width)
-        lines.append(f"    (rule")
+        lines.append("    (rule")
         lines.append(f"      (width {trace_um:.1f})")
         lines.append(f"      (clearance {clearance_um:.1f})")
         lines.append(f"      (clearance {clearance_um:.1f} (type default_smd))")
         lines.append(f"      (clearance {clearance_um:.1f} (type smd_smd))")
-        lines.append(f"    )")
+        lines.append("    )")
 
         lines.append("  )")
         return "\n".join(lines)
@@ -624,7 +630,9 @@ class KiCadToDSNExporter:
             rot = fp.rotation
 
             lines.append(f"    (component {_dsn_quote(image_name)}")
-            lines.append(f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:.1f})")
+            lines.append(
+                f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:.1f})"
+            )
             lines.append("    )")
 
         lines.append("  )")
@@ -654,7 +662,9 @@ class KiCadToDSNExporter:
 
                 px_um = mm_to_um(pad.x)
                 py_um = mm_to_um(pad.y)
-                lines.append(f"      (pin {_dsn_quote(ps_name)} {_dsn_quote(pad.number)} {px_um:.1f} {py_um:.1f})")
+                lines.append(
+                    f"      (pin {_dsn_quote(ps_name)} {_dsn_quote(pad.number)} {px_um:.1f} {py_um:.1f})"
+                )
 
             lines.append("    )")
 
@@ -679,9 +689,7 @@ class KiCadToDSNExporter:
         for fp in self._footprints:
             for pad in fp.pads:
                 if pad.net_name and pad.net_number != 0:
-                    net_pins.setdefault(pad.net_name, []).append(
-                        f"{fp.reference}-{pad.number}"
-                    )
+                    net_pins.setdefault(pad.net_name, []).append(f"{fp.reference}-{pad.number}")
 
         # Generate net definitions
         for net_name, pins in sorted(net_pins.items()):
@@ -698,13 +706,13 @@ class KiCadToDSNExporter:
             lines.append(f"      {_dsn_quote(net_name)}")
         trace_um = mm_to_um(self._default_trace_width)
         clearance_um = mm_to_um(self._default_clearance)
-        lines.append(f"      (circuit")
+        lines.append("      (circuit")
         lines.append(f"        (use_via {_dsn_quote(self._via_padstack_name)})")
-        lines.append(f"      )")
-        lines.append(f"      (rule")
+        lines.append("      )")
+        lines.append("      (rule")
         lines.append(f"        (width {trace_um:.1f})")
         lines.append(f"        (clearance {clearance_um:.1f})")
-        lines.append(f"      )")
+        lines.append("      )")
         lines.append("    )")
 
         lines.append("  )")
@@ -730,11 +738,13 @@ class KiCadToDSNExporter:
             y1 = mm_to_um(seg.y1)
             x2 = mm_to_um(seg.x2)
             y2 = mm_to_um(seg.y2)
-            lines.append(f"    (wire")
-            lines.append(f"      (path {_dsn_quote(dsn_layer)} {w_um:.1f} {x1:.1f} {y1:.1f} {x2:.1f} {y2:.1f})")
+            lines.append("    (wire")
+            lines.append(
+                f"      (path {_dsn_quote(dsn_layer)} {w_um:.1f} {x1:.1f} {y1:.1f} {x2:.1f} {y2:.1f})"
+            )
             lines.append(f"      (net {_dsn_quote(net_name)})")
-            lines.append(f"      (type protect)")
-            lines.append(f"    )")
+            lines.append("      (type protect)")
+            lines.append("    )")
 
         for via in self._vias:
             net_name = self._nets.get(via.net, "")
@@ -742,11 +752,11 @@ class KiCadToDSNExporter:
                 continue
             x = mm_to_um(via.x)
             y = mm_to_um(via.y)
-            lines.append(f"    (via")
+            lines.append("    (via")
             lines.append(f"      {_dsn_quote(self._via_padstack_name)} {x:.1f} {y:.1f}")
             lines.append(f"      (net {_dsn_quote(net_name)})")
-            lines.append(f"      (type protect)")
-            lines.append(f"    )")
+            lines.append("      (type protect)")
+            lines.append("    )")
 
         lines.append("  )")
         return "\n".join(lines)
@@ -771,6 +781,7 @@ class KiCadToDSNExporter:
 
 
 # -- Helpers --
+
 
 def _get_str(node: SExp) -> str | None:
     """Get the string value of an atom node."""

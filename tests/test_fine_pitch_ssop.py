@@ -12,7 +12,6 @@ import pytest
 from kicad_tools.router.escape import (
     EscapeDirection,
     EscapeRouter,
-    PackageInfo,
     PackageType,
     detect_package_type,
     get_package_info,
@@ -461,9 +460,7 @@ class TestI2SSignalPins:
         escapes = escape_router.generate_escapes(package_info)
 
         # Find escapes for I2S pins
-        i2s_escapes = [
-            e for e in escapes if e.pad.net_name in ("I2S_BCLK", "I2S_LRCLK", "I2S_DIN")
-        ]
+        i2s_escapes = [e for e in escapes if e.pad.net_name in ("I2S_BCLK", "I2S_LRCLK", "I2S_DIN")]
         assert len(i2s_escapes) == 3
 
         # Verify they have different escape layers

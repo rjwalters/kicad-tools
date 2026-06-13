@@ -161,14 +161,11 @@ class GlobalRouter:
         self.region_graph.update_utilization(region_path, layer=layer)
 
         # Convert region path to waypoints
-        waypoint_coords = self._build_waypoint_coords(
-            region_path, src_pos, tgt_pos
-        )
+        waypoint_coords = self._build_waypoint_coords(region_path, src_pos, tgt_pos)
 
         # Build Corridor from waypoints
         waypoints = [
-            Waypoint(x=x, y=y, layer=layer, waypoint_type="global")
-            for x, y in waypoint_coords
+            Waypoint(x=x, y=y, layer=layer, waypoint_type="global") for x, y in waypoint_coords
         ]
 
         corridor = Corridor.from_waypoints(
@@ -238,9 +235,7 @@ class GlobalRouter:
         num_layers = self.region_graph.num_layers
         for i, net_id in enumerate(net_order):
             if net_id in net_pad_positions:
-                net_layers[net_id] = (
-                    i % num_layers if num_layers > 1 else self.default_layer
-                )
+                net_layers[net_id] = i % num_layers if num_layers > 1 else self.default_layer
 
         # --- Iteration 0: greedy routing ---
         assignments: dict[int, CorridorAssignment] = {}
@@ -250,9 +245,7 @@ class GlobalRouter:
             if net_id not in net_pad_positions:
                 continue
             layer = net_layers.get(net_id, self.default_layer)
-            assignment = self.route_net(
-                net_id, net_pad_positions[net_id], layer=layer
-            )
+            assignment = self.route_net(net_id, net_pad_positions[net_id], layer=layer)
             if assignment is not None:
                 assignments[net_id] = assignment
             else:
@@ -297,17 +290,13 @@ class GlobalRouter:
                 for net_id in nets_to_reroute:
                     assign = assignments[net_id]
                     layer = assign.layer
-                    self.region_graph.release_utilization(
-                        assign.region_path, layer=layer
-                    )
+                    self.region_graph.release_utilization(assign.region_path, layer=layer)
                     del assignments[net_id]
 
                 # Reroute them
                 for net_id in nets_to_reroute:
                     layer = net_layers.get(net_id, self.default_layer)
-                    assignment = self.route_net(
-                        net_id, net_pad_positions[net_id], layer=layer
-                    )
+                    assignment = self.route_net(net_id, net_pad_positions[net_id], layer=layer)
                     if assignment is not None:
                         assignments[net_id] = assignment
                     elif net_id not in failed:
@@ -386,10 +375,13 @@ class GlobalRouter:
         region_centers = self.region_graph.path_to_waypoint_coords(region_path)
         for center in region_centers:
             # Skip if too close to source or target (within half a region width)
-            min_dim = min(
-                self.region_graph.board_width / self.region_graph.num_cols,
-                self.region_graph.board_height / self.region_graph.num_rows,
-            ) / 2.0
+            min_dim = (
+                min(
+                    self.region_graph.board_width / self.region_graph.num_cols,
+                    self.region_graph.board_height / self.region_graph.num_rows,
+                )
+                / 2.0
+            )
             dx_src = center[0] - src_pos[0]
             dy_src = center[1] - src_pos[1]
             dx_tgt = center[0] - tgt_pos[0]

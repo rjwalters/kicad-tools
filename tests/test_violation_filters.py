@@ -6,23 +6,20 @@ import textwrap
 
 import pytest
 
-from kicad_tools.core.types import Severity
-from kicad_tools.core.types import ERCSeverity
+from kicad_tools.core.types import ERCSeverity, Severity
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import DRCViolation as DRCReportViolation
-from kicad_tools.drc.violation import Location, ViolationType
+from kicad_tools.drc.violation import ViolationType
 from kicad_tools.erc.report import ERCReport
 from kicad_tools.erc.violation import ERCViolation, ERCViolationType
 from kicad_tools.validate.filters import (
     FilterConfigError,
     FilterEngine,
-    FilterResult,
     ViolationFilter,
     load_filters_from_toml,
     parse_filters_from_config,
 )
 from kicad_tools.validate.violations import DRCViolation as ValidateViolation
-
 
 # ---------------------------------------------------------------------------
 # Helper factories

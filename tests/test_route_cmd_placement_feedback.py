@@ -110,9 +110,7 @@ class TestPlacementFeedbackParser:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args(
-            ["route", "test.kicad_pcb", "--placement-feedback"]
-        )
+        args = parser.parse_args(["route", "test.kicad_pcb", "--placement-feedback"])
         assert args.placement_feedback is True
 
     def test_no_flag_disables(self):
@@ -272,9 +270,7 @@ class TestPlacementFeedbackForwarding:
             assert "--placement-feedback-no-anchor" not in call_args
             # Issue #2606: at default values these must NOT appear in
             # sub-argv so the "byte-identical" invariant holds.
-            assert (
-                "--placement-feedback-stagnation-patience" not in call_args
-            )
+            assert "--placement-feedback-stagnation-patience" not in call_args
             assert "--placement-feedback-outer-timeout" not in call_args
 
     def test_forwarded_when_enabled(self):
@@ -293,9 +289,7 @@ class TestPlacementFeedbackForwarding:
     def test_budget_forwarded_when_non_default(self):
         from kicad_tools.cli.commands.routing import run_route_command
 
-        args = _make_base_args(
-            placement_feedback=True, placement_feedback_budget=5
-        )
+        args = _make_base_args(placement_feedback=True, placement_feedback_budget=5)
 
         with patch("kicad_tools.cli.route_cmd.main") as mock_main:
             mock_main.return_value = 0
@@ -309,9 +303,7 @@ class TestPlacementFeedbackForwarding:
     def test_budget_not_forwarded_when_default(self):
         from kicad_tools.cli.commands.routing import run_route_command
 
-        args = _make_base_args(
-            placement_feedback=True, placement_feedback_budget=3
-        )
+        args = _make_base_args(placement_feedback=True, placement_feedback_budget=3)
 
         with patch("kicad_tools.cli.route_cmd.main") as mock_main:
             mock_main.return_value = 0
@@ -323,9 +315,7 @@ class TestPlacementFeedbackForwarding:
     def test_max_movement_forwarded_when_non_default(self):
         from kicad_tools.cli.commands.routing import run_route_command
 
-        args = _make_base_args(
-            placement_feedback=True, placement_feedback_max_movement=2.0
-        )
+        args = _make_base_args(placement_feedback=True, placement_feedback_max_movement=2.0)
 
         with patch("kicad_tools.cli.route_cmd.main") as mock_main:
             mock_main.return_value = 0
@@ -339,9 +329,7 @@ class TestPlacementFeedbackForwarding:
     def test_anchor_forwarded(self):
         from kicad_tools.cli.commands.routing import run_route_command
 
-        args = _make_base_args(
-            placement_feedback=True, placement_feedback_anchor="U5,U7"
-        )
+        args = _make_base_args(placement_feedback=True, placement_feedback_anchor="U5,U7")
 
         with patch("kicad_tools.cli.route_cmd.main") as mock_main:
             mock_main.return_value = 0
@@ -355,9 +343,7 @@ class TestPlacementFeedbackForwarding:
     def test_no_anchor_forwarded(self):
         from kicad_tools.cli.commands.routing import run_route_command
 
-        args = _make_base_args(
-            placement_feedback=True, placement_feedback_no_anchor="J3"
-        )
+        args = _make_base_args(placement_feedback=True, placement_feedback_no_anchor="J3")
 
         with patch("kicad_tools.cli.route_cmd.main") as mock_main:
             mock_main.return_value = 0
@@ -383,9 +369,7 @@ class TestPlacementFeedbackForwarding:
             run_route_command(args)
 
             call_args = mock_main.call_args[0][0]
-            assert (
-                "--placement-feedback-stagnation-patience" not in call_args
-            )
+            assert "--placement-feedback-stagnation-patience" not in call_args
 
     def test_stagnation_patience_forwarded_when_non_default(self):
         from kicad_tools.cli.commands.routing import run_route_command
@@ -401,9 +385,7 @@ class TestPlacementFeedbackForwarding:
 
             call_args = mock_main.call_args[0][0]
             assert "--placement-feedback-stagnation-patience" in call_args
-            idx = call_args.index(
-                "--placement-feedback-stagnation-patience"
-            )
+            idx = call_args.index("--placement-feedback-stagnation-patience")
             assert call_args[idx + 1] == "5"
 
     def test_outer_timeout_not_forwarded_when_default(self):
@@ -518,9 +500,7 @@ class TestAutoDetectAnchoredRefs:
         """Footprints with locked=True are anchored regardless of prefix."""
         from kicad_tools.cli.route_cmd import _auto_detect_anchored_refs
 
-        pcb = _MockPCB(
-            [_MockFootprint("U5", locked=True), _MockFootprint("U7")]
-        )
+        pcb = _MockPCB([_MockFootprint("U5", locked=True), _MockFootprint("U7")])
         anchored = _auto_detect_anchored_refs(pcb)
         assert "U5" in anchored
         assert "U7" not in anchored
@@ -787,9 +767,7 @@ class TestPlacementDiffEntry:
     def test_zero_distance_when_unchanged(self):
         from kicad_tools.router import PlacementDiffEntry
 
-        entry = PlacementDiffEntry(
-            ref="C1", old_xy=(5.0, 5.0), new_xy=(5.0, 5.0)
-        )
+        entry = PlacementDiffEntry(ref="C1", old_xy=(5.0, 5.0), new_xy=(5.0, 5.0))
         assert entry.distance_mm == 0.0
 
     def test_exported_from_router_module(self):
@@ -836,8 +814,7 @@ class TestInnerParserPlacementFeedbackFlags:
             route_main(["--help"])
         help_text = buf.getvalue()
         assert "--placement-feedback-outer-timeout" in help_text, (
-            "inner parser help text is missing --placement-feedback-"
-            "outer-timeout (Issue #2620)"
+            "inner parser help text is missing --placement-feedback-outer-timeout (Issue #2620)"
         )
         # Help wording mirrors parser.py:2370-2375 (Issue #2606 tag).
         assert "Issue #2606." in help_text
@@ -885,14 +862,11 @@ class TestInnerParserPlacementFeedbackFlags:
             rc = int(exc.code) if exc.code is not None else 0
 
         assert rc != 2, (
-            "inner argparse rejected --placement-feedback-outer-timeout "
-            "(Issue #2620 regression)"
+            "inner argparse rejected --placement-feedback-outer-timeout (Issue #2620 regression)"
         )
         # File-not-found is the expected next failure mode (rc=1) once
         # argparse accepts the flag.
-        assert rc == 1, (
-            f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
-        )
+        assert rc == 1, f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
 
     def test_inner_parser_accepts_stagnation_patience_no_exit_2(self, tmp_path):
         """Regression: inner argparse must accept --placement-feedback-
@@ -917,9 +891,7 @@ class TestInnerParserPlacementFeedbackFlags:
             "inner argparse rejected --placement-feedback-stagnation-patience "
             "(Issue #2620 regression)"
         )
-        assert rc == 1, (
-            f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
-        )
+        assert rc == 1, f"Expected rc=1 (file-not-found) after argparse success, got rc={rc}"
 
     def test_inner_parser_outer_timeout_value_and_type(self):
         """Issue #2620: parsed value is a float matching the input.
@@ -1004,12 +976,8 @@ class TestInnerParserPlacementFeedbackFlags:
         )
 
         with (
-            patch(
-                "kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb
-            ),
-            patch(
-                "pathlib.Path.write_text", return_value=None
-            ),
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
         ):
             _run_placement_feedback(
                 router=router,

@@ -135,9 +135,7 @@ def _straight_route(net: int, name: str, y: float, length: float = 10.0) -> Rout
 
 
 def _route_length(route: Route) -> float:
-    return sum(
-        math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments
-    )
+    return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
 
 
 def test_partner_aware_serpentine_is_one_sided():
@@ -158,8 +156,7 @@ def test_partner_aware_serpentine_is_one_sided():
     assert ok, "partner-aware serpentine must succeed on an open straight run"
     for seg in target.segments:
         assert seg.y1 <= 10.0 + 1e-9 and seg.y2 <= 10.0 + 1e-9, (
-            f"bulge crossed toward the partner: ({seg.x1},{seg.y1})->"
-            f"({seg.x2},{seg.y2})"
+            f"bulge crossed toward the partner: ({seg.x1},{seg.y1})->({seg.x2},{seg.y2})"
         )
 
 
@@ -182,8 +179,7 @@ def test_partner_aware_serpentine_adds_requested_length():
     assert ok
     added = _route_length(target) - before
     assert added >= 0.7 * requested, (
-        f"serpentine added only {added:.3f}mm of the requested "
-        f"{requested:.3f}mm"
+        f"serpentine added only {added:.3f}mm of the requested {requested:.3f}mm"
     )
 
 
@@ -203,9 +199,7 @@ def test_legacy_serpentine_still_alternates():
 
 
 def _seg(x1, y1, x2, y2, layer=Layer.F_CU) -> Segment:
-    return Segment(
-        x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=layer, net=1, net_name="P"
-    )
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=layer, net=1, net_name="P")
 
 
 def test_point_segment_distance_perpendicular():
@@ -259,9 +253,7 @@ def test_asymmetric_moves_generated_mid_route():
     for ns, _c, is_via in neighbors:
         if is_via:
             continue
-        spacing = math.hypot(
-            ns.p_pos.x - ns.n_pos.x, ns.p_pos.y - ns.n_pos.y
-        )
+        spacing = math.hypot(ns.p_pos.x - ns.n_pos.x, ns.p_pos.y - ns.n_pos.y)
         assert abs(spacing - 4) <= 1 + 1e-9
 
 
@@ -301,8 +293,7 @@ def test_proximity_guard_rejects_near_partner_trail():
         if ns.p_pos != state.p_pos:  # P advanced
             d = math.hypot(ns.p_pos.x - 101, ns.p_pos.y - 101)
             assert d >= 4 - 1e-9, (
-                f"P landed {d:.2f} cells from the partner trail "
-                f"(< min_spacing_cells=4): {ns.p_pos}"
+                f"P landed {d:.2f} cells from the partner trail (< min_spacing_cells=4): {ns.p_pos}"
             )
 
 
@@ -328,9 +319,7 @@ def test_proximity_guard_allows_exact_min_spacing():
         p_trail_buckets={},
     )
     forward = [
-        ns
-        for ns, _c, is_via in neighbors
-        if not is_via and ns.p_pos == GridPos(101, 100, 0)
+        ns for ns, _c, is_via in neighbors if not is_via and ns.p_pos == GridPos(101, 100, 0)
     ]
     assert forward, (
         "P's forward symmetric step at exactly min_spacing distance from "
@@ -371,15 +360,11 @@ def test_shadow_construction_flag_plumbed_from_config():
     # No pairs detected -> the call returns immediately, but the flag
     # must already have been copied from the config.
     router.route_all_with_diffpairs(
-        diffpair_config=DifferentialPairConfig(
-            enabled=True, enable_shadow_construction=True
-        )
+        diffpair_config=DifferentialPairConfig(enabled=True, enable_shadow_construction=True)
     )
     assert dpr.enable_shadow_construction is True
 
-    router.route_all_with_diffpairs(
-        diffpair_config=DifferentialPairConfig(enabled=True)
-    )
+    router.route_all_with_diffpairs(diffpair_config=DifferentialPairConfig(enabled=True))
     assert dpr.enable_shadow_construction is False
 
 
@@ -429,30 +414,64 @@ def _two_pad_coupled_router_and_pair():
     router.add_component(
         "U1",
         [
-            {"number": "1", "x": 5.0, "y": p_y, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": n_y, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 5.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     router.add_component(
         "J1",
         [
-            {"number": "1", "x": 25.0, "y": p_y, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 25.0, "y": n_y, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     pair = DifferentialPair(
         name="USB_D",
         positive=DifferentialSignal(
-            net_name="USB_D+", net_id=1, base_name="USB_D",
-            polarity="P", notation="plus_minus",
+            net_name="USB_D+",
+            net_id=1,
+            base_name="USB_D",
+            polarity="P",
+            notation="plus_minus",
         ),
         negative=DifferentialSignal(
-            net_name="USB_D-", net_id=2, base_name="USB_D",
-            polarity="N", notation="plus_minus",
+            net_name="USB_D-",
+            net_id=2,
+            base_name="USB_D",
+            polarity="N",
+            notation="plus_minus",
         ),
         pair_type=DifferentialPairType.USB2,
     )
@@ -514,16 +533,12 @@ def test_flag_off_uses_classic_astar_search(monkeypatch):
     """
     from kicad_tools.router.diffpair_routing import COUPLED_HEURISTIC_WEIGHT
 
-    assert COUPLED_HEURISTIC_WEIGHT > 1.0, (
-        "fixture assumes the weighted-A* upgrade is > 1.0"
-    )
+    assert COUPLED_HEURISTIC_WEIGHT > 1.0, "fixture assumes the weighted-A* upgrade is > 1.0"
     router, pair = _two_pad_coupled_router_and_pair()
     dpr = router._diffpair
     dpr.enable_shadow_construction = False
     monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
-    captured = _patch_pathfinder_capture_weight(
-        monkeypatch, None, rescue_eligible=False
-    )
+    captured = _patch_pathfinder_capture_weight(monkeypatch, None, rescue_eligible=False)
 
     dpr.route_differential_pair_coupled(pair, coupled_only=True)
 
@@ -546,9 +561,7 @@ def test_flag_on_uses_weighted_astar_search(monkeypatch):
     dpr = router._diffpair
     dpr.enable_shadow_construction = True
     monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
-    captured = _patch_pathfinder_capture_weight(
-        monkeypatch, None, rescue_eligible=False
-    )
+    captured = _patch_pathfinder_capture_weight(monkeypatch, None, rescue_eligible=False)
 
     dpr.route_differential_pair_coupled(pair, coupled_only=True)
 
@@ -578,15 +591,12 @@ def test_flag_off_does_not_invoke_near_miss_rescue(monkeypatch):
         calls["n"] += 1
         return None
 
-    monkeypatch.setattr(
-        type(dpr), "_rescue_near_miss_coupled", _spy, raising=True
-    )
+    monkeypatch.setattr(type(dpr), "_rescue_near_miss_coupled", _spy, raising=True)
 
     dpr.route_differential_pair_coupled(pair, coupled_only=True)
 
     assert calls["n"] == 0, (
-        "near-miss rescue must NOT be invoked when "
-        "enable_shadow_construction is False"
+        "near-miss rescue must NOT be invoked when enable_shadow_construction is False"
     )
 
 
@@ -608,13 +618,10 @@ def test_flag_on_invokes_near_miss_rescue(monkeypatch):
         calls["n"] += 1
         return None  # rescue declines; we only assert it was consulted
 
-    monkeypatch.setattr(
-        type(dpr), "_rescue_near_miss_coupled", _spy, raising=True
-    )
+    monkeypatch.setattr(type(dpr), "_rescue_near_miss_coupled", _spy, raising=True)
 
     dpr.route_differential_pair_coupled(pair, coupled_only=True)
 
     assert calls["n"] == 1, (
-        "near-miss rescue must be invoked when "
-        "enable_shadow_construction is True"
+        "near-miss rescue must be invoked when enable_shadow_construction is True"
     )

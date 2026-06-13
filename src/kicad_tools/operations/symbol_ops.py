@@ -183,9 +183,7 @@ def replace_symbol_lib_id(
             short_name = new_lib_id.split(":", 1)[1] if ":" in new_lib_id else new_lib_id
             new_lib_sym = lib.get_symbol(short_name)
         if new_lib_sym is None:
-            raise ValueError(
-                f"Symbol '{new_lib_id}' not found in library '{lib_path}'"
-            )
+            raise ValueError(f"Symbol '{new_lib_id}' not found in library '{lib_path}'")
 
         # Resolve the effective pins: for derived symbols the pins live
         # on the base symbol; for standalone symbols they are on the
@@ -240,9 +238,7 @@ def replace_symbol_lib_id(
                 units=base_sym.units,
             )
             sch.embed_lib_symbol(base_embed)
-            changes.append(
-                f"lib_symbols: embedded base symbol '{base_sym.name}'"
-            )
+            changes.append(f"lib_symbols: embedded base symbol '{base_sym.name}'")
 
         # Replace the lib_symbols entry.  We need to rename the new
         # library symbol to match the lib_id used in the schematic so

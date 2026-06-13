@@ -197,9 +197,7 @@ class GeneratedZone:
     # toggle via :func:`route_all_negotiated` (with ``seed=...``).
     # When the toggle is off this falls through to ``uuid.uuid4()``
     # exactly as before.
-    uuid: str = field(
-        default_factory=lambda: _zone_uuid_factory()
-    )
+    uuid: str = field(default_factory=lambda: _zone_uuid_factory())
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression node for this zone."""
@@ -1320,9 +1318,7 @@ def _compute_pour_outlines(
         # as the carve fallback when the normal subtraction returns empty.
         pad_safe = _bbox_polygon(positions, PAD_SAFE_MARGIN_MM)
         if pad_safe is not None:
-            pad_safe_bboxes[net_name] = _clip_polygon_to_outline(
-                pad_safe, board_outline
-            )
+            pad_safe_bboxes[net_name] = _clip_polygon_to_outline(pad_safe, board_outline)
 
     # Second pass (#3043): for each layer that hosts multiple zones, subtract
     # higher-priority zone bboxes from lower-priority zones so the final
@@ -1441,11 +1437,7 @@ def _compute_pour_outlines(
             lower_union = None
             for poly in lower_pad_safes:
                 lower_union = _union_polygons(lower_union, poly)
-            carved_raw = (
-                _subtract_polygon(raw, lower_union)
-                if lower_union is not None
-                else None
-            )
+            carved_raw = _subtract_polygon(raw, lower_union) if lower_union is not None else None
             if carved_raw is not None:
                 # Hole-free staircase difference: keeps the raw extremes.
                 effective_subtrahend[net_name] = carved_raw
@@ -1509,9 +1501,8 @@ def _compute_pour_outlines(
                     else:
                         # Numerical edge case: tiny but positive non-overlap
                         # area below Shapely's empty-threshold.
-                        non_overlap_area = (
-                            _polygon_area_simple(pad_safe)
-                            - _polygon_overlap_area(pad_safe, winners_union)
+                        non_overlap_area = _polygon_area_simple(pad_safe) - _polygon_overlap_area(
+                            pad_safe, winners_union
                         )
                         if non_overlap_area > 1e-6:
                             outlines[net_name] = pad_safe

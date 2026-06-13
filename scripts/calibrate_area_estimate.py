@@ -72,10 +72,7 @@ def main() -> int:
         f"mfr={args.mfr} (min_clearance={mfr_limits.min_clearance} mm)"
     )
     print()
-    print(
-        f"{'board':<22}{'env mm^2':>12}{'est mm^2':>12}{'ratio':>10}"
-        f"{'fps':>6}{'nets':>6}"
-    )
+    print(f"{'board':<22}{'env mm^2':>12}{'est mm^2':>12}{'ratio':>10}{'fps':>6}{'nets':>6}")
     print("-" * 70)
 
     for name, path in boards.items():
@@ -96,11 +93,7 @@ def main() -> int:
                 continue
             w, h = dims
             envelope_mm2 = w * h
-            ratio = (
-                envelope_mm2 / est.total_mm2
-                if est.total_mm2 > 0
-                else float("inf")
-            )
+            ratio = envelope_mm2 / est.total_mm2 if est.total_mm2 > 0 else float("inf")
             print(
                 f"{name:<22}{envelope_mm2:>12.0f}{est.total_mm2:>12.0f}"
                 f"{ratio:>10.2f}{est.footprint_count:>6d}{est.signal_net_count:>6d}"

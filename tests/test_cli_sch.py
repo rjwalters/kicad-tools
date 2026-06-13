@@ -3440,9 +3440,7 @@ class TestSchValidateMissingProjectInstances:
         """Power symbols with wrong_project are still flagged (they need repair too)."""
         from kicad_tools.cli.sch_validate import check_missing_project_instances
 
-        block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(
-            ref="#PWR01", unit=1
-        )
+        block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(ref="#PWR01", unit=1)
         sch_file = self._make_schematic_with_block(
             tmp_path,
             block,
@@ -3556,9 +3554,7 @@ class TestSchValidateMissingProjectInstances:
             argv.extend(["--skip", c])
         return argv
 
-    def test_exit_code_nonzero_on_wrong_project(
-        self, tmp_path: Path, capsys, monkeypatch
-    ):
+    def test_exit_code_nonzero_on_wrong_project(self, tmp_path: Path, capsys, monkeypatch):
         """End-to-end: kct sch validate exits non-zero when wrong_project present."""
         from kicad_tools.cli.sch_validate import main
 
@@ -3572,9 +3568,7 @@ class TestSchValidateMissingProjectInstances:
         # error_count > 0 -> sys.exit(1)
         assert exc_info.value.code == 1
 
-    def test_exit_code_nonzero_on_loose_project(
-        self, tmp_path: Path, capsys, monkeypatch
-    ):
+    def test_exit_code_nonzero_on_loose_project(self, tmp_path: Path, capsys, monkeypatch):
         """End-to-end: kct sch validate exits non-zero when loose_project_blocks present."""
         from kicad_tools.cli.sch_validate import main
 
@@ -3587,9 +3581,7 @@ class TestSchValidateMissingProjectInstances:
 
         assert exc_info.value.code == 1
 
-    def test_exit_code_zero_on_missing_only(
-        self, tmp_path: Path, capsys, monkeypatch
-    ):
+    def test_exit_code_zero_on_missing_only(self, tmp_path: Path, capsys, monkeypatch):
         """End-to-end: missing-instances alone stays a warning (exit 0)."""
         from kicad_tools.cli.sch_validate import main
 
@@ -3604,40 +3596,30 @@ class TestSchValidateMissingProjectInstances:
             exit_code = e.code or 0
         assert exit_code == 0
 
-    def test_json_output_wrong_project_is_error(
-        self, tmp_path: Path, capsys, monkeypatch
-    ):
+    def test_json_output_wrong_project_is_error(self, tmp_path: Path, capsys, monkeypatch):
         """JSON output for wrong_project surfaces severity=error in project_instances."""
         from kicad_tools.cli.sch_validate import main
 
         block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(ref="R1", unit=1)
         sch_file = self._make_schematic_with_block(tmp_path, block)
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-validate", str(sch_file), "--format", "json"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-validate", str(sch_file), "--format", "json"])
         with contextlib.suppress(SystemExit):
             main()
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
-        pi_issues = [
-            i for i in data["issues"] if i["category"] == "project_instances"
-        ]
+        pi_issues = [i for i in data["issues"] if i["category"] == "project_instances"]
         assert len(pi_issues) == 1
         assert pi_issues[0]["severity"] == "error"
 
-    def test_validator_and_repair_dry_run_agree(
-        self, tmp_path: Path, capsys
-    ):
+    def test_validator_and_repair_dry_run_agree(self, tmp_path: Path, capsys):
         """Validator and repair-instances --dry-run report the same count."""
         from kicad_tools.cli.sch_repair_instances import run_repair_instances
         from kicad_tools.cli.sch_validate import check_missing_project_instances
 
         # Schematic with one wrong_project symbol + one loose_project symbol.
-        wrong_block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(
-            ref="R1", unit=1
-        )
+        wrong_block = self._WRONG_PROJECT_INSTANCES_BLOCK.format(ref="R1", unit=1)
         loose_block = self._LOOSE_PROJECT_BLOCK.format(ref="R2", unit=1)
 
         sym1 = self._BASE_SYMBOL.format(
@@ -3679,17 +3661,13 @@ class TestSchValidateMissingProjectInstances:
         assert validator_count == 2  # one wrong + one loose
 
         # Repair-instances dry-run side (JSON for stable counting)
-        run_repair_instances(
-            sch_file, dry_run=True, backup=False, format="json"
-        )
+        run_repair_instances(sch_file, dry_run=True, backup=False, format="json")
         captured = capsys.readouterr()
         # The JSON envelope reports a 'total' field
         data = json.loads(captured.out)
         repair_count = data["total"]
 
-        assert (
-            validator_count == repair_count
-        ), (
+        assert validator_count == repair_count, (
             f"validate reported {validator_count} errors but "
             f"repair-instances dry-run reported {repair_count}"
         )

@@ -80,9 +80,7 @@ def _make_pcb(
 
 def _square_footprint(side_mm: float) -> _StubFootprint:
     """Build a single-pad footprint that contributes ``side_mm x side_mm`` to the bbox."""
-    return _StubFootprint(
-        pads=[_StubPad(position=(0.0, 0.0), size=(side_mm, side_mm))]
-    )
+    return _StubFootprint(pads=[_StubPad(position=(0.0, 0.0), size=(side_mm, side_mm))])
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +147,7 @@ class TestEstimateRequiredAreaMath:
         )
         est = estimate_required_area(pcb, MFR_JLCPCB)
         assert est.signal_net_count == 1
-        assert est.routing_channel_mm2 == pytest.approx(
-            DEFAULT_ROUTING_CHANNEL_PER_NET_MM2
-        )
+        assert est.routing_channel_mm2 == pytest.approx(DEFAULT_ROUTING_CHANNEL_PER_NET_MM2)
         # 2.5 * (25 + 2.54 + 20) = 118.85
         assert est.total_mm2 == pytest.approx(118.85)
 
@@ -181,9 +177,7 @@ class TestEstimateRequiredAreaMath:
         )
         est = estimate_required_area(pcb, MFR_JLCPCB)
         assert est.signal_net_count == 2
-        assert est.routing_channel_mm2 == pytest.approx(
-            2 * DEFAULT_ROUTING_CHANNEL_PER_NET_MM2
-        )
+        assert est.routing_channel_mm2 == pytest.approx(2 * DEFAULT_ROUTING_CHANNEL_PER_NET_MM2)
 
     def test_multi_pad_footprint_bbox(self):
         """Multi-pad footprint's bbox spans the pad-array extent."""

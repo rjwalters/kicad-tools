@@ -2708,8 +2708,11 @@ class TestStripTraces:
         power_names = ["GND", "+3V3", "+5V", "VCC", "VDD", "VBUS"]
         for i, name in enumerate(power_names):
             pcb.add_trace(
-                start=(10, 10 + i * 10), end=(50, 10 + i * 10),
-                width=0.25, layer="In1.Cu", net=name,
+                start=(10, 10 + i * 10),
+                end=(50, 10 + i * 10),
+                width=0.25,
+                layer="In1.Cu",
+                net=name,
             )
         pcb.add_trace(start=(10, 80), end=(50, 80), width=0.25, layer="In1.Cu", net="AUDIO")
 
@@ -2735,9 +2738,7 @@ class TestStripTraces:
 
         # Custom pattern that matches PWR_*
         pattern = re.compile(r"^PWR_", re.IGNORECASE)
-        stats = pcb.strip_traces(
-            layers=["In1.Cu"], exclude_power=True, power_pattern=pattern
-        )
+        stats = pcb.strip_traces(layers=["In1.Cu"], exclude_power=True, power_pattern=pattern)
 
         assert stats["segments"] == 1
         assert len(pcb.segments) == 1
@@ -3148,18 +3149,12 @@ class TestRemoveSegments:
     def test_remove_segment_sexp_node_gone(self, minimal_pcb: Path):
         """Test that the segment S-expression node is removed from the tree."""
         pcb = PCB.load(str(minimal_pcb))
-        seg_nodes_before = [
-            c for c in pcb._sexp.children
-            if not c.is_atom and c.name == "segment"
-        ]
+        seg_nodes_before = [c for c in pcb._sexp.children if not c.is_atom and c.name == "segment"]
         assert len(seg_nodes_before) == 1
 
         pcb.remove_segments(pcb.segments[:])
 
-        seg_nodes_after = [
-            c for c in pcb._sexp.children
-            if not c.is_atom and c.name == "segment"
-        ]
+        seg_nodes_after = [c for c in pcb._sexp.children if not c.is_atom and c.name == "segment"]
         assert len(seg_nodes_after) == 0
 
 

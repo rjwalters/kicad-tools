@@ -40,7 +40,7 @@ EXCLUDED_PREFIXES = {"#PWR", "#FLG", "#SYM"}
 _POWER_PREFIXES = {"#PWR", "#FLG"}
 
 # Whitespace token for regex: matches one or more tabs or spaces
-_WS = r'[ \t]+'
+_WS = r"[ \t]+"
 
 
 def _format_reference(prefix: str, number: int, unit_suffix: str = "") -> str:
@@ -65,16 +65,16 @@ def _detect_indent(text: str) -> str:
         The single-level indent string (e.g. ``'\\t'`` or ``'  '``).
     """
     for line in text.splitlines():
-        if line and line[0] in (' ', '\t'):
+        if line and line[0] in (" ", "\t"):
             # Count leading whitespace
-            stripped = line.lstrip(' \t')
-            leading = line[:len(line) - len(stripped)]
-            if '\t' in leading:
-                return '\t'
+            stripped = line.lstrip(" \t")
+            leading = line[: len(line) - len(stripped)]
+            if "\t" in leading:
+                return "\t"
             # Assume the first indented line is at depth 1
             # Common space counts: 2 or 4
             return leading
-    return '\t'
+    return "\t"
 
 
 def _parse_reference(ref: str) -> tuple[str, int | None, str]:
@@ -88,11 +88,11 @@ def _parse_reference(ref: str) -> tuple[str, int | None, str]:
         "R?"   -> ("R", None, "")
     """
     # Match prefix (letters/underscores, optionally starting with #), number, optional unit letter
-    m = re.match(r'^(#?[A-Za-z_]+)(\d+)([A-Za-z]?)$', ref)
+    m = re.match(r"^(#?[A-Za-z_]+)(\d+)([A-Za-z]?)$", ref)
     if m:
         return m.group(1), int(m.group(2)), m.group(3)
     # Unannotated reference like "R?" or "#PWR_FLAG?"
-    m = re.match(r'^(#?[A-Za-z_]+)\?$', ref)
+    m = re.match(r"^(#?[A-Za-z_]+)\?$", ref)
     if m:
         return m.group(1), None, ""
     return ref, None, ""
@@ -118,11 +118,18 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
     # Find all symbol blocks that have lib_id (instances, not lib definitions)
     # Use _WS instead of literal \t to support both tab and space indentation
     block_pattern = re.compile(
-        _WS + r'\(symbol\n'
-        + _WS + r'\(lib_id "[^"]+"\)'
-        r'.*?'
-        r'(?:' + _WS + r'\(instances\n.*?' + _WS + r'\)\n' + _WS + r'\)'
-        r'|' + _WS + r'\(pin "[^"]+"\n' + _WS + r'\(uuid "[^"]+"\)\n' + _WS + r'\)\n' + _WS + r'\))',
+        _WS + r"\(symbol\n" + _WS + r'\(lib_id "[^"]+"\)'
+        r".*?"
+        r"(?:" + _WS + r"\(instances\n.*?" + _WS + r"\)\n" + _WS + r"\)"
+        r"|"
+        + _WS
+        + r'\(pin "[^"]+"\n'
+        + _WS
+        + r'\(uuid "[^"]+"\)\n'
+        + _WS
+        + r"\)\n"
+        + _WS
+        + r"\))",
         re.DOTALL,
     )
 
@@ -131,7 +138,7 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
     for match in block_pattern.finditer(text):
         block = match.group(0)
         lib_match = re.search(r'\(lib_id "([^"]+)"\)', block)
-        at_match = re.search(r'\(at ([\d.eE+-]+) ([\d.eE+-]+)', block)
+        at_match = re.search(r"\(at ([\d.eE+-]+) ([\d.eE+-]+)", block)
         ref_match = ref_pattern.search(block)
         uuid_match = re.search(r'\(uuid "([^"]+)"\)', block)
 
@@ -147,16 +154,18 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
         prefix, number, unit_suffix = _parse_reference(ref)
 
         seen_uuids.add(sym_uuid)
-        symbols.append({
-            "reference": ref,
-            "prefix": prefix,
-            "number": number,
-            "unit_suffix": unit_suffix,
-            "position_x": x,
-            "position_y": y,
-            "lib_id": lib_id,
-            "uuid": sym_uuid,
-        })
+        symbols.append(
+            {
+                "reference": ref,
+                "prefix": prefix,
+                "number": number,
+                "unit_suffix": unit_suffix,
+                "position_x": x,
+                "position_y": y,
+                "lib_id": lib_id,
+                "uuid": sym_uuid,
+            }
+        )
 
     # Second pass: find unannotated symbols (Reference contains "?") that have
     # no (instances) block and no (pin) entries.  These are "bare" symbol blocks
@@ -167,8 +176,8 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
     # block's closing paren.
     unannotated_ref_pattern = re.compile(r'\(property "Reference" "([^"]*\?[^"]*)"')
     uuid_pattern = re.compile(r'\(uuid "([^"]+)"\)')
-    symbol_start_pattern = re.compile(_WS + r'\(symbol\n')
-    block_close_pattern = re.compile(r'\n' + _WS + r'\)')
+    symbol_start_pattern = re.compile(_WS + r"\(symbol\n")
+    block_close_pattern = re.compile(r"\n" + _WS + r"\)")
 
     for ref_match in unannotated_ref_pattern.finditer(text):
         ref = ref_match.group(1)
@@ -204,23 +213,25 @@ def _extract_symbols_from_text(text: str) -> list[dict]:
             continue
         lib_id = lib_match.group(1)
 
-        at_match = re.search(r'\(at ([\d.eE+-]+) ([\d.eE+-]+)', block)
+        at_match = re.search(r"\(at ([\d.eE+-]+) ([\d.eE+-]+)", block)
         x = float(at_match.group(1)) if at_match else 0.0
         y = float(at_match.group(2)) if at_match else 0.0
 
         prefix, number, unit_suffix = _parse_reference(ref)
 
         seen_uuids.add(sym_uuid)
-        symbols.append({
-            "reference": ref,
-            "prefix": prefix,
-            "number": number,
-            "unit_suffix": unit_suffix,
-            "position_x": x,
-            "position_y": y,
-            "lib_id": lib_id,
-            "uuid": sym_uuid,
-        })
+        symbols.append(
+            {
+                "reference": ref,
+                "prefix": prefix,
+                "number": number,
+                "unit_suffix": unit_suffix,
+                "position_x": x,
+                "position_y": y,
+                "lib_id": lib_id,
+                "uuid": sym_uuid,
+            }
+        )
 
     return symbols
 
@@ -235,14 +246,14 @@ def _apply_reference_rename(text: str, old_ref: str, new_ref: str) -> str:
     # Update property "Reference" value
     text = re.sub(
         r'(\(property "Reference" ")' + re.escape(old_ref) + r'"',
-        r'\g<1>' + new_ref + '"',
+        r"\g<1>" + new_ref + '"',
         text,
     )
 
     # Update (reference "OLD") in instances blocks
     text = re.sub(
         r'(\(reference ")' + re.escape(old_ref) + r'"\)',
-        r'\g<1>' + new_ref + '")',
+        r"\g<1>" + new_ref + '")',
         text,
     )
 
@@ -266,7 +277,7 @@ def _apply_uuid_reference_rename(text: str, sym_uuid: str, new_ref: str) -> str:
 
     # Walk backward to find the start of this symbol block using regex
     # to support both tab and space indentation
-    start_pattern = re.compile(_WS + r'\(symbol\n')
+    start_pattern = re.compile(_WS + r"\(symbol\n")
     block_start = -1
     for m in start_pattern.finditer(text, 0, uuid_pos):
         block_start = m.start()
@@ -274,7 +285,7 @@ def _apply_uuid_reference_rename(text: str, sym_uuid: str, new_ref: str) -> str:
         return text
 
     # Walk forward to find the end of this symbol block (\n<indent>) at depth 1)
-    end_pattern = re.compile(r'\n' + _WS + r'\)')
+    end_pattern = re.compile(r"\n" + _WS + r"\)")
     end_match = end_pattern.search(text, uuid_pos)
     if end_match is None:
         return text
@@ -285,7 +296,7 @@ def _apply_uuid_reference_rename(text: str, sym_uuid: str, new_ref: str) -> str:
     # Replace the Reference property within this specific block
     new_block = re.sub(
         r'(\(property "Reference" ")[^"]+"',
-        r'\g<1>' + new_ref + '"',
+        r"\g<1>" + new_ref + '"',
         block,
         count=1,
     )
@@ -310,7 +321,7 @@ def _detect_project_info(
     root_text = root_path.read_text(encoding="utf-8")
 
     # Find root schematic UUID (first uuid at top level)
-    root_uuid_match = re.search(r'^' + _WS + r'\(uuid "([^"]+)"\)', root_text, re.MULTILINE)
+    root_uuid_match = re.search(r"^" + _WS + r'\(uuid "([^"]+)"\)', root_text, re.MULTILINE)
     root_uuid = root_uuid_match.group(1) if root_uuid_match else ""
 
     # Build map of sub-sheet file -> instance path
@@ -346,7 +357,7 @@ def _find_symbol_block_bounds(text: str, sym_uuid: str) -> tuple[int, int] | Non
         return None
 
     # Walk backward to find the most recent (symbol\n start before the uuid
-    start_pattern = re.compile(_WS + r'\(symbol\n')
+    start_pattern = re.compile(_WS + r"\(symbol\n")
     block_start = -1
     for m in start_pattern.finditer(text, 0, uuid_pos):
         block_start = m.start()
@@ -366,15 +377,15 @@ def _find_symbol_block_bounds(text: str, sym_uuid: str) -> tuple[int, int] | Non
         if ch == '"':
             in_string = not in_string
         elif not in_string:
-            if ch == '(':
+            if ch == "(":
                 depth += 1
-            elif ch == ')':
+            elif ch == ")":
                 depth -= 1
                 if depth == 0:
                     # This ) closes the outermost (symbol ...) block
                     # Consume to end of line
                     end = i + 1
-                    if end < len(text) and text[end] == '\n':
+                    if end < len(text) and text[end] == "\n":
                         end += 1
                     return (block_start, end)
         i += 1
@@ -422,9 +433,9 @@ def _add_project_instance(
         f'{i3}(project "{project_name}"\n'
         f'{i4}(path "{instance_path}"\n'
         f'{i5}(reference "{new_ref}")\n'
-        f'{i5}(unit {unit})\n'
-        f'{i4})\n'
-        f'{i3})\n'
+        f"{i5}(unit {unit})\n"
+        f"{i4})\n"
+        f"{i3})\n"
     )
 
     # Locate the exact symbol block for this UUID using positional bounds
@@ -437,9 +448,9 @@ def _add_project_instance(
 
     # Case 1: Block already has an (instances) block — append a new project entry
     instances_pattern = re.compile(
-        r'(' + _WS + r'\(instances\n)'
-        r'(.*?)'
-        r'(' + _WS + r'\)\n' + _WS + r'\))',
+        r"(" + _WS + r"\(instances\n)"
+        r"(.*?)"
+        r"(" + _WS + r"\)\n" + _WS + r"\))",
         re.DOTALL,
     )
     inst_match = instances_pattern.search(block)
@@ -448,28 +459,19 @@ def _add_project_instance(
         if f'(project "{project_name}"' in instances_body:
             return text
         # Insert new project entry before the closing ) of the instances block
-        new_body = (
-            inst_match.group(1)
-            + instances_body
-            + instance_entry
-            + inst_match.group(3)
-        )
-        new_block = block[:inst_match.start()] + new_body + block[inst_match.end():]
+        new_body = inst_match.group(1) + instances_body + instance_entry + inst_match.group(3)
+        new_block = block[: inst_match.start()] + new_body + block[inst_match.end() :]
         return text[:block_start] + new_block + text[block_end:]
 
     # Case 2: No instances block.  Insert one before the symbol's closing ).
     # Find the closing ) of the symbol block — it is the last ) in the block.
     # The block ends with \n<ws>) so we insert the instances block before it.
-    close_pattern = re.compile(r'\n(' + _WS + r'\))$')
+    close_pattern = re.compile(r"\n(" + _WS + r"\))$")
     close_match = close_pattern.search(block)
     if close_match is None:
         return text
 
-    instances_block = (
-        f'{i2}(instances\n'
-        f'{instance_entry}'
-        f'{i2})\n'
-    )
+    instances_block = f"{i2}(instances\n{instance_entry}{i2})\n"
     insert_pos = close_match.start() + 1  # after the \n, before the <ws>)
     new_block = block[:insert_pos] + instances_block + block[insert_pos:]
     return text[:block_start] + new_block + text[block_end:]
@@ -516,9 +518,7 @@ def run_re_annotate(
         return 1
 
     # Detect project info for multi-project instance handling
-    project_name, root_uuid, file_instance_paths = _detect_project_info(
-        schematic_path, all_files
-    )
+    project_name, root_uuid, file_instance_paths = _detect_project_info(schematic_path, all_files)
 
     # Phase 1: Collect all symbols across hierarchy
     file_symbols: dict[Path, list[dict]] = {}
@@ -539,13 +539,19 @@ def run_re_annotate(
 
     if per_sheet:
         uuid_mapping = _build_per_sheet_mapping(
-            all_files, file_symbols, prefixes, start_from,
+            all_files,
+            file_symbols,
+            prefixes,
+            start_from,
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
     else:
         uuid_mapping = _build_continuous_mapping(
-            all_files, file_symbols, prefixes, start_from,
+            all_files,
+            file_symbols,
+            prefixes,
+            start_from,
             unannotated_only=unannotated_only,
             include_power=include_power,
         )
@@ -556,8 +562,7 @@ def run_re_annotate(
 
     # Filter out identity mappings
     effective_mapping = {
-        uid: info for uid, info in uuid_mapping.items()
-        if info["old"] != info["new"]
+        uid: info for uid, info in uuid_mapping.items() if info["old"] != info["new"]
     }
 
     if not effective_mapping:
@@ -567,12 +572,11 @@ def run_re_annotate(
     # Phase 3: Output mapping / apply changes
     if format == "json":
         import json
+
         output = {
             "mappings": [
                 {"old": info["old"], "new": info["new"], "uuid": uid}
-                for uid, info in sorted(
-                    effective_mapping.items(), key=lambda x: x[1]["new"]
-                )
+                for uid, info in sorted(effective_mapping.items(), key=lambda x: x[1]["new"])
             ],
             "total": len(effective_mapping),
             "dry_run": dry_run,
@@ -584,9 +588,7 @@ def run_re_annotate(
 
         # Group by prefix for display
         by_prefix: dict[str, list[tuple[str, str]]] = {}
-        for uid, info in sorted(
-            effective_mapping.items(), key=lambda x: x[1]["new"]
-        ):
+        for uid, info in sorted(effective_mapping.items(), key=lambda x: x[1]["new"]):
             prefix, _, _ = _parse_reference(info["new"])
             by_prefix.setdefault(prefix, []).append((info["old"], info["new"]))
 
@@ -620,11 +622,13 @@ def run_re_annotate(
             if uid not in uuids_in_file:
                 continue
             if info["unannotated"]:
-                unannotated_entries.append({
-                    "uuid": uid,
-                    "old": info["old"],
-                    "new": info["new"],
-                })
+                unannotated_entries.append(
+                    {
+                        "uuid": uid,
+                        "old": info["old"],
+                        "new": info["new"],
+                    }
+                )
             else:
                 if info["old"] != info["new"]:
                     annotated_mapping[info["old"]] = info["new"]
@@ -651,9 +655,7 @@ def run_re_annotate(
         # Step B: Handle unannotated refs with UUID-targeted replacement
         instance_path = file_instance_paths.get(sch_file, "")
         for entry in unannotated_entries:
-            current_text = _apply_uuid_reference_rename(
-                current_text, entry["uuid"], entry["new"]
-            )
+            current_text = _apply_uuid_reference_rename(current_text, entry["uuid"], entry["new"])
             # Add project instance entry
             if instance_path:
                 current_text = _add_project_instance(
@@ -712,9 +714,13 @@ def _build_continuous_mapping(
         syms_sorted = sorted(syms, key=lambda s: (s["position_y"], s["position_x"]))
         ordered_symbols.extend(syms_sorted)
 
-    return _assign_numbers(ordered_symbols, prefixes, start_from,
-                           unannotated_only=unannotated_only,
-                           include_power=include_power)
+    return _assign_numbers(
+        ordered_symbols,
+        prefixes,
+        start_from,
+        unannotated_only=unannotated_only,
+        include_power=include_power,
+    )
 
 
 def _build_per_sheet_mapping(
@@ -732,9 +738,13 @@ def _build_per_sheet_mapping(
     for sch_file in all_files:
         syms = file_symbols[sch_file]
         syms_sorted = sorted(syms, key=lambda s: (s["position_y"], s["position_x"]))
-        sheet_mapping = _assign_numbers(syms_sorted, prefixes, start_from,
-                                        unannotated_only=unannotated_only,
-                                        include_power=include_power)
+        sheet_mapping = _assign_numbers(
+            syms_sorted,
+            prefixes,
+            start_from,
+            unannotated_only=unannotated_only,
+            include_power=include_power,
+        )
         mapping.update(sheet_mapping)
 
     return mapping
@@ -768,7 +778,9 @@ def _assign_numbers(
 
     if unannotated_only:
         return _assign_numbers_unannotated_only(
-            symbols, prefixes, start_from,
+            symbols,
+            prefixes,
+            start_from,
             include_power=include_power,
         )
 
@@ -928,9 +940,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
     parser.add_argument(
         "--prefix",
         help="Comma-separated list of prefixes to renumber (e.g., R,C,U)",

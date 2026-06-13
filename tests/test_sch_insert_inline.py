@@ -7,23 +7,20 @@ rejection, and gap-too-small error without --expand-gap.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli.sch_insert_inline import (
-    PlannedAction,
-    _auto_reference,
     _auto_rotation_for_wire,
     _compute_pin_span,
     _is_axis_aligned,
     _is_horizontal,
-    _shift_downstream_wires,
     _snap,
     _wire_length,
+)
+from kicad_tools.cli.sch_insert_inline import (
     main as insert_inline_main,
-    run_insert_inline,
 )
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.library import LibraryPin, LibrarySymbol
@@ -199,12 +196,20 @@ class TestHelpers:
             properties={},
             pins=[
                 LibraryPin(
-                    number="1", name="K", type="passive",
-                    position=(0, 2.54), rotation=270, length=1.27,
+                    number="1",
+                    name="K",
+                    type="passive",
+                    position=(0, 2.54),
+                    rotation=270,
+                    length=1.27,
                 ),
                 LibraryPin(
-                    number="2", name="A", type="passive",
-                    position=(0, -2.54), rotation=90, length=1.27,
+                    number="2",
+                    name="A",
+                    type="passive",
+                    position=(0, -2.54),
+                    rotation=90,
+                    length=1.27,
                 ),
             ],
         )
@@ -218,12 +223,20 @@ class TestHelpers:
             properties={},
             pins=[
                 LibraryPin(
-                    number="1", name="K", type="passive",
-                    position=(0, 2.54), rotation=270, length=1.27,
+                    number="1",
+                    name="K",
+                    type="passive",
+                    position=(0, 2.54),
+                    rotation=270,
+                    length=1.27,
                 ),
                 LibraryPin(
-                    number="2", name="A", type="passive",
-                    position=(0, -2.54), rotation=90, length=1.27,
+                    number="2",
+                    name="A",
+                    type="passive",
+                    position=(0, -2.54),
+                    rotation=90,
+                    length=1.27,
                 ),
             ],
         )
@@ -236,12 +249,20 @@ class TestHelpers:
             properties={},
             pins=[
                 LibraryPin(
-                    number="1", name="K", type="passive",
-                    position=(0, 2.54), rotation=270, length=1.27,
+                    number="1",
+                    name="K",
+                    type="passive",
+                    position=(0, 2.54),
+                    rotation=270,
+                    length=1.27,
                 ),
                 LibraryPin(
-                    number="2", name="A", type="passive",
-                    position=(0, -2.54), rotation=90, length=1.27,
+                    number="2",
+                    name="A",
+                    type="passive",
+                    position=(0, -2.54),
+                    rotation=90,
+                    length=1.27,
                 ),
             ],
         )
@@ -258,15 +279,25 @@ class TestInsertInlineHorizontal:
     def test_basic_insert(self, tmp_path):
         """Insert a Device:D diode into a horizontal wire with sufficient gap."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "120", "50",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "120",
+                "50",
+            ]
+        )
         assert rc == 0
 
         # Reload and verify
@@ -275,8 +306,10 @@ class TestInsertInlineHorizontal:
         wire_endpoints = [(w.start, w.end) for w in sch.wires]
         # Should NOT have the original (100,50)->(120,50) wire
         original_present = any(
-            abs(s[0] - 100) < 0.5 and abs(s[1] - 50) < 0.5
-            and abs(e[0] - 120) < 0.5 and abs(e[1] - 50) < 0.5
+            abs(s[0] - 100) < 0.5
+            and abs(s[1] - 50) < 0.5
+            and abs(e[0] - 120) < 0.5
+            and abs(e[1] - 50) < 0.5
             for s, e in wire_endpoints
         )
         assert not original_present, "Original wire should have been removed"
@@ -294,16 +327,26 @@ class TestInsertInlineHorizontal:
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
         original_content = sch_path.read_text()
 
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "120", "50",
-            "--dry-run",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "120",
+                "50",
+                "--dry-run",
+            ]
+        )
         assert rc == 0
         assert sch_path.read_text() == original_content
 
@@ -311,16 +354,26 @@ class TestInsertInlineHorizontal:
         """Backup flag should create a backup file."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
 
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "120", "50",
-            "--backup",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "120",
+                "50",
+                "--backup",
+            ]
+        )
         assert rc == 0
 
         backup_files = list(tmp_path.glob("*.backup-*"))
@@ -330,14 +383,22 @@ class TestInsertInlineHorizontal:
         """--near should find the nearest wire and insert there."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
 
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--near", "110", "50",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--near",
+                "110",
+                "50",
+            ]
+        )
         assert rc == 0
 
         sch = Schematic.load(sch_path)
@@ -354,15 +415,25 @@ class TestInsertInlineVertical:
     def test_basic_insert(self, tmp_path):
         """Insert a Device:D diode into a vertical wire."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_VERTICAL_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "1N4148",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "100", "70",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "1N4148",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "100",
+                "70",
+            ]
+        )
         assert rc == 0
 
         sch = Schematic.load(sch_path)
@@ -380,30 +451,50 @@ class TestGapExpansion:
     def test_gap_too_small_without_expand(self, tmp_path):
         """Without --expand-gap, inserting into a short wire should fail."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_SHORT_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "102", "50",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "102",
+                "50",
+            ]
+        )
         assert rc == 1  # Should fail
 
     def test_gap_expansion_succeeds(self, tmp_path):
         """With --expand-gap, a short wire should be expanded."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_SHORT_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "102", "50",
-            "--expand-gap",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "102",
+                "50",
+                "--expand-gap",
+            ]
+        )
         assert rc == 0
 
         sch = Schematic.load(sch_path)
@@ -420,69 +511,116 @@ class TestErrors:
     def test_diagonal_wire_rejected(self, tmp_path):
         """Diagonal wires should produce an error."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_DIAGONAL_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "110", "60",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "110",
+                "60",
+            ]
+        )
         assert rc == 1
 
     def test_no_wire_found(self, tmp_path):
         """Specifying endpoints that don't match should fail."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "200", "200",
-            "--to", "300", "200",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "200",
+                "200",
+                "--to",
+                "300",
+                "200",
+            ]
+        )
         assert rc == 1
 
     def test_mutual_exclusion_from_near(self, tmp_path):
         """--from/--to and --near are mutually exclusive."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "120", "50",
-            "--near", "110", "50",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "120",
+                "50",
+                "--near",
+                "110",
+                "50",
+            ]
+        )
         assert rc == 1
 
     def test_neither_from_nor_near(self, tmp_path):
         """Must specify either --from/--to or --near."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+            ]
+        )
         assert rc == 1
 
     def test_auto_reference(self, tmp_path):
         """When --reference is omitted, auto-assign from prefix."""
         sch_path = _write_sch(tmp_path, SCHEMATIC_HORIZONTAL_WIRE)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "120", "50",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "120",
+                "50",
+            ]
+        )
         assert rc == 0
 
         sch = Schematic.load(sch_path)
@@ -501,17 +639,25 @@ class TestEdgeCases:
         """Wire length exactly equals pin span -- no gap expansion needed."""
         # The Device:D has pin span ~5.08 mm at rotation 90 (horizontal).
         # Create a wire that is exactly 5.08 mm long.
-        content = SCHEMATIC_HORIZONTAL_WIRE.replace(
-            "(xy 120 50)", "(xy 105.08 50)"
-        )
+        content = SCHEMATIC_HORIZONTAL_WIRE.replace("(xy 120 50)", "(xy 105.08 50)")
         sch_path = _write_sch(tmp_path, content)
-        rc = insert_inline_main([
-            str(sch_path),
-            "--lib-id", "Device:D",
-            "--reference", "D1",
-            "--value", "BAT54",
-            "--footprint", "Diode_SMD:D_SOD-323",
-            "--from", "100", "50",
-            "--to", "105.08", "50",
-        ])
+        rc = insert_inline_main(
+            [
+                str(sch_path),
+                "--lib-id",
+                "Device:D",
+                "--reference",
+                "D1",
+                "--value",
+                "BAT54",
+                "--footprint",
+                "Diode_SMD:D_SOD-323",
+                "--from",
+                "100",
+                "50",
+                "--to",
+                "105.08",
+                "50",
+            ]
+        )
         assert rc == 0

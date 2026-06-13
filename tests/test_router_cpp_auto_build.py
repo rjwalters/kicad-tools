@@ -437,9 +437,7 @@ class TestReloadCppBackend:
             # state that the auto-build path would see.
             monkeypatch.setattr(cpp_backend, "_CPP_AVAILABLE", False)
             monkeypatch.setattr(cpp_backend, "router_cpp", None)
-            monkeypatch.setattr(
-                cpp_backend, "_CPP_IMPORT_ERROR", "stub: simulated startup failure"
-            )
+            monkeypatch.setattr(cpp_backend, "_CPP_IMPORT_ERROR", "stub: simulated startup failure")
 
             recovered = cpp_backend._reload_cpp_backend()
 
