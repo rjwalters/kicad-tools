@@ -4005,6 +4005,21 @@ class DiffPairRouter:
         # (~90k iterations for ONE 5-point shell on board 06) and no
         # CI-affordable iteration budget converges.  See the
         # ``heuristic_weight`` rationale in ``CoupledPathfinder``.
+        #
+        # Issue #3547: the weighted-A* search upgrade is gated behind
+        # ``enable_shadow_construction``.  Weighting the heuristic changes
+        # WHICH joint states the always-running coupled pre-phase explores
+        # (goal-ward gradient dominates shell-flooding), so a search that
+        # DEFERRED on the pre-#3508 baseline can CONVERGE with the flag
+        # off -- committing a route where main deferred re-exposes the
+        # gated hazards (#3542 corridor competition, #3544 pre-phase
+        # seg-seg violations).  With the shadow constructor disabled
+        # (default) fall back to classic optimal A* (``heuristic_weight=
+        # 1.0``), the pre-#3508 search behaviour, so a flag-off run keeps
+        # recipes on their pre-#3508 budget-exit path.
+        coupled_heuristic_weight = (
+            COUPLED_HEURISTIC_WEIGHT if self.enable_shadow_construction else 1.0
+        )
         pathfinder = CoupledPathfinder(
             self.autorouter.grid,
             self.autorouter.rules,
@@ -4012,7 +4027,7 @@ class DiffPairRouter:
             net_class_map=self.autorouter.net_class_map,
             allow_swap_via=False,  # Issue #3508: see rationale above
             min_spacing_cells=min_spacing_cells,
-            heuristic_weight=COUPLED_HEURISTIC_WEIGHT,
+            heuristic_weight=coupled_heuristic_weight,
         )
 
         routes: list[Route] = []
@@ -4287,7 +4302,20 @@ class DiffPairRouter:
             # routinely.  The resulting tail (<= ~2 mm of a 30-50 mm
             # route) keeps the coupled-length fraction far above every
             # ``coupled_continuity_threshold`` in use (0.7-0.9).
-            if result is None and pathfinder.last_best_node is not None:
+            # Issue #3547: the near-miss rescue commits a coupled body +
+            # single-ended tails for a search that DEFERRED on the
+            # pre-#3508 baseline.  Committing where main deferred
+            # re-exposes the exact hazards the gate exists to suppress
+            # (#3542 corridor competition stranding singles, #3544
+            # pre-phase copper seg-seg violations).  Gate the rescue on
+            # ``enable_shadow_construction`` so a flag-off run never
+            # invokes it -- the pre-phase may only defer, matching the
+            # pre-#3508 budget-exit behaviour.
+            if (
+                self.enable_shadow_construction
+                and result is None
+                and pathfinder.last_best_node is not None
+            ):
                 if pathfinder.last_best_progress <= NEAR_MISS_RESCUE_CELLS:
                     rescue = self._rescue_near_miss_coupled(pair, spec, pathfinder)
                     if rescue is not None:
