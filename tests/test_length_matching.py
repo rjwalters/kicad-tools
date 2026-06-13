@@ -444,6 +444,58 @@ class TestSerpentineGenerator:
             assert s.net == 42
             assert s.net_name == "SIGNAL"
 
+    @pytest.mark.parametrize(
+        ("x2", "y2"),
+        [
+            (20.0, 0.0),  # horizontal host
+            (0.0, 20.0),  # vertical host
+            (14.0, 14.0),  # exact-45 host
+            (20.0, 6.0),  # ~16.7-degree off-axis host (A* staircase collapse)
+            (6.0, 20.0),  # ~73-degree steep off-axis host
+            (20.0, 19.0),  # near-45 (~43.5-degree) host
+        ],
+    )
+    def test_generate_trombone_emits_only_45_aligned_copper(self, generator, x2, y2):
+        """Issue #3535: every emitted meander leg is on {0,45,90,135}.
+
+        A* frequently hands the length tuner host segments that are not
+        axis-aligned (rip-up/re-route staircases collapse to diagonal-
+        but-not-exactly-45 runs).  Travelling along the host's raw slope
+        used to make every emitted leg inherit that off-angle direction
+        (board 07 shipped 55 such segments).  The emitter now snaps the
+        travel direction to the legal 8-direction set and quantizes the
+        closing exit leg, so the meander is 45-aligned by construction
+        regardless of host slope -- and the endpoints stay pinned so
+        connectivity is preserved.
+        """
+        from kicad_tools.router.quantize import off_angle_degrees
+
+        seg = Segment(
+            x1=0.0, y1=0.0, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="DQ0"
+        )
+        result = generator.generate_trombone(seg, target_length_add=3.0)
+        assert result.success
+        assert result.new_segments
+
+        # Every leg is 45-aligned (zero-length legs are never emitted).
+        off_angle = [
+            s for s in result.new_segments if off_angle_degrees(s.x2 - s.x1, s.y2 - s.y1) > 0.01
+        ]
+        assert not off_angle, (
+            f"host ({x2}, {y2}) produced {len(off_angle)} off-angle meander "
+            f"leg(s): {[(s.x1, s.y1, s.x2, s.y2) for s in off_angle]}"
+        )
+
+        # Endpoints pinned + chain contiguous (connectivity preserved).
+        first, last = result.new_segments[0], result.new_segments[-1]
+        assert (first.x1, first.y1) == (seg.x1, seg.y1)
+        assert (last.x2, last.y2) == (seg.x2, seg.y2)
+        for a, b in zip(result.new_segments[:-1], result.new_segments[1:], strict=True):
+            assert (a.x2, a.y2) == (b.x1, b.y1)
+
+        # The tuner still gets useful added length to converge on.
+        assert result.length_added > 0.0
+
     def test_add_serpentine_increases_length(self, generator, long_horizontal_route):
         """Test that add_serpentine increases route length."""
         original_length = LengthTracker.calculate_route_length(long_horizontal_route)

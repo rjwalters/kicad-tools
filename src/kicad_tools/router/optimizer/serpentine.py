@@ -19,6 +19,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 from ..primitives import Route, Segment
+from ..quantize import dogleg_points, is_45_aligned, snap_direction_8
 from .geometry import segment_length
 
 if TYPE_CHECKING:
@@ -193,9 +194,23 @@ class SerpentineGenerator:
                 message=f"Segment too short ({length:.2f}mm < {self.config.min_segment_length:.2f}mm)",
             )
 
-        # Unit vectors
-        ux, uy = dx / length, dy / length  # Along segment
-        px, py = -uy, ux  # Perpendicular (90 degrees CCW)
+        # Unit vectors.  Issue #3535: the meander emitter must produce
+        # ONLY 45-aligned copper (the {0, 45, 90, 135} angle set), the
+        # same manufacturability convention enforced fleet-wide by the
+        # #3532 quantizer.  A* hands the length tuner host segments that
+        # are frequently NOT axis-aligned (rip-up/re-route staircases
+        # collapse to diagonal-but-not-exactly-45 runs).  Travelling
+        # along the host's RAW direction makes every emitted leg inherit
+        # that off-angle slope, so we snap the along-segment direction to
+        # the nearest legal routing direction and build the trombone in
+        # that snapped frame.  The perpendicular of a snapped direction
+        # is itself a legal direction (rotating a member of the 8-set by
+        # 90 degrees stays in the 8-set), so every internally-emitted leg
+        # is 45-aligned by construction.  The endpoints stay pinned, so
+        # connectivity is bit-for-bit preserved; only the closing exit
+        # leg may need a dogleg (see below).
+        ux, uy = snap_direction_8(dx, dy)  # Along segment (snapped to 8-dir)
+        px, py = -uy, ux  # Perpendicular (90 degrees CCW) -- also a legal dir
 
         # Issue #2648: when the caller asks for a single-sided trombone
         # (``side="outer"`` or ``"inner"``), pick the half-plane defined
@@ -358,19 +373,29 @@ class SerpentineGenerator:
             if alternate_direction:
                 direction *= -1
 
-        # Exit: connect to original segment end
-        new_segments.append(
-            Segment(
-                x1=current_x,
-                y1=current_y,
-                x2=segment.x2,
-                y2=segment.y2,
-                width=segment.width,
-                layer=segment.layer,
-                net=segment.net,
-                net_name=segment.net_name,
+        # Exit: connect back to the original segment end.  Because the
+        # loops advanced along the SNAPPED direction (not the host's raw
+        # slope), the straight chord from the last loop endpoint to the
+        # pinned end point may itself be off-angle.  Route it through the
+        # 45-quantizer (Issue #3535): an already-aligned chord stays a
+        # single segment; an off-angle chord becomes a two-leg dogleg
+        # (one exact 45-degree leg + one axis leg).  Endpoints unchanged.
+        exit_pts = dogleg_points(current_x, current_y, segment.x2, segment.y2)
+        for (sx, sy), (ex, ey) in zip(exit_pts[:-1], exit_pts[1:], strict=True):
+            if sx == ex and sy == ey:
+                continue  # skip a degenerate zero-length leg
+            new_segments.append(
+                Segment(
+                    x1=sx,
+                    y1=sy,
+                    x2=ex,
+                    y2=ey,
+                    width=segment.width,
+                    layer=segment.layer,
+                    net=segment.net,
+                    net_name=segment.net_name,
+                )
             )
-        )
 
         # Calculate actual length added
         original_length = segment_length(segment)
