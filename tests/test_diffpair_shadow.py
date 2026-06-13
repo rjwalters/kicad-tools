@@ -625,3 +625,132 @@ def test_flag_on_invokes_near_miss_rescue(monkeypatch):
     assert calls["n"] == 1, (
         "near-miss rescue must be invoked when enable_shadow_construction is True"
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. Issue #3540: transactional pad-connectivity claim
+#
+# The shadow constructor (and its rescue-tail / stub-edge machinery) can
+# commit copper that fails to actually REACH a goal pad while the per-spec
+# commit has already marked that copper on the grid.  Left as-is the caller
+# claims the pair's nets (#2464 reserve), the negotiated main strategy
+# skips them, and the goal pads are STRANDED for the rest of the pipeline.
+#
+# ``route_differential_pair_coupled`` must make the claim TRANSACTIONAL:
+# after committing the pair's copper (body + tails + stub edges), it
+# verifies every pad of BOTH nets is reached.  On any gap it rips the
+# pair's copper off the grid + route list and defers the whole pair
+# (returns ``([], None)`` under ``coupled_only`` so the caller never
+# claims, or falls through to the single-ended router otherwise).
+# ---------------------------------------------------------------------------
+
+
+def _coupled_routes_for_pair(pair, p_end_x: float, n_end_x: float) -> tuple[Route, Route]:
+    """Build a committable (P, N) result for the 2-pad fixture.
+
+    The U1 pads sit at x=5.0 and the J1 pads at x=25.0 (y=4.8 for P,
+    y=5.2 for N).  Each returned route is a single horizontal segment
+    from the U1 pad to ``*_end_x``; passing 25.0 reaches the J1 goal
+    pad, while a shorter value (e.g. 15.0) STRANDS it -- the exact
+    "claimed-but-unconnected goal pad" failure mode #3540 fixes.
+    """
+    p_route = Route(net=pair.positive.net_id, net_name=pair.positive.net_name)
+    p_route.segments.append(
+        Segment(
+            x1=5.0,
+            y1=4.8,
+            x2=p_end_x,
+            y2=4.8,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=pair.positive.net_id,
+            net_name=pair.positive.net_name,
+        )
+    )
+    n_route = Route(net=pair.negative.net_id, net_name=pair.negative.net_name)
+    n_route.segments.append(
+        Segment(
+            x1=5.0,
+            y1=5.2,
+            x2=n_end_x,
+            y2=5.2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=pair.negative.net_id,
+            net_name=pair.negative.net_name,
+        )
+    )
+    return p_route, n_route
+
+
+def test_shadow_claim_rolls_back_when_goal_pad_stranded(monkeypatch):
+    """Flag ON + a committed route that strands a goal pad -> full rollback.
+
+    The stub pathfinder converges with a P route that stops at x=15.0 --
+    10 mm short of the J1.1 goal pad at x=25.0 -- so the P net has only
+    1 of its 2 pads reachable from the committed copper.  The
+    transactional claim must:
+
+      * NOT return any routes (so the caller never claims the nets),
+      * leave the autorouter's route list empty (the committed P and N
+        copper is ripped), and
+      * unmark every cell it had marked on the grid (no stranded copper).
+    """
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = True
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+    # P strands its J1 goal pad (stops at x=15.0); N reaches its goal.
+    stranded = _coupled_routes_for_pair(pair, p_end_x=15.0, n_end_x=25.0)
+    _patch_pathfinder_capture_weight(monkeypatch, stranded, rescue_eligible=False)
+
+    grid = router.grid
+
+    def _pair_cell_count() -> int:
+        net_arr = grid._net
+        return int(((net_arr == pair.positive.net_id) | (net_arr == pair.negative.net_id)).sum())
+
+    occupied_before = _pair_cell_count()
+
+    routes, warning = dpr.route_differential_pair_coupled(pair, coupled_only=True)
+
+    assert routes == [], (
+        "a shadow pair that strands a goal pad must NOT return routes "
+        "(returning routes is what makes the caller claim the nets)"
+    )
+    assert warning is None
+    # The committed copper was ripped from the autorouter's route list.
+    assert not any(r.net in (pair.positive.net_id, pair.negative.net_id) for r in router.routes), (
+        "stranded pair copper must be removed from autorouter.routes on rollback"
+    )
+    # And every cell it marked on the grid was unmarked (clean rollback).
+    occupied_after = _pair_cell_count()
+    assert occupied_after == occupied_before, (
+        "rollback must unmark the stranded pair's copper from the grid "
+        f"(cells before={occupied_before}, after={occupied_after})"
+    )
+
+
+def test_shadow_claim_commits_when_all_pads_reached(monkeypatch):
+    """Control: a shadow pair that reaches every goal pad IS claimed.
+
+    Same converged-search setup as the rollback test, but both routes run
+    fully from the U1 pads to the J1 pads, so both nets are fully
+    connected.  The transactional check must let the claim stand: routes
+    are returned and the copper stays committed on the autorouter.
+    """
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = True
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+    good = _coupled_routes_for_pair(pair, p_end_x=25.0, n_end_x=25.0)
+    _patch_pathfinder_capture_weight(monkeypatch, good, rescue_eligible=False)
+
+    routes, _warning = dpr.route_differential_pair_coupled(pair, coupled_only=True)
+
+    p_nets = {r.net for r in routes}
+    assert pair.positive.net_id in p_nets and pair.negative.net_id in p_nets, (
+        "a fully-connected shadow pair must return both nets' routes so the caller claims them"
+    )
+    assert any(r.net == pair.positive.net_id for r in router.routes)
+    assert any(r.net == pair.negative.net_id for r in router.routes)
