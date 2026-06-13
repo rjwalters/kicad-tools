@@ -1537,6 +1537,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "42",
         "--timeout",
         "600",
+        # Issue #3538: bound the per-net A* search by an ITERATION budget
+        # (fixed node-expansion count) instead of the per-net wall-clock
+        # cutoff, so the seed-42 re-route lands the SAME copper -- and the
+        # SAME DRC count -- regardless of runner speed/load.  This is the
+        # fix for the "#3466 wall-clock-budget cliff" that forced the
+        # board-07 floor in .github/routed-drc-tolerance.yml to absorb a
+        # machine-variance band (21 -> 28 -> 34 -> ...).  --timeout 600
+        # above is now a SAFETY backstop only; the iteration budget is the
+        # binding constraint.  Combined with --seed 42 + PYTHONHASHSEED=42
+        # the re-route is reproducible across CI ubuntu-latest and local
+        # macOS arm64.
+        "--deterministic-budget",
         "--skip-nets",
         ",".join(skip_nets),
         "--net-class-map",

@@ -225,6 +225,13 @@ def run_route_command(args) -> int:
     max_iter_val = getattr(args, "max_search_iterations", 0) or 0
     if max_iter_val:
         sub_argv.extend(["--max-search-iterations", str(max_iter_val)])
+    # Issue #3538: forward --deterministic-budget to the inner parser.  Both
+    # sites declare it as store_true defaulting to False, so only forward when
+    # the user passed it (matches the --targeted-ripup pattern above).  The
+    # inner ``route_cmd._normalize_deterministic_budget`` then disables the
+    # per-net wall-clock cutoff and pins the iteration backstop.
+    if getattr(args, "deterministic_budget", False):
+        sub_argv.append("--deterministic-budget")
     if args.verbose:
         sub_argv.append("--verbose")
     if args.dry_run:
