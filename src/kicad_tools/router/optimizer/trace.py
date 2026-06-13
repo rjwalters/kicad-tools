@@ -61,6 +61,20 @@ def optimize_routes_grid_synced(
     optimized geometry is unchanged are skipped (the incremental
     unmark-old/mark-new perf shape).
 
+    Issue #3511: the incremental per-route unmark is net-guarded but
+    geometry-scoped -- ``grid.unmark_route(route)`` clears every cell the
+    OLD envelope owned, including cells that a same-net SIBLING route
+    (left geometry-unchanged by the optimizer) still occupies where the
+    two envelopes overlapped.  The per-route ``mark_route`` only re-marks
+    the mutated route's NEW geometry, so the sibling's cells inside the
+    old overlap region stay cleared and the grid under-blocks real
+    own-net copper.  To close that asymmetry we collect the
+    ``(old, new)`` pair for every mutated route and issue ONE batched
+    :meth:`RoutingGrid.resync_route_occupancy` after the loop: its step-4
+    affected-net re-mark restores the sibling cells, and its single
+    wholesale R-tree rebuild keeps the pass O(n) (calling resync per
+    route would re-rebuild the R-trees n times -- the O(n^2) trap).
+
     Args:
         router: ``Autorouter`` whose ``routes`` will be optimized and
             replaced in place.
@@ -79,6 +93,10 @@ def optimize_routes_grid_synced(
     """
     grid = router.grid
     optimized_routes: list[Route] = []
+    # Issue #3511: (old, new) pairs for every MUTATED route, replayed
+    # through a single batched resync after the loop so same-net sibling
+    # cells cleared by an incremental unmark are re-marked.
+    mutated_pairs: list[tuple[Route, Route]] = []
     for route in router.routes:
         if skip_nets is not None and route.net in skip_nets:
             optimized_routes.append(route)
@@ -97,11 +115,26 @@ def optimize_routes_grid_synced(
             continue
         # Incremental grid transaction: rip the old copper (cells +
         # R-trees + grid.routes + C++ mirror + stored-route snapshot
-        # invalidation), then commit the new copper on both grids.
+        # invalidation), then commit the new copper on both grids.  Route
+        # ``i`` must collision-check against the POST-opt copper of routes
+        # ``0..i-1``, so this stays incremental -- the batched resync
+        # below only repairs same-net sibling under-marking, it does not
+        # replace the per-route transaction.
         grid.unmark_route(route)
         grid.mark_route(optimized)
         grid._mark_route_on_cpp_cells(optimized)
+        mutated_pairs.append((route, optimized))
     router.routes = optimized_routes
+    # Issue #3511: ONE batched repair after the loop.  The incremental
+    # per-route ``unmark_route`` above clears every cell the old envelope
+    # owned, which can blank cells still occupied by a geometry-unchanged
+    # same-net sibling route where the envelopes overlapped; the per-route
+    # ``mark_route`` only re-marks the mutated route's new geometry.
+    # ``resync_route_occupancy``'s affected-net re-mark (its step 4)
+    # restores those sibling cells, and its single wholesale R-tree
+    # rebuild keeps the pass O(n) -- do NOT call it per route.
+    if mutated_pairs:
+        grid.resync_route_occupancy(mutated_pairs)
     return optimized_routes
 
 

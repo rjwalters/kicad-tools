@@ -209,6 +209,52 @@ class TestResyncRouteOccupancy:
         _assert_marked(router.grid, mutated)
         _assert_unmarked(router.grid, snapshot.segments[0])
 
+    def test_resync_defers_cpp_unmark_inside_window(self):
+        """Issue #3511 secondary: with a corridor-reservation window open
+        (``begin_cpp_unmark_deferral``), ``resync_route_occupancy`` must
+        QUEUE the stale C++ unmark into ``_deferred_cpp_unmarks`` rather
+        than applying it immediately, and the flush must apply it -- the
+        same defer-don't-apply contract ``unmark_route`` honors.  This
+        branch (grid.py step 1) is otherwise unexercised because the
+        post-route passes run after the negotiated loop closes its
+        windows; the test pins it so a future in-window caller is
+        protected."""
+        router = _make_router()
+        grid = router.grid
+        live = _make_route(9, "I", [(5.0, 10.0), (20.0, 10.0)])
+        _commit(router, live)
+
+        snapshot = live.copy_geometry()
+        live.segments[0].y1 = 25.0
+        live.segments[0].y2 = 25.0
+
+        applied: list[Route] = []
+        with patch.object(
+            grid,
+            "_unmark_route_on_cpp_cells",
+            side_effect=lambda route, **_kw: applied.append(route),
+        ):
+            grid.begin_cpp_unmark_deferral()
+            changed = grid.resync_route_occupancy([(snapshot, live)])
+
+            assert changed == 1
+            # The stale C++ unmark is QUEUED, not applied, while the
+            # window is open.
+            assert applied == []
+            queued = [r for r, _mtw in grid._deferred_cpp_unmarks]
+            assert snapshot in queued
+
+            # Flushing the window applies exactly the queued stale unmark.
+            flushed = grid.flush_cpp_unmark_deferral()
+
+        assert snapshot in flushed
+        assert snapshot in applied
+        assert grid._deferred_cpp_unmarks == []
+        assert grid._cpp_unmark_deferred is False
+        # The Python grid is unaffected by deferral (unmarked immediately).
+        _assert_unmarked(grid, snapshot.segments[0])
+        _assert_marked(grid, live)
+
     def test_segment_rtree_rebuilt_from_current_geometry(self):
         router = _make_router()
         grid = router.grid
@@ -262,6 +308,58 @@ class TestOptimizeRoutesGridSynced:
         # same object (no stale twin for later resyncs to re-mark).
         assert router.routes[0] is route
         assert router.grid.routes[0] is route
+
+    def test_same_net_sibling_cells_survive_optimize_loop(self):
+        """Issue #3511: the incremental per-route unmark clears every cell
+        the OLD envelope owned, including cells a geometry-unchanged
+        same-net SIBLING route still occupies where the envelopes
+        overlapped.  The per-route ``mark_route`` only re-marks the
+        mutated route's NEW geometry, so without the batched
+        post-loop resync the sibling's cells in the old overlap region
+        stay blank.  The trailing ``resync_route_occupancy`` must
+        re-mark them."""
+        router = _make_router()
+        # A vertical sibling the optimizer cannot simplify (single
+        # segment) crossing a horizontal mutated route at (10, 10).
+        sibling = _make_route(5, "E", [(10.0, 5.0), (10.0, 15.0)])
+        # Collinear 3-point horizontal route through the crossing point:
+        # merge_collinear collapses it to one segment from (5,10)-(20,10),
+        # so the route is MUTATED (new object) and its old envelope
+        # overlapped the sibling at (10, 10).
+        mutated = _make_route(5, "E", [(5.0, 10.0), (12.0, 10.0), (20.0, 10.0)])
+        _commit(router, sibling)
+        _commit(router, mutated)
+
+        optimizer = TraceOptimizer(config=OptimizationConfig(merge_collinear=True))
+        optimize_routes_grid_synced(router, optimizer)
+
+        by_net_segments = {len(r.segments) for r in router.routes}
+        # The mutated route really did collapse (3 points -> 1 segment).
+        assert 1 in by_net_segments
+        # The unchanged sibling's copper -- including the crossing cell at
+        # (10, 10) the mutated route's old envelope also owned -- must
+        # still be marked after the loop's batched resync.
+        _assert_marked(router.grid, sibling)
+        for r in router.routes:
+            _assert_marked(router.grid, r)
+        # Grid bookkeeping still mirrors router.routes (no stale twins).
+        assert _grid_route_geometries(router.grid) == _router_route_geometries(router)
+
+    def test_no_resync_when_nothing_mutated(self):
+        """Issue #3511: when no route changes geometry the loop must not
+        invoke the (R-tree-rebuilding) resync at all."""
+        router = _make_router()
+        route = _make_route(2, "B", [(5.0, 10.0), (20.0, 10.0)])
+        _commit(router, route)
+
+        optimizer = TraceOptimizer(config=OptimizationConfig(merge_collinear=True))
+        with patch.object(
+            router.grid,
+            "resync_route_occupancy",
+            wraps=router.grid.resync_route_occupancy,
+        ) as spy:
+            optimize_routes_grid_synced(router, optimizer)
+        spy.assert_not_called()
 
 
 class TestNudgePassGridConsistency:
