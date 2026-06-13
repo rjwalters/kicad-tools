@@ -7073,6 +7073,12 @@ class EscapeRouter:
         )
         if conflicting is not None:
             self.adjacent_in_pad_via_conflicts_refused += 1
+            # ``_adjacent_in_pad_via_conflict`` only returns an EscapeRoute
+            # whose ``.via`` is non-None (it skips ``via is None`` siblings),
+            # so narrowing here is sound -- the local lets mypy prove the
+            # attribute access below type-checks (Via | None -> Via).
+            sibling_via = conflicting.via
+            assert sibling_via is not None
             logger.info(
                 "In-pad rescue REFUSED for pad %s (ref=%s pin=%s) at "
                 "(%.3f, %.3f): via barrel (OD %.3fmm) conflicts with the "
@@ -7089,8 +7095,8 @@ class EscapeRouter:
                 via_diameter,
                 conflicting.pad.pin,
                 conflicting.pad.net_name,
-                conflicting.via.x,
-                conflicting.via.y,
+                sibling_via.x,
+                sibling_via.y,
             )
             return None
 
