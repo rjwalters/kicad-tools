@@ -1374,28 +1374,86 @@ def _compute_pour_outlines(
         # Step 1: for each net, decide its "effective outline subtrahend"
         # used when carving lower-priority siblings.  Default = raw bbox.
         # If the raw bbox fully covers any lower-priority sibling's
-        # pad-safe bbox, downgrade this net's subtrahend to its OWN
-        # pad-safe bbox so the lower sibling can keep its copper.
+        # pad-safe bbox, the raw bbox over-claims space the sibling needs.
+        #
+        # Issue #3443: the legacy fix (#3240) collapsed the over-claiming
+        # net's entire outline to its tight 0.3 mm pad-safe bbox.  On
+        # board 05 the highest-priority pour (+24V) over-claims a sibling
+        # (+5V) whose pads sit *interleaved in the middle* of the +24V pad
+        # span, so +24V was uniformly shrunk to pad-safe -- including at
+        # its own exclusive extremes where the HS-MOSFET drain tabs
+        # (Q1/Q3/Q5) live.  That starved the thermal-stitch halo around
+        # those tabs of copper (issue #2901 AC #4 regressed).
+        #
+        # The narrower, geometry-correct disambiguation is to carve only
+        # the contested region out of the over-claiming net's RAW bbox:
+        #
+        #     effective_outline = raw - union(lower siblings' pad-safe bboxes)
+        #
+        # When the contested siblings touch or cross the net's bbox edge
+        # (the common case -- interleaved power rails on a shared layer),
+        # this difference is a single hole-free concave ("staircase")
+        # polygon that keeps the full raw margin at the net's exclusive
+        # extremes while yielding the inter-pad region to the siblings.
+        # Both the net's own outline AND its carving subtrahend use this
+        # polygon, so the disjoint-carve invariant is preserved (no
+        # silent overlap that the fill resolver would award away).
+        #
+        # KiCad zone outlines cannot carry holes, so when a sibling sits
+        # *strictly interior* (the difference would need a hole) we fall
+        # back to the #3240 pad-safe bbox -- the lower sibling still
+        # survives, just without the larger extreme-edge copper.
         effective_subtrahend: dict[str, list[tuple[float, float]] | None] = {}
         for idx, (net_name, _priority) in enumerate(nets_on_layer):
             raw = raw_bboxes.get(net_name)
             if raw is None:
                 continue
             pad_safe = pad_safe_bboxes.get(net_name)
-            downgrade = False
+            over_claims = False
+            lower_pad_safes: list[list[tuple[float, float]]] = []
             for lower_name, _lower_pri in nets_on_layer[idx + 1 :]:
                 lower_pad_safe = pad_safe_bboxes.get(lower_name)
                 if lower_pad_safe is None:
                     continue
+                lower_pad_safes.append(lower_pad_safe)
                 # Would subtracting RAW from lower_pad_safe leave empty?
                 test = _subtract_polygon(lower_pad_safe, raw)
                 if test is None:
                     # Yes: the raw bbox over-claims this lower sibling's
-                    # pad region.  Downgrade to pad-safe so the lower
-                    # sibling survives.
-                    downgrade = True
-                    break
-            if downgrade and pad_safe is not None:
+                    # pad region.  The raw bbox is too greedy and we must
+                    # carve the contested region out of it.
+                    over_claims = True
+
+            if not over_claims:
+                effective_subtrahend[net_name] = raw
+                continue
+
+            # Carve ALL lower siblings' pad-safe bboxes out of the RAW
+            # bbox.  Subtracting the full set (not just the enclosed
+            # sibling) preserves the disjoint-carve invariant AND tends to
+            # produce a hole-free result: a sibling that crosses the net's
+            # bbox edge "opens" what would otherwise be an interior hole
+            # into a concave staircase notch, which KiCad can represent.
+            # This keeps the over-claiming net's full raw margin at its
+            # exclusive extremes -- where board 05's HS-MOSFET drain tabs
+            # (Q1/Q3/Q5) sit -- instead of collapsing the whole outline to
+            # the tight pad-safe bbox the way #3240 did (issue #3443).
+            lower_union = None
+            for poly in lower_pad_safes:
+                lower_union = _union_polygons(lower_union, poly)
+            carved_raw = (
+                _subtract_polygon(raw, lower_union)
+                if lower_union is not None
+                else None
+            )
+            if carved_raw is not None:
+                # Hole-free staircase difference: keeps the raw extremes.
+                effective_subtrahend[net_name] = carved_raw
+            elif pad_safe is not None:
+                # The difference would need a hole (a sibling sits strictly
+                # interior with no edge-crossing neighbour to open it), or
+                # Shapely is unavailable: fall back to the #3240 pad-safe
+                # bbox so the lower sibling still survives.
                 effective_subtrahend[net_name] = pad_safe
             else:
                 effective_subtrahend[net_name] = raw
@@ -1409,9 +1467,10 @@ def _compute_pour_outlines(
             current = raw_bboxes[net_name]
 
             # The net's own outline: start with its raw bbox, but if its
-            # effective subtrahend was downgraded to pad-safe (meaning the
-            # raw bbox was too greedy), use the pad-safe bbox so the
-            # outline matches what we subtract from siblings.
+            # effective subtrahend was reduced (carved staircase or, as a
+            # last resort, the pad-safe bbox) because the raw bbox was too
+            # greedy, use that reduced polygon so the net's own outline
+            # matches what we subtract from siblings (disjoint invariant).
             self_outline = effective_subtrahend.get(net_name) or current
 
             # Subtract higher-priority effective subtrahends from this
