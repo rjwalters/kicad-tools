@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -29,6 +30,28 @@ from pathlib import Path
 from typing import Any
 
 from kicad_tools.schema.bom import extract_bom
+
+# Mechanical mounting holes (and similar fiducial/mechanical features) have no
+# schematic symbol by convention, so they always appear as PCB-only footprints.
+# Treating them as sync drift produces a permanent, benign "PCB out of sync"
+# warning on every otherwise-clean board.  They are filtered from the PCB
+# component set before drift analysis (refs like MH1/H1, or any footprint whose
+# name marks it as a mounting hole).
+_MOUNTING_HOLE_REF_RE = re.compile(r"^(?:MH|MK|MP|MTG|H)\d+$", re.IGNORECASE)
+
+
+def _is_mounting_hole(reference: str, footprint_name: str = "") -> bool:
+    """Return True when a PCB footprint is a mechanical mounting hole.
+
+    Matches by reference designator (``MH1``, ``H1``, ...) or by footprint
+    name (anything containing ``mounting`` / ``mountinghole``).  Used to
+    exclude mechanical holes from schematic/PCB drift analysis, since they
+    legitimately have no schematic symbol.
+    """
+    if reference and _MOUNTING_HOLE_REF_RE.match(reference):
+        return True
+    fp_lower = footprint_name.lower()
+    return "mountinghole" in fp_lower or "mounting_hole" in fp_lower
 
 
 @dataclass(frozen=True)
@@ -542,6 +565,11 @@ class Reconciler:
         components: dict[str, dict[str, str]] = {}
         for fp in checker.pcb.footprints:
             if fp.reference and not fp.reference.startswith("#"):
+                # Mechanical mounting holes have no schematic symbol by
+                # convention; excluding them keeps them from registering as
+                # benign-but-noisy PCB-only drift (issue #3496).
+                if _is_mounting_hole(fp.reference, fp.name or ""):
+                    continue
                 components[fp.reference] = {
                     "value": fp.value or "",
                     "footprint": fp.name or "",
