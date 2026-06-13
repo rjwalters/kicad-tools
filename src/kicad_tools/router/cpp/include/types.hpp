@@ -83,7 +83,14 @@ namespace router {
 // through J1-1's halo at 0.127mm actual vs 0.200mm required).
 // ``mark_blocked`` also began recording ``original_net`` for ALL static
 // cells (previously pad-metal only) so the restore has the owner net.
-constexpr int ROUTER_CPP_BUILD_VERSION = 11;
+//
+// Bump to 12 (Issue #3490): the same-component validator carve-out in
+// ``validate_route`` now silences NEGATIVE pad clearance for net=0
+// (unconnected / NC) same-component pads, restoring routability to a
+// signal pad whose metal overlaps an adjacent net=0 pad (the #1764
+// reachability guarantee). Foreign signal pads keep the strict >= 0
+// guard (#2933).
+constexpr int ROUTER_CPP_BUILD_VERSION = 12;
 
 // Grid cell state
 struct GridCell {

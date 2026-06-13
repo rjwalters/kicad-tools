@@ -187,10 +187,6 @@ class TestPadBlockedByAdjacentNetZero:
     area regardless of blocked/net state.
     """
 
-    @pytest.mark.xfail(
-        reason="pad blocked by adjacent net=0 pad on main -- see issue #3490",
-        strict=False,
-    )
     def test_route_to_pad_adjacent_to_net0_pad(self):
         """Route to a signal pad whose metal area overlaps with a net=0 pad's cells.
 
