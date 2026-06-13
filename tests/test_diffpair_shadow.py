@@ -46,7 +46,7 @@ from kicad_tools.router.diffpair_routing import (
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 
@@ -754,3 +754,281 @@ def test_shadow_claim_commits_when_all_pads_reached(monkeypatch):
     )
     assert any(r.net == pair.positive.net_id for r in router.routes)
     assert any(r.net == pair.negative.net_id for r in router.routes)
+
+
+# ---------------------------------------------------------------------------
+# 10. Issue #3541: shadow via must not intersect the partner trace
+#
+# When the geometric shadow constructor places its own via before a guide
+# layer change, the barrel sits at a perpendicular offset taken against the
+# INCOMING guide leg's normal.  The guide BENDS at the via, so an offset
+# that clears the incoming leg can still let the barrel intersect the
+# OUTGOING leg when the guide turns back toward the shadow side.  At board
+# 06's tightly-coupled gaps (0.075-0.15 mm) this produced a ~0.04 mm
+# physical overlap between the shadow via and the partner copper -- a short
+# that the recipe's 6b audit ripped (USB2_D / USB3_RX1 / USB3_RX2 / PCIE_TX
+# de-coupled).
+#
+# The fix validates each candidate via site against the WHOLE guide
+# polyline (barrel vs any-layer copper) with the same
+# ``via_diameter/2 + trace_clearance + guide_width/2`` bound the crossing-
+# tail synthesizer uses, and widens the perpendicular spread (the
+# ``lat_mult`` lattice) until a site clears every guide segment.
+# ---------------------------------------------------------------------------
+
+
+def _via_clearance_bound(rules, guide) -> float:
+    """The #3541 via-barrel-vs-partner bound the constructor enforces."""
+    guide_width = max((g.width for g in guide.segments), default=rules.trace_width)
+    return rules.via_diameter / 2 + rules.trace_clearance + guide_width / 2
+
+
+def _layer_change_guide(p_start_pad, bend_end: tuple[float, float]) -> Route:
+    """F_CU leg -> via at (12.0, 4.8) -> B_CU leg toward ``bend_end``.
+
+    The pre-via leg approaches the layer change along +x; the post-via leg
+    heads toward ``bend_end``.  Choosing a ``bend_end`` that sweeps the
+    out-going leg back through the shadow-via neighbourhood is what made the
+    pre-#3541 minimum-lateral via intersect the partner.
+    """
+    net, name = p_start_pad.net, p_start_pad.net_name
+    guide = Route(net=net, net_name=name)
+    guide.segments.append(
+        Segment(
+            x1=5.0,
+            y1=4.8,
+            x2=12.0,
+            y2=4.8,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name=name,
+        )
+    )
+    guide.segments.append(
+        Segment(
+            x1=12.0,
+            y1=4.8,
+            x2=bend_end[0],
+            y2=bend_end[1],
+            width=0.2,
+            layer=Layer.B_CU,
+            net=net,
+            net_name=name,
+        )
+    )
+    guide.vias.append(
+        Via(
+            x=12.0,
+            y=4.8,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=net,
+            net_name=name,
+        )
+    )
+    return guide
+
+
+def _shadow_setup(spacing_cells: int, bend_end: tuple[float, float]):
+    """Build (dpr, pair, spec, pathfinder, guide) for the via-geometry test.
+
+    Open 2-pad fixture (no obstacles), a tight coupled spacing, and a
+    layer-changing guide bending toward ``bend_end``.
+    """
+    from kicad_tools.router.diffpair_routing import CoupledPathfinder, CoupledSegmentSpec
+
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = True
+    spec = CoupledSegmentSpec(
+        p_start=router.pads[("U1", "1")],
+        p_end=router.pads[("J1", "1")],
+        n_start=router.pads[("U1", "2")],
+        n_end=router.pads[("J1", "2")],
+    )
+    pathfinder = CoupledPathfinder(
+        grid=router.grid,
+        rules=router.rules,
+        target_spacing_cells=spacing_cells,
+        net_class_map=getattr(router, "net_class_map", None),
+    )
+    guide = _layer_change_guide(router.pads[("U1", "1")], bend_end)
+    return dpr, pair, spec, pathfinder, guide
+
+
+def _stub_tail_route(self, _pf, head, goal, _layer, _label, _name, partner_segments=None):
+    """Degenerate body-anchor tail (isolates the via geometry under test).
+
+    Routing the real pad-reaching tail would have a straight fake tail
+    cross the guide and trip the constructor's separate intra-pair / overlap
+    self-checks -- artifacts unrelated to the #3541 via geometry.  A
+    near-zero stub at the body anchor leaves the body's via intact.
+    """
+    r = Route(net=goal.net, net_name=goal.net_name)
+    r.segments.append(
+        Segment(
+            x1=head.x,
+            y1=head.y,
+            x2=head.x + 0.001,
+            y2=head.y,
+            width=0.2,
+            layer=head.layer,
+            net=goal.net,
+            net_name=goal.net_name,
+        )
+    )
+    return r
+
+
+# The #3541 load-bearing geometry: an out-going B_CU leg bending up-and-LEFT
+# (``bend_end`` below x=12.0) that sweeps the guide back through the side=+1.0
+# minimum-lateral (lat_mult=1.0) shadow-via neighbourhood.  At this geometry
+# the un-spread via barrel lands 0.354 mm from the guide -- a SHORT against the
+# ~0.65 mm ``via_clear`` bound -- and the guide's own seg-vs-seg self-check
+# (``find_intra_pair_clearance_violations``) does NOT see it (it is a
+# via-vs-trace overlap, not seg-vs-seg), so WITHOUT the guard the constructor
+# COMMITS the shorting via.  WITH the guard the lattice widens to lat_mult>1.0
+# and the via clears at 0.700 mm.  (Verified by deleting the guard: the
+# committed via min-dist drops 0.700 -> 0.354 mm.)
+_SHADOW_VIA_GUARD_BEND_END = (11.0, 7.7)
+
+
+def test_shadow_via_clears_partner_at_tight_gap(monkeypatch):
+    """End-to-end: the constructed shadow via clears the partner copper.
+
+    Drives ``_shadow_route_pair`` with a layer-changing guide and a tightly-
+    coupled spacing (4 cells = 0.4 mm, well below the ~0.65 mm via bound).
+    Every via the shadow places must clear EVERY guide segment by at least
+    ``via_diameter/2 + trace_clearance + guide_width/2`` -- the geometric
+    guarantee the perpendicular spread provides (issue #3541 acceptance:
+    "via_edge -> partner_copper >= trace_clearance, validated cell-by-cell").
+
+    Uses the load-bearing geometry (:data:`_SHADOW_VIA_GUARD_BEND_END`) at
+    which the un-spread minimum-lateral via shorts the guide, so the assertion
+    is only satisfiable because the guard widened the lattice -- see
+    ``test_shadow_via_guard_is_load_bearing`` for the matching negative control.
+    """
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    spacing_cells = 4
+    dpr, pair, spec, pathfinder, guide = _shadow_setup(
+        spacing_cells, bend_end=_SHADOW_VIA_GUARD_BEND_END
+    )
+
+    monkeypatch.setattr(DiffPairRouter, "_tail_route", _stub_tail_route, raising=True)
+    # Defeat the belt-and-braces overlap gate so we observe the via the
+    # constructor PRODUCES (the fix must clear the guide by construction,
+    # not merely fail the side over to a reject-everything None).
+    monkeypatch.setattr(
+        DiffPairRouter, "_pair_has_physical_overlap", lambda self, p, n: False, raising=True
+    )
+
+    result = dpr._shadow_route_pair(pair, spec, pathfinder, guide, spacing_cells)
+    assert result is not None, "shadow constructor should place a clearing via, not give up"
+    _p_route, n_route = result  # P is the guide; N is the geometric shadow.
+
+    via_clear = _via_clearance_bound(dpr.autorouter.rules, guide)
+    assert n_route.vias, "the shadow must carry its own layer-change via"
+    for via in n_route.vias:
+        for seg in guide.segments:
+            dist = DiffPairRouter._point_segment_distance(via.x, via.y, seg)
+            assert dist >= via_clear - 1e-9, (
+                f"shadow via at ({via.x:.3f},{via.y:.3f}) intersects partner "
+                f"copper: centerline distance {dist:.4f} mm < required "
+                f"{via_clear:.4f} mm (barrel overlaps the guide trace)"
+            )
+
+
+def test_shadow_via_guard_is_load_bearing(monkeypatch):
+    """Negative control: deleting the guard makes ``_shadow_route_pair`` short.
+
+    This is the integration-level proof the #3541 guard is load-bearing -- it
+    drives ``_shadow_route_pair`` END TO END (asserting on the route it
+    RETURNS, not on the geometry helper) and contrasts two runs on the same
+    load-bearing geometry (:data:`_SHADOW_VIA_GUARD_BEND_END`):
+
+      * **Guard present** (production): the minimum-lateral (lat_mult=1.0) via
+        site grazes the out-going guide leg, so the guard rejects it and the
+        lattice widens; the committed via clears the guide by >= ``via_clear``.
+      * **Guard absent** (the guard predicate stubbed out via
+        ``_min_distance_to_partner`` -> +inf, the ONLY call site of that helper
+        inside ``_shadow_route_pair``): the constructor COMMITS the grazing
+        lat_mult=1.0 via, whose barrel sits < ``via_clear`` from the guide -- a
+        short.  The seg-vs-seg self-check (``find_intra_pair_clearance_violations``)
+        does NOT catch it because the overlap is via-vs-trace, not seg-vs-seg.
+
+    The downstream ``_pair_has_physical_overlap`` belt-and-braces gate IS the
+    backstop that would otherwise defer this short in production, so it is
+    stubbed off in BOTH runs to isolate the guard's contribution -- exactly the
+    PCIE_TX 0.0%-continuity short #3541 locks down (a future refactor that
+    silently drops the guard re-exposes it, and this test then fails).
+    """
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+
+    spacing_cells = 4
+
+    def _committed_shadow_via(disable_guard: bool):
+        # A fresh patch context per run: the guard is patched out ONLY for the
+        # unguarded run, then reverted, so the guarded run sees the real guard.
+        with monkeypatch.context() as mp:
+            dpr, pair, spec, pathfinder, guide = _shadow_setup(
+                spacing_cells, bend_end=_SHADOW_VIA_GUARD_BEND_END
+            )
+            mp.setattr(DiffPairRouter, "_tail_route", _stub_tail_route, raising=True)
+            # Stub OFF the belt-and-braces overlap gate in both runs: it is the
+            # production backstop, but here we are isolating the GUARD's effect,
+            # so what the constructor COMMITS (clean vs short) must be the
+            # guard's doing, not the gate's.
+            mp.setattr(
+                DiffPairRouter, "_pair_has_physical_overlap", lambda self, p, n: False, raising=True
+            )
+            if disable_guard:
+                # ``_min_distance_to_partner`` is called in exactly one place
+                # inside ``_shadow_route_pair`` -- the #3541 via-vs-guide guard.
+                # Forcing it to +inf makes every candidate pass the guard, i.e.
+                # deletes the guard.
+                mp.setattr(
+                    DiffPairRouter,
+                    "_min_distance_to_partner",
+                    lambda self, *a, **k: float("inf"),
+                    raising=True,
+                )
+            result = dpr._shadow_route_pair(pair, spec, pathfinder, guide, spacing_cells)
+        assert result is not None, "shadow constructor should commit a route at this geometry"
+        _p_route, n_route = result
+        assert n_route.vias, "the shadow must carry its own layer-change via"
+        via_clear = _via_clearance_bound(dpr.autorouter.rules, guide)
+        min_dist = min(
+            DiffPairRouter._point_segment_distance(via.x, via.y, seg)
+            for via in n_route.vias
+            for seg in guide.segments
+        )
+        return min_dist, via_clear
+
+    # Guard ABSENT: the constructor commits the grazing lat_mult=1.0 via -- a
+    # short.  This is the assertion that FAILS if the guard is restored, and
+    # (equivalently) PASSES only because deleting the guard re-introduces the
+    # #3541 short -- proving the guard is what prevents it.
+    unguarded_dist, via_clear = _committed_shadow_via(disable_guard=True)
+    assert unguarded_dist < via_clear, (
+        "negative control failed: with the #3541 guard deleted, "
+        "_shadow_route_pair must COMMIT a shorting via (barrel-to-guide "
+        f"{unguarded_dist:.4f} mm < required {via_clear:.4f} mm).  If this "
+        "passes, the geometry no longer exercises the guard and the positive "
+        "case below is vacuous."
+    )
+
+    # Guard PRESENT (production): the same geometry now clears, because the
+    # guard rejected the grazing site and the lattice widened.
+    guarded_dist, _via_clear = _committed_shadow_via(disable_guard=False)
+    assert guarded_dist >= via_clear - 1e-9, (
+        "with the #3541 guard active the committed shadow via must clear the "
+        f"guide (barrel-to-guide {guarded_dist:.4f} mm >= {via_clear:.4f} mm)"
+    )
+    # And the guard's effect is the difference between the two runs.
+    assert guarded_dist > unguarded_dist, (
+        "the guard must change the committed geometry: clearing via "
+        f"({guarded_dist:.4f} mm) vs grazing via ({unguarded_dist:.4f} mm)"
+    )

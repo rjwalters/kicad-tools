@@ -3371,9 +3371,20 @@ class DiffPairRouter:
         # trace (via_r + clearance + guide_width/2), independent of the
         # tighter coupled gap d.
         guide_width = max((g.width for g in guide.segments), default=s_width)
-        via_lateral = max(
-            d, rules.via_diameter / 2 + rules.trace_clearance + guide_width / 2 + 0.05
-        )
+        # Issue #3541: the perpendicular distance from the shadow via to
+        # the partner (guide) copper must keep this bound everywhere, not
+        # just at the projected guide-via point ``gv``.  The guide BENDS
+        # at the layer change, so a nominal ``via_lateral`` offset taken
+        # against the incoming leg's normal can still let the barrel
+        # intersect the outgoing leg (measured: ~0.04 mm intersection at
+        # board 06's 0.075-0.15 mm coupled gaps).  ``via_clear`` is the
+        # same via-barrel-vs-partner bound the crossing-tail synthesizer
+        # enforces (see ``_synthesize_crossing_tail``); we validate each
+        # candidate site against the guide polyline with it and widen the
+        # perpendicular spread (the ``lat_mult`` lattice) until it holds.
+        via_clear = rules.via_diameter / 2 + rules.trace_clearance + guide_width / 2
+        via_lateral = max(d, via_clear + 0.05)
+        guide_segs = list(guide.segments)
         # Longitudinal stagger so shadow-via-to-guide-via >= via pitch.
         via_pitch = rules.via_diameter + rules.via_clearance
         stagger = max(0.0, math.sqrt(max(0.0, via_pitch**2 - via_lateral**2))) + 0.05
@@ -3443,6 +3454,32 @@ class DiffPairRouter:
                                     )
                                     gvx, gvy = grid.world_to_grid(vx, vy)
                                     if pathfinder._is_via_blocked(gvx, gvy, s_net):
+                                        continue
+                                    # Issue #3541: the guide is NOT in the
+                                    # grid, so ``_is_via_blocked`` cannot
+                                    # see a barrel grazing the partner.
+                                    # The barrel offset is taken against
+                                    # the INCOMING leg's normal, but the
+                                    # guide BENDS at the via -- so a site
+                                    # that clears the incoming leg can
+                                    # still intersect the OUTGOING leg
+                                    # when the guide turns toward the
+                                    # shadow side (measured: ~0.04 mm
+                                    # overlap at board 06's 0.075-0.15 mm
+                                    # gaps).  Reject any candidate whose
+                                    # barrel violates the via-vs-partner
+                                    # clearance against the WHOLE guide
+                                    # polyline (any layer -- the barrel
+                                    # spans all layers); the lattice then
+                                    # widens the perpendicular spread
+                                    # (larger ``lat_mult``) until a site
+                                    # clears every guide segment.
+                                    if (
+                                        self._min_distance_to_partner(
+                                            vx, vy, vx, vy, guide_segs, None
+                                        )
+                                        < via_clear
+                                    ):
                                         continue
                                     elements.append(
                                         ("seg", prev_pt[0], prev_pt[1], vx, vy, prev_layer)
