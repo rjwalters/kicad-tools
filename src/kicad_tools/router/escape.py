@@ -379,9 +379,7 @@ def is_dense_package(
     # reach (19/26 with stubs vs 22/26 without), and before the column-
     # orientation fix above their broken stubs made two nets statically
     # unroutable.  Plain A* routes these pads natively.
-    if 2 < len(pads) < 8 and not any(
-        getattr(p, "through_hole", False) for p in pads
-    ):
+    if 2 < len(pads) < 8 and not any(getattr(p, "through_hole", False) for p in pads):
         xs = sorted(p.x for p in pads)
         ys = sorted(p.y for p in pads)
 
@@ -441,9 +439,7 @@ def _looks_like_quad_layout(pads: list[Pad]) -> bool:
     return _is_quad_arrangement(pads, center_x, center_y, width, height)
 
 
-def is_fine_pitch_ssop(
-    pads: list[Pad], pitch_threshold: float = FINE_PITCH_THRESHOLD_MM
-) -> bool:
+def is_fine_pitch_ssop(pads: list[Pad], pitch_threshold: float = FINE_PITCH_THRESHOLD_MM) -> bool:
     """Check if pads represent a fine-pitch dual-row package.
 
     Fine-pitch dual-row packages (SOIC-8 at 1.27mm; SSOP at 0.65mm; TSSOP
@@ -1384,7 +1380,7 @@ class EscapeRouter:
         # ``strict_in_pad_clearance`` / ``micro_via_in_pad_fallback`` /
         # ``extended_pitch_in_pad_fallback`` (env-var-driven opt-in
         # flags) for stylistic consistency.
-        self.escape_pad_layer_overrides: dict[tuple[str, str], "Layer"] = {}
+        self.escape_pad_layer_overrides: dict[tuple[str, str], Layer] = {}
         _override_json = _os.environ.get("KICAD_TOOLS_ESCAPE_PAD_LAYER_OVERRIDES")
         if _override_json:
             try:
@@ -1511,9 +1507,7 @@ class EscapeRouter:
                 # ``_clearance_for_pin_pitch``.
                 candidate = region.escape_clearance
                 pitch = region.pin_pitch
-                effective_channel = (
-                    pitch - 2.0 * candidate - self.rules.trace_width
-                )
+                effective_channel = pitch - 2.0 * candidate - self.rules.trace_width
                 required_channel = 2.0 * candidate + self.rules.trace_width
                 if effective_channel < required_channel:
                     return fallback
@@ -3363,9 +3357,7 @@ class EscapeRouter:
         escape_width = (
             self.rules.min_trace_width
             if self.rules.min_trace_width is not None
-            else self._get_trace_width_for_net(
-                package.pads[0].net_name if package.pads else ""
-            )
+            else self._get_trace_width_for_net(package.pads[0].net_name if package.pads else "")
         )
 
         # Issue #3183: heuristic for "needs in-pad rescue".  The
@@ -3398,13 +3390,16 @@ class EscapeRouter:
                 if abs(p.x - center_x) < edge_margin and abs(p.y - center_y) < edge_margin:
                     continue  # thermal pad
                 # Same edge as the loop's primary direction?
-                if primary_dir == EscapeDirection.NORTH and abs(p.y - max_y) < edge_margin:
-                    edge_with_plane.append(p)
-                elif primary_dir == EscapeDirection.SOUTH and abs(p.y - min_y) < edge_margin:
-                    edge_with_plane.append(p)
-                elif primary_dir == EscapeDirection.EAST and abs(p.x - max_x) < edge_margin:
-                    edge_with_plane.append(p)
-                elif primary_dir == EscapeDirection.WEST and abs(p.x - min_x) < edge_margin:
+                if (
+                    primary_dir == EscapeDirection.NORTH
+                    and abs(p.y - max_y) < edge_margin
+                    or primary_dir == EscapeDirection.SOUTH
+                    and abs(p.y - min_y) < edge_margin
+                    or primary_dir == EscapeDirection.EAST
+                    and abs(p.x - max_x) < edge_margin
+                    or primary_dir == EscapeDirection.WEST
+                    and abs(p.x - min_x) < edge_margin
+                ):
                     edge_with_plane.append(p)
             if primary_dir in (EscapeDirection.NORTH, EscapeDirection.SOUTH):
                 edge_with_plane.sort(key=lambda p: p.x)
@@ -3431,10 +3426,7 @@ class EscapeRouter:
                             continue
                         if idx > 0 and edge_with_plane[idx - 1].net != 0:
                             neighbour_signal = True
-                        if (
-                            idx < len(edge_with_plane) - 1
-                            and edge_with_plane[idx + 1].net != 0
-                        ):
+                        if idx < len(edge_with_plane) - 1 and edge_with_plane[idx + 1].net != 0:
                             neighbour_signal = True
                         break
 
@@ -3989,9 +3981,7 @@ class EscapeRouter:
         if self.rules.min_trace_width is not None:
             row_max_width = self.rules.min_trace_width
         elif pads:
-            row_max_width = max(
-                self._get_trace_width_for_net(p.net_name or "") for p in pads
-            )
+            row_max_width = max(self._get_trace_width_for_net(p.net_name or "") for p in pads)
         else:
             row_max_width = self.rules.trace_width
 
@@ -4061,9 +4051,7 @@ class EscapeRouter:
             # B.Cu overlap in U1's east column without flipping the
             # alternation globally (which regressed routing reach 8/10 ->
             # 7/10 per #3235's negative-results note).
-            override_layer = self.escape_pad_layer_overrides.get(
-                (pad.ref, str(pad.pin))
-            )
+            override_layer = self.escape_pad_layer_overrides.get((pad.ref, str(pad.pin)))
             if override_layer is not None:
                 needs_via = override_layer != pad.layer
                 logger.info(
@@ -5229,9 +5217,7 @@ class EscapeRouter:
         # in-pad rescue (far target only) or NO escape geometry.
         dynamic_threshold = 2 * (self.rules.trace_width + self.rules.trace_clearance)
         package_pitch = getattr(package, "pin_pitch", None) or 0.0
-        rescue_only_band = (
-            package_pitch > 0.75 + 1e-9 and package_pitch >= dynamic_threshold - 1e-9
-        )
+        rescue_only_band = package_pitch > 0.75 + 1e-9 and package_pitch >= dynamic_threshold - 1e-9
 
         # Issue #3398: rescue-only band -- never fall through to the
         # staggered geometry.  Pads with local consumers, plane pads,
@@ -5475,9 +5461,7 @@ class EscapeRouter:
         # away from the package center.  ``populated_dir`` is +1 if
         # populated side is the high-coord side, -1 if the low-coord
         # side, 0 if balanced (use original center-based strategy).
-        populated_dir = self._detect_populated_routing_side(
-            package, is_horizontal
-        )
+        populated_dir = self._detect_populated_routing_side(package, is_horizontal)
 
         if populated_dir != 0:
             # Sort rows in the OPPOSITE direction from the populated
@@ -5497,13 +5481,9 @@ class EscapeRouter:
             # Symmetric case: sort rows by distance from center (outermost
             # first) and let each row escape outward.
             if is_horizontal:
-                sorted_coords = sorted(
-                    row_coords, key=lambda c: abs(c - center_y), reverse=True
-                )
+                sorted_coords = sorted(row_coords, key=lambda c: abs(c - center_y), reverse=True)
             else:
-                sorted_coords = sorted(
-                    row_coords, key=lambda c: abs(c - center_x), reverse=True
-                )
+                sorted_coords = sorted(row_coords, key=lambda c: abs(c - center_x), reverse=True)
 
         # Select inner escape layer once (not hardcoded)
         inner_escape_layer = self._select_inner_escape_layer(Layer.F_CU)
@@ -5523,9 +5503,7 @@ class EscapeRouter:
             # are excluded.
             if self.grid.layer_stack is not None:
                 try:
-                    alt_def = self.grid.layer_stack.get_layer_by_name(
-                        Layer.B_CU.kicad_name
-                    )
+                    alt_def = self.grid.layer_stack.get_layer_by_name(Layer.B_CU.kicad_name)
                     if alt_def is not None and alt_def.layer_type in (
                         LayerType.SIGNAL,
                         LayerType.MIXED,
@@ -5561,26 +5539,16 @@ class EscapeRouter:
                 # Issue #3310: all rows escape toward the populated side.
                 if is_horizontal:
                     direction = (
-                        EscapeDirection.NORTH if populated_dir > 0
-                        else EscapeDirection.SOUTH
+                        EscapeDirection.NORTH if populated_dir > 0 else EscapeDirection.SOUTH
                     )
                 else:
-                    direction = (
-                        EscapeDirection.EAST if populated_dir > 0
-                        else EscapeDirection.WEST
-                    )
+                    direction = EscapeDirection.EAST if populated_dir > 0 else EscapeDirection.WEST
             else:
                 # Symmetric center-sorted strategy.
                 if is_horizontal:
-                    direction = (
-                        EscapeDirection.NORTH if coord > center_y
-                        else EscapeDirection.SOUTH
-                    )
+                    direction = EscapeDirection.NORTH if coord > center_y else EscapeDirection.SOUTH
                 else:
-                    direction = (
-                        EscapeDirection.EAST if coord > center_x
-                        else EscapeDirection.WEST
-                    )
+                    direction = EscapeDirection.EAST if coord > center_x else EscapeDirection.WEST
 
             dx, dy = self._direction_to_vector(direction)
 
@@ -5626,8 +5594,7 @@ class EscapeRouter:
                     # different layers and don't conflict.
                     if alt_inner_escape_layer is not None:
                         effective_inner_layer = (
-                            inner_escape_layer if i % 2 == 0
-                            else alt_inner_escape_layer
+                            inner_escape_layer if i % 2 == 0 else alt_inner_escape_layer
                         )
                     else:
                         effective_inner_layer = inner_escape_layer
@@ -5643,20 +5610,13 @@ class EscapeRouter:
                     # width across the row and size the stagger to
                     # max_trace + clearance + a small safety margin.
                     row_max_trace_width = max(
-                        (
-                            self._get_trace_width_for_net(rp.net_name)
-                            for rp in row_pads
-                        ),
+                        (self._get_trace_width_for_net(rp.net_name) for rp in row_pads),
                         default=self.rules.trace_width,
                     )
                     perp_stagger_amount = (
-                        row_max_trace_width
-                        + self.rules.trace_clearance
-                        + self.rules.via_clearance
+                        row_max_trace_width + self.rules.trace_clearance + self.rules.via_clearance
                     )
-                    perp_stagger = (
-                        perp_stagger_amount if i % 2 == 0 else 0.0
-                    )
+                    perp_stagger = perp_stagger_amount if i % 2 == 0 else 0.0
 
                     if populated_dir != 0:
                         # Issue #3310: For board-edge connectors, place
@@ -5677,14 +5637,10 @@ class EscapeRouter:
                     if is_horizontal:
                         # Long axis = X.  Vias offset in +/- Y direction.
                         via_x = pad.x + stagger
-                        via_y = pad.y + via_perp_sign * (
-                            via_offset_base + perp_stagger
-                        )
+                        via_y = pad.y + via_perp_sign * (via_offset_base + perp_stagger)
                     else:
                         # Long axis = Y.  Vias offset in +/- X direction.
-                        via_x = pad.x + via_perp_sign * (
-                            via_offset_base + perp_stagger
-                        )
+                        via_x = pad.x + via_perp_sign * (via_offset_base + perp_stagger)
                         via_y = pad.y + stagger
 
                     if populated_dir != 0:
@@ -5702,10 +5658,7 @@ class EscapeRouter:
                         # length to a connector end) would intersect
                         # other pads' vias and get dropped by the
                         # apply_escape_routes foreign-via gate.
-                        endpoint_offset = (
-                            self.rules.via_diameter / 2
-                            + self.rules.trace_clearance
-                        )
+                        endpoint_offset = self.rules.via_diameter / 2 + self.rules.trace_clearance
                         if is_horizontal:
                             ep_x = via_x
                             ep_y = via_y + via_perp_sign * endpoint_offset
@@ -7178,9 +7131,7 @@ class EscapeRouter:
             opposite = self._OPPOSITE_DIRECTIONS.get(effective_direction)
             if opposite is not None:
                 candidates.append(opposite)
-            candidates.extend(
-                self._PERPENDICULAR_DIRECTIONS.get(effective_direction, ())
-            )
+            candidates.extend(self._PERPENDICULAR_DIRECTIONS.get(effective_direction, ()))
             for cand_index, cand_dir in enumerate(candidates):
                 cand_width = stub_width if cand_index == 0 else necked_width
                 cdx, cdy = self._direction_to_vector(cand_dir)
@@ -7705,9 +7656,7 @@ class EscapeRouter:
                 if seg.layer != layer:
                     continue
                 required = (stub_width + seg.width) / 2 + clearance
-                dist = segment_to_segment_distance(
-                    x1, y1, x2, y2, seg.x1, seg.y1, seg.x2, seg.y2
-                )
+                dist = segment_to_segment_distance(x1, y1, x2, y2, seg.x1, seg.y1, seg.x2, seg.y2)
                 if dist < required - eps:
                     return True
             via = getattr(esc, "via", None)

@@ -11,53 +11,52 @@ Includes tests for:
 import pytest
 
 from kicad_tools.intent import InterfaceCategory
-from kicad_tools.patterns.adaptation import _format_capacitance
 from kicad_tools.patterns import (
     # Adaptation
     AdaptedPatternParams,
-    adapt_buck_pattern,
-    adapt_decoupling_pattern,
-    adapt_ldo_pattern,
-    adapt_pattern,
-    ComponentRequirements,
-    PatternSpec,
-    PatternValidationResult,
-    PatternValidator,
-    PatternViolation,
-    ValidationViolation,
-    get_component_requirements,
-    list_components,
-    # Schema types
-    Placement,
-    PlacementPriority,
-    PlacementRule,
-    RoutingConstraint,
+    ADCInputFilter,
     # Placement patterns
     BuckPattern,
-    CrystalPattern,
-    I2CPattern,
-    LDOPattern,
-    OscillatorPattern,
-    USBPattern,
+    ComponentRequirements,
     # Constraint pattern base classes
     ConstraintPlacementRule,
     ConstraintPriority,
     ConstraintRoutingRule,
-    IntentPattern,
-    # Constraint patterns
-    SPIPattern,
-    UARTPattern,
-    EthernetPattern,
-    ADCInputFilter,
+    CrystalPattern,
     DACOutputFilter,
-    OpAmpCircuit,
-    SensorInterface,
     ESDProtection,
+    EthernetPattern,
+    I2CPattern,
+    LDOPattern,
+    OpAmpCircuit,
+    OscillatorPattern,
     OvercurrentProtection,
     OvervoltageProtection,
+    PatternSpec,
+    PatternValidationResult,
+    PatternValidator,
+    PatternViolation,
+    # Schema types
+    Placement,
+    PlacementPriority,
+    PlacementRule,
     ReversePolarityProtection,
+    RoutingConstraint,
+    SensorInterface,
+    # Constraint patterns
+    SPIPattern,
     ThermalShutdown,
+    UARTPattern,
+    USBPattern,
+    ValidationViolation,
+    adapt_buck_pattern,
+    adapt_decoupling_pattern,
+    adapt_ldo_pattern,
+    adapt_pattern,
+    get_component_requirements,
+    list_components,
 )
+from kicad_tools.patterns.adaptation import _format_capacitance
 
 
 class TestValidationViolation:
@@ -931,6 +930,7 @@ class TestPCBPatternHelpers:
         )
         assert violation is not None
         assert "too close" in violation.message
+
 
 # =============================================================================
 # Constraint Pattern Base Class Tests

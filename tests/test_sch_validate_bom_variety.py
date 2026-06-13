@@ -4,13 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     check_bom_variety,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics
@@ -113,9 +109,7 @@ def _build_schematic(symbols: list[dict]) -> str:
             lib_symbols.append(_make_lib_symbol(lib_id))
             seen_lib_ids.add(lib_id)
 
-        symbol_instances.append(
-            _make_symbol(ref, lib_id, value, footprint, x=x, dnp=dnp)
-        )
+        symbol_instances.append(_make_symbol(ref, lib_id, value, footprint, x=x, dnp=dnp))
 
     lib_str = "\n".join(lib_symbols)
     sym_str = "\n".join(symbol_instances)
@@ -172,9 +166,24 @@ class TestBomVarietySameFootprint:
 
     def test_caps_same_footprint(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C3", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C3",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -182,8 +191,18 @@ class TestBomVarietySameFootprint:
 
     def test_resistors_same_footprint(self, tmp_path):
         symbols = [
-            {"ref": "R1", "lib_id": "Device:R", "value": "10k", "footprint": "Resistor_SMD:R_0402_1005Metric"},
-            {"ref": "R2", "lib_id": "Device:R", "value": "10k", "footprint": "Resistor_SMD:R_0402_1005Metric"},
+            {
+                "ref": "R1",
+                "lib_id": "Device:R",
+                "value": "10k",
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+            },
+            {
+                "ref": "R2",
+                "lib_id": "Device:R",
+                "value": "10k",
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -195,10 +214,30 @@ class TestBomVarietyDifferentFootprints:
 
     def test_caps_mixed_footprints(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C3", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C5", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C7", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0603_1608Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C3",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C5",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C7",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -215,8 +254,18 @@ class TestBomVarietyDifferentFootprints:
 
     def test_resistors_mixed_footprints(self, tmp_path):
         symbols = [
-            {"ref": "R1", "lib_id": "Device:R_Small", "value": "10k", "footprint": "Resistor_SMD:R_0402_1005Metric"},
-            {"ref": "R2", "lib_id": "Device:R_Small", "value": "10k", "footprint": "Resistor_SMD:R_0603_1608Metric"},
+            {
+                "ref": "R1",
+                "lib_id": "Device:R_Small",
+                "value": "10k",
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+            },
+            {
+                "ref": "R2",
+                "lib_id": "Device:R_Small",
+                "value": "10k",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -229,8 +278,18 @@ class TestBomVarietyVoltageRating:
 
     def test_different_voltage_ratings(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF 25V", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 50V", "footprint": "Capacitor_SMD:C_0603_1608Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF 25V",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "value": "100nF 50V",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -238,8 +297,18 @@ class TestBomVarietyVoltageRating:
 
     def test_same_voltage_different_footprint_triggers(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF 25V", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF 25V", "footprint": "Capacitor_SMD:C_0603_1608Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF 25V",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "value": "100nF 25V",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -252,8 +321,19 @@ class TestBomVarietyDnpExclusion:
 
     def test_dnp_excluded(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0603_1608Metric", "dnp": True},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                "dnp": True,
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -266,8 +346,18 @@ class TestBomVarietyNonPassiveIgnored:
 
     def test_ic_ignored(self, tmp_path):
         symbols = [
-            {"ref": "U1", "lib_id": "MCU_ST_STM32:STM32C011F6Px", "value": "STM32C011F6Px", "footprint": "Package_SO:TSSOP-20"},
-            {"ref": "U2", "lib_id": "MCU_ST_STM32:STM32C011F6Px", "value": "STM32C011F6Px", "footprint": "Package_QFP:QFP-32"},
+            {
+                "ref": "U1",
+                "lib_id": "MCU_ST_STM32:STM32C011F6Px",
+                "value": "STM32C011F6Px",
+                "footprint": "Package_SO:TSSOP-20",
+            },
+            {
+                "ref": "U2",
+                "lib_id": "MCU_ST_STM32:STM32C011F6Px",
+                "value": "STM32C011F6Px",
+                "footprint": "Package_QFP:QFP-32",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -275,8 +365,18 @@ class TestBomVarietyNonPassiveIgnored:
 
     def test_connector_ignored(self, tmp_path):
         symbols = [
-            {"ref": "J1", "lib_id": "Connector:Conn_01x04", "value": "Conn_01x04", "footprint": "Connector_PinHeader:PinHeader_1x04_P2.54mm_Vertical"},
-            {"ref": "J2", "lib_id": "Connector:Conn_01x04", "value": "Conn_01x04", "footprint": "Connector_PinSocket:PinSocket_1x04_P2.54mm_Vertical"},
+            {
+                "ref": "J1",
+                "lib_id": "Connector:Conn_01x04",
+                "value": "Conn_01x04",
+                "footprint": "Connector_PinHeader:PinHeader_1x04_P2.54mm_Vertical",
+            },
+            {
+                "ref": "J2",
+                "lib_id": "Connector:Conn_01x04",
+                "value": "Conn_01x04",
+                "footprint": "Connector_PinSocket:PinSocket_1x04_P2.54mm_Vertical",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -288,7 +388,12 @@ class TestBomVarietyEdgeCases:
 
     def test_single_component_no_warning(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -296,7 +401,12 @@ class TestBomVarietyEdgeCases:
 
     def test_missing_footprint_excluded(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
             {"ref": "C2", "lib_id": "Device:C", "value": "100nF", "footprint": ""},
         ]
         sch_path = _write_schematic(tmp_path, symbols)
@@ -306,8 +416,18 @@ class TestBomVarietyEdgeCases:
 
     def test_missing_value_excluded(self, tmp_path):
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "~", "footprint": "Capacitor_SMD:C_0603_1608Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "value": "~",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -317,8 +437,18 @@ class TestBomVarietyEdgeCases:
     def test_different_values_different_footprints_no_warning(self, tmp_path):
         """Different values should form separate groups even with different footprints."""
         symbols = [
-            {"ref": "C1", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
-            {"ref": "C2", "lib_id": "Device:C", "value": "10uF", "footprint": "Capacitor_SMD:C_0603_1608Metric"},
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100nF",
+                "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            },
+            {
+                "ref": "C2",
+                "lib_id": "Device:C",
+                "value": "10uF",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)
@@ -327,8 +457,18 @@ class TestBomVarietyEdgeCases:
     def test_different_component_types_same_value_separate_groups(self, tmp_path):
         """R and C with the same value string should not be grouped together."""
         symbols = [
-            {"ref": "R1", "lib_id": "Device:R", "value": "100", "footprint": "Resistor_SMD:R_0402_1005Metric"},
-            {"ref": "C1", "lib_id": "Device:C", "value": "100", "footprint": "Capacitor_SMD:C_0603_1608Metric"},
+            {
+                "ref": "R1",
+                "lib_id": "Device:R",
+                "value": "100",
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+            },
+            {
+                "ref": "C1",
+                "lib_id": "Device:C",
+                "value": "100",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            },
         ]
         sch_path = _write_schematic(tmp_path, symbols)
         issues = check_bom_variety(sch_path)

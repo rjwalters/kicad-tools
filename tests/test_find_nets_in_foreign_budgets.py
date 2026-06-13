@@ -258,15 +258,19 @@ class TestFindNetsInForeignBudgets:
         neg = _make_neg_router_with_grid()
         # Four stranded source nets, each owning one contested band.
         budgets = [
-            FakeBudget(0, 0, 3, 5, source_net=11, layer=-1),    # GATE_NEG-like
-            FakeBudget(0, 5, 3, 10, source_net=14, layer=-1),   # I_SENSE_OUT-like
+            FakeBudget(0, 0, 3, 5, source_net=11, layer=-1),  # GATE_NEG-like
+            FakeBudget(0, 5, 3, 10, source_net=14, layer=-1),  # I_SENSE_OUT-like
             FakeBudget(0, 10, 3, 15, source_net=16, layer=-1),  # ZC_DETECT-like
             FakeBudget(0, 15, 3, 20, source_net=18, layer=-1),  # SWCLK-like
         ]
         # Three squatters camping across the column at different bands.
         net_routes = {
-            42: [FakeRoute(42, [FakeSegment(1, 2, 1, 7, FakeLayer(0))])],   # crosses GATE_NEG and I_SENSE_OUT bands
-            43: [FakeRoute(43, [FakeSegment(1, 12, 1, 17, FakeLayer(1))])],  # crosses ZC_DETECT and SWCLK bands
+            42: [
+                FakeRoute(42, [FakeSegment(1, 2, 1, 7, FakeLayer(0))])
+            ],  # crosses GATE_NEG and I_SENSE_OUT bands
+            43: [
+                FakeRoute(43, [FakeSegment(1, 12, 1, 17, FakeLayer(1))])
+            ],  # crosses ZC_DETECT and SWCLK bands
             44: [FakeRoute(44, [FakeSegment(50, 50, 60, 60, FakeLayer(0))])],  # outside the column
         }
         stranded = {11, 14, 16, 18}
@@ -309,6 +313,7 @@ class TestEscapePhaseOffsetInfrastructure:
         get the historical strict-by-position alternation unchanged.
         """
         import inspect
+
         from kicad_tools.router.escape import EscapeRouter
 
         sig = inspect.signature(EscapeRouter._create_fine_pitch_row_escapes)

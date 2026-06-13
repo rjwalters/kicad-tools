@@ -79,7 +79,7 @@ class NetlistRule(DRCRule):
                             rule_id=self.rule_id,
                             severity="warning",
                             message=(
-                                f'Pad {ref}-{pad.number} references undeclared net '
+                                f"Pad {ref}-{pad.number} references undeclared net "
                                 f'"{pad.net_name}" on footprint {ref}'
                             ),
                             location=location,

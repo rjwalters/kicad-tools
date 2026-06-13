@@ -76,12 +76,8 @@ def test_starting_layers_matches_audit(board: str, expected: int | None) -> None
 
     spec = load_spec(spec_path)
     requirements = getattr(spec, "requirements", None)
-    manufacturing = (
-        getattr(requirements, "manufacturing", None) if requirements else None
-    )
-    escalation = (
-        getattr(manufacturing, "escalation", None) if manufacturing else None
-    )
+    manufacturing = getattr(requirements, "manufacturing", None) if requirements else None
+    escalation = getattr(manufacturing, "escalation", None) if manufacturing else None
 
     if expected is None:
         # Default group: either no escalation block, or escalation

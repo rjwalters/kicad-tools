@@ -412,9 +412,7 @@ def main(argv=None):
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument(
-        "--ref", required=True, help="Symbol reference designator (e.g., U1)"
-    )
+    parser.add_argument("--ref", required=True, help="Symbol reference designator (e.g., U1)")
     parser.add_argument(
         "--to",
         nargs=2,
@@ -423,17 +421,11 @@ def main(argv=None):
         metavar=("X", "Y"),
         help="New position coordinates",
     )
-    parser.add_argument(
-        "--lib-path", action="append", dest="lib_paths", help="Library search path"
-    )
+    parser.add_argument("--lib-path", action="append", dest="lib_paths", help="Library search path")
     parser.add_argument("--lib", action="append", dest="libs", help="Specific library file")
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
     parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
-    parser.add_argument(
-        "--format", choices=["text", "json"], default="text", help="Output format"
-    )
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
 
     args = parser.parse_args(argv)
     return run_move_component(args)

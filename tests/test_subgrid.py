@@ -5,10 +5,8 @@ Issue #1109: Router support for fine-pitch components (sub-grid routing).
 
 import math
 
-import pytest
-
 from kicad_tools.router.grid import RoutingGrid
-from kicad_tools.router.layers import Layer, LayerStack
+from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Segment
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.subgrid import (
@@ -97,10 +95,10 @@ class TestSubGridAnalysis:
 
         # 0.65mm pitch - doesn't align with 0.1mm grid
         pads = [
-            make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1"),   # On grid
-            make_pad(x=1.65, y=1.0, net=2, ref="U1", pin="2"),   # Off grid (0.05mm offset)
-            make_pad(x=2.30, y=1.0, net=3, ref="U1", pin="3"),   # On grid (2.3 = 23 * 0.1)
-            make_pad(x=2.95, y=1.0, net=4, ref="U1", pin="4"),   # Off grid (0.05mm offset)
+            make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1"),  # On grid
+            make_pad(x=1.65, y=1.0, net=2, ref="U1", pin="2"),  # Off grid (0.05mm offset)
+            make_pad(x=2.30, y=1.0, net=3, ref="U1", pin="3"),  # On grid (2.3 = 23 * 0.1)
+            make_pad(x=2.95, y=1.0, net=4, ref="U1", pin="4"),  # Off grid (0.05mm offset)
         ]
 
         analysis = subgrid.analyze_pads(pads)
@@ -311,10 +309,17 @@ class TestSubGridEscapeGeneration:
         # Use smaller pad dimensions to fit within clearance at 0.65mm pitch
         pads = []
         for i in range(4):
-            pads.append(make_pad(
-                x=1.0 + i * 0.65, y=1.0, net=i + 1, ref="U1", pin=str(i + 1),
-                width=0.3, height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=1.0 + i * 0.65,
+                    y=1.0,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -472,8 +477,13 @@ class TestSubGridDataclasses:
                 SubGridEscape(
                     pad=make_pad(x=1.65, y=1.0, net=1, ref="U1", pin="1"),
                     segment=Segment(
-                        x1=1.65, y1=1.0, x2=1.7, y2=1.0,
-                        width=0.2, layer=Layer.F_CU, net=1,
+                        x1=1.65,
+                        y1=1.0,
+                        x2=1.7,
+                        y2=1.0,
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=1,
                     ),
                     grid_point=(17, 10),
                     snap_point=(1.7, 1.0),
@@ -528,27 +538,31 @@ class TestSubGridSSOP:
 
         # Left side pads
         for i in range(10):
-            pads.append(make_pad(
-                x=base_x,
-                y=base_y + i * 0.65,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-                width=0.3,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x,
+                    y=base_y + i * 0.65,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         # Right side pads
         for i in range(10):
-            pads.append(make_pad(
-                x=base_x + 6.0,  # Body width
-                y=base_y + i * 0.65,
-                net=i + 11,
-                ref="U1",
-                pin=str(i + 11),
-                width=0.3,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x + 6.0,  # Body width
+                    y=base_y + i * 0.65,
+                    net=i + 11,
+                    ref="U1",
+                    pin=str(i + 11),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -580,26 +594,30 @@ class TestSubGridSSOP:
 
         # SSOP: 0.65mm pitch (off-grid)
         for i in range(8):
-            pads.append(make_pad(
-                x=5.0 + i * 0.65,
-                y=5.0,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-            ))
+            pads.append(
+                make_pad(
+                    x=5.0 + i * 0.65,
+                    y=5.0,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                )
+            )
 
         # Through-hole connector: 2.54mm pitch (on-grid at 0.1mm)
         for i in range(4):
-            pads.append(make_pad(
-                x=20.0 + i * 2.54,
-                y=20.0,
-                net=i + 20,
-                ref="J1",
-                pin=str(i + 1),
-                through_hole=True,
-                width=1.7,
-                height=1.7,
-            ))
+            pads.append(
+                make_pad(
+                    x=20.0 + i * 2.54,
+                    y=20.0,
+                    net=i + 20,
+                    ref="J1",
+                    pin=str(i + 1),
+                    through_hole=True,
+                    width=1.7,
+                    height=1.7,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -629,14 +647,11 @@ class TestDesignRulesSubgrid:
         """SubGridRouter should respect escape_search_radius from rules."""
         rules = DesignRules(subgrid_escape_radius=5)
         grid = RoutingGrid(width=20.0, height=20.0, rules=rules)
-        subgrid = SubGridRouter(
-            grid, rules, escape_search_radius=rules.subgrid_escape_radius
-        )
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=rules.subgrid_escape_radius)
         assert subgrid.escape_search_radius == 5
 
 
 # Import Segment for use in test data construction
-from kicad_tools.router.primitives import Segment
 
 
 class TestEscapeClearanceValidation:
@@ -662,21 +677,36 @@ class TestEscapeClearanceValidation:
 
         # Off-grid pad (net 1) at 1.05mm -- between grid points 1.0 and 1.1
         off_grid_pad = make_pad(
-            x=1.05, y=1.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=1.05,
+            y=1.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
 
         # Neighboring pad (net 2) very close -- will create clearance violation
         # for escape segments heading toward grid point 1.0 (leftward)
         neighbor_pad = make_pad(
-            x=0.7, y=1.0, net=2, ref="U2", pin="1",
-            width=0.3, height=0.3,
+            x=0.7,
+            y=1.0,
+            net=2,
+            ref="U2",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
 
         # A pad on the other side for component center calculation
         center_pad = make_pad(
-            x=1.05, y=2.0, net=3, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            x=1.05,
+            y=2.0,
+            net=3,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.3,
         )
 
         all_pads = [off_grid_pad, neighbor_pad, center_pad]
@@ -695,7 +725,8 @@ class TestEscapeClearanceValidation:
         for escape in result.escapes:
             if escape.pad.net == 1:
                 _is_valid, actual_clearance, _loc = grid.validate_segment_clearance(
-                    escape.segment, exclude_net=1,
+                    escape.segment,
+                    exclude_net=1,
                 )
                 assert actual_clearance >= relaxed_clearance - 0.001, (
                     f"Escape segment for net 1 has insufficient clearance "
@@ -718,25 +749,45 @@ class TestEscapeClearanceValidation:
 
         # Off-grid pad at 5.05mm
         off_grid_pad = make_pad(
-            x=5.05, y=5.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.8,
+            x=5.05,
+            y=5.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.8,
         )
 
         # Place neighbor pads of different nets very close on both sides
         # to narrow the escape corridor
         neighbor_left = make_pad(
-            x=4.7, y=5.0, net=10, ref="U2", pin="1",
-            width=0.3, height=0.8,
+            x=4.7,
+            y=5.0,
+            net=10,
+            ref="U2",
+            pin="1",
+            width=0.3,
+            height=0.8,
         )
         neighbor_right = make_pad(
-            x=5.4, y=5.0, net=11, ref="U2", pin="2",
-            width=0.3, height=0.8,
+            x=5.4,
+            y=5.0,
+            net=11,
+            ref="U2",
+            pin="2",
+            width=0.3,
+            height=0.8,
         )
 
         # Component center pad
         center_pad = make_pad(
-            x=5.05, y=6.0, net=12, ref="U1", pin="2",
-            width=0.3, height=0.8,
+            x=5.05,
+            y=6.0,
+            net=12,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.8,
         )
 
         all_pads = [off_grid_pad, neighbor_left, neighbor_right, center_pad]
@@ -750,11 +801,10 @@ class TestEscapeClearanceValidation:
         for escape in result.escapes:
             if escape.pad.net == 1:
                 is_valid, _clearance, _loc = grid.validate_segment_clearance(
-                    escape.segment, exclude_net=1,
+                    escape.segment,
+                    exclude_net=1,
                 )
-                assert is_valid, (
-                    "Escape segment should pass clearance validation"
-                )
+                assert is_valid, "Escape segment should pass clearance validation"
 
     def test_escape_all_candidates_fail_clearance(self):
         """When all candidates violate clearance, pad should go to failed_pads."""
@@ -770,22 +820,38 @@ class TestEscapeClearanceValidation:
 
         # Off-grid pad surrounded by other-net pads on all sides
         off_grid_pad = make_pad(
-            x=5.05, y=5.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=5.05,
+            y=5.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
 
         # Surround with large pads from different nets
         blockers = []
         for bx, by, bnet in [
-            (4.8, 5.0, 10), (5.3, 5.0, 11),
-            (5.05, 4.7, 12), (5.05, 5.3, 13),
-            (4.8, 4.7, 14), (5.3, 4.7, 15),
-            (4.8, 5.3, 16), (5.3, 5.3, 17),
+            (4.8, 5.0, 10),
+            (5.3, 5.0, 11),
+            (5.05, 4.7, 12),
+            (5.05, 5.3, 13),
+            (4.8, 4.7, 14),
+            (5.3, 4.7, 15),
+            (4.8, 5.3, 16),
+            (5.3, 5.3, 17),
         ]:
-            blockers.append(make_pad(
-                x=bx, y=by, net=bnet, ref="U2", pin=str(bnet),
-                width=0.4, height=0.4,
-            ))
+            blockers.append(
+                make_pad(
+                    x=bx,
+                    y=by,
+                    net=bnet,
+                    ref="U2",
+                    pin=str(bnet),
+                    width=0.4,
+                    height=0.4,
+                )
+            )
 
         all_pads = [off_grid_pad] + blockers
         for p in all_pads:
@@ -798,7 +864,8 @@ class TestEscapeClearanceValidation:
         net1_escapes = [e for e in result.escapes if e.pad.net == 1]
         for escape in net1_escapes:
             is_valid, _clearance, _loc = grid.validate_segment_clearance(
-                escape.segment, exclude_net=1,
+                escape.segment,
+                exclude_net=1,
             )
             assert is_valid, "Any accepted escape must pass clearance"
 
@@ -819,15 +886,17 @@ class TestEscapeClearanceValidation:
         base_x = 10.0
         base_y = 10.0
         for i in range(6):
-            pads.append(make_pad(
-                x=base_x,
-                y=base_y + i * 0.65,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-                width=0.3,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x,
+                    y=base_y + i * 0.65,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -878,13 +947,23 @@ class TestEscapeClearanceValidation:
 
         # Pad offset by exactly resolution/2 = 0.05mm
         pad = make_pad(
-            x=5.05, y=5.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=5.05,
+            y=5.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
         # Companion pad for component center
         center_pad = make_pad(
-            x=5.05, y=7.0, net=2, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            x=5.05,
+            y=7.0,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.3,
         )
 
         for p in [pad, center_pad]:
@@ -897,7 +976,8 @@ class TestEscapeClearanceValidation:
         for escape in result.escapes:
             if escape.pad.net == 1:
                 is_valid, _clearance, _loc = grid.validate_segment_clearance(
-                    escape.segment, exclude_net=1,
+                    escape.segment,
+                    exclude_net=1,
                 )
                 assert is_valid
 
@@ -916,12 +996,22 @@ class TestEscapeClearanceValidation:
         subgrid = SubGridRouter(grid, rules)
 
         pad = make_pad(
-            x=5.03, y=5.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=5.03,
+            y=5.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
         center_pad = make_pad(
-            x=5.03, y=7.0, net=2, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            x=5.03,
+            y=7.0,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.3,
         )
 
         for p in [pad, center_pad]:
@@ -933,7 +1023,8 @@ class TestEscapeClearanceValidation:
         result = subgrid.generate_escape_segments(analysis)
         for escape in result.escapes:
             is_valid, _clearance, _loc = grid.validate_segment_clearance(
-                escape.segment, exclude_net=escape.pad.net,
+                escape.segment,
+                exclude_net=escape.pad.net,
             )
             assert is_valid
 
@@ -960,21 +1051,36 @@ class TestClearanceWeightedSelection:
 
         # Off-grid pad at y=5.05 (between grid points 5.0 and 5.1)
         off_grid_pad = make_pad(
-            x=5.0, y=5.05, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=5.0,
+            y=5.05,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
 
         # Neighbor pad of different net close to grid point y=5.0 (below),
         # making y=5.0 a worse escape target than y=5.1
         neighbor_below = make_pad(
-            x=5.0, y=4.6, net=2, ref="U2", pin="1",
-            width=0.3, height=0.3,
+            x=5.0,
+            y=4.6,
+            net=2,
+            ref="U2",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
 
         # Component center pad (for escape direction calculation)
         center_pad = make_pad(
-            x=5.0, y=7.0, net=3, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            x=5.0,
+            y=7.0,
+            net=3,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.3,
         )
 
         all_pads = [off_grid_pad, neighbor_below, center_pad]
@@ -996,7 +1102,8 @@ class TestClearanceWeightedSelection:
         )
         # Must also pass binary clearance validation
         is_valid, _clearance, _loc = grid.validate_segment_clearance(
-            escape.segment, exclude_net=1,
+            escape.segment,
+            exclude_net=1,
         )
         assert is_valid
 
@@ -1017,12 +1124,22 @@ class TestClearanceWeightedSelection:
 
         # Isolated off-grid pad -- no different-net neighbors nearby
         off_grid_pad = make_pad(
-            x=10.05, y=10.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=10.05,
+            y=10.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
         center_pad = make_pad(
-            x=10.05, y=12.0, net=2, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            x=10.05,
+            y=12.0,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.3,
         )
 
         all_pads = [off_grid_pad, center_pad]
@@ -1059,8 +1176,13 @@ class TestClearanceWeightedSelection:
 
         # Place a pad at (5.0, 5.0) with width=0.4, height=0.4 -> radius=0.2
         neighbor = make_pad(
-            x=5.0, y=5.0, net=2, ref="U2", pin="1",
-            width=0.4, height=0.4,
+            x=5.0,
+            y=5.0,
+            net=2,
+            ref="U2",
+            pin="1",
+            width=0.4,
+            height=0.4,
         )
         grid.add_pad(neighbor)
 
@@ -1068,7 +1190,11 @@ class TestClearanceWeightedSelection:
         # Center-to-center = 0.5mm, edge-to-edge = 0.5 - 0.075 - 0.2 = 0.225
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         dist = subgrid._min_clearance_to_neighbors(
-            5.5, 5.0, 0.075, net=1, layer_idx=layer_idx,
+            5.5,
+            5.0,
+            0.075,
+            net=1,
+            layer_idx=layer_idx,
         )
         expected = 0.5 - 0.075 - 0.2
         assert abs(dist - expected) < 0.001, f"Expected {expected}, got {dist}"
@@ -1086,14 +1212,23 @@ class TestClearanceWeightedSelection:
 
         # Pad on net=1 -- should be skipped when querying for net=1
         same_net_pad = make_pad(
-            x=5.0, y=5.0, net=1, ref="U1", pin="1",
-            width=0.4, height=0.4,
+            x=5.0,
+            y=5.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.4,
+            height=0.4,
         )
         grid.add_pad(same_net_pad)
 
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         dist = subgrid._min_clearance_to_neighbors(
-            5.5, 5.0, 0.075, net=1, layer_idx=layer_idx,
+            5.5,
+            5.0,
+            0.075,
+            net=1,
+            layer_idx=layer_idx,
         )
         assert dist == float("inf"), "Same-net pad should be ignored"
 
@@ -1110,15 +1245,24 @@ class TestClearanceWeightedSelection:
 
         # Pad on B.Cu -- should be skipped when querying F.Cu layer
         back_pad = make_pad(
-            x=5.0, y=5.0, net=2, ref="U2", pin="1",
-            width=0.4, height=0.4,
+            x=5.0,
+            y=5.0,
+            net=2,
+            ref="U2",
+            pin="1",
+            width=0.4,
+            height=0.4,
             layer=Layer.B_CU,
         )
         grid.add_pad(back_pad)
 
         f_cu_idx = grid.layer_to_index(Layer.F_CU.value)
         dist = subgrid._min_clearance_to_neighbors(
-            5.5, 5.0, 0.075, net=1, layer_idx=f_cu_idx,
+            5.5,
+            5.0,
+            0.075,
+            net=1,
+            layer_idx=f_cu_idx,
         )
         assert dist == float("inf"), "Pad on B.Cu should be skipped for F.Cu query"
 
@@ -1135,15 +1279,24 @@ class TestClearanceWeightedSelection:
 
         # Through-hole pad should be visible on all layers
         th_pad = make_pad(
-            x=5.0, y=5.0, net=2, ref="J1", pin="1",
-            width=1.7, height=1.7,
+            x=5.0,
+            y=5.0,
+            net=2,
+            ref="J1",
+            pin="1",
+            width=1.7,
+            height=1.7,
             through_hole=True,
         )
         grid.add_pad(th_pad)
 
         f_cu_idx = grid.layer_to_index(Layer.F_CU.value)
         dist = subgrid._min_clearance_to_neighbors(
-            5.5, 5.0, 0.075, net=1, layer_idx=f_cu_idx,
+            5.5,
+            5.0,
+            0.075,
+            net=1,
+            layer_idx=f_cu_idx,
         )
         # Through-hole pad radius = 1.7/2 = 0.85
         # Distance = 0.5 - 0.075 - 0.85 = -0.425 (overlapping)
@@ -1162,12 +1315,22 @@ class TestClearanceWeightedSelection:
         subgrid = SubGridRouter(grid, rules, clearance_weight=0.0)
 
         off_grid_pad = make_pad(
-            x=5.05, y=5.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=5.05,
+            y=5.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
         center_pad = make_pad(
-            x=5.05, y=7.0, net=2, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            x=5.05,
+            y=7.0,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.3,
         )
 
         all_pads = [off_grid_pad, center_pad]
@@ -1180,7 +1343,8 @@ class TestClearanceWeightedSelection:
         # Should still produce valid escapes (binary check is defense-in-depth)
         for escape in result.escapes:
             is_valid, _clearance, _loc = grid.validate_segment_clearance(
-                escape.segment, exclude_net=escape.pad.net,
+                escape.segment,
+                exclude_net=escape.pad.net,
             )
             assert is_valid
 
@@ -1223,27 +1387,31 @@ class TestFineGridClearanceZoneUnblocking:
 
         # Left side pads (pin 1-14)
         for i in range(14):
-            pads.append(make_pad(
-                x=base_x,
-                y=base_y + i * 0.65,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-                width=0.3,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x,
+                    y=base_y + i * 0.65,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         # Right side pads (pin 15-28)
         for i in range(14):
-            pads.append(make_pad(
-                x=base_x + 6.0,
-                y=base_y + i * 0.65,
-                net=i + 15,
-                ref="U1",
-                pin=str(i + 15),
-                width=0.3,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x + 6.0,
+                    y=base_y + i * 0.65,
+                    net=i + 15,
+                    ref="U1",
+                    pin=str(i + 15),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -1287,17 +1455,35 @@ class TestFineGridClearanceZoneUnblocking:
 
         # Two adjacent pads at 0.65mm apart on different nets, off-grid
         pad_a = make_pad(
-            x=5.023, y=5.017, net=1, ref="U1", pin="1",
-            width=0.3, height=0.45, net_name="NET_A",
+            x=5.023,
+            y=5.017,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.45,
+            net_name="NET_A",
         )
         pad_b = make_pad(
-            x=5.023, y=5.667, net=2, ref="U1", pin="2",
-            width=0.3, height=0.45, net_name="NET_B",
+            x=5.023,
+            y=5.667,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.45,
+            net_name="NET_B",
         )
         # Third pad for component center calculation
         pad_c = make_pad(
-            x=5.023, y=6.317, net=3, ref="U1", pin="3",
-            width=0.3, height=0.45, net_name="NET_C",
+            x=5.023,
+            y=6.317,
+            net=3,
+            ref="U1",
+            pin="3",
+            width=0.3,
+            height=0.45,
+            net_name="NET_C",
         )
 
         for p in [pad_a, pad_b, pad_c]:
@@ -1325,13 +1511,23 @@ class TestFineGridClearanceZoneUnblocking:
 
         # Place a pad at an off-grid position
         pad = make_pad(
-            x=5.023, y=5.017, net=1, ref="U1", pin="1",
-            width=0.3, height=0.45,
+            x=5.023,
+            y=5.017,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.45,
         )
         # Another pad on a different net nearby (its copper will be pad_blocked)
         other_pad = make_pad(
-            x=5.023, y=5.667, net=2, ref="U1", pin="2",
-            width=0.3, height=0.45,
+            x=5.023,
+            y=5.667,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.45,
         )
 
         for p in [pad, other_pad]:
@@ -1397,15 +1593,17 @@ class TestFineGridClearanceZoneUnblocking:
         # Row of 6 pads at 0.65mm pitch, off-grid placement
         pads = []
         for i in range(6):
-            pads.append(make_pad(
-                x=5.023,
-                y=5.017 + i * 0.65,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-                width=0.3,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=5.023,
+                    y=5.017 + i * 0.65,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -1515,8 +1713,11 @@ class TestFineZoneAwareEscape:
 
         # Coarse grid at 0.17mm
         grid, rules = make_grid_and_rules(
-            width=20.0, height=20.0, resolution=0.17,
-            trace_width=0.15, trace_clearance=0.1,
+            width=20.0,
+            height=20.0,
+            resolution=0.17,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
 
         # Place a pad at an off-grid position (offset > resolution/4 = 0.0425mm)
@@ -1526,7 +1727,11 @@ class TestFineZoneAwareEscape:
 
         # Fine zone covering the pad area
         zone = FineZone(
-            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            ref="U1",
+            x_min=9.0,
+            y_min=9.0,
+            x_max=11.0,
+            y_max=11.0,
             resolution=0.05,
         )
 
@@ -1552,9 +1757,7 @@ class TestFineZoneAwareEscape:
         coarse_len = math.sqrt(
             (coarse_seg.x2 - coarse_seg.x1) ** 2 + (coarse_seg.y2 - coarse_seg.y1) ** 2
         )
-        fine_len = math.sqrt(
-            (fine_seg.x2 - fine_seg.x1) ** 2 + (fine_seg.y2 - fine_seg.y1) ** 2
-        )
+        fine_len = math.sqrt((fine_seg.x2 - fine_seg.x1) ** 2 + (fine_seg.y2 - fine_seg.y1) ** 2)
 
         assert fine_len <= coarse_len + 0.001, (
             f"Fine escape segment ({fine_len:.4f}mm) should be no longer than "
@@ -1566,15 +1769,22 @@ class TestFineZoneAwareEscape:
         from kicad_tools.router.io import FineZone
 
         grid, rules = make_grid_and_rules(
-            width=20.0, height=20.0, resolution=0.17,
-            trace_width=0.15, trace_clearance=0.1,
+            width=20.0,
+            height=20.0,
+            resolution=0.17,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
 
         pad = make_pad(x=10.075, y=10.075, net=1, ref="U1", pin="1")
         grid.add_pad(pad)
 
         zone = FineZone(
-            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            ref="U1",
+            x_min=9.0,
+            y_min=9.0,
+            x_max=11.0,
+            y_max=11.0,
             resolution=0.05,
         )
 
@@ -1595,8 +1805,11 @@ class TestFineZoneAwareEscape:
         from kicad_tools.router.io import FineZone
 
         grid, rules = make_grid_and_rules(
-            width=20.0, height=20.0, resolution=0.17,
-            trace_width=0.15, trace_clearance=0.1,
+            width=20.0,
+            height=20.0,
+            resolution=0.17,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
 
         # Pad well outside the fine zone (offset > resolution/4 = 0.0425mm)
@@ -1604,7 +1817,11 @@ class TestFineZoneAwareEscape:
         grid.add_pad(pad)
 
         zone = FineZone(
-            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            ref="U1",
+            x_min=9.0,
+            y_min=9.0,
+            x_max=11.0,
+            y_max=11.0,
             resolution=0.05,
         )
 
@@ -1626,15 +1843,22 @@ class TestFineZoneAwareEscape:
         from kicad_tools.router.io import FineZone
 
         grid, rules = make_grid_and_rules(
-            width=20.0, height=20.0, resolution=0.17,
-            trace_width=0.15, trace_clearance=0.1,
+            width=20.0,
+            height=20.0,
+            resolution=0.17,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
 
         pad = make_pad(x=10.075, y=10.075, net=1, ref="U1", pin="1")
         grid.add_pad(pad)
 
         zone = FineZone(
-            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=11.0,
+            ref="U1",
+            x_min=9.0,
+            y_min=9.0,
+            x_max=11.0,
+            y_max=11.0,
             resolution=0.05,
         )
 
@@ -1656,8 +1880,11 @@ class TestFineZoneAwareEscape:
         from kicad_tools.router.io import FineZone
 
         grid, rules = make_grid_and_rules(
-            width=20.0, height=20.0, resolution=0.17,
-            trace_width=0.15, trace_clearance=0.1,
+            width=20.0,
+            height=20.0,
+            resolution=0.17,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
 
         # Place two pads from the same component at fine pitch (0.65mm)
@@ -1667,7 +1894,11 @@ class TestFineZoneAwareEscape:
         grid.add_pad(pad2)
 
         zone = FineZone(
-            ref="U1", x_min=9.0, y_min=9.0, x_max=11.0, y_max=12.0,
+            ref="U1",
+            x_min=9.0,
+            y_min=9.0,
+            x_max=11.0,
+            y_max=12.0,
             resolution=0.05,
         )
 
@@ -1725,27 +1956,31 @@ class TestTightPitchClearanceRejection:
 
         # Left side pads (pin 1-14)
         for i in range(14):
-            pads.append(make_pad(
-                x=base_x,
-                y=base_y + i * 0.65,
-                net=i + 1,
-                ref="U4",
-                pin=str(i + 1),
-                width=0.35,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x,
+                    y=base_y + i * 0.65,
+                    net=i + 1,
+                    ref="U4",
+                    pin=str(i + 1),
+                    width=0.35,
+                    height=0.45,
+                )
+            )
 
         # Right side pads (pin 15-28)
         for i in range(14):
-            pads.append(make_pad(
-                x=base_x + 6.0,
-                y=base_y + i * 0.65,
-                net=i + 15,
-                ref="U4",
-                pin=str(i + 15),
-                width=0.35,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x + 6.0,
+                    y=base_y + i * 0.65,
+                    net=i + 15,
+                    ref="U4",
+                    pin=str(i + 15),
+                    width=0.35,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -1795,25 +2030,29 @@ class TestTightPitchClearanceRejection:
         pads = []
         base_y = 10.0
         for i in range(3):
-            pads.append(make_pad(
-                x=10.0,
-                y=base_y + i * 0.65,
-                net=i + 1,
+            pads.append(
+                make_pad(
+                    x=10.0,
+                    y=base_y + i * 0.65,
+                    net=i + 1,
+                    ref="U4",
+                    pin=str(i + 1),
+                    width=0.35,
+                    height=0.45,
+                )
+            )
+        # Add a pad on the opposite side for realistic component center
+        pads.append(
+            make_pad(
+                x=16.0,
+                y=base_y + 0.65,
+                net=10,
                 ref="U4",
-                pin=str(i + 1),
+                pin="10",
                 width=0.35,
                 height=0.45,
-            ))
-        # Add a pad on the opposite side for realistic component center
-        pads.append(make_pad(
-            x=16.0,
-            y=base_y + 0.65,
-            net=10,
-            ref="U4",
-            pin="10",
-            width=0.35,
-            height=0.45,
-        ))
+            )
+        )
 
         for p in pads:
             grid.add_pad(p)
@@ -1822,10 +2061,7 @@ class TestTightPitchClearanceRejection:
         result = subgrid.generate_escape_segments(analysis)
 
         # Check the middle pad (pin 2) escape direction
-        middle_escapes = [
-            e for e in result.escapes
-            if e.pad.pin == "2" and e.pad.ref == "U4"
-        ]
+        middle_escapes = [e for e in result.escapes if e.pad.pin == "2" and e.pad.ref == "U4"]
         if middle_escapes:
             escape = middle_escapes[0]
             # The escape should NOT go between pads (Y direction toward
@@ -1838,8 +2074,7 @@ class TestTightPitchClearanceRejection:
                 # The X component of the escape direction should be
                 # negative (leftward, away from IC body) or neutral
                 assert dx <= 0.01, (
-                    f"Middle pad escape goes toward IC body (dx={dx:.3f}), "
-                    f"expected outward escape"
+                    f"Middle pad escape goes toward IC body (dx={dx:.3f}), expected outward escape"
                 )
 
             # Must also pass clearance
@@ -1870,15 +2105,17 @@ class TestTightPitchClearanceRejection:
         # Use off-grid base_y so pads don't snap to grid points.
         pads = []
         for i in range(6):
-            pads.append(make_pad(
-                x=10.0,
-                y=10.03 + i * 0.85,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-                width=0.3,
-                height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=10.0,
+                    y=10.03 + i * 0.85,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -1904,8 +2141,7 @@ class TestTightPitchClearanceRejection:
                 exclude_net=escape.pad.net,
             )
             assert is_valid, (
-                f"Escape for {escape.pad.ref}.{escape.pad.pin} violates "
-                f"clearance={clearance:.4f}mm"
+                f"Escape for {escape.pad.ref}.{escape.pad.pin} violates clearance={clearance:.4f}mm"
             )
 
 
@@ -1947,14 +2183,24 @@ class TestEscapeFallbackStrategies:
 
         # Off-grid pad (offset 0.05mm from grid on a 0.1mm grid)
         off_grid_pad = make_pad(
-            x=10.05, y=10.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=10.05,
+            y=10.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
 
         # Component center pad on the opposite side so escape direction = +X
         center_pad = make_pad(
-            x=8.0, y=10.0, net=2, ref="U1", pin="2",
-            width=0.1, height=0.1,
+            x=8.0,
+            y=10.0,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.1,
+            height=0.1,
         )
 
         all_pads = [off_grid_pad, center_pad]
@@ -1995,21 +2241,29 @@ class TestEscapeFallbackStrategies:
         # but relaxed clearance (50%) allows them.
         pads = []
         for i in range(4):
-            pads.append(make_pad(
-                x=10.0,
-                y=10.0 + i * 0.55,  # 0.55mm pitch, tight
-                net=i + 1,
+            pads.append(
+                make_pad(
+                    x=10.0,
+                    y=10.0 + i * 0.55,  # 0.55mm pitch, tight
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.4,
+                )
+            )
+        # Opposite side for component center
+        pads.append(
+            make_pad(
+                x=16.0,
+                y=10.825,
+                net=10,
                 ref="U1",
-                pin=str(i + 1),
+                pin="10",
                 width=0.3,
                 height=0.4,
-            ))
-        # Opposite side for component center
-        pads.append(make_pad(
-            x=16.0, y=10.825, net=10,
-            ref="U1", pin="10",
-            width=0.3, height=0.4,
-        ))
+            )
+        )
 
         for p in pads:
             grid.add_pad(p)
@@ -2041,24 +2295,30 @@ class TestEscapeFallbackStrategies:
         base_y = 10.0
 
         for i in range(14):
-            pads.append(make_pad(
-                x=base_x,
-                y=base_y + i * 0.65,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-                width=0.3, height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x,
+                    y=base_y + i * 0.65,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for i in range(14):
-            pads.append(make_pad(
-                x=base_x + 6.0,
-                y=base_y + i * 0.65,
-                net=i + 15,
-                ref="U1",
-                pin=str(i + 15),
-                width=0.3, height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=base_x + 6.0,
+                    y=base_y + i * 0.65,
+                    net=i + 15,
+                    ref="U1",
+                    pin=str(i + 15),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -2088,12 +2348,22 @@ class TestEscapeFallbackStrategies:
 
         # Off-grid pad with neighbors -- escape may need multi-hop
         off_grid_pad = make_pad(
-            x=10.05, y=10.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=10.05,
+            y=10.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
         center_pad = make_pad(
-            x=10.05, y=12.0, net=2, ref="U1", pin="2",
-            width=0.3, height=0.3,
+            x=10.05,
+            y=12.0,
+            net=2,
+            ref="U1",
+            pin="2",
+            width=0.3,
+            height=0.3,
         )
 
         for p in [off_grid_pad, center_pad]:
@@ -2130,14 +2400,17 @@ class TestEscapeFallbackStrategies:
         # 1.0mm pitch (generous) -- should all escape with normal strategy
         pads = []
         for i in range(6):
-            pads.append(make_pad(
-                x=10.0,
-                y=10.03 + i * 1.0,
-                net=i + 1,
-                ref="U1",
-                pin=str(i + 1),
-                width=0.3, height=0.45,
-            ))
+            pads.append(
+                make_pad(
+                    x=10.0,
+                    y=10.03 + i * 1.0,
+                    net=i + 1,
+                    ref="U1",
+                    pin=str(i + 1),
+                    width=0.3,
+                    height=0.45,
+                )
+            )
 
         for p in pads:
             grid.add_pad(p)
@@ -2147,8 +2420,7 @@ class TestEscapeFallbackStrategies:
 
         # All off-grid pads should escape successfully
         assert result.success_count == result.total_attempted, (
-            f"Wide-pitch pads: {result.success_count}/{result.total_attempted} "
-            f"should all escape"
+            f"Wide-pitch pads: {result.success_count}/{result.total_attempted} should all escape"
         )
 
         # All escapes must pass full clearance validation
@@ -2158,8 +2430,7 @@ class TestEscapeFallbackStrategies:
                 exclude_net=escape.pad.net,
             )
             assert is_valid, (
-                f"Escape for {escape.pad.ref}.{escape.pad.pin} violates "
-                f"clearance={clearance:.4f}mm"
+                f"Escape for {escape.pad.ref}.{escape.pad.pin} violates clearance={clearance:.4f}mm"
             )
 
 
@@ -2220,12 +2491,24 @@ class TestSubGridResultFailureTracking:
         # Create a minimal analysis to track attempted counts
         analysis = SubGridAnalysis(
             off_grid_pads=[
-                SubGridPad(pad=p1, grid_x=10, grid_y=10,
-                           offset_x=0.05, offset_y=0.0,
-                           snap_x=1.0, snap_y=1.0),
-                SubGridPad(pad=p2, grid_x=20, grid_y=10,
-                           offset_x=0.05, offset_y=0.0,
-                           snap_x=2.0, snap_y=1.0),
+                SubGridPad(
+                    pad=p1,
+                    grid_x=10,
+                    grid_y=10,
+                    offset_x=0.05,
+                    offset_y=0.0,
+                    snap_x=1.0,
+                    snap_y=1.0,
+                ),
+                SubGridPad(
+                    pad=p2,
+                    grid_x=20,
+                    grid_y=10,
+                    offset_x=0.05,
+                    offset_y=0.0,
+                    snap_x=2.0,
+                    snap_y=1.0,
+                ),
             ],
         )
         result = SubGridResult(
@@ -2249,20 +2532,37 @@ class TestSubGridResultFailureTracking:
         escape = SubGridEscape(
             pad=p_ok,
             segment=Segment(
-                x1=1.0, y1=1.0, x2=1.1, y2=1.0,
-                width=0.2, layer=Layer.F_CU, net=1,
+                x1=1.0,
+                y1=1.0,
+                x2=1.1,
+                y2=1.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
             ),
             grid_point=(11, 10),
             snap_point=(1.1, 1.0),
         )
         analysis = SubGridAnalysis(
             off_grid_pads=[
-                SubGridPad(pad=p_ok, grid_x=10, grid_y=10,
-                           offset_x=0.05, offset_y=0.0,
-                           snap_x=1.0, snap_y=1.0),
-                SubGridPad(pad=p_fail, grid_x=20, grid_y=10,
-                           offset_x=0.05, offset_y=0.0,
-                           snap_x=2.0, snap_y=1.0),
+                SubGridPad(
+                    pad=p_ok,
+                    grid_x=10,
+                    grid_y=10,
+                    offset_x=0.05,
+                    offset_y=0.0,
+                    snap_x=1.0,
+                    snap_y=1.0,
+                ),
+                SubGridPad(
+                    pad=p_fail,
+                    grid_x=20,
+                    grid_y=10,
+                    offset_x=0.05,
+                    offset_y=0.0,
+                    snap_x=2.0,
+                    snap_y=1.0,
+                ),
             ],
         )
         result = SubGridResult(
@@ -2296,22 +2596,38 @@ class TestSubGridEscapeFailureLogging:
 
         # Off-grid pad surrounded by other-net pads on all sides
         off_grid_pad = make_pad(
-            x=5.05, y=5.0, net=1, ref="U1", pin="1",
-            width=0.3, height=0.3,
+            x=5.05,
+            y=5.0,
+            net=1,
+            ref="U1",
+            pin="1",
+            width=0.3,
+            height=0.3,
         )
 
         # Surround with large pads from different nets
         blockers = []
         for bx, by, bnet in [
-            (4.8, 5.0, 10), (5.3, 5.0, 11),
-            (5.05, 4.7, 12), (5.05, 5.3, 13),
-            (4.8, 4.7, 14), (5.3, 4.7, 15),
-            (4.8, 5.3, 16), (5.3, 5.3, 17),
+            (4.8, 5.0, 10),
+            (5.3, 5.0, 11),
+            (5.05, 4.7, 12),
+            (5.05, 5.3, 13),
+            (4.8, 4.7, 14),
+            (5.3, 4.7, 15),
+            (4.8, 5.3, 16),
+            (5.3, 5.3, 17),
         ]:
-            blockers.append(make_pad(
-                x=bx, y=by, net=bnet, ref="U2", pin=str(bnet),
-                width=0.4, height=0.4,
-            ))
+            blockers.append(
+                make_pad(
+                    x=bx,
+                    y=by,
+                    net=bnet,
+                    ref="U2",
+                    pin=str(bnet),
+                    width=0.4,
+                    height=0.4,
+                )
+            )
 
         all_pads = [off_grid_pad] + blockers
         for p in all_pads:
@@ -2324,9 +2640,7 @@ class TestSubGridEscapeFailureLogging:
 
         if result.failed_pads:
             # Should have WARNING logs with per-component info
-            warning_msgs = [
-                r.message for r in caplog.records if r.levelno == logging.WARNING
-            ]
+            warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
             assert any("U1:" in msg for msg in warning_msgs), (
                 f"Expected WARNING with 'U1:' but got: {warning_msgs}"
             )
@@ -2345,8 +2659,7 @@ class TestSubGridEscapeFailureLogging:
 
         # Single off-grid pad with lots of room -- should succeed
         pads = [
-            make_pad(x=1.05, y=1.0, net=1, ref="U1", pin="1",
-                     width=0.3, height=0.45),
+            make_pad(x=1.05, y=1.0, net=1, ref="U1", pin="1", width=0.3, height=0.45),
         ]
         for p in pads:
             grid.add_pad(p)
@@ -2357,12 +2670,8 @@ class TestSubGridEscapeFailureLogging:
         with caplog.at_level(logging.WARNING, logger="kicad_tools.router.subgrid"):
             result = subgrid.generate_escape_segments(analysis)
 
-        warning_msgs = [
-            r.message for r in caplog.records if r.levelno == logging.WARNING
-        ]
-        assert not warning_msgs, (
-            f"Expected no WARNING on success but got: {warning_msgs}"
-        )
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert not warning_msgs, f"Expected no WARNING on success but got: {warning_msgs}"
 
 
 class TestInPadViaRescue:
@@ -2450,8 +2759,7 @@ class TestInPadViaRescue:
         # At least some pads should have been rescued via in-pad via.
         rescues = [e for e in result.escapes if e.via is not None]
         assert len(rescues) > 0, (
-            "Expected at least one Phase 5 in-pad rescue for the LQFP-32 "
-            "inner pads"
+            "Expected at least one Phase 5 in-pad rescue for the LQFP-32 inner pads"
         )
 
         # Every rescue must (a) place an in-pad via, (b) target an
@@ -2500,9 +2808,7 @@ class TestInPadViaRescue:
         # No rescues should fire when the manufacturer does not support
         # via-in-pad processing.
         rescues = [e for e in result.escapes if e.via is not None]
-        assert len(rescues) == 0, (
-            "Expected zero Phase 5 rescues on base jlcpcb (no via-in-pad)"
-        )
+        assert len(rescues) == 0, "Expected zero Phase 5 rescues on base jlcpcb (no via-in-pad)"
 
     def test_rescue_skipped_when_no_manufacturer_set(self):
         """Rescue must not fire when no manufacturer profile is configured."""
@@ -2538,9 +2844,7 @@ class TestInPadViaRescue:
         result = subgrid.generate_escape_segments(analysis)
 
         rescues = [e for e in result.escapes if e.via is not None]
-        assert len(rescues) == 0, (
-            "Expected zero Phase 5 rescues when manufacturer is unset"
-        )
+        assert len(rescues) == 0, "Expected zero Phase 5 rescues when manufacturer is unset"
 
     def test_rescue_skips_plane_net_pads(self):
         """Plane-net pads (net == 0) must never be rescued."""
@@ -2557,9 +2861,7 @@ class TestInPadViaRescue:
 
         rescues = [e for e in result.escapes if e.via is not None]
         for e in rescues:
-            assert e.pad.net != 0, (
-                f"Plane-net pad {e.pad.ref}.{e.pad.pin} should not be rescued"
-            )
+            assert e.pad.net != 0, f"Plane-net pad {e.pad.ref}.{e.pad.pin} should not be rescued"
 
     def test_rescue_skips_through_hole_pads(self):
         """Through-hole pads connect every layer and need no Phase 5 rescue."""
@@ -2617,9 +2919,7 @@ class TestInPadViaRescue:
             # Rescue routes do NOT emit a zero-length surface stub.
             for seg in r.segments:
                 length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
-                assert length > 1e-6, (
-                    "Rescue route should not emit a zero-length surface stub"
-                )
+                assert length > 1e-6, "Rescue route should not emit a zero-length surface stub"
 
     def test_apply_unblocks_inner_layer_cell_for_rescue(self):
         """``apply_escape_segments`` must unblock the inner-layer

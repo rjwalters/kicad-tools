@@ -200,8 +200,6 @@ def parse_fp_lib_table(path: Path) -> list[FpLibEntry]:
             # surface an entry whose directory has been deleted, which is
             # often the bug we want to diagnose.
 
-        entries.append(
-            FpLibEntry(name=name, type=lib_type, uri=uri, resolved_path=resolved)
-        )
+        entries.append(FpLibEntry(name=name, type=lib_type, uri=uri, resolved_path=resolved))
 
     return entries

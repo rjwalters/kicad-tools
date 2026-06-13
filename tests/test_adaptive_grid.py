@@ -4,8 +4,6 @@ Issue #1135: Adaptive grid routing for fine-pitch components.
 Issue #1768: Make adaptive multi-resolution grid the default routing strategy.
 """
 
-import math
-
 import pytest
 
 from kicad_tools.router.adaptive_grid import (
@@ -22,7 +20,7 @@ from kicad_tools.router.io import (
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
-from kicad_tools.router.subgrid import SubGridResult, compute_subgrid_resolution
+from kicad_tools.router.subgrid import SubGridResult
 
 
 def make_pad(
@@ -99,10 +97,12 @@ class TestIdentifyFinePitchComponents:
     def test_through_hole_not_flagged(self):
         """Through-hole at 2.54mm pitch should NOT be identified as fine-pitch."""
         pads = {
-            ("J1", "1"): make_pad(x=1.0, y=1.0, net=1, ref="J1", pin="1",
-                                  through_hole=True, width=1.7, height=1.7),
-            ("J1", "2"): make_pad(x=3.54, y=1.0, net=2, ref="J1", pin="2",
-                                  through_hole=True, width=1.7, height=1.7),
+            ("J1", "1"): make_pad(
+                x=1.0, y=1.0, net=1, ref="J1", pin="1", through_hole=True, width=1.7, height=1.7
+            ),
+            ("J1", "2"): make_pad(
+                x=3.54, y=1.0, net=2, ref="J1", pin="2", through_hole=True, width=1.7, height=1.7
+            ),
         }
 
         result = identify_fine_pitch_components(pads, coarse_resolution=0.1)
@@ -181,9 +181,7 @@ class TestAdaptiveGridRouter:
         pads = {}
         for i in range(4):
             key = ("U1", str(i + 1))
-            pad = make_pad(
-                x=5.0 + i * 0.65, y=5.0, net=i + 1, ref="U1", pin=str(i + 1)
-            )
+            pad = make_pad(x=5.0 + i * 0.65, y=5.0, net=i + 1, ref="U1", pin=str(i + 1))
             pads[key] = pad
             grid.add_pad(pad)
 
@@ -200,10 +198,8 @@ class TestAdaptiveGridRouter:
 
         # 2.54mm pitch - all on grid
         pads = {
-            ("J1", "1"): make_pad(x=5.0, y=5.0, net=1, ref="J1", pin="1",
-                                  through_hole=True),
-            ("J1", "2"): make_pad(x=7.54, y=5.0, net=2, ref="J1", pin="2",
-                                  through_hole=True),
+            ("J1", "1"): make_pad(x=5.0, y=5.0, net=1, ref="J1", pin="1", through_hole=True),
+            ("J1", "2"): make_pad(x=7.54, y=5.0, net=2, ref="J1", pin="2", through_hole=True),
         }
         for p in pads.values():
             grid.add_pad(p)
@@ -221,9 +217,7 @@ class TestAdaptiveGridRouter:
         pads = {}
         for i in range(4):
             key = ("U1", str(i + 1))
-            pad = make_pad(
-                x=5.0 + i * 0.65, y=5.0, net=i + 1, ref="U1", pin=str(i + 1)
-            )
+            pad = make_pad(x=5.0 + i * 0.65, y=5.0, net=i + 1, ref="U1", pin=str(i + 1))
             pads[key] = pad
             grid.add_pad(pad)
 
@@ -234,10 +228,13 @@ class TestAdaptiveGridRouter:
 
         # Mock route function
         mock_routes = [
-            Route(net=1, net_name="NET1", segments=[
-                Segment(x1=5.0, y1=5.0, x2=5.7, y2=5.0, width=0.2,
-                        layer=Layer.F_CU, net=1),
-            ]),
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(x1=5.0, y1=5.0, x2=5.7, y2=5.0, width=0.2, layer=Layer.F_CU, net=1),
+                ],
+            ),
         ]
 
         result = router.route_adaptive(nets, pads, route_fn=lambda: mock_routes)
@@ -262,10 +259,13 @@ class TestAdaptiveGridRouter:
         nets = {1: [("R1", "1"), ("R1", "2")]}
 
         mock_routes = [
-            Route(net=1, net_name="NET1", segments=[
-                Segment(x1=5.0, y1=5.0, x2=7.0, y2=5.0, width=0.2,
-                        layer=Layer.F_CU, net=1),
-            ]),
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(x1=5.0, y1=5.0, x2=7.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1),
+                ],
+            ),
         ]
 
         result = router.route_adaptive(nets, pads, route_fn=lambda: mock_routes)
@@ -289,14 +289,20 @@ class TestAdaptiveGridResult:
 
     def test_all_routes_combines(self):
         """all_routes should combine escape and main routes."""
-        escape = Route(net=1, net_name="NET1", segments=[
-            Segment(x1=1.0, y1=1.0, x2=1.1, y2=1.0, width=0.2,
-                    layer=Layer.F_CU, net=1),
-        ])
-        main = Route(net=1, net_name="NET1", segments=[
-            Segment(x1=1.1, y1=1.0, x2=5.0, y2=5.0, width=0.2,
-                    layer=Layer.F_CU, net=1),
-        ])
+        escape = Route(
+            net=1,
+            net_name="NET1",
+            segments=[
+                Segment(x1=1.0, y1=1.0, x2=1.1, y2=1.0, width=0.2, layer=Layer.F_CU, net=1),
+            ],
+        )
+        main = Route(
+            net=1,
+            net_name="NET1",
+            segments=[
+                Segment(x1=1.1, y1=1.0, x2=5.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1),
+            ],
+        )
 
         result = AdaptiveGridResult(
             escape_routes=[escape],
@@ -339,8 +345,13 @@ class TestAdaptiveGridResult:
                 SubGridEscape(
                     pad=make_pad(x=1.65, y=1.0, net=1, ref="U1", pin="1"),
                     segment=Segment(
-                        x1=1.65, y1=1.0, x2=1.7, y2=1.0,
-                        width=0.2, layer=Layer.F_CU, net=1,
+                        x1=1.65,
+                        y1=1.0,
+                        x2=1.7,
+                        y2=1.0,
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=1,
                     ),
                     grid_point=(17, 10),
                     snap_point=(1.7, 1.0),
@@ -419,15 +430,16 @@ class TestAdaptiveGridSSOP:
         nets = {i + 1: [("U1", str(i + 1))] for i in range(20)}
 
         mock_channel_routes = [
-            Route(net=1, net_name="NET1", segments=[
-                Segment(x1=10.0, y1=10.0, x2=16.0, y2=10.0,
-                        width=0.2, layer=Layer.F_CU, net=1),
-            ]),
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(x1=10.0, y1=10.0, x2=16.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1),
+                ],
+            ),
         ]
 
-        result = router.route_adaptive(
-            nets, pads, route_fn=lambda: mock_channel_routes
-        )
+        result = router.route_adaptive(nets, pads, route_fn=lambda: mock_channel_routes)
 
         assert isinstance(result, AdaptiveGridResult)
         assert result.escaped_pads > 0
@@ -497,9 +509,7 @@ class TestMultiResolutionGridPlan:
         pads = {}
         for i in range(10):
             key = ("U1", str(i + 1))
-            pads[key] = make_pad(
-                x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1)
-            )
+            pads[key] = make_pad(x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1))
 
         plan = compute_multi_resolution_plan(
             pads=pads,
@@ -522,8 +532,14 @@ class TestMultiResolutionGridPlan:
         for i in range(4):
             key = ("J1", str(i + 1))
             pads[key] = make_pad(
-                x=5.0 + i * 2.54, y=5.0, net=i + 1, ref="J1", pin=str(i + 1),
-                through_hole=True, width=1.7, height=1.7,
+                x=5.0 + i * 2.54,
+                y=5.0,
+                net=i + 1,
+                ref="J1",
+                pin=str(i + 1),
+                through_hole=True,
+                width=1.7,
+                height=1.7,
             )
 
         plan = compute_multi_resolution_plan(
@@ -544,13 +560,21 @@ class TestMultiResolutionGridPlan:
             pads[key] = make_pad(
                 x=10.0 + (i % 10) * 0.65,
                 y=10.0 + (i // 10) * 6.0,
-                net=i + 1, ref="U1", pin=str(i + 1),
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
             )
         for i in range(8):
             key = ("J1", str(i + 1))
             pads[key] = make_pad(
-                x=40.0 + i * 2.54, y=30.0, net=i + 30, ref="J1", pin=str(i + 1),
-                through_hole=True, width=1.7, height=1.7,
+                x=40.0 + i * 2.54,
+                y=30.0,
+                net=i + 30,
+                ref="J1",
+                pin=str(i + 1),
+                through_hole=True,
+                width=1.7,
+                height=1.7,
             )
 
         plan = compute_multi_resolution_plan(
@@ -569,9 +593,7 @@ class TestMultiResolutionGridPlan:
         pads = {}
         for i in range(4):
             key = ("U1", str(i + 1))
-            pads[key] = make_pad(
-                x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1)
-            )
+            pads[key] = make_pad(x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1))
 
         plan = compute_multi_resolution_plan(
             pads=pads,
@@ -604,15 +626,11 @@ class TestMultiResolutionGridPlan:
         # Component U1 at 0.65mm pitch
         for i in range(4):
             key = ("U1", str(i + 1))
-            pads[key] = make_pad(
-                x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1)
-            )
+            pads[key] = make_pad(x=10.0 + i * 0.65, y=10.0, net=i + 1, ref="U1", pin=str(i + 1))
         # Component U2 at 0.5mm pitch
         for i in range(4):
             key = ("U2", str(i + 1))
-            pads[key] = make_pad(
-                x=30.0 + i * 0.5, y=30.0, net=i + 10, ref="U2", pin=str(i + 1)
-            )
+            pads[key] = make_pad(x=30.0 + i * 0.5, y=30.0, net=i + 10, ref="U2", pin=str(i + 1))
 
         plan = compute_multi_resolution_plan(
             pads=pads,
@@ -635,8 +653,10 @@ class TestFineZone:
         """cell_count should compute expected cells for zone."""
         zone = FineZone(
             ref="U1",
-            x_min=0.0, y_min=0.0,
-            x_max=10.0, y_max=10.0,
+            x_min=0.0,
+            y_min=0.0,
+            x_max=10.0,
+            y_max=10.0,
             resolution=0.05,
         )
         # (10/0.05 + 1) * (10/0.05 + 1) = 201 * 201 = 40401
@@ -646,8 +666,10 @@ class TestFineZone:
         """Width and height properties should be correct."""
         zone = FineZone(
             ref="U1",
-            x_min=5.0, y_min=3.0,
-            x_max=15.0, y_max=8.0,
+            x_min=5.0,
+            y_min=3.0,
+            x_max=15.0,
+            y_max=8.0,
             resolution=0.1,
         )
         assert zone.width == pytest.approx(10.0)
@@ -703,7 +725,11 @@ class TestIssue2387FinePitchThresholdEpsilon:
         # Build a 4-pad strip at exactly 0.8mm pitch
         pads = {
             ("U1", str(i + 1)): make_pad(
-                x=1.0 + 0.8 * i, y=1.0, net=i + 1, ref="U1", pin=str(i + 1),
+                x=1.0 + 0.8 * i,
+                y=1.0,
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
             )
             for i in range(4)
         }
@@ -712,9 +738,7 @@ class TestIssue2387FinePitchThresholdEpsilon:
             coarse_resolution=0.1,
             fine_pitch_threshold=0.8,
         )
-        assert "U1" in result, (
-            "Strict 0.8mm pitch must trip the 0.8mm threshold (issue #2387)"
-        )
+        assert "U1" in result, "Strict 0.8mm pitch must trip the 0.8mm threshold (issue #2387)"
 
     def test_strict_05mm_pitch_detected_at_05mm_threshold(self):
         """0.5mm pitch trips a 0.5mm threshold (epsilon margin only)."""
@@ -807,8 +831,14 @@ class TestIssue2387FinePitchEscapeFailure:
         # attempted and 32 in failed_pads — all escapes failed.
         u1_pads = [
             Pad(
-                x=1.0 + 0.8 * i, y=1.0, width=0.5, height=1.5,
-                net=i + 1, net_name=f"NET{i + 1}", ref="U1", pin=str(i + 1),
+                x=1.0 + 0.8 * i,
+                y=1.0,
+                width=0.5,
+                height=1.5,
+                net=i + 1,
+                net_name=f"NET{i + 1}",
+                ref="U1",
+                pin=str(i + 1),
             )
             for i in range(32)
         ]
@@ -853,8 +883,14 @@ class TestIssue2387FinePitchEscapeFailure:
         router = AdaptiveGridRouter(grid, rules)
         u1_pads = [
             Pad(
-                x=1.0 + 0.8 * i, y=1.0, width=0.5, height=1.5,
-                net=i + 1, net_name=f"NET{i + 1}", ref="U1", pin=str(i + 1),
+                x=1.0 + 0.8 * i,
+                y=1.0,
+                width=0.5,
+                height=1.5,
+                net=i + 1,
+                net_name=f"NET{i + 1}",
+                ref="U1",
+                pin=str(i + 1),
             )
             for i in range(4)
         ]
@@ -891,7 +927,9 @@ class TestIssue2387FinePitchEscapeFailure:
         grid, rules = make_grid_and_rules()
         router = AdaptiveGridRouter(grid, rules)
         analysis = SubGridAnalysis(
-            off_grid_pads=[], on_grid_pads=[], grid_resolution=0.1,
+            off_grid_pads=[],
+            on_grid_pads=[],
+            grid_resolution=0.1,
         )
         result = SubGridResult(analysis=analysis, failed_pads=[])
         router._raise_if_component_fully_failed(result, {})
@@ -912,9 +950,7 @@ class TestAdaptiveGridStrategyDispatch:
         pads = {}
         for i in range(4):
             key = ("U1", str(i + 1))
-            pad = make_pad(
-                x=5.0 + i * 0.65, y=5.0, net=i + 1, ref="U1", pin=str(i + 1)
-            )
+            pad = make_pad(x=5.0 + i * 0.65, y=5.0, net=i + 1, ref="U1", pin=str(i + 1))
             pads[key] = pad
             grid.add_pad(pad)
         nets = {1: [("U1", "1"), ("U1", "2")], 3: [("U1", "3"), ("U1", "4")]}
@@ -928,7 +964,7 @@ class TestAdaptiveGridStrategyDispatch:
         lambda in route_cmd.py correctly dispatches evolutionary strategy
         when the adaptive multi-resolution grid is active.
         """
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         grid, rules = make_grid_and_rules()
         adaptive_router = AdaptiveGridRouter(grid, rules)
@@ -937,10 +973,13 @@ class TestAdaptiveGridStrategyDispatch:
         # Track which method the route_fn invokes
         calls = []
         mock_routes = [
-            Route(net=1, net_name="NET1", segments=[
-                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
-                        layer=Layer.F_CU, net=1),
-            ]),
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2, layer=Layer.F_CU, net=1),
+                ],
+            ),
         ]
 
         def fake_route_all_evolutionary(**kwargs):
@@ -954,7 +993,9 @@ class TestAdaptiveGridStrategyDispatch:
 
         def phase2_route_fn():
             return mock_router.route_all_evolutionary(
-                pop_size=20, generations=10, verbose=False,
+                pop_size=20,
+                generations=10,
+                verbose=False,
             )
 
         result = adaptive_router.route_adaptive(nets, pads, route_fn=phase2_route_fn)
@@ -977,10 +1018,13 @@ class TestAdaptiveGridStrategyDispatch:
 
         calls = []
         mock_routes = [
-            Route(net=1, net_name="NET1", segments=[
-                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
-                        layer=Layer.F_CU, net=1),
-            ]),
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2, layer=Layer.F_CU, net=1),
+                ],
+            ),
         ]
 
         def fake_route_all_monte_carlo(**kwargs):
@@ -993,7 +1037,8 @@ class TestAdaptiveGridStrategyDispatch:
         # Simulate the phase2_route_fn lambda for strategy="monte-carlo"
         def phase2_route_fn():
             return mock_router.route_all_monte_carlo(
-                num_trials=10, verbose=False,
+                num_trials=10,
+                verbose=False,
             )
 
         result = adaptive_router.route_adaptive(nets, pads, route_fn=phase2_route_fn)
@@ -1015,10 +1060,13 @@ class TestAdaptiveGridStrategyDispatch:
 
         calls = []
         mock_routes = [
-            Route(net=1, net_name="NET1", segments=[
-                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
-                        layer=Layer.F_CU, net=1),
-            ]),
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2, layer=Layer.F_CU, net=1),
+                ],
+            ),
         ]
 
         def fake_route_all_negotiated(**kwargs):
@@ -1030,9 +1078,12 @@ class TestAdaptiveGridStrategyDispatch:
 
         def phase2_route_fn():
             return mock_router.route_all_negotiated(
-                max_iterations=50, timeout=None,
-                per_net_timeout=None, batch_routing=False,
-                hierarchical=False, perturbation=True,
+                max_iterations=50,
+                timeout=None,
+                per_net_timeout=None,
+                batch_routing=False,
+                hierarchical=False,
+                perturbation=True,
             )
 
         result = adaptive_router.route_adaptive(nets, pads, route_fn=phase2_route_fn)
@@ -1055,10 +1106,13 @@ class TestAdaptiveGridStrategyDispatch:
 
         # Mock the internal _route_with_router to avoid needing a real router
         mock_routes = [
-            Route(net=1, net_name="NET1", segments=[
-                Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2,
-                        layer=Layer.F_CU, net=1),
-            ]),
+            Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(x1=5.0, y1=5.0, x2=5.65, y2=5.0, width=0.2, layer=Layer.F_CU, net=1),
+                ],
+            ),
         ]
         with patch.object(
             adaptive_router, "_route_with_router", return_value=mock_routes
@@ -1081,6 +1135,7 @@ class TestPhase2RouteFnDispatchLogic:
     @staticmethod
     def _build_phase2_route_fn(strategy, router_mock, args_mock):
         """Replicate the phase2_route_fn lambda from route_cmd.py."""
+
         def phase2_route_fn():
             if strategy == "evolutionary":
                 return router_mock.route_all_evolutionary(
@@ -1113,11 +1168,13 @@ class TestPhase2RouteFnDispatchLogic:
                 )
             else:
                 return router_mock.route_all()
+
         return phase2_route_fn
 
     def test_evolutionary_calls_route_all_evolutionary(self):
         """strategy='evolutionary' must call route_all_evolutionary."""
         from unittest.mock import MagicMock
+
         router_mock = MagicMock()
         router_mock.route_all_evolutionary.return_value = []
         args_mock = MagicMock(pop_size=20, generations=10)
@@ -1132,6 +1189,7 @@ class TestPhase2RouteFnDispatchLogic:
     def test_monte_carlo_calls_route_all_monte_carlo(self):
         """strategy='monte-carlo' must call route_all_monte_carlo."""
         from unittest.mock import MagicMock
+
         router_mock = MagicMock()
         router_mock.route_all_monte_carlo.return_value = []
         args_mock = MagicMock(mc_trials=10)
@@ -1146,10 +1204,13 @@ class TestPhase2RouteFnDispatchLogic:
     def test_negotiated_calls_route_all_negotiated(self):
         """strategy='negotiated' (default) must call route_all_negotiated."""
         from unittest.mock import MagicMock
+
         router_mock = MagicMock()
         router_mock.route_all_negotiated.return_value = []
         args_mock = MagicMock(
-            two_phase=False, iterations=50, timeout=None,
+            two_phase=False,
+            iterations=50,
+            timeout=None,
             per_net_timeout=None,
         )
 
@@ -1162,11 +1223,15 @@ class TestPhase2RouteFnDispatchLogic:
     def test_negotiated_two_phase_calls_route_all_two_phase(self):
         """strategy='negotiated' with two_phase=True must call route_all_two_phase."""
         from unittest.mock import MagicMock
+
         router_mock = MagicMock()
         router_mock.route_all_two_phase.return_value = []
         args_mock = MagicMock(
-            two_phase=True, iterations=50, timeout=None,
-            per_net_timeout=None, two_phase_iterations=None,
+            two_phase=True,
+            iterations=50,
+            timeout=None,
+            per_net_timeout=None,
+            two_phase_iterations=None,
         )
 
         fn = self._build_phase2_route_fn("negotiated", router_mock, args_mock)
@@ -1178,6 +1243,7 @@ class TestPhase2RouteFnDispatchLogic:
     def test_basic_strategy_falls_through_to_route_all(self):
         """strategy='basic' must call the default route_all."""
         from unittest.mock import MagicMock
+
         router_mock = MagicMock()
         router_mock.route_all.return_value = []
         args_mock = MagicMock()
@@ -1192,6 +1258,7 @@ class TestPhase2RouteFnDispatchLogic:
     def test_evolutionary_passes_pop_size_and_generations(self):
         """Evolutionary strategy must forward pop_size and generations args."""
         from unittest.mock import MagicMock
+
         router_mock = MagicMock()
         router_mock.route_all_evolutionary.return_value = []
         args_mock = MagicMock(pop_size=30, generations=15)
@@ -1200,12 +1267,15 @@ class TestPhase2RouteFnDispatchLogic:
         fn()
 
         router_mock.route_all_evolutionary.assert_called_once_with(
-            pop_size=30, generations=15, verbose=False,
+            pop_size=30,
+            generations=15,
+            verbose=False,
         )
 
     def test_monte_carlo_passes_mc_trials(self):
         """Monte Carlo strategy must forward mc_trials as num_trials."""
         from unittest.mock import MagicMock
+
         router_mock = MagicMock()
         router_mock.route_all_monte_carlo.return_value = []
         args_mock = MagicMock(mc_trials=25)
@@ -1214,5 +1284,6 @@ class TestPhase2RouteFnDispatchLogic:
         fn()
 
         router_mock.route_all_monte_carlo.assert_called_once_with(
-            num_trials=25, verbose=False,
+            num_trials=25,
+            verbose=False,
         )

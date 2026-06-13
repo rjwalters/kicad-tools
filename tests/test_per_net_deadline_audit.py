@@ -102,10 +102,7 @@ def _build_unreachable_grid(
             for gx in range(max(0, gx_lo), min(grid.cols, gx_hi + 1)):
                 # Leave the very center free so the goal exists but
                 # cannot be reached through the ring.
-                if (
-                    inner_lo_gx <= gx <= inner_hi_gx
-                    and inner_lo_gy <= gy <= inner_hi_gy
-                ):
+                if inner_lo_gx <= gx <= inner_hi_gx and inner_lo_gy <= gy <= inner_hi_gy:
                     continue
                 cell = grid.grid[layer_idx][gy][gx]
                 cell.blocked = True
@@ -113,12 +110,22 @@ def _build_unreachable_grid(
                 cell.is_obstacle = True
 
     start = Pad(
-        x=5.0, y=5.0, width=0.5, height=0.5,
-        net=1, net_name="AUDIT_NET", layer=Layer.F_CU,
+        x=5.0,
+        y=5.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="AUDIT_NET",
+        layer=Layer.F_CU,
     )
     end = Pad(
-        x=end_x, y=end_y, width=0.5, height=0.5,
-        net=1, net_name="AUDIT_NET", layer=Layer.F_CU,
+        x=end_x,
+        y=end_y,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="AUDIT_NET",
+        layer=Layer.F_CU,
     )
     return grid, rules, start, end
 
@@ -152,7 +159,9 @@ class TestInstrumentationAPI:
         invariant itself).
         """
         grid, rules, start, end = _build_unreachable_grid(
-            width=30.0, height=30.0, resolution=0.1,
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
         )
         router = Router(grid, rules)
         router.enable_per_call_timing(True)
@@ -165,8 +174,12 @@ class TestInstrumentationAPI:
         rec = records[0]
         # Schema parity with the docstring on ``__init__``.
         assert set(rec.keys()) == {
-            "net", "net_name", "elapsed", "per_net_timeout",
-            "deadline_violated", "succeeded",
+            "net",
+            "net_name",
+            "elapsed",
+            "per_net_timeout",
+            "deadline_violated",
+            "succeeded",
         }
         assert rec["net"] == start.net
         assert rec["net_name"] == "AUDIT_NET"
@@ -181,7 +194,9 @@ class TestInstrumentationAPI:
         Otherwise sequential audit windows would accumulate stale records.
         """
         grid, rules, start, end = _build_unreachable_grid(
-            width=30.0, height=30.0, resolution=0.1,
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
         )
         router = Router(grid, rules)
         router.enable_per_call_timing(True)
@@ -194,7 +209,9 @@ class TestInstrumentationAPI:
     def test_disable_clears_records(self):
         """Toggling instrumentation off must drop any pending records."""
         grid, rules, start, end = _build_unreachable_grid(
-            width=30.0, height=30.0, resolution=0.1,
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
         )
         router = Router(grid, rules)
         router.enable_per_call_timing(True)
@@ -220,7 +237,9 @@ class TestInstrumentationAPI:
         from either backend without branching.
         """
         grid, rules, start, end = _build_unreachable_grid(
-            width=30.0, height=30.0, resolution=0.1,
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
         )
         cpp_grid = CppGrid.from_routing_grid(grid)
         pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
@@ -235,8 +254,12 @@ class TestInstrumentationAPI:
         rec = records[0]
         # Schema parity with the Python pathfinder.
         assert set(rec.keys()) == {
-            "net", "net_name", "elapsed", "per_net_timeout",
-            "deadline_violated", "succeeded",
+            "net",
+            "net_name",
+            "elapsed",
+            "per_net_timeout",
+            "deadline_violated",
+            "succeeded",
         }
         assert rec["net"] == start.net
         assert rec["net_name"] == "AUDIT_NET"
@@ -278,7 +301,9 @@ class TestDeadlineContract:
         criterion 2 is meaningful.
         """
         grid, rules, start, end = _build_unreachable_grid(
-            width=40.0, height=40.0, resolution=0.1,
+            width=40.0,
+            height=40.0,
+            resolution=0.1,
         )
         router = Router(grid, rules)
         budget = 3.0  # >> 1024-iter batch cost; 1.2x slack is meaningful
@@ -307,7 +332,9 @@ class TestDeadlineContract:
         caught in CI rather than via board-level audit.
         """
         grid, rules, start, end = _build_unreachable_grid(
-            width=30.0, height=30.0, resolution=0.1,
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
         )
         cpp_grid = CppGrid.from_routing_grid(grid)
         pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
@@ -328,8 +355,7 @@ class TestDeadlineContract:
         # iteration cap (many seconds for the 600x600 grid here), well
         # above this bound.
         assert rec["elapsed"] <= budget * 1.2 + 0.5, (
-            f"C++ A* exceeded deadline contract: "
-            f"elapsed={rec['elapsed']:.3f}s vs budget={budget}s"
+            f"C++ A* exceeded deadline contract: elapsed={rec['elapsed']:.3f}s vs budget={budget}s"
         )
         assert rec["deadline_violated"] is False
 
@@ -343,7 +369,9 @@ class TestDeadlineContract:
         This test catches that regression.
         """
         grid, rules, start, end = _build_unreachable_grid(
-            width=30.0, height=30.0, resolution=0.1,
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
         )
         router = Router(grid, rules)
 
@@ -396,7 +424,9 @@ class TestCumulativeRetryBehavior:
         per-net deadline.
         """
         grid, rules, start, end = _build_unreachable_grid(
-            width=20.0, height=20.0, resolution=0.1,
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
         )
         router = Router(grid, rules)
         router.enable_per_call_timing(True)
@@ -412,8 +442,7 @@ class TestCumulativeRetryBehavior:
         # 1.2x + 1s slack documented on the timing record schema).
         for i, rec in enumerate(records):
             assert rec["deadline_violated"] is False, (
-                f"Call {i}: elapsed={rec['elapsed']:.3f}s exceeded "
-                f"budget {budget}s + slack"
+                f"Call {i}: elapsed={rec['elapsed']:.3f}s exceeded budget {budget}s + slack"
             )
             assert rec["per_net_timeout"] == budget
         # Cumulative wall-clock is roughly n_calls * budget, which is

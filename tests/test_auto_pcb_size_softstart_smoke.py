@@ -137,9 +137,16 @@ def _build_args(pcb_path: Path, output_path: Path) -> SimpleNamespace:
         fine_pitch_clearance=None,
         # Skipping / nets -- softstart's power + heavy-current return nets
         skip_nets=[
-            "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-            "+3.3V", "VRECT",
-            "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+            "AC_LINE",
+            "AC_NEUTRAL",
+            "FUSED_LINE",
+            "GND",
+            "+3.3V",
+            "VRECT",
+            "SCAP_POS+",
+            "SCAP_POS_GND",
+            "SCAP_NEG+",
+            "SCAP_NEG_GND",
             "ISENSE_POS",
         ],
         skip_drc=False,
@@ -241,9 +248,7 @@ def test_softstart_smoke_routes_or_refuses_cleanly(tmp_path: Path) -> None:
     except Exception as exc:  # pragma: no cover - debugging aid
         pytest.fail(f"route_with_size_escalation crashed unexpectedly: {exc}")
 
-    assert rc in (0, 1, 2, 3), (
-        f"route_with_size_escalation returned an unexpected exit code {rc!r}"
-    )
+    assert rc in (0, 1, 2, 3), f"route_with_size_escalation returned an unexpected exit code {rc!r}"
 
     # When the routing produced an output PCB, structurally validate it.
     if output_path.exists():
@@ -252,9 +257,7 @@ def test_softstart_smoke_routes_or_refuses_cleanly(tmp_path: Path) -> None:
         try:
             PCB.load(output_path)
         except Exception as exc:
-            pytest.fail(
-                f"Routed PCB at {output_path} is not loadable as a valid kicad_pcb: {exc}"
-            )
+            pytest.fail(f"Routed PCB at {output_path} is not loadable as a valid kicad_pcb: {exc}")
 
 
 def test_refusal_path_emits_actionable_message(
@@ -284,9 +287,7 @@ def test_refusal_path_emits_actionable_message(
     # PCB content is irrelevant here because we patch the inner
     # routing call; we only need a valid kicad_pcb file with a board
     # outline so ``extract_board_dimensions`` succeeds.
-    src_pcb = (
-        REPO_ROOT / "boards" / "01-voltage-divider" / "output" / "voltage_divider.kicad_pcb"
-    )
+    src_pcb = REPO_ROOT / "boards" / "01-voltage-divider" / "output" / "voltage_divider.kicad_pcb"
     if not src_pcb.exists():
         pytest.skip(
             f"Voltage-divider fixture not found at {src_pcb}; run "

@@ -101,8 +101,7 @@ class TestStdoutStreamingDefault:
         # All three progress lines should have been forwarded.
         for i in range(3):
             assert f"progress line {i}" in captured.out, (
-                f"Expected 'progress line {i}' in streamed stdout, "
-                f"got: {captured.out!r}"
+                f"Expected 'progress line {i}' in streamed stdout, got: {captured.out!r}"
             )
 
     def test_default_verbose_still_streams(

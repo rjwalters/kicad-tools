@@ -105,8 +105,14 @@ class TestSegmentVsExtraEscapeVia:
 
         # Net A (main router): segment running through (5.0, 5.0) on B.Cu.
         seg_a = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1, net_name="BOOT0",
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
+            net_name="BOOT0",
         )
         net_routes = {
             1: [Route(net=1, net_name="BOOT0", segments=[seg_a], vias=[])],
@@ -116,8 +122,13 @@ class TestSegmentVsExtraEscapeVia:
         # This via lives in self.routes but NOT in net_routes -- emulating
         # the lateral-helper output from PR #3070.
         via_b = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="OSC_OUT",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OSC_OUT",
         )
         extra_routes = [
             Route(net=2, net_name="OSC_OUT", segments=[], vias=[via_b]),
@@ -136,7 +147,9 @@ class TestSegmentVsExtraEscapeVia:
         # With extra_routes, the hook surfaces net A (the segment's net)
         # for re-routing.
         violators = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, extra_routes=extra_routes,
+            net_routes,
+            trace_clearance=0.15,
+            extra_routes=extra_routes,
         )
         assert 1 in violators, (
             "Fix: extra_routes=[escape] surfaces the main-router net "
@@ -154,12 +167,21 @@ class TestSegmentVsExtraEscapeVia:
         grid = _make_grid(rules)
         neg = _make_neg_router(grid, rules)
         seg = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,  # SAME net as seg.
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,  # SAME net as seg.
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg], vias=[])],
@@ -168,7 +190,9 @@ class TestSegmentVsExtraEscapeVia:
             Route(net=1, net_name="A", segments=[], vias=[via]),
         ]
         violators = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, extra_routes=extra_routes,
+            net_routes,
+            trace_clearance=0.15,
+            extra_routes=extra_routes,
         )
         assert violators == []
 
@@ -180,26 +204,43 @@ class TestSegmentVsExtraEscapeVia:
         grid = _make_grid(rules)
         neg = _make_neg_router(grid, rules)
         seg_a = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         via_b = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         stub_b = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=2,
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[seg_a], vias=[])],
             2: [Route(net=2, net_name="B", segments=[stub_b], vias=[via_b])],
         }
         baseline = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15,
+            net_routes,
+            trace_clearance=0.15,
         )
         with_empty = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, extra_routes=[],
+            net_routes,
+            trace_clearance=0.15,
+            extra_routes=[],
         )
         assert set(baseline) == set(with_empty)
 
@@ -220,15 +261,26 @@ class TestSegmentVsExtraEscapeVia:
         neg = _make_neg_router(grid, rules)
 
         seg_a = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1, net_name="BOOT0",
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
+            net_name="BOOT0",
         )
         net_routes = {
             1: [Route(net=1, net_name="BOOT0", segments=[seg_a], vias=[])],
         }
         via_b = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="OSC_OUT",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="OSC_OUT",
         )
         extra_routes = [
             Route(net=2, net_name="OSC_OUT", segments=[], vias=[via_b]),
@@ -236,7 +288,9 @@ class TestSegmentVsExtraEscapeVia:
 
         # First call: no extra_routes -- no violations seen, cache stores [].
         empty = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, cache_key=("k",),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("k",),
         )
         assert empty == []
 
@@ -244,7 +298,9 @@ class TestSegmentVsExtraEscapeVia:
         # cache MUST be invalidated by the extra_routes discriminator so
         # the violator surfaces.
         violators = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, cache_key=("k",),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("k",),
             extra_routes=extra_routes,
         )
         assert 1 in violators, (
@@ -255,7 +311,9 @@ class TestSegmentVsExtraEscapeVia:
         # Third call: same extra_routes -- cache should hit and return the
         # same answer.
         violators2 = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, cache_key=("k",),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("k",),
             extra_routes=extra_routes,
         )
         assert set(violators) == set(violators2)
@@ -270,29 +328,50 @@ class TestSegmentVsExtraEscapeVia:
         neg = _make_neg_router(grid, rules)
 
         via_a = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="BOOT0",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="BOOT0",
         )
         stub_a = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="BOOT0",
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="BOOT0",
         )
         net_routes = {
             1: [Route(net=1, net_name="BOOT0", segments=[stub_a], vias=[via_a])],
         }
         seg_b = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=2, net_name="SWDIO",
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=2,
+            net_name="SWDIO",
         )
         extra_routes = [
             Route(net=2, net_name="SWDIO", segments=[seg_b], vias=[]),
         ]
         empty = neg.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=0.15, cache_key=("k",),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("k",),
         )
         assert empty == []
         violators = neg.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=0.15, cache_key=("k",),
+            net_routes,
+            trace_clearance=0.15,
+            cache_key=("k",),
             extra_routes=extra_routes,
         )
         assert 1 in violators
@@ -314,27 +393,47 @@ class TestSegmentVsExtraEscapeVia:
         # via at (5,5), net 2 via at (5.1, 5)) -- but neither is
         # main-routed, so neither can be surfaced.
         via1 = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         via2 = Via(
-            x=5.1, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2,
+            x=5.1,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
         )
         seg1 = Segment(
-            x1=5.0, y1=5.0, x2=6.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=1,
+            x1=5.0,
+            y1=5.0,
+            x2=6.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=1,
         )
         seg2 = Segment(
-            x1=5.1, y1=5.0, x2=6.1, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=2,
+            x1=5.1,
+            y1=5.0,
+            x2=6.1,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=2,
         )
         extra_routes = [
             Route(net=1, net_name="A", segments=[seg1], vias=[via1]),
             Route(net=2, net_name="B", segments=[seg2], vias=[via2]),
         ]
         violators = neg.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=0.15, extra_routes=extra_routes,
+            net_routes,
+            trace_clearance=0.15,
+            extra_routes=extra_routes,
         )
         # Nothing in net_routes -> nothing to walk for segments -> empty.
         assert violators == []
@@ -358,13 +457,24 @@ class TestViaVsExtraEscapeSegment:
 
         # Net A (main router): a through-hole via at (5, 5).
         via_a = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="BOOT0",
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="BOOT0",
         )
         # And a tiny stub so net_routes has something to iterate.
         stub_a = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="BOOT0",
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="BOOT0",
         )
         net_routes = {
             1: [Route(net=1, net_name="BOOT0", segments=[stub_a], vias=[via_a])],
@@ -372,8 +482,14 @@ class TestViaVsExtraEscapeSegment:
 
         # Net B (escape phase): a segment running through (5, 5) on B.Cu.
         seg_b = Segment(
-            x1=0.0, y1=5.0, x2=10.0, y2=5.0,
-            width=0.2, layer=Layer.B_CU, net=2, net_name="SWDIO",
+            x1=0.0,
+            y1=5.0,
+            x2=10.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=2,
+            net_name="SWDIO",
         )
         extra_routes = [
             Route(net=2, net_name="SWDIO", segments=[seg_b], vias=[]),
@@ -381,13 +497,16 @@ class TestViaVsExtraEscapeSegment:
 
         # Without extra_routes the escape segment is invisible.
         violators_no_extra = neg.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=0.15,
+            net_routes,
+            trace_clearance=0.15,
         )
         assert 1 not in violators_no_extra
 
         # With extra_routes the via's net surfaces.
         violators = neg.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=0.15, extra_routes=extra_routes,
+            net_routes,
+            trace_clearance=0.15,
+            extra_routes=extra_routes,
         )
         assert 1 in violators
         assert 2 not in violators  # Escape segment owner -- not rippable.
@@ -397,26 +516,43 @@ class TestViaVsExtraEscapeSegment:
         grid = _make_grid(rules)
         neg = _make_neg_router(grid, rules)
         via_a = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1,
+            x=5.0,
+            y=5.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
         )
         stub_a = Segment(
-            x1=5.0, y1=5.0, x2=5.5, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1,
+            x1=5.0,
+            y1=5.0,
+            x2=5.5,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
         )
         seg_b = Segment(
-            x1=0.0, y1=2.0, x2=10.0, y2=2.0,
-            width=0.2, layer=Layer.B_CU, net=2,
+            x1=0.0,
+            y1=2.0,
+            x2=10.0,
+            y2=2.0,
+            width=0.2,
+            layer=Layer.B_CU,
+            net=2,
         )
         net_routes = {
             1: [Route(net=1, net_name="A", segments=[stub_a], vias=[via_a])],
             2: [Route(net=2, net_name="B", segments=[seg_b], vias=[])],
         }
         baseline = neg.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=0.15,
+            net_routes,
+            trace_clearance=0.15,
         )
         with_empty = neg.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=0.15, extra_routes=[],
+            net_routes,
+            trace_clearance=0.15,
+            extra_routes=[],
         )
         assert set(baseline) == set(with_empty)
 
@@ -445,12 +581,22 @@ class TestCollectExtraRoutesHelper:
         # and the helper, which doesn't touch any other state.
         ar = Autorouter.__new__(Autorouter)
         seg_escape = Segment(
-            x1=0.0, y1=0.0, x2=1.0, y2=0.0,
-            width=0.2, layer=Layer.F_CU, net=10,
+            x1=0.0,
+            y1=0.0,
+            x2=1.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
         )
         seg_main = Segment(
-            x1=5.0, y1=5.0, x2=6.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=20,
+            x1=5.0,
+            y1=5.0,
+            x2=6.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=20,
         )
         route_escape = Route(net=10, net_name="ESC", segments=[seg_escape], vias=[])
         route_main = Route(net=20, net_name="MAIN", segments=[seg_main], vias=[])
@@ -462,16 +608,23 @@ class TestCollectExtraRoutesHelper:
 
     def test_returns_empty_when_routes_empty(self):
         from kicad_tools.router.core import Autorouter
+
         ar = Autorouter.__new__(Autorouter)
         ar.routes = []
         assert ar._collect_extra_routes_for_revalidation({}) == []
 
     def test_returns_empty_when_all_routes_tracked(self):
         from kicad_tools.router.core import Autorouter
+
         ar = Autorouter.__new__(Autorouter)
         seg = Segment(
-            x1=0.0, y1=0.0, x2=1.0, y2=0.0,
-            width=0.2, layer=Layer.F_CU, net=5,
+            x1=0.0,
+            y1=0.0,
+            x2=1.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=5,
         )
         route = Route(net=5, net_name="A", segments=[seg], vias=[])
         ar.routes = [route]
@@ -485,10 +638,16 @@ class TestCollectExtraRoutesHelper:
         with the same net + segments as an escape stub.
         """
         from kicad_tools.router.core import Autorouter
+
         ar = Autorouter.__new__(Autorouter)
         seg = Segment(
-            x1=0.0, y1=0.0, x2=1.0, y2=0.0,
-            width=0.2, layer=Layer.F_CU, net=5,
+            x1=0.0,
+            y1=0.0,
+            x2=1.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=5,
         )
         route_a = Route(net=5, net_name="A", segments=[seg], vias=[])
         # Build an identical-content but distinct Route.
@@ -509,12 +668,22 @@ class TestCollectExtraRoutesHelper:
 
         tp = TwoPhaseRouter.__new__(TwoPhaseRouter)
         seg_escape = Segment(
-            x1=0.0, y1=0.0, x2=1.0, y2=0.0,
-            width=0.2, layer=Layer.F_CU, net=10,
+            x1=0.0,
+            y1=0.0,
+            x2=1.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
         )
         seg_main = Segment(
-            x1=5.0, y1=5.0, x2=6.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=20,
+            x1=5.0,
+            y1=5.0,
+            x2=6.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=20,
         )
         route_escape = Route(net=10, net_name="ESC", segments=[seg_escape], vias=[])
         route_main = Route(net=20, net_name="MAIN", segments=[seg_main], vias=[])

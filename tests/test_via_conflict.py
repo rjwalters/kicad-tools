@@ -304,8 +304,10 @@ class TestViaConflictManagerFindBlockingVias:
                 self.num_layers = 2
                 # Minimal grid (not needed for find_blocking_vias)
                 self.grid = [
-                    [[type("Cell", (), {"blocked": False, "net": 0, "is_obstacle": False})]
-                     for _ in range(500)]
+                    [
+                        [type("Cell", (), {"blocked": False, "net": 0, "is_obstacle": False})]
+                        for _ in range(500)
+                    ]
                     for _ in range(2)
                 ]
 
@@ -352,9 +354,7 @@ class TestViaConflictManagerFindBlockingVias:
         manager = self._make_manager_with_routes([route])
 
         pad = _make_pad(10.0, 20.0, net=2)
-        conflicts = manager.find_blocking_vias(
-            pad, pad_net=2, net_names={1: "GND", 2: "SIGNAL"}
-        )
+        conflicts = manager.find_blocking_vias(pad, pad_net=2, net_names={1: "GND", 2: "SIGNAL"})
         assert len(conflicts) == 1
         assert conflicts[0].blocking_net == 1
         assert conflicts[0].blocking_net_name == "GND"
@@ -490,9 +490,7 @@ class TestResolveConflicts:
             clearance_needed=0.1,
         )
 
-        results = manager.resolve_conflicts(
-            [conflict], strategy=ViaConflictStrategy.NONE
-        )
+        results = manager.resolve_conflicts([conflict], strategy=ViaConflictStrategy.NONE)
         assert len(results) == 0
 
 
@@ -803,10 +801,7 @@ class TestViaConflictManagerIntegration:
         )
         vc_stats = stats["via_conflict_resolution"]
         assert vc_stats["conflicts_found"] >= 1
-        assert (
-            vc_stats["relocations_succeeded"] + vc_stats["rip_reroutes_succeeded"]
-            >= 1
-        )
+        assert vc_stats["relocations_succeeded"] + vc_stats["rip_reroutes_succeeded"] >= 1
         assert vc_stats["total_resolved"] >= 1
 
 
@@ -996,8 +991,7 @@ class TestTraceConflictResolution:
         # segment y=10.0 is |10.065 - 10.0| = 0.065 mm.  Tolerance 1e-3
         # accommodates floating-point error in the projection math.
         assert abs(conflict.distance - 0.065) < 1e-3, (
-            f"Expected perpendicular distance ~0.065 mm, got "
-            f"{conflict.distance:.6f} mm."
+            f"Expected perpendicular distance ~0.065 mm, got {conflict.distance:.6f} mm."
         )
         # Closest point on segment to the pad should be (5.048, 10.0)
         # (the perpendicular foot of the pad onto the horizontal segment).

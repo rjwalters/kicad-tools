@@ -18,7 +18,6 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.sparse import Corridor, Waypoint
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -122,12 +121,22 @@ class TestCorridorCostInAStar:
         """A net with a corridor should route closer to the corridor centerline."""
         # Pads at same y as corridor centerline
         start_on = Pad(
-            x=5.0, y=15.0, width=0.5, height=0.5,
-            net=1, net_name="test", layer=Layer.F_CU,
+            x=5.0,
+            y=15.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="test",
+            layer=Layer.F_CU,
         )
         end_on = Pad(
-            x=25.0, y=15.0, width=0.5, height=0.5,
-            net=1, net_name="test", layer=Layer.F_CU,
+            x=25.0,
+            y=15.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="test",
+            layer=Layer.F_CU,
         )
         grid.add_pad(start_on)
         grid.add_pad(end_on)
@@ -169,12 +178,22 @@ class TestCorridorCostInAStar:
 
         # Pads offset from centerline but within corridor width
         start_pad = Pad(
-            x=5.0, y=20.0, width=1.0, height=1.0,
-            net=1, net_name="sig", layer=Layer.F_CU,
+            x=5.0,
+            y=20.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="sig",
+            layer=Layer.F_CU,
         )
         end_pad = Pad(
-            x=35.0, y=20.0, width=1.0, height=1.0,
-            net=1, net_name="sig", layer=Layer.F_CU,
+            x=35.0,
+            y=20.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="sig",
+            layer=Layer.F_CU,
         )
         grid.add_pad(start_pad)
         grid.add_pad(end_pad)
@@ -185,12 +204,8 @@ class TestCorridorCostInAStar:
 
         # Check that segments stay within the corridor bounds (y=20 +/- 6)
         for seg in route.segments:
-            assert 14.0 <= seg.y1 <= 26.0, (
-                f"Segment y1={seg.y1} outside corridor bounds"
-            )
-            assert 14.0 <= seg.y2 <= 26.0, (
-                f"Segment y2={seg.y2} outside corridor bounds"
-            )
+            assert 14.0 <= seg.y1 <= 26.0, f"Segment y1={seg.y1} outside corridor bounds"
+            assert 14.0 <= seg.y2 <= 26.0, f"Segment y2={seg.y2} outside corridor bounds"
 
     def test_zero_cost_disables_corridor(self, rules):
         """With cost_corridor_deviation=0, corridor has no effect."""
@@ -202,12 +217,22 @@ class TestCorridorCostInAStar:
         router = Router(grid, no_corridor_rules)
 
         start_pad = Pad(
-            x=5.0, y=15.0, width=0.5, height=0.5,
-            net=1, net_name="test", layer=Layer.F_CU,
+            x=5.0,
+            y=15.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="test",
+            layer=Layer.F_CU,
         )
         end_pad = Pad(
-            x=25.0, y=15.0, width=0.5, height=0.5,
-            net=1, net_name="test", layer=Layer.F_CU,
+            x=25.0,
+            y=15.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="test",
+            layer=Layer.F_CU,
         )
         grid.add_pad(start_pad)
         grid.add_pad(end_pad)

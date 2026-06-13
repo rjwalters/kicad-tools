@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .composition import ComposedPart
 
 
 class PartCategory(Enum):
@@ -123,7 +127,7 @@ class Part:
             return self.prices[0].unit_price if self.prices else None
         return max(applicable, key=lambda p: p.quantity).unit_price
 
-    def to_composed(self) -> "ComposedPart":
+    def to_composed(self) -> ComposedPart:
         """
         Project this flat supplier ``Part`` into a ``ComposedPart``.
 

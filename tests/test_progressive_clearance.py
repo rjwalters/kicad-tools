@@ -8,8 +8,6 @@ clearance constraints.
 import pytest
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.failure_analysis import FailureCause
-from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import DesignRules
 
 
@@ -92,9 +90,7 @@ class TestProgressiveClearanceRelaxation:
         assert isinstance(routes, list)
         assert isinstance(relaxed_nets, dict)
 
-    def test_progressive_clearance_with_default_min_clearance(
-        self, router_with_simple_net
-    ):
+    def test_progressive_clearance_with_default_min_clearance(self, router_with_simple_net):
         """Test progressive clearance with default min_clearance (50% of original)."""
         router = router_with_simple_net
 

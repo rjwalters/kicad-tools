@@ -100,11 +100,21 @@ def _regenerate_softstart_pcb(output_dir: Path) -> Path:
 # the SOT-23 escape fixes, not the recipe's power-copper strategy, so
 # it keeps the historical denominator.
 _SKIP_NETS = [
-    "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-    "+3.3V", "VRECT",
-    "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
+    "AC_LINE",
+    "AC_NEUTRAL",
+    "FUSED_LINE",
+    "GND",
+    "+3.3V",
+    "VRECT",
+    "SCAP_POS+",
+    "SCAP_POS_GND",
+    "SCAP_NEG+",
+    "SCAP_NEG_GND",
     "ISENSE_POS",
-    "VGATE", "SRC_POS", "SRC_NEG", "BUS_LINE",
+    "VGATE",
+    "SRC_POS",
+    "SRC_NEG",
+    "BUS_LINE",
 ]
 
 
@@ -229,7 +239,9 @@ def test_softstart_revb_fine_pitch_regions_install(tmp_path: Path) -> None:
         manufacturer="jlcpcb-tier1",
     )
     router, _ = load_pcb_for_routing(
-        str(pcb_path), skip_nets=_SKIP_NETS, rules=rules,
+        str(pcb_path),
+        skip_nets=_SKIP_NETS,
+        rules=rules,
     )
 
     regions = router.grid.get_fine_pitch_regions()
@@ -242,9 +254,7 @@ def test_softstart_revb_fine_pitch_regions_install(tmp_path: Path) -> None:
     # The fixture must surface at least U1 (LQFP-32) and one of the
     # UCC27211 SOIC-8s; missing either points to a regression in
     # ``detect_fine_pitch_regions`` (see ``fine_pitch_escape.py``).
-    assert "U1" in region_refs, (
-        f"Expected U1 LQFP-32 in fine-pitch region list; got {region_refs}"
-    )
+    assert "U1" in region_refs, f"Expected U1 LQFP-32 in fine-pitch region list; got {region_refs}"
     soic_refs = [r for r in region_refs if r in ("U5", "U6", "U7")]
     assert soic_refs, (
         f"Expected at least one UCC27211 / LM393 SOIC-8 (U5/U6/U7) in the "
@@ -339,6 +349,7 @@ def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
     # ``four_layer_sig_gnd_pwr_sig`` is the first stack ``kct route``
     # tries at L=4 (see route_cmd.py).
     from kicad_tools.router import LayerStack
+
     layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
 
     routed_count, total, _ = _route_softstart_in_process(

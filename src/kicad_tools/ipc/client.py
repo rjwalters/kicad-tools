@@ -149,8 +149,7 @@ class IPCClient:
             logger.info("Connected to KiCad IPC at %s", address)
         except pynng.exceptions.ConnectionRefused:
             raise IPCConnectionError(
-                f"Connection refused at {address}. "
-                "Is KiCad running with IPC enabled?"
+                f"Connection refused at {address}. Is KiCad running with IPC enabled?"
             )
         except pynng.exceptions.AddressInUse:
             raise IPCConnectionError(
@@ -158,9 +157,7 @@ class IPCClient:
                 "KiCad's IPC API supports only one client at a time."
             )
         except Exception as exc:
-            raise IPCConnectionError(
-                f"Failed to connect to {address}: {exc}"
-            ) from exc
+            raise IPCConnectionError(f"Failed to connect to {address}: {exc}") from exc
 
     def disconnect(self) -> None:
         """Close the NNG socket connection."""
@@ -235,16 +232,12 @@ class IPCClient:
                     f"{timeout_ms or self._timeout_ms}ms. "
                     "KiCad may be busy with user interaction."
                 ) from exc
-            raise IPCConnectionError(
-                f"Communication error during '{command}': {exc}"
-            ) from exc
+            raise IPCConnectionError(f"Communication error during '{command}': {exc}") from exc
 
         try:
             response_data = json.loads(response_bytes.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise IPCProtocolError(
-                f"Invalid response from KiCad for '{command}': {exc}"
-            ) from exc
+            raise IPCProtocolError(f"Invalid response from KiCad for '{command}': {exc}") from exc
 
         response = ApiResponse.from_dict(response_data)
 

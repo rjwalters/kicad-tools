@@ -309,7 +309,10 @@ class TestExportFailedNets:
 
         export_file = tmp_path / "failed.txt"
         result = _export_failed_nets(
-            router, net_map, str(export_file), quiet=True,
+            router,
+            net_map,
+            str(export_file),
+            quiet=True,
             nets_to_route_ids=multi_pad_net_ids,
         )
 
@@ -332,7 +335,10 @@ class TestExportFailedNets:
 
         export_file = tmp_path / "failed.txt"
         result = _export_failed_nets(
-            router, net_map, str(export_file), quiet=True,
+            router,
+            net_map,
+            str(export_file),
+            quiet=True,
         )
 
         assert result is True

@@ -10,14 +10,11 @@ hierarchical schematic traversal.
 import json
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_re_annotate import (
     _add_project_instance,
     _apply_reference_rename,
     _apply_uuid_reference_rename,
     _assign_numbers,
-    _build_continuous_mapping,
     _detect_indent,
     _detect_project_info,
     _extract_symbols_from_text,
@@ -531,10 +528,10 @@ def _tabs_to_spaces(text: str, width: int = 2) -> str:
     lines = []
     for line in text.splitlines(True):
         # Count leading tabs
-        stripped = line.lstrip('\t')
+        stripped = line.lstrip("\t")
         n_tabs = len(line) - len(stripped)
-        lines.append(' ' * (n_tabs * width) + stripped)
-    return ''.join(lines)
+        lines.append(" " * (n_tabs * width) + stripped)
+    return "".join(lines)
 
 
 # Space-indented variants of key test fixtures
@@ -776,8 +773,13 @@ class TestAssignNumbers:
     def test_annotates_unannotated(self):
         """Unannotated refs (R?) should be assigned numbers."""
         symbols = [
-            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
-             "uuid": "uuid-r-question"},
+            {
+                "reference": "R?",
+                "prefix": "R",
+                "number": None,
+                "unit_suffix": "",
+                "uuid": "uuid-r-question",
+            },
             {"reference": "R3", "prefix": "R", "number": 3, "unit_suffix": ""},
         ]
         raw = _assign_numbers(symbols, None, 1)
@@ -790,10 +792,20 @@ class TestAssignNumbers:
     def test_multiple_unannotated_get_unique_numbers(self):
         """Multiple R? components should each get a unique number."""
         symbols = [
-            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
-             "uuid": "uuid-r1"},
-            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
-             "uuid": "uuid-r2"},
+            {
+                "reference": "R?",
+                "prefix": "R",
+                "number": None,
+                "unit_suffix": "",
+                "uuid": "uuid-r1",
+            },
+            {
+                "reference": "R?",
+                "prefix": "R",
+                "number": None,
+                "unit_suffix": "",
+                "uuid": "uuid-r2",
+            },
             {"reference": "R5", "prefix": "R", "number": 5, "unit_suffix": ""},
         ]
         raw = _assign_numbers(symbols, None, 1)
@@ -846,9 +858,7 @@ class TestRunReAnnotate:
 
     def test_prefix_filter(self, tmp_path):
         sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
-        ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False, prefixes=["R"]
-        )
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, prefixes=["R"])
         assert ret == 0
         text = sch.read_text()
         # R5 -> R2 (renumbered)
@@ -858,9 +868,7 @@ class TestRunReAnnotate:
 
     def test_start_from(self, tmp_path):
         sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
-        ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False, start_from=10
-        )
+        ret = run_re_annotate(schematic_path=sch, dry_run=False, backup=False, start_from=10)
         assert ret == 0
         text = sch.read_text()
         assert '"Reference" "R10"' in text
@@ -886,16 +894,12 @@ class TestRunReAnnotate:
         assert '"Reference" "#PWR01"' in text
 
     def test_missing_schematic(self, tmp_path):
-        ret = run_re_annotate(
-            schematic_path=tmp_path / "nonexistent.kicad_sch"
-        )
+        ret = run_re_annotate(schematic_path=tmp_path / "nonexistent.kicad_sch")
         assert ret == 1
 
     def test_json_output(self, tmp_path, capsys):
         sch = _write_sch(tmp_path, GAPPED_SCHEMATIC)
-        ret = run_re_annotate(
-            schematic_path=sch, dry_run=True, backup=False, format="json"
-        )
+        ret = run_re_annotate(schematic_path=sch, dry_run=True, backup=False, format="json")
         assert ret == 0
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -926,9 +930,7 @@ class TestHierarchicalReAnnotate:
         child = tmp_path / "sub.kicad_sch"
         child.write_text(CHILD_SCHEMATIC)
 
-        ret = run_re_annotate(
-            schematic_path=parent, dry_run=False, backup=False
-        )
+        ret = run_re_annotate(schematic_path=parent, dry_run=False, backup=False)
         assert ret == 0
 
         parent_text = parent.read_text()
@@ -948,9 +950,7 @@ class TestHierarchicalReAnnotate:
         child = tmp_path / "sub.kicad_sch"
         child.write_text(CHILD_SCHEMATIC)
 
-        ret = run_re_annotate(
-            schematic_path=parent, dry_run=False, backup=False, per_sheet=True
-        )
+        ret = run_re_annotate(schematic_path=parent, dry_run=False, backup=False, per_sheet=True)
         assert ret == 0
 
         parent_text = parent.read_text()
@@ -972,9 +972,7 @@ class TestHierarchicalReAnnotate:
         original_parent = parent.read_text()
         original_child = child.read_text()
 
-        ret = run_re_annotate(
-            schematic_path=parent, dry_run=True, backup=False
-        )
+        ret = run_re_annotate(schematic_path=parent, dry_run=True, backup=False)
         assert ret == 0
         assert parent.read_text() == original_parent
         assert child.read_text() == original_child
@@ -985,9 +983,7 @@ class TestHierarchicalReAnnotate:
         child = tmp_path / "sub.kicad_sch"
         child.write_text(CHILD_SCHEMATIC)
 
-        ret = run_re_annotate(
-            schematic_path=parent, dry_run=False, backup=True
-        )
+        ret = run_re_annotate(schematic_path=parent, dry_run=False, backup=True)
         assert ret == 0
         # Both files should have backups
         backups = list(tmp_path.glob("*_backup_*"))
@@ -1038,9 +1034,7 @@ class TestUnannotatedComponents:
     def test_dry_run_shows_unannotated(self, tmp_path, capsys):
         """Dry run should show unannotated components in the mapping."""
         sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
-        ret = run_re_annotate(
-            schematic_path=sch, dry_run=True, backup=False, format="json"
-        )
+        ret = run_re_annotate(schematic_path=sch, dry_run=True, backup=False, format="json")
         assert ret == 0
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -1065,14 +1059,14 @@ class TestUnannotatedComponents:
 
 class TestDetectIndent:
     def test_detects_tabs(self):
-        assert _detect_indent(MINIMAL_SCHEMATIC) == '\t'
+        assert _detect_indent(MINIMAL_SCHEMATIC) == "\t"
 
     def test_detects_spaces(self):
-        assert _detect_indent(SPACE_INDENTED_SCHEMATIC) == '  '
+        assert _detect_indent(SPACE_INDENTED_SCHEMATIC) == "  "
 
     def test_detects_four_spaces(self):
         text = _tabs_to_spaces(MINIMAL_SCHEMATIC, width=4)
-        assert _detect_indent(text) == '    '
+        assert _detect_indent(text) == "    "
 
 
 class TestSpaceIndentedExtractSymbols:
@@ -1239,9 +1233,7 @@ class TestSpaceIndentedHierarchical:
         child = tmp_path / "sub.kicad_sch"
         child.write_text(_tabs_to_spaces(CHILD_SCHEMATIC))
 
-        ret = run_re_annotate(
-            schematic_path=parent, dry_run=False, backup=False
-        )
+        ret = run_re_annotate(schematic_path=parent, dry_run=False, backup=False)
         assert ret == 0
 
         parent_text = parent.read_text()
@@ -1348,7 +1340,9 @@ class TestUnannotatedOnly:
         """With --unannotated-only, R1 stays R1 and R? becomes R2."""
         sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             unannotated_only=True,
         )
         assert ret == 0
@@ -1367,7 +1361,9 @@ class TestUnannotatedOnly:
         """R1, R2 exist; R? must become R3, not R1 or R2."""
         sch = _write_sch(tmp_path, COLLISION_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             unannotated_only=True,
         )
         assert ret == 0
@@ -1384,7 +1380,9 @@ class TestUnannotatedOnly:
         sch = _write_sch(tmp_path, SEQUENTIAL_SCHEMATIC)
         original = sch.read_text()
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             unannotated_only=True,
         )
         assert ret == 0
@@ -1396,8 +1394,11 @@ class TestUnannotatedOnly:
         """--unannotated-only with --prefix R: only unannotated R refs assigned."""
         sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
-            prefixes=["R"], unannotated_only=True,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
+            prefixes=["R"],
+            unannotated_only=True,
         )
         assert ret == 0
         text = sch.read_text()
@@ -1411,8 +1412,11 @@ class TestUnannotatedOnly:
         """--unannotated-only with --start-from should respect start value."""
         sch = _write_sch(tmp_path, UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
-            start_from=10, unannotated_only=True,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
+            start_from=10,
+            unannotated_only=True,
         )
         assert ret == 0
         text = sch.read_text()
@@ -1428,8 +1432,13 @@ class TestUnannotatedOnly:
         symbols = [
             {"reference": "R1", "prefix": "R", "number": 1, "unit_suffix": ""},
             {"reference": "R5", "prefix": "R", "number": 5, "unit_suffix": ""},
-            {"reference": "R?", "prefix": "R", "number": None, "unit_suffix": "",
-             "uuid": "uuid-rq"},
+            {
+                "reference": "R?",
+                "prefix": "R",
+                "number": None,
+                "unit_suffix": "",
+                "uuid": "uuid-rq",
+            },
         ]
         raw = _assign_numbers(symbols, None, 1, unannotated_only=True)
         # Only the unannotated ref should be in the mapping
@@ -1531,8 +1540,11 @@ class TestUnannotatedOnly:
         child.write_text(child_sch)
 
         ret = run_re_annotate(
-            schematic_path=parent, dry_run=False, backup=False,
-            per_sheet=True, unannotated_only=True,
+            schematic_path=parent,
+            dry_run=False,
+            backup=False,
+            per_sheet=True,
+            unannotated_only=True,
         )
         assert ret == 0
 
@@ -1656,7 +1668,9 @@ class TestBareUnannotatedSymbols:
         """--unannotated-only must assign numbers to bare unannotated symbols."""
         sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             unannotated_only=True,
         )
         assert ret == 0
@@ -1675,7 +1689,9 @@ class TestBareUnannotatedSymbols:
         """Bare unannotated symbols must receive an (instances) block."""
         sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             unannotated_only=True,
         )
         assert ret == 0
@@ -1690,20 +1706,24 @@ class TestBareUnannotatedSymbols:
         """The created instances block must use the correct project UUID path."""
         sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             unannotated_only=True,
         )
         assert ret == 0
         text = sch.read_text()
         # Root UUID is 00000000-0000-0000-0000-000000000001 so path must be
         # /00000000-0000-0000-0000-000000000001
-        assert '/00000000-0000-0000-0000-000000000001' in text
+        assert "/00000000-0000-0000-0000-000000000001" in text
 
     def test_full_annotate_also_handles_bare_symbols(self, tmp_path):
         """Full re-annotate (not just --unannotated-only) must handle bare symbols too."""
         sch = _write_sch(tmp_path, BARE_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
         )
         assert ret == 0
         text = sch.read_text()
@@ -1715,7 +1735,9 @@ class TestBareUnannotatedSymbols:
         """Bare unannotated symbols in space-indented files are also handled."""
         sch = _write_sch(tmp_path, SPACE_INDENTED_BARE_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             unannotated_only=True,
         )
         assert ret == 0
@@ -1734,7 +1756,7 @@ class TestBareUnannotatedSymbols:
             "/00000000-0000-0000-0000-000000000001",
             "R2",
         )
-        assert '(instances' in result
+        assert "(instances" in result
         assert '(project "test"' in result
         assert '(reference "R2")' in result
 
@@ -1911,7 +1933,9 @@ class TestIncludePower:
         """--include-power annotates #PWR? and #FLG? symbols."""
         sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             include_power=True,
         )
         assert ret == 0
@@ -1928,7 +1952,9 @@ class TestIncludePower:
         """Without --include-power, #PWR? and #FLG? remain unannotated."""
         sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             include_power=False,
         )
         assert ret == 0
@@ -1941,8 +1967,11 @@ class TestIncludePower:
         """#PWR? avoids collision with existing #PWR01."""
         sch = _write_sch(tmp_path, POWER_COLLISION_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
-            unannotated_only=True, include_power=True,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
+            unannotated_only=True,
+            include_power=True,
         )
         assert ret == 0
         text = sch.read_text()
@@ -1955,15 +1984,25 @@ class TestIncludePower:
     def test_power_annotation_zero_padding(self):
         """Number 1 produces #PWR01, number 10 produces #PWR10."""
         symbols = [
-            {"reference": "#PWR?", "prefix": "#PWR", "number": None,
-             "unit_suffix": "", "uuid": "uuid-pwr1"},
+            {
+                "reference": "#PWR?",
+                "prefix": "#PWR",
+                "number": None,
+                "unit_suffix": "",
+                "uuid": "uuid-pwr1",
+            },
         ]
         raw = _assign_numbers(symbols, None, 1, include_power=True)
         assert raw["uuid-pwr1"]["new"] == "#PWR01"
 
         symbols2 = [
-            {"reference": "#PWR?", "prefix": "#PWR", "number": None,
-             "unit_suffix": "", "uuid": "uuid-pwr1"},
+            {
+                "reference": "#PWR?",
+                "prefix": "#PWR",
+                "number": None,
+                "unit_suffix": "",
+                "uuid": "uuid-pwr1",
+            },
         ]
         raw2 = _assign_numbers(symbols2, None, 10, include_power=True)
         assert raw2["uuid-pwr1"]["new"] == "#PWR10"
@@ -1972,7 +2011,9 @@ class TestIncludePower:
         """Full renumber mode with --include-power re-sequences power symbols."""
         sch = _write_sch(tmp_path, POWER_COLLISION_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
             include_power=True,
         )
         assert ret == 0
@@ -1985,12 +2026,10 @@ class TestIncludePower:
     def test_sym_prefix_always_excluded(self):
         """#SYM symbols are never annotated even with --include-power."""
         symbols = [
-            {"reference": "#SYM1", "prefix": "#SYM", "number": 1,
-             "unit_suffix": ""},
+            {"reference": "#SYM1", "prefix": "#SYM", "number": 1, "unit_suffix": ""},
             {"reference": "R3", "prefix": "R", "number": 3, "unit_suffix": ""},
         ]
-        mapping = _old_new_map(_assign_numbers(symbols, None, 1,
-                                               include_power=True))
+        mapping = _old_new_map(_assign_numbers(symbols, None, 1, include_power=True))
         assert "#SYM1" not in mapping
         assert mapping["R3"] == "R1"
 
@@ -1998,8 +2037,11 @@ class TestIncludePower:
         """--format json output includes power symbol mappings."""
         sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=True, backup=False,
-            format="json", include_power=True,
+            schematic_path=sch,
+            dry_run=True,
+            backup=False,
+            format="json",
+            include_power=True,
         )
         assert ret == 0
         captured = capsys.readouterr()
@@ -2013,8 +2055,11 @@ class TestIncludePower:
         sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
         original = sch.read_text()
         ret = run_re_annotate(
-            schematic_path=sch, dry_run=False, backup=False,
-            unannotated_only=True, include_power=False,
+            schematic_path=sch,
+            dry_run=False,
+            backup=False,
+            unannotated_only=True,
+            include_power=False,
         )
         assert ret == 0
         text = sch.read_text()

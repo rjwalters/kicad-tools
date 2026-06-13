@@ -11,7 +11,6 @@ from kicad_tools.erc.cross_sheet import (
 )
 from kicad_tools.erc.violation import ERCViolationType, Severity
 
-
 # ---------------------------------------------------------------------------
 # Fixture schematic templates
 # ---------------------------------------------------------------------------
@@ -109,14 +108,10 @@ class TestCrossSheetDuplicates:
 
         root_symbols = _make_symbol("R12", "10k", uuid="root-r12")
         root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
-        root_content = _ROOT_TEMPLATE.format(
-            symbols=root_symbols, sheets=root_sheets
-        )
+        root_content = _ROOT_TEMPLATE.format(symbols=root_symbols, sheets=root_sheets)
 
         sub_symbols = _make_symbol("R12", "4.7k", uuid="sub-r12")
-        sub_content = _SUBSHEET_TEMPLATE.format(
-            uuid="sub-uuid-001", symbols=sub_symbols
-        )
+        sub_content = _SUBSHEET_TEMPLATE.format(uuid="sub-uuid-001", symbols=sub_symbols)
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
         (tmp_path / sub_file).write_text(sub_content)
@@ -136,14 +131,10 @@ class TestCrossSheetDuplicates:
 
         root_symbols = _make_symbol("R1", "10k", uuid="root-r1")
         root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
-        root_content = _ROOT_TEMPLATE.format(
-            symbols=root_symbols, sheets=root_sheets
-        )
+        root_content = _ROOT_TEMPLATE.format(symbols=root_symbols, sheets=root_sheets)
 
         sub_symbols = _make_symbol("R2", "4.7k", uuid="sub-r2")
-        sub_content = _SUBSHEET_TEMPLATE.format(
-            uuid="sub-uuid-001", symbols=sub_symbols
-        )
+        sub_content = _SUBSHEET_TEMPLATE.format(uuid="sub-uuid-001", symbols=sub_symbols)
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
         (tmp_path / sub_file).write_text(sub_content)
@@ -153,10 +144,9 @@ class TestCrossSheetDuplicates:
 
     def test_multi_unit_same_sheet_not_flagged(self, tmp_path: Path):
         """Multi-unit symbol (same lib_id, same sheet) should not be flagged."""
-        symbols = (
-            _make_symbol("U1", "LM324", lib_id="Amplifier:LM324", uuid="u1-a", unit=1)
-            + _make_symbol("U1", "LM324", lib_id="Amplifier:LM324", uuid="u1-b", unit=2)
-        )
+        symbols = _make_symbol(
+            "U1", "LM324", lib_id="Amplifier:LM324", uuid="u1-a", unit=1
+        ) + _make_symbol("U1", "LM324", lib_id="Amplifier:LM324", uuid="u1-b", unit=2)
         root_content = _ROOT_TEMPLATE.format(symbols=symbols, sheets="")
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
@@ -168,20 +158,12 @@ class TestCrossSheetDuplicates:
         """Power symbols (lib_id starting with power:) should be ignored."""
         sub_file = "sub.kicad_sch"
 
-        root_symbols = _make_symbol(
-            "#PWR01", "GND", lib_id="power:GND", uuid="pwr-root"
-        )
+        root_symbols = _make_symbol("#PWR01", "GND", lib_id="power:GND", uuid="pwr-root")
         root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
-        root_content = _ROOT_TEMPLATE.format(
-            symbols=root_symbols, sheets=root_sheets
-        )
+        root_content = _ROOT_TEMPLATE.format(symbols=root_symbols, sheets=root_sheets)
 
-        sub_symbols = _make_symbol(
-            "#PWR01", "GND", lib_id="power:GND", uuid="pwr-sub"
-        )
-        sub_content = _SUBSHEET_TEMPLATE.format(
-            uuid="sub-uuid-001", symbols=sub_symbols
-        )
+        sub_symbols = _make_symbol("#PWR01", "GND", lib_id="power:GND", uuid="pwr-sub")
+        sub_content = _SUBSHEET_TEMPLATE.format(uuid="sub-uuid-001", symbols=sub_symbols)
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
         (tmp_path / sub_file).write_text(sub_content)
@@ -204,19 +186,14 @@ class TestCrossSheetDuplicates:
         sub_file = "sub.kicad_sch"
 
         # R1 on root, R1 and R2 on sub (R1 is the duplicate)
-        root_symbols = (
-            _make_symbol("R1", "10k", uuid="root-r1")
-            + _make_symbol("R2", "22k", uuid="root-r2")
+        root_symbols = _make_symbol("R1", "10k", uuid="root-r1") + _make_symbol(
+            "R2", "22k", uuid="root-r2"
         )
         root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
-        root_content = _ROOT_TEMPLATE.format(
-            symbols=root_symbols, sheets=root_sheets
-        )
+        root_content = _ROOT_TEMPLATE.format(symbols=root_symbols, sheets=root_sheets)
 
         sub_symbols = _make_symbol("R1", "4.7k", uuid="sub-r1")
-        sub_content = _SUBSHEET_TEMPLATE.format(
-            uuid="sub-uuid-001", symbols=sub_symbols
-        )
+        sub_content = _SUBSHEET_TEMPLATE.format(uuid="sub-uuid-001", symbols=sub_symbols)
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
         (tmp_path / sub_file).write_text(sub_content)
@@ -245,22 +222,17 @@ class TestCrossSheetDuplicates:
         sub_file = "shared.kicad_sch"
 
         root_symbols = ""
-        root_sheets = (
-            _make_sheet("SheetA", sub_file, uuid="sheet-a")
-            + _make_sheet("SheetB", sub_file, uuid="sheet-b")
+        root_sheets = _make_sheet("SheetA", sub_file, uuid="sheet-a") + _make_sheet(
+            "SheetB", sub_file, uuid="sheet-b"
         )
-        root_content = _ROOT_TEMPLATE.format(
-            symbols=root_symbols, sheets=root_sheets
-        )
+        root_content = _ROOT_TEMPLATE.format(symbols=root_symbols, sheets=root_sheets)
 
         # The shared sub-sheet has R1.  Because the hierarchy builder
         # detects circular references the second instance is a shallow
         # copy.  The check should still not report R1 as a cross-sheet
         # duplicate because the file is the same logical entity.
         sub_symbols = _make_symbol("R1", "10k", uuid="shared-r1")
-        sub_content = _SUBSHEET_TEMPLATE.format(
-            uuid="shared-uuid-001", symbols=sub_symbols
-        )
+        sub_content = _SUBSHEET_TEMPLATE.format(uuid="shared-uuid-001", symbols=sub_symbols)
 
         (tmp_path / "root.kicad_sch").write_text(root_content)
         (tmp_path / sub_file).write_text(sub_content)
@@ -420,12 +392,8 @@ class TestBuildPowerDriverInventory:
         """Power driver on a sub-sheet should be detected."""
         sub_file = "power_sub.kicad_sch"
 
-        root_sheets = _SHEET_TEMPLATE.format(
-            name="Power", filename=sub_file, uuid="sheet-pwr"
-        )
-        root_content = _POWER_ROOT_TEMPLATE.format(
-            lib_symbols="", symbols="", sheets=root_sheets
-        )
+        root_sheets = _SHEET_TEMPLATE.format(name="Power", filename=sub_file, uuid="sheet-pwr")
+        root_content = _POWER_ROOT_TEMPLATE.format(lib_symbols="", symbols="", sheets=root_sheets)
 
         pwr_flag_sym = _POWER_SYMBOL_TEMPLATE.format(
             lib_id="power:PWR_FLAG",
@@ -447,9 +415,7 @@ class TestBuildPowerDriverInventory:
 
     def test_empty_schematic(self, tmp_path: Path):
         """Schematic with no symbols returns empty set."""
-        root_content = _POWER_ROOT_TEMPLATE.format(
-            lib_symbols="", symbols="", sheets=""
-        )
+        root_content = _POWER_ROOT_TEMPLATE.format(lib_symbols="", symbols="", sheets="")
         (tmp_path / "root.kicad_sch").write_text(root_content)
 
         driven = build_power_driver_inventory(str(tmp_path / "root.kicad_sch"))
@@ -484,9 +450,7 @@ class TestFilterCrossSheetPowerIntegration:
             },
         ]
 
-        result = filter_cross_sheet_power_violations(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_power_violations(violations, str(tmp_path / "root.kicad_sch"))
         assert len(result) == 0
 
     def test_preserves_violation_when_no_driver(self, tmp_path: Path):
@@ -514,8 +478,6 @@ class TestFilterCrossSheetPowerIntegration:
             },
         ]
 
-        result = filter_cross_sheet_power_violations(
-            violations, str(tmp_path / "root.kicad_sch")
-        )
+        result = filter_cross_sheet_power_violations(violations, str(tmp_path / "root.kicad_sch"))
         # VCC is not in the driven set -- violation is a true positive
         assert len(result) == 1

@@ -2485,11 +2485,7 @@ def _filter_layer_configs_for_pcb(
     # already alerted the user.  Issue #3400: still respect starting_layers
     # so the user's explicit floor is honoured.
     if not filtered:
-        filtered = [
-            (n, s)
-            for n, s in layer_configs
-            if n <= max_layers and n >= starting_layers
-        ]
+        filtered = [(n, s) for n, s in layer_configs if n <= max_layers and n >= starting_layers]
 
     if not quiet and detected_count > 2:
         dropped = len(layer_configs) - len(filtered)
@@ -2972,9 +2968,8 @@ def route_with_layer_escalation(
     # tier does not support via-in-pad (e.g. tier-0 jlcpcb), the
     # composition is a strict no-op.
     _user_explicit_fallback = bool(getattr(args, "micro_via_in_pad_fallback", False))
-    _fp5_compose_fallback = (
-        not _user_explicit_fallback
-        and _mfr_supports_via_in_pad(getattr(args, "manufacturer", None))
+    _fp5_compose_fallback = not _user_explicit_fallback and _mfr_supports_via_in_pad(
+        getattr(args, "manufacturer", None)
     )
     layer_configs = _interleave_fine_pitch_fallback_attempts(
         layer_configs, enabled=_fp5_compose_fallback
@@ -3044,9 +3039,7 @@ def route_with_layer_escalation(
         preserved_sexp=_preserved_sexp,
     )
 
-    for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(
-        layer_configs, 1
-    ):
+    for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(layer_configs, 1):
         # Issue #3371 / P_FP5: stamp / clear the via-in-pad fallback env var
         # *around* this attempt so the lazily-constructed EscapeRouter
         # picks up the per-attempt opt-in.  The env var is sticky across

@@ -7,7 +7,6 @@ import pytest
 
 from kicad_tools.cli.pcb_query import main as pcb_query_main
 
-
 # PCB with fully connected nets (all pads linked by traces)
 CONNECTED_PCB = """(kicad_pcb
   (version 20240108)
@@ -202,9 +201,7 @@ class TestCheckConnectivityJSON:
 
     def test_disconnected_net_reports_multiple_islands(self, disconnected_pcb: Path, capsys):
         """A net with disconnected segments should report island_count > 1."""
-        pcb_query_main(
-            [str(disconnected_pcb), "nets", "--check-connectivity", "--format", "json"]
-        )
+        pcb_query_main([str(disconnected_pcb), "nets", "--check-connectivity", "--format", "json"])
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -237,9 +234,7 @@ class TestCheckConnectivityJSON:
 
     def test_zero_pad_net_reports_zero_islands(self, zero_pad_net_pcb: Path, capsys):
         """A net with no pads should report island_count=0."""
-        pcb_query_main(
-            [str(zero_pad_net_pcb), "nets", "--check-connectivity", "--format", "json"]
-        )
+        pcb_query_main([str(zero_pad_net_pcb), "nets", "--check-connectivity", "--format", "json"])
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -259,9 +254,7 @@ class TestCheckConnectivityText:
         captured = capsys.readouterr()
         assert "Islands" in captured.out
 
-    def test_text_output_shows_island_detail_for_disconnected(
-        self, disconnected_pcb: Path, capsys
-    ):
+    def test_text_output_shows_island_detail_for_disconnected(self, disconnected_pcb: Path, capsys):
         """Disconnected nets should show island membership in text output."""
         pcb_query_main([str(disconnected_pcb), "nets", "--check-connectivity"])
 
@@ -305,7 +298,15 @@ class TestCLIFlagWiring:
     def test_flag_combined_with_filter(self, disconnected_pcb: Path, capsys):
         """--check-connectivity should work with --filter."""
         pcb_query_main(
-            [str(disconnected_pcb), "nets", "--check-connectivity", "--filter", "SCL", "--format", "json"]
+            [
+                str(disconnected_pcb),
+                "nets",
+                "--check-connectivity",
+                "--filter",
+                "SCL",
+                "--format",
+                "json",
+            ]
         )
 
         captured = capsys.readouterr()

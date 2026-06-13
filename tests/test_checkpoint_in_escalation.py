@@ -137,15 +137,11 @@ class TestCheckpointForwardedInLayerEscalation:
                         "kicad_tools.cli.route_cmd.run_post_route_drc",
                         return_value=False,
                     ):
-                        route_with_layer_escalation(
-                            pcb, out, _make_args(), quiet=True
-                        )
+                        route_with_layer_escalation(pcb, out, _make_args(), quiet=True)
 
         # Inspect the call: route_all_negotiated must have been called
         # with a non-None checkpoint_callback kwarg.
-        assert router.route_all_negotiated.called, (
-            "route_all_negotiated should have been called"
-        )
+        assert router.route_all_negotiated.called, "route_all_negotiated should have been called"
         call = router.route_all_negotiated.call_args
         assert "checkpoint_callback" in call.kwargs, (
             "Issue #3051: route_with_layer_escalation must pass "
@@ -193,8 +189,7 @@ class TestCheckpointForwardedInLayerEscalation:
         # Either explicit None or absent are both valid opt-out states.
         cb = call.kwargs.get("checkpoint_callback")
         assert cb is None, (
-            "checkpoint_callback should be None when --checkpoint-interval 0; "
-            f"got {cb!r}"
+            f"checkpoint_callback should be None when --checkpoint-interval 0; got {cb!r}"
         )
 
 
@@ -241,8 +236,7 @@ class TestCheckpointForwardedInRuleRelaxation:
                         route_with_rule_relaxation(pcb, out, args, quiet=True)
 
         assert router.route_all_negotiated.called, (
-            "route_all_negotiated should have been called in the "
-            "rule-relaxation path"
+            "route_all_negotiated should have been called in the rule-relaxation path"
         )
         call = router.route_all_negotiated.call_args
         assert "checkpoint_callback" in call.kwargs, (
@@ -292,13 +286,10 @@ class TestCheckpointForwardedInCombinedEscalation:
                         "kicad_tools.cli.route_cmd.run_post_route_drc",
                         return_value=False,
                     ):
-                        route_with_combined_escalation(
-                            pcb, out, _make_args(), quiet=True
-                        )
+                        route_with_combined_escalation(pcb, out, _make_args(), quiet=True)
 
         assert router.route_all_negotiated.called, (
-            "route_all_negotiated should have been called in the "
-            "combined-escalation path"
+            "route_all_negotiated should have been called in the combined-escalation path"
         )
         call = router.route_all_negotiated.call_args
         assert "checkpoint_callback" in call.kwargs, (
@@ -393,16 +384,12 @@ class TestCheckpointActuallyWritesInEscalation:
                         "kicad_tools.cli.route_cmd.run_post_route_drc",
                         return_value=False,
                     ):
-                        route_with_layer_escalation(
-                            pcb, out, _make_args(), quiet=True
-                        )
+                        route_with_layer_escalation(pcb, out, _make_args(), quiet=True)
 
         # Output file exists AND contains at least one segment.  Pre-fix:
         # callback was never forwarded, so this assertion failed with 0
         # segments (or no file at all).
-        assert out.exists(), (
-            "Issue #3051: output PCB must exist after callback invocation"
-        )
+        assert out.exists(), "Issue #3051: output PCB must exist after callback invocation"
         segment_count = out.read_text().count("(segment")
         assert segment_count >= 1, (
             f"Issue #3051: expected >=1 (segment after checkpoint, got "

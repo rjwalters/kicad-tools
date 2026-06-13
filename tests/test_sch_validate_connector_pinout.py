@@ -7,13 +7,11 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _INTERFACE_CATALOG,
     _match_interface,
     _normalise_signal,
     check_connector_pinout,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics with connectors
@@ -38,7 +36,7 @@ def _make_connector_lib_symbol(pin_count: int) -> str:
     pin_block = "\n".join(pins)
     return f"""(symbol "{lib_id}"
             (pin_names hide)
-            (symbol "{lib_id.split(':')[1]}_0_1"
+            (symbol "{lib_id.split(":")[1]}_0_1"
                 (rectangle
                     (start -1.27 -{(pin_count * 2.54) + 1.27:.2f})
                     (end 1.27 1.27)
@@ -46,15 +44,13 @@ def _make_connector_lib_symbol(pin_count: int) -> str:
                     (fill (type none))
                 )
             )
-            (symbol "{lib_id.split(':')[1]}_1_1"
+            (symbol "{lib_id.split(":")[1]}_1_1"
                 {pin_block}
             )
         )"""
 
 
-def _make_symbol_instance(
-    ref: str, lib_id: str, pin_count: int, x: float, y: float
-) -> str:
+def _make_symbol_instance(ref: str, lib_id: str, pin_count: int, x: float, y: float) -> str:
     """Generate a symbol instance S-expression."""
     pin_entries = "\n".join(
         f'(pin "{i}" (uuid "pin-{ref.lower()}-{i}"))' for i in range(1, pin_count + 1)
@@ -71,7 +67,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[1]}"
+        (property "Value" "{lib_id.split(":")[1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -237,7 +233,9 @@ class TestCheckConnectorPinout:
         sch_path.write_text(sch_text)
 
         issues = check_connector_pinout(str(sch_path))
-        pinout_issues = [i for i in issues if i.category == "connector_pinout" and i.severity == "error"]
+        pinout_issues = [
+            i for i in issues if i.category == "connector_pinout" and i.severity == "error"
+        ]
         assert pinout_issues == [], f"Unexpected issues: {pinout_issues}"
 
     def test_swapped_swd_pins_produce_errors(self, tmp_path: Path):
@@ -255,7 +253,9 @@ class TestCheckConnectorPinout:
         sch_path.write_text(sch_text)
 
         issues = check_connector_pinout(str(sch_path))
-        pinout_errors = [i for i in issues if i.category == "connector_pinout" and i.severity == "error"]
+        pinout_errors = [
+            i for i in issues if i.category == "connector_pinout" and i.severity == "error"
+        ]
 
         assert len(pinout_errors) == 2
 
@@ -278,7 +278,9 @@ class TestCheckConnectorPinout:
         sch_path.write_text(sch_text)
 
         issues = check_connector_pinout(str(sch_path))
-        pinout_issues = [i for i in issues if i.category == "connector_pinout" and i.severity == "error"]
+        pinout_issues = [
+            i for i in issues if i.category == "connector_pinout" and i.severity == "error"
+        ]
         assert pinout_issues == []
 
     def test_correct_jtag_20pin_no_issues(self, tmp_path: Path):
@@ -296,7 +298,9 @@ class TestCheckConnectorPinout:
         sch_path.write_text(sch_text)
 
         issues = check_connector_pinout(str(sch_path))
-        pinout_errors = [i for i in issues if i.category == "connector_pinout" and i.severity == "error"]
+        pinout_errors = [
+            i for i in issues if i.category == "connector_pinout" and i.severity == "error"
+        ]
         assert pinout_errors == [], f"Unexpected issues: {pinout_errors}"
 
     def test_power_rail_alias_accepted(self, tmp_path: Path):
@@ -314,7 +318,9 @@ class TestCheckConnectorPinout:
         sch_path.write_text(sch_text)
 
         issues = check_connector_pinout(str(sch_path))
-        pinout_errors = [i for i in issues if i.category == "connector_pinout" and i.severity == "error"]
+        pinout_errors = [
+            i for i in issues if i.category == "connector_pinout" and i.severity == "error"
+        ]
         assert pinout_errors == [], f"Unexpected issues: {pinout_errors}"
 
     def test_non_connector_symbols_ignored(self, tmp_path: Path):
@@ -328,7 +334,9 @@ class TestCheckConnectorPinout:
             pytest.skip("simple_rc fixture not available")
 
         issues = check_connector_pinout(str(simple_rc))
-        pinout_issues = [i for i in issues if i.category == "connector_pinout" and i.severity == "error"]
+        pinout_issues = [
+            i for i in issues if i.category == "connector_pinout" and i.severity == "error"
+        ]
         assert pinout_issues == []
 
     def test_error_message_includes_standard_name(self, tmp_path: Path):

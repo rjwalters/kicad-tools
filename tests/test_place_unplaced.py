@@ -202,9 +202,7 @@ _ORIGIN_FP_TEMPLATE = """\
 def _make_overflow_board() -> str:
     fps = []
     for i in range(1, 21):
-        fps.append(
-            _ORIGIN_FP_TEMPLATE.format(idx=i, net_a=(i * 2 - 1), net_b=(i * 2))
-        )
+        fps.append(_ORIGIN_FP_TEMPLATE.format(idx=i, net_a=(i * 2 - 1), net_b=(i * 2)))
     nets = "\n".join(f'  (net {n} "N{n}")' for n in range(1, 41))
     return f"""\
 (kicad_pcb

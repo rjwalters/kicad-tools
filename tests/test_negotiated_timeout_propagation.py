@@ -32,13 +32,17 @@ def _make_route(net: int, tag: str = "") -> Route:
     return Route(
         net=net,
         net_name=f"Net{net}{'_' + tag if tag else ''}",
-        segments=[Segment(
-            x1=0.0, y1=0.0,
-            x2=1.0, y2=1.0,
-            width=0.2,
-            layer=0,
-            net=net,
-        )],
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=0.0,
+                x2=1.0,
+                y2=1.0,
+                width=0.2,
+                layer=0,
+                net=net,
+            )
+        ],
     )
 
 
@@ -94,16 +98,24 @@ class FakeNegotiatedRouter:
     # two-phase loop's best-state comparator queries these after every
     # iteration. The fake reports a clean board so the timeout machinery
     # alone drives the loop (issue #3436 stale-fake fix).
-    def find_nets_with_segment_via_violations(self, net_routes, trace_clearance, cache_key=None, extra_routes=None):
+    def find_nets_with_segment_via_violations(
+        self, net_routes, trace_clearance, cache_key=None, extra_routes=None
+    ):
         return []
 
-    def find_nets_with_via_segment_violations(self, net_routes, trace_clearance, cache_key=None, extra_routes=None):
+    def find_nets_with_via_segment_violations(
+        self, net_routes, trace_clearance, cache_key=None, extra_routes=None
+    ):
         return []
 
-    def find_nets_with_segment_segment_violations(self, net_routes, trace_clearance, cache_key=None, extra_routes=None):
+    def find_nets_with_segment_segment_violations(
+        self, net_routes, trace_clearance, cache_key=None, extra_routes=None
+    ):
         return []
 
-    def find_segment_segment_violation_pairs(self, net_routes, trace_clearance, extra_routes=None, copper_overlap_only=False):
+    def find_segment_segment_violation_pairs(
+        self, net_routes, trace_clearance, extra_routes=None, copper_overlap_only=False
+    ):
         return []
 
     def rip_up_nets(self, nets, net_routes, routes_list):

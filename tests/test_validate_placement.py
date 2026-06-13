@@ -12,7 +12,6 @@ from kicad_tools.validate.rules.placement import (
     point_in_polygon,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers -- lightweight stand-ins for schema objects
 # ---------------------------------------------------------------------------
@@ -34,8 +33,7 @@ class _FakePCB:
         self,
         footprints: list[_FakeFootprint],
         outline_polygon: list[tuple[float, float]],
-        outline_segments: list[tuple[tuple[float, float], tuple[float, float]]]
-        | None = None,
+        outline_segments: list[tuple[tuple[float, float], tuple[float, float]]] | None = None,
     ) -> None:
         self.footprints = footprints
         self._outline_polygon = outline_polygon
@@ -129,9 +127,9 @@ class TestFootprintOutsideBoardRule:
         """Violations reported for footprints outside the board."""
         pcb = _FakePCB(
             footprints=[
-                _FakeFootprint("U1", (5.0, 5.0)),   # inside
-                _FakeFootprint("R1", (15.0, 5.0)),   # outside
-                _FakeFootprint("C1", (-5.0, 5.0)),   # outside
+                _FakeFootprint("U1", (5.0, 5.0)),  # inside
+                _FakeFootprint("R1", (15.0, 5.0)),  # outside
+                _FakeFootprint("C1", (-5.0, 5.0)),  # outside
             ],
             outline_polygon=_RECT_OUTLINE,
         )
@@ -175,8 +173,8 @@ class TestFootprintOutsideBoardRule:
         polygon = [(0, 0), (10, 0), (10, 5), (5, 5), (5, 10), (0, 10)]
         pcb = _FakePCB(
             footprints=[
-                _FakeFootprint("U1", (2.0, 2.0)),   # inside bottom leg
-                _FakeFootprint("R1", (7.0, 7.0)),   # in the notch (outside)
+                _FakeFootprint("U1", (2.0, 2.0)),  # inside bottom leg
+                _FakeFootprint("R1", (7.0, 7.0)),  # in the notch (outside)
             ],
             outline_polygon=polygon,
         )
@@ -224,8 +222,8 @@ class TestFootprintOutsideBoardRule:
         """A footprint genuinely outside the board-relative outline is flagged."""
         pcb = _FakePCB(
             footprints=[
-                _FakeFootprint("U1", (5.0, 5.0)),   # inside
-                _FakeFootprint("R1", (-5.0, 5.0)),   # outside (negative x)
+                _FakeFootprint("U1", (5.0, 5.0)),  # inside
+                _FakeFootprint("R1", (-5.0, 5.0)),  # outside (negative x)
             ],
             outline_polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
         )

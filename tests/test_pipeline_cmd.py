@@ -274,9 +274,7 @@ class TestHasRoutingSegments:
 
     def test_nonexistent_file(self, tmp_path: Path):
         """Non-existent file returns unrouted with zero counts."""
-        is_routed, trace_count = _has_routing_segments(
-            tmp_path / "nonexistent.kicad_pcb"
-        )
+        is_routed, trace_count = _has_routing_segments(tmp_path / "nonexistent.kicad_pcb")
         assert is_routed is False
         assert trace_count == 0
 

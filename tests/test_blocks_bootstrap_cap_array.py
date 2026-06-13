@@ -349,10 +349,9 @@ class TestGateDriverBlockComposition:
         # (default cap_ref_start=1 -> C1..C3).  Bypass caps follow at C4+ and
         # are addressed by the donor pattern in PR #3016.
         bootstrap_calls = [
-            call for call in mock_schematic.add_symbol.call_args_list
-            if call.args
-            and call.args[0] == "Device:C"
-            and call.args[3] in {"C1", "C2", "C3"}
+            call
+            for call in mock_schematic.add_symbol.call_args_list
+            if call.args and call.args[0] == "Device:C" and call.args[3] in {"C1", "C2", "C3"}
         ]
         assert len(bootstrap_calls) == 3
         for call in bootstrap_calls:

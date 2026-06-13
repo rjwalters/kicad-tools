@@ -262,8 +262,7 @@ class TestPCBCreate:
         max_net_pos = max(net_positions)
         min_footprint_pos = min(footprint_positions)
         assert max_net_pos < min_footprint_pos, (
-            f"Last net at {max_net_pos} should be before "
-            f"first footprint at {min_footprint_pos}"
+            f"Last net at {max_net_pos} should be before first footprint at {min_footprint_pos}"
         )
 
         # Save and verify the file

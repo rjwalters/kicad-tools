@@ -477,16 +477,23 @@ class TestSoftstartCallSite:
 
         # PR #3481: the recipe builds a ``kct route`` argv via
         # ``sys.executable, "-m", "kicad_tools.cli", "route", ...`` and
-        # runs it with subprocess.run(...).  The two tokens together
-        # uniquely identify the production subprocess invocation.
-        assert '"-m", "kicad_tools.cli", "route"' in text, (
+        # runs it with subprocess.run(...).  Check each argv token
+        # individually rather than as a contiguous substring -- issue
+        # #3464's repo-wide ``ruff format`` line-splits long call args, so
+        # a literal ``'"-m", "kicad_tools.cli", "route"'`` match is
+        # brittle.  The combination of the three tokens plus the
+        # ``subprocess.run(`` guard below still uniquely identifies the
+        # production subprocess invocation.
+        kct_route_tokens = ('"-m"', '"kicad_tools.cli"', '"route"')
+        missing = [tok for tok in kct_route_tokens if tok not in text]
+        assert not missing, (
             "Issue #3492: softstart generate_design.py must shell out to "
             "the ``kct route`` CLI (``sys.executable -m kicad_tools.cli "
             "route ...``) -- the board-05 #3425/#3472 production pattern "
             "PR #3481 adopted.  The CLI runs the dense-package escape "
             "pre-pass AND the DRC-nudge / validation post-passes that "
             "drain the negotiated loop's overflow copper (24/26 vs 22/26 "
-            "for the in-process path)."
+            "for the in-process path).  Missing argv tokens: " + ", ".join(missing)
         )
         assert "subprocess.run(" in text, (
             "Issue #3492: the ``kct route`` argv must actually be executed "

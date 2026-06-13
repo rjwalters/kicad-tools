@@ -33,7 +33,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Synthetic PCB fixtures
 # ---------------------------------------------------------------------------
@@ -157,9 +156,7 @@ def _check_clearances(pcb_content: str, tmp_path: Path):
 
 def _count_segment_via(results) -> int:
     """Count clearance_segment_via violations."""
-    return len(
-        [v for v in results.violations if v.rule_id == "clearance_segment_via"]
-    )
+    return len([v for v in results.violations if v.rule_id == "clearance_segment_via"])
 
 
 # ---------------------------------------------------------------------------
@@ -312,12 +309,8 @@ class TestCheckLayerColocationUnit:
         # Bypass _collect_elements by monkey-patching:
         rule._collect_elements = MagicMock(return_value=[seg, via])
 
-        violations = rule._check_layer(
-            pcb, "B.Cu", min_clearance=0.127, diff_pair_set=set()
-        )
-        assert len(violations) == 0, (
-            "_check_layer should skip the coincident (segment, via) pair"
-        )
+        violations = rule._check_layer(pcb, "B.Cu", min_clearance=0.127, diff_pair_set=set())
+        assert len(violations) == 0, "_check_layer should skip the coincident (segment, via) pair"
 
     def test_check_layer_fires_on_close_but_not_coincident(self):
         """Endpoint just outside epsilon -> violation fires."""
@@ -325,9 +318,9 @@ class TestCheckLayerColocationUnit:
 
         from kicad_tools.schema.pcb import Layer
         from kicad_tools.validate.rules.clearance import (
+            _COLOCATION_EPSILON_MM,
             ClearanceRule,
             CopperElement,
-            _COLOCATION_EPSILON_MM,
         )
 
         # Place segment endpoint just outside the epsilon (2x epsilon
@@ -356,9 +349,7 @@ class TestCheckLayerColocationUnit:
         pcb.copper_layers = [Layer(number=31, name="B.Cu", type="signal")]
         rule._collect_elements = MagicMock(return_value=[seg, via])
 
-        violations = rule._check_layer(
-            pcb, "B.Cu", min_clearance=0.127, diff_pair_set=set()
-        )
+        violations = rule._check_layer(pcb, "B.Cu", min_clearance=0.127, diff_pair_set=set())
         assert len(violations) == 1, (
             "Endpoint just outside epsilon should still produce a "
             "violation -- the skip must be strictly less-than"

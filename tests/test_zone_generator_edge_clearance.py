@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -121,31 +120,23 @@ class TestIsAxisAlignedRect:
     def test_standard_rect(self):
         from kicad_tools.zones.generator import ZoneGenerator
 
-        assert ZoneGenerator._is_axis_aligned_rect(
-            [(0, 0), (10, 0), (10, 5), (0, 5)]
-        )
+        assert ZoneGenerator._is_axis_aligned_rect([(0, 0), (10, 0), (10, 5), (0, 5)])
 
     def test_offset_rect(self):
         from kicad_tools.zones.generator import ZoneGenerator
 
-        assert ZoneGenerator._is_axis_aligned_rect(
-            [(100, 100), (150, 100), (150, 155), (100, 155)]
-        )
+        assert ZoneGenerator._is_axis_aligned_rect([(100, 100), (150, 100), (150, 155), (100, 155)])
 
     def test_corners_in_any_order(self):
         from kicad_tools.zones.generator import ZoneGenerator
 
         # Corners listed in non-standard order
-        assert ZoneGenerator._is_axis_aligned_rect(
-            [(10, 10), (0, 0), (10, 0), (0, 10)]
-        )
+        assert ZoneGenerator._is_axis_aligned_rect([(10, 10), (0, 0), (10, 0), (0, 10)])
 
     def test_triangle_not_rect(self):
         from kicad_tools.zones.generator import ZoneGenerator
 
-        assert not ZoneGenerator._is_axis_aligned_rect(
-            [(0, 0), (10, 0), (5, 10)]
-        )
+        assert not ZoneGenerator._is_axis_aligned_rect([(0, 0), (10, 0), (5, 10)])
 
     def test_five_points_not_rect(self):
         from kicad_tools.zones.generator import ZoneGenerator
@@ -158,9 +149,7 @@ class TestIsAxisAlignedRect:
         from kicad_tools.zones.generator import ZoneGenerator
 
         # Diamond shape (45-degree rotated square)
-        assert not ZoneGenerator._is_axis_aligned_rect(
-            [(5, 0), (10, 5), (5, 10), (0, 5)]
-        )
+        assert not ZoneGenerator._is_axis_aligned_rect([(5, 0), (10, 5), (5, 10), (0, 5)])
 
 
 class TestEdgeClearanceWithRectFallback:
@@ -216,9 +205,7 @@ class TestEdgeClearanceWithRectFallback:
         gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=5.0)
 
         custom_boundary = [(0, 0), (100, 0), (100, 100), (0, 100)]
-        zone = gen.add_zone(
-            net="GND", layer="B.Cu", boundary=custom_boundary
-        )
+        zone = gen.add_zone(net="GND", layer="B.Cu", boundary=custom_boundary)
 
         assert zone.boundary == custom_boundary
 
@@ -246,6 +233,7 @@ class TestEdgeClearanceWithRectFallback:
 def _has_shapely() -> bool:
     try:
         import shapely  # noqa: F401
+
         return True
     except ImportError:
         return False

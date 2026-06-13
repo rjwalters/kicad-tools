@@ -4,17 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _is_boot0_pin,
     _is_stm32_symbol,
     _is_switch_or_button,
-    _tokenize_name,
     check_boot0_pulldown,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for helper functions
@@ -151,12 +146,14 @@ def _make_lib_symbol(
 
 
 def _make_symbol_instance(
-    ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    ref: str,
+    lib_id: str,
+    pins: list[tuple[str, str, str]],
+    x: float,
+    y: float,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -169,7 +166,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -293,10 +290,7 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "warning"]
         assert len(warnings) == 1
         assert "BOOT0" in warnings[0].message
         assert "pull-down" in warnings[0].message
@@ -338,10 +332,7 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "warning"]
         assert warnings == []
 
     def test_resistor_to_vcc_not_pulldown(self, tmp_path: Path):
@@ -378,10 +369,7 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "warning"]
         assert len(warnings) == 1
         assert "BOOT0" in warnings[0].message
 
@@ -420,10 +408,7 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        errors = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "error"
-        ]
+        errors = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "error"]
         assert len(errors) >= 1
         # Should mention SWCLK signal contamination
         assert any("SWCLK" in e.message for e in errors)
@@ -453,9 +438,7 @@ class TestCheckBoot0Pulldown:
         issues = check_boot0_pulldown(str(sch_path))
         boot0_issues = [i for i in issues if i.category == "boot0_pulldown"]
         # Should have no warnings or errors (info messages about skipped sheets are OK)
-        real_issues = [
-            i for i in boot0_issues if i.severity in ("warning", "error")
-        ]
+        real_issues = [i for i in boot0_issues if i.severity in ("warning", "error")]
         assert real_issues == []
 
     def test_boot0_with_button_no_contamination_error(self, tmp_path: Path):
@@ -507,15 +490,9 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        errors = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "error"
-        ]
+        errors = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "error"]
         assert errors == []
-        warnings = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "warning"]
         assert warnings == []
 
     def test_pulldown_to_vss_accepted(self, tmp_path: Path):
@@ -551,10 +528,7 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "warning"]
         assert warnings == []
 
     def test_warning_includes_sheet_location(self, tmp_path: Path):
@@ -576,10 +550,7 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "warning"]
         assert len(warnings) == 1
         assert warnings[0].location != ""
 
@@ -614,9 +585,6 @@ class TestCheckBoot0Pulldown:
         sch_path.write_text(sch_text)
 
         issues = check_boot0_pulldown(str(sch_path))
-        errors = [
-            i for i in issues
-            if i.category == "boot0_pulldown" and i.severity == "error"
-        ]
+        errors = [i for i in issues if i.category == "boot0_pulldown" and i.severity == "error"]
         assert len(errors) >= 1
         assert any("MOSI" in e.message for e in errors)

@@ -376,9 +376,14 @@ class TestDryRun:
         sch_path = _write_sch(tmp_path, SCHEMATIC_EXCLUSIVE_WIRE)
         original_content = sch_path.read_text()
 
-        rc = remove_component_main([
-            str(sch_path), "--ref", "#FLG01", "--dry-run",
-        ])
+        rc = remove_component_main(
+            [
+                str(sch_path),
+                "--ref",
+                "#FLG01",
+                "--dry-run",
+            ]
+        )
 
         assert rc == 0
         # File should be unchanged
@@ -392,9 +397,16 @@ class TestDryRun:
         sch_path = _write_sch(tmp_path, SCHEMATIC_EXCLUSIVE_WIRE)
         original_content = sch_path.read_text()
 
-        rc = remove_component_main([
-            str(sch_path), "--ref", "#FLG01", "--dry-run", "--format", "json",
-        ])
+        rc = remove_component_main(
+            [
+                str(sch_path),
+                "--ref",
+                "#FLG01",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
 
         assert rc == 0
         assert sch_path.read_text() == original_content
@@ -413,9 +425,13 @@ class TestReferenceNotFound:
     def test_not_found_text(self, tmp_path: Path, capsys):
         sch_path = _write_sch(tmp_path, SCHEMATIC_NO_WIRES)
 
-        rc = remove_component_main([
-            str(sch_path), "--ref", "NONEXISTENT",
-        ])
+        rc = remove_component_main(
+            [
+                str(sch_path),
+                "--ref",
+                "NONEXISTENT",
+            ]
+        )
 
         assert rc == 1
         captured = capsys.readouterr()
@@ -424,9 +440,15 @@ class TestReferenceNotFound:
     def test_not_found_json(self, tmp_path: Path, capsys):
         sch_path = _write_sch(tmp_path, SCHEMATIC_NO_WIRES)
 
-        rc = remove_component_main([
-            str(sch_path), "--ref", "NONEXISTENT", "--format", "json",
-        ])
+        rc = remove_component_main(
+            [
+                str(sch_path),
+                "--ref",
+                "NONEXISTENT",
+                "--format",
+                "json",
+            ]
+        )
 
         assert rc == 1
         captured = capsys.readouterr()
@@ -441,9 +463,15 @@ class TestJsonOutput:
     def test_json_success(self, tmp_path: Path, capsys):
         sch_path = _write_sch(tmp_path, SCHEMATIC_EXCLUSIVE_WIRE)
 
-        rc = remove_component_main([
-            str(sch_path), "--ref", "#FLG01", "--format", "json",
-        ])
+        rc = remove_component_main(
+            [
+                str(sch_path),
+                "--ref",
+                "#FLG01",
+                "--format",
+                "json",
+            ]
+        )
 
         assert rc == 0
         captured = capsys.readouterr()
@@ -463,9 +491,14 @@ class TestBackup:
         sch_path = _write_sch(tmp_path, SCHEMATIC_EXCLUSIVE_WIRE)
         original_content = sch_path.read_text()
 
-        rc = remove_component_main([
-            str(sch_path), "--ref", "#FLG01", "--backup",
-        ])
+        rc = remove_component_main(
+            [
+                str(sch_path),
+                "--ref",
+                "#FLG01",
+                "--backup",
+            ]
+        )
 
         assert rc == 0
 
@@ -481,9 +514,13 @@ class TestSaveRoundTrip:
     def test_round_trip(self, tmp_path: Path):
         sch_path = _write_sch(tmp_path, SCHEMATIC_EXCLUSIVE_WIRE)
 
-        rc = remove_component_main([
-            str(sch_path), "--ref", "#FLG01",
-        ])
+        rc = remove_component_main(
+            [
+                str(sch_path),
+                "--ref",
+                "#FLG01",
+            ]
+        )
         assert rc == 0
 
         # Reload and verify

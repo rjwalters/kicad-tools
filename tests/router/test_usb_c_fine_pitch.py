@@ -336,7 +336,7 @@ class TestUsbCEscapeTier1:
         # only require the pattern to be observable for any pair.)
         for row, label in [(top_row, "top"), (bottom_row, "bottom")]:
             different_layer_adjacencies = 0
-            for a, b in zip(row, row[1:]):
+            for a, b in zip(row, row[1:], strict=False):
                 if a.escape_layer != b.escape_layer:
                     different_layer_adjacencies += 1
             assert different_layer_adjacencies > 0, (
@@ -357,10 +357,7 @@ class TestUsbCEscapeTier1:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        a_row_d = [
-            e for e in escapes
-            if e.pad.pin in ("A6", "A7") and not e.pad.through_hole
-        ]
+        a_row_d = [e for e in escapes if e.pad.pin in ("A6", "A7") and not e.pad.through_hole]
         # Both pins should have an escape (no deferral on the core pair).
         if len(a_row_d) == 2:
             assert a_row_d[0].escape_layer != a_row_d[1].escape_layer, (
@@ -404,12 +401,10 @@ class TestUsbCEscapeTier2:
         escapes = escape_router.generate_escapes(package_info)
 
         odd_pin_vias = [
-            e for e in escapes
-            if e.via is not None and not getattr(e.via, "in_pad", False)
+            e for e in escapes if e.via is not None and not getattr(e.via, "in_pad", False)
         ]
         assert len(odd_pin_vias) > 0, (
-            "USB-C alternating-layer escape must produce near-pad vias "
-            "for odd-indexed pins."
+            "USB-C alternating-layer escape must produce near-pad vias for odd-indexed pins."
         )
 
     def test_no_in_pad_via_at_base_jlcpcb(self):
@@ -425,13 +420,8 @@ class TestUsbCEscapeTier2:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
-        assert in_pad_vias == [], (
-            "Base jlcpcb profile must NOT produce in-pad vias."
-        )
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
+        assert in_pad_vias == [], "Base jlcpcb profile must NOT produce in-pad vias."
 
     def test_in_pad_rescue_chains_for_large_pad_geometry(self):
         """Tier-2 (via-in-pad) integration: when a USB-C-class connector
@@ -503,10 +493,7 @@ class TestUsbCEscapeTier2:
 
         # The in-pad rescue must be invoked at least once -- this is the
         # AC#3 contract for the USB-C-class dispatcher.
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert len(in_pad_vias) > 0, (
             "USB_C_CONNECTOR dispatcher must chain into in-pad rescue "
             "when pad geometry permits (AC#3)."
@@ -531,8 +518,7 @@ class TestUsbCFixture:
         pads = load_pads_for_analysis(FIXTURE_PATH)
         j1_pads = [p for p in pads if p.ref == "J1"]
         assert len(j1_pads) >= 16, (
-            f"Fixture J1 must have at least 16 pads (SMT signals + PTH "
-            f"tabs); got {len(j1_pads)}."
+            f"Fixture J1 must have at least 16 pads (SMT signals + PTH tabs); got {len(j1_pads)}."
         )
 
         assert is_usb_c_class_connector(j1_pads)

@@ -44,9 +44,7 @@ class BOMItem:
         ``#PWR`` reference prefix as a fallback when a power symbol is
         loaded from a file whose ``lib_id`` was stripped or rewritten.
         """
-        if self.lib_id.startswith("power:") or self.lib_id.startswith(
-            "kicad_tools_pwr:"
-        ):
+        if self.lib_id.startswith("power:") or self.lib_id.startswith("kicad_tools_pwr:"):
             return True
         return bool(self.reference) and self.reference.startswith("#PWR")
 

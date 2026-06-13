@@ -139,8 +139,7 @@ class TestSubCellPadMargin:
         cell = grid.grid[layer_idx][probe_cell_y][probe_cell_x]
 
         assert cell.blocked is True, (
-            "Sub-cell margin cell sits inside the clearance halo and "
-            "must be ``blocked = True``"
+            "Sub-cell margin cell sits inside the clearance halo and must be ``blocked = True``"
         )
         assert cell.pad_blocked is True, (
             "Issue #3233: a cell whose extent overlaps continuous pad "
@@ -160,9 +159,7 @@ class TestSubCellPadMargin:
             "it to foreign-net traces after one trace touches it."
         )
 
-    def test_cell_well_outside_metal_extent_remains_halo_only(
-        self, jlcpcb_rules
-    ):
+    def test_cell_well_outside_metal_extent_remains_halo_only(self, jlcpcb_rules):
         """A cell whose extent does NOT overlap continuous metal must
         remain halo-only -- the inflation by ``resolution/2`` is
         precisely one cell on each side, not unbounded.

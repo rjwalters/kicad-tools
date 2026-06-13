@@ -114,15 +114,11 @@ class TestCheckAllMethodsConstant:
             assert hasattr(DRCChecker, name), (
                 f"CHECK_ALL_METHODS lists {name!r} but DRCChecker has no such method"
             )
-            assert callable(getattr(DRCChecker, name)), (
-                f"DRCChecker.{name} is not callable"
-            )
+            assert callable(getattr(DRCChecker, name)), f"DRCChecker.{name} is not callable"
 
     def test_names_are_unique(self) -> None:
         names = list(DRCChecker.CHECK_ALL_METHODS)
-        assert len(names) == len(set(names)), (
-            f"CHECK_ALL_METHODS contains duplicates: {names}"
-        )
+        assert len(names) == len(set(names)), f"CHECK_ALL_METHODS contains duplicates: {names}"
 
 
 class TestDispatcherIsSupersetOfCheckAll:

@@ -160,9 +160,7 @@ class TestBuilderSchematicRunERC:
 
     @patch("kicad_tools.erc.ERCReport.load")
     @patch("kicad_tools.cli.runner.run_erc")
-    def test_run_erc_after_write_success(
-        self, mock_run_erc, mock_load, tmp_path: Path
-    ):
+    def test_run_erc_after_write_success(self, mock_run_erc, mock_load, tmp_path: Path):
         """Test that run_erc works after write()."""
         sch = BuilderSchematic("Test Design")
         output_file = tmp_path / "test.kicad_sch"
@@ -225,9 +223,7 @@ class TestRunERCIntegration:
             pytest.skip("kicad-cli not installed")
 
     @pytest.mark.slow
-    def test_run_erc_on_simple_schematic(
-        self, fixtures_dir: Path, skip_if_no_kicad_cli
-    ):
+    def test_run_erc_on_simple_schematic(self, fixtures_dir: Path, skip_if_no_kicad_cli):
         """Test running actual ERC on a simple schematic."""
         schematic_path = fixtures_dir / "simple_rc.kicad_sch"
 

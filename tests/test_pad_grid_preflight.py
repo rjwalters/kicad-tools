@@ -450,9 +450,7 @@ class TestStockLibraryFriendlyDefault:
         assert len(report.off_grid_pads) == 1
         assert report.off_grid_pads[0].offset_mm == pytest.approx(0.0640, abs=1e-3)
 
-    def test_combined_intrinsic_pass_and_placement_error_fail(
-        self, tmp_path: Path
-    ) -> None:
+    def test_combined_intrinsic_pass_and_placement_error_fail(self, tmp_path: Path) -> None:
         """Synthetic 2-pad fixture: intrinsic offset passes, placement error fails.
 
         This is the canonical regression guard for issue #3042: a single

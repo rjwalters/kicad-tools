@@ -76,9 +76,7 @@ def _tht_pad(x: float, y: float, net: int, net_name: str, ref: str, pin: str) ->
 class TestStaticHaloRipupRestore:
     """Rip-up must restore static halo cells, not erase them."""
 
-    def test_python_ripup_restores_static_halo(
-        self, grid: RoutingGrid, rules: DesignRules
-    ) -> None:
+    def test_python_ripup_restores_static_halo(self, grid: RoutingGrid, rules: DesignRules) -> None:
         """Mark + unmark a same-net route over a pad halo; halo survives."""
         pad = _tht_pad(8.0, 12.0, net=1, net_name="NET1", ref="J1", pin="1")
         grid.add_pad(pad)
@@ -173,9 +171,7 @@ class TestNetAwareSameComponentCarveout:
         grid.add_pad(_tht_pad(8.0, 12.0, net=1, net_name="NET1", ref="J1", pin="1"))
         grid.add_pad(_tht_pad(8.0, 14.54, net=3, net_name="NET3", ref="J1", pin="2"))
 
-        seg = Segment(
-            x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3
-        )
+        seg = Segment(x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3)
 
         # Pre-#3545: exclude_refs={"J1"} silently exempted J1-1 (foreign
         # net) and the validator reported the segment as clean.
@@ -190,18 +186,14 @@ class TestNetAwareSameComponentCarveout:
         # trace = 0.127mm < 0.200mm required.
         assert clearance == pytest.approx(0.127, abs=0.01)
 
-    def test_explicit_component_override_keeps_carveout(
-        self, rules: DesignRules
-    ) -> None:
+    def test_explicit_component_override_keeps_carveout(self, rules: DesignRules) -> None:
         """Fine-pitch-style explicit override keeps the #1764 carve-out."""
         rules.component_clearances = {"J1": 0.05}
         grid = RoutingGrid(100, 100, rules, origin_x=0.0, origin_y=0.0)
         grid.add_pad(_tht_pad(8.0, 12.0, net=1, net_name="NET1", ref="J1", pin="1"))
         grid.add_pad(_tht_pad(8.0, 14.54, net=3, net_name="NET3", ref="J1", pin="2"))
 
-        seg = Segment(
-            x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3
-        )
+        seg = Segment(x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3)
         # 0.127mm actual >= 0.05mm required AND the relaxation is in
         # effect, so the carve-out applies and the segment validates.
         is_valid, _clearance, _loc = grid.validate_segment_clearance(
@@ -218,9 +210,7 @@ class TestNetAwareSameComponentCarveout:
         # Simulate the #2452 corridor relaxation bookkeeping.
         grid._relaxed_clearance_refs.add("J1")
 
-        seg = Segment(
-            x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3
-        )
+        seg = Segment(x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3)
         is_valid, _clearance, _loc = grid.validate_segment_clearance(
             seg, exclude_net=3, exclude_refs={"J1"}
         )
@@ -233,9 +223,7 @@ class TestNetAwareSameComponentCarveout:
         grid._relaxed_clearance_refs.add("J1")
 
         # Segment centerline crossing J1-1's pad metal.
-        seg = Segment(
-            x1=7.5, y1=11.0, x2=7.5, y2=13.0, width=0.2, layer=Layer.F_CU, net=3
-        )
+        seg = Segment(x1=7.5, y1=11.0, x2=7.5, y2=13.0, width=0.2, layer=Layer.F_CU, net=3)
         is_valid, clearance, _loc = grid.validate_segment_clearance(
             seg, exclude_net=3, exclude_refs={"J1"}
         )
@@ -247,13 +235,9 @@ class TestPadClearanceDemotionBackstop:
     """Finalization backstop: severe foreign-pad violations are demoted,
     never committed."""
 
-    def test_forced_route_through_static_halo_is_demoted(
-        self, rules: DesignRules
-    ) -> None:
+    def test_forced_route_through_static_halo_is_demoted(self, rules: DesignRules) -> None:
         """A route forced across a foreign pad's halo is stripped."""
-        router, _ = load_pcb_for_routing(
-            str(FIXTURE), rules=rules, validate_drc=False
-        )
+        router, _ = load_pcb_for_routing(str(FIXTURE), rules=rules, validate_drc=False)
         # NET3 copper slicing through J1 pad 1 (NET1, at 8.0/12.0):
         # clearance = 0.6 - 0.85 - 0.1 = -0.35mm => deficit 0.55mm,
         # far beyond the 0.2mm grid-resolution nudge reach.
@@ -272,9 +256,7 @@ class TestPadClearanceDemotionBackstop:
 
     def test_clean_route_is_not_demoted(self, rules: DesignRules) -> None:
         """A legally placed route survives the backstop untouched."""
-        router, _ = load_pcb_for_routing(
-            str(FIXTURE), rules=rules, validate_drc=False
-        )
+        router, _ = load_pcb_for_routing(str(FIXTURE), rules=rules, validate_drc=False)
         # Vertical NET3 run at x=6.0: 2.0mm from J1-1's center, well
         # clear of every pad at full clearance.
         good = Route(net=3, net_name="NET3")
@@ -290,14 +272,10 @@ class TestPadClearanceDemotionBackstop:
         assert net_routes[3] == [good]
         assert good in router.routes
 
-    def test_worst_segment_pad_deficit_geometry(
-        self, grid: RoutingGrid
-    ) -> None:
+    def test_worst_segment_pad_deficit_geometry(self, grid: RoutingGrid) -> None:
         """Exact-geometry deficit matches the fixture's 0.073mm gap."""
         grid.add_pad(_tht_pad(8.0, 12.0, net=1, net_name="NET1", ref="J1", pin="1"))
-        seg = Segment(
-            x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3
-        )
+        seg = Segment(x1=7.0, y1=11.0, x2=7.0, y2=11.6, width=0.2, layer=Layer.F_CU, net=3)
         deficit, loc = grid.worst_segment_pad_deficit(seg, exclude_net=3)
         assert deficit == pytest.approx(0.2 - 0.127, abs=0.01)
         assert loc == (8.0, 12.0)

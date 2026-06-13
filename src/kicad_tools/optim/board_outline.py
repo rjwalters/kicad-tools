@@ -136,8 +136,6 @@ def _chain_lines_to_polygon(
     return vertices if len(vertices) >= 3 else None
 
 
-def _pts_close(
-    a: tuple[float, float], b: tuple[float, float], tol: float
-) -> bool:
+def _pts_close(a: tuple[float, float], b: tuple[float, float], tol: float) -> bool:
     """Check if two points are within *tol* of each other."""
     return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol

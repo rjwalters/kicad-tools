@@ -16,8 +16,10 @@ from kicad_tools.cli.sch_pin_map import (
     _flood_fill_net,
     _point_on_segment,
     _to_coord,
-    main as pin_map_main,
     resolve_pin_map,
+)
+from kicad_tools.cli.sch_pin_map import (
+    main as pin_map_main,
 )
 from kicad_tools.schema import Schematic
 
@@ -714,9 +716,7 @@ class TestBuildWireGraph:
 
         # No coordinate should have "PWR_FLAG" as its net name
         for coord, name in net_names.items():
-            assert name != "PWR_FLAG", (
-                f"PWR_FLAG should not be registered as a net name at {coord}"
-            )
+            assert name != "PWR_FLAG", f"PWR_FLAG should not be registered as a net name at {coord}"
 
         # The +5V power symbol at (100, 35) should still be registered
         pwr_coord = _to_coord(100, 35)
@@ -738,9 +738,7 @@ class TestPwrFlagFiltering:
 
         assert "R1" in pin_map
         r1_pin1_net = pin_map["R1"]["pins"]["1"]["net"]
-        assert r1_pin1_net == "+5V", (
-            f"R1 pin 1 should resolve to '+5V', got {r1_pin1_net!r}"
-        )
+        assert r1_pin1_net == "+5V", f"R1 pin 1 should resolve to '+5V', got {r1_pin1_net!r}"
         assert pin_map["R1"]["pins"]["1"]["connected"] is True
 
     def test_pwr_flag_with_label(self, tmp_path):
@@ -761,9 +759,7 @@ class TestPwrFlagFiltering:
 
         assert "R1" in pin_map
         r1_pin1_net = pin_map["R1"]["pins"]["1"]["net"]
-        assert r1_pin1_net != "PWR_FLAG", (
-            "R1 pin 1 must not resolve to 'PWR_FLAG'"
-        )
+        assert r1_pin1_net != "PWR_FLAG", "R1 pin 1 must not resolve to 'PWR_FLAG'"
         # It should be a synthetic local net since the pin is wired but unlabeled
         assert r1_pin1_net is not None and r1_pin1_net.startswith("_local_"), (
             f"R1 pin 1 should get _local_N synthetic net, got {r1_pin1_net!r}"
@@ -1033,9 +1029,7 @@ class TestBFSBarrier:
         assert d1_pin1_net.startswith("_local_"), (
             f"D1 cathode should have _local_N net name, got {d1_pin1_net!r}"
         )
-        assert d1_pin1_net != "GND", (
-            "D1 cathode must NOT resolve to GND through R1's body"
-        )
+        assert d1_pin1_net != "GND", "D1 cathode must NOT resolve to GND through R1's body"
         assert pin_map["D1"]["pins"]["1"]["connected"] is True
 
         # D1 anode (pin 2) should resolve to VBUS
@@ -1092,9 +1086,7 @@ class TestPullupBarrierNetPropagation:
 
         # R1 pin 2 must resolve to SCL (was None before fix)
         r1_pin2_net = pin_map["R1"]["pins"]["2"]["net"]
-        assert r1_pin2_net == "SCL", (
-            f"R1 pin 2 should resolve to 'SCL', got {r1_pin2_net!r}"
-        )
+        assert r1_pin2_net == "SCL", f"R1 pin 2 should resolve to 'SCL', got {r1_pin2_net!r}"
 
         # R1 pin 1 should resolve to +3.3V (power symbol)
         assert pin_map["R1"]["pins"]["1"]["net"] == "+3.3V"
@@ -1112,9 +1104,7 @@ class TestPullupBarrierNetPropagation:
         pin_map = resolve_pin_map(sch)
 
         d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
-        assert d1_pin1_net != "GND", (
-            f"D1 cathode must NOT resolve to GND, got {d1_pin1_net!r}"
-        )
+        assert d1_pin1_net != "GND", f"D1 cathode must NOT resolve to GND, got {d1_pin1_net!r}"
         assert d1_pin1_net is not None and d1_pin1_net.startswith("_local_"), (
             f"D1 cathode should have _local_N synthetic net, got {d1_pin1_net!r}"
         )
@@ -1495,9 +1485,7 @@ class TestNetTieTraversal:
 
         # U1 pin 1 is connected to the center pad of a 3-pad net-tie
         u1_pin1_net = pin_map["U1"]["pins"]["1"]["net"]
-        assert u1_pin1_net is not None, (
-            "U1 pin 1 should resolve to a net name through NetTie_3"
-        )
+        assert u1_pin1_net is not None, "U1 pin 1 should resolve to a net name through NetTie_3"
         # It should pick up NET_A or NET_B -- both propagate through the wire graph
         assert u1_pin1_net in ("NET_A", "NET_B"), (
             f"U1 pin 1 should resolve to NET_A or NET_B, got {u1_pin1_net!r}"
@@ -1525,9 +1513,7 @@ class TestNetTieTraversal:
         pin_map = resolve_pin_map(sch)
 
         d1_pin1_net = pin_map["D1"]["pins"]["1"]["net"]
-        assert d1_pin1_net != "GND", (
-            f"D1 cathode must NOT resolve to GND, got {d1_pin1_net!r}"
-        )
+        assert d1_pin1_net != "GND", f"D1 cathode must NOT resolve to GND, got {d1_pin1_net!r}"
         assert d1_pin1_net is not None and d1_pin1_net.startswith("_local_"), (
             f"D1 cathode should have _local_N synthetic net, got {d1_pin1_net!r}"
         )
@@ -1645,12 +1631,9 @@ class TestUnnamedLocalNets:
         r1_net = pin_map["R1"]["pins"]["1"]["net"]
         r2_net = pin_map["R2"]["pins"]["1"]["net"]
         assert r1_net is not None, "R1 pin 1 should not be None (it is wired)"
-        assert r1_net.startswith("_local_"), (
-            f"R1 pin 1 should get _local_N, got {r1_net!r}"
-        )
+        assert r1_net.startswith("_local_"), f"R1 pin 1 should get _local_N, got {r1_net!r}"
         assert r1_net == r2_net, (
-            f"R1 and R2 pin 1 should share the same local net, "
-            f"got R1={r1_net!r} vs R2={r2_net!r}"
+            f"R1 and R2 pin 1 should share the same local net, got R1={r1_net!r} vs R2={r2_net!r}"
         )
         assert pin_map["R1"]["pins"]["1"]["connected"] is True
         assert pin_map["R2"]["pins"]["1"]["connected"] is True
@@ -1881,9 +1864,7 @@ class TestHierarchyTraversal:
 
     def test_sheet_filter(self, capsys):
         """--sheet restricts output to components on the matching sheet."""
-        rc = pin_map_main([
-            str(HIERARCHICAL_ROOT), "--sheet", "sub_b", "--format", "json"
-        ])
+        rc = pin_map_main([str(HIERARCHICAL_ROOT), "--sheet", "sub_b", "--format", "json"])
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
 

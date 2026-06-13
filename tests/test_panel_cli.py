@@ -31,33 +31,47 @@ class TestPanelCLI:
 
     def test_parser_custom_grid(self, parser):
         """Parser accepts custom grid size."""
-        args = parser.parse_args([
-            "panel", str(TEST_PCB),
-            "--rows", "3",
-            "--cols", "4",
-            "--spacing", "3.5",
-        ])
+        args = parser.parse_args(
+            [
+                "panel",
+                str(TEST_PCB),
+                "--rows",
+                "3",
+                "--cols",
+                "4",
+                "--spacing",
+                "3.5",
+            ]
+        )
         assert args.panel_rows == 3
         assert args.panel_cols == 4
         assert args.panel_spacing == 3.5
 
     def test_parser_cut_method(self, parser):
         """Parser accepts cut method selection."""
-        args = parser.parse_args([
-            "panel", str(TEST_PCB),
-            "--cut", "vcut",
-        ])
+        args = parser.parse_args(
+            [
+                "panel",
+                str(TEST_PCB),
+                "--cut",
+                "vcut",
+            ]
+        )
         assert args.panel_cut == "vcut"
 
     def test_parser_frame_options(self, parser):
         """Parser accepts frame configuration."""
-        args = parser.parse_args([
-            "panel", str(TEST_PCB),
-            "--frame",
-            "--frame-width", "6.0",
-            "--tooling-holes",
-            "--fiducials",
-        ])
+        args = parser.parse_args(
+            [
+                "panel",
+                str(TEST_PCB),
+                "--frame",
+                "--frame-width",
+                "6.0",
+                "--tooling-holes",
+                "--fiducials",
+            ]
+        )
         assert args.panel_frame is True
         assert args.panel_frame_width == 6.0
         assert args.panel_tooling_holes is True

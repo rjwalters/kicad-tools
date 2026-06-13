@@ -17,9 +17,7 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
-def point_in_polygon(
-    x: float, y: float, polygon: list[tuple[float, float]]
-) -> bool:
+def point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
     """Test if a point is inside a polygon using ray casting.
 
     Casts a ray from the point in the +X direction and counts the number
@@ -42,9 +40,7 @@ def point_in_polygon(
     for i in range(n):
         xi, yi = polygon[i]
         xj, yj = polygon[j]
-        if ((yi > y) != (yj > y)) and (
-            x < (xj - xi) * (y - yi) / (yj - yi) + xi
-        ):
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
             inside = not inside
         j = i
     return inside
@@ -94,9 +90,7 @@ class FootprintOutsideBoardRule(DRCRule):
             fx, fy = footprint.position
             if not point_in_polygon(fx, fy, outline_polygon):
                 # Compute distance to nearest edge for the message.
-                distance = EdgeClearanceRule()._min_distance_to_outline(
-                    (fx, fy), outline_segments
-                )
+                distance = EdgeClearanceRule()._min_distance_to_outline((fx, fy), outline_segments)
                 results.add(
                     DRCViolation(
                         rule_id="footprint_outside_board",

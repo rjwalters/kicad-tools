@@ -441,7 +441,7 @@ def create_charlieplex_pcb(output_dir: Path) -> Path:
     for i, (pos, led_conn) in enumerate(zip(LED_POSITIONS, LED_CONNECTIONS, strict=False)):
         parts.append(generate_led(led_conn.ref, pos, led_conn.anode_node, led_conn.cathode_node))
 
-    print(f"   D1-D9 (LEDs) in 3x3 grid")
+    print("   D1-D9 (LEDs) in 3x3 grid")
 
     parts.append(")")
 

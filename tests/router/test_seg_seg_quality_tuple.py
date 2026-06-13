@@ -393,12 +393,8 @@ class TestIterationMetricsDemotableConnected:
         """With ``demotable_connected`` defaulted (0), ``effective_connected``
         collapses to ``nets_fully_connected`` and the historical #3117
         ordering is unchanged: higher raw connectivity wins."""
-        nine = IterationMetrics(
-            iteration=1, routed_count=9, overflow=0, nets_fully_connected=9
-        )
-        eight = IterationMetrics(
-            iteration=2, routed_count=9, overflow=0, nets_fully_connected=8
-        )
+        nine = IterationMetrics(iteration=1, routed_count=9, overflow=0, nets_fully_connected=9)
+        eight = IterationMetrics(iteration=2, routed_count=9, overflow=0, nets_fully_connected=8)
         assert nine.effective_connected == 9
         assert eight.effective_connected == 8
         assert nine.is_better_than(eight)
@@ -564,12 +560,8 @@ class TestCorrectionBeforeDemotionOnTimeout:
             calls.append(("demotion", None))
             return []
 
-        monkeypatch.setattr(
-            Autorouter, "_post_route_clearance_correction", _fake_correction
-        )
-        monkeypatch.setattr(
-            Autorouter, "_demote_seg_seg_overlap_nets", _fake_demotion
-        )
+        monkeypatch.setattr(Autorouter, "_post_route_clearance_correction", _fake_correction)
+        monkeypatch.setattr(Autorouter, "_demote_seg_seg_overlap_nets", _fake_demotion)
 
     def test_correction_runs_bounded_before_demotion_on_timeout(self, monkeypatch):
         ar = self._make_autorouter()
@@ -592,9 +584,7 @@ class TestCorrectionBeforeDemotionOnTimeout:
 
         def _slow_route(self, net, present_factor, per_net_timeout=None):
             _FakeClock.t += 10.0
-            return real_route(
-                self, net, present_factor, per_net_timeout=per_net_timeout
-            )
+            return real_route(self, net, present_factor, per_net_timeout=per_net_timeout)
 
         monkeypatch.setattr(Autorouter, "_route_net_negotiated", _slow_route)
 
@@ -605,8 +595,7 @@ class TestCorrectionBeforeDemotionOnTimeout:
 
         names = [name for name, _ in calls]
         assert "correction" in names, (
-            "Timeout exit must still run the bounded correction pass "
-            "(successful_nets > 0)"
+            "Timeout exit must still run the bounded correction pass (successful_nets > 0)"
         )
         assert "demotion" in names, "The #3433 safety net must always run"
         assert names.index("correction") < names.index("demotion"), (

@@ -250,15 +250,16 @@ class TestStaggeredRowRescueWiring:
         _install_u5_region(router, pads)
         package = _FakePackage(pads, pin_pitch=1.27)
         # Far consumers (50 mm north, different ref) for every net.
-        router.net_target_positions = {
-            p.net: [(p.x, p.y + 50.0, "J1")] for p in pads
-        }
+        router.net_target_positions = {p.net: [(p.x, p.y + 50.0, "J1")] for p in pads}
 
         with mock.patch.dict(
-            os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+            os.environ,
+            {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
         ):
             escapes = router._create_staggered_row_escapes(
-                pads=pads, direction=EscapeDirection.NORTH, package=package,
+                pads=pads,
+                direction=EscapeDirection.NORTH,
+                package=package,
             )
 
         # Row cap (Issue #3398): exactly ONE rescue for the row, granted
@@ -266,13 +267,11 @@ class TestStaggeredRowRescueWiring:
         # index 0 -> pin "1").  In-pad rescue places the via dead-centre
         # on the pad.
         assert len(escapes) == 1, (
-            f"Expected exactly 1 rescue (SOP_RESCUE_MAX_PER_ROW); "
-            f"got {len(escapes)}"
+            f"Expected exactly 1 rescue (SOP_RESCUE_MAX_PER_ROW); got {len(escapes)}"
         )
         esc = escapes[0]
         assert esc.pad.pin == "1", (
-            f"Expected the exact-tie to resolve to row index 0 (pin 1); "
-            f"got pin {esc.pad.pin}"
+            f"Expected the exact-tie to resolve to row index 0 (pin 1); got pin {esc.pad.pin}"
         )
         assert esc.via_pos is not None
         assert esc.via is not None
@@ -308,7 +307,9 @@ class TestStaggeredRowRescueWiring:
         package = _BarePackage(pads)
 
         escapes = router._create_staggered_row_escapes(
-            pads=pads, direction=EscapeDirection.NORTH, package=package,
+            pads=pads,
+            direction=EscapeDirection.NORTH,
+            package=package,
         )
 
         # Pin 0 (i=0, even) gets no stagger offset -> via_y is at
@@ -356,17 +357,18 @@ class TestRescueOnlyBandConsumerDeferral:
         package = _FakePackage(pads, pin_pitch=1.27)
         # Local consumers 5 mm away (softstart: bootstrap caps, TVS
         # clamps, gate resistors sit 2-12 mm from the driver pins).
-        router.net_target_positions = {
-            p.net: [(p.x, p.y + 5.0, "C21")] for p in pads
-        }
+        router.net_target_positions = {p.net: [(p.x, p.y + 5.0, "C21")] for p in pads}
 
         # Row cap pinned to 1 so the deferral below is attributable to
         # the LOCALITY gate, not the default cap of 0.
         with mock.patch.dict(
-            os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+            os.environ,
+            {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
         ):
             escapes = router._create_staggered_row_escapes(
-                pads=pads, direction=EscapeDirection.NORTH, package=package,
+                pads=pads,
+                direction=EscapeDirection.NORTH,
+                package=package,
             )
         assert escapes == [], (
             "Local-consumer pads on a rescue-only-band SOP must emit NO "
@@ -383,10 +385,13 @@ class TestRescueOnlyBandConsumerDeferral:
         # router.net_target_positions left empty (legacy/direct callers).
 
         with mock.patch.dict(
-            os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+            os.environ,
+            {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
         ):
             escapes = router._create_staggered_row_escapes(
-                pads=pads, direction=EscapeDirection.NORTH, package=package,
+                pads=pads,
+                direction=EscapeDirection.NORTH,
+                package=package,
             )
         assert escapes == [], (
             "Without consumer information the rescue-only band must "
@@ -409,10 +414,13 @@ class TestRescueOnlyBandConsumerDeferral:
         package = _FakePackage(pads, pin_pitch=1.27)
 
         with mock.patch.dict(
-            os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+            os.environ,
+            {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
         ):
             escapes = router._create_staggered_row_escapes(
-                pads=pads, direction=EscapeDirection.NORTH, package=package,
+                pads=pads,
+                direction=EscapeDirection.NORTH,
+                package=package,
             )
         assert escapes == [], (
             "Plane-net pads on a rescue-only-band SOP must emit NO "
@@ -448,10 +456,13 @@ class TestRescueOnlyBandConsumerDeferral:
         }
 
         with mock.patch.dict(
-            os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+            os.environ,
+            {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
         ):
             escapes = router._create_staggered_row_escapes(
-                pads=pads, direction=EscapeDirection.NORTH, package=package,
+                pads=pads,
+                direction=EscapeDirection.NORTH,
+                package=package,
             )
 
         rescued_pins = sorted(esc.pad.pin for esc in escapes)
@@ -486,15 +497,15 @@ class TestRescueOnlyBandConsumerDeferral:
         package = _FakePackage(pads, pin_pitch=1.27)
         # Far consumers for every net -- the rescue WOULD fire if the
         # cap allowed it (see test_eligible_geometry_triggers_in_pad_rescue).
-        router.net_target_positions = {
-            p.net: [(p.x, p.y + 50.0, "J1")] for p in pads
-        }
+        router.net_target_positions = {p.net: [(p.x, p.y + 50.0, "J1")] for p in pads}
 
         env = dict(os.environ)
         env.pop("KICAD_TOOLS_SOP_RESCUE_ROW_CAP", None)
         with mock.patch.dict(os.environ, env, clear=True):
             escapes = router._create_staggered_row_escapes(
-                pads=pads, direction=EscapeDirection.NORTH, package=package,
+                pads=pads,
+                direction=EscapeDirection.NORTH,
+                package=package,
             )
         assert escapes == [], (
             "Default row cap (0) must defer every rescue on the "
@@ -518,7 +529,9 @@ class TestRescueOnlyBandConsumerDeferral:
         package = _FakePackage(pads, pin_pitch=0.95)
 
         escapes = router._create_staggered_row_escapes(
-            pads=pads, direction=EscapeDirection.NORTH, package=package,
+            pads=pads,
+            direction=EscapeDirection.NORTH,
+            package=package,
         )
 
         assert len(escapes) == len(pads), (
@@ -567,14 +580,15 @@ class TestSopRescueFallbackMonotonic:
         pads_off = _ucc27211_row()
         _install_u5_region(router_off, pads_off)
         pkg_off = _FakePackage(pads_off, pin_pitch=1.27)
-        router_off.net_target_positions = {
-            p.net: [(p.x, p.y + 50.0, "J1")] for p in pads_off
-        }
+        router_off.net_target_positions = {p.net: [(p.x, p.y + 50.0, "J1")] for p in pads_off}
         with mock.patch.dict(
-            os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+            os.environ,
+            {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
         ):
             esc_off = router_off._create_staggered_row_escapes(
-                pads=pads_off, direction=EscapeDirection.NORTH, package=pkg_off,
+                pads=pads_off,
+                direction=EscapeDirection.NORTH,
+                package=pkg_off,
             )
 
         # On.
@@ -582,21 +596,21 @@ class TestSopRescueFallbackMonotonic:
         pads_on = _ucc27211_row()
         _install_u5_region(router_on, pads_on)
         pkg_on = _FakePackage(pads_on, pin_pitch=1.27)
-        router_on.net_target_positions = {
-            p.net: [(p.x, p.y + 50.0, "J1")] for p in pads_on
-        }
+        router_on.net_target_positions = {p.net: [(p.x, p.y + 50.0, "J1")] for p in pads_on}
         with mock.patch.dict(
-            os.environ, {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
+            os.environ,
+            {"KICAD_TOOLS_SOP_RESCUE_ROW_CAP": "1"},
         ):
             esc_on = router_on._create_staggered_row_escapes(
-                pads=pads_on, direction=EscapeDirection.NORTH, package=pkg_on,
+                pads=pads_on,
+                direction=EscapeDirection.NORTH,
+                package=pkg_on,
             )
 
         # On the no-clip geometry the rescue must not fire either way,
         # so the routes are identical (same count, same via offsets).
         assert len(esc_on) >= len(esc_off), (
-            "Fallback ON must not reduce escape route count; "
-            f"off={len(esc_off)}, on={len(esc_on)}"
+            f"Fallback ON must not reduce escape route count; off={len(esc_off)}, on={len(esc_on)}"
         )
         # Per-pad via offsets identical -- pins down the strict no-op
         # contract for the common case.
@@ -604,7 +618,8 @@ class TestSopRescueFallbackMonotonic:
             assert off_route.via_pos is not None
             assert on_route.via_pos is not None
             assert off_route.via_pos[1] == pytest.approx(
-                on_route.via_pos[1], abs=1e-6,
+                on_route.via_pos[1],
+                abs=1e-6,
             ), (
                 "Fallback ON changed via_y on the legacy SOP path -- "
                 "the flag must be a strict no-op when the rescue "
@@ -614,4 +629,5 @@ class TestSopRescueFallbackMonotonic:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__, "-v", "--no-cov"]))

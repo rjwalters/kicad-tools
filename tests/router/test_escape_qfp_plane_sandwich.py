@@ -36,7 +36,6 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
-
 # ----------------------------------------------------------------------------
 # Fixtures -- mirrored from test_escape_via_in_pad_lqfp.py but with selective
 # plane-net assignment on the west edge so we can reason about which pads are
@@ -105,9 +104,9 @@ def _make_lqfp48_with_plane_sandwich(
         102,  # pin 3 (signal, both-sides-signal -> not sandwiched)
         103,  # pin 4 (signal)
         104,  # pin 5 (signal, only one plane neighbour)
-        0,    # pin 6 (PLANE)
+        0,  # pin 6 (PLANE)
         200,  # pin 7 (SIGNAL SANDWICHED)
-        0,    # pin 8 (PLANE)
+        0,  # pin 8 (PLANE)
         105,  # pin 9 (signal, only one plane neighbour)
         106,  # pin 10 (signal)
         107,  # pin 11 (signal)
@@ -253,17 +252,17 @@ def _make_lqfp48_along_edge_sandwich(
     """
     west_nets: list[int] = [
         100,  # pin 1 (signal, top of edge)
-        0,    # pin 2 (plane)
-        0,    # pin 3 (plane)
+        0,  # pin 2 (plane)
+        0,  # pin 3 (plane)
         200,  # pin 4 (SANDWICH SIGNAL)
-        0,    # pin 5 (plane)
-        0,    # pin 6 (plane)
+        0,  # pin 5 (plane)
+        0,  # pin 6 (plane)
         104,  # pin 7 (signal)
-        0,    # pin 8 (plane)
-        0,    # pin 9 (plane)
-        0,    # pin 10 (plane)
-        0,    # pin 11 (plane)
-        0,    # pin 12 (plane)
+        0,  # pin 8 (plane)
+        0,  # pin 9 (plane)
+        0,  # pin 10 (plane)
+        0,  # pin 11 (plane)
+        0,  # pin 12 (plane)
     ]
     assert len(west_nets) == pads_per_edge
 
@@ -388,17 +387,18 @@ class TestPlaneSandwichPredicate:
         pads = _make_lqfp48_with_plane_sandwich()
         package = router.analyze_package(pads)
         assert package.package_type in (
-            PackageType.QFP, PackageType.TQFP, PackageType.QFN,
+            PackageType.QFP,
+            PackageType.TQFP,
+            PackageType.QFN,
         )
 
         # Pin 7 on the west edge is the signal pin with plane neighbours
         # at pins 6 and 8.
-        west_signal = next(
-            p for p in pads if p.pin == "7"
-        )
+        west_signal = next(p for p in pads if p.pin == "7")
         assert west_signal.net == 200, "fixture sanity"
         assert router._is_pin_boxed_by_plane_neighbours(
-            west_signal, package,
+            west_signal,
+            package,
         ), "Pin 7 should be plane-sandwiched (pins 6 GND, 8 +3.3V)"
 
     def test_predicate_does_not_fire_on_plane_pad(self):
@@ -413,7 +413,8 @@ class TestPlaneSandwichPredicate:
         west_plane = next(p for p in pads if p.pin == "6")
         assert west_plane.net == 0
         assert not router._is_pin_boxed_by_plane_neighbours(
-            west_plane, package,
+            west_plane,
+            package,
         )
 
     def test_predicate_does_not_fire_on_signal_without_plane_neighbours(self):
@@ -434,7 +435,8 @@ class TestPlaneSandwichPredicate:
         west_mid = next(p for p in pads if p.pin == "3")
         assert west_mid.net != 0
         assert not router._is_pin_boxed_by_plane_neighbours(
-            west_mid, package,
+            west_mid,
+            package,
         )
 
     def test_predicate_does_not_fire_on_corner_pin(self):
@@ -450,7 +452,8 @@ class TestPlaneSandwichPredicate:
         # below it; cannot be sandwiched.
         corner = next(p for p in pads if p.pin == "1")
         assert not router._is_pin_boxed_by_plane_neighbours(
-            corner, package,
+            corner,
+            package,
         )
 
     def test_predicate_does_not_fire_when_only_one_neighbour_is_plane(self):
@@ -465,7 +468,8 @@ class TestPlaneSandwichPredicate:
         # Only one plane neighbour -- not sandwiched.
         west_one_side = next(p for p in pads if p.pin == "5")
         assert not router._is_pin_boxed_by_plane_neighbours(
-            west_one_side, package,
+            west_one_side,
+            package,
         )
 
 
@@ -562,7 +566,8 @@ class TestForcedInPadRescue:
         # is correctly set up).
         sandwich_pad = next(p for p in pads if p.pin == "7" and p.net == 200)
         assert router._is_pin_boxed_by_plane_neighbours(
-            sandwich_pad, package,
+            sandwich_pad,
+            package,
         )
 
     def test_no_through_channel_routing_for_sandwich_pin(self):
@@ -577,16 +582,12 @@ class TestForcedInPadRescue:
 
         escapes = router.generate_escapes(package)
 
-        sandwich_escape = next(
-            e for e in escapes if e.pad.pin == "4" and e.pad.net == 200
-        )
+        sandwich_escape = next(e for e in escapes if e.pad.pin == "4" and e.pad.net == 200)
 
         # The single segment must run on the INNER layer (B.Cu on this
         # 2-layer fixture), not on F.Cu.  An in-pad escape has one inner
         # segment running from the via to the inner-layer escape point.
-        f_cu_segments = [
-            seg for seg in sandwich_escape.segments if seg.layer == Layer.F_CU
-        ]
+        f_cu_segments = [seg for seg in sandwich_escape.segments if seg.layer == Layer.F_CU]
         assert f_cu_segments == [], (
             "Plane-sandwich rescue must not emit any F.Cu segments "
             f"(through-channel route on surface); got {f_cu_segments}"
@@ -625,9 +626,7 @@ class TestNoViaInPadErrorPath:
         # specific phrasing so the message can be tuned without
         # breaking the test.
         sandwich_errors = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+            r for r in caplog.records if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
         ]
         assert len(sandwich_errors) >= 1, (
             "Expected at least one ERROR log referencing Issue #2880; "
@@ -636,9 +635,7 @@ class TestNoViaInPadErrorPath:
 
         # The message must name the manufacturer (so the user can act
         # on the diagnostic).
-        assert any(
-            "jlcpcb" in r.getMessage() for r in sandwich_errors
-        ), (
+        assert any("jlcpcb" in r.getMessage() for r in sandwich_errors), (
             "Sandwich error must name the manufacturer; got: "
             f"{[r.getMessage() for r in sandwich_errors]}"
         )
@@ -656,9 +653,7 @@ class TestNoViaInPadErrorPath:
             router.generate_escapes(package)
 
         sandwich_errors = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+            r for r in caplog.records if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
         ]
         assert sandwich_errors == [], (
             "When via-in-pad is supported, no #2880 ERROR records should "
@@ -694,9 +689,7 @@ class TestAutoMfrTierLogSuppression:
             router.generate_escapes(package)
 
         sandwich_errors = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+            r for r in caplog.records if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
         ]
         assert sandwich_errors == [], (
             "Escalation-in-progress must suppress the #2880 ERROR; "
@@ -704,9 +697,7 @@ class TestAutoMfrTierLogSuppression:
         )
 
         sandwich_debugs = [
-            r
-            for r in caplog.records
-            if r.levelno == logging.DEBUG and "#2880" in r.getMessage()
+            r for r in caplog.records if r.levelno == logging.DEBUG and "#2880" in r.getMessage()
         ]
         assert len(sandwich_debugs) >= 1, (
             "Escalation-in-progress must still log #2880 at DEBUG so log "
@@ -735,9 +726,7 @@ class TestAutoMfrTierLogSuppression:
             router.generate_escapes(package)
 
         sandwich_errors = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+            r for r in caplog.records if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
         ]
         assert len(sandwich_errors) >= 1, (
             "When escalation is NOT in progress (final-tier attempt), the "
@@ -764,9 +753,7 @@ class TestAutoMfrTierLogSuppression:
             router.generate_escapes(package)
 
         sandwich_errors = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
+            r for r in caplog.records if r.levelno >= logging.ERROR and "#2880" in r.getMessage()
         ]
         assert len(sandwich_errors) >= 1, (
             "Non-escalation callers must still see the #2880 ERROR "

@@ -33,16 +33,13 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ARTIFACT = (
-    REPO_ROOT / "boards" / "external" / "softstart" / "output"
-    / "softstart_routed.kicad_pcb"
-)
+ARTIFACT = REPO_ROOT / "boards" / "external" / "softstart" / "output" / "softstart_routed.kicad_pcb"
 
 MIN_CLEARANCE = 0.1016  # jlcpcb-tier1 inner-layer clearance (mm)
 
 SEG_RE = re.compile(
-    r'\(segment\s*\n\s*\(start ([\d.-]+) ([\d.-]+)\)\s*\n\s*'
-    r'\(end ([\d.-]+) ([\d.-]+)\)\s*\n\s*\(width ([\d.]+)\)\s*\n\s*'
+    r"\(segment\s*\n\s*\(start ([\d.-]+) ([\d.-]+)\)\s*\n\s*"
+    r"\(end ([\d.-]+) ([\d.-]+)\)\s*\n\s*\(width ([\d.]+)\)\s*\n\s*"
     r'\(layer "([^"]+)"\)\s*\n\s*'
     r'(?:\(uuid "[^"]+"\)\s*\n\s*\(net (\d+)\)'
     r'|\(net (\d+)\)\s*\n\s*\(uuid "[^"]+"\))'
@@ -67,9 +64,13 @@ def _parse(pcb_path):
     text = pcb_path.read_text()
     segs = [
         (
-            float(m.group(1)), float(m.group(2)),
-            float(m.group(3)), float(m.group(4)),
-            float(m.group(5)), m.group(6), m.group(7) or m.group(8),
+            float(m.group(1)),
+            float(m.group(2)),
+            float(m.group(3)),
+            float(m.group(4)),
+            float(m.group(5)),
+            m.group(6),
+            m.group(7) or m.group(8),
         )
         for m in SEG_RE.finditer(text)
     ]
@@ -107,9 +108,7 @@ def _assert_all_45(segs):
         dx, dy = ex - sx, ey - sy
         if dx == 0 and dy == 0:
             continue
-        assert is_45_aligned(dx, dy), (
-            f"off-angle segment ({sx},{sy})-({ex},{ey})"
-        )
+        assert is_45_aligned(dx, dy), f"off-angle segment ({sx},{sy})-({ex},{ey})"
 
 
 @pytest.mark.skipif(not ARTIFACT.exists(), reason="committed artifact missing")

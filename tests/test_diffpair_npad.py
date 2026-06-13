@@ -69,19 +69,47 @@ def _two_pad_router(spacing: float = 0.8) -> Autorouter:
     router.add_component(
         "U1",
         [
-            {"number": "1", "x": 5.0, "y": p_y, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": n_y, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 5.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     router.add_component(
         "J1",
         [
-            {"number": "1", "x": 25.0, "y": p_y, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 25.0, "y": n_y, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": p_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": n_y,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     return router
@@ -139,10 +167,24 @@ def _three_pad_no_swap_router() -> Autorouter:
         router.add_component(
             ref,
             [
-                {"number": "1", "x": x, "y": 10.0, "width": 0.4, "height": 0.4,
-                 "net": 1, "net_name": "PAIR_P"},
-                {"number": "2", "x": x, "y": 12.0, "width": 0.4, "height": 0.4,
-                 "net": 2, "net_name": "PAIR_N"},
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": 10.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "PAIR_P",
+                },
+                {
+                    "number": "2",
+                    "x": x,
+                    "y": 12.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "PAIR_N",
+                },
             ],
         )
     return router
@@ -156,9 +198,7 @@ def test_three_pad_no_swap_pair_up():
     yields 2 edges connecting the 3 representative pad pairs.
     """
     router = _three_pad_no_swap_router()
-    pads = router._diffpair._get_pair_pads(
-        router._diffpair.detect_differential_pairs()[0]
-    )
+    pads = router._diffpair._get_pair_pads(router._diffpair.detect_differential_pairs()[0])
     assert pads is not None
     p_pads, n_pads = pads
 
@@ -223,10 +263,24 @@ def _polarity_swap_router() -> Autorouter:
     router.add_component(
         "U1",
         [
-            {"number": "29", "x": 4.0, "y": 4.0, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "28", "x": 6.0, "y": 4.0, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "29",
+                "x": 4.0,
+                "y": 4.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "28",
+                "x": 6.0,
+                "y": 4.0,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
 
@@ -234,14 +288,42 @@ def _polarity_swap_router() -> Autorouter:
     router.add_component(
         "J1",
         [
-            {"number": "A6", "x": 10.0, "y": 3.75, "width": 0.25, "height": 0.35,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 12.0, "y": 3.75, "width": 0.25, "height": 0.35,
-             "net": 2, "net_name": "USB_D-"},
-            {"number": "B6", "x": 12.0, "y": 5.25, "width": 0.25, "height": 0.35,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "B7", "x": 10.0, "y": 5.25, "width": 0.25, "height": 0.35,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "A6",
+                "x": 10.0,
+                "y": 3.75,
+                "width": 0.25,
+                "height": 0.35,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "A7",
+                "x": 12.0,
+                "y": 3.75,
+                "width": 0.25,
+                "height": 0.35,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
+            {
+                "number": "B6",
+                "x": 12.0,
+                "y": 5.25,
+                "width": 0.25,
+                "height": 0.35,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "B7",
+                "x": 10.0,
+                "y": 5.25,
+                "width": 0.25,
+                "height": 0.35,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     return router
@@ -250,9 +332,7 @@ def _polarity_swap_router() -> Autorouter:
 def test_polarity_swap_detected_in_pair_up():
     """The pair-up flags an MST edge that crosses inverted-orientation clusters."""
     router = _polarity_swap_router()
-    pads = router._diffpair._get_pair_pads(
-        router._diffpair.detect_differential_pairs()[0]
-    )
+    pads = router._diffpair._get_pair_pads(router._diffpair.detect_differential_pairs()[0])
     assert pads is not None
     p_pads, n_pads = pads
 
@@ -310,19 +390,47 @@ def test_off_grid_pad_reaches_actual_pad_center():
     router.add_component(
         "U1",
         [
-            {"number": "1", "x": 10.05, "y": 4.6, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "PAIR_P"},
-            {"number": "2", "x": 10.0, "y": 5.4, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "PAIR_N"},
+            {
+                "number": "1",
+                "x": 10.05,
+                "y": 4.6,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "PAIR_P",
+            },
+            {
+                "number": "2",
+                "x": 10.0,
+                "y": 5.4,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "PAIR_N",
+            },
         ],
     )
     router.add_component(
         "J1",
         [
-            {"number": "1", "x": 25.05, "y": 4.6, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "PAIR_P"},
-            {"number": "2", "x": 25.0, "y": 5.4, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "PAIR_N"},
+            {
+                "number": "1",
+                "x": 25.05,
+                "y": 4.6,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "PAIR_P",
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": 5.4,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "PAIR_N",
+            },
         ],
     )
 
@@ -359,8 +467,7 @@ def test_off_grid_pad_reaches_actual_pad_center():
 
 
 def _make_pad(ref: str, pin: str, x: float, y: float, net: int, name: str) -> Pad:
-    return Pad(x=x, y=y, width=0.4, height=0.4, net=net, net_name=name,
-               ref=ref, pin=pin)
+    return Pad(x=x, y=y, width=0.4, height=0.4, net=net, net_name=name, ref=ref, pin=pin)
 
 
 def test_pair_up_minimizes_total_pn_length():
@@ -404,10 +511,8 @@ def test_pair_up_minimizes_total_pn_length():
 
     # Compute total P+N length of the chosen MST.
     def edge_weight(spec: CoupledSegmentSpec) -> float:
-        p_d = math.hypot(spec.p_start.x - spec.p_end.x,
-                         spec.p_start.y - spec.p_end.y)
-        n_d = math.hypot(spec.n_start.x - spec.n_end.x,
-                         spec.n_start.y - spec.n_end.y)
+        p_d = math.hypot(spec.p_start.x - spec.p_end.x, spec.p_start.y - spec.p_end.y)
+        n_d = math.hypot(spec.n_start.x - spec.n_end.x, spec.n_start.y - spec.n_end.y)
         return p_d + n_d
 
     mst_total = sum(edge_weight(e) for e in coupled)
@@ -419,16 +524,14 @@ def test_pair_up_minimizes_total_pn_length():
     worst_total = 2 * (p_d_full + n_d_full)
 
     assert mst_total < worst_total, (
-        f"MST should beat the worst spanning tree: "
-        f"mst={mst_total:.2f}, worst={worst_total:.2f}"
+        f"MST should beat the worst spanning tree: mst={mst_total:.2f}, worst={worst_total:.2f}"
     )
 
     # MST should pick the two short edges P0-P1 and P1-P2 (or N variants),
     # totalling roughly 2 * (sqrt(101) + sqrt(101)) ~= 40.2.  Definitely
     # less than the worst-case total of 4 * 20 = 80.
     assert mst_total < 50.0, (
-        f"MST total {mst_total:.2f} unexpectedly large; "
-        "expected ~40 for this fixture"
+        f"MST total {mst_total:.2f} unexpectedly large; expected ~40 for this fixture"
     )
 
 
@@ -458,17 +561,13 @@ def test_polarity_swap_helper_detects_orientation_inversion():
     p_left_end = _make_pad("U2", "1", 10.0, 0.0, 1, "P")
     n_right_end = _make_pad("U2", "2", 11.0, 0.0, 2, "N")
 
-    assert not DiffPairRouter._polarity_swap_between(
-        p_left, n_right, p_left_end, n_right_end
-    )
+    assert not DiffPairRouter._polarity_swap_between(p_left, n_right, p_left_end, n_right_end)
 
     # End cluster inverts the orientation (P right, N left).
     p_right_end = _make_pad("U2", "1", 11.0, 0.0, 1, "P")
     n_left_end = _make_pad("U2", "2", 10.0, 0.0, 2, "N")
 
-    assert DiffPairRouter._polarity_swap_between(
-        p_left, n_right, p_right_end, n_left_end
-    )
+    assert DiffPairRouter._polarity_swap_between(p_left, n_right, p_right_end, n_left_end)
 
 
 # ---------------------------------------------------------------------------
@@ -496,10 +595,24 @@ def _pitch_mismatch_router() -> Autorouter:
     router.add_component(
         "U1",
         [
-            {"number": "29", "x": 9.6, "y": 15.5, "width": 0.5, "height": 0.5,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "28", "x": 10.4, "y": 15.5, "width": 0.5, "height": 0.5,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "29",
+                "x": 9.6,
+                "y": 15.5,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "28",
+                "x": 10.4,
+                "y": 15.5,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
 
@@ -507,10 +620,24 @@ def _pitch_mismatch_router() -> Autorouter:
     router.add_component(
         "J1",
         [
-            {"number": "A6", "x": 9.75, "y": 5.0, "width": 0.25, "height": 0.35,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 10.25, "y": 5.0, "width": 0.25, "height": 0.35,
-             "net": 2, "net_name": "USB_D-"},
+            {
+                "number": "A6",
+                "x": 9.75,
+                "y": 5.0,
+                "width": 0.25,
+                "height": 0.35,
+                "net": 1,
+                "net_name": "USB_D+",
+            },
+            {
+                "number": "A7",
+                "x": 10.25,
+                "y": 5.0,
+                "width": 0.25,
+                "height": 0.35,
+                "net": 2,
+                "net_name": "USB_D-",
+            },
         ],
     )
     return router

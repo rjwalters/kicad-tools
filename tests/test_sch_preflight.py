@@ -1,11 +1,9 @@
 """Tests for the sch preflight pre-layout validation command."""
 
-import contextlib
 import json
 from pathlib import Path
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixtures: schematic snippets used by the preflight checks
@@ -421,7 +419,7 @@ class TestCheckFootprintLibraryResolution:
         sch.write_text(
             '(kicad_sch (version 20231120) (generator "test")'
             ' (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")'
-            ' (lib_symbols)'
+            " (lib_symbols)"
             ' (symbol (lib_id "Device:R") (at 0 0 0)'
             '   (uuid "00000000-0000-0000-0000-000000000002")'
             '   (property "Reference" "R1" (at 0 0 0))'
@@ -437,10 +435,7 @@ class TestCheckFootprintLibraryResolution:
         msgs = [i.message for i in issues if i.category == "footprint_resolution"]
         assert any("file not found" in m for m in msgs), msgs
         # The mod-file failure is an error, not just a warning.
-        assert any(
-            i.severity == "error" and "file not found" in i.message
-            for i in issues
-        )
+        assert any(i.severity == "error" and "file not found" in i.message for i in issues)
 
     def test_on_disk_check_flags_unknown_nickname(self, tmp_path: Path):
         """Reference to a library nickname absent from both tables => error."""
@@ -460,7 +455,7 @@ class TestCheckFootprintLibraryResolution:
         sch.write_text(
             '(kicad_sch (version 20231120) (generator "test")'
             ' (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")'
-            ' (lib_symbols)'
+            " (lib_symbols)"
             ' (symbol (lib_id "Device:R") (at 0 0 0)'
             '   (uuid "00000000-0000-0000-0000-000000000002")'
             '   (property "Reference" "R1" (at 0 0 0))'
@@ -497,7 +492,7 @@ class TestCheckFootprintLibraryResolution:
         sch.write_text(
             '(kicad_sch (version 20231120) (generator "test")'
             ' (uuid "00000000-0000-0000-0000-000000000001") (paper "A4")'
-            ' (lib_symbols)'
+            " (lib_symbols)"
             ' (symbol (lib_id "Device:R") (at 0 0 0)'
             '   (uuid "00000000-0000-0000-0000-000000000002")'
             '   (property "Reference" "R1" (at 0 0 0))'
@@ -701,7 +696,9 @@ class TestPreflightCLI:
         # Without --strict, warnings do not cause exit(1)
         main([str(sch)])
         captured = capsys.readouterr()
-        assert "warning" in captured.out.lower() or "Warning" in captured.out or len(captured.out) > 0
+        assert (
+            "warning" in captured.out.lower() or "Warning" in captured.out or len(captured.out) > 0
+        )
 
     def test_quiet_json_omits_warnings(self, _write_sch, capsys):
         from kicad_tools.cli.sch_preflight import main

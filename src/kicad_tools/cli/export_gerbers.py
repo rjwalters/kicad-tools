@@ -55,7 +55,6 @@ FOUR_LAYER_STACK = [
 ]
 
 
-
 def export_gerbers(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> bool:
     """Export Gerber files using kicad-cli."""
     print(f"Exporting Gerbers from: {pcb_path}")

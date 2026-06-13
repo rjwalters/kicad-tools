@@ -10,7 +10,6 @@ cells in the overlap region while preserving a reduced clearance of
 
 import math
 
-import numpy as np
 import pytest
 
 from kicad_tools.router.grid import RoutingGrid
@@ -155,12 +154,26 @@ class TestSameComponentClearanceRelaxation:
         # 1.0mm pad width, clearance = 0.25mm each side -> zones overlap by
         # 0.5mm at the midpoint).
         pad1 = Pad(
-            x=4.25, y=5.0, width=1.0, height=1.3,
-            net=1, net_name="NET1", layer=Layer.F_CU, ref="Y1", pin="1",
+            x=4.25,
+            y=5.0,
+            width=1.0,
+            height=1.3,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            ref="Y1",
+            pin="1",
         )
         pad2 = Pad(
-            x=5.75, y=5.0, width=1.0, height=1.3,
-            net=2, net_name="NET2", layer=Layer.F_CU, ref="R1", pin="1",
+            x=5.75,
+            y=5.0,
+            width=1.0,
+            height=1.3,
+            net=2,
+            net_name="NET2",
+            layer=Layer.F_CU,
+            ref="R1",
+            pin="1",
         )
         grid.add_pad(pad1)
         grid.add_pad(pad2)
@@ -185,12 +198,26 @@ class TestSameComponentClearanceRelaxation:
 
         # Two pads on the same component AND same net
         pad1 = Pad(
-            x=4.0, y=5.0, width=1.0, height=1.3,
-            net=1, net_name="GND", layer=Layer.F_CU, ref="U1", pin="1",
+            x=4.0,
+            y=5.0,
+            width=1.0,
+            height=1.3,
+            net=1,
+            net_name="GND",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
         )
         pad2 = Pad(
-            x=6.0, y=5.0, width=1.0, height=1.3,
-            net=1, net_name="GND", layer=Layer.F_CU, ref="U1", pin="2",
+            x=6.0,
+            y=5.0,
+            width=1.0,
+            height=1.3,
+            net=1,
+            net_name="GND",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="2",
         )
         grid.add_pad(pad1)
 
@@ -221,12 +248,26 @@ class TestSameComponentClearanceRelaxation:
         grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
 
         pad1 = Pad(
-            x=4.0, y=5.0, width=1.0, height=1.3,
-            net=0, net_name="", layer=Layer.F_CU, ref="Y1", pin="1",
+            x=4.0,
+            y=5.0,
+            width=1.0,
+            height=1.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="Y1",
+            pin="1",
         )
         pad2 = Pad(
-            x=6.0, y=5.0, width=1.0, height=1.3,
-            net=2, net_name="OSC_OUT", layer=Layer.F_CU, ref="Y1", pin="2",
+            x=6.0,
+            y=5.0,
+            width=1.0,
+            height=1.3,
+            net=2,
+            net_name="OSC_OUT",
+            layer=Layer.F_CU,
+            ref="Y1",
+            pin="2",
         )
         grid.add_pad(pad1)
         grid.add_pad(pad2)
@@ -247,12 +288,26 @@ class TestSameComponentClearanceRelaxation:
 
         # SOT-23: 0.6mm pads at 0.95mm pitch
         pad1 = Pad(
-            x=5.0 - 0.95 / 2, y=5.0, width=0.6, height=1.0,
-            net=1, net_name="BASE", layer=Layer.F_CU, ref="Q1", pin="1",
+            x=5.0 - 0.95 / 2,
+            y=5.0,
+            width=0.6,
+            height=1.0,
+            net=1,
+            net_name="BASE",
+            layer=Layer.F_CU,
+            ref="Q1",
+            pin="1",
         )
         pad2 = Pad(
-            x=5.0 + 0.95 / 2, y=5.0, width=0.6, height=1.0,
-            net=2, net_name="EMITTER", layer=Layer.F_CU, ref="Q1", pin="2",
+            x=5.0 + 0.95 / 2,
+            y=5.0,
+            width=0.6,
+            height=1.0,
+            net=2,
+            net_name="EMITTER",
+            layer=Layer.F_CU,
+            ref="Q1",
+            pin="2",
         )
         grid.add_pad(pad1)
         grid.add_pad(pad2)
@@ -265,9 +320,7 @@ class TestSameComponentClearanceRelaxation:
             if not grid._blocked[layer_idx, gy, mid_gx]:
                 passable += 1
 
-        assert passable > 0, (
-            "SOT-23 corridor should have passable cells after relaxation"
-        )
+        assert passable > 0, "SOT-23 corridor should have passable cells after relaxation"
 
     def test_through_hole_pads_relaxation(self):
         """Through-hole pads on the same component should also be relaxed.
@@ -291,14 +344,30 @@ class TestSameComponentClearanceRelaxation:
         # Use 1.8mm pitch with 1.5mm pads so clearance zones clearly overlap.
         # Gap = 1.8 - 1.5 = 0.3mm, clearance = 0.25mm each side -> overlap.
         pad1 = Pad(
-            x=4.1, y=5.0, width=1.5, height=1.5,
-            net=1, net_name="NET1", layer=Layer.F_CU, ref="J1", pin="1",
-            through_hole=True, drill=0.8,
+            x=4.1,
+            y=5.0,
+            width=1.5,
+            height=1.5,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
+            through_hole=True,
+            drill=0.8,
         )
         pad2 = Pad(
-            x=5.9, y=5.0, width=1.5, height=1.5,
-            net=2, net_name="NET2", layer=Layer.F_CU, ref="J1", pin="2",
-            through_hole=True, drill=0.8,
+            x=5.9,
+            y=5.0,
+            width=1.5,
+            height=1.5,
+            net=2,
+            net_name="NET2",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="2",
+            through_hole=True,
+            drill=0.8,
         )
         grid.add_pad(pad1)
         grid.add_pad(pad2)
@@ -311,9 +380,7 @@ class TestSameComponentClearanceRelaxation:
         # same-net escape semantics preserved by Issues #2915/#2940/#2961.
         mid_gx, mid_gy = grid.world_to_grid(5.0, 5.0)
         for layer_idx in range(grid.num_layers):
-            blocked_for_net1 = grid.compute_expanded_blocked(
-                radius=0, net=1, allow_sharing=False
-            )
+            blocked_for_net1 = grid.compute_expanded_blocked(radius=0, net=1, allow_sharing=False)
             passable = 0
             for gy in range(max(0, mid_gy - 20), min(grid.rows, mid_gy + 21)):
                 if not blocked_for_net1[layer_idx, gy, mid_gx]:
@@ -335,12 +402,26 @@ class TestSameComponentClearanceRelaxation:
         grid = RoutingGrid(width=20.0, height=10.0, rules=rules)
 
         pad1 = Pad(
-            x=3.0, y=5.0, width=1.0, height=1.0,
-            net=1, net_name="NET1", layer=Layer.F_CU, ref="Y1", pin="1",
+            x=3.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            ref="Y1",
+            pin="1",
         )
         pad2 = Pad(
-            x=17.0, y=5.0, width=1.0, height=1.0,
-            net=2, net_name="NET2", layer=Layer.F_CU, ref="Y1", pin="2",
+            x=17.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="NET2",
+            layer=Layer.F_CU,
+            ref="Y1",
+            pin="2",
         )
         grid.add_pad(pad1)
         grid.add_pad(pad2)

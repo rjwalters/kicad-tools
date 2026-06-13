@@ -32,9 +32,7 @@ def _attr_census(pcb_path: Path) -> tuple[int, int, int]:
     return total, smd, tht
 
 
-@pytest.mark.parametrize(
-    "filename", ["softstart.kicad_pcb", "softstart_routed.kicad_pcb"]
-)
+@pytest.mark.parametrize("filename", ["softstart.kicad_pcb", "softstart_routed.kicad_pcb"])
 def test_softstart_footprints_carry_mount_attrs(filename: str):
     total, smd, tht = _attr_census(_SOFTSTART_OUT / filename)
     assert total == 78

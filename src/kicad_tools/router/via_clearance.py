@@ -238,9 +238,7 @@ def point_clear_of_copper(
 
     if other_net_tracks:
         for seg in other_net_tracks:
-            dist = point_to_segment_distance(
-                x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
-            )
+            dist = point_to_segment_distance(x, y, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
             min_dist = via_radius + seg.width / 2 + clearance
             if dist < min_dist:
                 return False
@@ -336,8 +334,8 @@ class _ViaLike(Protocol):
 
 
 def segment_clears_foreign_via(
-    seg: "_SegmentLike",
-    via: "_ViaLike",
+    seg: _SegmentLike,
+    via: _ViaLike,
     trace_clearance: float,
     hard_intersection_only: bool = False,
 ) -> bool:
@@ -407,9 +405,7 @@ def segment_clears_foreign_via(
     if not (v_lo <= seg.layer.value <= v_hi):
         return True  # Via doesn't reach the segment's layer.
 
-    dist = point_to_segment_distance(
-        via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
-    )
+    dist = point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
     required = via.diameter / 2 + seg.width / 2
     if not hard_intersection_only:
         required += trace_clearance
@@ -419,8 +415,8 @@ def segment_clears_foreign_via(
 
 
 def via_clears_foreign_segment(
-    via: "_ViaLike",
-    seg: "_SegmentLike",
+    via: _ViaLike,
+    seg: _SegmentLike,
     trace_clearance: float,
     hard_intersection_only: bool = False,
 ) -> bool:
@@ -497,7 +493,9 @@ def via_clears_foreign_segment(
     # overlap".  Aliasing keeps the implementations bit-identical and
     # mathematically symmetric.
     return segment_clears_foreign_via(
-        seg, via, trace_clearance,
+        seg,
+        via,
+        trace_clearance,
         hard_intersection_only=hard_intersection_only,
     )
 

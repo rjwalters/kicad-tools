@@ -152,9 +152,7 @@ def main(argv: list[str] | None = None):
     )
     parser.add_argument("schematic", type=Path, help="Path to .kicad_sch file")
     parser.add_argument("--ref", help="Symbol reference (e.g., U4, R1)")
-    parser.add_argument(
-        "--value", help="Value to assign (e.g., AP2204K-3.3TRG1)"
-    )
+    parser.add_argument("--value", help="Value to assign (e.g., AP2204K-3.3TRG1)")
     parser.add_argument(
         "--map",
         dest="map_file",
@@ -164,9 +162,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
-    parser.add_argument(
-        "--no-backup", action="store_true", help="Skip creating backup files"
-    )
+    parser.add_argument("--no-backup", action="store_true", help="Skip creating backup files")
 
     args = parser.parse_args(argv)
 

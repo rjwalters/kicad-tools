@@ -75,8 +75,7 @@ def _check_duplicates(
         # Check if two renames target the same new reference
         if new_ref in new_refs_seen:
             errors.append(
-                f"Cannot rename {old_ref} -> {new_ref}: "
-                f"duplicate target reference in mapping"
+                f"Cannot rename {old_ref} -> {new_ref}: duplicate target reference in mapping"
             )
         new_refs_seen.add(new_ref)
 
@@ -225,9 +224,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument(
         "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
     )
-    parser.add_argument(
-        "--no-backup", action="store_true", help="Skip creating backup files"
-    )
+    parser.add_argument("--no-backup", action="store_true", help="Skip creating backup files")
 
     args = parser.parse_args(argv)
 

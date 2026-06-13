@@ -91,15 +91,15 @@ def test_symmetric_move_floor_rejects_below_floor():
     # P at (10, 10), N at (11, 10).  Spacing = 1 cell.
     state = CoupledState(GridPos(10, 10, 0), GridPos(11, 10, 0), (0, 0))
     # No goals -- approach phase off (approach_relaxed = False).
-    neighbors = pf._get_coupled_neighbors(
-        state, p_net=1, n_net=2, target_spacing_cells=1
-    )
+    neighbors = pf._get_coupled_neighbors(state, p_net=1, n_net=2, target_spacing_cells=1)
     # All symmetric neighbors would keep spacing at 1 cell.  Without the
     # floor (target=1, tol=1) they'd pass the tolerance check; with the
     # floor (>= 2) they must be rejected.  Vias don't change spacing
     # either, so the only allowed move is "no symmetric move accepted".
     symmetric_moves = [
-        (s, c, v) for (s, c, v) in neighbors if not v  # not via
+        (s, c, v)
+        for (s, c, v) in neighbors
+        if not v  # not via
     ]
     assert symmetric_moves == [], (
         f"Expected zero symmetric moves with min_spacing_cells=2 from a "
@@ -112,9 +112,7 @@ def test_symmetric_move_floor_accepts_at_floor():
     pf = _make_pathfinder(min_spacing_cells=2)
     # P at (10, 10), N at (12, 10).  Spacing = 2 cells exactly.
     state = CoupledState(GridPos(10, 10, 0), GridPos(12, 10, 0), (0, 0))
-    neighbors = pf._get_coupled_neighbors(
-        state, p_net=1, n_net=2, target_spacing_cells=2
-    )
+    neighbors = pf._get_coupled_neighbors(state, p_net=1, n_net=2, target_spacing_cells=2)
     # Symmetric moves at spacing=2 should be accepted (tolerance=1 around target=2).
     symmetric_moves = [(s, c, v) for (s, c, v) in neighbors if not v]
     assert len(symmetric_moves) > 0
@@ -153,16 +151,12 @@ def test_approach_phase_floor_still_enforced():
     for st, _cost, is_via in neighbors:
         if is_via:
             continue
-        sp = math.sqrt(
-            (st.p_pos.x - st.n_pos.x) ** 2 + (st.p_pos.y - st.n_pos.y) ** 2
+        sp = math.sqrt((st.p_pos.x - st.n_pos.x) ** 2 + (st.p_pos.y - st.n_pos.y) ** 2)
+        p_at_endpoint = (st.p_pos.x == p_goal.x and st.p_pos.y == p_goal.y) or (
+            st.p_pos.x == state.p_pos.x and st.p_pos.y == state.p_pos.y
         )
-        p_at_endpoint = (
-            (st.p_pos.x == p_goal.x and st.p_pos.y == p_goal.y)
-            or (st.p_pos.x == state.p_pos.x and st.p_pos.y == state.p_pos.y)
-        )
-        n_at_endpoint = (
-            (st.n_pos.x == n_goal.x and st.n_pos.y == n_goal.y)
-            or (st.n_pos.x == state.n_pos.x and st.n_pos.y == state.n_pos.y)
+        n_at_endpoint = (st.n_pos.x == n_goal.x and st.n_pos.y == n_goal.y) or (
+            st.n_pos.x == state.n_pos.x and st.n_pos.y == state.n_pos.y
         )
         if p_at_endpoint and n_at_endpoint:
             continue

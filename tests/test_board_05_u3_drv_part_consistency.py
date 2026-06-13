@@ -97,12 +97,10 @@ def test_bom_lists_drv8301_with_htssop56() -> None:
     # The Designator field may aggregate multiple refs (e.g. "U1,U2"), so
     # narrow to rows where U3 is one of the comma-separated tokens.
     u3_rows = [
-        row for row in u3_rows
-        if "U3" in [token.strip() for token in row["Designator"].split(",")]
+        row for row in u3_rows if "U3" in [token.strip() for token in row["Designator"].split(",")]
     ]
     assert len(u3_rows) == 1, (
-        f"Expected exactly one BOM row referencing U3, got {len(u3_rows)}: "
-        f"{u3_rows}"
+        f"Expected exactly one BOM row referencing U3, got {len(u3_rows)}: {u3_rows}"
     )
 
     row = u3_rows[0]
@@ -217,17 +215,13 @@ def test_design_py_emits_u3_value_drv8301(tmp_path: Path) -> None:
     # ``Value`` property with the part number.  We scan forward from the
     # first occurrence of ``"U3"`` as a Reference value to the next
     # Value property.
-    sch_u3_ref = re.search(
-        r'\(property\s+"Reference"\s+"U3"', sch_text
-    )
+    sch_u3_ref = re.search(r'\(property\s+"Reference"\s+"U3"', sch_text)
     assert sch_u3_ref is not None, (
         f"Could not locate U3 Reference property in schematic at {sch_path!s}"
     )
-    sch_after = sch_text[sch_u3_ref.end():]
+    sch_after = sch_text[sch_u3_ref.end() :]
     sch_value = re.search(r'\(property\s+"Value"\s+"([^"]+)"', sch_after)
-    assert sch_value is not None, (
-        f"Could not locate U3 Value property in schematic at {sch_path!s}"
-    )
+    assert sch_value is not None, f"Could not locate U3 Value property in schematic at {sch_path!s}"
     assert sch_value.group(1) == EXPECTED_PART_NUMBER, (
         f"Schematic U3 Value is {sch_value.group(1)!r}, expected "
         f"{EXPECTED_PART_NUMBER!r}.  The schematic Value field drives "
@@ -240,26 +234,18 @@ def test_design_py_emits_u3_value_drv8301(tmp_path: Path) -> None:
     # ``(fp_text value "DRV8301")``, NOT the schematic's ``(property
     # "Reference" "U3")`` form.
     pcb_text = pcb_path.read_text()
-    pcb_u3_ref = re.search(
-        r'\(fp_text\s+reference\s+"U3"', pcb_text
-    )
-    assert pcb_u3_ref is not None, (
-        f"Could not locate U3 fp_text reference in PCB at {pcb_path!s}"
-    )
+    pcb_u3_ref = re.search(r'\(fp_text\s+reference\s+"U3"', pcb_text)
+    assert pcb_u3_ref is not None, f"Could not locate U3 fp_text reference in PCB at {pcb_path!s}"
     # Walk back to the enclosing ``(footprint ...)`` block and forward
     # to its ``(fp_text value "...")`` to read U3's value text.
     upto = pcb_text[: pcb_u3_ref.start()]
     fp_match_list = list(re.finditer(r'\(footprint\s+"[^"]+"', upto))
-    assert fp_match_list, (
-        f"Could not locate enclosing footprint block for U3 in {pcb_path!s}"
-    )
+    assert fp_match_list, f"Could not locate enclosing footprint block for U3 in {pcb_path!s}"
     fp_start = fp_match_list[-1].start()
     # Search for the next fp_text value within this block, before the
     # next footprint block starts.
-    next_fp = re.search(r'\(footprint\s+"[^"]+"', pcb_text[pcb_u3_ref.end():])
-    block_end = (
-        pcb_u3_ref.end() + next_fp.start() if next_fp else len(pcb_text)
-    )
+    next_fp = re.search(r'\(footprint\s+"[^"]+"', pcb_text[pcb_u3_ref.end() :])
+    block_end = pcb_u3_ref.end() + next_fp.start() if next_fp else len(pcb_text)
     fp_block = pcb_text[fp_start:block_end]
     fp_value = re.search(r'\(fp_text\s+value\s+"([^"]+)"', fp_block)
     if fp_value is not None:
@@ -270,6 +256,6 @@ def test_design_py_emits_u3_value_drv8301(tmp_path: Path) -> None:
         assert fp_value.group(1) == EXPECTED_PART_NUMBER, (
             f"PCB U3 fp_text value is {fp_value.group(1)!r}, expected "
             f"{EXPECTED_PART_NUMBER!r}.  A mismatch indicates "
-            f"``generate_htssop56(\"U3\", ..., value=...)`` was edited "
+            f'``generate_htssop56("U3", ..., value=...)`` was edited '
             f"to a different string -- reconcile with the schematic."
         )

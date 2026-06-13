@@ -48,9 +48,7 @@ def drc_results_to_report(
 
         loc_list: list[Location] = []
         if v.location:
-            loc_list.append(
-                Location(x_mm=v.location[0], y_mm=v.location[1], layer=v.layer or "")
-            )
+            loc_list.append(Location(x_mm=v.location[0], y_mm=v.location[1], layer=v.layer or ""))
 
         violations.append(
             ReportViolation(

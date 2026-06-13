@@ -94,15 +94,13 @@ class TestSchematicSaveRoundtrip:
         # Regression guard: the page field must be quoted.
         contents = sch_path.read_text()
         assert '(page "1")' in contents, (
-            "Regression guard: sheet_instances must emit (page \"1\") with "
+            'Regression guard: sheet_instances must emit (page "1") with '
             "the page value quoted.  Bare-numeric (page 1) is rejected by "
             "kicad-cli with 'Failed to load schematic' (exit 3).  See "
             "src/kicad_tools/sexp/builders.py:sheet_instances."
         )
 
-        _assert_kicad_cli_loads(
-            sch_path, producer="Schematic.write (blank)", tmp_path=tmp_path
-        )
+        _assert_kicad_cli_loads(sch_path, producer="Schematic.write (blank)", tmp_path=tmp_path)
 
     def test_schematic_with_numeric_value_symbol_roundtrip(self, tmp_path: Path) -> None:
         """A schematic with a resistor whose value is "330" must load.
@@ -140,8 +138,8 @@ class TestSchematicSaveRoundtrip:
         # Regression guard: the resistor's "Value" property must be quoted.
         contents = sch_path.read_text()
         assert '(property "Value" "330"' in contents, (
-            "Regression guard: a SymbolInstance with value=\"330\" must emit "
-            "(property \"Value\" \"330\" ...) with the value quoted.  Bare-"
+            'Regression guard: a SymbolInstance with value="330" must emit '
+            '(property "Value" "330" ...) with the value quoted.  Bare-'
             "numeric form is rejected by kicad-cli with 'Failed to load "
             "schematic' (exit 3).  See "
             "src/kicad_tools/sexp/builders.py:symbol_property_node."

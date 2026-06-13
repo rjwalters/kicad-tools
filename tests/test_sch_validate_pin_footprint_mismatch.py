@@ -7,12 +7,10 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     check_symbol_footprint_pin_mismatch,
     validate_schematic,
 )
 from kicad_tools.pcb.footprints import _FP_PAD_COUNT_RE, get_pad_count
-
 
 # ---------------------------------------------------------------------------
 # Helpers: synthetic KiCad schematic generation
@@ -68,9 +66,7 @@ def _make_symbol_instance(
     dnp: bool = False,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     dnp_str = "yes" if dnp else "no"
     return f"""(symbol
         (lib_id "{lib_id}")
@@ -84,7 +80,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -322,7 +318,9 @@ class TestPinFootprintMismatch:
             ("8", "V+", "power_in"),
         ]
         # SOIC-8 -> 8 pads via heuristic
-        inst = _make_symbol_instance("U1", lib_id, "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", pins_for_inst)
+        inst = _make_symbol_instance(
+            "U1", lib_id, "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", pins_for_inst
+        )
         content = _make_schematic(inst, lib_symbols=lib_sym_sexp)
         sch_path = _write_sch(tmp_path, content)
 
@@ -352,9 +350,7 @@ class TestPinFootprintMismatch:
         ]
         lib_id = "Regulator_Linear:AP2204K"
         lib_sym = _make_lib_symbol(lib_id, pins_5)
-        inst = _make_symbol_instance(
-            "U1", lib_id, "Package_TO_SOT_SMD:SOT-23-3", pins_5, dnp=True
-        )
+        inst = _make_symbol_instance("U1", lib_id, "Package_TO_SOT_SMD:SOT-23-3", pins_5, dnp=True)
         content = _make_schematic(inst, lib_symbols=lib_sym)
         sch_path = _write_sch(tmp_path, content)
 

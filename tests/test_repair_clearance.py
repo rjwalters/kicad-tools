@@ -2807,14 +2807,19 @@ class TestFootprintNudge:
         report_file = tmp_path / "test-drc.rpt"
         report_file.write_text(self.DRC_REPORT_PAD_PAD)
 
-        result = main([
-            str(pcb_file),
-            "--drc-report", str(report_file),
-            "--nudge-footprints",
-            "--max-displacement", "0.2",
-            "--dry-run",
-            "--format", "json",
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--nudge-footprints",
+                "--max-displacement",
+                "0.2",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
 
         # Should not error -- exit code 0 means all violations repaired
         assert result == 0

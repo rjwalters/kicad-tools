@@ -20,7 +20,6 @@ from kicad_tools.erc.cross_sheet import (
     reattribute_wire_dangling_violations,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -271,9 +270,7 @@ class TestReattributeWireDangling:
                 "items": [],
             }
         ]
-        with patch(
-            "kicad_tools.schema.hierarchy.build_hierarchy"
-        ) as mock_build:
+        with patch("kicad_tools.schema.hierarchy.build_hierarchy") as mock_build:
             reattribute_wire_dangling_violations(violations, "test.kicad_sch")
             mock_build.assert_not_called()
 
@@ -381,9 +378,7 @@ class TestRunERCWireDanglingIntegration:
 
     def test_reattribute_called_in_pipeline(self):
         """Verify that reattribute_wire_dangling_violations is called."""
-        erc_json = _make_erc_json(
-            [_make_sheet("/", [_wire_dangling(100.0, 50.0)])]
-        )
+        erc_json = _make_erc_json([_make_sheet("/", [_wire_dangling(100.0, 50.0)])])
 
         tmp = _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
         tmp.write(erc_json)
@@ -965,9 +960,7 @@ class TestFilterPhantomWireViolations:
                 "items": [],
             }
         ]
-        with patch(
-            "kicad_tools.schema.hierarchy.build_hierarchy"
-        ) as mock_build:
+        with patch("kicad_tools.schema.hierarchy.build_hierarchy") as mock_build:
             filter_phantom_wire_violations(violations, "test.kicad_sch")
             mock_build.assert_not_called()
 
@@ -1108,9 +1101,7 @@ class TestFilterPhantomWireViolations:
         assert "pin_not_connected" in types
         # The phantom one should be gone
         positions = [
-            (v["pos"]["x"], v["pos"]["y"])
-            for v in result
-            if v.get("type") == "wire_dangling"
+            (v["pos"]["x"], v["pos"]["y"]) for v in result if v.get("type") == "wire_dangling"
         ]
         assert (100.0, 50.0) in positions
         assert (777.0, 666.0) not in positions
@@ -1126,9 +1117,7 @@ class TestRunERCPhantomFilterIntegration:
 
     def test_phantom_filter_called_in_pipeline(self):
         """Verify that filter_phantom_wire_violations is invoked during run_erc."""
-        erc_json = _make_erc_json(
-            [_make_sheet("/", [_wire_dangling(100.0, 50.0)])]
-        )
+        erc_json = _make_erc_json([_make_sheet("/", [_wire_dangling(100.0, 50.0)])])
 
         tmp = _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
         tmp.write(erc_json)

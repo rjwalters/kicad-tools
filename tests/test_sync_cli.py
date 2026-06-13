@@ -1,7 +1,6 @@
 """CLI integration tests for kct sync command."""
 
 import json
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -259,9 +258,7 @@ class TestSyncCLIRemoveOrphans:
         ]
         MockReconciler.return_value = mock
 
-        result = sync_main(
-            ["--apply", "--confirm", "--remove-orphans", "project.kicad_pro"]
-        )
+        result = sync_main(["--apply", "--confirm", "--remove-orphans", "project.kicad_pro"])
         assert result == 0
 
         # Verify remove_orphans was passed to apply()
@@ -302,9 +299,7 @@ class TestSyncCLIRemoveOrphans:
         ]
         MockReconciler.return_value = mock
 
-        result = sync_main(
-            ["--apply", "--dry-run", "--remove-orphans", "project.kicad_pro"]
-        )
+        result = sync_main(["--apply", "--dry-run", "--remove-orphans", "project.kicad_pro"])
         assert result == 0
         captured = capsys.readouterr()
         assert "(would remove)" in captured.out
@@ -323,9 +318,7 @@ class TestSyncCLIRemoveOrphans:
         ]
         MockReconciler.return_value = mock
 
-        result = sync_main(
-            ["--apply", "--confirm", "--remove-orphans", "project.kicad_pro"]
-        )
+        result = sync_main(["--apply", "--confirm", "--remove-orphans", "project.kicad_pro"])
         assert result == 0
         captured = capsys.readouterr()
         assert "(removed)" in captured.out
@@ -345,9 +338,7 @@ class TestSyncCLIMapping:
         MockReconciler.return_value = mock
 
         mapping_path = str(tmp_path / "mapping.json")
-        result = sync_main(
-            ["--analyze", "--output-mapping", mapping_path, "project.kicad_pro"]
-        )
+        result = sync_main(["--analyze", "--output-mapping", mapping_path, "project.kicad_pro"])
         assert result == 0
 
         # Verify the mapping call was made

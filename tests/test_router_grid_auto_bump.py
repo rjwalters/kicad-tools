@@ -116,10 +116,8 @@ def _hc49_crystal_pads(
 ) -> list[Pad]:
     """Generate two crystal pads at +/- pitch/2 from cx along x."""
     return [
-        _make_pad(cx - pitch / 2.0, cy, ref, "1",
-                  width=1.4, height=1.4, through_hole=True),
-        _make_pad(cx + pitch / 2.0, cy, ref, "2",
-                  width=1.4, height=1.4, through_hole=True),
+        _make_pad(cx - pitch / 2.0, cy, ref, "1", width=1.4, height=1.4, through_hole=True),
+        _make_pad(cx + pitch / 2.0, cy, ref, "2", width=1.4, height=1.4, through_hole=True),
     ]
 
 
@@ -149,7 +147,9 @@ class TestComputeZoneResolutionAndOffset:
         # 4 pads at x = 10, 11, 12, 13; y = 5 (all multiples of 0.05)
         pads = [_make_pad(10.0 + i, 5.0, "R1", str(i + 1)) for i in range(4)]
         res, x_off, y_off = _compute_zone_resolution_and_offset(
-            pads, coarse_resolution=0.1, min_fine_resolution=0.005,
+            pads,
+            coarse_resolution=0.1,
+            min_fine_resolution=0.005,
         )
         # The coarsest fine grid finer than 0.1mm that aligns is 0.05mm.
         assert res == 0.05
@@ -164,7 +164,9 @@ class TestComputeZoneResolutionAndOffset:
             _make_pad(138.250, 100.0, "J1", "3"),
         ]
         res, x_off, y_off = _compute_zone_resolution_and_offset(
-            pads, coarse_resolution=0.1, min_fine_resolution=0.005,
+            pads,
+            coarse_resolution=0.1,
+            min_fine_resolution=0.005,
         )
         # 137.250 % 0.05 = 0 (250.5 = exact 250 in float terms within
         # threshold). 0.05 should be chosen at offset (0, 0).
@@ -181,7 +183,9 @@ class TestComputeZoneResolutionAndOffset:
         pads[0].x = 152.560
         pads[1].x = 157.440
         res, x_off, y_off = _compute_zone_resolution_and_offset(
-            pads, coarse_resolution=0.1, min_fine_resolution=0.005,
+            pads,
+            coarse_resolution=0.1,
+            min_fine_resolution=0.005,
         )
         # All pads must land on the chosen grid+offset.
         off_count = _count_off_grid_with_offset(pads, res, x_off, y_off)
@@ -201,7 +205,9 @@ class TestComputeZoneResolutionAndOffset:
         # best-effort resolution rather than 0.005mm.  Verify the result
         # is at or above the floor.
         res, _, _ = _compute_zone_resolution_and_offset(
-            pads, coarse_resolution=0.1, min_fine_resolution=0.05,
+            pads,
+            coarse_resolution=0.1,
+            min_fine_resolution=0.05,
         )
         # If 0.05mm can't cover both pads, the solver still returns >= 0.05
         # (the lower-bound candidate filter).
@@ -210,7 +216,9 @@ class TestComputeZoneResolutionAndOffset:
     def test_empty_component_returns_floor(self):
         """An empty pad list returns the min_fine_resolution and zero offsets."""
         res, x, y = _compute_zone_resolution_and_offset(
-            [], coarse_resolution=0.1, min_fine_resolution=0.025,
+            [],
+            coarse_resolution=0.1,
+            min_fine_resolution=0.025,
         )
         assert (res, x, y) == (0.025, 0.0, 0.0)
 
@@ -241,12 +249,22 @@ class TestSyntheticOffGridBoard:
         pads.extend(_hc49_crystal_pads(cx=50.0, cy=30.0, pitch=4.88, ref="Y1"))
         # Plenty of on-grid resistors (anchor the global offset to 0).
         for i in range(8):
-            pads.extend(_on_grid_resistor_pads(
-                cx=5.0 + i * 5.0, cy=50.0, pitch=1.0, ref=f"R{i + 1}",
-            ))
-            pads.extend(_on_grid_resistor_pads(
-                cx=5.0 + i * 5.0, cy=55.0, pitch=1.0, ref=f"R{i + 10}",
-            ))
+            pads.extend(
+                _on_grid_resistor_pads(
+                    cx=5.0 + i * 5.0,
+                    cy=50.0,
+                    pitch=1.0,
+                    ref=f"R{i + 1}",
+                )
+            )
+            pads.extend(
+                _on_grid_resistor_pads(
+                    cx=5.0 + i * 5.0,
+                    cy=55.0,
+                    pitch=1.0,
+                    ref=f"R{i + 10}",
+                )
+            )
         return pads
 
     def test_uniform_grid_leaves_offgrid_pads(self, synthetic_pads):
@@ -264,7 +282,8 @@ class TestSyntheticOffGridBoard:
         assert result.resolution >= 0.05
 
     def test_multi_resolution_plan_covers_offgrid_components(
-        self, synthetic_pads,
+        self,
+        synthetic_pads,
     ):
         """The plan must include fine zones for U1 AND Y1 with valid (R, O)."""
         plan = compute_multi_resolution_plan(
@@ -278,12 +297,8 @@ class TestSyntheticOffGridBoard:
 
         zones_by_ref = {z.ref: z for z in plan.fine_zones}
         # Both off-grid components must have fine zones.
-        assert "U1" in zones_by_ref, (
-            f"U1 missing from fine zones: {sorted(zones_by_ref.keys())}"
-        )
-        assert "Y1" in zones_by_ref, (
-            f"Y1 missing from fine zones: {sorted(zones_by_ref.keys())}"
-        )
+        assert "U1" in zones_by_ref, f"U1 missing from fine zones: {sorted(zones_by_ref.keys())}"
+        assert "Y1" in zones_by_ref, f"Y1 missing from fine zones: {sorted(zones_by_ref.keys())}"
 
         # Each zone's (resolution, offset) must place ALL of that
         # component's pads on-grid.
@@ -291,7 +306,10 @@ class TestSyntheticOffGridBoard:
             zone = zones_by_ref[ref]
             comp_pads = [p for p in synthetic_pads if p.ref == ref]
             off = _count_off_grid_with_offset(
-                comp_pads, zone.resolution, zone.x_offset, zone.y_offset,
+                comp_pads,
+                zone.resolution,
+                zone.x_offset,
+                zone.y_offset,
             )
             assert off == 0, (
                 f"{ref} fine zone @ {zone.resolution}mm offset="
@@ -319,16 +337,29 @@ class TestOnGridBoardNoSpuriousBump:
         """50x50mm board with on-grid 0805 resistors -> plan is None."""
         pads: list[Pad] = []
         for i in range(8):
-            pads.extend(_on_grid_resistor_pads(
-                cx=10.0 + i * 5.0, cy=10.0, pitch=1.0, ref=f"R{i + 1}",
-            ))
-            pads.extend(_on_grid_resistor_pads(
-                cx=10.0 + i * 5.0, cy=20.0, pitch=1.0, ref=f"R{i + 10}",
-            ))
+            pads.extend(
+                _on_grid_resistor_pads(
+                    cx=10.0 + i * 5.0,
+                    cy=10.0,
+                    pitch=1.0,
+                    ref=f"R{i + 1}",
+                )
+            )
+            pads.extend(
+                _on_grid_resistor_pads(
+                    cx=10.0 + i * 5.0,
+                    cy=20.0,
+                    pitch=1.0,
+                    ref=f"R{i + 10}",
+                )
+            )
 
         # Sanity: the selector finds a perfect grid.
         u = auto_select_grid_resolution(
-            pads, clearance=0.15, board_width=50.0, board_height=50.0,
+            pads,
+            clearance=0.15,
+            board_width=50.0,
+            board_height=50.0,
         )
         assert u.off_grid_pads == 0
 
@@ -361,10 +392,7 @@ class TestEscalationTelemetry:
         assert plan is not None and plan.is_multi_resolution
 
         # Find the escalation log entry
-        matching = [
-            r for r in caplog.records
-            if "Off-grid escalation" in r.getMessage()
-        ]
+        matching = [r for r in caplog.records if "Off-grid escalation" in r.getMessage()]
         assert matching, (
             "Expected an 'Off-grid escalation' log entry but found none. "
             f"Records: {[r.getMessage() for r in caplog.records]}"
@@ -380,12 +408,22 @@ def synthetic_pads_factory():
         pads.extend(_tqfp32_pads(cx=20.025, cy=20.025, pitch=0.8, ref="U1"))
         pads.extend(_hc49_crystal_pads(cx=50.0, cy=30.0, pitch=4.88, ref="Y1"))
         for i in range(8):
-            pads.extend(_on_grid_resistor_pads(
-                cx=5.0 + i * 5.0, cy=50.0, pitch=1.0, ref=f"R{i + 1}",
-            ))
-            pads.extend(_on_grid_resistor_pads(
-                cx=5.0 + i * 5.0, cy=55.0, pitch=1.0, ref=f"R{i + 10}",
-            ))
+            pads.extend(
+                _on_grid_resistor_pads(
+                    cx=5.0 + i * 5.0,
+                    cy=50.0,
+                    pitch=1.0,
+                    ref=f"R{i + 1}",
+                )
+            )
+            pads.extend(
+                _on_grid_resistor_pads(
+                    cx=5.0 + i * 5.0,
+                    cy=55.0,
+                    pitch=1.0,
+                    ref=f"R{i + 10}",
+                )
+            )
         return pads
 
     return _factory
@@ -397,8 +435,12 @@ class TestFineZoneOffsetFields:
     def test_offsets_default_to_zero(self):
         """Old constructor signature (no offsets) still works."""
         zone = FineZone(
-            ref="U1", x_min=0.0, y_min=0.0,
-            x_max=10.0, y_max=10.0, resolution=0.05,
+            ref="U1",
+            x_min=0.0,
+            y_min=0.0,
+            x_max=10.0,
+            y_max=10.0,
+            resolution=0.05,
         )
         assert zone.x_offset == 0.0
         assert zone.y_offset == 0.0
@@ -406,9 +448,14 @@ class TestFineZoneOffsetFields:
     def test_offsets_accepted_explicitly(self):
         """New constructor with explicit offsets stores them."""
         zone = FineZone(
-            ref="U1", x_min=0.0, y_min=0.0,
-            x_max=10.0, y_max=10.0, resolution=0.05,
-            x_offset=0.025, y_offset=0.025,
+            ref="U1",
+            x_min=0.0,
+            y_min=0.0,
+            x_max=10.0,
+            y_max=10.0,
+            resolution=0.05,
+            x_offset=0.025,
+            y_offset=0.025,
         )
         assert zone.x_offset == 0.025
         assert zone.y_offset == 0.025
@@ -426,7 +473,9 @@ class TestSubGridUsesZoneOffset:
         from kicad_tools.router.subgrid import SubGridRouter
 
         rules = DesignRules(
-            grid_resolution=0.1, trace_width=0.15, trace_clearance=0.1,
+            grid_resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
         grid = RoutingGrid(width=20.0, height=20.0, rules=rules)
 
@@ -436,10 +485,14 @@ class TestSubGridUsesZoneOffset:
 
         # Fine zone covering the pad with explicit offset (0.025, 0.025)
         zone = FineZone(
-            ref="U1", x_min=9.0, y_min=9.0,
-            x_max=11.0, y_max=11.0,
+            ref="U1",
+            x_min=9.0,
+            y_min=9.0,
+            x_max=11.0,
+            y_max=11.0,
             resolution=0.05,
-            x_offset=0.025, y_offset=0.025,
+            x_offset=0.025,
+            y_offset=0.025,
         )
 
         router = SubGridRouter(grid, rules, fine_zones=[zone])

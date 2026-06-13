@@ -215,9 +215,7 @@ def compute_routing_statistics(
           has pads that are not connected
     """
     total_length = sum(
-        math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2)
-        for r in routes
-        for s in r.segments
+        math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) for r in routes for s in r.segments
     )
     congestion_stats = grid.get_congestion_map()
 
@@ -238,12 +236,9 @@ def compute_routing_statistics(
             else net_pads
         )
         connectivity = validate_net_connectivity(routes, target_pads)
-        nets_fully_connected = sum(
-            1 for info in connectivity.values() if info["connected"]
-        )
+        nets_fully_connected = sum(1 for info in connectivity.values() if info["connected"])
         has_disconnected_islands = any(
-            not info["connected"] for info in connectivity.values()
-            if info["total_pads"] >= 2
+            not info["connected"] for info in connectivity.values() if info["total_pads"] >= 2
         )
 
         # Issue #3311 / #3255: partial vs unrouted breakdown.
@@ -325,11 +320,7 @@ def compute_layer_usage_statistics(
     for route in routes:
         for seg in route.segments:
             # Get layer index from segment
-            layer_idx = (
-                grid.layer_to_index(seg.layer.value)
-                if layer_stack
-                else seg.layer.value
-            )
+            layer_idx = grid.layer_to_index(seg.layer.value) if layer_stack else seg.layer.value
 
             if layer_idx not in layer_stats:
                 layer_stats[layer_idx] = {

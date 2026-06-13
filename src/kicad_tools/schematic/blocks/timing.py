@@ -213,7 +213,9 @@ class CrystalOscillator(CircuitBlock):
         cap_x_spacing = 15  # mm between caps (crystal is centered)
 
         # Place crystal
-        self.crystal = sch.add_symbol(crystal_symbol, x, y, y_ref, frequency, footprint=crystal_footprint)
+        self.crystal = sch.add_symbol(
+            crystal_symbol, x, y, y_ref, frequency, footprint=crystal_footprint
+        )
 
         # Place load capacitors below crystal
         c1_x = x - cap_x_spacing / 2
@@ -223,8 +225,12 @@ class CrystalOscillator(CircuitBlock):
         c1_ref = f"C{cap_ref_start}"
         c2_ref = f"C{cap_ref_start + 1}"
 
-        self.cap1 = sch.add_symbol(cap_symbol, c1_x, cap_y, c1_ref, cap1_value, footprint=cap_footprint)
-        self.cap2 = sch.add_symbol(cap_symbol, c2_x, cap_y, c2_ref, cap2_value, footprint=cap_footprint)
+        self.cap1 = sch.add_symbol(
+            cap_symbol, c1_x, cap_y, c1_ref, cap1_value, footprint=cap_footprint
+        )
+        self.cap2 = sch.add_symbol(
+            cap_symbol, c2_x, cap_y, c2_ref, cap2_value, footprint=cap_footprint
+        )
 
         self.components = {
             "XTAL": self.crystal,

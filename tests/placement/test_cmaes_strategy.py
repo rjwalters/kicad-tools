@@ -17,9 +17,7 @@ from kicad_tools.placement.vector import ComponentDef, bounds
 def _make_bounds():
     """Build placement bounds for a small synthetic board + components."""
     board = BoardOutline(min_x=0.0, min_y=0.0, max_x=50.0, max_y=50.0)
-    components = [
-        ComponentDef(reference=f"U{i + 1}", width=2.0, height=2.0) for i in range(3)
-    ]
+    components = [ComponentDef(reference=f"U{i + 1}", width=2.0, height=2.0) for i in range(3)]
     return bounds(board, components)
 
 
@@ -96,8 +94,7 @@ class TestFeasibilityGatedConvergence:
             pop = strategy.suggest(6)
 
         assert strategy.converged, (
-            "Strategy should converge after feasible best plus plateau "
-            f"(best={strategy.best()[1]})"
+            f"Strategy should converge after feasible best plus plateau (best={strategy.best()[1]})"
         )
 
     def test_score_just_below_offset_is_treated_as_feasible(self):
@@ -176,6 +173,5 @@ class TestFeasibilityGatedConvergence:
             pop = strategy.suggest(6)
 
         assert strategy.converged, (
-            "Feasibility gate must not block convergence at small "
-            "weighted-sum scores."
+            "Feasibility gate must not block convergence at small weighted-sum scores."
         )

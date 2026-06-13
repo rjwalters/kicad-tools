@@ -6,8 +6,12 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .violation import DRCViolation, Location, Severity, ViolationType
+
+if TYPE_CHECKING:
+    from kicad_tools.validate.filters import ViolationFilter
 
 
 @dataclass
@@ -91,7 +95,7 @@ class DRCReport:
             matched by ``action="warning"`` or ``action="error"`` rules have
             their severity reclassified in-place.
         """
-        from kicad_tools.validate.filters import FilterEngine, ViolationFilter
+        from kicad_tools.validate.filters import FilterEngine
 
         engine = FilterEngine(filters)
         result = engine.apply(self.violations)

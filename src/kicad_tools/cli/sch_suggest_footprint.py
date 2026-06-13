@@ -327,9 +327,7 @@ def run_suggest_footprint(
     # Detect KiCad library.  Even if the global library is missing, we
     # can still serve candidates from the project's fp-lib-table.
     paths = detect_kicad_library_path(config_override)
-    project_table = (
-        find_project_fp_lib_table(schematic_path) if not no_project_lib else None
-    )
+    project_table = find_project_fp_lib_table(schematic_path) if not no_project_lib else None
     if not paths.found and project_table is None:
         print(
             "Error: No KiCad footprint library found. "
@@ -383,12 +381,8 @@ def run_suggest_footprint(
             print("  (no matching footprints found)")
         else:
             for c in candidates:
-                origin_tag = (
-                    " [project]" if c.get("origin") == "project" else ""
-                )
-                print(
-                    f"  {c['library']}:{c['footprint']} ({c['pads']} pads){origin_tag}"
-                )
+                origin_tag = " [project]" if c.get("origin") == "project" else ""
+                print(f"  {c['library']}:{c['footprint']} ({c['pads']} pads){origin_tag}")
 
     if not candidates:
         hint = ""

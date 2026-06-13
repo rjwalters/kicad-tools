@@ -7,16 +7,12 @@ template placeholder injection.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from kicad_tools.report.pcb_data import (
     extract_pcb_data,
     natsort_refs,
 )
-
 
 # ---------------------------------------------------------------------------
 # natsort_refs
@@ -60,7 +56,10 @@ def _make_mock_pcb(
         pcb.get_board_outline.return_value = outline
     else:
         pcb.get_board_outline.return_value = [
-            (0, 0), (50, 0), (50, 30), (0, 30),
+            (0, 0),
+            (50, 0),
+            (50, 30),
+            (0, 30),
         ]
 
     # Copper layers
@@ -343,7 +342,10 @@ class TestRenderInteractiveHtml:
 
         html = _build_html(
             "Board <script>alert(1)</script>",
-            pcb_data, drc_data, "test", "2026-01-01",
+            pcb_data,
+            drc_data,
+            "test",
+            "2026-01-01",
         )
         # Title should be escaped
         assert "&lt;script&gt;" in html

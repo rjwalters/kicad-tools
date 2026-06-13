@@ -227,9 +227,7 @@ from net_class_map_resolver import (  # noqa: E402
 )
 
 
-def measure_signal_reach(
-    pcb_path: Path, pour_nets: set[str]
-) -> tuple[int, int, list[str]]:
+def measure_signal_reach(pcb_path: Path, pour_nets: set[str]) -> tuple[int, int, list[str]]:
     """Measure routed-signal-net reach on a routed PCB.
 
     Issue #3413 phase 5: the gate previously asserted only the DRC error
@@ -260,9 +258,7 @@ def measure_signal_reach(
     return len(complete), len(signal), incomplete_names
 
 
-def measure_pour_connectivity(
-    recipe_mod, pcb_path: Path, pour_nets: set[str]
-) -> list[str]:
+def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -> list[str]:
     """Run the board recipe's copper-union pour audit on a routed PCB.
 
     Issue #3509: the board 06 recipe runs a shapely copper-union audit
@@ -314,8 +310,7 @@ def measure_pour_connectivity(
         if not info["connected"]:
             largest = len(info["pad_groups"][0]) if info["pad_groups"] else 0
             failures.append(
-                f"{net}: {len(info['pad_groups'])} disjoint pad groups "
-                f"(largest {largest}/{n_pads})"
+                f"{net}: {len(info['pad_groups'])} disjoint pad groups (largest {largest}/{n_pads})"
             )
         if info.get("zero_fill_zones"):
             failures.append(
@@ -648,9 +643,7 @@ def check_board(
     # completeness model the connectivity DRC rule uses.
     if required_reach is not None:
         try:
-            complete, signal_total, incomplete_names = measure_signal_reach(
-                routed_pcb, pour_nets
-            )
+            complete, signal_total, incomplete_names = measure_signal_reach(routed_pcb, pour_nets)
         except Exception as e:
             annotate_error(str(routed_pcb), f"Reach measurement failed: {e}")
             return 1
@@ -669,10 +662,7 @@ def check_board(
             )
             failed = True
         else:
-            print(
-                f"[diffpair-coverage] OK: reach {complete}/{signal_total} "
-                f">= {required_reach}."
-            )
+            print(f"[diffpair-coverage] OK: reach {complete}/{signal_total} >= {required_reach}.")
 
     # Issue #3509: pour-connectivity assertion.  The board recipe's
     # copper-union audit verdict was previously informational only --
@@ -681,9 +671,7 @@ def check_board(
     # audit re-run here against the routed artifact; failures gate.
     if require_pour_connectivity:
         try:
-            pour_failures = measure_pour_connectivity(
-                recipe_mod, routed_pcb, pour_nets
-            )
+            pour_failures = measure_pour_connectivity(recipe_mod, routed_pcb, pour_nets)
         except RuntimeError as e:
             annotate_error(
                 str(routed_pcb),

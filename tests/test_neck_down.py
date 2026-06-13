@@ -255,8 +255,9 @@ class TestNeckDownBaseWidthOverride:
         )
         # base_width=None should behave identically to omitting the kwarg
         for d in (0.0, 0.5, 1.0, 2.0):
-            assert rules.get_neck_down_width(d, pin_pitch=0.5) == \
-                rules.get_neck_down_width(d, pin_pitch=0.5, base_width=None)
+            assert rules.get_neck_down_width(d, pin_pitch=0.5) == rules.get_neck_down_width(
+                d, pin_pitch=0.5, base_width=None
+            )
 
     def test_base_width_below_min_returns_corridor(self):
         """Degenerate ``base_width`` < ``min_trace_width`` is left alone."""
@@ -319,8 +320,24 @@ class TestNeckDownRouting:
 
         # Add a simple two-pad connection with standard pitch
         pads = [
-            {"number": "1", "x": 5.0, "y": 5.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "NET1"},
-            {"number": "2", "x": 20.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "NET1"},
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 5.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 20.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
         ]
         router.add_component("R1", pads)
         routes = router.route_all()
@@ -343,21 +360,34 @@ class TestNeckDownRouting:
         # Pads close together trigger automatic fine-pitch detection
         pads = []
         for i in range(4):
-            pads.append({
-                "number": str(i + 1),
-                "x": 10.0 + i * 0.65,  # 0.65mm pitch
-                "y": 10.0,
-                "width": 0.3,
-                "height": 0.8,
-                "net": i + 1,
-                "net_name": f"NET{i + 1}",
-            })
+            pads.append(
+                {
+                    "number": str(i + 1),
+                    "x": 10.0 + i * 0.65,  # 0.65mm pitch
+                    "y": 10.0,
+                    "width": 0.3,
+                    "height": 0.8,
+                    "net": i + 1,
+                    "net_name": f"NET{i + 1}",
+                }
+            )
         router.add_component("U1", pads)
 
         # Add a destination pad far from the IC
-        router.add_component("R1", [
-            {"number": "1", "x": 25.0, "y": 25.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "NET1"},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 25.0,
+                    "y": 25.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "NET1",
+                },
+            ],
+        )
 
         routes = router.route_all()
 
@@ -384,15 +414,42 @@ class TestNeckDownRouting:
 
         # Add a standard-pitch component (2.54mm pitch)
         pads = [
-            {"number": "1", "x": 5.0, "y": 5.0, "width": 1.5, "height": 1.5, "net": 1, "net_name": "NET1"},
-            {"number": "2", "x": 7.54, "y": 5.0, "width": 1.5, "height": 1.5, "net": 2, "net_name": "NET2"},
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 5.0,
+                "width": 1.5,
+                "height": 1.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 7.54,
+                "y": 5.0,
+                "width": 1.5,
+                "height": 1.5,
+                "net": 2,
+                "net_name": "NET2",
+            },
         ]
         router.add_component("J1", pads)
 
         # Add destination far away
-        router.add_component("R1", [
-            {"number": "1", "x": 20.0, "y": 20.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "NET1"},
-        ])
+        router.add_component(
+            "R1",
+            [
+                {
+                    "number": "1",
+                    "x": 20.0,
+                    "y": 20.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "NET1",
+                },
+            ],
+        )
 
         routes = router.route_all()
 
@@ -414,22 +471,35 @@ class TestNeckDownRouting:
         # Add a fine-pitch IC
         pads = []
         for i in range(6):
-            pads.append({
-                "number": str(i + 1),
-                "x": 15.0 + i * 0.5,  # 0.5mm pitch (very fine)
-                "y": 15.0,
-                "width": 0.25,
-                "height": 0.6,
-                "net": i + 1,
-                "net_name": f"NET{i + 1}",
-            })
+            pads.append(
+                {
+                    "number": str(i + 1),
+                    "x": 15.0 + i * 0.5,  # 0.5mm pitch (very fine)
+                    "y": 15.0,
+                    "width": 0.25,
+                    "height": 0.6,
+                    "net": i + 1,
+                    "net_name": f"NET{i + 1}",
+                }
+            )
         router.add_component("U1", pads)
 
         # Add several destination pads at varying distances
         for i in range(3):
-            router.add_component(f"R{i + 1}", [
-                {"number": "1", "x": 5.0 + i * 5.0, "y": 30.0, "width": 0.5, "height": 0.5, "net": i + 1, "net_name": f"NET{i + 1}"},
-            ])
+            router.add_component(
+                f"R{i + 1}",
+                [
+                    {
+                        "number": "1",
+                        "x": 5.0 + i * 5.0,
+                        "y": 30.0,
+                        "width": 0.5,
+                        "height": 0.5,
+                        "net": i + 1,
+                        "net_name": f"NET{i + 1}",
+                    },
+                ],
+            )
 
         routes = router.route_all()
         assert len(routes) > 0

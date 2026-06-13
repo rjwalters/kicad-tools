@@ -139,8 +139,13 @@ class TestCanPlaceViaWorldCoord:
         # Via at (10.0, 10.0) with diameter 0.6 -> radius 0.3.
         # Required = 0.3 + 0.1 + 0.15 = 0.55; distance = 0.4 -> reject.
         foreign = Pad(
-            x=10.4, y=10.0, width=0.2, height=0.2,
-            net=99, net_name="OTHER", layer=Layer.F_CU,
+            x=10.4,
+            y=10.0,
+            width=0.2,
+            height=0.2,
+            net=99,
+            net_name="OTHER",
+            layer=Layer.F_CU,
         )
         own_net = 5
         assert not router._can_place_via(
@@ -161,8 +166,13 @@ class TestCanPlaceViaWorldCoord:
         router = EscapeRouter(grid, rules)
 
         same_net_pad = Pad(
-            x=10.0, y=10.0, width=1.5, height=0.3,
-            net=5, net_name="OSC_OUT", layer=Layer.F_CU,
+            x=10.0,
+            y=10.0,
+            width=1.5,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            layer=Layer.F_CU,
         )
         assert router._can_place_via(
             x=10.0,
@@ -185,8 +195,14 @@ class TestCanPlaceViaWorldCoord:
         # Horizontal foreign-net trace 0.4mm above the via.  Required
         # = 0.3 + 0.1 + 0.15 = 0.55mm.
         foreign_seg = Segment(
-            x1=9.0, y1=10.4, x2=11.0, y2=10.4,
-            width=0.2, layer=Layer.F_CU, net=99, net_name="OTHER",
+            x1=9.0,
+            y1=10.4,
+            x2=11.0,
+            y2=10.4,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=99,
+            net_name="OTHER",
         )
         assert not router._can_place_via(
             x=10.0,
@@ -211,16 +227,31 @@ class TestInPadEscapeClearance:
 
         # LQFP-48 west edge: pads at x=0, y stepping by 0.5mm.
         pad5 = Pad(
-            x=0.0, y=-0.5, width=1.5, height=0.3,
-            net=4, net_name="OSC_IN", layer=Layer.F_CU,
+            x=0.0,
+            y=-0.5,
+            width=1.5,
+            height=0.3,
+            net=4,
+            net_name="OSC_IN",
+            layer=Layer.F_CU,
         )
         pad6 = Pad(
-            x=0.0, y=0.0, width=1.5, height=0.3,
-            net=5, net_name="OSC_OUT", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.5,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            layer=Layer.F_CU,
         )
         pad7 = Pad(
-            x=0.0, y=0.5, width=1.5, height=0.3,
-            net=9, net_name="NRST", layer=Layer.F_CU,
+            x=0.0,
+            y=0.5,
+            width=1.5,
+            height=0.3,
+            net=9,
+            net_name="NRST",
+            layer=Layer.F_CU,
         )
 
         # Via dead-centre on pad6 (OSC_OUT).  via_diameter=0.6 ->
@@ -245,16 +276,31 @@ class TestInPadEscapeClearance:
         router = EscapeRouter(grid, rules)
 
         pad_a = Pad(
-            x=0.0, y=-1.0, width=1.5, height=0.3,
-            net=4, net_name="A", layer=Layer.F_CU,
+            x=0.0,
+            y=-1.0,
+            width=1.5,
+            height=0.3,
+            net=4,
+            net_name="A",
+            layer=Layer.F_CU,
         )
         pad_b = Pad(
-            x=0.0, y=0.0, width=1.5, height=0.3,
-            net=5, net_name="B", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.5,
+            height=0.3,
+            net=5,
+            net_name="B",
+            layer=Layer.F_CU,
         )
         pad_c = Pad(
-            x=0.0, y=1.0, width=1.5, height=0.3,
-            net=9, net_name="C", layer=Layer.F_CU,
+            x=0.0,
+            y=1.0,
+            width=1.5,
+            height=0.3,
+            net=9,
+            net_name="C",
+            layer=Layer.F_CU,
         )
 
         assert router._via_clears_other_pads(
@@ -275,8 +321,13 @@ class TestInPadEscapeClearance:
         router = EscapeRouter(grid, rules)
 
         same_net_pad = Pad(
-            x=0.0, y=0.3, width=1.5, height=0.3,
-            net=5, net_name="OSC_OUT", layer=Layer.F_CU,
+            x=0.0,
+            y=0.3,
+            width=1.5,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            layer=Layer.F_CU,
         )
         assert router._via_clears_other_pads(
             x=0.0,
@@ -296,8 +347,13 @@ class TestInPadEscapeClearance:
         router = EscapeRouter(grid, rules)
 
         foreign_pad = Pad(
-            x=0.0, y=0.0, width=1.5, height=0.3,
-            net=99, net_name="OTHER", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.5,
+            height=0.3,
+            net=99,
+            net_name="OTHER",
+            layer=Layer.F_CU,
         )
         assert not router._via_clears_other_pads(
             x=0.0,
@@ -398,8 +454,13 @@ class TestRectAwareForeignPadClearance:
         # ``_can_place_via`` entry point so the Pad -> 5-tuple
         # conversion in escape.py is exercised.
         foreign = Pad(
-            x=10.0, y=10.0, width=0.3, height=1.4,
-            net=99, net_name="FOREIGN", layer=Layer.F_CU,
+            x=10.0,
+            y=10.0,
+            width=0.3,
+            height=1.4,
+            net=99,
+            net_name="FOREIGN",
+            layer=Layer.F_CU,
         )
         # Via at (10.6, 10.5) -- 0.45mm rect-distance to pad short edge,
         # exactly at threshold (0.3 + 0.15 = 0.45).  Rect admits.  Disc
@@ -427,8 +488,13 @@ class TestRectAwareForeignPadClearance:
         # edge along Y.  Rect: outside_x=0, outside_y=-0.2 (inside).
         # Via center is inside the pad rectangle -> immediate rejection.
         foreign = Pad(
-            x=10.0, y=10.0, width=0.3, height=1.4,
-            net=99, net_name="FOREIGN", layer=Layer.F_CU,
+            x=10.0,
+            y=10.0,
+            width=0.3,
+            height=1.4,
+            net=99,
+            net_name="FOREIGN",
+            layer=Layer.F_CU,
         )
         assert not router._can_place_via(
             x=10.0,

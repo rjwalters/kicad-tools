@@ -170,8 +170,7 @@ class TestInitialPassGraceEndToEnd:
         )
         routed_nets = {r.net for r in routes}
         assert routed_nets == {1, 2}, (
-            f"Grace pass must rescue the starved tail; got routes for "
-            f"{sorted(routed_nets)}"
+            f"Grace pass must rescue the starved tail; got routes for {sorted(routed_nets)}"
         )
 
     def test_expired_timeout_respects_per_net_timeout_floor(self):

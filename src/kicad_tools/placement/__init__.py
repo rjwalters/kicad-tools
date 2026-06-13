@@ -30,6 +30,7 @@ from .cost import (
     compute_block_boundary_violation,
     compute_inter_block_spacing_violation,
 )
+
 with contextlib.suppress(ImportError):
     from .cmaes_strategy import CMAESStrategy
 from .collision import (

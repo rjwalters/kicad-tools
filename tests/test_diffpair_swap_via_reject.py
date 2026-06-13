@@ -45,7 +45,6 @@ from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-
 # ---------------------------------------------------------------------------
 # DQS-like fine-pitch polarity-swap fixture
 # ---------------------------------------------------------------------------
@@ -100,20 +99,48 @@ def _dqs_polarity_swap_router(grid_resolution: float = 0.127) -> Autorouter:
     router.add_component(
         "U1",
         [
-            {"number": "30", "x": 5.0, "y": 5.4, "width": 0.3, "height": 0.3,
-             "net": 1, "net_name": "DQS_P"},
-            {"number": "31", "x": 5.0, "y": 4.6, "width": 0.3, "height": 0.3,
-             "net": 2, "net_name": "DQS_N"},
+            {
+                "number": "30",
+                "x": 5.0,
+                "y": 5.4,
+                "width": 0.3,
+                "height": 0.3,
+                "net": 1,
+                "net_name": "DQS_P",
+            },
+            {
+                "number": "31",
+                "x": 5.0,
+                "y": 4.6,
+                "width": 0.3,
+                "height": 0.3,
+                "net": 2,
+                "net_name": "DQS_N",
+            },
         ],
     )
     # DDR side: P (net 1) BELOW N (net 2) -- polarity swap
     router.add_component(
         "U2",
         [
-            {"number": "6", "x": 25.0, "y": 4.6, "width": 0.3, "height": 0.3,
-             "net": 1, "net_name": "DQS_P"},
-            {"number": "7", "x": 25.0, "y": 5.4, "width": 0.3, "height": 0.3,
-             "net": 2, "net_name": "DQS_N"},
+            {
+                "number": "6",
+                "x": 25.0,
+                "y": 4.6,
+                "width": 0.3,
+                "height": 0.3,
+                "net": 1,
+                "net_name": "DQS_P",
+            },
+            {
+                "number": "7",
+                "x": 25.0,
+                "y": 5.4,
+                "width": 0.3,
+                "height": 0.3,
+                "net": 2,
+                "net_name": "DQS_N",
+            },
         ],
     )
     return router
@@ -134,8 +161,16 @@ def _min_intra_pair_clearance(p_route, n_route) -> float:
             if ps.layer != ns.layer:
                 continue
             c = segment_clearance(
-                ps.x1, ps.y1, ps.x2, ps.y2, ps.width,
-                ns.x1, ns.y1, ns.x2, ns.y2, ns.width,
+                ps.x1,
+                ps.y1,
+                ps.x2,
+                ps.y2,
+                ps.width,
+                ns.x1,
+                ns.y1,
+                ns.x2,
+                ns.y2,
+                ns.width,
             )
             if c < worst:
                 worst = c
@@ -181,9 +216,7 @@ def test_dqs_like_polarity_swap_does_not_produce_negative_clearance():
     # Split routes by net.
     p_routes = [r for r in routes if r.net == 1]
     n_routes = [r for r in routes if r.net == 2]
-    assert p_routes and n_routes, (
-        f"both nets must route; got p={len(p_routes)} n={len(n_routes)}"
-    )
+    assert p_routes and n_routes, f"both nets must route; got p={len(p_routes)} n={len(n_routes)}"
 
     # Compute worst-case intra-pair clearance across all (P, N) route
     # combinations on the same layer.
@@ -225,27 +258,44 @@ def test_severe_overlap_triggers_independent_fallback():
 
     # Hand-construct two overlapping routes.  P at y=0, N at y=0 (fully
     # coincident, clearance = -trace_width = -0.15).
-    p_route = Route(net=1, net_name="P", segments=[
-        Segment(
-            x1=0.0, y1=0.0, x2=5.0, y2=0.0,
-            width=0.15, layer=Layer.F_CU, net=1, net_name="P",
-        ),
-    ])
-    n_route = Route(net=2, net_name="N", segments=[
-        Segment(
-            x1=0.0, y1=0.0, x2=5.0, y2=0.0,
-            width=0.15, layer=Layer.F_CU, net=2, net_name="N",
-        ),
-    ])
-    v = find_intra_pair_clearance_violations(
-        p_route, n_route, threshold_mm=0.1, pair_name="P/N"
+    p_route = Route(
+        net=1,
+        net_name="P",
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=0.0,
+                x2=5.0,
+                y2=0.0,
+                width=0.15,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="P",
+            ),
+        ],
     )
+    n_route = Route(
+        net=2,
+        net_name="N",
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=0.0,
+                x2=5.0,
+                y2=0.0,
+                width=0.15,
+                layer=Layer.F_CU,
+                net=2,
+                net_name="N",
+            ),
+        ],
+    )
+    v = find_intra_pair_clearance_violations(p_route, n_route, threshold_mm=0.1, pair_name="P/N")
     assert v is not None
     # The severity classifier in route_differential_pair_coupled is
     # ``violation.actual_clearance_mm < 0.0``.
     assert v.actual_clearance_mm < 0.0, (
-        f"hand-built overlap must report negative clearance; "
-        f"got actual={v.actual_clearance_mm}"
+        f"hand-built overlap must report negative clearance; got actual={v.actual_clearance_mm}"
     )
 
 
@@ -269,26 +319,43 @@ def test_quantization_slack_does_not_trigger_fallback():
     # trace widths 0.15 mm each -> edge-to-edge clearance = 0.05 mm.
     # Threshold = 0.10 mm so this is a quantization-slack violation
     # (positive but below threshold).
-    p_route = Route(net=1, net_name="P", segments=[
-        Segment(
-            x1=0.0, y1=0.0, x2=5.0, y2=0.0,
-            width=0.15, layer=Layer.F_CU, net=1, net_name="P",
-        ),
-    ])
-    n_route = Route(net=2, net_name="N", segments=[
-        Segment(
-            x1=0.0, y1=0.20, x2=5.0, y2=0.20,
-            width=0.15, layer=Layer.F_CU, net=2, net_name="N",
-        ),
-    ])
-    v = find_intra_pair_clearance_violations(
-        p_route, n_route, threshold_mm=0.10, pair_name="P/N"
+    p_route = Route(
+        net=1,
+        net_name="P",
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=0.0,
+                x2=5.0,
+                y2=0.0,
+                width=0.15,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="P",
+            ),
+        ],
     )
+    n_route = Route(
+        net=2,
+        net_name="N",
+        segments=[
+            Segment(
+                x1=0.0,
+                y1=0.20,
+                x2=5.0,
+                y2=0.20,
+                width=0.15,
+                layer=Layer.F_CU,
+                net=2,
+                net_name="N",
+            ),
+        ],
+    )
+    v = find_intra_pair_clearance_violations(p_route, n_route, threshold_mm=0.10, pair_name="P/N")
     assert v is not None
     # Clearance is positive (5e-2 mm) -- below threshold but not overlap.
     assert 0.0 <= v.actual_clearance_mm < 0.10, (
-        f"expected quantization-slack violation (0 <= c < 0.10); "
-        f"got actual={v.actual_clearance_mm}"
+        f"expected quantization-slack violation (0 <= c < 0.10); got actual={v.actual_clearance_mm}"
     )
     # The severity classifier is ``actual_clearance_mm < 0.0`` -- this
     # must be False so the coupled route is committed (no fallback).

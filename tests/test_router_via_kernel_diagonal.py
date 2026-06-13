@@ -87,9 +87,7 @@ def _make_cpp_pf_with_blocker(
     rules.cost_turn = 1.5
     rules.cost_via = 10.0
     pf = router_cpp.Pathfinder(grid, rules, True)
-    grid.mark_blocked(
-        blocker_xy[0], blocker_xy[1], 0, blocker_net, False, False
-    )
+    grid.mark_blocked(blocker_xy[0], blocker_xy[1], 0, blocker_net, False, False)
     return grid, pf
 
 
@@ -109,15 +107,13 @@ class TestPythonViaKernelIsEuclidean:
         r_sq = r * r
 
         offsets = sorted(
-            (int(dx), int(dy))
-            for dx, dy in zip(pf._via_offset_dx, pf._via_offset_dy, strict=True)
+            (int(dx), int(dy)) for dx, dy in zip(pf._via_offset_dx, pf._via_offset_dy, strict=True)
         )
 
         # Every offset must satisfy the Euclidean filter.
         for dx, dy in offsets:
             assert dx * dx + dy * dy <= r_sq, (
-                f"Offset ({dx},{dy}) violates disc: dist_sq={dx*dx+dy*dy} "
-                f"> r_sq={r_sq}"
+                f"Offset ({dx},{dy}) violates disc: dist_sq={dx * dx + dy * dy} > r_sq={r_sq}"
             )
 
         # The kernel must be COMPLETE: every Chebyshev-square cell that
@@ -142,15 +138,14 @@ class TestPythonViaKernelIsEuclidean:
         r = pf._via_half_cells
 
         offsets_set = {
-            (int(dx), int(dy))
-            for dx, dy in zip(pf._via_offset_dx, pf._via_offset_dy, strict=True)
+            (int(dx), int(dy)) for dx, dy in zip(pf._via_offset_dx, pf._via_offset_dy, strict=True)
         }
         for sx in (-1, 1):
             for sy in (-1, 1):
                 corner = (sx * r, sy * r)
                 assert corner not in offsets_set, (
                     f"Diagonal corner {corner} present in via kernel: "
-                    f"dist_sq={r*r + r*r} > r_sq={r*r} -- the kernel is "
+                    f"dist_sq={r * r + r * r} > r_sq={r * r} -- the kernel is "
                     f"still Chebyshev (legacy bug)"
                 )
 
@@ -178,10 +173,9 @@ class TestPythonViaBlockedDiagonal:
         # The candidate at (50, 50) puts the blocker at the diagonal corner
         # of the kernel.  The Euclidean disc must EXCLUDE it -> accept.
         for layer in range(py_grid.num_layers):
-            assert (
-                pf._is_via_blocked(50, 50, layer, net=1, allow_sharing=False)
-                is False
-            ), f"Diagonal corner blocker triggered rejection on layer {layer}"
+            assert pf._is_via_blocked(50, 50, layer, net=1, allow_sharing=False) is False, (
+                f"Diagonal corner blocker triggered rejection on layer {layer}"
+            )
 
     def test_axial_blocker_at_radius_rejects(self) -> None:
         """A foreign blocked cell on-axis at distance exactly
@@ -265,10 +259,7 @@ class TestCppViaBlockedDiagonal:
         r = math.ceil((0.6 / 2 + 0.15) / 0.1)
         # Need r >= 5 so the offset (r, 1) has dist_sq = r^2 + 1 > r^2
         # while still being inside the Chebyshev square.
-        assert r == 5, (
-            f"Test assumes r=5 with the fixture's via_diameter/clearance "
-            f"(got {r})"
-        )
+        assert r == 5, f"Test assumes r=5 with the fixture's via_diameter/clearance (got {r})"
         _, pf = _make_cpp_pf_with_blocker((50 + r, 51))
         assert pf.is_via_blocked(50, 50, 1, False, 0) is False
 
@@ -334,9 +325,7 @@ class TestPythonCppViaKernelSymmetry:
                         f"ACCEPTED by the disc kernel"
                     )
                     diag_accepts += 1
-        assert diag_accepts == 4, (
-            f"Expected to test all 4 diagonal corners, tested {diag_accepts}"
-        )
+        assert diag_accepts == 4, f"Expected to test all 4 diagonal corners, tested {diag_accepts}"
 
     def test_kernel_decision_matches_euclidean_distance(self) -> None:
         """Cross-check: the C++ kernel's accept/reject decision must
@@ -389,12 +378,7 @@ class TestPythonViaRadiusOverrideIsEuclidean:
             py_grid._net[layer, by, bx] = 2
         # With radius=override_r, blocker at offset (+r,+r) is outside
         # the Euclidean disc (dist_sq = 2*r^2 > r^2) -> accept.
-        assert (
-            pf._is_via_blocked(
-                50, 50, 0, net=1, allow_sharing=False, radius=override_r
-            )
-            is False
-        )
+        assert pf._is_via_blocked(50, 50, 0, net=1, allow_sharing=False, radius=override_r) is False
 
     def test_override_axial_blocker_at_radius_rejects(self) -> None:
         py_grid, rules = _make_grid()
@@ -403,12 +387,7 @@ class TestPythonViaRadiusOverrideIsEuclidean:
         # On-axis at distance == override_r: inside disc (boundary).
         py_grid._blocked[0, 50, 50 + override_r] = True
         py_grid._net[0, 50, 50 + override_r] = 2
-        assert (
-            pf._is_via_blocked(
-                50, 50, 0, net=1, allow_sharing=False, radius=override_r
-            )
-            is True
-        )
+        assert pf._is_via_blocked(50, 50, 0, net=1, allow_sharing=False, radius=override_r) is True
 
 
 @requires_cpp
@@ -419,9 +398,7 @@ class TestCppViaRadiusOverrideIsEuclidean:
         override_r = 7  # arbitrary; > default via_half_cells_=5
         _, pf = _make_cpp_pf_with_blocker((50 + override_r, 50 + override_r))
         # is_via_blocked(x, y, net, allow_sharing, radius_override)
-        assert (
-            pf.is_via_blocked(50, 50, 1, False, override_r) is False
-        )
+        assert pf.is_via_blocked(50, 50, 1, False, override_r) is False
 
     def test_override_axial_blocker_at_radius_rejects(self) -> None:
         override_r = 7

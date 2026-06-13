@@ -15,7 +15,6 @@ from kicad_tools.router.algorithms.negotiated import (
     calculate_present_cost,
 )
 
-
 # =========================================================================
 # Exponential present cost escalation
 # =========================================================================
@@ -27,12 +26,19 @@ class TestExponentialPresentCost:
     def test_exponential_grows_faster_than_linear(self):
         """Exponential mode should produce higher costs at later iterations."""
         linear = calculate_present_cost(
-            iteration=5, total_iterations=10, overflow_ratio=0.05, base_cost=0.5,
+            iteration=5,
+            total_iterations=10,
+            overflow_ratio=0.05,
+            base_cost=0.5,
             exponential=False,
         )
         exp = calculate_present_cost(
-            iteration=5, total_iterations=10, overflow_ratio=0.05, base_cost=0.5,
-            exponential=True, pres_fac_mult=1.3,
+            iteration=5,
+            total_iterations=10,
+            overflow_ratio=0.05,
+            base_cost=0.5,
+            exponential=True,
+            pres_fac_mult=1.3,
         )
         # At iteration 5 with mult 1.3: 0.5 * 1.3^5 = 0.5 * 3.71 = 1.856
         assert exp > linear
@@ -40,24 +46,38 @@ class TestExponentialPresentCost:
     def test_exponential_at_iteration_zero(self):
         """At iteration 0, exponential should equal base cost (1.3^0 = 1)."""
         result = calculate_present_cost(
-            iteration=0, total_iterations=10, overflow_ratio=0.0, base_cost=0.5,
-            exponential=True, pres_fac_mult=1.3,
+            iteration=0,
+            total_iterations=10,
+            overflow_ratio=0.0,
+            base_cost=0.5,
+            exponential=True,
+            pres_fac_mult=1.3,
         )
         assert result == pytest.approx(0.5)
 
     def test_exponential_respects_cap(self):
         """Exponential cost should be capped at pres_fac_cap."""
         result = calculate_present_cost(
-            iteration=100, total_iterations=100, overflow_ratio=0.0, base_cost=0.5,
-            exponential=True, pres_fac_mult=1.3, pres_fac_cap=10.0,
+            iteration=100,
+            total_iterations=100,
+            overflow_ratio=0.0,
+            base_cost=0.5,
+            exponential=True,
+            pres_fac_mult=1.3,
+            pres_fac_cap=10.0,
         )
         assert result == pytest.approx(10.0)
 
     def test_exponential_formula(self):
         """Verify exact exponential formula: base * mult^iteration."""
         result = calculate_present_cost(
-            iteration=3, total_iterations=10, overflow_ratio=0.0, base_cost=1.0,
-            exponential=True, pres_fac_mult=2.0, pres_fac_cap=100.0,
+            iteration=3,
+            total_iterations=10,
+            overflow_ratio=0.0,
+            base_cost=1.0,
+            exponential=True,
+            pres_fac_mult=2.0,
+            pres_fac_cap=100.0,
         )
         # 1.0 * 2.0^3 = 8.0
         assert result == pytest.approx(8.0)
@@ -65,7 +85,10 @@ class TestExponentialPresentCost:
     def test_backward_compatible_linear_default(self):
         """Default (exponential=False) should produce same results as before."""
         result = calculate_present_cost(
-            iteration=3, total_iterations=10, overflow_ratio=0.1, base_cost=0.5,
+            iteration=3,
+            total_iterations=10,
+            overflow_ratio=0.1,
+            base_cost=0.5,
         )
         # progress_factor = 1 + 3/10 = 1.3
         # congestion_factor = 1 + min(0.2, 2.0) = 1.2
@@ -84,7 +107,9 @@ class TestCongestionAutoTune:
     def test_high_congestion_increases_params(self):
         """High congestion (>10%) should increase both parameters."""
         mult, hist = calculate_congestion_tuned_params(
-            overflow_ratio=0.15, base_pres_fac_mult=1.3, base_history_increment=0.5,
+            overflow_ratio=0.15,
+            base_pres_fac_mult=1.3,
+            base_history_increment=0.5,
         )
         # scale = 1 + min(0.15, 0.5) = 1.15
         # mult = 1 + (1.3 - 1) * 1.15 = 1 + 0.345 = 1.345
@@ -95,7 +120,9 @@ class TestCongestionAutoTune:
     def test_low_congestion_reduces_params(self):
         """Low congestion (<1%) should reduce both parameters."""
         mult, hist = calculate_congestion_tuned_params(
-            overflow_ratio=0.005, base_pres_fac_mult=1.3, base_history_increment=0.5,
+            overflow_ratio=0.005,
+            base_pres_fac_mult=1.3,
+            base_history_increment=0.5,
         )
         # scale = 0.7
         # mult = 1 + 0.3 * 0.7 = 1.21
@@ -106,7 +133,9 @@ class TestCongestionAutoTune:
     def test_moderate_congestion_unchanged(self):
         """Moderate congestion (1-10%) should use base parameters."""
         mult, hist = calculate_congestion_tuned_params(
-            overflow_ratio=0.05, base_pres_fac_mult=1.3, base_history_increment=0.5,
+            overflow_ratio=0.05,
+            base_pres_fac_mult=1.3,
+            base_history_increment=0.5,
         )
         assert mult == pytest.approx(1.3)
         assert hist == pytest.approx(0.5)
@@ -114,7 +143,9 @@ class TestCongestionAutoTune:
     def test_very_high_congestion_capped(self):
         """Very high congestion should cap the scale factor."""
         mult, hist = calculate_congestion_tuned_params(
-            overflow_ratio=0.8, base_pres_fac_mult=1.3, base_history_increment=0.5,
+            overflow_ratio=0.8,
+            base_pres_fac_mult=1.3,
+            base_history_increment=0.5,
         )
         # scale = 1 + min(0.8, 0.5) = 1.5
         assert mult == pytest.approx(1.0 + 0.3 * 1.5)
@@ -123,7 +154,9 @@ class TestCongestionAutoTune:
     def test_zero_congestion(self):
         """Zero congestion should use the low-congestion scale."""
         mult, hist = calculate_congestion_tuned_params(
-            overflow_ratio=0.0, base_pres_fac_mult=1.3, base_history_increment=0.5,
+            overflow_ratio=0.0,
+            base_pres_fac_mult=1.3,
+            base_history_increment=0.5,
         )
         # 0.0 < 0.01 -> scale = 0.7
         assert mult == pytest.approx(1.21)
@@ -150,6 +183,7 @@ class TestEMASmoothing:
         grid._backend_type.name = "CPU"
         # Use a property check that works
         from kicad_tools.router.grid import BackendType
+
         grid._backend_type = BackendType.CPU
         grid._usage_count = np.array([[[0, 1, 2]]], dtype=np.int16)
         grid._present_cost_ema = None
@@ -214,7 +248,6 @@ class TestHotsetOnlyMode:
 
     def test_hotset_only_parameter_accepted(self):
         """route_all_negotiated should accept hotset_only parameter."""
-        from unittest.mock import MagicMock
 
         from kicad_tools.router.core import Autorouter
 
@@ -223,30 +256,37 @@ class TestHotsetOnlyMode:
         # We can't easily call route_all_negotiated without full setup,
         # so just verify the method signature accepts the parameter
         import inspect
+
         sig = inspect.signature(router.route_all_negotiated)
         assert "hotset_only" in sig.parameters
         assert sig.parameters["hotset_only"].default is False
 
     def test_ema_smoothing_parameter_accepted(self):
         """route_all_negotiated should accept ema_smoothing parameter."""
-        from kicad_tools.router.core import Autorouter
         import inspect
+
+        from kicad_tools.router.core import Autorouter
+
         sig = inspect.signature(Autorouter.route_all_negotiated)
         assert "ema_smoothing" in sig.parameters
         assert sig.parameters["ema_smoothing"].default is False
 
     def test_exponential_cost_parameter_accepted(self):
         """route_all_negotiated should accept exponential_cost parameter."""
-        from kicad_tools.router.core import Autorouter
         import inspect
+
+        from kicad_tools.router.core import Autorouter
+
         sig = inspect.signature(Autorouter.route_all_negotiated)
         assert "exponential_cost" in sig.parameters
         assert sig.parameters["exponential_cost"].default is False
 
     def test_congestion_auto_tune_parameter_accepted(self):
         """route_all_negotiated should accept congestion_auto_tune parameter."""
-        from kicad_tools.router.core import Autorouter
         import inspect
+
+        from kicad_tools.router.core import Autorouter
+
         sig = inspect.signature(Autorouter.route_all_negotiated)
         assert "congestion_auto_tune" in sig.parameters
         assert sig.parameters["congestion_auto_tune"].default is False
@@ -272,6 +312,7 @@ class TestAStarEMAIntegration:
 
         # Set up a 1-layer, 1x3 grid
         from kicad_tools.router.grid import BackendType
+
         grid._backend_type = BackendType.CPU
         grid.cols = 3
         grid.rows = 1
@@ -293,9 +334,11 @@ class TestAStarEMAIntegration:
         cell2.usage_count = 1
         cell2.history_cost = 0.5
 
-        grid.grid = [[
-            [MagicMock(is_obstacle=False), cell1, cell2],
-        ]]
+        grid.grid = [
+            [
+                [MagicMock(is_obstacle=False), cell1, cell2],
+            ]
+        ]
 
         # With EMA, present cost should use EMA value, not factor * usage
         cost = grid.get_negotiated_cost(1, 0, 0, present_cost_factor=100.0)
@@ -307,7 +350,7 @@ class TestAStarEMAIntegration:
         """get_negotiated_cost should use factor * usage when no EMA."""
         from unittest.mock import MagicMock
 
-        from kicad_tools.router.grid import RoutingGrid, BackendType
+        from kicad_tools.router.grid import BackendType, RoutingGrid
 
         grid = RoutingGrid.__new__(RoutingGrid)
         grid._backend = np

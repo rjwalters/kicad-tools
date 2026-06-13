@@ -74,7 +74,6 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Segment
 from kicad_tools.router.rules import DesignRules
 
-
 # -----------------------------------------------------------------------------
 # Fixture helpers
 # -----------------------------------------------------------------------------
@@ -212,8 +211,14 @@ class TestRectSegmentCenterlineDistance:
     def test_segment_crossing_rect_edge_returns_zero(self) -> None:
         # Horizontal segment cutting straight across the rect's long axis.
         d = _rect_segment_centerline_distance(
-            126.8375, 119.25, 1.475, 0.3,
-            120.0, 119.25, 135.0, 119.25,
+            126.8375,
+            119.25,
+            1.475,
+            0.3,
+            120.0,
+            119.25,
+            135.0,
+            119.25,
         )
         assert d == pytest.approx(0.0, abs=1e-9)
 
@@ -221,8 +226,14 @@ class TestRectSegmentCenterlineDistance:
         # Short segment entirely INSIDE the rect.  Sign convention:
         # negative magnitude equal to the deepest signed-depth.
         d = _rect_segment_centerline_distance(
-            126.8375, 119.25, 1.475, 0.3,
-            126.8375, 119.25, 126.9, 119.30,
+            126.8375,
+            119.25,
+            1.475,
+            0.3,
+            126.8375,
+            119.25,
+            126.9,
+            119.30,
         )
         # Deepest signed-depth at the rect centre is -min(0.15, 0.7375) = -0.15.
         assert d < 0.0
@@ -231,8 +242,14 @@ class TestRectSegmentCenterlineDistance:
     def test_endpoint_straddles_boundary_returns_zero(self) -> None:
         # One endpoint inside, one outside -- the centerline crosses an edge.
         d = _rect_segment_centerline_distance(
-            126.8375, 119.25, 1.475, 0.3,
-            126.8375, 119.25, 130.0, 119.25,
+            126.8375,
+            119.25,
+            1.475,
+            0.3,
+            126.8375,
+            119.25,
+            130.0,
+            119.25,
         )
         assert d == pytest.approx(0.0, abs=1e-9)
 
@@ -253,28 +270,71 @@ class TestIsPlaneNetPad:
     )
     def test_numbered_voltage_rails_are_plane_nets(self, net_name: str) -> None:
         pad = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=2, net_name=net_name, ref="U1", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name=net_name,
+            ref="U1",
+            pin="1",
+            layer=Layer.F_CU,
         )
         assert _is_plane_net_pad(pad) is True
 
     @pytest.mark.parametrize(
         "net_name",
-        ["GND", "AGND", "DGND", "PGND", "SGND", "GROUND", "EARTH",
-         "VCC", "VDD", "VSS", "VEE", "VBAT", "VDDA", "VDDIO", "AVDD", "AVSS",
-         "DVDD", "DVSS", "VAA"],
+        [
+            "GND",
+            "AGND",
+            "DGND",
+            "PGND",
+            "SGND",
+            "GROUND",
+            "EARTH",
+            "VCC",
+            "VDD",
+            "VSS",
+            "VEE",
+            "VBAT",
+            "VDDA",
+            "VDDIO",
+            "AVDD",
+            "AVSS",
+            "DVDD",
+            "DVSS",
+            "VAA",
+        ],
     )
     def test_canonical_power_pin_names_are_plane_nets(self, net_name: str) -> None:
         pad = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=3, net_name=net_name, ref="U1", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=3,
+            net_name=net_name,
+            ref="U1",
+            pin="1",
+            layer=Layer.F_CU,
         )
         assert _is_plane_net_pad(pad) is True
 
     @pytest.mark.parametrize(
         "net_name",
-        ["VIN", "VOUT", "VBUS", "OSC_OUT", "NRST", "SWDIO", "USART2_TX",
-         "DATA", "CLK", "MOSI", "MISO"],
+        [
+            "VIN",
+            "VOUT",
+            "VBUS",
+            "OSC_OUT",
+            "NRST",
+            "SWDIO",
+            "USART2_TX",
+            "DATA",
+            "CLK",
+            "MOSI",
+            "MISO",
+        ],
     )
     def test_signal_nets_are_not_plane_nets(self, net_name: str) -> None:
         """Single-drop signal nets are NEVER plane nets even when their
@@ -282,8 +342,15 @@ class TestIsPlaneNetPad:
         that prevents board 01's voltage-divider routing from regressing
         (VIN/VOUT are 2-pad signal nets, not pours)."""
         pad = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=10, net_name=net_name, ref="R1", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=10,
+            net_name=net_name,
+            ref="R1",
+            pin="1",
+            layer=Layer.F_CU,
         )
         assert _is_plane_net_pad(pad) is False
 
@@ -303,8 +370,15 @@ class TestIsPlaneNetPad:
         classifier to require an explicit plane-net ``net_name``.
         """
         pad = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=0, net_name="GND", ref="U1", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=0,
+            net_name="GND",
+            ref="U1",
+            pin="1",
+            layer=Layer.F_CU,
         )
         assert _is_plane_net_pad(pad) is True
 
@@ -317,8 +391,15 @@ class TestIsPlaneNetPad:
         LQFP-48).
         """
         pad = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0,
-            net=0, net_name="", ref="U1", pin="33", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=0,
+            net_name="",
+            ref="U1",
+            pin="33",
+            layer=Layer.F_CU,
         )
         assert _is_plane_net_pad(pad) is False
 
@@ -357,8 +438,10 @@ class TestSameComponentPlaneNetCarveOut:
         # entirely above U2.2's top edge (y > 119.9 keeps clear of U2.2),
         # while still inside U2.1's clearance envelope.
         seg = Segment(
-            x1=127.5, y1=119.45,
-            x2=126.5, y2=119.45,
+            x1=127.5,
+            y1=119.45,
+            x2=126.5,
+            y2=119.45,
             width=0.2,
             layer=Layer.F_CU,
             net=5,
@@ -392,8 +475,10 @@ class TestSameComponentPlaneNetCarveOut:
         # filter in ``validate_segment_clearance``).
         grid = _make_grid_with_lqfp48_west_edge()
         seg = Segment(
-            x1=126.8375, y1=121.75,  # U2.6 centre
-            x2=126.0, y2=121.75,     # 0.8 mm west
+            x1=126.8375,
+            y1=121.75,  # U2.6 centre
+            x2=126.0,
+            y2=121.75,  # 0.8 mm west
             width=0.2,
             layer=Layer.F_CU,
             net=5,
@@ -436,8 +521,10 @@ class TestSameComponentPlaneNetCarveOut:
         # (positive clearance, but still inside the manufacturer's
         # 0.127mm clearance envelope where the carve-out is engaged).
         seg = Segment(
-            x1=127.5, y1=120.05,     # 0.15mm above U2.2 metal top edge
-            x2=127.0, y2=120.05,
+            x1=127.5,
+            y1=120.05,  # 0.15mm above U2.2 metal top edge
+            x2=127.0,
+            y2=120.05,
             width=0.2,
             layer=Layer.F_CU,
             net=12,
@@ -462,8 +549,10 @@ class TestSameComponentPlaneNetCarveOut:
         """
         grid = _make_grid_with_lqfp48_west_edge()
         seg = Segment(
-            x1=130.0, y1=119.25,
-            x2=130.0, y2=125.0,
+            x1=130.0,
+            y1=119.25,
+            x2=130.0,
+            y2=125.0,
             width=0.2,
             layer=Layer.F_CU,
             net=12,
@@ -497,14 +586,24 @@ class TestNoRegressionOnCircularPads:
         """
         rules = _make_jlcpcb_tier1_rules()
         grid = RoutingGrid(
-            width=10.0, height=10.0, rules=rules, origin_x=0.0, origin_y=0.0,
+            width=10.0,
+            height=10.0,
+            rules=rules,
+            origin_x=0.0,
+            origin_y=0.0,
         )
         # Square 1 x 1 mm pad at the centre, signal net.
         grid.add_pad(
             Pad(
-                x=5.0, y=5.0, width=1.0, height=1.0,
-                net=2, net_name="+3.3V",
-                ref="U1", pin="1", layer=Layer.F_CU,
+                x=5.0,
+                y=5.0,
+                width=1.0,
+                height=1.0,
+                net=2,
+                net_name="+3.3V",
+                ref="U1",
+                pin="1",
+                layer=Layer.F_CU,
             )
         )
 
@@ -512,11 +611,18 @@ class TestNoRegressionOnCircularPads:
         # 0.5, distance = 0.6, disc clearance = 0.6 - 0.5 = 0.1.  Half
         # trace = 0.1.  Final = 0.0 -- right at the trace edge.
         seg = Segment(
-            x1=5.6, y1=4.0, x2=5.6, y2=6.0,
-            width=0.2, layer=Layer.F_CU, net=10, net_name="DATA",
+            x1=5.6,
+            y1=4.0,
+            x2=5.6,
+            y2=6.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=10,
+            net_name="DATA",
         )
         is_valid, clearance, _location = grid.validate_segment_clearance(
-            seg, exclude_net=10,
+            seg,
+            exclude_net=10,
         )
         # Disc and rect agree for square pads.  Either way the
         # clearance must be 0.0 (touching pad metal).
@@ -561,17 +667,29 @@ class TestIssue2933SameComponentSignalMetalOverlap:
         # R1.1 at (107, 138), 1.0 x 1.3mm, LINE_A (signal net 1)
         grid.add_pad(
             Pad(
-                x=107.0, y=138.0, width=1.0, height=1.3,
-                net=1, net_name="LINE_A",
-                ref="R1", pin="1", layer=Layer.F_CU,
+                x=107.0,
+                y=138.0,
+                width=1.0,
+                height=1.3,
+                net=1,
+                net_name="LINE_A",
+                ref="R1",
+                pin="1",
+                layer=Layer.F_CU,
             )
         )
         # R1.2 at (109, 138), 1.0 x 1.3mm, NODE_A (signal net 5)
         grid.add_pad(
             Pad(
-                x=109.0, y=138.0, width=1.0, height=1.3,
-                net=5, net_name="NODE_A",
-                ref="R1", pin="2", layer=Layer.F_CU,
+                x=109.0,
+                y=138.0,
+                width=1.0,
+                height=1.3,
+                net=5,
+                net_name="NODE_A",
+                ref="R1",
+                pin="2",
+                layer=Layer.F_CU,
             )
         )
         return grid
@@ -592,8 +710,10 @@ class TestIssue2933SameComponentSignalMetalOverlap:
         # west through R1.2's metal area (109, 138.5).  Even a tiny
         # segment inside the pad copper is a defect.
         seg = Segment(
-            x1=109.1, y1=138.5,
-            x2=108.9, y2=138.5,
+            x1=109.1,
+            y1=138.5,
+            x2=108.9,
+            y2=138.5,
             width=0.2,
             layer=Layer.F_CU,
             net=1,
@@ -658,8 +778,10 @@ class TestIssue2933SameComponentSignalMetalOverlap:
         # half-width, clearance = 0.1.  Below required 0.127 -- the
         # carve-out should suppress this complaint.
         seg = Segment(
-            x1=108.0, y1=137.15,
-            x2=110.0, y2=137.15,
+            x1=108.0,
+            y1=137.15,
+            x2=110.0,
+            y2=137.15,
             width=0.2,
             layer=Layer.F_CU,
             net=2,
@@ -686,20 +808,38 @@ def test_validator_does_not_over_reject_non_fine_pitch_geometry() -> None:
     """
     rules = _make_jlcpcb_tier1_rules()
     grid = RoutingGrid(
-        width=10.0, height=10.0, rules=rules, origin_x=0.0, origin_y=0.0,
+        width=10.0,
+        height=10.0,
+        rules=rules,
+        origin_x=0.0,
+        origin_y=0.0,
     )
     # Two 0805 pads (1.0 x 1.25 mm) at standard 0805 pitch (1.85 mm
     # centre-to-centre).
     grid.add_pad(
         Pad(
-            x=4.075, y=5.0, width=1.0, height=1.25,
-            net=2, net_name="+3.3V", ref="C1", pin="1", layer=Layer.F_CU,
+            x=4.075,
+            y=5.0,
+            width=1.0,
+            height=1.25,
+            net=2,
+            net_name="+3.3V",
+            ref="C1",
+            pin="1",
+            layer=Layer.F_CU,
         )
     )
     grid.add_pad(
         Pad(
-            x=5.925, y=5.0, width=1.0, height=1.25,
-            net=3, net_name="GND", ref="C1", pin="2", layer=Layer.F_CU,
+            x=5.925,
+            y=5.0,
+            width=1.0,
+            height=1.25,
+            net=3,
+            net_name="GND",
+            ref="C1",
+            pin="2",
+            layer=Layer.F_CU,
         )
     )
 
@@ -707,11 +847,18 @@ def test_validator_does_not_over_reject_non_fine_pitch_geometry() -> None:
     # A foreign-net segment running at 0.5 mm above the cap (well clear)
     # must pass.
     seg = Segment(
-        x1=4.0, y1=6.0, x2=6.0, y2=6.0,
-        width=0.127, layer=Layer.F_CU, net=10, net_name="DATA",
+        x1=4.0,
+        y1=6.0,
+        x2=6.0,
+        y2=6.0,
+        width=0.127,
+        layer=Layer.F_CU,
+        net=10,
+        net_name="DATA",
     )
     is_valid, _clearance, _location = grid.validate_segment_clearance(
-        seg, exclude_net=10,
+        seg,
+        exclude_net=10,
     )
     # Cap top edge at y = 5.625; segment at y = 6.0; centerline distance
     # 0.375 - 0.0635 (half trace) = 0.311.  Required = 0.127.  PASS.

@@ -6,8 +6,6 @@ validate DRCViolation.to_dict() round-trips correctly through
 drc.report._parse_kct_check_json().
 """
 
-import json
-
 import pytest
 
 from kicad_tools.drc.violation import ViolationType
@@ -142,9 +140,7 @@ class TestValidateRuleIdMapping:
     def test_no_unknown_for_validate_rules(self, rule_id: str):
         """Every validate rule_id must resolve to a specific type, never UNKNOWN."""
         result = ViolationType.from_string(rule_id)
-        assert result != ViolationType.UNKNOWN, (
-            f"rule_id {rule_id!r} mapped to UNKNOWN"
-        )
+        assert result != ViolationType.UNKNOWN, f"rule_id {rule_id!r} mapped to UNKNOWN"
 
 
 class TestValidateViolationToDict:

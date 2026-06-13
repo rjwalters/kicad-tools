@@ -7,14 +7,12 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _ChannelFilterSignature,
     _find_matched_pairs,
     _is_bypass_cap,
     _parse_capacitance_farads,
     check_matched_channel_symmetry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for pair detection
@@ -65,9 +63,7 @@ class TestFindMatchedPairs:
         assert len(pairs) == 1
 
     def test_multiple_pairs(self):
-        pairs = _find_matched_pairs(
-            {"AUDIO_L", "AUDIO_R", "USB_D_P", "USB_D_N"}
-        )
+        pairs = _find_matched_pairs({"AUDIO_L", "AUDIO_R", "USB_D_P", "USB_D_N"})
         assert len(pairs) == 2
 
 
@@ -95,9 +91,7 @@ class TestChannelFilterSignature:
         assert "series components" in diff
 
     def test_total_passives(self):
-        sig = _ChannelFilterSignature(
-            shunt_caps=1, shunt_resistors=1, series_components=["R"]
-        )
+        sig = _ChannelFilterSignature(shunt_caps=1, shunt_resistors=1, series_components=["R"])
         assert sig.total_passives == 3
 
 
@@ -141,14 +135,16 @@ def _make_lib_symbol(
 
 
 def _make_symbol_instance(
-    ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    ref: str,
+    lib_id: str,
+    pins: list[tuple[str, str, str]],
+    x: float,
+    y: float,
     value: str | None = None,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
-    value_str = value if value is not None else lib_id.split(':')[-1]
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
+    value_str = value if value is not None else lib_id.split(":")[-1]
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -302,9 +298,9 @@ class TestCheckMatchedChannelSymmetry:
 
         issues = check_matched_channel_symmetry(str(sch_path))
         warnings = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and i.severity == "warning"
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and i.severity == "warning"
         ]
         assert len(warnings) == 1
         assert "AUDIO_L" in warnings[0].message
@@ -360,9 +356,9 @@ class TestCheckMatchedChannelSymmetry:
 
         issues = check_matched_channel_symmetry(str(sch_path))
         symmetry_issues = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and i.severity in ("warning", "error")
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and i.severity in ("warning", "error")
         ]
         assert symmetry_issues == []
 
@@ -388,9 +384,9 @@ class TestCheckMatchedChannelSymmetry:
 
         issues = check_matched_channel_symmetry(str(sch_path))
         symmetry_issues = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and i.severity in ("warning", "error")
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and i.severity in ("warning", "error")
         ]
         assert symmetry_issues == []
 
@@ -429,9 +425,7 @@ class TestCheckMatchedChannelSymmetry:
 
         issues = check_matched_channel_symmetry(str(sch_path))
         errors = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and i.severity == "error"
+            i for i in issues if i.category == "matched_channel_symmetry" and i.severity == "error"
         ]
         assert len(errors) == 1
         assert "USB_D_P" in errors[0].message
@@ -472,9 +466,9 @@ class TestCheckMatchedChannelSymmetry:
 
         issues = check_matched_channel_symmetry(str(sch_path))
         warnings = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and i.severity == "warning"
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and i.severity == "warning"
         ]
         assert len(warnings) == 1
         assert "series" in warnings[0].message
@@ -533,9 +527,9 @@ class TestCheckMatchedChannelSymmetry:
 
         issues = check_matched_channel_symmetry(str(sch_path))
         warnings = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and i.severity == "warning"
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and i.severity == "warning"
         ]
         assert len(warnings) == 1
         assert "CH_A" in warnings[0].message
@@ -593,13 +587,11 @@ class TestCheckMatchedChannelSymmetry:
         # The shunt cap counts should match (1 vs 1).
         # The bypass cap difference should be reported separately.
         shunt_warnings = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and "shunt caps" in i.message
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and "shunt caps" in i.message
         ]
-        assert shunt_warnings == [], (
-            f"Should not warn about shunt cap mismatch: {shunt_warnings}"
-        )
+        assert shunt_warnings == [], f"Should not warn about shunt cap mismatch: {shunt_warnings}"
 
     def test_mismatched_filter_caps_still_warns(self, tmp_path: Path):
         """Different numbers of small-value filter caps should still warn."""
@@ -646,9 +638,9 @@ class TestCheckMatchedChannelSymmetry:
 
         issues = check_matched_channel_symmetry(str(sch_path))
         warnings = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and "shunt caps" in i.message
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and "shunt caps" in i.message
         ]
         assert len(warnings) == 1
         assert "1 vs 2" in warnings[0].message or "2 vs 1" in warnings[0].message
@@ -684,16 +676,14 @@ class TestCheckMatchedChannelSymmetry:
         issues = check_matched_channel_symmetry(str(sch_path))
         # Should classify as series, not shunt
         shunt_warnings = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and "shunt caps" in i.message
+            i
+            for i in issues
+            if i.category == "matched_channel_symmetry" and "shunt caps" in i.message
         ]
         assert shunt_warnings == []
         # Should report series asymmetry
         series_warnings = [
-            i for i in issues
-            if i.category == "matched_channel_symmetry"
-            and "series" in i.message
+            i for i in issues if i.category == "matched_channel_symmetry" and "series" in i.message
         ]
         assert len(series_warnings) == 1
 

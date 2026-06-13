@@ -4130,7 +4130,8 @@ class TestGateDriverBlockMocked:
 
         # Every bypass-cap call to add_symbol must carry footprint=fp.
         bypass_calls = [
-            call for call in mock_schematic.add_symbol.call_args_list
+            call
+            for call in mock_schematic.add_symbol.call_args_list
             if call.args and call.args[0] == "Device:C"
         ]
         assert len(bypass_calls) == 2
@@ -4149,7 +4150,8 @@ class TestGateDriverBlockMocked:
 
         assert len(driver.bypass_caps) == 2
         bypass_calls = [
-            call for call in mock_schematic.add_symbol.call_args_list
+            call
+            for call in mock_schematic.add_symbol.call_args_list
             if call.args and call.args[0] == "Device:C"
         ]
         assert len(bypass_calls) == 2
@@ -4160,16 +4162,15 @@ class TestGateDriverBlockMocked:
         """Default construction (no footprint kwargs) preserves back-compat."""
         # Should not raise, bypass caps land with footprint="" (matches the
         # pre-#3009 production behavior so existing callers see no change).
-        driver = GateDriverBlock(
-            mock_schematic, x=100, y=100, bootstrap_caps=None
-        )
+        driver = GateDriverBlock(mock_schematic, x=100, y=100, bootstrap_caps=None)
 
         assert len(driver.bypass_caps) == 2
         for cap in driver.bypass_caps:
             assert cap.footprint == ""
 
         bypass_calls = [
-            call for call in mock_schematic.add_symbol.call_args_list
+            call
+            for call in mock_schematic.add_symbol.call_args_list
             if call.args and call.args[0] == "Device:C"
         ]
         assert len(bypass_calls) == 2
@@ -4830,7 +4831,6 @@ class TestPortMatchingTypeWarning:
 
     def test_interface_mismatch_generates_warning(self):
         """Composing ports with mismatched interface types produces warnings."""
-        from kicad_tools.intent.types import InterfaceCategory
         from kicad_tools.schematic.blocks.interfaces import DataPort, PowerPort
 
         left = _make_block(

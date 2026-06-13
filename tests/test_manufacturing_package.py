@@ -1074,7 +1074,6 @@ class TestLatestReportOnly:
 
     def test_cli_keep_build_artifacts_flag(self):
         """CLI --keep-build-artifacts flag parses correctly."""
-        from kicad_tools.cli.export_cmd import main
         import argparse
 
         # We just need to verify the argument parses without running the export

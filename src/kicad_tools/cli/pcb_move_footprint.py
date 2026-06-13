@@ -73,14 +73,16 @@ def run_move_footprint(
         if not fp:
             _print_error(f"Footprint {ref} not found in PCB", output_format)
             return 1
-        move_details.append({
-            "reference": ref,
-            "footprint": fp.name,
-            "old_position": list(fp.position),
-            "old_rotation": fp.rotation,
-            "new_position": [x, y],
-            "new_rotation": rot if rot is not None else fp.rotation,
-        })
+        move_details.append(
+            {
+                "reference": ref,
+                "footprint": fp.name,
+                "old_position": list(fp.position),
+                "old_rotation": fp.rotation,
+                "new_position": [x, y],
+                "new_rotation": rot if rot is not None else fp.rotation,
+            }
+        )
 
     result = {
         "pcb": str(pcb_path),

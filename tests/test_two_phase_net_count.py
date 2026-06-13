@@ -10,13 +10,10 @@ population so they do not inflate the 'nets routed' denominator.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from kicad_tools.router.observability import validate_net_connectivity
 from kicad_tools.router.primitives import Layer, Pad, Route, Segment
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,9 +22,15 @@ from kicad_tools.router.primitives import Layer, Pad, Route, Segment
 
 def _make_pad(net: int, x: float, y: float, ref: str = "U1", pin: str = "1") -> Pad:
     return Pad(
-        x=x, y=y, width=0.5, height=0.5,
-        net=net, net_name=f"Net{net}",
-        layer=Layer.F_CU, ref=ref, pin=pin,
+        x=x,
+        y=y,
+        width=0.5,
+        height=0.5,
+        net=net,
+        net_name=f"Net{net}",
+        layer=Layer.F_CU,
+        ref=ref,
+        pin=pin,
     )
 
 
@@ -89,9 +92,7 @@ class TestConnectivityAwareNetCount:
 
         # This is the same formula used in the fixed two_phase.py
         nets_with_segments = len({r.net for r in all_routes})
-        connected_nets = sum(
-            1 for info in connectivity.values() if info["connected"]
-        )
+        connected_nets = sum(1 for info in connectivity.values() if info["connected"])
 
         assert nets_with_segments == 2, "Both nets have segments"
         assert connected_nets == 1, "Only one net is fully connected"
@@ -186,9 +187,7 @@ class TestSinglePadNetFiltering:
         connectivity_all = validate_net_connectivity(
             [route_2], {1: [pad_single], 2: [pad_2a, pad_2b]}
         )
-        assert connectivity_all[1]["connected"] is True, (
-            "Single-pad net is trivially connected"
-        )
+        assert connectivity_all[1]["connected"] is True, "Single-pad net is trivially connected"
 
         # But total_nets should only count multi-pad nets
         # With the filter: total_nets=1, connected_nets=1 -> 100%

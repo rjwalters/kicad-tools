@@ -137,27 +137,51 @@ def _route_with_auto_pcb_size(
     path (``jlcpcb-tier1`` manufacturer profile, 0.20mm clearance,
     0.30mm trace width).
     """
-    skip_nets = ",".join([
-        "AC_LINE", "AC_NEUTRAL", "FUSED_LINE", "GND",
-        "+3.3V", "VRECT",
-        "SCAP_POS+", "SCAP_POS_GND", "SCAP_NEG+", "SCAP_NEG_GND",
-        "ISENSE_POS",
-        # Issue #3343 P-R1 skip-list alignment (architect S1)
-        "VGATE", "SRC_POS", "SRC_NEG", "BUS_LINE",
-    ])
+    skip_nets = ",".join(
+        [
+            "AC_LINE",
+            "AC_NEUTRAL",
+            "FUSED_LINE",
+            "GND",
+            "+3.3V",
+            "VRECT",
+            "SCAP_POS+",
+            "SCAP_POS_GND",
+            "SCAP_NEG+",
+            "SCAP_NEG_GND",
+            "ISENSE_POS",
+            # Issue #3343 P-R1 skip-list alignment (architect S1)
+            "VGATE",
+            "SRC_POS",
+            "SRC_NEG",
+            "BUS_LINE",
+        ]
+    )
     cmd = [
-        sys.executable, "-m", "kicad_tools.cli", "route",
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
         str(pcb_path),
-        "--output", str(output_path),
-        "--backend", "cpp",
+        "--output",
+        str(output_path),
+        "--backend",
+        "cpp",
         "--auto-pcb-size",
-        "--manufacturer", "jlcpcb-tier1",
-        "--skip-nets", skip_nets,
-        "--seed", "42",
-        "--timeout", str(timeout_seconds),
-        "--per-net-timeout", "45",
-        "--clearance", "0.20",
-        "--trace-width", "0.30",
+        "--manufacturer",
+        "jlcpcb-tier1",
+        "--skip-nets",
+        skip_nets,
+        "--seed",
+        "42",
+        "--timeout",
+        str(timeout_seconds),
+        "--per-net-timeout",
+        "45",
+        "--clearance",
+        "0.20",
+        "--trace-width",
+        "0.30",
     ]
     return subprocess.run(
         cmd,

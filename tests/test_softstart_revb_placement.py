@@ -97,21 +97,19 @@ def _parse_footprints(pcb_path: Path):
         depth = 0
         j = fp_start
         while j < len(content):
-            if content[j] == '(':
+            if content[j] == "(":
                 depth += 1
-            elif content[j] == ')':
+            elif content[j] == ")":
                 depth -= 1
                 if depth == 0:
                     break
             j += 1
-        fp_block = content[fp_start:j + 1]
+        fp_block = content[fp_start : j + 1]
         lib = m.group(1)
-        at_m = re.search(r'\(at\s+([\d.\-]+)\s+([\d.\-]+)', fp_block)
+        at_m = re.search(r"\(at\s+([\d.\-]+)\s+([\d.\-]+)", fp_block)
         ref_m = re.search(r'\(fp_text reference\s+"([^"]+)"', fp_block)
         if at_m and ref_m:
-            footprints.append(
-                (ref_m.group(1), lib, float(at_m.group(1)), float(at_m.group(2)))
-            )
+            footprints.append((ref_m.group(1), lib, float(at_m.group(1)), float(at_m.group(2))))
         i = j + 1
     return footprints
 
@@ -130,10 +128,7 @@ def _overlap(a: tuple, b: tuple, tol: float = 0.2) -> bool:
     """True if bounding boxes overlap (with tolerance)."""
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
-    return (
-        ax1 < bx2 - tol and bx1 < ax2 - tol
-        and ay1 < by2 - tol and by1 < ay2 - tol
-    )
+    return ax1 < bx2 - tol and bx1 < ax2 - tol and ay1 < by2 - tol and by1 < ay2 - tol
 
 
 def test_erc_zero_errors(generated_output):
@@ -198,8 +193,7 @@ def test_all_within_board_envelope(generated_output):
         x_lo, y_lo, x_hi, y_hi = _bbox_for(lib, x, y)
         if x_lo < ox or x_hi > ox + bw or y_lo < oy or y_hi > oy + bh:
             out_of_bounds.append(
-                f"{ref} at ({x}, {y}) extends to ({x_lo:.1f}..{x_hi:.1f}, "
-                f"{y_lo:.1f}..{y_hi:.1f})"
+                f"{ref} at ({x}, {y}) extends to ({x_lo:.1f}..{x_hi:.1f}, {y_lo:.1f}..{y_hi:.1f})"
             )
     assert not out_of_bounds, f"Components outside envelope: {out_of_bounds}"
 

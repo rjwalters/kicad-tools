@@ -47,6 +47,7 @@ from kicad_tools.mcp.tools.patterns import (
     list_available_components,
     validate_pattern,
 )
+from kicad_tools.mcp.tools.placement import placement_place_unplaced
 from kicad_tools.mcp.tools.registry import (
     TOOL_REGISTRY,
     ToolSpec,
@@ -55,7 +56,6 @@ from kicad_tools.mcp.tools.registry import (
     list_tools,
     register_tool,
 )
-from kicad_tools.mcp.tools.placement import placement_place_unplaced
 from kicad_tools.mcp.tools.routing import (
     get_unrouted_nets,
     route_net,

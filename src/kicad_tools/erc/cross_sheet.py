@@ -135,10 +135,7 @@ def check_cross_sheet_duplicates(root_schematic: str) -> list[ERCViolation]:
 
         suggestion = _suggest_next_available(ref, used_numbers, ref_pattern)
 
-        description = (
-            f"Reference '{ref}' is used on multiple sheets: "
-            + "; ".join(sheet_details)
-        )
+        description = f"Reference '{ref}' is used on multiple sheets: " + "; ".join(sheet_details)
 
         violation = ERCViolation(
             type=ERCViolationType.DUPLICATE_REFERENCE,
@@ -352,9 +349,7 @@ def filter_cross_sheet_global_labels(
             filtered.append(v)
             continue
 
-        label_name = _extract_label_name(
-            v.get("description", ""), v.get("items")
-        )
+        label_name = _extract_label_name(v.get("description", ""), v.get("items"))
         if label_name is None:
             # Could not parse label name.  If the violation's sheet has no
             # labels at all, this is a phantom detection -- suppress it.
@@ -445,9 +440,7 @@ def build_power_driver_inventory(root_schematic: str) -> set[str]:
     return driven_nets
 
 
-def _extract_power_net_name(
-    description: str, items: list[dict] | None = None
-) -> str | None:
+def _extract_power_net_name(description: str, items: list[dict] | None = None) -> str | None:
     """Extract the power net / pin name from a ``power_pin_not_driven`` violation.
 
     KiCad formats these violations as:
@@ -528,9 +521,7 @@ def filter_cross_sheet_power_violations(
             filtered.append(v)
             continue
 
-        net_name = _extract_power_net_name(
-            v.get("description", ""), v.get("items")
-        )
+        net_name = _extract_power_net_name(v.get("description", ""), v.get("items"))
 
         if net_name is not None and net_name in driven_nets:
             # Power net has a driver on some sheet -- false positive.
@@ -642,8 +633,7 @@ def reattribute_wire_dangling_violations(
 
     # Quick check: skip expensive hierarchy traversal when unnecessary.
     has_target = any(
-        v.get("type", "") in target_types and v.get("_sheet_path", "") == "/"
-        for v in violations
+        v.get("type", "") in target_types and v.get("_sheet_path", "") == "/" for v in violations
     )
     if not has_target:
         # Still enrich descriptions with coordinates even when no
@@ -1008,8 +998,7 @@ def reattribute_symbol_violations(
 
     # Quick check: skip expensive hierarchy traversal when unnecessary.
     has_target = any(
-        v.get("type", "") in target_types and v.get("_sheet_path", "") == "/"
-        for v in violations
+        v.get("type", "") in target_types and v.get("_sheet_path", "") == "/" for v in violations
     )
     if not has_target:
         return violations

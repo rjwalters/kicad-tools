@@ -110,7 +110,9 @@ class SyncChange:
     """
 
     reference: str
-    change_type: str  # "rename", "update_value", "update_footprint", "add_footprint", "remove_orphan"
+    change_type: (
+        str  # "rename", "update_value", "update_footprint", "add_footprint", "remove_orphan"
+    )
     old_value: str
     new_value: str
     applied: bool = False
@@ -280,12 +282,8 @@ class Reconciler:
                 project_dir = project_path.parent
                 pcb_candidates = sorted(project_dir.glob("*.kicad_pcb"))
                 sch_candidates = sorted(project_dir.glob("*.kicad_sch"))
-                pcb_str = (
-                    ", ".join(p.name for p in pcb_candidates) if pcb_candidates else "(none)"
-                )
-                sch_str = (
-                    ", ".join(p.name for p in sch_candidates) if sch_candidates else "(none)"
-                )
+                pcb_str = ", ".join(p.name for p in pcb_candidates) if pcb_candidates else "(none)"
+                sch_str = ", ".join(p.name for p in sch_candidates) if sch_candidates else "(none)"
                 raise ValueError(
                     f"Project {project_path.name} loaded, but "
                     f"{' and '.join(missing)} file(s) could not be resolved. "
@@ -821,9 +819,7 @@ class Reconciler:
             for n_ref in neighbors:
                 if n_ref in fp_positions:
                     abs_pos = fp_positions[n_ref]
-                    neighbor_positions.append(
-                        (abs_pos[0] - origin_x, abs_pos[1] - origin_y)
-                    )
+                    neighbor_positions.append((abs_pos[0] - origin_x, abs_pos[1] - origin_y))
 
             if not neighbor_positions:
                 continue

@@ -663,9 +663,7 @@ class TestWeasprintAvailable:
             _weasyprint_available()
             _weasyprint_available()
 
-        libgobject_warnings = [
-            r for r in caplog.records if "libgobject" in r.getMessage()
-        ]
+        libgobject_warnings = [r for r in caplog.records if "libgobject" in r.getMessage()]
         assert len(libgobject_warnings) == 1, (
             f"Expected exactly one libgobject hint, got {len(libgobject_warnings)}: "
             f"{[r.getMessage() for r in libgobject_warnings]}"

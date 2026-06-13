@@ -240,9 +240,7 @@ class TestPadBlockedByAdjacentNetZero:
 
         # Route net 1 - should succeed; prior to fix this returned no path
         routes = router.route_net(1)
-        assert len(routes) > 0, (
-            "Routing net 1 failed - target pad blocked by adjacent net=0 pad"
-        )
+        assert len(routes) > 0, "Routing net 1 failed - target pad blocked by adjacent net=0 pad"
         assert routes[0].segments, "Route should have segments"
 
     def test_net0_pad_on_different_component_still_blocks(self):
@@ -361,7 +359,9 @@ class TestAutorouterNetPriority:
         router.add_component("R1", pads)
 
         # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
-        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = (
+            router._get_net_priority(1)
+        )
         assert priority == 10  # Default priority
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
@@ -375,7 +375,9 @@ class TestAutorouterNetPriority:
         router.add_component("R2", pads2)
 
         # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion_score)
-        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = (
+            router._get_net_priority(1)
+        )
         assert pad_count == 2
         # Distance should be sqrt(3^2 + 4^2) = 5.0
         assert abs(distance - 5.0) < 0.001
@@ -862,14 +864,10 @@ class TestAutorouterMonteCarlo:
         router.add_component("R2", pads_b)
 
         # Build routes – NET1 trace runs right through NET2 pads
-        seg1 = Segment(
-            x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1
-        )
+        seg1 = Segment(x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
         route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
 
-        seg2 = Segment(
-            x1=15.0, y1=9.9, x2=15.0, y2=10.1, width=0.2, layer=Layer.F_CU, net=2
-        )
+        seg2 = Segment(x1=15.0, y1=9.9, x2=15.0, y2=10.1, width=0.2, layer=Layer.F_CU, net=2)
         route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
 
         # Use MonteCarloRouter directly to test with explicit DRC counts.
@@ -893,9 +891,7 @@ class TestAutorouterMonteCarlo:
         ]
         router.add_component("R1", pads)
 
-        seg = Segment(
-            x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1
-        )
+        seg = Segment(x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
         route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
 
         mc = MonteCarloRouter(1)
@@ -918,9 +914,7 @@ class TestAutorouterMonteCarlo:
         ]
         router.add_component("R1", pads)
 
-        seg = Segment(
-            x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1
-        )
+        seg = Segment(x1=10.0, y1=10.0, x2=20.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1)
         route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
 
         mc = MonteCarloRouter(1)
@@ -1358,12 +1352,9 @@ class TestAutorouterIntraICRoutes:
             ("U1", "28"): mk("U1", "28", 140.40, 127.5),
         }
 
-        reduced = reduce_pads_after_intra_ic(
-            pads, connected_indices={0, 1}, pad_lookup=lookup
-        )
+        reduced = reduce_pads_after_intra_ic(pads, connected_indices={0, 1}, pad_lookup=lookup)
         assert ("J1", "B7") in reduced, (
-            f"Expected externally-facing B7 as the J1 group representative, "
-            f"got {reduced}"
+            f"Expected externally-facing B7 as the J1 group representative, got {reduced}"
         )
         assert ("J1", "A7") not in reduced
         assert ("U1", "28") in reduced
@@ -1563,12 +1554,8 @@ class TestIntraICClearanceValidation:
         from kicad_tools.router.rules import DesignRules
 
         lookup = {
-            ("J1", "A6"): self._mk_pad(
-                "J1", "A6", 10.0, 10.0, 6, "USB2_D+", width=0.3, height=0.3
-            ),
-            ("J1", "B6"): self._mk_pad(
-                "J1", "B6", 10.0, 12.0, 6, "USB2_D+", width=0.3, height=0.3
-            ),
+            ("J1", "A6"): self._mk_pad("J1", "A6", 10.0, 10.0, 6, "USB2_D+", width=0.3, height=0.3),
+            ("J1", "B6"): self._mk_pad("J1", "B6", 10.0, 12.0, 6, "USB2_D+", width=0.3, height=0.3),
         }
         rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
 
@@ -1605,12 +1592,8 @@ class TestIntraICClearanceValidation:
         from kicad_tools.router.rules import DesignRules
 
         lookup = {
-            ("J1", "A6"): self._mk_pad(
-                "J1", "A6", 10.0, 10.0, 6, "USB2_D+", width=0.3, height=0.3
-            ),
-            ("J1", "B6"): self._mk_pad(
-                "J1", "B6", 10.0, 12.0, 6, "USB2_D+", width=0.3, height=0.3
-            ),
+            ("J1", "A6"): self._mk_pad("J1", "A6", 10.0, 10.0, 6, "USB2_D+", width=0.3, height=0.3),
+            ("J1", "B6"): self._mk_pad("J1", "B6", 10.0, 12.0, 6, "USB2_D+", width=0.3, height=0.3),
         }
         rules = DesignRules(trace_width=0.2, trace_clearance=self.CLEARANCE)
         far_blocker = Segment(
@@ -1718,9 +1701,7 @@ class TestAutorouterRouteAll:
             f"got: {[str(w.message) for w in relevant]}"
         )
 
-    def test_route_all_no_warning_when_per_net_timeout_supplied(
-        self, router_with_nets
-    ):
+    def test_route_all_no_warning_when_per_net_timeout_supplied(self, router_with_nets):
         """Issue #2794: passing ``per_net_timeout`` suppresses the warning
         even though it is currently advisory in the basic path."""
         import warnings
@@ -1762,9 +1743,7 @@ class TestAutorouterRouteAll:
     #   3. ``timeout=None`` (default) still works (legacy back-compat).
     # ------------------------------------------------------------------
 
-    def test_route_all_multi_resolution_accepts_timeout_kwarg(
-        self, router_with_nets
-    ):
+    def test_route_all_multi_resolution_accepts_timeout_kwarg(self, router_with_nets):
         """Issue #2800: ``route_all_multi_resolution`` must accept
         ``timeout`` and forward it through both branches.
 
@@ -1786,9 +1765,7 @@ class TestAutorouterRouteAll:
             f"(would indicate kwarg silently dropped)"
         )
 
-    def test_route_all_multi_resolution_default_no_timeout(
-        self, router_with_nets
-    ):
+    def test_route_all_multi_resolution_default_no_timeout(self, router_with_nets):
         """Issue #2800: legacy back-compat -- ``timeout=None`` (default)
         must continue to work."""
         routes = router_with_nets.route_all_multi_resolution(
@@ -1817,9 +1794,7 @@ class TestAutorouterRouteAll:
             f"(would indicate kwarg silently dropped)"
         )
 
-    def test_route_all_tuned_profile_accepts_timeout_kwarg(
-        self, router_with_nets
-    ):
+    def test_route_all_tuned_profile_accepts_timeout_kwarg(self, router_with_nets):
         """Issue #2800: same contract on the ``profile=`` branch
         (separate code path at L4129)."""
         routes = router_with_nets.route_all_tuned(
@@ -1834,9 +1809,7 @@ class TestAutorouterRouteAll:
         routes = router_with_nets.route_all_tuned(method="quick")
         assert isinstance(routes, list)
 
-    def test_route_all_block_aware_accepts_timeout_kwarg(
-        self, router_with_nets
-    ):
+    def test_route_all_block_aware_accepts_timeout_kwarg(self, router_with_nets):
         """Issue #2800: ``route_all_block_aware`` must accept ``timeout``
         and ``per_net_timeout`` and forward them through both the
         no-blocks fallback and Phase B inter-block routing.
@@ -1860,9 +1833,7 @@ class TestAutorouterRouteAll:
             f"(would indicate kwarg silently dropped)"
         )
 
-    def test_route_all_block_aware_negotiated_accepts_timeout_kwarg(
-        self, router_with_nets
-    ):
+    def test_route_all_block_aware_negotiated_accepts_timeout_kwarg(self, router_with_nets):
         """Issue #2800: same contract on the negotiated fallback branch
         (L6690 -- forwards to ``route_all_negotiated``)."""
         routes = router_with_nets.route_all_block_aware(
@@ -3814,16 +3785,19 @@ class TestPostRouteClearanceCorrection:
 
         # Create a route manually to simulate rerouting
         seg = Segment(
-            x1=5.0, y1=10.0, x2=15.0, y2=10.0,
-            width=0.5, net=1, layer=Layer.F_CU,
+            x1=5.0,
+            y1=10.0,
+            x2=15.0,
+            y2=10.0,
+            width=0.5,
+            net=1,
+            layer=Layer.F_CU,
         )
         route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
 
         # Patch validate_routes to return a violation so the correction runs,
         # then return no violations on the second call so it stops.
-        violation = type(
-            "V", (), {"net": 1, "obstacle_net": 2, "obstacle_type": "segment"}
-        )()
+        violation = type("V", (), {"net": 1, "obstacle_net": 2, "obstacle_type": "segment"})()
         call_count = [0]
 
         def mock_validate(router_obj):
@@ -3836,11 +3810,12 @@ class TestPostRouteClearanceCorrection:
         def mock_route_net(net, pf, per_net_timeout=None):
             return [route]
 
-        with patch("kicad_tools.router.io.validate_routes", mock_validate), \
-             patch.object(router, "_route_net_negotiated", mock_route_net), \
-             patch.object(router.grid, "mark_route") as mock_mark_route, \
-             patch.object(router.grid, "mark_route_usage") as mock_mark_usage:
-
+        with (
+            patch("kicad_tools.router.io.validate_routes", mock_validate),
+            patch.object(router, "_route_net_negotiated", mock_route_net),
+            patch.object(router.grid, "mark_route") as mock_mark_route,
+            patch.object(router.grid, "mark_route_usage") as mock_mark_usage,
+        ):
             router._post_route_clearance_correction(
                 net_routes={1: [route], 2: []},
                 pads_by_net={},
@@ -3958,9 +3933,7 @@ class TestPostRouteCorrectionAllStrategies:
         router.routes = [r1, r2]
 
         # Create a violation between nets 1 and 2
-        violation = type(
-            "V", (), {"net": 1, "obstacle_net": 2, "obstacle_type": "segment"}
-        )()
+        violation = type("V", (), {"net": 1, "obstacle_net": 2, "obstacle_type": "segment"})()
 
         validate_call_count = [0]
 
@@ -3972,7 +3945,8 @@ class TestPostRouteCorrectionAllStrategies:
             return []
 
         good_route = Route(
-            net=1, net_name="NET1",
+            net=1,
+            net_name="NET1",
             segments=[Segment(x1=5, y1=11, x2=15, y2=11, width=0.2, net=1, layer=Layer.F_CU)],
             vias=[],
         )
@@ -3980,12 +3954,13 @@ class TestPostRouteCorrectionAllStrategies:
         def mock_route_net(net, pf, per_net_timeout=None):
             return [good_route]
 
-        with patch("kicad_tools.router.io.validate_routes", mock_validate), \
-             patch.object(router, "_route_net_negotiated", mock_route_net), \
-             patch.object(router.grid, "mark_route"), \
-             patch.object(router.grid, "unmark_route"), \
-             patch.object(router.grid, "unmark_route_usage"):
-
+        with (
+            patch("kicad_tools.router.io.validate_routes", mock_validate),
+            patch.object(router, "_route_net_negotiated", mock_route_net),
+            patch.object(router.grid, "mark_route"),
+            patch.object(router.grid, "unmark_route"),
+            patch.object(router.grid, "unmark_route_usage"),
+        ):
             corrected = router._post_route_clearance_correction(
                 net_routes={1: [r1], 2: [r2]},
                 present_factor=0.5,
@@ -4061,19 +4036,26 @@ class TestIncrementalSteinerRouting:
         rules = DesignRules(grid_resolution=0.5)
         stack = LayerStack.two_layer()
         grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules, layer_stack=stack,
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=stack,
         )
         pathfinder = Router(grid, rules)
         neg_router = NegotiatedRouter(
-            grid=grid, router=pathfinder, rules=rules, net_class_map={},
+            grid=grid,
+            router=pathfinder,
+            rules=rules,
+            net_class_map={},
         )
 
         # Create a simple route with one segment
         layer_enum = stack.layers[0].layer_enum
         route = Route(net=1, net_name="SIG")
         route.segments.append(
-            Segment(x1=1.0, y1=1.0, x2=5.0, y2=1.0, width=0.25,
-                    layer=layer_enum, net=1, net_name="SIG")
+            Segment(
+                x1=1.0, y1=1.0, x2=5.0, y2=1.0, width=0.25, layer=layer_enum, net=1, net_name="SIG"
+            )
         )
 
         cell_set: set[tuple[int, int, int]] = set()
@@ -4093,15 +4075,16 @@ class TestIncrementalSteinerRouting:
         rules = DesignRules(grid_resolution=0.5)
         stack = LayerStack.two_layer()
         grid = RoutingGrid(
-            width=20.0, height=20.0, rules=rules, layer_stack=stack,
+            width=20.0,
+            height=20.0,
+            rules=rules,
+            layer_stack=stack,
         )
         pathfinder = Router(grid, rules)
 
         layer_enum = stack.layers[0].layer_enum
-        start = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
-                     net_name="SIG", layer=layer_enum)
-        end = Pad(x=18.0, y=18.0, width=1.0, height=1.0, net=1,
-                   net_name="SIG", layer=layer_enum)
+        start = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1, net_name="SIG", layer=layer_enum)
+        end = Pad(x=18.0, y=18.0, width=1.0, height=1.0, net=1, net_name="SIG", layer=layer_enum)
 
         # Place an extra goal cell close to the start to verify early
         # termination. The midpoint (10, 10) at grid coords should be
@@ -4111,7 +4094,8 @@ class TestIncrementalSteinerRouting:
         extra = {(mid_gx, mid_gy, layer_idx)}
 
         route = pathfinder.route(
-            start, end,
+            start,
+            end,
             negotiated_mode=True,
             present_cost_factor=0.0,
             extra_goal_cells=extra,
@@ -4167,10 +4151,8 @@ class TestPowerNetStallAbort:
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 10.0, "y": 10.0, "net": 4,
-                 "net_name": "SPI_MOSI"},
-                {"number": "2", "x": 20.0, "y": 10.0, "net": 4,
-                 "net_name": "SPI_MOSI"},
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 4, "net_name": "SPI_MOSI"},
+                {"number": "2", "x": 20.0, "y": 10.0, "net": 4, "net_name": "SPI_MOSI"},
             ],
         )
         assert router._is_power_net_by_class(4) is False
@@ -4216,10 +4198,8 @@ class TestPowerNetStallAbort:
         router.add_component(
             "R1",
             [
-                {"number": "1", "x": 10.0, "y": 30.0, "net": 3,
-                 "net_name": "SPI_MOSI"},
-                {"number": "2", "x": 20.0, "y": 30.0, "net": 3,
-                 "net_name": "SPI_MOSI"},
+                {"number": "1", "x": 10.0, "y": 30.0, "net": 3, "net_name": "SPI_MOSI"},
+                {"number": "2", "x": 20.0, "y": 30.0, "net": 3, "net_name": "SPI_MOSI"},
             ],
         )
 
@@ -4230,10 +4210,7 @@ class TestPowerNetStallAbort:
             stalled
             and len(overflow_history) >= 2
             and overflow_history[-1] == overflow_history[-2]
-            and all(
-                router._is_pour_net(n) or router._is_power_net_by_class(n)
-                for n in stalled
-            )
+            and all(router._is_pour_net(n) or router._is_power_net_by_class(n) for n in stalled)
         )
         assert triggered, "Heuristic must fire on all-power stalled + plateau"
 
@@ -4244,8 +4221,7 @@ class TestPowerNetStallAbort:
             and len(overflow_history) >= 2
             and overflow_history[-1] == overflow_history[-2]
             and all(
-                router._is_pour_net(n) or router._is_power_net_by_class(n)
-                for n in stalled_mixed
+                router._is_pour_net(n) or router._is_power_net_by_class(n) for n in stalled_mixed
             )
         )
         assert not triggered_mixed, (
@@ -4269,9 +4245,7 @@ class TestPowerNetStallAbort:
             and len(overflow_improving) >= 2
             and overflow_improving[-1] == overflow_improving[-2]
         )
-        assert not triggered_improving, (
-            "Heuristic must NOT fire when overflow is improving"
-        )
+        assert not triggered_improving, "Heuristic must NOT fire when overflow is improving"
 
     def test_early_abort_terminates_route_all_negotiated(self):
         """Synthetic high-fanout power-net scenario terminates without
@@ -4288,7 +4262,9 @@ class TestPowerNetStallAbort:
 
         net_classes = create_net_class_map(power_nets=["GND"])
         router = Autorouter(
-            width=10.0, height=10.0, net_class_map=net_classes,
+            width=10.0,
+            height=10.0,
+            net_class_map=net_classes,
         )
 
         # High-fanout GND net: many pads packed close together.  This is
@@ -4298,13 +4274,15 @@ class TestPowerNetStallAbort:
         # it as a routable signal -- mirroring the boards 04/05 case.
         gnd_pads = []
         for i in range(8):
-            gnd_pads.append({
-                "number": str(i + 1),
-                "x": 1.0 + i * 0.5,
-                "y": 5.0,
-                "net": 1,
-                "net_name": "GND",
-            })
+            gnd_pads.append(
+                {
+                    "number": str(i + 1),
+                    "x": 1.0 + i * 0.5,
+                    "y": 5.0,
+                    "net": 1,
+                    "net_name": "GND",
+                }
+            )
         router.add_component("U1", gnd_pads)
         # Force the autorouter to treat GND as a routable signal
         # (matches the boards 04/05 condition: no zone is defined).
@@ -4339,9 +4317,7 @@ class TestPowerNetStallAbort:
         # Either the heuristic fired (power_stall_abort is set) OR
         # routing finished quickly because the case was trivially solved.
         # The key invariant: we did not spin for tens of seconds.
-        assert elapsed < 30.0, (
-            f"Routing took {elapsed:.1f}s -- early-abort did not engage"
-        )
+        assert elapsed < 30.0, f"Routing took {elapsed:.1f}s -- early-abort did not engage"
 
 
 class TestEscalationStateReset:
@@ -4371,7 +4347,13 @@ class TestEscalationStateReset:
         """reset_attempt_state clears routing_failures to empty list."""
         router = Autorouter(width=50.0, height=40.0)
         router.routing_failures.append(
-            RoutingFailure(net=1, net_name="TEST", source_pad=("U1", "1"), target_pad=("U1", "2"), reason="TEST_FAILURE")
+            RoutingFailure(
+                net=1,
+                net_name="TEST",
+                source_pad=("U1", "1"),
+                target_pad=("U1", "2"),
+                reason="TEST_FAILURE",
+            )
         )
         router.reset_attempt_state()
         assert router.routing_failures == []
@@ -4396,7 +4378,13 @@ class TestEscalationStateReset:
         router.power_stall_abort = True
         router.power_stall_nets = ["+3.3V", "GND"]
         router.routing_failures.append(
-            RoutingFailure(net=1, net_name="TEST", source_pad=("U1", "1"), target_pad=("U1", "2"), reason="TEST")
+            RoutingFailure(
+                net=1,
+                net_name="TEST",
+                source_pad=("U1", "1"),
+                target_pad=("U1", "2"),
+                reason="TEST",
+            )
         )
         router._perturbation_magnitude = 0.3
         router._congestion_estimator = "sentinel"
@@ -4449,25 +4437,39 @@ class TestLargeGridPerformance:
         )
 
         # Place some obstacles to make the search non-trivial
-        import numpy as np
+
         for y_start in range(50, 350, 40):
-            grid._blocked[0, y_start:y_start + 20, 50:350] = True
-            grid._net[0, y_start:y_start + 20, 50:350] = 99  # different net
+            grid._blocked[0, y_start : y_start + 20, 50:350] = True
+            grid._net[0, y_start : y_start + 20, 50:350] = 99  # different net
             # Leave gaps for routing
-            grid._blocked[0, y_start:y_start + 20, 190:210] = False
-            grid._net[0, y_start:y_start + 20, 190:210] = 0
+            grid._blocked[0, y_start : y_start + 20, 190:210] = False
+            grid._net[0, y_start : y_start + 20, 190:210] = 0
 
         router = Router(grid, rules)
 
         start_pad = Pad(
-            x=1.0, y=1.0, width=0.5, height=0.5,
-            net=1, net_name="TEST", layer=Layer.F_CU,
-            ref="U1", pin="1", through_hole=False,
+            x=1.0,
+            y=1.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="TEST",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
+            through_hole=False,
         )
         end_pad = Pad(
-            x=39.0, y=39.0, width=0.5, height=0.5,
-            net=1, net_name="TEST", layer=Layer.F_CU,
-            ref="U2", pin="1", through_hole=False,
+            x=39.0,
+            y=39.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="TEST",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="1",
+            through_hole=False,
         )
 
         t0 = time.monotonic()
@@ -4478,9 +4480,7 @@ class TestLargeGridPerformance:
         assert route is not None, f"Route failed on 400x400 grid (took {elapsed:.2f}s)"
         # Performance budget: must complete in <15s on CI (generous for slow runners).
         # Before Issue #2430 optimizations, this would timeout or take >30s.
-        assert elapsed < 15.0, (
-            f"Route took {elapsed:.2f}s on 400x400 grid (budget: 15s)"
-        )
+        assert elapsed < 15.0, f"Route took {elapsed:.2f}s on 400x400 grid (budget: 15s)"
 
     def test_crossing_index_scales_sublinearly(self):
         """Crossing detection with spatial index should not degrade linearly.
@@ -4510,6 +4510,7 @@ class TestLargeGridPerformance:
 
         # Add 500 routed segments spread across the grid
         import random
+
         rng = random.Random(42)
         for _ in range(500):
             x1 = rng.randint(0, 350)
@@ -4538,7 +4539,6 @@ class TestLargeGridPerformance:
 
     def test_expanded_blocked_bitmap_consistency(self):
         """Pre-computed expanded blocked bitmap matches per-cell checks."""
-        import numpy as np
 
         from kicad_tools.router.grid import RoutingGrid
         from kicad_tools.router.pathfinder import Router
@@ -4732,6 +4732,8 @@ class TestSinglePadNetExclusion:
         assert "SWDIO" in captured or "SWCLK" in captured, (
             f"Expected single-pad net names in diagnostic. Got:\n{captured}"
         )
+
+
 class TestStagnationRecovery:
     """Tests for Issue #2515: stagnation-driven recovery for never-routed nets.
 
@@ -4760,8 +4762,13 @@ class TestStagnationRecovery:
             router.add_component(
                 f"U{i + 1}",
                 [
-                    {"number": "1", "x": 2.0 + i * 0.5, "y": 5.0 + i * 2.0,
-                     "net": i + 1, "net_name": f"PHASE_{chr(ord('A') + i)}"},
+                    {
+                        "number": "1",
+                        "x": 2.0 + i * 0.5,
+                        "y": 5.0 + i * 2.0,
+                        "net": i + 1,
+                        "net_name": f"PHASE_{chr(ord('A') + i)}",
+                    },
                 ],
             )
         # Shared destination connector with all three pads inside one
@@ -4785,12 +4792,10 @@ class TestStagnationRecovery:
         # unrouted/partial nets.
         if "Early termination" in captured.out or "No nets to rip up" in captured.out:
             named_diagnostic = (
-                "Unrouted nets:" in captured.out
-                or "Partially routed nets:" in captured.out
+                "Unrouted nets:" in captured.out or "Partially routed nets:" in captured.out
             )
             assert named_diagnostic, (
-                "Termination must include named diagnostic, got:\n"
-                + captured.out[-2000:]
+                "Termination must include named diagnostic, got:\n" + captured.out[-2000:]
             )
 
     def test_stagnation_recovery_fires_on_oscillating_cohort(self, capsys):
@@ -4806,8 +4811,13 @@ class TestStagnationRecovery:
             router.add_component(
                 f"Q{i + 1}",
                 [
-                    {"number": "1", "x": 2.0, "y": 5.0 + i * 4.0,
-                     "net": i + 1, "net_name": f"PHASE_{chr(ord('A') + i)}"},
+                    {
+                        "number": "1",
+                        "x": 2.0,
+                        "y": 5.0 + i * 4.0,
+                        "net": i + 1,
+                        "net_name": f"PHASE_{chr(ord('A') + i)}",
+                    },
                 ],
             )
         router.add_component(
@@ -4829,13 +4839,9 @@ class TestStagnationRecovery:
         # routing converges immediately without stagnation (which is also
         # acceptable -- this is a sanity check that recovery doesn't
         # destabilise the simple case).
-        if (
-            "Excluding" in captured.out
-            and "stalled net(s) from rip-up" in captured.out
-        ):
+        if "Excluding" in captured.out and "stalled net(s) from rip-up" in captured.out:
             # Stalls were detected; recovery should have been attempted at
             # least once before final termination.
             assert "Stagnation recovery" in captured.out, (
-                "Stalls were detected without stagnation recovery firing.\n"
-                + captured.out[-2000:]
+                "Stalls were detected without stagnation recovery firing.\n" + captured.out[-2000:]
             )

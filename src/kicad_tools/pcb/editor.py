@@ -28,7 +28,14 @@ from pathlib import Path
 
 # Import SExp parsing and builders
 from kicad_tools.sexp import SExp, parse_file
-from kicad_tools.sexp.builders import fmt, gr_line_node, gr_text_node, segment_node, via_node, zone_node
+from kicad_tools.sexp.builders import (
+    fmt,
+    gr_line_node,
+    gr_text_node,
+    segment_node,
+    via_node,
+    zone_node,
+)
 
 
 @dataclass
@@ -575,7 +582,11 @@ class PCBEditor:
             raise ValueError("No PCB document loaded")
 
         node = gr_text_node(
-            text, x, y, layer=layer, font_size=font_size,
+            text,
+            x,
+            y,
+            layer=layer,
+            font_size=font_size,
             font_thickness=font_thickness,
             uuid_str=str(uuid_module.uuid4()),
         )

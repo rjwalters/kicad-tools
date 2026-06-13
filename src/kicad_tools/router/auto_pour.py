@@ -430,15 +430,11 @@ def auto_skip_pour_nets(
             if pour_skip:
                 skip_nets.extend(pour_skip)
                 if not quiet:
-                    print(
-                        f"Auto-skip: {', '.join(sorted(pour_skip))} (pour nets — use zone fill)"
-                    )
+                    print(f"Auto-skip: {', '.join(sorted(pour_skip))} (pour nets — use zone fill)")
             if manual_skip:
                 skip_nets.extend(manual_skip)
                 if not quiet:
-                    print(
-                        f"Manual: {', '.join(sorted(manual_skip))} (skipped — route_via=manual)"
-                    )
+                    print(f"Manual: {', '.join(sorted(manual_skip))} (skipped — route_via=manual)")
             # Warn about pour nets without zones (excluding ERC markers
             # which never get zones by design).  ``route_via="manual"``
             # nets are intentionally NOT in this list -- the designer has
@@ -543,10 +539,7 @@ def auto_pour_if_missing(
         forced_pour_nets = [(name, cls) for name, cls in pour_nets if name in forced]
         if not forced_pour_nets:
             if not quiet:
-                print(
-                    "Auto-pour: skipped (all nets are power/ground — "
-                    "routing as signals instead)"
-                )
+                print("Auto-pour: skipped (all nets are power/ground — routing as signals instead)")
             return 0, []
         # Some pour candidates are forced; restrict to those.  The
         # remaining power/ground nets stay zone-less so the router
@@ -676,9 +669,7 @@ def _add_dual_side_ground_for_forced(
     # Inventory zones already in the file (any net): we must not
     # mirror onto F.Cu when some other net already owns that layer.
     fcu_taken_by_other: set[str] = {
-        zone.net_name
-        for zone in pcb.zones
-        if zone.layer == "F.Cu" and zone.net_name
+        zone.net_name for zone in pcb.zones if zone.layer == "F.Cu" and zone.net_name
     }
 
     extra_zones: list[tuple[str, str, int]] = []

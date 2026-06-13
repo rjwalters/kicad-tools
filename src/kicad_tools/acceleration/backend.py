@@ -64,8 +64,6 @@ def detect_backend() -> BackendType:
 
     # Try Metal via MLX
     try:
-        import mlx.core as mx
-
         # MLX always uses Metal on Apple Silicon
         import platform
 
@@ -103,9 +101,7 @@ class GPUArrayPool:
         pool.return_array(arr, backend)
     """
 
-    _cache: dict[tuple[tuple[int, ...], str, BackendType], list[Any]] = field(
-        default_factory=dict
-    )
+    _cache: dict[tuple[tuple[int, ...], str, BackendType], list[Any]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
     max_pool_size: int = 10  # Max arrays per shape/dtype
 
@@ -132,9 +128,10 @@ class GPUArrayPool:
             if key in self._cache and self._cache[key]:
                 arr = self._cache[key].pop()
                 # Zero the array before returning
-                if backend.backend_type == BackendType.CPU:
-                    arr.fill(0)
-                elif backend.backend_type == BackendType.CUDA:
+                if (
+                    backend.backend_type == BackendType.CPU
+                    or backend.backend_type == BackendType.CUDA
+                ):
                     arr.fill(0)
                 elif backend.backend_type == BackendType.METAL:
                     # MLX arrays are immutable, return new zeroed array
@@ -350,7 +347,9 @@ class ArrayBackend:
             dtype = self._numpy_to_mlx_dtype(dtype)
         return self._xp.full(shape, fill_value, dtype=dtype)
 
-    def sum(self, arr: Any, axis: int | tuple[int, ...] | None = None, keepdims: bool = False) -> Any:
+    def sum(
+        self, arr: Any, axis: int | tuple[int, ...] | None = None, keepdims: bool = False
+    ) -> Any:
         """Sum array elements.
 
         Args:

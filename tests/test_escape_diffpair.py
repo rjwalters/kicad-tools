@@ -87,9 +87,15 @@ def make_bga_with_pair(p_net: str = "TX_P", n_net: str = "TX_N") -> list[Pad]:
                 nid += 1
             pads.append(
                 Pad(
-                    x=x, y=y, width=0.4, height=0.4,
-                    net=net_id, net_name=net_name,
-                    layer=Layer.F_CU, ref="U1", through_hole=False,
+                    x=x,
+                    y=y,
+                    width=0.4,
+                    height=0.4,
+                    net=net_id,
+                    net_name=net_name,
+                    layer=Layer.F_CU,
+                    ref="U1",
+                    through_hole=False,
                 )
             )
     return pads
@@ -118,39 +124,56 @@ def make_qfn_with_pair(p_net: str = "USB_D+", n_net: str = "USB_D-") -> list[Pad
             nid += 1
         pads.append(
             Pad(
-                x=x, y=-half, width=0.3, height=0.8,
-                net=net_id, net_name=net_name,
-                layer=Layer.F_CU, ref="U2",
+                x=x,
+                y=-half,
+                width=0.3,
+                height=0.8,
+                net=net_id,
+                net_name=net_name,
+                layer=Layer.F_CU,
+                ref="U2",
             )
         )
     # The other three sides
     for i in range(pins_per_side):
         pads.append(
             Pad(
-                x=half, y=-half + 1.0 + i * pitch,
-                width=0.8, height=0.3,
-                net=nid, net_name=f"NET_{nid}",
-                layer=Layer.F_CU, ref="U2",
+                x=half,
+                y=-half + 1.0 + i * pitch,
+                width=0.8,
+                height=0.3,
+                net=nid,
+                net_name=f"NET_{nid}",
+                layer=Layer.F_CU,
+                ref="U2",
             )
         )
         nid += 1
     for i in range(pins_per_side):
         pads.append(
             Pad(
-                x=half - 1.0 - i * pitch, y=half,
-                width=0.3, height=0.8,
-                net=nid, net_name=f"NET_{nid}",
-                layer=Layer.F_CU, ref="U2",
+                x=half - 1.0 - i * pitch,
+                y=half,
+                width=0.3,
+                height=0.8,
+                net=nid,
+                net_name=f"NET_{nid}",
+                layer=Layer.F_CU,
+                ref="U2",
             )
         )
         nid += 1
     for i in range(pins_per_side):
         pads.append(
             Pad(
-                x=-half, y=half - 1.0 - i * pitch,
-                width=0.8, height=0.3,
-                net=nid, net_name=f"NET_{nid}",
-                layer=Layer.F_CU, ref="U2",
+                x=-half,
+                y=half - 1.0 - i * pitch,
+                width=0.8,
+                height=0.3,
+                net=nid,
+                net_name=f"NET_{nid}",
+                layer=Layer.F_CU,
+                ref="U2",
             )
         )
         nid += 1
@@ -181,9 +204,15 @@ def make_usbc_with_pair(p_net: str = "USB_D+", n_net: str = "USB_D-") -> list[Pa
             nid += 1
         pads.append(
             Pad(
-                x=x, y=0.0, width=0.25, height=0.35,
-                net=net_id, net_name=net_name,
-                layer=Layer.F_CU, ref="J1", through_hole=False,
+                x=x,
+                y=0.0,
+                width=0.25,
+                height=0.35,
+                net=net_id,
+                net_name=net_name,
+                layer=Layer.F_CU,
+                ref="J1",
+                through_hole=False,
             )
         )
 
@@ -192,9 +221,15 @@ def make_usbc_with_pair(p_net: str = "USB_D+", n_net: str = "USB_D-") -> list[Pa
         x = -half + i * pitch
         pads.append(
             Pad(
-                x=x, y=1.0, width=0.25, height=0.35,
-                net=nid, net_name=f"NET_{nid}",
-                layer=Layer.F_CU, ref="J1", through_hole=False,
+                x=x,
+                y=1.0,
+                width=0.25,
+                height=0.35,
+                net=nid,
+                net_name=f"NET_{nid}",
+                layer=Layer.F_CU,
+                ref="J1",
+                through_hole=False,
             )
         )
         nid += 1
@@ -203,10 +238,16 @@ def make_usbc_with_pair(p_net: str = "USB_D+", n_net: str = "USB_D-") -> list[Pa
     for tx in (-half - 1.0, half + 1.0):
         pads.append(
             Pad(
-                x=tx, y=0.0, width=1.0, height=1.0,
-                net=nid, net_name=f"NET_{nid}",
-                layer=Layer.F_CU, ref="J1",
-                through_hole=True, drill=0.6,
+                x=tx,
+                y=0.0,
+                width=1.0,
+                height=1.0,
+                net=nid,
+                net_name=f"NET_{nid}",
+                layer=Layer.F_CU,
+                ref="J1",
+                through_hole=True,
+                drill=0.6,
             )
         )
         nid += 1
@@ -486,14 +527,26 @@ class TestOrchestratorPairedEscapeGate:
         )
         pads = [
             Pad(
-                x=1.0, y=1.0, width=0.4, height=0.4,
-                net=1, net_name="USB_D+",
-                layer=Layer.F_CU, ref="U1", through_hole=False,
+                x=1.0,
+                y=1.0,
+                width=0.4,
+                height=0.4,
+                net=1,
+                net_name="USB_D+",
+                layer=Layer.F_CU,
+                ref="U1",
+                through_hole=False,
             ),
             Pad(
-                x=5.0, y=5.0, width=0.4, height=0.4,
-                net=1, net_name="USB_D+",
-                layer=Layer.F_CU, ref="J1", through_hole=False,
+                x=5.0,
+                y=5.0,
+                width=0.4,
+                height=0.4,
+                net=1,
+                net_name="USB_D+",
+                layer=Layer.F_CU,
+                ref="J1",
+                through_hole=False,
             ),
         ]
         result = orch._route_escape_then_global("USB_D+", pads)
@@ -526,7 +579,8 @@ class TestGate3EscapeRouterUsesMap:
         pads = make_qfn_with_pair("USB_D+", "USB_D-")
         info = make_package_info(pads, PackageType.QFN, "U2")
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
         )
         assert er.diff_pair_segment_calls == 0
@@ -557,7 +611,8 @@ class TestGate4DispatchPerPackageType:
         pads = make_bga_with_pair("TX_P", "TX_N")
         info = make_package_info(pads, PackageType.BGA, "U1")
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
         )
         er.generate_escapes(info)
@@ -567,7 +622,8 @@ class TestGate4DispatchPerPackageType:
         pads = make_qfn_with_pair("USB_D+", "USB_D-")
         info = make_package_info(pads, PackageType.QFN, "U2")
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
         )
         er.generate_escapes(info)
@@ -577,7 +633,8 @@ class TestGate4DispatchPerPackageType:
         pads = make_usbc_with_pair("USB_D+", "USB_D-")
         info = make_package_info(pads, PackageType.MULTI_ROW_CONNECTOR, "J1")
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
         )
         er.generate_escapes(info)
@@ -594,7 +651,8 @@ class TestGate4DispatchPerPackageType:
         info = make_package_info(pads, PackageType.BGA, "U1")
         # Map declares some OTHER pair that doesn't appear on this package
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"OTHER_P": "OTHER_N", "OTHER_N": "OTHER_P"},
         )
         er.generate_escapes(info)
@@ -612,7 +670,8 @@ class TestGate4DispatchPerPackageType:
         # The map declares TX_P partners with TX_N, which is NOT on
         # this package.
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
         )
         er.generate_escapes(info)
@@ -636,12 +695,18 @@ class TestGate5PairedEscapeGeometry:
         [
             (make_bga_with_pair, PackageType.BGA, "U1", "TX_P", "TX_N"),
             (make_qfn_with_pair, PackageType.QFN, "U2", "USB_D+", "USB_D-"),
-            (make_usbc_with_pair, PackageType.MULTI_ROW_CONNECTOR, "J1",
-             "USB_D+", "USB_D-"),
+            (make_usbc_with_pair, PackageType.MULTI_ROW_CONNECTOR, "J1", "USB_D+", "USB_D-"),
         ],
     )
     def test_paired_endpoint_spacing(
-        self, grid, rules, fixture_builder, pkg_type, ref, p_net, n_net,
+        self,
+        grid,
+        rules,
+        fixture_builder,
+        pkg_type,
+        ref,
+        p_net,
+        n_net,
     ):
         pads = fixture_builder(p_net, n_net)
         info = make_package_info(pads, pkg_type, ref)
@@ -649,7 +714,9 @@ class TestGate5PairedEscapeGeometry:
         # the 0.075mm target the issue mentions.
         ncm = {p_net: NET_CLASS_HIGH_SPEED, n_net: NET_CLASS_HIGH_SPEED}
         er = EscapeRouter(
-            grid, rules, net_class_map=ncm,
+            grid,
+            rules,
+            net_class_map=ncm,
             diff_pair_map={p_net: n_net, n_net: p_net},
         )
         escapes = er.generate_escapes(info)
@@ -696,7 +763,9 @@ class TestGate5PairedEscapeGeometry:
         info = make_package_info(pads, PackageType.MULTI_ROW_CONNECTOR, "J1")
         ncm = {"USB_D+": NET_CLASS_HIGH_SPEED, "USB_D-": NET_CLASS_HIGH_SPEED}
         er = EscapeRouter(
-            grid, rules, net_class_map=ncm,
+            grid,
+            rules,
+            net_class_map=ncm,
             diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
         )
         escapes = er.generate_escapes(info)
@@ -738,11 +807,14 @@ class TestGate5PairedEscapeGeometry:
 class TestNoRegressionWhenMapEmpty:
     """Empty (or None) diff_pair_map preserves pre-#2639 geometry exactly."""
 
-    @pytest.mark.parametrize("pkg_type", [
-        PackageType.BGA,
-        PackageType.QFN,
-        PackageType.MULTI_ROW_CONNECTOR,
-    ])
+    @pytest.mark.parametrize(
+        "pkg_type",
+        [
+            PackageType.BGA,
+            PackageType.QFN,
+            PackageType.MULTI_ROW_CONNECTOR,
+        ],
+    )
     def test_empty_map_produces_same_escape_count(self, grid, rules, pkg_type):
         """The total number of escapes matches the no-map baseline."""
         if pkg_type == PackageType.BGA:
@@ -814,7 +886,9 @@ class TestCorridorReservation:
         info = make_package_info(pads, PackageType.BGA, "U1")
         ncm = {"TX_P": NET_CLASS_HIGH_SPEED, "TX_N": NET_CLASS_HIGH_SPEED}
         er = EscapeRouter(
-            grid_obj, rules_obj, net_class_map=ncm,
+            grid_obj,
+            rules_obj,
+            net_class_map=ncm,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
         )
         return er, info
@@ -824,7 +898,9 @@ class TestCorridorReservation:
     # ------------------------------------------------------------------
 
     def test_gate_a_corridor_reserved_during_paired_escape(
-        self, grid_4layer, rules,
+        self,
+        grid_4layer,
+        rules,
     ):
         """``_reserve_pair_continuation_corridor`` runs during the
         paired pre-pass.
@@ -855,7 +931,9 @@ class TestCorridorReservation:
     # ------------------------------------------------------------------
 
     def test_gate_b_partner_vias_do_not_consume_reserved_cells(
-        self, grid_4layer, rules,
+        self,
+        grid_4layer,
+        rules,
     ):
         """A partner-net via placed on top of a reserved cell does NOT
         block that cell.
@@ -888,12 +966,15 @@ class TestCorridorReservation:
 
         # Synthesise a partner-net via (net=42, not in {1, 2}).
         from kicad_tools.router.layers import Layer as _Layer
+
         partner_via = _Via(
-            x=wx, y=wy,
+            x=wx,
+            y=wy,
             drill=rules.via_drill,
             diameter=rules.via_diameter,
             layers=(_Layer.F_CU, _Layer.B_CU),
-            net=42, net_name="PARTNER",
+            net=42,
+            net_name="PARTNER",
         )
         grid_4layer._mark_via(partner_via)
 
@@ -907,11 +988,13 @@ class TestCorridorReservation:
 
         # Conversely: an owner-net via DOES block the cell (sanity).
         owner_via = _Via(
-            x=wx, y=wy,
+            x=wx,
+            y=wy,
             drill=rules.via_drill,
             diameter=rules.via_diameter,
             layers=(_Layer.F_CU, _Layer.B_CU),
-            net=1, net_name="TX_P",  # in owner set
+            net=1,
+            net_name="TX_P",  # in owner set
         )
         grid_4layer._mark_via(owner_via)
         assert grid_4layer.grid[layer_idx][gy][gx].blocked, (
@@ -923,7 +1006,9 @@ class TestCorridorReservation:
     # ------------------------------------------------------------------
 
     def test_gate_c_reservation_precedes_partner_via_marking(
-        self, grid_4layer, rules,
+        self,
+        grid_4layer,
+        rules,
     ):
         """The reservation count is non-zero AT the time the
         non-paired dispatcher runs its via marking.
@@ -989,21 +1074,26 @@ class TestCorridorReservation:
         members = []
         for i, net_id in enumerate((1, 2, 3)):
             pad = _Pad(
-                x=0.0, y=float(i) * 0.2,
-                width=0.2, height=0.2,
-                net=net_id, net_name=f"NET_{net_id}",
+                x=0.0,
+                y=float(i) * 0.2,
+                width=0.2,
+                height=0.2,
+                net=net_id,
+                net_name=f"NET_{net_id}",
                 layer=_Layer.F_CU,
             )
-            members.append(EscapeRoute(
-                pad=pad,
-                direction=EscapeDirection.EAST,
-                escape_point=(1.0, float(i) * 0.2),
-                escape_layer=_Layer.F_CU,
-                via_pos=None,
-                segments=[],
-                via=None,
-                ring_index=0,
-            ))
+            members.append(
+                EscapeRoute(
+                    pad=pad,
+                    direction=EscapeDirection.EAST,
+                    escape_point=(1.0, float(i) * 0.2),
+                    escape_layer=_Layer.F_CU,
+                    via_pos=None,
+                    segments=[],
+                    via=None,
+                    ring_index=0,
+                )
+            )
 
         count = er._reserve_pair_continuation_corridor(
             members=members,
@@ -1014,9 +1104,7 @@ class TestCorridorReservation:
         assert er.pair_corridor_reservations == 1
         # Owner set should be {1, 2, 3}.
         owners = next(iter(grid_4layer._reserved_for_nets.values()))
-        assert owners == frozenset({1, 2, 3}), (
-            f"3-member corridor owners {owners} != {{1,2,3}}"
-        )
+        assert owners == frozenset({1, 2, 3}), f"3-member corridor owners {owners} != {{1,2,3}}"
 
     # ------------------------------------------------------------------
     # Gate (e): empty diff_pair_map -> NO reservation (regression)
@@ -1099,34 +1187,56 @@ class TestCorridorAttractor:
         # Reserve a small patch on layer 1 (inner) for nets {1, 2}.
         cells = [(10, 10), (10, 11), (11, 10), (11, 11)]
         grid_4layer.reserve_corridor_cells(
-            layer_idx=1, cells=cells, net_ids={1, 2},
+            layer_idx=1,
+            cells=cells,
+            net_ids={1, 2},
         )
 
         # Owner-net query: bonus magnitude returned.
         bonus = grid_4layer.get_corridor_attractor_bonus(
-            layer_idx=1, gx=10, gy=10, net_id=1, bonus=3.0,
+            layer_idx=1,
+            gx=10,
+            gy=10,
+            net_id=1,
+            bonus=3.0,
         )
         assert bonus == 3.0
         bonus = grid_4layer.get_corridor_attractor_bonus(
-            layer_idx=1, gx=11, gy=11, net_id=2, bonus=3.0,
+            layer_idx=1,
+            gx=11,
+            gy=11,
+            net_id=2,
+            bonus=3.0,
         )
         assert bonus == 3.0
 
         # Non-owner-net query: zero.
         bonus = grid_4layer.get_corridor_attractor_bonus(
-            layer_idx=1, gx=10, gy=10, net_id=42, bonus=3.0,
+            layer_idx=1,
+            gx=10,
+            gy=10,
+            net_id=42,
+            bonus=3.0,
         )
         assert bonus == 0.0
 
         # Unreserved cell: zero.
         bonus = grid_4layer.get_corridor_attractor_bonus(
-            layer_idx=1, gx=20, gy=20, net_id=1, bonus=3.0,
+            layer_idx=1,
+            gx=20,
+            gy=20,
+            net_id=1,
+            bonus=3.0,
         )
         assert bonus == 0.0
 
         # Other-layer query for a reserved (x, y): zero (layer-scoped).
         bonus = grid_4layer.get_corridor_attractor_bonus(
-            layer_idx=0, gx=10, gy=10, net_id=1, bonus=3.0,
+            layer_idx=0,
+            gx=10,
+            gy=10,
+            net_id=1,
+            bonus=3.0,
         )
         assert bonus == 0.0
 
@@ -1137,7 +1247,11 @@ class TestCorridorAttractor:
         assert grid_4layer.reserved_cell_count() == 0
         # Even with a non-zero bonus, no reservations -> 0.0.
         bonus = grid_4layer.get_corridor_attractor_bonus(
-            layer_idx=1, gx=10, gy=10, net_id=1, bonus=3.0,
+            layer_idx=1,
+            gx=10,
+            gy=10,
+            net_id=1,
+            bonus=3.0,
         )
         assert bonus == 0.0
 
@@ -1146,10 +1260,16 @@ class TestCorridorAttractor:
         0.0 even for reserved cells (feature kill-switch).
         """
         grid_4layer.reserve_corridor_cells(
-            layer_idx=1, cells=[(10, 10)], net_ids={1},
+            layer_idx=1,
+            cells=[(10, 10)],
+            net_ids={1},
         )
         bonus = grid_4layer.get_corridor_attractor_bonus(
-            layer_idx=1, gx=10, gy=10, net_id=1, bonus=0.0,
+            layer_idx=1,
+            gx=10,
+            gy=10,
+            net_id=1,
+            bonus=0.0,
         )
         assert bonus == 0.0
 
@@ -1158,7 +1278,9 @@ class TestCorridorAttractor:
     # ------------------------------------------------------------------
 
     def test_pathfinder_prefers_reserved_corridor_for_paired_net(
-        self, grid_4layer, rules,
+        self,
+        grid_4layer,
+        rules,
     ):
         """A* prefers cells on the reserved inner layer when the route
         belongs to a paired net.
@@ -1192,19 +1314,33 @@ class TestCorridorAttractor:
                 gx, gy = grid_4layer.world_to_grid(x_mm_x10 / 10.0, y_mm_x10 / 10.0)
                 strip_cells.add((gx, gy))
         grid_4layer.reserve_corridor_cells(
-            layer_idx=1, cells=strip_cells, net_ids={1, 2},
+            layer_idx=1,
+            cells=strip_cells,
+            net_ids={1, 2},
         )
         assert grid_4layer.reserved_cell_count() == len(strip_cells)
 
         start = _Pad(
-            x=5.0, y=25.0, width=0.4, height=0.4,
-            net=1, net_name="TX_P", layer=Layer.F_CU,
-            ref="U1", pin="1",
+            x=5.0,
+            y=25.0,
+            width=0.4,
+            height=0.4,
+            net=1,
+            net_name="TX_P",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
         )
         end = _Pad(
-            x=45.0, y=25.0, width=0.4, height=0.4,
-            net=1, net_name="TX_P", layer=Layer.F_CU,
-            ref="U2", pin="1",
+            x=45.0,
+            y=25.0,
+            width=0.4,
+            height=0.4,
+            net=1,
+            net_name="TX_P",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="1",
         )
 
         # With attractor enabled (default rule value), route should
@@ -1218,7 +1354,8 @@ class TestCorridorAttractor:
         assert route is not None, "Pathfinder must still complete a basic route"
 
     def test_pathfinder_uses_reserved_layer_when_surface_blocked(
-        self, rules,
+        self,
+        rules,
     ):
         """When the surface layer is blocked between start and end, the
         attractor-aware pathfinder dives into the reserved inner layer
@@ -1262,18 +1399,32 @@ class TestCorridorAttractor:
                 gx, gy = grid.world_to_grid(x_mm_x10 / 10.0, y_mm_x10 / 10.0)
                 strip_cells.add((gx, gy))
         grid.reserve_corridor_cells(
-            layer_idx=1, cells=strip_cells, net_ids={1, 2},
+            layer_idx=1,
+            cells=strip_cells,
+            net_ids={1, 2},
         )
 
         start = _Pad(
-            x=5.0, y=25.0, width=0.4, height=0.4,
-            net=1, net_name="TX_P", layer=Layer.F_CU,
-            ref="U1", pin="1",
+            x=5.0,
+            y=25.0,
+            width=0.4,
+            height=0.4,
+            net=1,
+            net_name="TX_P",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
         )
         end = _Pad(
-            x=45.0, y=25.0, width=0.4, height=0.4,
-            net=1, net_name="TX_P", layer=Layer.F_CU,
-            ref="U2", pin="1",
+            x=45.0,
+            y=25.0,
+            width=0.4,
+            height=0.4,
+            net=1,
+            net_name="TX_P",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="1",
         )
 
         router = Router(grid, rules)
@@ -1287,8 +1438,7 @@ class TestCorridorAttractor:
         # a wall on the surface -- there is no surface-only completion).
         via_count = len(route.vias) if route.vias else 0
         assert via_count >= 1, (
-            f"Expected the route to use a via (surface wall present); "
-            f"got {via_count} vias"
+            f"Expected the route to use a via (surface wall present); got {via_count} vias"
         )
 
         # And at least one segment must live on the RESERVED inner
@@ -1298,10 +1448,7 @@ class TestCorridorAttractor:
         # if the attractor produced 0.0 bonus and the route dived
         # randomly into In2.Cu, which is exactly the regression class
         # this gate is meant to catch (Judge soft finding on PR #2938).
-        reserved_layer_segments = [
-            s for s in route.segments
-            if s.layer == Layer.IN1_CU
-        ]
+        reserved_layer_segments = [s for s in route.segments if s.layer == Layer.IN1_CU]
         assert len(reserved_layer_segments) >= 1, (
             f"Expected route to traverse the RESERVED inner layer "
             f"(In1.Cu); got segments on layers "
@@ -1314,7 +1461,9 @@ class TestCorridorAttractor:
     # ------------------------------------------------------------------
 
     def test_partner_via_just_outside_corridor_does_not_invade_reserved_cells(
-        self, grid_4layer, rules,
+        self,
+        grid_4layer,
+        rules,
     ):
         """A partner via whose CENTRE sits just outside the reserved
         corridor still does not colonise any reserved cell.
@@ -1355,7 +1504,8 @@ class TestCorridorAttractor:
         (target_layer_idx,) = layer_indices  # exactly one layer reserved
         max_gy = max(k[1] for k in reserved_cells_before if k[0] == target_layer_idx)
         boundary_cells = [
-            (k[2], k[1]) for k in reserved_cells_before
+            (k[2], k[1])
+            for k in reserved_cells_before
             if k[0] == target_layer_idx and k[1] == max_gy
         ]
         gx, gy = boundary_cells[len(boundary_cells) // 2]
@@ -1366,32 +1516,25 @@ class TestCorridorAttractor:
         # reserved boundary cells.
         partner_wx, partner_wy = grid_4layer.grid_to_world(gx, gy + 2)
         partner_via = _Via(
-            x=partner_wx, y=partner_wy,
+            x=partner_wx,
+            y=partner_wy,
             drill=rules.via_drill,
             diameter=rules.via_diameter,
             layers=(_Layer.F_CU, _Layer.B_CU),
-            net=42, net_name="PARTNER",
+            net=42,
+            net_name="PARTNER",
         )
 
         # Capture cell states before the via mark.
-        pre_state = {
-            k: grid_4layer.grid[k[0]][k[1]][k[2]].blocked
-            for k in reserved_cells_before
-        }
+        pre_state = {k: grid_4layer.grid[k[0]][k[1]][k[2]].blocked for k in reserved_cells_before}
         grid_4layer._mark_via(partner_via)
 
         # All reserved cells that were unblocked before must remain
         # unblocked after -- the partner via's envelope cells were
         # SKIPPED per-cell within the corridor (per-cell protection
         # from #2677 + #2911).
-        post_state = {
-            k: grid_4layer.grid[k[0]][k[1]][k[2]].blocked
-            for k in reserved_cells_before
-        }
-        newly_blocked = [
-            k for k in reserved_cells_before
-            if not pre_state[k] and post_state[k]
-        ]
+        post_state = {k: grid_4layer.grid[k[0]][k[1]][k[2]].blocked for k in reserved_cells_before}
+        newly_blocked = [k for k in reserved_cells_before if not pre_state[k] and post_state[k]]
         assert not newly_blocked, (
             f"Partner via just outside corridor colonised {len(newly_blocked)} "
             f"reserved cells -- per-cell protection failed"
@@ -1404,7 +1547,9 @@ class TestCorridorAttractor:
         info = make_package_info(pads, PackageType.BGA, "U1")
         ncm = {"TX_P": NET_CLASS_HIGH_SPEED, "TX_N": NET_CLASS_HIGH_SPEED}
         er = EscapeRouter(
-            grid_obj, rules_obj, net_class_map=ncm,
+            grid_obj,
+            rules_obj,
+            net_class_map=ncm,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
         )
         return er, info
@@ -1484,10 +1629,14 @@ def make_bga49_with_inner_ring_pair(
             net_name, net_id = pin_nets[f"{row_letter}{col}"]
             pads.append(
                 Pad(
-                    x=px, y=py,
-                    width=pad_size, height=pad_size,
-                    net=net_id, net_name=net_name,
-                    layer=Layer.F_CU, ref="U2",
+                    x=px,
+                    y=py,
+                    width=pad_size,
+                    height=pad_size,
+                    net=net_id,
+                    net_name=net_name,
+                    layer=Layer.F_CU,
+                    ref="U2",
                     through_hole=False,
                     pin=f"{row_letter}{col}",
                 )
@@ -1517,19 +1666,20 @@ class TestBGA49InnerRingCorridorDriftPrevention:
         pads = make_bga49_with_inner_ring_pair()
         info = make_package_info(pads, PackageType.BGA, "U2")
         diff_pair_map = {"USB3_TX1+": "USB3_TX1-", "USB3_TX1-": "USB3_TX1+"}
-        ncm = {n: NET_CLASS_HIGH_SPEED for n in diff_pair_map}
+        ncm = dict.fromkeys(diff_pair_map, NET_CLASS_HIGH_SPEED)
 
         er = EscapeRouter(
-            grid_4layer, rules,
-            net_class_map=ncm, diff_pair_map=diff_pair_map,
+            grid_4layer,
+            rules,
+            net_class_map=ncm,
+            diff_pair_map=diff_pair_map,
         )
 
         assert er.pair_corridor_reservations == 0
         er.generate_escapes(info)
 
         assert er.diff_pair_segment_calls == 1, (
-            "Inner-ring paired escape must run exactly once for the "
-            "single B2/B3 USB3 pair"
+            "Inner-ring paired escape must run exactly once for the single B2/B3 USB3 pair"
         )
         assert er.pair_corridor_reservations == 1, (
             "Inner-ring B2/B3 pair must reserve exactly one corridor; "
@@ -1557,21 +1707,18 @@ class TestBGA49InnerRingCorridorDriftPrevention:
         pads = make_bga49_with_inner_ring_pair()
         info = make_package_info(pads, PackageType.BGA, "U2")
         diff_pair_map = {"USB3_TX1+": "USB3_TX1-", "USB3_TX1-": "USB3_TX1+"}
-        ncm = {n: NET_CLASS_HIGH_SPEED for n in diff_pair_map}
+        ncm = dict.fromkeys(diff_pair_map, NET_CLASS_HIGH_SPEED)
 
         er = EscapeRouter(
-            grid_4layer, rules,
-            net_class_map=ncm, diff_pair_map=diff_pair_map,
+            grid_4layer,
+            rules,
+            net_class_map=ncm,
+            diff_pair_map=diff_pair_map,
         )
         escapes = er.generate_escapes(info)
 
-        pair_escapes = [
-            e for e in escapes
-            if e.pad.net_name in ("USB3_TX1+", "USB3_TX1-")
-        ]
-        assert len(pair_escapes) == 2, (
-            "Expected exactly 2 paired escapes for B2/B3 inner-ring pair"
-        )
+        pair_escapes = [e for e in escapes if e.pad.net_name in ("USB3_TX1+", "USB3_TX1-")]
+        assert len(pair_escapes) == 2, "Expected exactly 2 paired escapes for B2/B3 inner-ring pair"
         for e in pair_escapes:
             assert e.direction == EscapeDirection.SOUTH, (
                 f"Inner-ring B-row pair must launch SOUTH (outward), "
@@ -1585,7 +1732,9 @@ class TestBGA49InnerRingCorridorDriftPrevention:
             assert e.escape_layer == Layer.F_CU
 
     def test_inner_ring_pair_corridor_owner_set_is_pair_only(
-        self, grid_4layer, rules,
+        self,
+        grid_4layer,
+        rules,
     ):
         """The B2/B3 corridor is owned by the B2/B3 pair, not other USB3 lanes.
 
@@ -1600,11 +1749,13 @@ class TestBGA49InnerRingCorridorDriftPrevention:
         pads = make_bga49_with_inner_ring_pair()
         info = make_package_info(pads, PackageType.BGA, "U2")
         diff_pair_map = {"USB3_TX1+": "USB3_TX1-", "USB3_TX1-": "USB3_TX1+"}
-        ncm = {n: NET_CLASS_HIGH_SPEED for n in diff_pair_map}
+        ncm = dict.fromkeys(diff_pair_map, NET_CLASS_HIGH_SPEED)
 
         er = EscapeRouter(
-            grid_4layer, rules,
-            net_class_map=ncm, diff_pair_map=diff_pair_map,
+            grid_4layer,
+            rules,
+            net_class_map=ncm,
+            diff_pair_map=diff_pair_map,
         )
         er.generate_escapes(info)
 
@@ -1662,7 +1813,8 @@ class TestPairLaunchDirectionHeuristic:
             "TX_N": [(pad_n.x, pad_n.y)],
         }
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
         )
@@ -1687,7 +1839,8 @@ class TestPairLaunchDirectionHeuristic:
             "TX_N": [(pad_n.x, pad_n.y), (30.0, mid_y - 0.2)],
         }
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
         )
@@ -1711,7 +1864,8 @@ class TestPairLaunchDirectionHeuristic:
             "TX_N": [(pad_n.x, pad_n.y), (0.2, 30.0)],
         }
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
         )
@@ -1728,7 +1882,8 @@ class TestPairLaunchDirectionHeuristic:
             "TX_N": [(pad_n.x, pad_n.y), (30.0, mid_y - 0.2)],
         }
         er = EscapeRouter(
-            grid, rules,
+            grid,
+            rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
         )

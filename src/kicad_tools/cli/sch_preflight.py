@@ -416,15 +416,9 @@ def main(argv=None):
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument(
-        "--format", choices=["text", "json"], default="text", help="Output format"
-    )
-    parser.add_argument(
-        "--strict", action="store_true", help="Exit with error on any warning"
-    )
-    parser.add_argument(
-        "--quiet", "-q", action="store_true", help="Only show errors"
-    )
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument("--strict", action="store_true", help="Exit with error on any warning")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Only show errors")
 
     args = parser.parse_args(argv)
 

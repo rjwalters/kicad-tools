@@ -58,13 +58,6 @@ User-Defined Patterns:
 """
 
 # Analog patterns (constraint-based)
-from .analog import (
-    ADCInputFilter,
-    DACOutputFilter,
-    OpAmpCircuit,
-    SensorInterface,
-)
-
 # Adaptation
 from kicad_tools.patterns.adaptation import (
     AdaptedPatternParams,
@@ -73,6 +66,26 @@ from kicad_tools.patterns.adaptation import (
     adapt_from_pcb,
     adapt_ldo_pattern,
     adapt_pattern,
+)
+from kicad_tools.patterns.components import (
+    ComponentRequirements,
+    get_component_requirements,
+    list_components,
+)
+from kicad_tools.patterns.validation import (
+    PatternValidationResult,
+    PatternValidator,
+    ViolationSeverity,
+)
+from kicad_tools.patterns.validation import (
+    PatternViolation as ValidationViolation,
+)
+
+from .analog import (
+    ADCInputFilter,
+    DACOutputFilter,
+    OpAmpCircuit,
+    SensorInterface,
 )
 
 # Base classes
@@ -90,11 +103,6 @@ from .checks import (
     create_check,
     get_check,
     register_check,
-)
-from kicad_tools.patterns.components import (
-    ComponentRequirements,
-    get_component_requirements,
-    list_components,
 )
 from .constraints import (
     ConstraintPlacementRule,
@@ -154,14 +162,6 @@ from .schema import (
 
 # Timing patterns (placement-based)
 from .timing import CrystalPattern, OscillatorPattern
-from kicad_tools.patterns.validation import (
-    PatternValidationResult,
-    PatternValidator,
-    ViolationSeverity,
-)
-from kicad_tools.patterns.validation import (
-    PatternViolation as ValidationViolation,
-)
 
 __all__ = [
     # Schema types

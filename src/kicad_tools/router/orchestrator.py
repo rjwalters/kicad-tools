@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from .rules import DesignRules, NetClassRouting
 
 from .adaptive import AdaptiveAutorouter
-from .adaptive_grid import AdaptiveGridRouter, identify_fine_pitch_components
+from .adaptive_grid import identify_fine_pitch_components
 from .escape import EscapeRouter, is_dense_package
 from .global_router import GlobalRouter
 from .region_graph import RegionGraph
@@ -271,9 +271,7 @@ class RoutingOrchestrator:
                     net = getattr(pad, "net", 0)
                     if not isinstance(net, int) or net == 0:
                         continue
-                    result.setdefault(net, []).append(
-                        (pad.x, pad.y, getattr(pad, "ref", "") or "")
-                    )
+                    result.setdefault(net, []).append((pad.x, pad.y, getattr(pad, "ref", "") or ""))
                 return result or None
 
             footprints = getattr(self.pcb, "footprints", None)

@@ -17,14 +17,14 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.schema.library import (
+    LibraryManager,
     LibraryPin,
     LibrarySymbol,
-    LibraryManager,
     SymbolLibrary,
     SymbolPolyline,
     resolve_extends,
 )
-from kicad_tools.sexp import SExp, parse_string
+from kicad_tools.sexp import parse_string
 
 
 def _make_pin(number: str, name: str, pin_type: str = "passive") -> LibraryPin:
@@ -197,12 +197,20 @@ class TestLibrarySymbolInternalMethods:
             name="Base",
             pins=[
                 LibraryPin(
-                    number="1", name="A", type="passive",
-                    position=(2.54, 0), rotation=180, length=2.54,
+                    number="1",
+                    name="A",
+                    type="passive",
+                    position=(2.54, 0),
+                    rotation=180,
+                    length=2.54,
                 ),
                 LibraryPin(
-                    number="2", name="B", type="passive",
-                    position=(-2.54, 0), rotation=0, length=2.54,
+                    number="2",
+                    name="B",
+                    type="passive",
+                    position=(-2.54, 0),
+                    rotation=0,
+                    length=2.54,
                 ),
             ],
         )
@@ -346,6 +354,7 @@ class TestSchematicGetLibSymbolResolved:
         sch_path.write_text(sch_content)
 
         from kicad_tools.schema import Schematic
+
         sch = Schematic.load(str(sch_path))
 
         # Non-derived symbol
@@ -370,6 +379,7 @@ class TestSchematicGetLibSymbolResolved:
         sch_path.write_text(sch_content)
 
         from kicad_tools.schema import Schematic
+
         sch = Schematic.load(str(sch_path))
 
         result = sch.get_lib_symbol_resolved("nonexistent:Symbol")

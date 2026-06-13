@@ -53,7 +53,6 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
-
 # C++ backend is mandatory for these tests -- the bug they regress is
 # C++-only by construction (the Python A* uses Python's own grid).
 requires_cpp = pytest.mark.skipif(

@@ -551,14 +551,22 @@ class TestDeterministicUuidToggle:
 
             random.seed(42)
             sexp_a = Via(
-                x=1.0, y=2.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1,
+                x=1.0,
+                y=2.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
             ).to_sexp()
 
             random.seed(42)
             sexp_b = Via(
-                x=1.0, y=2.0, drill=0.3, diameter=0.6,
-                layers=(Layer.F_CU, Layer.B_CU), net=1,
+                x=1.0,
+                y=2.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
             ).to_sexp()
         finally:
             reset_deterministic_uuids()

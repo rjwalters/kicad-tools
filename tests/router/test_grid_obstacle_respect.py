@@ -272,36 +272,34 @@ class TestPathfinderRejectsPadMetalForForeignNets:
         "pad_kwargs,description",
         [
             (
-                dict(
-                    width=1.8,
-                    height=1.8,
-                    through_hole=True,
-                    drill=1.0,
-                ),
+                {
+                    "width": 1.8,
+                    "height": 1.8,
+                    "through_hole": True,
+                    "drill": 1.0,
+                },
                 "THT rectangular (TO-220)",
             ),
             (
-                dict(width=1.25, height=1.7),
+                {"width": 1.25, "height": 1.7},
                 "SMD rectangular (0805)",
             ),
             (
-                dict(width=0.5, height=0.5),
+                {"width": 0.5, "height": 0.5},
                 "SMD round-equivalent (0402)",
             ),
             (
-                dict(
-                    width=2.0,
-                    height=3.0,
-                    through_hole=True,
-                    drill=1.2,
-                ),
+                {
+                    "width": 2.0,
+                    "height": 3.0,
+                    "through_hole": True,
+                    "drill": 1.2,
+                },
                 "Oval THT (audio jack)",
             ),
         ],
     )
-    def test_foreign_net_blocked_in_negotiated_mode(
-        self, jlcpcb_rules, pad_kwargs, description
-    ):
+    def test_foreign_net_blocked_in_negotiated_mode(self, jlcpcb_rules, pad_kwargs, description):
         """Each isolated pad shape: ``compute_expanded_blocked`` (the
         negotiated-mode bitmap) blocks foreign nets at the pad centre.
         """
@@ -323,9 +321,7 @@ class TestPathfinderRejectsPadMetalForForeignNets:
 
         # Foreign net 42, negotiated mode (allow_sharing=True).
         # Radius=0 isolates the per-cell decision from dilation effects.
-        blocked = grid.compute_expanded_blocked(
-            radius=0, net=42, allow_sharing=True
-        )
+        blocked = grid.compute_expanded_blocked(radius=0, net=42, allow_sharing=True)
 
         assert bool(blocked[layer_idx, gy, gx]) is True, (
             f"Issue #2915/#2920: {description} pad metal cell must block "
@@ -361,9 +357,7 @@ class TestPathfinderRejectsPadMetalForForeignNets:
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
 
         # Own net 5, negotiated mode.
-        blocked = grid.compute_expanded_blocked(
-            radius=0, net=5, allow_sharing=True
-        )
+        blocked = grid.compute_expanded_blocked(radius=0, net=5, allow_sharing=True)
 
         assert bool(blocked[layer_idx, gy, gx]) is False, (
             "Own-net trace must remain passable through its own pad metal "
@@ -442,8 +436,7 @@ class TestTO220HBridgeFixture:
             gx, gy = grid.world_to_grid(pad.x, pad.y)
             cell = grid.grid[layer_idx][gy][gx]
             assert cell.pad_blocked is True, (
-                f"TO-220 pad {pad.ref}.{pad.pin} (net={pad.net}) center "
-                f"must be pad_blocked"
+                f"TO-220 pad {pad.ref}.{pad.pin} (net={pad.net}) center must be pad_blocked"
             )
             assert cell.is_obstacle is True, (
                 f"Issue #2920: TO-220 pad {pad.ref}.{pad.pin} (net={pad.net}) "
@@ -508,9 +501,7 @@ class TestTO220HBridgeFixture:
 
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         # PHASE_B trace (foreign net 99) probing Q6.
-        blocked = grid.compute_expanded_blocked(
-            radius=0, net=99, allow_sharing=True
-        )
+        blocked = grid.compute_expanded_blocked(radius=0, net=99, allow_sharing=True)
 
         for pad in pads:
             gx, gy = grid.world_to_grid(pad.x, pad.y)
@@ -552,9 +543,7 @@ class TestIsolatedPadClearanceHaloIsObstacle:
     pad's own net (so ``obstacle_blocks`` excludes own-net cells).
     """
 
-    def test_clearance_halo_cell_is_obstacle_for_isolated_pad(
-        self, jlcpcb_rules
-    ):
+    def test_clearance_halo_cell_is_obstacle_for_isolated_pad(self, jlcpcb_rules):
         """Isolated SMD rectangular pad: a cell INSIDE the clearance
         halo (but OUTSIDE the metal area) is marked ``is_obstacle =
         True`` and assigned ``cell.net = pad.net`` on first touch.
@@ -589,9 +578,7 @@ class TestIsolatedPadClearanceHaloIsObstacle:
         halo_gx, halo_gy = grid.world_to_grid(0.35, 0.35)
         halo_cell = grid.grid[layer_idx][halo_gy][halo_gx]
 
-        assert halo_cell.blocked is True, (
-            "Clearance halo cell must be blocked"
-        )
+        assert halo_cell.blocked is True, "Clearance halo cell must be blocked"
         assert halo_cell.pad_blocked is False, (
             "Clearance halo cell is OUTSIDE the metal area and must "
             "NOT carry ``pad_blocked = True`` (that flag is reserved "
@@ -608,9 +595,7 @@ class TestIsolatedPadClearanceHaloIsObstacle:
             "branch release it to foreign nets after ``usage_count > 0``)"
         )
 
-    def test_clearance_halo_foreign_net_blocked_in_negotiated_mode(
-        self, jlcpcb_rules
-    ):
+    def test_clearance_halo_foreign_net_blocked_in_negotiated_mode(self, jlcpcb_rules):
         """Negotiated-mode invariant: a halo cell of an isolated pad
         must remain blocked for foreign nets after one trace has touched
         the region.
@@ -646,9 +631,7 @@ class TestIsolatedPadClearanceHaloIsObstacle:
 
         # Foreign net 42, negotiated mode.  Radius=0 isolates the
         # per-cell decision from dilation effects.
-        blocked = grid.compute_expanded_blocked(
-            radius=0, net=42, allow_sharing=True
-        )
+        blocked = grid.compute_expanded_blocked(radius=0, net=42, allow_sharing=True)
 
         assert bool(blocked[layer_idx, halo_gy, halo_gx]) is True, (
             "Issue #2940: isolated THT pad clearance halo must block "
@@ -657,9 +640,7 @@ class TestIsolatedPadClearanceHaloIsObstacle:
             "static_blocks branch released it once usage_count > 0"
         )
 
-    def test_clearance_halo_own_net_passable_in_negotiated_mode(
-        self, jlcpcb_rules
-    ):
+    def test_clearance_halo_own_net_passable_in_negotiated_mode(self, jlcpcb_rules):
         """Same-net regression guard: setting ``is_obstacle = True`` on
         halo cells must NOT break own-net escape routing.
 
@@ -688,9 +669,7 @@ class TestIsolatedPadClearanceHaloIsObstacle:
         halo_gx, halo_gy = grid.world_to_grid(0.9, 0.0)
 
         # Own-net trace (net=10), negotiated mode.
-        blocked = grid.compute_expanded_blocked(
-            radius=0, net=10, allow_sharing=True
-        )
+        blocked = grid.compute_expanded_blocked(radius=0, net=10, allow_sharing=True)
 
         assert bool(blocked[layer_idx, halo_gy, halo_gx]) is False, (
             "Own-net trace must remain passable through its own pad's "
@@ -704,35 +683,35 @@ class TestIsolatedPadClearanceHaloIsObstacle:
             (
                 # USB-C SMD pad: 0.25 x 0.35 mm, the board 03 J1
                 # pad-cluster geometry that motivated #2940.
-                dict(width=0.25, height=0.35),
+                {"width": 0.25, "height": 0.35},
                 (0.2, 0.0),
                 "USB-C SMD (0.25 x 0.35 mm)",
             ),
             (
                 # 0402 SMD pad
-                dict(width=0.56, height=0.62),
+                {"width": 0.56, "height": 0.62},
                 (0.32, 0.0),
                 "0402 SMD rectangular",
             ),
             (
                 # Joystick THT pin (1.6 mm circle)
-                dict(
-                    width=1.6,
-                    height=1.6,
-                    through_hole=True,
-                    drill=1.0,
-                ),
+                {
+                    "width": 1.6,
+                    "height": 1.6,
+                    "through_hole": True,
+                    "drill": 1.0,
+                },
                 (0.9, 0.0),
                 "Joystick THT circular",
             ),
             (
                 # USB-C shell THT (1.0 mm circle)
-                dict(
-                    width=1.0,
-                    height=1.0,
-                    through_hole=True,
-                    drill=0.6,
-                ),
+                {
+                    "width": 1.0,
+                    "height": 1.0,
+                    "through_hole": True,
+                    "drill": 0.6,
+                },
                 (0.6, 0.0),
                 "USB-C shell THT circular",
             ),
@@ -780,9 +759,7 @@ class TestIsolatedPadClearanceHaloIsObstacle:
         # area is so small that quantisation can land the probe on the
         # metal boundary -- accept either case as long as is_obstacle
         # is true.
-        blocked = grid.compute_expanded_blocked(
-            radius=0, net=42, allow_sharing=True
-        )
+        blocked = grid.compute_expanded_blocked(radius=0, net=42, allow_sharing=True)
 
         assert bool(blocked[layer_idx, halo_gy, halo_gx]) is True, (
             f"Issue #2940: {description} pad's clearance halo must "

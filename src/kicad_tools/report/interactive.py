@@ -88,12 +88,8 @@ def _gather_drc_data(
     else:
         violations = _try_auto_drc(pcb_path)
 
-    error_count = sum(
-        1 for v in violations if v.get("severity", "error") == "error"
-    )
-    warning_count = sum(
-        1 for v in violations if v.get("severity", "error") == "warning"
-    )
+    error_count = sum(1 for v in violations if v.get("severity", "error") == "error")
+    warning_count = sum(1 for v in violations if v.get("severity", "error") == "warning")
 
     return {
         "violations": violations,

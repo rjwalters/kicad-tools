@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 _STUB = 2.54
 
 
-def _stub_endpoint_would_collide(sch: "Schematic", x: float, y: float) -> bool:
+def _stub_endpoint_would_collide(sch: Schematic, x: float, y: float) -> bool:
     """Check whether a point ``(x, y)`` lands on an existing wire interior.
 
     Used by ``_emit_pin_net_stub`` to decide whether the symbol-center
@@ -73,7 +73,7 @@ def _stub_endpoint_would_collide(sch: "Schematic", x: float, y: float) -> bool:
 
 
 def _emit_pin_net_stub(
-    sch: "Schematic",
+    sch: Schematic,
     pin_pos: tuple[float, float],
     x_center: float,
     net_name: str,

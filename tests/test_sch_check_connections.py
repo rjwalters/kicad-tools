@@ -9,11 +9,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_check_connections import (
-    PinStatus,
     check_symbol_connections,
+)
+from kicad_tools.cli.sch_check_connections import (
     main as connections_main,
 )
 from kicad_tools.schema import Schematic
@@ -400,10 +399,7 @@ class TestJsonOutput:
         data = json.loads(captured.out)
 
         # Find pin 2 of R1 -- should have connection_type "no_connect"
-        nc_pins = [
-            p for p in data["pins"]
-            if p["reference"] == "R1" and p["pin_number"] == "2"
-        ]
+        nc_pins = [p for p in data["pins"] if p["reference"] == "R1" and p["pin_number"] == "2"]
         assert len(nc_pins) == 1
         assert nc_pins[0]["connection_type"] == "no_connect"
         assert nc_pins[0]["connected"] is True

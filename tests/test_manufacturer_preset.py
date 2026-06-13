@@ -11,23 +11,22 @@ Covers:
 
 import pytest
 
+from kicad_tools.export.pnp import (
+    GenericPnPFormatter,
+    JLCPCBPnPFormatter,
+    PCBWayPnPFormatter,
+    PlacementData,
+    PnPExportConfig,
+    export_pnp,
+    get_pnp_formatter,
+)
 from kicad_tools.manufacturers import (
     FileNamingConvention,
     get_profile,
     load_rotation_corrections,
     match_rotation_correction,
 )
-from kicad_tools.manufacturers.base import ManufacturerProfile, DesignRules
-from kicad_tools.export.pnp import (
-    JLCPCBPnPFormatter,
-    PCBWayPnPFormatter,
-    GenericPnPFormatter,
-    PlacementData,
-    PnPExportConfig,
-    get_pnp_formatter,
-    export_pnp,
-)
-
+from kicad_tools.manufacturers.base import DesignRules, ManufacturerProfile
 
 # ---------------------------------------------------------------------------
 # ManufacturerProfile extended fields
@@ -315,7 +314,8 @@ class TestUnifiedPresetResolution:
 
     def test_assembly_package_get_rotation_corrections(self):
         """_get_rotation_corrections resolves from manufacturer profile."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         from kicad_tools.export.assembly import AssemblyPackage
 
         mock_pcb = MagicMock()
@@ -334,12 +334,14 @@ class TestUnifiedPresetResolution:
                 assert len(corrections) > 0
                 # Verify a known JLCPCB correction
                 from kicad_tools.manufacturers.base import match_rotation_correction
+
                 assert match_rotation_correction("SOT-23", corrections) == 180.0
 
     def test_assembly_package_unknown_manufacturer_returns_none(self):
         """_get_rotation_corrections returns None for unknown manufacturers."""
-        from kicad_tools.export.assembly import AssemblyPackage
         from unittest.mock import MagicMock
+
+        from kicad_tools.export.assembly import AssemblyPackage
 
         pkg = AssemblyPackage.__new__(AssemblyPackage)
         pkg.pcb_path = MagicMock()

@@ -7,19 +7,16 @@ no-op when already connected, no existing connection, and error cases.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_reconnect_pin import (
-    PlannedAction,
     _is_power_net,
     _make_power_lib_sym,
     execute_reconnect,
-    main as reconnect_main,
     plan_reconnect,
-    trace_stub,
+)
+from kicad_tools.cli.sch_reconnect_pin import (
+    main as reconnect_main,
 )
 from kicad_tools.schema import LibraryManager, Schematic
 
@@ -145,12 +142,8 @@ class TestPowerToPowerReconnect:
         execute_reconnect(sch, pos, stub, "GNDD")
 
         # Verify: GNDA symbol removed, GNDD symbol present
-        gnda_symbols = [
-            s for s in sch.symbols if s.lib_id == "power:GNDA"
-        ]
-        gndd_symbols = [
-            s for s in sch.symbols if s.lib_id == "power:GNDD"
-        ]
+        gnda_symbols = [s for s in sch.symbols if s.lib_id == "power:GNDA"]
+        gndd_symbols = [s for s in sch.symbols if s.lib_id == "power:GNDD"]
         assert len(gnda_symbols) == 0, "GNDA should be removed"
         assert len(gndd_symbols) == 1, "GNDD should be added"
 
@@ -279,9 +272,9 @@ class TestDryRun:
         sch_file.write_text(SCHEMATIC_POWER_STUB)
         original = sch_file.read_text()
 
-        result = reconnect_main([
-            str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD", "--dry-run"
-        ])
+        result = reconnect_main(
+            [str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD", "--dry-run"]
+        )
 
         assert result == 0
         assert sch_file.read_text() == original, "File should not be modified in dry-run"
@@ -294,9 +287,9 @@ class TestBackup:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_POWER_STUB)
 
-        result = reconnect_main([
-            str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD", "--backup"
-        ])
+        result = reconnect_main(
+            [str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD", "--backup"]
+        )
 
         assert result == 0
         backups = list(tmp_path.glob("test.kicad_sch.backup-*"))
@@ -310,24 +303,28 @@ class TestErrorCases:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_POWER_STUB)
 
-        result = reconnect_main([
-            str(sch_file), "--ref", "C999", "--pin", "2", "--to-net", "GNDD"
-        ])
+        result = reconnect_main([str(sch_file), "--ref", "C999", "--pin", "2", "--to-net", "GNDD"])
         assert result == 1
 
     def test_invalid_pin(self, tmp_path: Path):
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_POWER_STUB)
 
-        result = reconnect_main([
-            str(sch_file), "--ref", "C1", "--pin", "99", "--to-net", "GNDD"
-        ])
+        result = reconnect_main([str(sch_file), "--ref", "C1", "--pin", "99", "--to-net", "GNDD"])
         assert result == 1
 
     def test_missing_schematic(self, tmp_path: Path):
-        result = reconnect_main([
-            str(tmp_path / "nonexistent.kicad_sch"), "--ref", "C1", "--pin", "2", "--to-net", "GNDD"
-        ])
+        result = reconnect_main(
+            [
+                str(tmp_path / "nonexistent.kicad_sch"),
+                "--ref",
+                "C1",
+                "--pin",
+                "2",
+                "--to-net",
+                "GNDD",
+            ]
+        )
         assert result == 1
 
 
@@ -670,9 +667,7 @@ class TestCLIIntegration:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_POWER_STUB)
 
-        result = reconnect_main([
-            str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD"
-        ])
+        result = reconnect_main([str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD"])
         assert result == 0
 
         # Reload and verify
@@ -686,9 +681,9 @@ class TestCLIIntegration:
         sch_file = tmp_path / "test.kicad_sch"
         sch_file.write_text(SCHEMATIC_POWER_STUB)
 
-        result = reconnect_main([
-            str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD", "--dry-run"
-        ])
+        result = reconnect_main(
+            [str(sch_file), "--ref", "C1", "--pin", "2", "--to-net", "GNDD", "--dry-run"]
+        )
         assert result == 0
 
 

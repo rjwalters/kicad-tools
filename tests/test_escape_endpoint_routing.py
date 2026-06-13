@@ -7,8 +7,7 @@ that RSMT edges connect escape endpoints correctly.
 
 import pytest
 
-from kicad_tools.router.escape import EscapeRoute, EscapeRouter, PackageType
-from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.escape import EscapeRoute
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Segment
 from kicad_tools.router.rules import DesignRules
@@ -37,16 +36,22 @@ def _make_pad(
     )
 
 
-def _make_escape_route(pad: Pad, escape_x: float, escape_y: float, escape_layer: Layer | None = None) -> EscapeRoute:
+def _make_escape_route(
+    pad: Pad, escape_x: float, escape_y: float, escape_layer: Layer | None = None
+) -> EscapeRoute:
     """Create a minimal EscapeRoute for testing."""
     from kicad_tools.router.escape import EscapeDirection
 
     elayer = escape_layer or pad.layer
     seg = Segment(
-        x1=pad.x, y1=pad.y,
-        x2=escape_x, y2=escape_y,
-        width=0.15, layer=elayer,
-        net=pad.net, net_name=pad.net_name,
+        x1=pad.x,
+        y1=pad.y,
+        x2=escape_x,
+        y2=escape_y,
+        width=0.15,
+        layer=elayer,
+        net=pad.net,
+        net_name=pad.net_name,
     )
     return EscapeRoute(
         pad=pad,
@@ -79,28 +84,32 @@ class TestEscapePadOverrides:
         pads = []
         net = 1
         for i in range(10):
-            pads.append({
-                "x": 10.0 + i * 0.65,
-                "y": 13.0,
-                "width": 0.3,
-                "height": 0.8,
-                "net": net,
-                "net_name": f"NET_{net}",
-                "layer": Layer.F_CU,
-                "number": str(i + 1),
-            })
+            pads.append(
+                {
+                    "x": 10.0 + i * 0.65,
+                    "y": 13.0,
+                    "width": 0.3,
+                    "height": 0.8,
+                    "net": net,
+                    "net_name": f"NET_{net}",
+                    "layer": Layer.F_CU,
+                    "number": str(i + 1),
+                }
+            )
             net += 1
         for i in range(10):
-            pads.append({
-                "x": 10.0 + i * 0.65,
-                "y": 17.0,
-                "width": 0.3,
-                "height": 0.8,
-                "net": net,
-                "net_name": f"NET_{net}",
-                "layer": Layer.F_CU,
-                "number": str(i + 11),
-            })
+            pads.append(
+                {
+                    "x": 10.0 + i * 0.65,
+                    "y": 17.0,
+                    "width": 0.3,
+                    "height": 0.8,
+                    "net": net,
+                    "net_name": f"NET_{net}",
+                    "layer": Layer.F_CU,
+                    "number": str(i + 11),
+                }
+            )
             net += 1
 
         router.add_component("U1", pads)
@@ -137,6 +146,7 @@ class TestEscapePadOverrides:
             assert virtual_pad.net == original_pad.net
             assert virtual_pad.ref == original_pad.ref
             assert virtual_pad.pin == original_pad.pin
+
 
 class TestRSMTUsesEscapeEndpoints:
     """Test that build_rsmt uses virtual pad positions."""
@@ -202,10 +212,7 @@ class TestMixedEscapedAndOriginalPads:
 
         # Simulate what _route_net_with_corridor does
         pad_keys = router.nets[1]
-        pad_objs = [
-            router._escape_pad_overrides.get(p, router.pads[p])
-            for p in pad_keys
-        ]
+        pad_objs = [router._escape_pad_overrides.get(p, router.pads[p]) for p in pad_keys]
 
         # Pad A should be the virtual pad
         assert pad_objs[0].x == 6.0
@@ -259,6 +266,4 @@ class TestEscapeLayerPreserved:
 
         # Verify layer is B.Cu (escape layer), not F.Cu (original)
         resolved = router._escape_pad_overrides.get(("U1", "1"), router.pads[("U1", "1")])
-        assert resolved.layer == Layer.B_CU, (
-            f"Expected escape layer B.Cu but got {resolved.layer}"
-        )
+        assert resolved.layer == Layer.B_CU, f"Expected escape layer B.Cu but got {resolved.layer}"

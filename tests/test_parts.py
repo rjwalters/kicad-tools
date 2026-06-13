@@ -1397,9 +1397,7 @@ class TestLCSCClientCircuitBreaker:
 
         mock_response = MagicMock()
         mock_response.status_code = 403
-        mock_response.raise_for_status.side_effect = requests.HTTPError(
-            response=mock_response
-        )
+        mock_response.raise_for_status.side_effect = requests.HTTPError(response=mock_response)
 
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             mock_session.return_value.post.return_value = mock_response
@@ -1424,9 +1422,7 @@ class TestLCSCClientCircuitBreaker:
 
         mock_response = MagicMock()
         mock_response.status_code = 403
-        mock_response.raise_for_status.side_effect = requests.HTTPError(
-            response=mock_response
-        )
+        mock_response.raise_for_status.side_effect = requests.HTTPError(response=mock_response)
 
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             mock_session.return_value.post.return_value = mock_response
@@ -1459,9 +1455,7 @@ class TestLCSCClientCircuitBreaker:
         from kicad_tools.parts import LCSCClient, PartsCache
 
         cache = PartsCache(db_path=tmp_path / "cache.db")
-        client = LCSCClient(
-            cache=cache, rate_limit=0, max_retries=2, base_retry_delay=0.01
-        )
+        client = LCSCClient(cache=cache, rate_limit=0, max_retries=2, base_retry_delay=0.01)
 
         mock_response_429 = MagicMock()
         mock_response_429.status_code = 429

@@ -7,7 +7,6 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.parallel import (
     GridRegion,
     RegionBasedNegotiatedRouter,
-    RegionPartition,
     classify_nets_by_region,
     partition_grid_into_regions,
 )
@@ -50,9 +49,7 @@ class TestGridRegion:
     def test_is_adjacent_diagonal(self):
         """Test that diagonal neighbors are not adjacent."""
         region1 = GridRegion(id=0, row=0, col=0, min_gx=0, max_gx=10, min_gy=0, max_gy=10)
-        region_diagonal = GridRegion(
-            id=3, row=1, col=1, min_gx=10, max_gx=20, min_gy=10, max_gy=20
-        )
+        region_diagonal = GridRegion(id=3, row=1, col=1, min_gx=10, max_gx=20, min_gy=10, max_gy=20)
         assert not region1.is_adjacent(region_diagonal)
 
     def test_is_adjacent_same_region(self):
@@ -463,9 +460,7 @@ class TestRegionParallelAutoGate:
             )
         return router
 
-    def test_gate_disables_region_parallel_on_small_workload(
-        self, small_workload_router, capsys
-    ):
+    def test_gate_disables_region_parallel_on_small_workload(self, small_workload_router, capsys):
         """Default threshold disables region_parallel when 4 nets / 4 regions."""
         small_workload_router.route_all_negotiated(
             max_iterations=1,
@@ -502,9 +497,7 @@ class TestRegionParallelAutoGate:
         # thread-safe grid conversion.
         assert small_workload_router.grid.thread_safe
 
-    def test_gate_allows_region_parallel_above_threshold(
-        self, small_workload_router, capsys
-    ):
+    def test_gate_allows_region_parallel_above_threshold(self, small_workload_router, capsys):
         """A low threshold lets a small workload through unchanged."""
         # 4 nets / 4 regions = 1.0 nets/region.  Threshold = 1 means
         # nets_per_region (1.0) is NOT < threshold (1), so gate does not fire.
@@ -520,9 +513,7 @@ class TestRegionParallelAutoGate:
         assert "Region parallel: auto-disabled" not in captured.out
         assert small_workload_router.grid.thread_safe
 
-    def test_gate_passthrough_when_region_parallel_false(
-        self, small_workload_router, capsys
-    ):
+    def test_gate_passthrough_when_region_parallel_false(self, small_workload_router, capsys):
         """Gate must not fire when region_parallel is not requested."""
         small_workload_router.route_all_negotiated(
             max_iterations=1,

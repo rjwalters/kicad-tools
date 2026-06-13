@@ -424,7 +424,7 @@ class FailureAnalysis:
             area_w = self.failure_area.width
             area_h = self.failure_area.height
             center = self.failure_area.center
-            desc = f"No path exists on available layers"
+            desc = "No path exists on available layers"
             if area_w > 0 and area_h > 0:
                 desc += f"\n            Blocked area: {area_w:.0f}x{area_h:.0f}mm around ({center[0]:.1f}, {center[1]:.1f})"
         elif self.root_cause == FailureCause.VIA_BLOCKED:
@@ -475,7 +475,7 @@ class CongestionMap:
         component_weight: float = 1.0,
         trace_weight: float = 0.5,
         via_weight: float = 0.3,
-        region: "Rectangle | None" = None,
+        region: Rectangle | None = None,
         stride: int = 1,
     ):
         """Initialize congestion map.
@@ -1400,7 +1400,7 @@ class RootCauseAnalyzer:
 
         if cause == FailureCause.CONGESTION:
             if num_layers < 4:
-                suggestions.append(f"Consider 6-layer stackup or placement adjustment")
+                suggestions.append("Consider 6-layer stackup or placement adjustment")
                 actionable.append(
                     ActionableSuggestion(
                         category="layer_stack",
@@ -1951,23 +1951,13 @@ def name_unfixable_constraint(
             "(via_in_pad_supported = false)."
         )
     if cause == FailureCause.CLEARANCE:
-        return (
-            f"Cannot route{ref_part} without violating {mfr_name} "
-            "minimum clearance."
-        )
+        return f"Cannot route{ref_part} without violating {mfr_name} minimum clearance."
     if cause == FailureCause.VIA_BLOCKED:
-        return (
-            f"Cannot place via{ref_part} on {mfr_name}: via geometry "
-            "exceeds available space."
-        )
+        return f"Cannot place via{ref_part} on {mfr_name}: via geometry exceeds available space."
     if cause == FailureCause.CONGESTION:
-        return (
-            f"Routing congestion{ref_part}: insufficient layer capacity "
-            "for the design."
-        )
+        return f"Routing congestion{ref_part}: insufficient layer capacity for the design."
     if cause == FailureCause.BLOCKED_PATH:
         return (
-            f"Path blocked{ref_part}: placement is forcing routing through "
-            "an obstructed corridor."
+            f"Path blocked{ref_part}: placement is forcing routing through an obstructed corridor."
         )
     return f"Routing failed{ref_part}: {cause.description}."

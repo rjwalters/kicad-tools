@@ -29,9 +29,7 @@ class _FakeLibSymbol:
     def __init__(self, pin_positions_abs: dict[str, tuple[float, float]]):
         self._abs = pin_positions_abs
 
-    def get_all_pin_positions(
-        self, instance_pos, instance_rot=0, mirror="", snap_to_grid=True
-    ):
+    def get_all_pin_positions(self, instance_pos, instance_rot=0, mirror="", snap_to_grid=True):
         return dict(self._abs)
 
 
@@ -62,8 +60,15 @@ def _no_connect(x: float, y: float):
     return SimpleNamespace(position=(x, y))
 
 
-def _sheet(symbols=None, wires=None, junctions=None, labels=None,
-           global_labels=None, hierarchical_labels=None, no_connects=None):
+def _sheet(
+    symbols=None,
+    wires=None,
+    junctions=None,
+    labels=None,
+    global_labels=None,
+    hierarchical_labels=None,
+    no_connects=None,
+):
     return SimpleNamespace(
         symbols=symbols or [],
         wires=wires or [],
@@ -255,14 +260,16 @@ class TestWireStubDetection:
 
     def test_multiple_stubs_each_reported(self):
         """Replicates the chorus-test pattern: many wires all 1 grid short."""
-        lib = _FakeLibSymbol({
-            "8": (83.82, 72.39),
-            "10": (83.82, 74.93),
-            "12": (83.82, 85.09),
-        })
+        lib = _FakeLibSymbol(
+            {
+                "8": (83.82, 72.39),
+                "10": (83.82, 74.93),
+                "12": (83.82, 85.09),
+            }
+        )
         j2 = _symbol("J2", "Conn:Test")
-        w_tx = _wire(66.04, 72.39, 81.28, 72.39)   # UART_TX
-        w_rx = _wire(66.04, 74.93, 81.28, 74.93)   # UART_RX
+        w_tx = _wire(66.04, 72.39, 81.28, 72.39)  # UART_TX
+        w_rx = _wire(66.04, 74.93, 81.28, 74.93)  # UART_RX
         w_bclk = _wire(54.61, 85.09, 81.28, 85.09)  # I2S_BCLK
         sheet = _sheet(symbols=[j2], wires=[w_tx, w_rx, w_bclk])
 
@@ -337,13 +344,11 @@ class TestWireStubSharedCorners:
         lib = _FakeLibSymbol({"1": (101.6, 119.38)})
         flg = _symbol("#FLG03", "power:PWR_FLAG")
         horiz = _wire(93.98, 119.38, 101.6, 119.38)  # reaches pin
-        vert = _wire(93.98, 107.95, 93.98, 119.38)   # joins corner
+        vert = _wire(93.98, 107.95, 93.98, 119.38)  # joins corner
         # The (93.98, 107.95) endpoint needs an anchor so it doesn't
         # fire the rule on its own — give it a label.
         lbl = _label_at(93.98, 107.95)
-        sheet = _sheet(
-            symbols=[flg], wires=[horiz, vert], global_labels=[lbl]
-        )
+        sheet = _sheet(symbols=[flg], wires=[horiz, vert], global_labels=[lbl])
 
         findings = find_wire_stubs(
             sheets=[("power.kicad_sch", sheet)],

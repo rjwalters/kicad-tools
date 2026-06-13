@@ -5,8 +5,12 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .violation import ERCViolation, ERCViolationType, Severity
+
+if TYPE_CHECKING:
+    from kicad_tools.validate.filters import ViolationFilter
 
 
 @dataclass
@@ -66,7 +70,7 @@ class ERCReport:
             A new :class:`ERCReport` containing only the kept violations
             (those not suppressed by ``action="ignore"`` rules).
         """
-        from kicad_tools.validate.filters import FilterEngine, ViolationFilter
+        from kicad_tools.validate.filters import FilterEngine
 
         engine = FilterEngine(filters)
         result = engine.apply(self.violations)

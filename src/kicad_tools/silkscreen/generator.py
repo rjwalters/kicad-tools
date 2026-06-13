@@ -174,9 +174,7 @@ class SilkscreenGenerator:
         for tag, text in markings:
             existing_uuid = self._lookup_registry_uuid(tag)
             existing_node = (
-                self._find_gr_text_by_uuid(existing_uuid)
-                if existing_uuid is not None
-                else None
+                self._find_gr_text_by_uuid(existing_uuid) if existing_uuid is not None else None
             )
 
             if existing_node is not None:
@@ -184,17 +182,13 @@ class SilkscreenGenerator:
                 if existing_text is not None and str(existing_text) == text:
                     # Same content already on the board: skip.
                     result.markings_skipped += 1
-                    result.messages.append(
-                        f"Marking '{tag}' already exists, skipped"
-                    )
+                    result.messages.append(f"Marking '{tag}' already exists, skipped")
                     continue
                 # Content differs (rename or revision bump): drop the old
                 # gr_text and registry row, then re-add below.
                 self.doc.remove(existing_node)
                 self._drop_registry_entry(tag)
-                result.messages.append(
-                    f"Replaced stale marking '{tag}'"
-                )
+                result.messages.append(f"Replaced stale marking '{tag}'")
             elif existing_uuid is not None:
                 # Registry knows about this tag but the gr_text is gone
                 # (user deleted it). Drop the stale row and re-add.
@@ -258,9 +252,7 @@ class SilkscreenGenerator:
             return []
 
         if not isinstance(data, dict):
-            logger.warning(
-                "Sidecar %s has unexpected shape; ignoring.", sidecar_path
-            )
+            logger.warning("Sidecar %s has unexpected shape; ignoring.", sidecar_path)
             return []
 
         markings = data.get("markings")
@@ -283,9 +275,7 @@ class SilkscreenGenerator:
         return clean
 
     @staticmethod
-    def _write_sidecar(
-        sidecar_path: Path, registry: list[dict[str, Any]]
-    ) -> None:
+    def _write_sidecar(sidecar_path: Path, registry: list[dict[str, Any]]) -> None:
         """Atomically write the sidecar registry to disk.
 
         If the registry is empty and no sidecar exists, nothing is
@@ -440,15 +430,13 @@ class SilkscreenGenerator:
             text_node.remove(hide_node)
         # Remove bare "hide" atoms from direct children
         text_node.children = [
-            c for c in text_node.children
-            if not (c.is_atom and str(c.value) == "hide")
+            c for c in text_node.children if not (c.is_atom and str(c.value) == "hide")
         ]
         # Remove from effects node
         effects = text_node.find("effects")
         if effects is not None:
             effects.children = [
-                c for c in effects.children
-                if not (c.is_atom and str(c.value) == "hide")
+                c for c in effects.children if not (c.is_atom and str(c.value) == "hide")
             ]
             hide_in_effects = effects.find("hide")
             if hide_in_effects is not None:

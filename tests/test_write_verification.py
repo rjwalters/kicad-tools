@@ -4,18 +4,18 @@ Covers the fix for issue #1944: zones batch and stitch commands silently
 fail to persist changes.
 """
 
-import pytest
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.core.sexp_file import (
+    WriteVerificationError,
     load_pcb,
     save_pcb,
     verify_pcb_write,
-    WriteVerificationError,
 )
-from kicad_tools.sexp import SExp, parse_string
-from kicad_tools.sexp.builders import via_node, zone_node, segment_node
-
+from kicad_tools.sexp import parse_string
+from kicad_tools.sexp.builders import segment_node, via_node, zone_node
 
 # ---------------------------------------------------------------------------
 # Minimal PCB fixture text

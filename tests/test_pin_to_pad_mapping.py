@@ -14,7 +14,6 @@ from kicad_tools.operations.netlist import (
 )
 from kicad_tools.schema.pcb import PCB
 
-
 # ---------------------------------------------------------------------------
 # PCB fixture: a 4-pad IC (U1) whose pads are numbered "A", "B", "C", "D"
 # instead of sequential "1", "2", "3", "4".
@@ -97,14 +96,22 @@ class TestAssignNetsWithPinToPadMap:
         netlist = Netlist(
             tool="kicad-tools (Python fallback)",
             nets=[
-                NetlistNet(code=1, name="VCC", nodes=[
-                    NetNode(reference="R1", pin="1"),
-                    NetNode(reference="C1", pin="1"),
-                ]),
-                NetlistNet(code=2, name="GND", nodes=[
-                    NetNode(reference="R1", pin="2"),
-                    NetNode(reference="C1", pin="2"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="R1", pin="1"),
+                        NetNode(reference="C1", pin="1"),
+                    ],
+                ),
+                NetlistNet(
+                    code=2,
+                    name="GND",
+                    nodes=[
+                        NetNode(reference="R1", pin="2"),
+                        NetNode(reference="C1", pin="2"),
+                    ],
+                ),
             ],
         )
 
@@ -138,18 +145,34 @@ class TestAssignNetsWithPinToPadMap:
         netlist = Netlist(
             tool="kicad-tools (Python fallback)",
             nets=[
-                NetlistNet(code=1, name="VCC", nodes=[
-                    NetNode(reference="U1", pin="1"),
-                ]),
-                NetlistNet(code=2, name="GND", nodes=[
-                    NetNode(reference="U1", pin="2"),
-                ]),
-                NetlistNet(code=3, name="SDA", nodes=[
-                    NetNode(reference="U1", pin="3"),
-                ]),
-                NetlistNet(code=4, name="SCL", nodes=[
-                    NetNode(reference="U1", pin="4"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="U1", pin="1"),
+                    ],
+                ),
+                NetlistNet(
+                    code=2,
+                    name="GND",
+                    nodes=[
+                        NetNode(reference="U1", pin="2"),
+                    ],
+                ),
+                NetlistNet(
+                    code=3,
+                    name="SDA",
+                    nodes=[
+                        NetNode(reference="U1", pin="3"),
+                    ],
+                ),
+                NetlistNet(
+                    code=4,
+                    name="SCL",
+                    nodes=[
+                        NetNode(reference="U1", pin="4"),
+                    ],
+                ),
             ],
         )
 
@@ -183,9 +206,13 @@ class TestAssignNetsWithPinToPadMap:
 
         netlist = Netlist(
             nets=[
-                NetlistNet(code=1, name="VCC", nodes=[
-                    NetNode(reference="R1", pin="1"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="R1", pin="1"),
+                    ],
+                ),
             ],
         )
 
@@ -199,12 +226,20 @@ class TestAssignNetsWithPinToPadMap:
 
         netlist = Netlist(
             nets=[
-                NetlistNet(code=1, name="VCC", nodes=[
-                    NetNode(reference="R1", pin="1"),
-                ]),
-                NetlistNet(code=2, name="GND", nodes=[
-                    NetNode(reference="R1", pin="2"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="R1", pin="1"),
+                    ],
+                ),
+                NetlistNet(
+                    code=2,
+                    name="GND",
+                    nodes=[
+                        NetNode(reference="R1", pin="2"),
+                    ],
+                ),
             ],
         )
 
@@ -225,9 +260,13 @@ class TestAssignNetsWithPinToPadMap:
         # Netlist uses numeric pins but footprint has alpha pads
         netlist = Netlist(
             nets=[
-                NetlistNet(code=1, name="VCC", nodes=[
-                    NetNode(reference="U1", pin="1"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="U1", pin="1"),
+                    ],
+                ),
             ],
         )
 
@@ -242,9 +281,13 @@ class TestAssignNetsWithPinToPadMap:
 
         netlist = Netlist(
             nets=[
-                NetlistNet(code=1, name="VCC", nodes=[
-                    NetNode(reference="U1", pin="1"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="U1", pin="1"),
+                    ],
+                ),
             ],
         )
 

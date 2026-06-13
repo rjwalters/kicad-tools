@@ -30,7 +30,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def load_design_rules_from_yaml(manufacturer_id: str) -> dict[str, "DesignRules"]:
+def load_design_rules_from_yaml(manufacturer_id: str) -> dict[str, DesignRules]:
     """
     Load design rules from a YAML configuration file.
 

@@ -170,8 +170,7 @@ class TestTransactionDeleteItems:
 
         # Should have called DeleteItems
         delete_calls = [
-            c for c in mock_client.send_command.call_args_list
-            if c[0][0] == "DeleteItems"
+            c for c in mock_client.send_command.call_args_list if c[0][0] == "DeleteItems"
         ]
         assert len(delete_calls) == 1
         assert delete_calls[0][1]["params"]["item_ids"] == ["id1", "id2"]

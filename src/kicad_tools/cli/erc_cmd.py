@@ -20,7 +20,13 @@ import json
 import sys
 from pathlib import Path
 
-from ..erc import ERC_CATEGORIES, ERC_TYPE_DESCRIPTIONS, ERCReport, ERCViolation, check_cross_sheet_duplicates
+from ..erc import (
+    ERC_CATEGORIES,
+    ERC_TYPE_DESCRIPTIONS,
+    ERCReport,
+    ERCViolation,
+    check_cross_sheet_duplicates,
+)
 from .runner import find_kicad_cli, run_erc
 
 
@@ -191,8 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.format == "summary":
         output_summary(violations, report, filtered_count=filter_ignored_count)
     else:
-        output_table(violations, report, args.verbose, args.by_sheet,
-                      filtered_count=filter_ignored_count)
+        output_table(
+            violations, report, args.verbose, args.by_sheet, filtered_count=filter_ignored_count
+        )
 
     # Exit code
     error_count = sum(1 for v in violations if v.is_error)
@@ -366,8 +373,7 @@ def _print_single(v: ERCViolation, verbose: bool, indent: str = "  ") -> None:
                 print(f"{indent}      - {suggestion}")
 
 
-def output_json(violations: list[ERCViolation], report: ERCReport,
-                 filtered_count: int = 0) -> None:
+def output_json(violations: list[ERCViolation], report: ERCReport, filtered_count: int = 0) -> None:
     """Output violations as JSON."""
     summary: dict = {
         "errors": sum(1 for v in violations if v.is_error),
@@ -385,8 +391,9 @@ def output_json(violations: list[ERCViolation], report: ERCReport,
     print(json.dumps(data, indent=2))
 
 
-def output_summary(violations: list[ERCViolation], report: ERCReport,
-                    filtered_count: int = 0) -> None:
+def output_summary(
+    violations: list[ERCViolation], report: ERCReport, filtered_count: int = 0
+) -> None:
     """Output violation summary by type."""
     if not violations:
         if filtered_count > 0:

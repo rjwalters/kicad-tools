@@ -90,9 +90,7 @@ def _approx_eq(a: float, b: float, eps: float = _COORD_EPS) -> bool:
     return abs(a - b) <= eps
 
 
-def _approx_point(
-    p: tuple[float, float], q: tuple[float, float], eps: float = _COORD_EPS
-) -> bool:
+def _approx_point(p: tuple[float, float], q: tuple[float, float], eps: float = _COORD_EPS) -> bool:
     return _approx_eq(p[0], q[0], eps) and _approx_eq(p[1], q[1], eps)
 
 
@@ -129,9 +127,7 @@ def _endpoint_is_connected(
     for nx, ny in no_connects:
         if _approx_eq(nx, ex) and _approx_eq(ny, ey):
             return True
-    return any(
-        _approx_eq(ox, ex) and _approx_eq(oy, ey) for ox, oy in other_wires_endpoints
-    )
+    return any(_approx_eq(ox, ex) and _approx_eq(oy, ey) for ox, oy in other_wires_endpoints)
 
 
 def _find_grid_aligned_pin(

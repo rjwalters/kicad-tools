@@ -4,16 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _is_i2c_net,
     _is_resistor,
     _tokenize_name,
     check_i2c_pullups,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for helper functions
@@ -157,12 +153,14 @@ def _make_lib_symbol(
 
 
 def _make_symbol_instance(
-    ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    ref: str,
+    lib_id: str,
+    pins: list[tuple[str, str, str]],
+    x: float,
+    y: float,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -175,7 +173,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -315,10 +313,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert len(warnings) == 2
         net_names = {w.message.split("'")[1] for w in warnings}
         assert net_names == {"SDA", "SCL"}
@@ -374,10 +369,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert warnings == []
 
     def test_resistor_to_gnd_not_pullup(self, tmp_path: Path):
@@ -414,10 +406,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert len(warnings) == 1
         assert "SDA" in warnings[0].message
 
@@ -442,10 +431,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert len(warnings) == 2
         net_names = {w.message.split("'")[1] for w in warnings}
         assert net_names == {"I2C1_SDA", "I2C1_SCL"}
@@ -473,10 +459,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert warnings == []
 
     def test_twi_sda_detected(self, tmp_path: Path):
@@ -500,10 +483,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert len(warnings) == 2
 
     def test_pullup_to_3v3_accepted(self, tmp_path: Path):
@@ -537,10 +517,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert warnings == []
 
     def test_warning_includes_net_name(self, tmp_path: Path):
@@ -562,10 +539,7 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert len(warnings) == 1
         assert "I2C1_SDA" in warnings[0].message
         assert "pull-up" in warnings[0].message
@@ -589,9 +563,6 @@ class TestCheckI2CPullups:
         sch_path.write_text(sch_text)
 
         issues = check_i2c_pullups(str(sch_path))
-        warnings = [
-            i for i in issues
-            if i.category == "i2c_pullups" and i.severity == "warning"
-        ]
+        warnings = [i for i in issues if i.category == "i2c_pullups" and i.severity == "warning"]
         assert len(warnings) == 1
         assert warnings[0].location != ""

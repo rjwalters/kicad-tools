@@ -21,7 +21,6 @@ import numpy as np
 from kicad_tools.acceleration.backend import (
     ArrayBackend,
     BackendType,
-    get_array_pool,
     get_backend,
     get_best_available_backend,
 )
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
 
     from kicad_tools.optim.components import Component
     from kicad_tools.optim.config import PlacementConfig
-    from kicad_tools.optim.geometry import Polygon, Vector2D
+    from kicad_tools.optim.geometry import Vector2D
     from kicad_tools.performance import PerformanceConfig
 
 
@@ -285,7 +284,9 @@ def compute_pairwise_repulsion_gpu(
             r_vecs = src_centers_exp - comp_centers_chunk  # (chunk, 2)
 
             # 2D cross product: r.x * F.y - r.y * F.x
-            torque_contrib = r_vecs[:, 0] * edge_forces[:, 1] - r_vecs[:, 1] * edge_forces[:, 0]  # (chunk,)
+            torque_contrib = (
+                r_vecs[:, 0] * edge_forces[:, 1] - r_vecs[:, 1] * edge_forces[:, 0]
+            )  # (chunk,)
 
             # GPU-native scatter-add for torques
             torques_accum = backend.scatter_add(torques_accum, src_comp, torque_contrib)
@@ -374,10 +375,7 @@ class PlacementGPUAccelerator:
             return {}, {}
 
         # Re-extract edges if batch not prepared or component count changed
-        if (
-            self._edge_batch is None
-            or len(self._edge_batch.component_centers) != n_components
-        ):
+        if self._edge_batch is None or len(self._edge_batch.component_centers) != n_components:
             self.prepare_batch(components)
 
         backend = self._get_backend(n_components)
@@ -385,9 +383,7 @@ class PlacementGPUAccelerator:
         # Create fixed mask
         fixed_mask = None
         if fixed_refs:
-            fixed_mask = np.array(
-                [comp.ref in fixed_refs for comp in components], dtype=np.bool_
-            )
+            fixed_mask = np.array([comp.ref in fixed_refs for comp in components], dtype=np.bool_)
 
         # Compute forces on GPU
         forces_array, torques_array = compute_pairwise_repulsion_gpu(

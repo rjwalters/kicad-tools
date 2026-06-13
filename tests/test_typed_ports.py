@@ -530,9 +530,7 @@ class TestLDOBlockTypedPorts:
             def _pin_pos(name, _pm=pin_map, _sym=symbol):
                 if name in _pm:
                     return _pm[name]
-                raise PinNotFoundError(
-                    pin_name=name, symbol_name=str(_sym), available_pins=[]
-                )
+                raise PinNotFoundError(pin_name=name, symbol_name=str(_sym), available_pins=[])
 
             mock.pin_position.side_effect = _pin_pos
             return mock

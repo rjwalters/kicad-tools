@@ -4,13 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     check_power_net_shorts,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics with power pins
@@ -57,12 +53,14 @@ def _make_ic_lib_symbol(
 
 
 def _make_symbol_instance(
-    ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    ref: str,
+    lib_id: str,
+    pins: list[tuple[str, str, str]],
+    x: float,
+    y: float,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -75,7 +73,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -255,17 +253,20 @@ class TestCheckPowerNetShorts:
         pin_nets2 = {"1": "BAD_NET", "2": "I2C_SCL"}
 
         sch_text = _make_two_ic_schematic(
-            "IC:ChipA", pins1, pin_nets1, "U1",
-            "IC:ChipB", pins2, pin_nets2, "U2",
+            "IC:ChipA",
+            pins1,
+            pin_nets1,
+            "U1",
+            "IC:ChipB",
+            pins2,
+            pin_nets2,
+            "U2",
         )
         sch_path = tmp_path / "vcc_gnd_short.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_net_shorts(str(sch_path))
-        power_errors = [
-            i for i in issues
-            if i.category == "power_short" and i.severity == "error"
-        ]
+        power_errors = [i for i in issues if i.category == "power_short" and i.severity == "error"]
         assert len(power_errors) >= 1
         assert any("BAD_NET" in i.message for i in power_errors)
         assert any("positive" in i.message and "negative" in i.message for i in power_errors)
@@ -287,10 +288,7 @@ class TestCheckPowerNetShorts:
         sch_path.write_text(sch_text)
 
         issues = check_power_net_shorts(str(sch_path))
-        power_errors = [
-            i for i in issues
-            if i.category == "power_short" and i.severity == "error"
-        ]
+        power_errors = [i for i in issues if i.category == "power_short" and i.severity == "error"]
         assert power_errors == []
 
     def test_multiple_vcc_pins_same_net_ok(self, tmp_path: Path):
@@ -307,24 +305,27 @@ class TestCheckPowerNetShorts:
         pin_nets2 = {"1": "POWER_3V3", "2": "I2C_SCL"}
 
         sch_text = _make_two_ic_schematic(
-            "IC:ChipA", pins1, pin_nets1, "U1",
-            "IC:ChipB", pins2, pin_nets2, "U2",
+            "IC:ChipA",
+            pins1,
+            pin_nets1,
+            "U1",
+            "IC:ChipB",
+            pins2,
+            pin_nets2,
+            "U2",
         )
         sch_path = tmp_path / "multi_vcc.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_net_shorts(str(sch_path))
-        power_errors = [
-            i for i in issues
-            if i.category == "power_short" and i.severity == "error"
-        ]
+        power_errors = [i for i in issues if i.category == "power_short" and i.severity == "error"]
         assert power_errors == []
 
     def test_non_power_pins_ignored(self, tmp_path: Path):
         """Non-power pin types should not be checked for power shorts."""
         pins = [
-            ("1", "VCC", "input"),    # Not power_in -- should be ignored
-            ("2", "GND", "passive"),   # Not power_in -- should be ignored
+            ("1", "VCC", "input"),  # Not power_in -- should be ignored
+            ("2", "GND", "passive"),  # Not power_in -- should be ignored
         ]
         pin_nets = {
             "1": "SHARED_NET",
@@ -335,10 +336,7 @@ class TestCheckPowerNetShorts:
         sch_path.write_text(sch_text)
 
         issues = check_power_net_shorts(str(sch_path))
-        power_errors = [
-            i for i in issues
-            if i.category == "power_short" and i.severity == "error"
-        ]
+        power_errors = [i for i in issues if i.category == "power_short" and i.severity == "error"]
         assert power_errors == []
 
     def test_avcc_agnd_same_net_flagged(self, tmp_path: Path):
@@ -349,17 +347,20 @@ class TestCheckPowerNetShorts:
         pin_nets2 = {"1": "ANALOG_SHORT"}
 
         sch_text = _make_two_ic_schematic(
-            "IC:AnalogA", pins1, pin_nets1, "U1",
-            "IC:AnalogB", pins2, pin_nets2, "U2",
+            "IC:AnalogA",
+            pins1,
+            pin_nets1,
+            "U1",
+            "IC:AnalogB",
+            pins2,
+            pin_nets2,
+            "U2",
         )
         sch_path = tmp_path / "avcc_agnd.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_net_shorts(str(sch_path))
-        power_errors = [
-            i for i in issues
-            if i.category == "power_short" and i.severity == "error"
-        ]
+        power_errors = [i for i in issues if i.category == "power_short" and i.severity == "error"]
         assert len(power_errors) >= 1
         assert any("ANALOG_SHORT" in i.message for i in power_errors)
 
@@ -371,17 +372,20 @@ class TestCheckPowerNetShorts:
         pin_nets2 = {"1": "SHORT_NET"}
 
         sch_text = _make_two_ic_schematic(
-            "IC:A", pins1, pin_nets1, "U1",
-            "IC:B", pins2, pin_nets2, "U2",
+            "IC:A",
+            pins1,
+            pin_nets1,
+            "U1",
+            "IC:B",
+            pins2,
+            pin_nets2,
+            "U2",
         )
         sch_path = tmp_path / "msg_check.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_power_net_shorts(str(sch_path))
-        power_errors = [
-            i for i in issues
-            if i.category == "power_short" and i.severity == "error"
-        ]
+        power_errors = [i for i in issues if i.category == "power_short" and i.severity == "error"]
         assert len(power_errors) == 1
         msg = power_errors[0].message
         assert "U1" in msg

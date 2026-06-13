@@ -152,7 +152,7 @@ def _list_rules() -> int:
 
 def _search_rules(query: str, format_type: str) -> int:
     """Search for rules matching a query."""
-    from kicad_tools.explain import format_result, search_rules
+    from kicad_tools.explain import search_rules
 
     matches = search_rules(query)
 

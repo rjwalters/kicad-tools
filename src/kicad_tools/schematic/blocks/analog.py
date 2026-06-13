@@ -729,7 +729,7 @@ class OvercurrentComparator(CircuitBlock):
         # three pins marked NC.
         unit_offsets = {
             2: (x + 50, y - 40),  # channel B (NC pins)
-            3: (x + 25, y),       # power (V+, V-)
+            3: (x + 25, y),  # power (V+, V-)
         }
         for u in range(2, unit_count + 1):
             if u not in unit_offsets:
@@ -913,4 +913,3 @@ class OvercurrentComparator(CircuitBlock):
         if r_ohms >= 1e3:
             return f"{r_ohms / 1e3:.1f}k"
         return f"{r_ohms:.0f}R"
-

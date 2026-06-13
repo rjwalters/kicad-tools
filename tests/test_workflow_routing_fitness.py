@@ -129,10 +129,10 @@ class TestRunEvolutionaryRoutingFitness:
         sentinel_eval.evaluate_routability = MagicMock(return_value=0.5)
 
         # Patch the evaluator-construction side, then patch the optimizer.
-        with patch.object(wf, "_build_routing_evaluator", return_value=sentinel_eval), patch(
-            "kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb"
-        ) as mock_from_pcb, patch(
-            "kicad_tools.optim.add_keepout_zones"
+        with (
+            patch.object(wf, "_build_routing_evaluator", return_value=sentinel_eval),
+            patch("kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb") as mock_from_pcb,
+            patch("kicad_tools.optim.add_keepout_zones"),
         ):
             # The mocked optimizer needs an .optimize() that returns a stub
             # individual + matching attributes for the result-building code.
@@ -163,9 +163,10 @@ class TestRunEvolutionaryRoutingFitness:
             ),
         )
 
-        with patch(
-            "kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb"
-        ) as mock_from_pcb, patch("kicad_tools.optim.add_keepout_zones"):
+        with (
+            patch("kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb") as mock_from_pcb,
+            patch("kicad_tools.optim.add_keepout_zones"),
+        ):
             mock_optimizer = MagicMock()
             mock_optimizer.components = []
             mock_optimizer.total_wire_length.return_value = 0.0
@@ -194,9 +195,11 @@ class TestRunEvolutionaryRoutingFitness:
 
         sentinel_eval = MagicMock(name="evaluator")
 
-        with patch.object(wf, "_build_routing_evaluator", return_value=sentinel_eval), patch(
-            "kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb"
-        ) as mock_from_pcb, patch("kicad_tools.optim.add_keepout_zones"):
+        with (
+            patch.object(wf, "_build_routing_evaluator", return_value=sentinel_eval),
+            patch("kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb") as mock_from_pcb,
+            patch("kicad_tools.optim.add_keepout_zones"),
+        ):
             mock_optimizer = MagicMock()
             mock_optimizer.components = []
             mock_optimizer.total_wire_length.return_value = 0.0
@@ -233,9 +236,11 @@ class TestRunHybridRoutingFitness:
 
         sentinel_eval = MagicMock(name="evaluator")
 
-        with patch.object(wf, "_build_routing_evaluator", return_value=sentinel_eval), patch(
-            "kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb"
-        ) as mock_from_pcb, patch("kicad_tools.optim.add_keepout_zones"):
+        with (
+            patch.object(wf, "_build_routing_evaluator", return_value=sentinel_eval),
+            patch("kicad_tools.optim.EvolutionaryPlacementOptimizer.from_pcb") as mock_from_pcb,
+            patch("kicad_tools.optim.add_keepout_zones"),
+        ):
             mock_evo_opt = MagicMock()
             mock_evo_opt.components = []
             mock_phys_opt = MagicMock()
@@ -274,11 +279,11 @@ class TestForceDirectedUnaffected:
 
         # _build_routing_evaluator is only called from _run_evolutionary /
         # _run_hybrid — patch at the workflow boundary to guard the contract.
-        with patch.object(
-            wf, "_build_routing_evaluator", return_value=None
-        ) as mock_build, patch(
-            "kicad_tools.optim.PlacementOptimizer.from_pcb"
-        ) as mock_from_pcb, patch("kicad_tools.optim.add_keepout_zones"):
+        with (
+            patch.object(wf, "_build_routing_evaluator", return_value=None) as mock_build,
+            patch("kicad_tools.optim.PlacementOptimizer.from_pcb") as mock_from_pcb,
+            patch("kicad_tools.optim.add_keepout_zones"),
+        ):
             mock_optimizer = MagicMock()
             mock_optimizer.components = []
             mock_optimizer.total_wire_length.return_value = 0.0

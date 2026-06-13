@@ -430,9 +430,7 @@ class NetStatusAnalyzer:
                 if pending_ids:
                     rules = classify_and_apply_rules(pending_ids)
                     result.advisory_incomplete_names = {
-                        n
-                        for n in incomplete_names
-                        if rules.get(n) and rules[n].is_pour_net
+                        n for n in incomplete_names if rules.get(n) and rules[n].is_pour_net
                     }
             except Exception:
                 # Conservative: leave advisory_incomplete_names empty so
@@ -685,16 +683,10 @@ class NetStatusAnalyzer:
                     chain_pads: set[str] = set()
                     for seg_idx in component:
                         seg = segments[seg_idx]
-                        chain_pads.update(
-                            self._find_pads_at_point(seg.start, pad_positions)
-                        )
-                        chain_pads.update(
-                            self._find_pads_at_point(seg.end, pad_positions)
-                        )
+                        chain_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                        chain_pads.update(self._find_pads_at_point(seg.end, pad_positions))
                     # Also include any pads at the via position itself
-                    chain_pads.update(
-                        self._find_pads_at_point(via.position, pad_positions)
-                    )
+                    chain_pads.update(self._find_pads_at_point(via.position, pad_positions))
                     # Connect all pads in this chain through the via
                     chain_list = list(chain_pads)
                     for i, pad in enumerate(chain_list):
@@ -705,12 +697,10 @@ class NetStatusAnalyzer:
         # Build bounding-box indices for zone polygons to avoid O(n*v) point-in-polygon
         # checks for zones whose bounding box doesn't contain the query point.
         boundary_bboxes = [
-            (layer, boundary, self._polygon_bbox(boundary))
-            for layer, boundary in zone_boundaries
+            (layer, boundary, self._polygon_bbox(boundary)) for layer, boundary in zone_boundaries
         ]
         filled_bboxes = [
-            (layer, polys, [self._polygon_bbox(p) for p in polys])
-            for layer, polys in net_zones
+            (layer, polys, [self._polygon_bbox(p) for p in polys]) for layer, polys in net_zones
         ]
 
         # Find zone connection points (via positions that touch zones)
@@ -738,7 +728,7 @@ class NetStatusAnalyzer:
             for via in vias:
                 if not self._via_spans_layer(via.layers, zone_layer):
                     continue
-                for poly, bbox in zip(filled_polys, poly_bboxes):
+                for poly, bbox in zip(filled_polys, poly_bboxes, strict=False):
                     if not self._point_in_bbox(via.position, bbox):
                         continue
                     if self._point_in_polygon(via.position, poly):
@@ -773,7 +763,7 @@ class NetStatusAnalyzer:
             for zone_layer, filled_polys, poly_bboxes in filled_bboxes:
                 if not self._pad_layer_matches_zone(layers, zone_layer):
                     continue
-                for poly, bbox in zip(filled_polys, poly_bboxes):
+                for poly, bbox in zip(filled_polys, poly_bboxes, strict=False):
                     if not self._point_in_bbox(pad_pos, bbox):
                         continue
                     if self._point_in_polygon(pad_pos, poly):

@@ -60,8 +60,11 @@ class SyncResult:
     @property
     def has_changes(self) -> bool:
         return bool(
-            self.added or self.renamed or self.orphaned
-            or self.removed or self.pin_mismatches
+            self.added
+            or self.renamed
+            or self.orphaned
+            or self.removed
+            or self.pin_mismatches
             or self.net_updated
         )
 
@@ -190,14 +193,16 @@ def sync_netlist(
                     severity = "info"
                 else:
                     severity = "warning"
-                result.pin_mismatches.append(PinMismatch(
-                    reference=ref,
-                    schematic_footprint=item.footprint,
-                    pcb_footprint=pcb_info["footprint"],
-                    schematic_pins=sch_pad_count,
-                    pcb_pads=actual_pad_count,
-                    severity=severity,
-                ))
+                result.pin_mismatches.append(
+                    PinMismatch(
+                        reference=ref,
+                        schematic_footprint=item.footprint,
+                        pcb_footprint=pcb_info["footprint"],
+                        schematic_pins=sch_pad_count,
+                        pcb_pads=actual_pad_count,
+                        severity=severity,
+                    )
+                )
 
     # --- Detect renames via value+footprint matching ---
     missing_refs = sch_ref_set - pcb_ref_set
@@ -248,30 +253,32 @@ def sync_netlist(
     # Renames
     for old_ref, new_ref in sorted(rename_map.items()):
         item = sch_components[new_ref]
-        result.renamed.append(SyncAction(
-            action="rename",
-            reference=new_ref,
-            old_reference=old_ref,
-            footprint=item.footprint,
-            value=item.value,
-            detail=f"{old_ref} -> {new_ref}",
-        ))
+        result.renamed.append(
+            SyncAction(
+                action="rename",
+                reference=new_ref,
+                old_reference=old_ref,
+                footprint=item.footprint,
+                value=item.value,
+                detail=f"{old_ref} -> {new_ref}",
+            )
+        )
 
     # Missing components to add
     for ref in sorted(truly_missing):
         item = sch_components[ref]
         if not item.footprint:
-            result.errors.append(
-                f"Component {ref} has no footprint assigned in schematic"
-            )
+            result.errors.append(f"Component {ref} has no footprint assigned in schematic")
             continue
-        result.added.append(SyncAction(
-            action="add",
-            reference=ref,
-            footprint=item.footprint,
-            value=item.value,
-            detail=f"Add {ref} ({item.value}, {item.footprint})",
-        ))
+        result.added.append(
+            SyncAction(
+                action="add",
+                reference=ref,
+                footprint=item.footprint,
+                value=item.value,
+                detail=f"Add {ref} ({item.value}, {item.footprint})",
+            )
+        )
 
     # Orphaned footprints -- categorize as remove or report-only
     for ref in sorted(truly_orphaned):
@@ -280,32 +287,36 @@ def sync_netlist(
             # Check for connected traces (safety check)
             has_traces = pcb.footprint_has_traces(ref)
             if has_traces and not force:
-                result.errors.append(
-                    f"Orphan {ref} has routed traces; use --force to remove"
+                result.errors.append(f"Orphan {ref} has routed traces; use --force to remove")
+                result.orphaned.append(
+                    SyncAction(
+                        action="orphan",
+                        reference=ref,
+                        footprint=info["footprint"],
+                        value=info["value"],
+                        detail=f"Orphan: {ref} ({info['value']}, {info['footprint']}) - has traces",
+                    )
                 )
-                result.orphaned.append(SyncAction(
+            else:
+                result.removed.append(
+                    SyncAction(
+                        action="remove",
+                        reference=ref,
+                        footprint=info["footprint"],
+                        value=info["value"],
+                        detail=f"Remove: {ref} ({info['value']}, {info['footprint']})",
+                    )
+                )
+        else:
+            result.orphaned.append(
+                SyncAction(
                     action="orphan",
                     reference=ref,
                     footprint=info["footprint"],
                     value=info["value"],
-                    detail=f"Orphan: {ref} ({info['value']}, {info['footprint']}) - has traces",
-                ))
-            else:
-                result.removed.append(SyncAction(
-                    action="remove",
-                    reference=ref,
-                    footprint=info["footprint"],
-                    value=info["value"],
-                    detail=f"Remove: {ref} ({info['value']}, {info['footprint']})",
-                ))
-        else:
-            result.orphaned.append(SyncAction(
-                action="orphan",
-                reference=ref,
-                footprint=info["footprint"],
-                value=info["value"],
-                detail=f"Orphan: {ref} ({info['value']}, {info['footprint']})",
-            ))
+                    detail=f"Orphan: {ref} ({info['value']}, {info['footprint']})",
+                )
+            )
 
     # --- Apply changes if not dry-run ---
     # When auto_rename is False and there are renames, the caller must confirm
@@ -332,23 +343,17 @@ def sync_netlist(
                     )
                     x_offset += 5.0  # Space footprints horizontally
                 except Exception as e:
-                    result.errors.append(
-                        f"Failed to add footprint for {action.reference}: {e}"
-                    )
+                    result.errors.append(f"Failed to add footprint for {action.reference}: {e}")
 
             # Remove orphaned footprints
             for action in result.removed:
                 if not pcb.remove_footprint(action.reference):
-                    result.errors.append(
-                        f"Failed to remove footprint {action.reference}"
-                    )
+                    result.errors.append(f"Failed to remove footprint {action.reference}")
 
         # Update net assignments from schematic netlist unconditionally.
         # This catches stale pad-net assignments even when no footprints are
         # added or renamed (e.g. when pad nets drifted from the schematic).
-        net_actions, net_errors = _assign_nets_from_schematic(
-            pcb, schematic_path
-        )
+        net_actions, net_errors = _assign_nets_from_schematic(pcb, schematic_path)
         result.net_updated.extend(net_actions)
         result.errors.extend(net_errors)
 
@@ -368,9 +373,7 @@ def sync_netlist(
         # Compute net diff for dry-run reporting (no PCB changes applied).
         # Note: this mutates the in-memory PCB to compute the diff but
         # never saves, so the file on disk is unchanged.
-        net_actions, net_errors = _assign_nets_from_schematic(
-            pcb, schematic_path
-        )
+        net_actions, net_errors = _assign_nets_from_schematic(pcb, schematic_path)
         result.net_updated.extend(net_actions)
         result.errors.extend(net_errors)
 
@@ -427,9 +430,7 @@ def _normalize_kicad_cli_net_names(netlist) -> None:
             net.name = net.name[1:]
 
 
-def _assign_nets_from_schematic(
-    pcb, schematic_path: Path
-) -> tuple[list[SyncAction], list[str]]:
+def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAction], list[str]]:
     """Export netlist from schematic and assign nets to PCB pads.
 
     Always applies net assignments to the in-memory *pcb* object.  The
@@ -477,9 +478,7 @@ def _assign_nets_from_schematic(
     try:
         pin_to_pad_map = build_pin_to_pad_map(schematic_path, pcb)
     except Exception as exc:
-        errors.append(
-            f"Failed to build pin-to-pad map (proceeding without): {exc}"
-        )
+        errors.append(f"Failed to build pin-to-pad map (proceeding without): {exc}")
 
     # Snapshot before assignment
     before = _get_pad_net_snapshot(pcb)
@@ -505,11 +504,13 @@ def _assign_nets_from_schematic(
         new_net = after.get(key, "")
         if old_net != new_net:
             ref, pad_num = key
-            actions.append(SyncAction(
-                action="net_updated",
-                reference=ref,
-                detail=f"{ref}.{pad_num}: \"{old_net}\" -> \"{new_net}\"",
-            ))
+            actions.append(
+                SyncAction(
+                    action="net_updated",
+                    reference=ref,
+                    detail=f'{ref}.{pad_num}: "{old_net}" -> "{new_net}"',
+                )
+            )
 
     return actions, errors
 
@@ -569,9 +570,7 @@ def _remove_unused_nets(pcb, result: SyncResult) -> None:
         removed.append(name)
 
     if removed:
-        result.warnings.append(
-            f"Removed {len(removed)} orphan net(s): {', '.join(removed)}"
-        )
+        result.warnings.append(f"Removed {len(removed)} orphan net(s): {', '.join(removed)}")
 
 
 def _apply_rename(pcb, old_ref: str, new_ref: str) -> bool:
@@ -800,12 +799,7 @@ def run_sync_netlist(
         print(format_text(result, dry_run, pcb_path))
 
     # Interactive confirmation for renames when not dry_run and not auto_rename
-    if (
-        not dry_run
-        and not auto_rename
-        and result.renamed
-        and not result.errors
-    ):
+    if not dry_run and not auto_rename and result.renamed and not result.errors:
         try:
             answer = input("Apply renames? [y/N] ")
         except (EOFError, KeyboardInterrupt):

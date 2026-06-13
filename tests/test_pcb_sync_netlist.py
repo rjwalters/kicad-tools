@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-
 # Minimal schematic with two components
 MINIMAL_SCHEMATIC = """(kicad_sch
   (version 20231120)
@@ -241,17 +240,13 @@ class TestSyncResult:
     def test_has_changes_with_added(self):
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult
 
-        result = SyncResult(
-            added=[SyncAction(action="add", reference="R1")]
-        )
+        result = SyncResult(added=[SyncAction(action="add", reference="R1")])
         assert result.has_changes is True
 
     def test_has_changes_with_orphaned(self):
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult
 
-        result = SyncResult(
-            orphaned=[SyncAction(action="orphan", reference="D1")]
-        )
+        result = SyncResult(orphaned=[SyncAction(action="orphan", reference="D1")])
         assert result.has_changes is True
 
     def test_has_changes_with_renamed(self):
@@ -356,9 +351,7 @@ class TestSyncNetlist:
         sch = tmp_path / "empty.kicad_sch"
         pcb = tmp_path / "test.kicad_pcb"
         # Write an empty schematic (no symbols)
-        sch.write_text(
-            "(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))"
-        )
+        sch.write_text("(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))")
         pcb.write_text(MINIMAL_PCB_MATCHING)
 
         result = sync_netlist(sch, pcb, dry_run=True)
@@ -435,7 +428,11 @@ class TestFormatText:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
 
         result = SyncResult(
-            added=[SyncAction(action="add", reference="R1", footprint="Resistor_SMD:R_0402", value="10k")]
+            added=[
+                SyncAction(
+                    action="add", reference="R1", footprint="Resistor_SMD:R_0402", value="10k"
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_text(result, dry_run=True, pcb_path=pcb)
@@ -448,7 +445,11 @@ class TestFormatText:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
 
         result = SyncResult(
-            orphaned=[SyncAction(action="orphan", reference="D1", footprint="LED_SMD:LED_0603", value="LED")]
+            orphaned=[
+                SyncAction(
+                    action="orphan", reference="D1", footprint="LED_SMD:LED_0603", value="LED"
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_text(result, dry_run=True, pcb_path=pcb)
@@ -525,7 +526,11 @@ class TestFormatJson:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_json
 
         result = SyncResult(
-            added=[SyncAction(action="add", reference="R1", footprint="Resistor_SMD:R_0402", value="10k")]
+            added=[
+                SyncAction(
+                    action="add", reference="R1", footprint="Resistor_SMD:R_0402", value="10k"
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_json(result, dry_run=False, pcb_path=pcb)
@@ -555,7 +560,11 @@ class TestFormatJson:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_json
 
         result = SyncResult(
-            orphaned=[SyncAction(action="orphan", reference="D1", footprint="LED_SMD:LED_0603", value="LED")]
+            orphaned=[
+                SyncAction(
+                    action="orphan", reference="D1", footprint="LED_SMD:LED_0603", value="LED"
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_json(result, dry_run=True, pcb_path=pcb)
@@ -633,7 +642,9 @@ class TestPcbSyncNetlistCLIDispatch:
 
         parser = create_parser()
         # Should not raise
-        args = parser.parse_args(["pcb", "sync-netlist", "--schematic", "test.kicad_sch", "test.kicad_pcb"])
+        args = parser.parse_args(
+            ["pcb", "sync-netlist", "--schematic", "test.kicad_sch", "test.kicad_pcb"]
+        )
         assert args.pcb_command == "sync-netlist"
         assert args.schematic == "test.kicad_sch"
         assert args.pcb == "test.kicad_pcb"
@@ -654,7 +665,15 @@ class TestPcbSyncNetlistCLIDispatch:
 
         parser = create_parser()
         args = parser.parse_args(
-            ["pcb", "sync-netlist", "--schematic", "test.kicad_sch", "--format", "json", "test.kicad_pcb"]
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "--format",
+                "json",
+                "test.kicad_pcb",
+            ]
         )
         assert args.format == "json"
 
@@ -920,9 +939,7 @@ class TestRemoveOrphans:
         sch.write_text(MINIMAL_SCHEMATIC)
         pcb.write_text(PCB_WITH_ORPHAN_TRACED)
 
-        result = sync_netlist(
-            sch, pcb, dry_run=False, remove_orphans=True, force=True
-        )
+        result = sync_netlist(sch, pcb, dry_run=False, remove_orphans=True, force=True)
 
         assert len(result.removed) == 1
         assert result.removed[0].reference == "D1"
@@ -954,9 +971,7 @@ class TestRemoveOrphans:
 
         sch = tmp_path / "empty.kicad_sch"
         pcb = tmp_path / "test.kicad_pcb"
-        sch.write_text(
-            "(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))"
-        )
+        sch.write_text("(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))")
         pcb.write_text(MINIMAL_PCB_MATCHING)
 
         result = sync_netlist(sch, pcb, dry_run=False, remove_orphans=True)
@@ -993,12 +1008,14 @@ class TestRemoveOrphansFormatting:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
 
         result = SyncResult(
-            removed=[SyncAction(
-                action="remove",
-                reference="D1",
-                footprint="LED_SMD:LED_0603",
-                value="LED",
-            )]
+            removed=[
+                SyncAction(
+                    action="remove",
+                    reference="D1",
+                    footprint="LED_SMD:LED_0603",
+                    value="LED",
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_text(result, dry_run=False, pcb_path=pcb)
@@ -1011,12 +1028,14 @@ class TestRemoveOrphansFormatting:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_json
 
         result = SyncResult(
-            removed=[SyncAction(
-                action="remove",
-                reference="D1",
-                footprint="LED_SMD:LED_0603",
-                value="LED",
-            )]
+            removed=[
+                SyncAction(
+                    action="remove",
+                    reference="D1",
+                    footprint="LED_SMD:LED_0603",
+                    value="LED",
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_json(result, dry_run=False, pcb_path=pcb)
@@ -1035,12 +1054,16 @@ class TestSyncNetlistCLIRemoveOrphansFlags:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "sync-netlist",
-            "--schematic", "test.kicad_sch",
-            "--remove-orphans",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "--remove-orphans",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.remove_orphans is True
 
     def test_parser_force_flag(self):
@@ -1048,13 +1071,17 @@ class TestSyncNetlistCLIRemoveOrphansFlags:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "sync-netlist",
-            "--schematic", "test.kicad_sch",
-            "--remove-orphans",
-            "--force",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "--remove-orphans",
+                "--force",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.force is True
 
     def test_dispatcher_passes_remove_orphans(self, tmp_path):
@@ -1236,7 +1263,9 @@ class TestAmbiguousMatchWarnings:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
 
         result = SyncResult(
-            orphaned=[SyncAction(action="orphan", reference="R50", footprint="R_0402", value="10k")],
+            orphaned=[
+                SyncAction(action="orphan", reference="R50", footprint="R_0402", value="10k")
+            ],
             warnings=["Ambiguous match for (R_0402, 10k)"],
         )
         pcb = tmp_path / "test.kicad_pcb"
@@ -1254,6 +1283,7 @@ class TestAmbiguousMatchWarnings:
         output = format_json(result, dry_run=True, pcb_path=pcb)
 
         import json
+
         data = json.loads(output)
         assert "warnings" in data
         assert len(data["warnings"]) == 1
@@ -1282,12 +1312,16 @@ class TestAutoRenameFlag:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "sync-netlist",
-            "--schematic", "test.kicad_sch",
-            "--auto-rename",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "--auto-rename",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.auto_rename is True
 
     def test_parser_auto_rename_default_false(self):
@@ -1295,11 +1329,15 @@ class TestAutoRenameFlag:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "sync-netlist",
-            "--schematic", "test.kicad_sch",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.auto_rename is False
 
     def test_auto_rename_applies_renames(self, tmp_path):
@@ -1584,9 +1622,7 @@ class TestHierarchicalSync:
         # Use root schematic that has NO symbols and NO sheet references
         root = tmp_path / "empty.kicad_sch"
         pcb = tmp_path / "test.kicad_pcb"
-        root.write_text(
-            "(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))"
-        )
+        root.write_text("(kicad_sch (version 20231120) (generator test) (uuid 0) (paper A4))")
         pcb.write_text(MINIMAL_PCB_MATCHING)
 
         result = sync_netlist(root, pcb, dry_run=True)
@@ -1685,7 +1721,10 @@ class TestGetBoardEdgePosition:
         mock_pcb.board_origin = (100.0, 80.0)
         # Board-relative outline: rect (0,0)-(50,30)
         mock_pcb.get_board_outline.return_value = [
-            (0, 0), (50, 0), (50, 30), (0, 30),
+            (0, 0),
+            (50, 0),
+            (50, 30),
+            (0, 30),
         ]
 
         x, y = _get_board_edge_position(mock_pcb)
@@ -1894,6 +1933,7 @@ PCB_STALE_NETS = """(kicad_pcb
   )
 )
 """
+
 
 class TestPinMismatch:
     """Tests for PinMismatch dataclass."""
@@ -2245,7 +2285,6 @@ class TestNetUpdates:
     def test_correct_nets_produce_no_net_updates(self, tmp_path):
         """PCB already matching schematic nets produces empty net_updated."""
         from kicad_tools.cli.pcb_sync_netlist import sync_netlist
-        from kicad_tools.schema.pcb import PCB
 
         sch = tmp_path / "test.kicad_sch"
         pcb = tmp_path / "test.kicad_pcb"
@@ -2281,11 +2320,13 @@ class TestNetUpdates:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_text
 
         result = SyncResult(
-            net_updated=[SyncAction(
-                action="net_updated",
-                reference="R1",
-                detail='R1.1: "old_net" -> "GND"',
-            )]
+            net_updated=[
+                SyncAction(
+                    action="net_updated",
+                    reference="R1",
+                    detail='R1.1: "old_net" -> "GND"',
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_text(result, dry_run=True, pcb_path=pcb)
@@ -2300,11 +2341,13 @@ class TestNetUpdates:
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult, format_json
 
         result = SyncResult(
-            net_updated=[SyncAction(
-                action="net_updated",
-                reference="R1",
-                detail='R1.1: "old_net" -> "GND"',
-            )]
+            net_updated=[
+                SyncAction(
+                    action="net_updated",
+                    reference="R1",
+                    detail='R1.1: "old_net" -> "GND"',
+                )
+            ]
         )
         pcb = tmp_path / "test.kicad_pcb"
         output = format_json(result, dry_run=False, pcb_path=pcb)
@@ -2319,9 +2362,7 @@ class TestNetUpdates:
         """SyncResult.has_changes is True when only net_updated has entries."""
         from kicad_tools.cli.pcb_sync_netlist import SyncAction, SyncResult
 
-        result = SyncResult(
-            net_updated=[SyncAction(action="net_updated", reference="R1")]
-        )
+        result = SyncResult(net_updated=[SyncAction(action="net_updated", reference="R1")])
         assert result.has_changes is True
 
 
@@ -2338,8 +2379,10 @@ class TestNetAssignmentErrorSurfacing:
         board = PCB.load(pcb_path)
 
         # Mock export_netlist to raise
-        import kicad_tools.cli.pcb_sync_netlist as mod
-        original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+
+        original_import = (
+            __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+        )
 
         def mock_export_netlist(path):
             raise RuntimeError("kicad-cli not found")
@@ -2349,9 +2392,7 @@ class TestNetAssignmentErrorSurfacing:
             mock_export_netlist,
         )
 
-        actions, errors = _assign_nets_from_schematic(
-            board, tmp_path / "nonexistent.kicad_sch"
-        )
+        actions, errors = _assign_nets_from_schematic(board, tmp_path / "nonexistent.kicad_sch")
 
         assert len(errors) > 0
         assert "Failed to export netlist" in errors[0]
@@ -2366,12 +2407,16 @@ class TestRemoveOrphanNets:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "sync-netlist",
-            "--schematic", "test.kicad_sch",
-            "--remove-orphan-nets",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "--remove-orphan-nets",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.remove_orphan_nets is True
 
     def test_parser_remove_orphan_nets_default_false(self):
@@ -2379,11 +2424,15 @@ class TestRemoveOrphanNets:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "sync-netlist",
-            "--schematic", "test.kicad_sch",
-            "test.kicad_pcb",
-        ])
+        args = parser.parse_args(
+            [
+                "pcb",
+                "sync-netlist",
+                "--schematic",
+                "test.kicad_sch",
+                "test.kicad_pcb",
+            ]
+        )
         assert args.remove_orphan_nets is False
 
     def test_orphan_net_removed(self, tmp_path):
@@ -2475,11 +2524,13 @@ class TestNormalizeKicadCliNetNames:
         """A single leading ``/`` is stripped from hierarchical labels."""
         from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
 
-        netlist = self._make_netlist([
-            self._make_net(1, "/BST_A"),
-            self._make_net(2, "/DRV_CP1"),
-            self._make_net(3, "/SPI_MISO"),
-        ])
+        netlist = self._make_netlist(
+            [
+                self._make_net(1, "/BST_A"),
+                self._make_net(2, "/DRV_CP1"),
+                self._make_net(3, "/SPI_MISO"),
+            ]
+        )
         _normalize_kicad_cli_net_names(netlist)
         names = [n.name for n in netlist.nets]
         assert names == ["BST_A", "DRV_CP1", "SPI_MISO"]
@@ -2488,13 +2539,15 @@ class TestNormalizeKicadCliNetNames:
         """Power-symbol names (``+3V3``, ``GND``, ``+5V``) are untouched."""
         from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
 
-        netlist = self._make_netlist([
-            self._make_net(1, "+3V3"),
-            self._make_net(2, "GND"),
-            self._make_net(3, "+5V"),
-            self._make_net(4, "+3.3V"),
-            self._make_net(5, "-12V"),
-        ])
+        netlist = self._make_netlist(
+            [
+                self._make_net(1, "+3V3"),
+                self._make_net(2, "GND"),
+                self._make_net(3, "+5V"),
+                self._make_net(4, "+3.3V"),
+                self._make_net(5, "-12V"),
+            ]
+        )
         _normalize_kicad_cli_net_names(netlist)
         names = [n.name for n in netlist.nets]
         assert names == ["+3V3", "GND", "+5V", "+3.3V", "-12V"]
@@ -2503,11 +2556,13 @@ class TestNormalizeKicadCliNetNames:
         """Already-bare names from the Python fallback are untouched."""
         from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
 
-        netlist = self._make_netlist([
-            self._make_net(1, "BST_A"),
-            self._make_net(2, "PHASE_A"),
-            self._make_net(3, "Net-(R1-Pad2)"),
-        ])
+        netlist = self._make_netlist(
+            [
+                self._make_net(1, "BST_A"),
+                self._make_net(2, "PHASE_A"),
+                self._make_net(3, "Net-(R1-Pad2)"),
+            ]
+        )
         _normalize_kicad_cli_net_names(netlist)
         names = [n.name for n in netlist.nets]
         assert names == ["BST_A", "PHASE_A", "Net-(R1-Pad2)"]
@@ -2536,13 +2591,15 @@ class TestNormalizeKicadCliNetNames:
         """Mixed power+hierarchical netlist: only ``/``-prefixed names change."""
         from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
 
-        netlist = self._make_netlist([
-            self._make_net(1, "/BST_A"),
-            self._make_net(2, "+3V3"),
-            self._make_net(3, "/DRV_CP1"),
-            self._make_net(4, "GND"),
-            self._make_net(5, "PWM_AH"),
-        ])
+        netlist = self._make_netlist(
+            [
+                self._make_net(1, "/BST_A"),
+                self._make_net(2, "+3V3"),
+                self._make_net(3, "/DRV_CP1"),
+                self._make_net(4, "GND"),
+                self._make_net(5, "PWM_AH"),
+            ]
+        )
         _normalize_kicad_cli_net_names(netlist)
         names = [n.name for n in netlist.nets]
         assert names == ["BST_A", "+3V3", "DRV_CP1", "GND", "PWM_AH"]
@@ -2551,10 +2608,12 @@ class TestNormalizeKicadCliNetNames:
         """Running the normaliser twice produces the same result."""
         from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
 
-        netlist = self._make_netlist([
-            self._make_net(1, "/BST_A"),
-            self._make_net(2, "+3V3"),
-        ])
+        netlist = self._make_netlist(
+            [
+                self._make_net(1, "/BST_A"),
+                self._make_net(2, "+3V3"),
+            ]
+        )
         _normalize_kicad_cli_net_names(netlist)
         first = [n.name for n in netlist.nets]
         _normalize_kicad_cli_net_names(netlist)
@@ -2587,14 +2646,24 @@ _BOARD_05_PCB = _BOARD_05_DIR / "bldc_controller_drifted.kicad_pcb"
 # The 14 hierarchical-local nets that were dropped before the
 # ``/``-prefix fix.  ``+3.3V`` is intentionally excluded -- it is a
 # power-symbol alias handled by ``canonicalize_power_nets``.
-_BOARD_05_DRIFT_NETS = frozenset({
-    "BST_A", "BST_B", "BST_C",
-    "DRV_CP1", "DRV_CP2",
-    "DRV_FAULTn", "DRV_LOCKn",
-    "DRV_VCP", "DRV_VINT", "DRV_VREG", "DRV_VSW",
-    "FGFB", "FGOUT",
-    "SPI_MISO",
-})
+_BOARD_05_DRIFT_NETS = frozenset(
+    {
+        "BST_A",
+        "BST_B",
+        "BST_C",
+        "DRV_CP1",
+        "DRV_CP2",
+        "DRV_FAULTn",
+        "DRV_LOCKn",
+        "DRV_VCP",
+        "DRV_VINT",
+        "DRV_VREG",
+        "DRV_VSW",
+        "FGFB",
+        "FGOUT",
+        "SPI_MISO",
+    }
+)
 
 # After the fix, the PCB must carry at least this many named nets
 # (40 pre-fix + 13 recovered drift nets = 53; ``+3.3V`` already
@@ -2640,9 +2709,7 @@ class TestBoard05SyncDriftRegression:
         pcb, _ = synced_pcb
         named = {n.name for n in pcb.nets.values() if n.name}
         missing = _BOARD_05_DRIFT_NETS - named
-        assert not missing, (
-            f"Drift nets still missing after sync: {sorted(missing)}"
-        )
+        assert not missing, f"Drift nets still missing after sync: {sorted(missing)}"
 
     def test_net_count_above_floor(self, synced_pcb):
         """The synced PCB carries >= 53 named nets (was 40 pre-fix)."""
@@ -2658,9 +2725,7 @@ class TestBoard05SyncDriftRegression:
         pcb, _ = synced_pcb
         named = {n.name for n in pcb.nets.values() if n.name}
         prefixed = {n for n in named if n.startswith("/")}
-        assert not prefixed, (
-            f"Found /-prefixed net names in synced PCB: {sorted(prefixed)}"
-        )
+        assert not prefixed, f"Found /-prefixed net names in synced PCB: {sorted(prefixed)}"
 
     def test_u3_drift_pads_assigned_correctly(self, synced_pcb):
         """U3 pads land on the schematic-intended drift nets, not stale rails.
@@ -2687,6 +2752,4 @@ class TestBoard05SyncDriftRegression:
         }
         for pad_num, want_net in expected.items():
             got = pad_nets.get(pad_num)
-            assert got == want_net, (
-                f"U3.{pad_num}: expected net {want_net!r}, got {got!r}"
-            )
+            assert got == want_net, f"U3.{pad_num}: expected net {want_net!r}, got {got!r}"

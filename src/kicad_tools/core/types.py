@@ -16,7 +16,6 @@ Consolidated types:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
 
 from .severity import SeverityMixin
 
@@ -69,7 +68,7 @@ class RiskLevel(str, Enum):
         return self.value
 
     @classmethod
-    def from_string(cls, s: str, default: "RiskLevel | None" = None) -> "RiskLevel":
+    def from_string(cls, s: str, default: RiskLevel | None = None) -> RiskLevel:
         """Parse risk level from string.
 
         Args:
@@ -150,7 +149,7 @@ class Layer(str, Enum):
         return self.value.startswith("B.")
 
     @classmethod
-    def from_string(cls, name: str) -> "Layer":
+    def from_string(cls, name: str) -> Layer:
         """Convert a KiCad layer name to a Layer enum.
 
         Args:
@@ -168,7 +167,7 @@ class Layer(str, Enum):
         raise ValueError(f"Unknown KiCad layer name: {name}")
 
     @classmethod
-    def copper_layers(cls) -> list["Layer"]:
+    def copper_layers(cls) -> list[Layer]:
         """Get all copper layers in stack order (top to bottom)."""
         return [
             cls.F_CU,
@@ -215,7 +214,7 @@ class CopperLayer(Enum):
         return self in (CopperLayer.F_CU, CopperLayer.B_CU)
 
     @classmethod
-    def from_kicad_name(cls, name: str) -> "CopperLayer":
+    def from_kicad_name(cls, name: str) -> CopperLayer:
         """Convert a KiCad layer name to a CopperLayer enum.
 
         Args:

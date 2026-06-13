@@ -19,13 +19,13 @@ These tests use pytest.mark.integration for separate execution from unit tests
 since they may be slower and depend on complete board fixtures.
 """
 
-from pathlib import Path
-import time
 import json
+import time
+from pathlib import Path
 
 import pytest
 
-from kicad_tools.router import load_pcb_for_routing, DesignRules
+from kicad_tools.router import DesignRules, load_pcb_for_routing
 from kicad_tools.router.io import merge_routes_into_pcb, validate_routes
 
 # Issue #3436: CI runs the suite with `-n auto --timeout=60`.  These
@@ -75,7 +75,9 @@ class TestRealBoardRouting:
         assert voltage_divider_pcb.exists(), f"Board fixture not found: {voltage_divider_pcb}"
 
         # Load board
-        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False)
+        router, net_map = load_pcb_for_routing(
+            str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
         assert router is not None
         assert len(net_map) >= 3, "Expected at least 3 nets"
 
@@ -88,7 +90,9 @@ class TestRealBoardRouting:
             # by zone fill, so trace-completion is vacuous (issue #3436
             # burn-down).  Keep the load assertions above as the regression
             # guard and exit.
-            pytest.skip("all voltage-divider nets are pour nets (zone-filled); no signal nets to route")
+            pytest.skip(
+                "all voltage-divider nets are pour nets (zone-filled); no signal nets to route"
+            )
 
         # Route all nets
         start_time = time.time()
@@ -108,12 +112,12 @@ class TestRealBoardRouting:
         assert routing_time < 300, f"Routing took {routing_time:.1f}s (>5 min)"
 
         # Log metrics for benchmarking
-        print(f"\n=== voltage-divider routing metrics ===")
+        print("\n=== voltage-divider routing metrics ===")
         print(f"Nets: {routed_nets}/{total_nets} ({completion_rate:.1%})")
         print(f"Time: {routing_time:.2f}s")
         print(f"Segments: {stats.get('segments', 0)}")
         print(f"Vias: {stats.get('vias', 0)}")
-        if hasattr(router, 'routing_failures'):
+        if hasattr(router, "routing_failures"):
             print(f"Failures: {len(router.routing_failures)}")
 
     def test_charlieplex_high_completion(self, charlieplex_pcb: Path):
@@ -145,7 +149,9 @@ class TestRealBoardRouting:
         assert charlieplex_pcb.exists(), f"Board fixture not found: {charlieplex_pcb}"
 
         # Load board
-        router, net_map = load_pcb_for_routing(str(charlieplex_pcb), rules=INTEGRATION_RULES, validate_drc=False)
+        router, net_map = load_pcb_for_routing(
+            str(charlieplex_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
         assert router is not None
         assert len(net_map) >= 8, "Expected at least 8 nets"
 
@@ -173,12 +179,12 @@ class TestRealBoardRouting:
         assert routing_time < 300, f"Routing took {routing_time:.1f}s (>5 min)"
 
         # Log metrics
-        print(f"\n=== charlieplex routing metrics ===")
+        print("\n=== charlieplex routing metrics ===")
         print(f"Nets: {routed_nets}/{total_nets} ({completion_rate:.1%})")
         print(f"Time: {routing_time:.2f}s")
         print(f"Segments: {stats.get('segments', 0)}")
         print(f"Vias: {stats.get('vias', 0)}")
-        if hasattr(router, 'routing_failures'):
+        if hasattr(router, "routing_failures"):
             print(f"Failures: {len(router.routing_failures)}")
 
     def test_usb_joystick_valid_output(self, usb_joystick_pcb: Path):
@@ -186,10 +192,12 @@ class TestRealBoardRouting:
         assert usb_joystick_pcb.exists(), f"Board fixture not found: {usb_joystick_pcb}"
 
         # Load board
-        with open(usb_joystick_pcb, "r") as f:
+        with open(usb_joystick_pcb) as f:
             original_pcb_text = f.read()
 
-        router, net_map = load_pcb_for_routing(str(usb_joystick_pcb), rules=INTEGRATION_RULES, validate_drc=False)
+        router, net_map = load_pcb_for_routing(
+            str(usb_joystick_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
         assert router is not None
 
         # Count signal nets
@@ -216,12 +224,12 @@ class TestRealBoardRouting:
         routed_nets = stats["nets_routed"]
         completion_rate = routed_nets / total_nets if total_nets > 0 else 0
 
-        print(f"\n=== usb-joystick routing metrics ===")
+        print("\n=== usb-joystick routing metrics ===")
         print(f"Nets: {routed_nets}/{total_nets} ({completion_rate:.1%})")
         print(f"Output size: {len(merged_pcb)} bytes")
         print(f"Segments: {stats.get('segments', 0)}")
         print(f"Vias: {stats.get('vias', 0)}")
-        if hasattr(router, 'routing_failures'):
+        if hasattr(router, "routing_failures"):
             print(f"Failures: {len(router.routing_failures)}")
 
         # Issue #2425: Assert minimum net completion rate.
@@ -236,7 +244,9 @@ class TestRealBoardRouting:
     def test_no_shorts_in_output(self, voltage_divider_pcb: Path):
         """Routed output must have zero net-to-net shorts."""
         # Load and route board
-        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False)
+        router, net_map = load_pcb_for_routing(
+            str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
 
         router.route_all()
 
@@ -246,18 +256,19 @@ class TestRealBoardRouting:
         # Filter for shorts (clearance violations between different nets)
         shorts = [v for v in violations if v.get("type") == "short"]
 
-        assert len(shorts) == 0, (
-            f"Found {len(shorts)} net-to-net shorts:\n"
-            + "\n".join(f"  - {s}" for s in shorts[:5])
+        assert len(shorts) == 0, f"Found {len(shorts)} net-to-net shorts:\n" + "\n".join(
+            f"  - {s}" for s in shorts[:5]
         )
 
-        print(f"\n=== Short detection ===")
+        print("\n=== Short detection ===")
         print(f"Shorts: {len(shorts)}")
         print(f"Other violations: {len(violations) - len(shorts)}")
 
     def test_routing_time_budget(self, voltage_divider_pcb: Path):
         """Board routing should complete within 5 minutes."""
-        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False)
+        router, net_map = load_pcb_for_routing(
+            str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False
+        )
 
         total_nets = len([n for n in router.nets if n > 0])
 
@@ -265,13 +276,11 @@ class TestRealBoardRouting:
         router.route_all()
         routing_time = time.time() - start_time
 
-        assert routing_time < 300, (
-            f"Routing took {routing_time:.1f}s, exceeding 5-minute budget"
-        )
+        assert routing_time < 300, f"Routing took {routing_time:.1f}s, exceeding 5-minute budget"
 
         stats = router.get_statistics()
 
-        print(f"\n=== Performance ===")
+        print("\n=== Performance ===")
         print(f"Routing time: {routing_time:.2f}s")
         print(f"Nets routed: {stats['nets_routed']}/{total_nets}")
 

@@ -94,9 +94,7 @@ def _extract_outline(pcb: Any) -> list[list[float]]:
         return []
 
 
-def _compute_bounds(
-    outline: list[list[float]], pcb: Any
-) -> dict[str, float]:
+def _compute_bounds(outline: list[list[float]], pcb: Any) -> dict[str, float]:
     """Compute bounding box from outline or fallback to all geometry."""
     if outline:
         xs = [p[0] for p in outline]
@@ -167,13 +165,15 @@ def _extract_segments(pcb: Any) -> list[dict[str, Any]]:
     """Extract trace segments."""
     segments = []
     for seg in pcb.segments:
-        segments.append({
-            "start": [round(seg.start[0], 3), round(seg.start[1], 3)],
-            "end": [round(seg.end[0], 3), round(seg.end[1], 3)],
-            "width": round(seg.width, 3),
-            "layer": seg.layer,
-            "net": seg.net_name or str(seg.net_number),
-        })
+        segments.append(
+            {
+                "start": [round(seg.start[0], 3), round(seg.start[1], 3)],
+                "end": [round(seg.end[0], 3), round(seg.end[1], 3)],
+                "width": round(seg.width, 3),
+                "layer": seg.layer,
+                "net": seg.net_name or str(seg.net_number),
+            }
+        )
     return segments
 
 
@@ -181,16 +181,18 @@ def _extract_vias(pcb: Any) -> list[dict[str, Any]]:
     """Extract vias."""
     vias = []
     for via in pcb.vias:
-        vias.append({
-            "position": [
-                round(via.position[0], 3),
-                round(via.position[1], 3),
-            ],
-            "size": round(via.size, 3),
-            "drill": round(via.drill, 3),
-            "layers": via.layers,
-            "net": via.net_name or str(via.net_number),
-        })
+        vias.append(
+            {
+                "position": [
+                    round(via.position[0], 3),
+                    round(via.position[1], 3),
+                ],
+                "size": round(via.size, 3),
+                "drill": round(via.drill, 3),
+                "layers": via.layers,
+                "net": via.net_name or str(via.net_number),
+            }
+        )
     return vias
 
 

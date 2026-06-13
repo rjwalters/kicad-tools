@@ -8,8 +8,6 @@ Verifies that:
 
 import logging
 
-import pytest
-
 from kicad_tools.router.escape import (
     EscapeRouter,
     PackageType,
@@ -104,8 +102,8 @@ class TestAutoDeriveClearance:
 
         # Before the fix, this returned 0. Now it should produce some escapes.
         assert len(escapes) > 0, (
-            f"SSOP-20 at 0.65mm pitch produced 0 escapes without "
-            f"fine_pitch_clearance -- issue #2350 fix not working"
+            "SSOP-20 at 0.65mm pitch produced 0 escapes without "
+            "fine_pitch_clearance -- issue #2350 fix not working"
         )
 
     def test_ssop20_escapes_with_explicit_fine_pitch_clearance(self):
@@ -227,9 +225,15 @@ class TestNeighborCheckAllPads:
 
         pads = [
             Pad(
-                x=i * 0.65, y=0.0, width=0.35, height=1.2,
-                net=i + 1, net_name=f"NET{i + 1}", ref="U8",
-                pin=str(i + 1), layer=Layer.F_CU,
+                x=i * 0.65,
+                y=0.0,
+                width=0.35,
+                height=1.2,
+                net=i + 1,
+                net_name=f"NET{i + 1}",
+                ref="U8",
+                pin=str(i + 1),
+                layer=Layer.F_CU,
             )
             for i in range(5)
         ]
@@ -237,8 +241,10 @@ class TestNeighborCheckAllPads:
         # Create a segment from pad[0] that extends laterally toward pad[2]
         # It passes pad[1] with enough clearance but gets close to pad[2]
         seg = Segment(
-            x1=0.0, y1=0.0,
-            x2=1.1, y2=-1.0,  # Long diagonal segment toward pad[2] area
+            x1=0.0,
+            y1=0.0,
+            x2=1.1,
+            y2=-1.0,  # Long diagonal segment toward pad[2] area
             width=0.127,
             layer=Layer.F_CU,
             net=1,
@@ -247,7 +253,10 @@ class TestNeighborCheckAllPads:
 
         # The method should check all pads, not just pad[-1] and pad[1]
         result = escape_router._segment_violates_pad_clearance(
-            seg, 0, pads, 0.127,
+            seg,
+            0,
+            pads,
+            0.127,
         )
 
         # We just verify it runs without error and checks beyond +/-1.
@@ -291,11 +300,7 @@ class TestZeroEscapeWarning:
 
         if len(escapes) == 0:
             # Verify WARNING was logged
-            warning_msgs = [
-                r.message for r in caplog.records
-                if r.levelno >= logging.WARNING
-            ]
+            warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
             assert any("0 pins escaped" in msg for msg in warning_msgs), (
-                "Expected WARNING about 0 pins escaped, but got: "
-                + str(warning_msgs)
+                "Expected WARNING about 0 pins escaped, but got: " + str(warning_msgs)
             )

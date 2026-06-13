@@ -66,17 +66,23 @@ class TileGrid:
             A new ``TileGrid`` instance.
         """
         if width <= 0 or height <= 0:
-            return cls(origin_x=origin_x, origin_y=origin_y,
-                       tile_w=max(width, 1.0), tile_h=max(height, 1.0),
-                       cols=1, rows=1)
+            return cls(
+                origin_x=origin_x,
+                origin_y=origin_y,
+                tile_w=max(width, 1.0),
+                tile_h=max(height, 1.0),
+                cols=1,
+                rows=1,
+            )
 
         aspect = width / height
         cols = max(1, round(math.sqrt(target_tiles * aspect)))
         rows = max(1, round(target_tiles / cols))
         tile_w = width / cols
         tile_h = height / rows
-        return cls(origin_x=origin_x, origin_y=origin_y,
-                   tile_w=tile_w, tile_h=tile_h, cols=cols, rows=rows)
+        return cls(
+            origin_x=origin_x, origin_y=origin_y, tile_w=tile_w, tile_h=tile_h, cols=cols, rows=rows
+        )
 
     def tile_at(self, x: float, y: float) -> tuple[int, int]:
         """Return (col, row) for the tile containing point (x, y).
@@ -90,7 +96,11 @@ class TileGrid:
         return (col, row)
 
     def tile_range(
-        self, min_x: float, min_y: float, max_x: float, max_y: float,
+        self,
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float,
     ) -> tuple[int, int, int, int]:
         """Return (col_lo, row_lo, col_hi, row_hi) covering a bounding box.
 
@@ -173,13 +183,14 @@ class CongestionEstimator:
             A populated ``CongestionEstimator``.
         """
         tile_grid = TileGrid.from_board(
-            board_origin_x, board_origin_y, board_width, board_height,
+            board_origin_x,
+            board_origin_y,
+            board_width,
+            board_height,
             target_tiles=target_tiles,
         )
         estimator = cls(grid=tile_grid)
-        estimator.demand = [
-            [0.0] * tile_grid.cols for _ in range(tile_grid.rows)
-        ]
+        estimator.demand = [[0.0] * tile_grid.cols for _ in range(tile_grid.rows)]
 
         pour_ids = pour_net_ids or set()
 
@@ -202,17 +213,24 @@ class CongestionEstimator:
             max_x = max(c[0] for c in coords)
             min_y = min(c[1] for c in coords)
             max_y = max(c[1] for c in coords)
-            net_bboxes.append(NetBBox(
-                net_id=net_id,
-                min_x=min_x, min_y=min_y,
-                max_x=max_x, max_y=max_y,
-                pad_count=len(coords),
-            ))
+            net_bboxes.append(
+                NetBBox(
+                    net_id=net_id,
+                    min_x=min_x,
+                    min_y=min_y,
+                    max_x=max_x,
+                    max_y=max_y,
+                    pad_count=len(coords),
+                )
+            )
 
         # Phase 2: distribute HPWL across tiles
         for bbox in net_bboxes:
             col_lo, row_lo, col_hi, row_hi = tile_grid.tile_range(
-                bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y,
+                bbox.min_x,
+                bbox.min_y,
+                bbox.max_x,
+                bbox.max_y,
             )
             n_tiles = (col_hi - col_lo + 1) * (row_hi - row_lo + 1)
             if n_tiles <= 0:
@@ -225,7 +243,10 @@ class CongestionEstimator:
         # Phase 3: compute per-net congestion score (average demand in bbox)
         for bbox in net_bboxes:
             col_lo, row_lo, col_hi, row_hi = tile_grid.tile_range(
-                bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y,
+                bbox.min_x,
+                bbox.min_y,
+                bbox.max_x,
+                bbox.max_y,
             )
             n_tiles = (col_hi - col_lo + 1) * (row_hi - row_lo + 1)
             if n_tiles <= 0:
@@ -338,10 +359,6 @@ class CongestionEstimator:
                 "width_mm": round(self.grid.tile_w, 3),
                 "height_mm": round(self.grid.tile_h, 3),
             },
-            "grid": [
-                [round(v, 4) for v in row] for row in self.demand
-            ],
-            "net_scores": {
-                str(k): round(v, 4) for k, v in sorted(self.net_scores.items())
-            },
+            "grid": [[round(v, 4) for v in row] for row in self.demand],
+            "net_scores": {str(k): round(v, 4) for k, v in sorted(self.net_scores.items())},
         }

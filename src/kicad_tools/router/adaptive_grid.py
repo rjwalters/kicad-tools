@@ -38,18 +38,17 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .pathfinder import Router
     from .grid import RoutingGrid
+    from .pathfinder import Router
     from .rules import DesignRules
 
-from .layers import Layer
-from .primitives import Pad, Route, Segment
-from .subgrid import SubGridRouter, SubGridResult, compute_subgrid_resolution
+from .primitives import Pad, Route
+from .subgrid import SubGridResult, SubGridRouter, compute_subgrid_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -154,12 +153,18 @@ class AdaptiveGridResult:
         if self.fine_resolutions:
             for ref, res in sorted(self.fine_resolutions.items()):
                 lines.append(f"  Fine grid ({ref}): {res:.4f}mm")
-        lines.append(f"  Phase 1 (pad escape): {self.escaped_pads} pads escaped, "
-                     f"{self.failed_escapes} failed, {self.phase1_time_ms:.0f}ms")
-        lines.append(f"  Phase 2 (channel routing): {self.nets_routed}/{self.nets_attempted} nets, "
-                     f"{self.phase2_time_ms:.0f}ms")
-        lines.append(f"  Total routes: {len(self.all_routes)} "
-                     f"({len(self.escape_routes)} escape + {len(self.main_routes)} channel)")
+        lines.append(
+            f"  Phase 1 (pad escape): {self.escaped_pads} pads escaped, "
+            f"{self.failed_escapes} failed, {self.phase1_time_ms:.0f}ms"
+        )
+        lines.append(
+            f"  Phase 2 (channel routing): {self.nets_routed}/{self.nets_attempted} nets, "
+            f"{self.phase2_time_ms:.0f}ms"
+        )
+        lines.append(
+            f"  Total routes: {len(self.all_routes)} "
+            f"({len(self.escape_routes)} escape + {len(self.main_routes)} channel)"
+        )
         return "\n".join(lines)
 
 
@@ -195,7 +200,7 @@ def _compute_component_pitches(
             continue
         min_pitch = float("inf")
         for i, p1 in enumerate(comp_pads):
-            for p2 in comp_pads[i + 1:]:
+            for p2 in comp_pads[i + 1 :]:
                 dist = math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
                 if dist > 0.001:  # Skip overlapping pads
                     min_pitch = min(min_pitch, dist)
@@ -236,9 +241,11 @@ def identify_fine_pitch_components(
             fine_res = compute_subgrid_resolution(pitch, coarse_resolution)
             fine_components[ref] = fine_res
             logger.debug(
-                "Component %s: pitch=%.3fmm (<= %.1fmm threshold), "
-                "fine grid=%.4fmm",
-                ref, pitch, fine_pitch_threshold, fine_res,
+                "Component %s: pitch=%.3fmm (<= %.1fmm threshold), fine grid=%.4fmm",
+                ref,
+                pitch,
+                fine_pitch_threshold,
+                fine_res,
             )
 
     return fine_components
@@ -274,7 +281,9 @@ class AdaptiveGridRouter:
         self.fine_pitch_threshold = fine_pitch_threshold
         self.escape_search_radius = escape_search_radius
         self._subgrid = SubGridRouter(
-            grid, rules, escape_search_radius=escape_search_radius,
+            grid,
+            rules,
+            escape_search_radius=escape_search_radius,
         )
 
     def route_adaptive(
@@ -314,8 +323,7 @@ class AdaptiveGridRouter:
         result.phase2_time_ms = (time.time() - phase2_start) * 1000
 
         logger.info(
-            "Adaptive grid routing complete: %d/%d nets, %d escape segments, "
-            "%.0fms total",
+            "Adaptive grid routing complete: %d/%d nets, %d escape segments, %.0fms total",
             result.nets_routed,
             result.nets_attempted,
             result.escaped_pads,
@@ -358,10 +366,7 @@ class AdaptiveGridRouter:
         )
 
         # Filter to only pads from fine-pitch components
-        fine_pads = [
-            pad for pad in pads.values()
-            if pad.ref in fine_components
-        ]
+        fine_pads = [pad for pad in pads.values() if pad.ref in fine_components]
 
         if not fine_pads:
             return SubGridResult(), [], {}
@@ -383,7 +388,8 @@ class AdaptiveGridRouter:
         # grid is doomed — abort routing with an actionable error rather
         # than continuing a hopeless pass.
         self._raise_if_component_fully_failed(
-            subgrid_result, fine_components,
+            subgrid_result,
+            fine_components,
         )
 
         return subgrid_result, escape_routes, fine_components
@@ -440,15 +446,12 @@ class AdaptiveGridRouter:
         """Recover the minimum pad pitch for a component from the analysis."""
         if subgrid_result.analysis is None:
             return None
-        comp_pads = [
-            sgp.pad for sgp in subgrid_result.analysis.off_grid_pads
-            if sgp.pad.ref == ref
-        ]
+        comp_pads = [sgp.pad for sgp in subgrid_result.analysis.off_grid_pads if sgp.pad.ref == ref]
         if len(comp_pads) < 2:
             return None
         min_pitch = float("inf")
         for i, p1 in enumerate(comp_pads):
-            for p2 in comp_pads[i + 1:]:
+            for p2 in comp_pads[i + 1 :]:
                 dist = math.hypot(p1.x - p2.x, p1.y - p2.y)
                 if dist > 0.001:
                     min_pitch = min(min_pitch, dist)
@@ -506,7 +509,8 @@ class AdaptiveGridRouter:
 
         logger.info(
             "Phase 2 complete: %d/%d nets routed on coarse grid",
-            nets_routed, nets_attempted,
+            nets_routed,
+            nets_attempted,
         )
 
         return routes, nets_attempted, nets_routed

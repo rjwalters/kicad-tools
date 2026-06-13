@@ -16,10 +16,9 @@ Usage::
 
 from __future__ import annotations
 
-import copy
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +27,6 @@ from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
 from kicad_tools.sexp.builders import (
     fmt,
     gr_line_node,
-    gr_rect_node,
-    uuid_node,
 )
 from kicad_tools.sexp.parser import SExp
 
@@ -336,9 +333,7 @@ class Panel:
             for j in range(len(row_insts) - 1):
                 a = row_insts[j]
                 b = row_insts[j + 1]
-                tabs = compute_tabs_between_boards(
-                    a.bounds, b.bounds, config, "horizontal"
-                )
+                tabs = compute_tabs_between_boards(a.bounds, b.bounds, config, "horizontal")
                 self._tabs.extend(tabs)
 
         # Tabs between vertically adjacent boards
@@ -351,18 +346,14 @@ class Panel:
             for j in range(len(col_insts) - 1):
                 a = col_insts[j]
                 b = col_insts[j + 1]
-                tabs = compute_tabs_between_boards(
-                    a.bounds, b.bounds, config, "vertical"
-                )
+                tabs = compute_tabs_between_boards(a.bounds, b.bounds, config, "vertical")
                 self._tabs.extend(tabs)
 
         # Tabs to frame (if frame is configured)
         if self._frame_config is not None:
             frame_inner = self._get_frame_inner_bounds()
             for inst in self._instances:
-                tabs = compute_tabs_to_frame(
-                    inst.bounds, frame_inner, config
-                )
+                tabs = compute_tabs_to_frame(inst.bounds, frame_inner, config)
                 self._tabs.extend(tabs)
 
         return self
@@ -396,9 +387,7 @@ class Panel:
         Returns:
             ``self`` for method chaining.
         """
-        self._mousebite_config = MousebiteConfig(
-            diameter=diameter, spacing=spacing, offset=offset
-        )
+        self._mousebite_config = MousebiteConfig(diameter=diameter, spacing=spacing, offset=offset)
         return self
 
     def make_vcuts(
@@ -439,9 +428,7 @@ class Panel:
         Returns:
             ``self`` for method chaining.
         """
-        self._tooling_config = ToolingHoleConfig(
-            diameter=diameter, offset=offset, pattern=pattern
-        )
+        self._tooling_config = ToolingHoleConfig(diameter=diameter, offset=offset, pattern=pattern)
         return self
 
     def make_fiducials(
@@ -495,9 +482,7 @@ class Panel:
             serialization.
         """
         if self._source_sexp is None:
-            raise ValueError(
-                "No board loaded. Call append_board() before build()."
-            )
+            raise ValueError("No board loaded. Call append_board() before build().")
 
         # Start with a skeleton PCB based on the source
         panel_sexp = self._build_skeleton()
@@ -573,8 +558,13 @@ class Panel:
 
         # Copy structural header nodes
         header_tags = {
-            "version", "generator", "generator_version", "general",
-            "paper", "layers", "setup",
+            "version",
+            "generator",
+            "generator_version",
+            "general",
+            "paper",
+            "layers",
+            "setup",
         }
         for child in src.children:
             if child.name in header_tags:
@@ -611,9 +601,7 @@ class Panel:
                 panel_net_num = self._next_net
                 self._next_net += 1
                 panel_net_name = f"B{inst.index}/{src_name}"
-                panel_sexp.append(
-                    SExp.list("net", panel_net_num, panel_net_name)
-                )
+                panel_sexp.append(SExp.list("net", panel_net_num, panel_net_name))
                 # Store mapping: (instance_index, source_net) -> panel_net
                 self._net_map[(inst.index, src_num)] = panel_net_num
 
@@ -634,8 +622,16 @@ class Panel:
 
         # Content node types to clone
         content_tags = {
-            "footprint", "segment", "via", "zone", "gr_line", "gr_arc",
-            "gr_rect", "gr_circle", "gr_text", "gr_poly",
+            "footprint",
+            "segment",
+            "via",
+            "zone",
+            "gr_line",
+            "gr_arc",
+            "gr_rect",
+            "gr_circle",
+            "gr_text",
+            "gr_poly",
         }
 
         src_min_x, src_min_y = self._board_bounds[0], self._board_bounds[1]
@@ -681,28 +677,44 @@ class Panel:
             # Tab spans horizontally -- draw vertical side lines
             panel_sexp.append(
                 gr_line_node(
-                    tab.min_x, tab.min_y, tab.min_x, tab.max_y,
-                    layer="Edge.Cuts", uuid_str=tab_uuid1,
+                    tab.min_x,
+                    tab.min_y,
+                    tab.min_x,
+                    tab.max_y,
+                    layer="Edge.Cuts",
+                    uuid_str=tab_uuid1,
                 )
             )
             panel_sexp.append(
                 gr_line_node(
-                    tab.max_x, tab.min_y, tab.max_x, tab.max_y,
-                    layer="Edge.Cuts", uuid_str=tab_uuid2,
+                    tab.max_x,
+                    tab.min_y,
+                    tab.max_x,
+                    tab.max_y,
+                    layer="Edge.Cuts",
+                    uuid_str=tab_uuid2,
                 )
             )
         else:
             # Tab spans vertically -- draw horizontal side lines
             panel_sexp.append(
                 gr_line_node(
-                    tab.min_x, tab.min_y, tab.max_x, tab.min_y,
-                    layer="Edge.Cuts", uuid_str=tab_uuid1,
+                    tab.min_x,
+                    tab.min_y,
+                    tab.max_x,
+                    tab.min_y,
+                    layer="Edge.Cuts",
+                    uuid_str=tab_uuid1,
                 )
             )
             panel_sexp.append(
                 gr_line_node(
-                    tab.min_x, tab.max_y, tab.max_x, tab.max_y,
-                    layer="Edge.Cuts", uuid_str=tab_uuid2,
+                    tab.min_x,
+                    tab.max_y,
+                    tab.max_x,
+                    tab.max_y,
+                    layer="Edge.Cuts",
+                    uuid_str=tab_uuid2,
                 )
             )
 
@@ -723,8 +735,7 @@ class Panel:
         ]
         for sx, sy, ex, ey in outer:
             panel_sexp.append(
-                gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts",
-                             uuid_str=str(uuid.uuid4()))
+                gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
             )
 
         # Inner frame rectangle
@@ -736,8 +747,7 @@ class Panel:
         ]
         for sx, sy, ex, ey in inner:
             panel_sexp.append(
-                gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts",
-                             uuid_str=str(uuid.uuid4()))
+                gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
             )
 
     def _render_panel_outline(self, panel_sexp: SExp) -> None:
@@ -754,8 +764,7 @@ class Panel:
                 ]
                 for sx, sy, ex, ey in edges:
                     panel_sexp.append(
-                        gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts",
-                                     uuid_str=str(uuid.uuid4()))
+                        gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
                     )
         else:
             # No frame -- render a simple outline around the entire panel
@@ -768,8 +777,7 @@ class Panel:
             ]
             for sx, sy, ex, ey in edges:
                 panel_sexp.append(
-                    gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts",
-                                 uuid_str=str(uuid.uuid4()))
+                    gr_line_node(sx, sy, ex, ey, layer="Edge.Cuts", uuid_str=str(uuid.uuid4()))
                 )
 
     def _compute_vcut_positions(
@@ -937,7 +945,5 @@ def _remap_reference(footprint_node: SExp, instance_index: int) -> None:
                 and value_child.is_atom
                 and isinstance(value_child.value, str)
             ):
-                child.children[1] = SExp(
-                    value=f"B{instance_index}_{value_child.value}"
-                )
+                child.children[1] = SExp(value=f"B{instance_index}_{value_child.value}")
                 return

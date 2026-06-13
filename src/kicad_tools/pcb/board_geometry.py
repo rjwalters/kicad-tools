@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 _SHAPELY_AVAILABLE = False
 try:
-    from shapely.geometry import LineString, MultiPolygon, Point  # noqa: F811
+    from shapely.geometry import LineString, Point  # noqa: F811
     from shapely.geometry import Polygon as ShapelyPolygon
     from shapely.ops import polygonize, unary_union
 
@@ -209,8 +209,7 @@ def _repair_outline_polygon(poly: Any) -> Any:
     pieces = [p for p in pieces if not p.is_empty]
     if not pieces:
         raise ValueError(
-            "Board outline is degenerate: repairing the invalid polygon "
-            "produced no polygonal area."
+            "Board outline is degenerate: repairing the invalid polygon produced no polygonal area."
         )
 
     if len(pieces) == 1:
@@ -321,12 +320,8 @@ class BoardGeometry:
             elif g.graphic_type == "circle":
                 cx_raw, cy_raw = g.start[0] - ox, g.start[1] - oy
                 ex_raw, ey_raw = g.end[0] - ox, g.end[1] - oy
-                radius = math.sqrt(
-                    (ex_raw - cx_raw) ** 2 + (ey_raw - cy_raw) ** 2
-                )
-                circle_poly = Point(cx_raw, cy_raw).buffer(
-                    radius, resolution=_DEFAULT_ARC_SEGMENTS
-                )
+                radius = math.sqrt((ex_raw - cx_raw) ** 2 + (ey_raw - cy_raw) ** 2)
+                circle_poly = Point(cx_raw, cy_raw).buffer(radius, resolution=_DEFAULT_ARC_SEGMENTS)
                 return cls(polygon=circle_poly, origin=origin)
 
             elif g.graphic_type == "bezier":
@@ -337,9 +332,7 @@ class BoardGeometry:
                     lines.append(pts)
 
         if not lines:
-            raise ValueError(
-                "No Edge.Cuts elements found -- cannot construct board outline."
-            )
+            raise ValueError("No Edge.Cuts elements found -- cannot construct board outline.")
 
         # Build Shapely LineStrings and polygonize
         shapely_lines = [LineString(seg) for seg in lines if len(seg) >= 2]
@@ -352,9 +345,7 @@ class BoardGeometry:
                 poly = ShapelyPolygon(all_coords)
                 if poly.is_valid:
                     return cls(polygon=poly, origin=origin)
-            raise ValueError(
-                "Could not form a closed polygon from Edge.Cuts segments."
-            )
+            raise ValueError("Could not form a closed polygon from Edge.Cuts segments.")
 
         if len(result) == 1:
             polygon = result[0]
@@ -502,9 +493,7 @@ class BoardGeometry:
         from kicad_tools.placement.cost import BoardOutline
 
         min_x, min_y, max_x, max_y = self.bounds
-        return BoardOutline(
-            min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y
-        )
+        return BoardOutline(min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y)
 
     def to_optim_polygon(self) -> Any:
         """Convert to an ``optim.geometry.Polygon`` for backward compatibility."""

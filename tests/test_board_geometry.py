@@ -21,7 +21,6 @@ from kicad_tools.pcb.board_geometry import (
     has_shapely,
 )
 
-
 # -----------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------
@@ -73,9 +72,7 @@ class TestConstruction:
         assert geom.area == pytest.approx(100.0 * 80.0)
 
     def test_from_outline_points_rectangle(self):
-        geom = BoardGeometry.from_outline_points(
-            [(0, 0), (50, 0), (50, 30), (0, 30)]
-        )
+        geom = BoardGeometry.from_outline_points([(0, 0), (50, 0), (50, 30), (0, 30)])
         assert geom.area == pytest.approx(50.0 * 30.0)
 
     def test_from_outline_points_l_shape(self):
@@ -92,9 +89,7 @@ class TestConstruction:
         from shapely.geometry import Polygon as ShapelyPolygon
 
         points = [(0.0, 0.0), (50.0, 0.0), (50.0, 30.0), (0.0, 30.0)]
-        with caplog.at_level(
-            "WARNING", logger="kicad_tools.pcb.board_geometry"
-        ):
+        with caplog.at_level("WARNING", logger="kicad_tools.pcb.board_geometry"):
             geom = BoardGeometry.from_outline_points(points)
         assert geom.polygon.equals(ShapelyPolygon(points))
         assert geom.area == pytest.approx(50.0 * 30.0)
@@ -113,9 +108,7 @@ class TestConstruction:
         #   - large lobe: triangle (0,0),(10,0),X  -> area 75/7
         #   - small lobe: triangle X,(0,3),(4,3)   -> area 12/7
         points = [(0.0, 0.0), (10.0, 0.0), (0.0, 3.0), (4.0, 3.0)]
-        with caplog.at_level(
-            "WARNING", logger="kicad_tools.pcb.board_geometry"
-        ):
+        with caplog.at_level("WARNING", logger="kicad_tools.pcb.board_geometry"):
             geom = BoardGeometry.from_outline_points(points)
 
         # Largest lobe kept, smaller lobe dropped
@@ -134,9 +127,7 @@ class TestConstruction:
     def test_degenerate_outline_raises(self):
         """Collinear points yield no polygonal area -> ValueError."""
         with pytest.raises(ValueError, match="degenerate"):
-            BoardGeometry.from_outline_points(
-                [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
-            )
+            BoardGeometry.from_outline_points([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)])
 
     def test_exterior_coords(self):
         geom = _rect_geometry(0, 0, 10, 10)

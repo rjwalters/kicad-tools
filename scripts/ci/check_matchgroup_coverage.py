@@ -290,9 +290,7 @@ def build_net_class_map_for_board(board_dir: Path) -> dict | None:
     return getattr(mod, "build_net_class_map", lambda: None)()
 
 
-def measure_pour_connectivity(
-    recipe_mod, pcb_path: Path, pour_nets: set[str]
-) -> list[str]:
+def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -> list[str]:
     """Run the board recipe's copper-union pour audit on a routed PCB.
 
     Issue #3617 (sibling of board 06's #3509): board 07's recipe runs a
@@ -343,8 +341,7 @@ def measure_pour_connectivity(
         if not info["connected"]:
             largest = len(info["pad_groups"][0]) if info["pad_groups"] else 0
             failures.append(
-                f"{net}: {len(info['pad_groups'])} disjoint pad groups "
-                f"(largest {largest}/{n_pads})"
+                f"{net}: {len(info['pad_groups'])} disjoint pad groups (largest {largest}/{n_pads})"
             )
         if info.get("zero_fill_zones"):
             failures.append(
@@ -651,9 +648,7 @@ def check_board(
     # pass.
     if require_pour_connectivity:
         try:
-            pour_failures = measure_pour_connectivity(
-                recipe_mod, routed_pcb, pour_nets
-            )
+            pour_failures = measure_pour_connectivity(recipe_mod, routed_pcb, pour_nets)
         except RuntimeError as e:
             annotate_error(
                 str(routed_pcb),

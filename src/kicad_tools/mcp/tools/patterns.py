@@ -14,9 +14,11 @@ from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.patterns import (
     PatternValidator,
-    adapt_pattern as _adapt_pattern,
     get_component_requirements,
     list_components,
+)
+from kicad_tools.patterns import (
+    adapt_pattern as _adapt_pattern,
 )
 from kicad_tools.schema.pcb import PCB
 

@@ -554,7 +554,10 @@ class LibrarySymbol:
         positions = {}
         for pin in self.pins:
             pos = self.get_pin_position(
-                pin.number, instance_pos, instance_rot, mirror,
+                pin.number,
+                instance_pos,
+                instance_rot,
+                mirror,
                 snap_to_grid=snap_to_grid,
             )
             if pos:
@@ -966,9 +969,7 @@ class SymbolLibrary:
         current = symbol
         while current.extends is not None:
             if current.name in visited:
-                raise ValueError(
-                    f"Circular extends chain detected at '{current.name}'"
-                )
+                raise ValueError(f"Circular extends chain detected at '{current.name}'")
             visited.add(current.name)
             base = self.symbols.get(current.extends)
             if base is None:
@@ -1249,7 +1250,9 @@ def resolve_extends(symbols: dict[str, LibrarySymbol], *, max_depth: int = 10) -
         current_name = sym.extends
         depth = 0
         resolved_pins: list[LibraryPin] | None = None
-        resolved_graphics: list[SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle] | None = None
+        resolved_graphics: (
+            list[SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle] | None
+        ) = None
 
         while current_name is not None and depth < max_depth:
             if current_name in visited:
@@ -1328,9 +1331,7 @@ class LibraryManager:
                 short_name = lib_id
 
             if lib_name not in self.libraries:
-                self.libraries[lib_name] = SymbolLibrary(
-                    path="<embedded>", symbols={}
-                )
+                self.libraries[lib_name] = SymbolLibrary(path="<embedded>", symbols={})
             if short_name not in self.libraries[lib_name].symbols:
                 self.libraries[lib_name].symbols[short_name] = sym
 

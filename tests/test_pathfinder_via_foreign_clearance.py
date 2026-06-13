@@ -40,9 +40,7 @@ class TestForeignContextBaseline:
         """A clear cell with no foreign context returns True."""
         router, grid = _make_router()
         # Pick a cell in the interior with no obstacles.
-        can_place = router._check_via_placement_cached(
-            gx=20, gy=20, net=1, allow_sharing=False
-        )
+        can_place = router._check_via_placement_cached(gx=20, gy=20, net=1, allow_sharing=False)
         assert can_place
 
     def test_setter_default_args_empty(self):
@@ -75,17 +73,18 @@ class TestForeignPadRejection:
         # Place a foreign-net pad 0.6 mm from the via center -- well
         # inside the 1.05 mm threshold.
         foreign_pad = Pad(
-            x=wx + 0.6, y=wy,
-            width=1.0, height=1.0,
-            net=99, net_name="FOREIGN",
+            x=wx + 0.6,
+            y=wy,
+            width=1.0,
+            height=1.0,
+            net=99,
+            net_name="FOREIGN",
         )
         router.set_via_foreign_context(foreign_pads=[foreign_pad])
 
         # Without foreign-context, the grid check would pass; the
         # world-coord check must now reject.
-        can_place = router._check_via_placement_cached(
-            gx=gx, gy=gy, net=1, allow_sharing=False
-        )
+        can_place = router._check_via_placement_cached(gx=gx, gy=gy, net=1, allow_sharing=False)
         assert not can_place, (
             "Via must be rejected: foreign-net pad at 0.6 mm violates "
             "0.35 (via_r) + 0.5 (pad_r) + 0.2 (clear) = 1.05 mm threshold"
@@ -98,15 +97,16 @@ class TestForeignPadRejection:
         wx, wy = grid.grid_to_world(gx, gy)
 
         same_net_pad = Pad(
-            x=wx + 0.6, y=wy,
-            width=1.0, height=1.0,
-            net=1, net_name="SAME",
+            x=wx + 0.6,
+            y=wy,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="SAME",
         )
         router.set_via_foreign_context(foreign_pads=[same_net_pad])
 
-        can_place = router._check_via_placement_cached(
-            gx=gx, gy=gy, net=1, allow_sharing=False
-        )
+        can_place = router._check_via_placement_cached(gx=gx, gy=gy, net=1, allow_sharing=False)
         assert can_place, "Same-net pad must not trigger foreign-net rejection"
 
     def test_distant_foreign_pad_does_not_block(self):
@@ -116,15 +116,16 @@ class TestForeignPadRejection:
         wx, wy = grid.grid_to_world(gx, gy)
 
         far_pad = Pad(
-            x=wx + 5.0, y=wy,  # 5 mm clear -- way beyond 1.05 mm
-            width=1.0, height=1.0,
-            net=99, net_name="FAR",
+            x=wx + 5.0,
+            y=wy,  # 5 mm clear -- way beyond 1.05 mm
+            width=1.0,
+            height=1.0,
+            net=99,
+            net_name="FAR",
         )
         router.set_via_foreign_context(foreign_pads=[far_pad])
 
-        can_place = router._check_via_placement_cached(
-            gx=gx, gy=gy, net=1, allow_sharing=False
-        )
+        can_place = router._check_via_placement_cached(gx=gx, gy=gy, net=1, allow_sharing=False)
         assert can_place
 
 
@@ -143,15 +144,18 @@ class TestForeignTrackRejection:
         # 0.15 mm is well inside.  Models the BOOT0 vs SWDIO/SWCLK
         # geometry from the board-04 cluster (-0.204 mm overlap).
         foreign_track = Segment(
-            x1=wx - 2.0, y1=wy + 0.15,
-            x2=wx + 2.0, y2=wy + 0.15,
-            width=0.25, layer=Layer.B_CU, net=99, net_name="BOOT0_FOE",
+            x1=wx - 2.0,
+            y1=wy + 0.15,
+            x2=wx + 2.0,
+            y2=wy + 0.15,
+            width=0.25,
+            layer=Layer.B_CU,
+            net=99,
+            net_name="BOOT0_FOE",
         )
         router.set_via_foreign_context(foreign_tracks=[foreign_track])
 
-        can_place = router._check_via_placement_cached(
-            gx=gx, gy=gy, net=1, allow_sharing=False
-        )
+        can_place = router._check_via_placement_cached(gx=gx, gy=gy, net=1, allow_sharing=False)
         assert not can_place, (
             "Via must be rejected: foreign-net track at 0.15 mm violates "
             "0.35 (via_r) + 0.125 (seg_w/2) + 0.2 (clear) = 0.675 mm threshold"
@@ -168,18 +172,19 @@ class TestCacheInvariants:
         router, grid = _make_router()
 
         # Prime the cache with a positive result.
-        can_place_1 = router._check_via_placement_cached(
-            gx=20, gy=20, net=1, allow_sharing=False
-        )
+        can_place_1 = router._check_via_placement_cached(gx=20, gy=20, net=1, allow_sharing=False)
         assert can_place_1
         assert (20, 20, 1, router._via_half_cells) in router._via_cache
 
         # Push a foreign context that should now block.
         wx, wy = grid.grid_to_world(20, 20)
         blocker = Pad(
-            x=wx, y=wy,  # dead-center -> definite overlap
-            width=1.0, height=1.0,
-            net=99, net_name="X",
+            x=wx,
+            y=wy,  # dead-center -> definite overlap
+            width=1.0,
+            height=1.0,
+            net=99,
+            net_name="X",
         )
         router.set_via_foreign_context(foreign_pads=[blocker])
 
@@ -187,9 +192,7 @@ class TestCacheInvariants:
         assert (20, 20, 1, router._via_half_cells) not in router._via_cache
 
         # Re-check: now blocked.
-        can_place_2 = router._check_via_placement_cached(
-            gx=20, gy=20, net=1, allow_sharing=False
-        )
+        can_place_2 = router._check_via_placement_cached(gx=20, gy=20, net=1, allow_sharing=False)
         assert not can_place_2
 
     def test_cache_key_is_net_keyed(self):
@@ -201,6 +204,4 @@ class TestCacheInvariants:
         router._check_via_placement_cached(20, 20, net=2, allow_sharing=False)
         keys = list(router._via_cache.keys())
         nets = {k[2] for k in keys}
-        assert {1, 2}.issubset(nets), (
-            f"Cache must discriminate by net for #2947 safety: {keys}"
-        )
+        assert {1, 2}.issubset(nets), f"Cache must discriminate by net for #2947 safety: {keys}"

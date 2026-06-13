@@ -55,14 +55,22 @@ def _make_simple_router(num_nets: int = 3) -> Autorouter:
         net_id = idx + 1
         pads = [
             {
-                "number": "1", "x": 5.0, "y": 4.0 + idx * 4.0,
-                "width": 0.5, "height": 0.5,
-                "net": net_id, "net_name": f"N{net_id}",
+                "number": "1",
+                "x": 5.0,
+                "y": 4.0 + idx * 4.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": f"N{net_id}",
             },
             {
-                "number": "2", "x": 35.0, "y": 4.0 + idx * 4.0,
-                "width": 0.5, "height": 0.5,
-                "net": net_id, "net_name": f"N{net_id}",
+                "number": "2",
+                "x": 35.0,
+                "y": 4.0 + idx * 4.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net_id,
+                "net_name": f"N{net_id}",
             },
         ]
         router.add_component(f"U{net_id}", pads)
@@ -84,9 +92,7 @@ class TestReliefModeBitmap:
         g._usage_count[0, gy, gx] = 0
 
         hard = g.compute_expanded_blocked(0, net=1, allow_sharing=True)
-        relief = g.compute_expanded_blocked(
-            0, net=1, allow_sharing=True, relief_mode=True
-        )
+        relief = g.compute_expanded_blocked(0, net=1, allow_sharing=True, relief_mode=True)
 
         assert hard[0, gy, gx], "foreign usage-0 cell must be hard in normal sharing mode"
         assert not relief[0, gy, gx], (
@@ -111,9 +117,7 @@ class TestReliefModeBitmap:
         g._net[0, oy, ox] = 2
         g._usage_count[0, oy, ox] = 0
 
-        relief = g.compute_expanded_blocked(
-            0, net=1, allow_sharing=True, relief_mode=True
-        )
+        relief = g.compute_expanded_blocked(0, net=1, allow_sharing=True, relief_mode=True)
         assert relief[0, zy, zx], "net-0 static blockage must stay hard in relief mode"
         assert relief[0, oy, ox], "foreign obstacle (pad) must stay hard in relief mode"
 
@@ -138,8 +142,13 @@ class TestFindReliefConflictNets:
             net_name="N1",
             segments=[
                 Segment(
-                    x1=10.0, y1=10.0, x2=30.0, y2=10.0,
-                    width=g.rules.trace_width, layer=Layer.F_CU, net=1,
+                    x1=10.0,
+                    y1=10.0,
+                    x2=30.0,
+                    y2=10.0,
+                    width=g.rules.trace_width,
+                    layer=Layer.F_CU,
+                    net=1,
                 ),
             ],
         )
@@ -181,8 +190,13 @@ class TestFindReliefConflictNets:
             net_name="N1",
             segments=[
                 Segment(
-                    x1=10.0, y1=10.0, x2=30.0, y2=10.0,
-                    width=g.rules.trace_width, layer=Layer.F_CU, net=1,
+                    x1=10.0,
+                    y1=10.0,
+                    x2=30.0,
+                    y2=10.0,
+                    width=g.rules.trace_width,
+                    layer=Layer.F_CU,
+                    net=1,
                 ),
             ],
         )
@@ -270,8 +284,13 @@ class TestReliefRescueTransaction:
             net_name="N1",
             segments=[
                 Segment(
-                    x1=5.0, y1=4.0, x2=10.0, y2=4.0,
-                    width=0.2, layer=Layer.F_CU, net=1,
+                    x1=5.0,
+                    y1=4.0,
+                    x2=10.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
                 ),
             ],
         )
@@ -280,13 +299,10 @@ class TestReliefRescueTransaction:
         router.routes.append(original)
         net_routes: dict[int, list[Route]] = {1: [original]}
         pads_by_net = {
-            net_id: [router.pads[p] for p in pad_ids]
-            for net_id, pad_ids in router.nets.items()
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
         }
 
-        with patch.object(
-            Autorouter, "_relief_probe", return_value=([], set())
-        ):
+        with patch.object(Autorouter, "_relief_probe", return_value=([], set())):
             ok = router._relief_rescue(
                 failed_net=1,
                 neg_router=neg_router,
@@ -299,9 +315,7 @@ class TestReliefRescueTransaction:
             )
 
         assert ok is False
-        assert net_routes[1] == [original], (
-            "rollback must restore the EXACT original Route objects"
-        )
+        assert net_routes[1] == [original], "rollback must restore the EXACT original Route objects"
         assert original in router.routes
 
     def test_conflict_free_probe_commits(self):
@@ -319,20 +333,22 @@ class TestReliefRescueTransaction:
             net_name="N1",
             segments=[
                 Segment(
-                    x1=5.0, y1=4.0, x2=35.0, y2=4.0,
-                    width=0.2, layer=Layer.F_CU, net=1,
+                    x1=5.0,
+                    y1=4.0,
+                    x2=35.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
                 ),
             ],
         )
         net_routes: dict[int, list[Route]] = {1: []}
         pads_by_net = {
-            net_id: [router.pads[p] for p in pad_ids]
-            for net_id, pad_ids in router.nets.items()
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
         }
 
-        with patch.object(
-            Autorouter, "_relief_probe", return_value=([probe], set())
-        ):
+        with patch.object(Autorouter, "_relief_probe", return_value=([probe], set())):
             ok = router._relief_rescue(
                 failed_net=1,
                 neg_router=neg_router,
@@ -365,8 +381,13 @@ class TestCorridorReservationDeferral:
             net_name="N1",
             segments=[
                 Segment(
-                    x1=5.0, y1=4.0, x2=20.0, y2=4.0,
-                    width=0.2, layer=Layer.F_CU, net=1,
+                    x1=5.0,
+                    y1=4.0,
+                    x2=20.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
                 ),
             ],
         )
@@ -397,8 +418,13 @@ class TestCorridorReservationDeferral:
             net_name="N1",
             segments=[
                 Segment(
-                    x1=5.0, y1=4.0, x2=20.0, y2=4.0,
-                    width=0.2, layer=Layer.F_CU, net=1,
+                    x1=5.0,
+                    y1=4.0,
+                    x2=20.0,
+                    y2=4.0,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
                 ),
             ],
         )

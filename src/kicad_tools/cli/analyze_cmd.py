@@ -36,9 +36,9 @@ from kicad_tools.analysis import (
     CongestionAnalyzer,
     RiskLevel,
     Severity,
-    TraceIntegrityAnalyzer,
     ThermalAnalyzer,
     ThermalSeverity,
+    TraceIntegrityAnalyzer,
     TraceLengthAnalyzer,
 )
 from kicad_tools.schema.pcb import PCB
@@ -1114,9 +1114,7 @@ def _output_complexity_text(report, filename: str, quiet: bool = False) -> None:
 
         for i, bottleneck in enumerate(report.bottlenecks[:5], 1):
             x, y = bottleneck.position
-            console.print(
-                f"  {i}. [cyan]{bottleneck.component_ref}[/cyan] at ({x:.1f}, {y:.1f})"
-            )
+            console.print(f"  {i}. [cyan]{bottleneck.component_ref}[/cyan] at ({x:.1f}, {y:.1f})")
             console.print(f"     {bottleneck.description}")
             console.print(
                 f"     Pins: {bottleneck.pin_count}, "

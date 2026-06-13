@@ -223,10 +223,7 @@ class TestGenuineConvergenceStillFires:
         # Either the iteration-0 early return or an in-loop convergence
         # break must fire -- the new predicate must not block a genuinely
         # complete result.
-        assert (
-            "No conflicts - routing complete!" in out
-            or "Convergence achieved" in out
-        )
+        assert "No conflicts - routing complete!" in out or "Convergence achieved" in out
         routed_nets = {r.net for r in routes}
         assert {1, 2} <= routed_nets
 

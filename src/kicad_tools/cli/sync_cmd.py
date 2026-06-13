@@ -17,7 +17,6 @@ Exit Codes:
 
 import json
 import sys
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -295,9 +294,7 @@ def _output_changes_table(changes, dry_run: bool) -> None:
                 status = "(skipped)"
 
         print(f"\n  {change.change_type}: {change.reference}")
-        if change.change_type == "add_footprint":
-            print(f"    {change.new_value} {status}")
-        elif change.change_type == "remove_orphan":
+        if change.change_type == "add_footprint" or change.change_type == "remove_orphan":
             print(f"    {change.new_value} {status}")
         else:
             print(f"    {change.old_value} -> {change.new_value} {status}")

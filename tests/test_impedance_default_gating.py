@@ -965,7 +965,5 @@ class TestNeckDownTaperExemption:
         pcb = PCB.load(str(neck_down_pcb))
         rule = ImpedanceRule()
         traces = rule._collect_traces(pcb)
-        lengths = sorted(
-            ImpedanceRule._segment_length_mm(t) for t in traces["MIPI_RST"]
-        )
+        lengths = sorted(ImpedanceRule._segment_length_mm(t) for t in traces["MIPI_RST"])
         assert lengths == pytest.approx([0.5, 0.7, 30.0])

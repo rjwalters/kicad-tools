@@ -76,8 +76,7 @@ def run_set_symbol_property(
     normalized = _normalize_flag_value(value)
     if normalized is None:
         print(
-            f"Error: Invalid value '{value}'. "
-            f"Accepted values: yes, no, true, false, 1, 0",
+            f"Error: Invalid value '{value}'. Accepted values: yes, no, true, false, 1, 0",
             file=sys.stderr,
         )
         return 1
@@ -105,14 +104,11 @@ def run_set_symbol_property(
             block = text[start:end]
             import re
 
-            flag_match = re.search(
-                rf"\({re.escape(property_name)}\s+(yes|no)\)", block
-            )
+            flag_match = re.search(rf"\({re.escape(property_name)}\s+(yes|no)\)", block)
             if flag_match:
                 old_val = flag_match.group(1)
                 print(
-                    f"  {ref}: {property_name} '{old_val}' -> '{normalized}'"
-                    f" (in {sch_file.name})"
+                    f"  {ref}: {property_name} '{old_val}' -> '{normalized}' (in {sch_file.name})"
                 )
             else:
                 print(
@@ -122,16 +118,11 @@ def run_set_symbol_property(
                 )
                 return 1
             print()
-            print(
-                f"Dry run: {property_name} on {ref} would be changed"
-                f" to '{normalized}'"
-            )
+            print(f"Dry run: {property_name} on {ref} would be changed to '{normalized}'")
             return 0
 
         # Apply the change
-        new_text, success, msg = set_symbol_flag_text(
-            text, ref, property_name, normalized
-        )
+        new_text, success, msg = set_symbol_flag_text(text, ref, property_name, normalized)
         if not success:
             print(f"Error: {msg}", file=sys.stderr)
             return 1
@@ -152,8 +143,7 @@ def run_set_symbol_property(
 
     # Symbol not found in any file
     print(
-        f"Error: Symbol '{ref}' not found in {schematic_path.name}"
-        f" or its sub-sheets",
+        f"Error: Symbol '{ref}' not found in {schematic_path.name} or its sub-sheets",
         file=sys.stderr,
     )
     return 1
@@ -169,9 +159,7 @@ def main(argv: list[str] | None = None):
         epilog=__doc__,
     )
     parser.add_argument("schematic", type=Path, help="Path to .kicad_sch file")
-    parser.add_argument(
-        "--ref", required=True, help="Symbol reference (e.g., #PWR052, U1)"
-    )
+    parser.add_argument("--ref", required=True, help="Symbol reference (e.g., #PWR052, U1)")
     parser.add_argument(
         "--property",
         dest="property_name",

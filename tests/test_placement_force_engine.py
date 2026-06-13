@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.optim.components import Component, Pin
+from kicad_tools.optim.components import Component
 from kicad_tools.optim.config import PlacementConfig
 from kicad_tools.optim.cpp_backend import is_cpp_available
-from kicad_tools.optim.geometry import Polygon, Vector2D
+from kicad_tools.optim.geometry import Polygon
 from kicad_tools.optim.placement import PlacementOptimizer
 
 # Tolerance for floating point comparison
@@ -29,7 +29,9 @@ TOLERANCE = 1e-6
 # ---------------------------------------------------------------------------
 
 
-def _make_component(ref: str, x: float, y: float, w: float, h: float, fixed: bool = False) -> Component:
+def _make_component(
+    ref: str, x: float, y: float, w: float, h: float, fixed: bool = False
+) -> Component:
     """Create a rectangular component at (x, y) with given dimensions."""
     comp = Component(
         ref=ref,
@@ -201,6 +203,7 @@ class TestCrossCheckRepulsion:
     def test_ten_components_match(self):
         """Ten components with known positions produce identical results."""
         import random
+
         random.seed(42)
 
         components_py = []
@@ -223,15 +226,9 @@ class TestCrossCheckRepulsion:
         cpp_forces, cpp_torques = opt_cpp._compute_component_repulsion_cpp()
 
         for ref in py_forces:
-            assert abs(py_forces[ref].x - cpp_forces[ref].x) < TOLERANCE, (
-                f"{ref} force_x mismatch"
-            )
-            assert abs(py_forces[ref].y - cpp_forces[ref].y) < TOLERANCE, (
-                f"{ref} force_y mismatch"
-            )
-            assert abs(py_torques[ref] - cpp_torques[ref]) < TOLERANCE, (
-                f"{ref} torque mismatch"
-            )
+            assert abs(py_forces[ref].x - cpp_forces[ref].x) < TOLERANCE, f"{ref} force_x mismatch"
+            assert abs(py_forces[ref].y - cpp_forces[ref].y) < TOLERANCE, f"{ref} force_y mismatch"
+            assert abs(py_torques[ref] - cpp_torques[ref]) < TOLERANCE, f"{ref} torque mismatch"
 
     def test_with_fixed_components(self):
         """Mixed fixed/unfixed components produce identical results."""

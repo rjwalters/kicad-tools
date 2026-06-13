@@ -163,19 +163,23 @@ def generate_vcut_lines(
 
     for pos in cut_positions:
         if orientation == "horizontal":
-            lines.append(VCutLine(
-                start_x=min_x,
-                start_y=pos,
-                end_x=max_x,
-                end_y=pos,
-            ))
+            lines.append(
+                VCutLine(
+                    start_x=min_x,
+                    start_y=pos,
+                    end_x=max_x,
+                    end_y=pos,
+                )
+            )
         else:
-            lines.append(VCutLine(
-                start_x=pos,
-                start_y=min_y,
-                end_x=pos,
-                end_y=max_y,
-            ))
+            lines.append(
+                VCutLine(
+                    start_x=pos,
+                    start_y=min_y,
+                    end_x=pos,
+                    end_y=max_y,
+                )
+            )
 
     return lines
 

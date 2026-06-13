@@ -349,11 +349,11 @@ def _make_project(tmp_path: Path, *, fp_filename: str = "MyPart.kicad_mod") -> P
     """Build a tmp project with .kicad_pro, fp-lib-table, schematic and lib."""
     (tmp_path / "proj.kicad_pro").write_text("{}", encoding="utf-8")
     (tmp_path / "fp-lib-table").write_text(
-        '(fp_lib_table\n'
-        '  (version 7)\n'
+        "(fp_lib_table\n"
+        "  (version 7)\n"
         '  (lib (name "CustomLib") (type "KiCad") (uri "${KIPRJMOD}/CustomLib.pretty")'
         '       (options "") (descr "Project local"))\n'
-        ')',
+        ")",
         encoding="utf-8",
     )
     lib_dir = tmp_path / "CustomLib.pretty"
@@ -381,9 +381,7 @@ def test_no_project_lib_flag_hides_project_libraries(tmp_path, capsys):
     sch = _make_project(tmp_path)
     # Return code may be 0 or 1 depending on whether global libs are available;
     # we only assert the project entry is absent from the JSON.
-    run_suggest_footprint(
-        sch, ref="R1", output_format="json", limit=50, no_project_lib=True
-    )
+    run_suggest_footprint(sch, ref="R1", output_format="json", limit=50, no_project_lib=True)
     out = capsys.readouterr().out
     data = json.loads(out)
     assert data["project_lib_table"] is None
@@ -391,9 +389,7 @@ def test_no_project_lib_flag_hides_project_libraries(tmp_path, capsys):
     assert ("CustomLib", "MyPart") not in libs
 
 
-def test_project_library_ranks_first_over_global_collision(
-    tmp_path, monkeypatch, capsys
-):
+def test_project_library_ranks_first_over_global_collision(tmp_path, monkeypatch, capsys):
     """AC: project entries win on nickname collision and rank ahead."""
     # Two libraries sharing the nickname "CustomLib": one in the project,
     # one in a fake "global" footprints root.  The project entry must win.
@@ -415,15 +411,13 @@ def test_project_library_ranks_first_over_global_collision(
     fake_global = tmp_path / "global_footprints"
     fake_global_lib = fake_global / "CustomLib.pretty"
     fake_global_lib.mkdir(parents=True)
-    fake_global_fp = (fake_global_lib / "GlobalPart.kicad_mod")
+    fake_global_fp = fake_global_lib / "GlobalPart.kicad_mod"
     fake_global_fp.write_text(_MINI_FP.replace("MyPart", "GlobalPart"), encoding="utf-8")
 
     def _global_paths(*_a, **_kw):
         return LibraryPaths(footprints_path=fake_global, source="env")
 
-    monkeypatch.setattr(
-        sch_suggest_footprint, "detect_kicad_library_path", _global_paths
-    )
+    monkeypatch.setattr(sch_suggest_footprint, "detect_kicad_library_path", _global_paths)
 
     rc = run_suggest_footprint(sch, ref="R1", output_format="json", limit=50)
     out = capsys.readouterr().out

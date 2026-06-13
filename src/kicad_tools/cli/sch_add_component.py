@@ -83,9 +83,7 @@ def parse_connect(spec: str) -> ConnectSpec:
 
     # Parse target coordinates
     if "," not in target_part:
-        raise ValueError(
-            f"Invalid target coordinates in --connect: '{spec}'. Expected 'x,y'"
-        )
+        raise ValueError(f"Invalid target coordinates in --connect: '{spec}'. Expected 'x,y'")
 
     parts = target_part.split(",")
     if len(parts) != 2:
@@ -97,9 +95,7 @@ def parse_connect(spec: str) -> ConnectSpec:
         x = float(parts[0].strip())
         y = float(parts[1].strip())
     except ValueError:
-        raise ValueError(
-            f"Invalid coordinate values in --connect: '{spec}'. Expected numeric x,y"
-        )
+        raise ValueError(f"Invalid coordinate values in --connect: '{spec}'. Expected numeric x,y")
 
     return ConnectSpec(pin_number=pin_number, target=(x, y))
 
@@ -238,8 +234,7 @@ def _validate_wire_endpoints(
             matches = sum(
                 1
                 for cp in connection_points
-                if abs(cp[0] - endpoint[0]) < tolerance
-                and abs(cp[1] - endpoint[1]) < tolerance
+                if abs(cp[0] - endpoint[0]) < tolerance and abs(cp[1] - endpoint[1]) < tolerance
             )
             if matches >= 2:
                 continue
@@ -327,9 +322,7 @@ def run_add_component(args) -> int:
                     from kicad_tools.schema.library import SymbolLibrary
 
                     if lib_name not in lib_manager.libraries:
-                        lib_manager.libraries[lib_name] = SymbolLibrary(
-                            path="", symbols={}
-                        )
+                        lib_manager.libraries[lib_name] = SymbolLibrary(path="", symbols={})
                     lib_manager.libraries[lib_name].symbols[sym_short] = lib_sym_obj
 
     # Check if we need to embed the library symbol
@@ -344,9 +337,7 @@ def run_add_component(args) -> int:
                 file=sys.stderr,
             )
             return 1
-        planned.append(
-            PlannedAction("embed", f"Embed library definition for {args.lib_id}")
-        )
+        planned.append(PlannedAction("embed", f"Embed library definition for {args.lib_id}"))
     else:
         lib_sym = None  # Already embedded, no need to re-embed
 
@@ -356,8 +347,7 @@ def run_add_component(args) -> int:
         planned.append(
             PlannedAction(
                 "power",
-                f"Place power symbol {power_name} at ({at_x:.2f}, {at_y:.2f})"
-                f" rotation={rotation}",
+                f"Place power symbol {power_name} at ({at_x:.2f}, {at_y:.2f}) rotation={rotation}",
             )
         )
     else:
@@ -443,8 +433,7 @@ def run_add_component(args) -> int:
 
             # Only plan a wire when start != end (mirrors execution phase).
             if not (
-                abs(pin_pos[0] - cs.target[0]) < 0.01
-                and abs(pin_pos[1] - cs.target[1]) < 0.01
+                abs(pin_pos[0] - cs.target[0]) < 0.01 and abs(pin_pos[1] - cs.target[1]) < 0.01
             ):
                 planned.append(
                     PlannedAction(
@@ -483,9 +472,7 @@ def run_add_component(args) -> int:
 
     # --- Create backup if requested ---
     if args.backup:
-        backup_path = (
-            f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup_path = f"{schematic_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         shutil.copy2(schematic_path, backup_path)
         print(f"Backup created: {backup_path}")
 
@@ -558,8 +545,7 @@ def run_add_component(args) -> int:
             # Add wire unless start == end (e.g. power symbol pin
             # already sits on the connect target).
             if not (
-                abs(pin_pos[0] - cs.target[0]) < 0.01
-                and abs(pin_pos[1] - cs.target[1]) < 0.01
+                abs(pin_pos[0] - cs.target[0]) < 0.01 and abs(pin_pos[1] - cs.target[1]) < 0.01
             ):
                 sch.add_wire(pin_pos, cs.target)
 
@@ -599,9 +585,7 @@ def main(argv=None):
     )
     parser.add_argument("--reference", help="Symbol reference (e.g., R1, U1)")
     parser.add_argument("--value", help="Component value (e.g., 10k, 100nF)")
-    parser.add_argument(
-        "--footprint", help="Footprint name (e.g., Resistor_SMD:R_0402_1005Metric)"
-    )
+    parser.add_argument("--footprint", help="Footprint name (e.g., Resistor_SMD:R_0402_1005Metric)")
     parser.add_argument(
         "--at",
         nargs=2,
@@ -613,9 +597,7 @@ def main(argv=None):
     parser.add_argument(
         "--rotation", type=float, default=0, help="Rotation in degrees (default: 0)"
     )
-    parser.add_argument(
-        "--mirror", choices=["x", "y"], default="", help="Mirror mode (x or y)"
-    )
+    parser.add_argument("--mirror", choices=["x", "y"], default="", help="Mirror mode (x or y)")
     parser.add_argument(
         "--connect",
         action="append",
@@ -623,12 +605,8 @@ def main(argv=None):
         metavar="PIN:X,Y",
         help="Connect pin to target coordinates (e.g., 1:120,80). Repeatable.",
     )
-    parser.add_argument(
-        "--lib-path", action="append", dest="lib_paths", help="Library search path"
-    )
-    parser.add_argument(
-        "--lib", action="append", dest="libs", help="Specific library file"
-    )
+    parser.add_argument("--lib-path", action="append", dest="lib_paths", help="Library search path")
+    parser.add_argument("--lib", action="append", dest="libs", help="Specific library file")
     parser.add_argument(
         "--project-name",
         dest="project_name",
@@ -641,12 +619,8 @@ def main(argv=None):
         default="",
         help="Hierarchy path for instances block (auto-detected from schematic UUID)",
     )
-    parser.add_argument(
-        "--dry-run", "-n", action="store_true", help="Preview without modifying"
-    )
-    parser.add_argument(
-        "--backup", action="store_true", help="Create backup before modifying"
-    )
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without modifying")
+    parser.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     args = parser.parse_args(argv)
     return run_add_component(args)

@@ -143,9 +143,7 @@ class TestLocalSymbolLibsAPI:
         from kicad_tools.exceptions import FileNotFoundError as KctFileNotFoundError
         from kicad_tools.schematic.exceptions import LibraryNotFoundError
 
-        with pytest.raises(
-            (LibraryNotFoundError, KctFileNotFoundError, FileNotFoundError)
-        ):
+        with pytest.raises((LibraryNotFoundError, KctFileNotFoundError, FileNotFoundError)):
             sch.add_symbol("softstart_custom:UCC27211", x=100, y=80, ref="U_TEST")
 
     def test_save_includes_local_symbol_in_lib_symbols(self):

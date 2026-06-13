@@ -800,6 +800,7 @@ class TestPartialRouteHeadline:
     def test_summary_counts_partial_separately(self, capsys):
         """A net with at least one routed segment but not all pads
         connected must be counted as 'partial', not strict-connect."""
+
         # Build a Pad-like object so connectivity validation runs.
         @dataclass
         class _Pad:
@@ -867,6 +868,7 @@ class TestPartialRouteHeadline:
         headline alone would say 1/4 (25%); the new breakdown surfaces
         the 2 partials that the strict number hides.
         """
+
         @dataclass
         class _Pad:
             x: float

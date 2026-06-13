@@ -72,7 +72,9 @@ class TestPrechargeSubsystem:
     def test_monitor_label_emits_when_requested(self, mock_schematic):
         """When ``monitor_label`` is provided, one label is added at the FET gate."""
         PrechargeSubsystem(
-            mock_schematic, x=100, y=80,
+            mock_schematic,
+            x=100,
+            y=80,
             monitor_label="PRECHARGE_POS",
         )
         labels = [c.args[0] for c in mock_schematic.add_label.call_args_list]
@@ -101,8 +103,11 @@ class TestPrechargeSubsystem:
     def test_custom_refs_propagate(self, mock_schematic):
         """Override ref_q / ref_r both flow through to add_symbol."""
         PrechargeSubsystem(
-            mock_schematic, x=100, y=80,
-            ref_q="Q42", ref_r="R99",
+            mock_schematic,
+            x=100,
+            y=80,
+            ref_q="Q42",
+            ref_r="R99",
         )
         calls = mock_schematic.add_symbol.call_args_list
         assert calls[0].args[3] == "R99"

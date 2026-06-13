@@ -8,7 +8,6 @@ Covers the two failure modes from issue #1812:
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -142,9 +141,7 @@ class TestCanonicalizeNetNode:
         """numeric_only=True (segments/vias): name-only -> (net N)."""
         from kicad_tools.cli.runner import _canonicalize_net_node
 
-        node = _canonicalize_net_node(
-            _net_node("GND"), {"GND": 1}, numeric_only=True
-        )
+        node = _canonicalize_net_node(_net_node("GND"), {"GND": 1}, numeric_only=True)
         assert node.get_int(0) == 1
         assert node.get_string(1) is None
 
@@ -160,9 +157,7 @@ class TestCanonicalizeNetNode:
         """numeric_only=True strips trailing name from (net N "name")."""
         from kicad_tools.cli.runner import _canonicalize_net_node
 
-        node = _canonicalize_net_node(
-            _net_node(79, "GNDA"), {"GNDA": 79}, numeric_only=True
-        )
+        node = _canonicalize_net_node(_net_node(79, "GNDA"), {"GNDA": 79}, numeric_only=True)
         assert node.get_int(0) == 79
         assert node.get_string(1) is None
 
@@ -652,7 +647,6 @@ class TestFallbackProximityRestore:
                         assert net_num != 7, "Segment too far should not be proximity-matched"
                 break
 
-
     def test_segment_restored_after_fix_drc_nudge(self, tmp_path):
         """Segment nudged up to 0.05 mm by fix-drc must still be proximity-matched.
 
@@ -737,7 +731,6 @@ class TestFallbackProximityRestore:
                         net_num = net_node.get_int(0)
                         assert net_num != 18, "Segment 0.6 mm away should not be proximity-matched"
                 break
-
 
 
 # ---------------------------------------------------------------------------
@@ -962,7 +955,7 @@ class TestAssignEmptyNetsToZero:
                 assert net_node is not None
                 net_num = net_node.get_int(0)
                 assert net_num == 0, (
-                    f"Unmatched (net \"\") segment should become (net 0), got {net_node}"
+                    f'Unmatched (net "") segment should become (net 0), got {net_node}'
                 )
                 break
         else:
@@ -1050,7 +1043,7 @@ class TestStripDualAtomNets:
         from kicad_tools.sexp.parser import parse_string as load_sexp
 
         tree = load_sexp(
-            '(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) '
+            "(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) "
             '(layer "F.Cu") (net 5 "GND") (uuid "s1")))'
         )
         changed = _strip_dual_atom_nets(tree)
@@ -1066,7 +1059,7 @@ class TestStripDualAtomNets:
         from kicad_tools.sexp.parser import parse_string as load_sexp
 
         tree = load_sexp(
-            '(kicad_pcb (via (at 10 20) (size 0.6) (drill 0.3) '
+            "(kicad_pcb (via (at 10 20) (size 0.6) (drill 0.3) "
             '(layers "F.Cu" "B.Cu") (net 3 "VCC") (uuid "v1")))'
         )
         changed = _strip_dual_atom_nets(tree)
@@ -1082,8 +1075,7 @@ class TestStripDualAtomNets:
         from kicad_tools.sexp.parser import parse_string as load_sexp
 
         tree = load_sexp(
-            '(kicad_pcb (pad "1" smd rect (at 0 0) (size 1 1) '
-            '(layers "F.Cu") (net 5 "GND")))'
+            '(kicad_pcb (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 5 "GND")))'
         )
         changed = _strip_dual_atom_nets(tree)
         assert changed is False
@@ -1094,7 +1086,7 @@ class TestStripDualAtomNets:
         from kicad_tools.sexp.parser import parse_string as load_sexp
 
         tree = load_sexp(
-            '(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) '
+            "(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) "
             '(layer "F.Cu") (net 5) (uuid "s2")))'
         )
         changed = _strip_dual_atom_nets(tree)
@@ -1125,7 +1117,7 @@ class TestResolveNameOnlyNets:
 
         tree = load_sexp(
             '(kicad_pcb (net 0 "") (net 2 "GND") '
-            '(segment (start 1 2) (end 3 4) (width 0.25) '
+            "(segment (start 1 2) (end 3 4) (width 0.25) "
             '(layer "F.Cu") (net "GND") (uuid "s1")))'
         )
         changed = _resolve_name_only_nets(tree)
@@ -1142,7 +1134,7 @@ class TestResolveNameOnlyNets:
 
         tree = load_sexp(
             '(kicad_pcb (net 0 "") (net 3 "VCC") '
-            '(via (at 10 20) (size 0.6) (drill 0.3) '
+            "(via (at 10 20) (size 0.6) (drill 0.3) "
             '(layers "F.Cu" "B.Cu") (net "VCC") (uuid "v1")))'
         )
         changed = _resolve_name_only_nets(tree)
@@ -1158,7 +1150,7 @@ class TestResolveNameOnlyNets:
 
         tree = load_sexp(
             '(kicad_pcb (net 0 "") (net 1 "GND") '
-            '(segment (start 1 2) (end 3 4) (width 0.25) '
+            "(segment (start 1 2) (end 3 4) (width 0.25) "
             '(layer "F.Cu") (net "MYSTERY") (uuid "s2")))'
         )
         changed = _resolve_name_only_nets(tree)
@@ -1171,7 +1163,7 @@ class TestResolveNameOnlyNets:
 
         tree = load_sexp(
             '(kicad_pcb (net 0 "") (net 5 "VCC") '
-            '(segment (start 1 2) (end 3 4) (width 0.25) '
+            "(segment (start 1 2) (end 3 4) (width 0.25) "
             '(layer "F.Cu") (net 5) (uuid "s3")))'
         )
         changed = _resolve_name_only_nets(tree)
@@ -1183,7 +1175,7 @@ class TestResolveNameOnlyNets:
         from kicad_tools.sexp.parser import parse_string as load_sexp
 
         tree = load_sexp(
-            '(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) '
+            "(kicad_pcb (segment (start 1 2) (end 3 4) (width 0.25) "
             '(layer "F.Cu") (net "GND") (uuid "s4")))'
         )
         changed = _resolve_name_only_nets(tree)
@@ -1543,7 +1535,5 @@ class TestWidenedProximityThreshold:
                 if net_node is not None:
                     net_num = net_node.get_int(0)
                     # Should be (net 0) from assign-empty-nets-to-zero, not (net 12)
-                    assert net_num != 12, (
-                        "Segment at exactly 0.5mm should NOT be proximity-matched"
-                    )
+                    assert net_num != 12, "Segment at exactly 0.5mm should NOT be proximity-matched"
                 break

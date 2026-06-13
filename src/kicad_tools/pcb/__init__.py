@@ -13,6 +13,7 @@ Block-based layout is available via the ``blocks`` subpackage:
     from kicad_tools.pcb.blocks import MCUBlock, LDOBlock, PCBLayout
 """
 
+from .board_geometry import BoardGeometry, has_shapely
 from .editor import (
     AudioLayoutRules,
     Keepout,
@@ -31,7 +32,6 @@ from .footprints import (
     get_footprint_pads,
     get_library,
 )
-from .board_geometry import BoardGeometry, has_shapely
 from .layout import PCBLayout
 
 __all__ = [

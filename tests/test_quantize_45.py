@@ -47,9 +47,7 @@ def _seg(x1, y1, x2, y2, **kw):
 
 
 def _all_aligned(segments, tol=ANGLE_TOL_DEG):
-    return all(
-        is_45_aligned(s.x2 - s.x1, s.y2 - s.y1, tol) for s in segments
-    )
+    return all(is_45_aligned(s.x2 - s.x1, s.y2 - s.y1, tol) for s in segments)
 
 
 class TestGeometryHelpers:
@@ -177,9 +175,7 @@ class TestQuantizePcbFile:
         assert text.count("(segment") == 2
 
     def test_idempotent_and_deterministic(self, tmp_path):
-        pcb = self._board(
-            tmp_path, SEG_BLOCK_UUID_BEFORE_NET, SEG_BLOCK_NET_BEFORE_UUID
-        )
+        pcb = self._board(tmp_path, SEG_BLOCK_UUID_BEFORE_NET, SEG_BLOCK_NET_BEFORE_UUID)
         quantize_pcb_file(pcb)
         first = pcb.read_text()
         assert quantize_pcb_file(pcb) == []
@@ -217,14 +213,14 @@ class TestQuantizePcbFile:
         base = str(_uuid.uuid5(_uuid.NAMESPACE_OID, parent + ":dogleg"))
         bumped = str(_uuid.uuid5(_uuid.NAMESPACE_OID, parent + ":dogleg:2"))
         stale_sibling = (
-            '\t(segment\n'
-            '\t\t(start 171.19 125.46)\n'
-            '\t\t(end 175 125.46)\n'
-            '\t\t(width 0.4)\n'
+            "\t(segment\n"
+            "\t\t(start 171.19 125.46)\n"
+            "\t\t(end 175 125.46)\n"
+            "\t\t(width 0.4)\n"
             '\t\t(layer "F.Cu")\n'
             f'\t\t(uuid "{base}")\n'
-            '\t\t(net 1)\n'
-            '\t)\n'
+            "\t\t(net 1)\n"
+            "\t)\n"
         )
         pcb = self._board(tmp_path, SEG_BLOCK_UUID_BEFORE_NET, stale_sibling)
         assert quantize_pcb_file(pcb) == [parent]
@@ -239,9 +235,7 @@ class TestQuantizePcbFile:
         # Determinism survives the bump: a fresh copy quantizes to
         # byte-identical output.
         other = tmp_path / "copy.kicad_pcb"
-        other.write_text(
-            "(kicad_pcb\n" + SEG_BLOCK_UUID_BEFORE_NET + stale_sibling + ")\n"
-        )
+        other.write_text("(kicad_pcb\n" + SEG_BLOCK_UUID_BEFORE_NET + stale_sibling + ")\n")
         quantize_pcb_file(other)
         assert other.read_text() == text
 
@@ -300,9 +294,7 @@ class TestOptimizerEmitters:
         ]
         result = pull_tight_pass(chain, OptimizationConfig())
         assert _all_aligned(result)
-        total = sum(
-            math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in result
-        )
+        total = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in result)
         original = 5.0 + 1.0 + 5.0
         assert total <= original
 
@@ -333,12 +325,24 @@ class TestPathfinderPadTails:
         router = Router(grid=grid, rules=rules)
         # Off-grid pads: centres do not land on the grid.
         start_pad = Pad(
-            x=2.13, y=2.07, width=1.0, height=1.0, net=1, net_name="N1",
-            layer=Layer.F_CU, ref="U1",
+            x=2.13,
+            y=2.07,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N1",
+            layer=Layer.F_CU,
+            ref="U1",
         )
         end_pad = Pad(
-            x=10.86, y=6.44, width=1.0, height=1.0, net=1, net_name="N1",
-            layer=Layer.F_CU, ref="U2",
+            x=10.86,
+            y=6.44,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N1",
+            layer=Layer.F_CU,
+            ref="U2",
         )
         # Grid-aligned A* path (all 8-direction steps).
         path = [
@@ -353,8 +357,7 @@ class TestPathfinderPadTails:
         assert route.segments, "expected segments to be emitted"
         for seg in route.segments:
             assert is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1), (
-                f"off-angle segment ({seg.x1}, {seg.y1}) -> "
-                f"({seg.x2}, {seg.y2})"
+                f"off-angle segment ({seg.x1}, {seg.y1}) -> ({seg.x2}, {seg.y2})"
             )
         # Terminal connectivity to the exact pad centres is preserved.
         assert (route.segments[0].x1, route.segments[0].y1) == (2.13, 2.07)

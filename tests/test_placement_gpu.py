@@ -9,12 +9,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import pytest
 
-from kicad_tools.optim.components import Component, Pin
-from kicad_tools.optim.config import PlacementConfig
-from kicad_tools.optim.geometry import Polygon, Vector2D
-from kicad_tools.optim.placement import PlacementOptimizer
 from kicad_tools.acceleration.backend import ArrayBackend, BackendType, get_backend
 from kicad_tools.acceleration.kernels.placement import (
     EdgeBatch,
@@ -22,6 +17,10 @@ from kicad_tools.acceleration.kernels.placement import (
     compute_pairwise_repulsion_gpu,
     extract_edges_batch,
 )
+from kicad_tools.optim.components import Component, Pin
+from kicad_tools.optim.config import PlacementConfig
+from kicad_tools.optim.geometry import Polygon
+from kicad_tools.optim.placement import PlacementOptimizer
 from kicad_tools.performance import PerformanceConfig
 
 
@@ -272,8 +271,8 @@ class TestGPUCPUEquivalence:
         # Note: We use a loose comparison because the GPU implementation
         # computes forces differently (all edges vs edge pairs)
         for ref in forces_cpu:
-            cpu_mag = math.sqrt(forces_cpu[ref].x**2 + forces_cpu[ref].y**2)
-            gpu_mag = math.sqrt(forces_gpu[ref].x**2 + forces_gpu[ref].y**2)
+            cpu_mag = math.sqrt(forces_cpu[ref].x ** 2 + forces_cpu[ref].y ** 2)
+            gpu_mag = math.sqrt(forces_gpu[ref].x ** 2 + forces_gpu[ref].y ** 2)
 
             # Both should have non-trivial forces
             if cpu_mag > 1.0:  # Only check if CPU has significant force
@@ -312,9 +311,7 @@ class TestPlacementOptimizerGPUIntegration:
         perf_config.gpu.thresholds.min_components = 5
 
         board = Polygon.rectangle(50, 50, 100, 100)
-        optimizer = PlacementOptimizer(
-            board, PlacementConfig(), perf_config=perf_config
-        )
+        optimizer = PlacementOptimizer(board, PlacementConfig(), perf_config=perf_config)
 
         # Add 10 components (above threshold)
         for i in range(10):
@@ -393,13 +390,16 @@ class TestScatterAdd:
         # Edge 3 -> component 2
         # Edge 4 -> component 1
         indices = backend.array([0, 0, 1, 2, 1], dtype=np.int32)
-        values = backend.array([
-            [1.0, 0.0],
-            [2.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 1.0],
-            [0.0, 2.0],
-        ], dtype=np.float32)
+        values = backend.array(
+            [
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 2.0],
+            ],
+            dtype=np.float32,
+        )
 
         # Scatter-add values to target
         result = backend.scatter_add(target, indices, values)
@@ -408,11 +408,13 @@ class TestScatterAdd:
         # Component 0: [1.0, 0.0] + [2.0, 0.0] = [3.0, 0.0]
         # Component 1: [0.0, 1.0] + [0.0, 2.0] = [0.0, 3.0]
         # Component 2: [1.0, 1.0] = [1.0, 1.0]
-        expected = np.array([
-            [3.0, 0.0],
-            [0.0, 3.0],
-            [1.0, 1.0],
-        ])
+        expected = np.array(
+            [
+                [3.0, 0.0],
+                [0.0, 3.0],
+                [1.0, 1.0],
+            ]
+        )
 
         assert np.allclose(backend.to_numpy(result), expected)
 
@@ -452,12 +454,15 @@ class TestScatterAdd:
 
         target = backend.zeros((1, 2))
         indices = backend.array([0, 0, 0, 0], dtype=np.int32)
-        values = backend.array([
-            [1.0, 0.0],
-            [2.0, 0.0],
-            [3.0, 0.0],
-            [4.0, 0.0],
-        ], dtype=np.float32)
+        values = backend.array(
+            [
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [3.0, 0.0],
+                [4.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
 
         result = backend.scatter_add(target, indices, values)
 

@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import pytest
 
 from kicad_tools.router.cpp_backend import is_cpp_available, router_cpp
@@ -55,7 +54,6 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router as Pathfinder
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
-
 
 requires_cpp = pytest.mark.skipif(
     not is_cpp_available(),
@@ -246,9 +244,7 @@ class TestPythonForeignPadMetalGuard:
         # Candidate far enough that no metal cell falls within radius=3.
         # Pad is 0.3 wide x 1.5 tall => metal extends ~7 cells in y.
         # 30 cells away on x is well outside any halo.
-        assert (
-            pf._is_foreign_pad_metal_within_radius(gx + 30, gy, 0, net=1, radius=3) is False
-        )
+        assert pf._is_foreign_pad_metal_within_radius(gx + 30, gy, 0, net=1, radius=3) is False
 
 
 # ---------------------------------------------------------------------------
@@ -402,12 +398,8 @@ class TestPythonCppGuardSymmetry:
             for dx in range(-radius - 2, radius + 3):
                 gx = 50 + dx
                 gy = 50 + dy
-                py_verdict = pf._is_foreign_pad_metal_within_radius(
-                    gx, gy, 0, net=1, radius=radius
-                )
-                cpp_verdict = cpp_pf.is_foreign_pad_metal_within_radius(
-                    gx, gy, 0, 1, radius
-                )
+                py_verdict = pf._is_foreign_pad_metal_within_radius(gx, gy, 0, net=1, radius=radius)
+                cpp_verdict = cpp_pf.is_foreign_pad_metal_within_radius(gx, gy, 0, 1, radius)
                 assert py_verdict == cpp_verdict, (
                     f"Python/C++ disagreement at offset (dx={dx},dy={dy}): "
                     f"py={py_verdict} cpp={cpp_verdict}"
@@ -423,8 +415,7 @@ class TestPythonCppGuardSymmetry:
                     )
                     diagonal_corner_count += 1
         assert diagonal_corner_count == 4, (
-            f"Expected to test all 4 diagonal corners of the kernel, "
-            f"tested {diagonal_corner_count}"
+            f"Expected to test all 4 diagonal corners of the kernel, tested {diagonal_corner_count}"
         )
 
     def test_dense_lqfp_like_geometry(self) -> None:
@@ -483,12 +474,8 @@ class TestPythonCppGuardSymmetry:
             gx = own_gx + dx
             if gx < 0 or gx >= py_grid.cols:
                 continue
-            py_verdict = pf._is_foreign_pad_metal_within_radius(
-                gx, own_gy, 0, net=1, radius=radius
-            )
-            cpp_verdict = cpp_pf.is_foreign_pad_metal_within_radius(
-                gx, own_gy, 0, 1, radius
-            )
+            py_verdict = pf._is_foreign_pad_metal_within_radius(gx, own_gy, 0, net=1, radius=radius)
+            cpp_verdict = cpp_pf.is_foreign_pad_metal_within_radius(gx, own_gy, 0, 1, radius)
             assert py_verdict == cpp_verdict, (
                 f"Python/C++ guard disagreement at (gx={gx}, gy={own_gy}): "
                 f"py={py_verdict} cpp={cpp_verdict}"
@@ -676,9 +663,7 @@ class TestKernelDrcCrossCheck:
                 gy = 25 + dy
                 dist_sq = dx * dx + dy * dy
                 expected_reject = dist_sq <= radius_sq  # inside Euclidean disc
-                actual_reject = pf.is_foreign_pad_metal_within_radius(
-                    gx, gy, 0, 1, radius
-                )
+                actual_reject = pf.is_foreign_pad_metal_within_radius(gx, gy, 0, 1, radius)
                 assert actual_reject == expected_reject, (
                     f"Kernel/Euclidean mismatch at offset ({dx},{dy}): "
                     f"dist_sq={dist_sq} radius_sq={radius_sq} "

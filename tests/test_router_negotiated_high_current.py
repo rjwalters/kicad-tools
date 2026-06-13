@@ -12,11 +12,9 @@ they correctly detect siblings, partial routes, and class priorities.
 
 from __future__ import annotations
 
-import pytest
-
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Pad, Route, Segment
+from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import (
     NET_CLASS_HIGH_CURRENT_SIGNAL,
     NET_CLASS_POWER,
@@ -47,26 +45,80 @@ def _make_autorouter_with_three_phase_nets() -> Autorouter:
 
     # Each phase has a source pad on a half-bridge "Q?" component plus a
     # destination pad on the shared J2 connector.
-    router.add_component("Q1", [
-        {"number": "1", "x": 5.0, "y": 5.0, "width": 0.5, "height": 0.5,
-         "net": 1, "net_name": "PHASE_A"},
-    ])
-    router.add_component("Q2", [
-        {"number": "1", "x": 5.0, "y": 10.0, "width": 0.5, "height": 0.5,
-         "net": 2, "net_name": "PHASE_B"},
-    ])
-    router.add_component("Q3", [
-        {"number": "1", "x": 5.0, "y": 15.0, "width": 0.5, "height": 0.5,
-         "net": 3, "net_name": "PHASE_C"},
-    ])
-    router.add_component("J2", [
-        {"number": "1", "x": 30.0, "y": 5.0, "width": 0.5, "height": 0.5,
-         "net": 1, "net_name": "PHASE_A"},
-        {"number": "2", "x": 30.0, "y": 10.0, "width": 0.5, "height": 0.5,
-         "net": 2, "net_name": "PHASE_B"},
-        {"number": "3", "x": 30.0, "y": 15.0, "width": 0.5, "height": 0.5,
-         "net": 3, "net_name": "PHASE_C"},
-    ])
+    router.add_component(
+        "Q1",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 5.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "PHASE_A",
+            },
+        ],
+    )
+    router.add_component(
+        "Q2",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "PHASE_B",
+            },
+        ],
+    )
+    router.add_component(
+        "Q3",
+        [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 15.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 3,
+                "net_name": "PHASE_C",
+            },
+        ],
+    )
+    router.add_component(
+        "J2",
+        [
+            {
+                "number": "1",
+                "x": 30.0,
+                "y": 5.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "PHASE_A",
+            },
+            {
+                "number": "2",
+                "x": 30.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "PHASE_B",
+            },
+            {
+                "number": "3",
+                "x": 30.0,
+                "y": 15.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 3,
+                "net_name": "PHASE_C",
+            },
+        ],
+    )
     return router
 
 
@@ -87,15 +139,20 @@ class TestGetNetClassPriority:
     def test_pour_net_returns_99(self):
         rules = DesignRules()
         gnd_class = NetClassRouting(
-            name="Ground", priority=1, trace_width=0.3,
-            clearance=0.2, is_pour_net=True,
+            name="Ground",
+            priority=1,
+            trace_width=0.3,
+            clearance=0.2,
+            is_pour_net=True,
         )
         net_class_map = {"GND": gnd_class}
-        router = Autorouter(width=10.0, height=10.0, rules=rules,
-                            net_class_map=net_class_map)
-        router.add_component("U1", [
-            {"number": "1", "x": 1.0, "y": 1.0, "net": 5, "net_name": "GND"},
-        ])
+        router = Autorouter(width=10.0, height=10.0, rules=rules, net_class_map=net_class_map)
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 1.0, "y": 1.0, "net": 5, "net_name": "GND"},
+            ],
+        )
         # Pour nets get sentinel priority 99 so they sort to the back.
         assert router._get_net_class_priority(5) == 99
 
@@ -124,9 +181,7 @@ class TestFindSameTierDestinationSiblings:
     def test_phase_a_finds_phase_b_and_c_as_siblings(self):
         """All three PHASE_* nets share J2 at priority 1."""
         router = _make_autorouter_with_three_phase_nets()
-        siblings = router._find_same_tier_destination_siblings(
-            failed_net=1, candidate_nets=[2, 3]
-        )
+        siblings = router._find_same_tier_destination_siblings(failed_net=1, candidate_nets=[2, 3])
         assert siblings == {2, 3}
 
     def test_failed_net_excluded_from_own_siblings(self):
@@ -142,21 +197,28 @@ class TestFindSameTierDestinationSiblings:
         """Priority 10 (default) is too broad for sibling detection."""
         rules = DesignRules()
         router = Autorouter(width=20.0, height=20.0, rules=rules)
-        router.add_component("U1", [
-            {"number": "1", "x": 1.0, "y": 1.0, "net": 1, "net_name": "SIG_A"},
-        ])
-        router.add_component("J1", [
-            {"number": "1", "x": 10.0, "y": 1.0, "net": 1, "net_name": "SIG_A"},
-            {"number": "2", "x": 10.0, "y": 2.0, "net": 2, "net_name": "SIG_B"},
-        ])
-        router.add_component("U2", [
-            {"number": "1", "x": 1.0, "y": 2.0, "net": 2, "net_name": "SIG_B"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 1.0, "y": 1.0, "net": 1, "net_name": "SIG_A"},
+            ],
+        )
+        router.add_component(
+            "J1",
+            [
+                {"number": "1", "x": 10.0, "y": 1.0, "net": 1, "net_name": "SIG_A"},
+                {"number": "2", "x": 10.0, "y": 2.0, "net": 2, "net_name": "SIG_B"},
+            ],
+        )
+        router.add_component(
+            "U2",
+            [
+                {"number": "1", "x": 1.0, "y": 2.0, "net": 2, "net_name": "SIG_B"},
+            ],
+        )
         # Both nets are at default priority 10 -- helper must NOT mark them
         # as siblings (this would cause indiscriminate rip-up).
-        siblings = router._find_same_tier_destination_siblings(
-            failed_net=1, candidate_nets=[2]
-        )
+        siblings = router._find_same_tier_destination_siblings(failed_net=1, candidate_nets=[2])
         assert siblings == set()
 
     def test_different_priority_excluded(self):
@@ -168,23 +230,29 @@ class TestFindSameTierDestinationSiblings:
         # POWER is priority 1, HIGH_CURRENT_SIGNAL is also priority 1, so
         # they do match.  Use a 2-priority class (CLOCK) for a non-match.
         from kicad_tools.router.rules import NET_CLASS_CLOCK
+
         net_class_map["CLK"] = NET_CLASS_CLOCK
         router = Autorouter(
-            width=20.0, height=20.0,
+            width=20.0,
+            height=20.0,
             net_class_map=net_class_map,
         )
-        router.add_component("U1", [
-            {"number": "1", "x": 1.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
-            {"number": "2", "x": 1.0, "y": 2.0, "net": 2, "net_name": "CLK"},
-        ])
-        router.add_component("J1", [
-            {"number": "1", "x": 10.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
-            {"number": "2", "x": 10.0, "y": 2.0, "net": 2, "net_name": "CLK"},
-        ])
-        # PHASE_A is priority 1, CLK is priority 2 -- not siblings.
-        siblings = router._find_same_tier_destination_siblings(
-            failed_net=1, candidate_nets=[2]
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 1.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
+                {"number": "2", "x": 1.0, "y": 2.0, "net": 2, "net_name": "CLK"},
+            ],
         )
+        router.add_component(
+            "J1",
+            [
+                {"number": "1", "x": 10.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
+                {"number": "2", "x": 10.0, "y": 2.0, "net": 2, "net_name": "CLK"},
+            ],
+        )
+        # PHASE_A is priority 1, CLK is priority 2 -- not siblings.
+        siblings = router._find_same_tier_destination_siblings(failed_net=1, candidate_nets=[2])
         assert siblings == set()
 
     def test_no_shared_destination_returns_empty(self):
@@ -194,22 +262,32 @@ class TestFindSameTierDestinationSiblings:
             "PHASE_B": NET_CLASS_HIGH_CURRENT_SIGNAL,
         }
         router = Autorouter(width=30.0, height=30.0, net_class_map=net_class_map)
-        router.add_component("Q1", [
-            {"number": "1", "x": 1.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
-        ])
-        router.add_component("J1", [
-            {"number": "1", "x": 10.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
-        ])
-        router.add_component("Q2", [
-            {"number": "1", "x": 1.0, "y": 20.0, "net": 2, "net_name": "PHASE_B"},
-        ])
-        router.add_component("J2", [
-            {"number": "1", "x": 20.0, "y": 20.0, "net": 2, "net_name": "PHASE_B"},
-        ])
-        # PHASE_A and PHASE_B share no destination -- not siblings for rip-up.
-        siblings = router._find_same_tier_destination_siblings(
-            failed_net=1, candidate_nets=[2]
+        router.add_component(
+            "Q1",
+            [
+                {"number": "1", "x": 1.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
+            ],
         )
+        router.add_component(
+            "J1",
+            [
+                {"number": "1", "x": 10.0, "y": 1.0, "net": 1, "net_name": "PHASE_A"},
+            ],
+        )
+        router.add_component(
+            "Q2",
+            [
+                {"number": "1", "x": 1.0, "y": 20.0, "net": 2, "net_name": "PHASE_B"},
+            ],
+        )
+        router.add_component(
+            "J2",
+            [
+                {"number": "1", "x": 20.0, "y": 20.0, "net": 2, "net_name": "PHASE_B"},
+            ],
+        )
+        # PHASE_A and PHASE_B share no destination -- not siblings for rip-up.
+        siblings = router._find_same_tier_destination_siblings(failed_net=1, candidate_nets=[2])
         assert siblings == set()
 
 
@@ -225,8 +303,14 @@ class TestGetPartiallyRoutedNets:
         router = _make_autorouter_with_three_phase_nets()
         # Build a route from Q1 (5,5) to J2-pad1 (30,5).
         seg = Segment(
-            x1=5.0, y1=5.0, x2=30.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="PHASE_A",
+            x1=5.0,
+            y1=5.0,
+            x2=30.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="PHASE_A",
         )
         route = Route(net=1, net_name="PHASE_A", segments=[seg], vias=[])
         net_routes = {1: [route]}
@@ -243,8 +327,14 @@ class TestGetPartiallyRoutedNets:
         # Default tolerance in validate_net_connectivity is 2mm so this
         # would actually be considered close enough.  Use a larger gap.
         seg = Segment(
-            x1=5.0, y1=5.0, x2=15.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="PHASE_A",
+            x1=5.0,
+            y1=5.0,
+            x2=15.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="PHASE_A",
         )
         route = Route(net=1, net_name="PHASE_A", segments=[seg], vias=[])
         net_routes = {1: [route]}
@@ -304,23 +394,71 @@ class TestFindConnectorSiblingsOfPreroutedNets:
             net_class_map=net_class_map,
         )
         # MCU side
-        router.add_component("U1", [
-            {"number": "1", "x": 5.0, "y": 5.0, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": 7.0, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
-            {"number": "3", "x": 5.0, "y": 9.0, "width": 0.4, "height": 0.4,
-             "net": 3, "net_name": "USB_CC1"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 5.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "2",
+                    "x": 5.0,
+                    "y": 7.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+                {
+                    "number": "3",
+                    "x": 5.0,
+                    "y": 9.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 3,
+                    "net_name": "USB_CC1",
+                },
+            ],
+        )
         # USB-C connector side -- all three nets terminate here.
-        router.add_component("J1", [
-            {"number": "A6", "x": 30.0, "y": 5.0, "width": 0.4, "height": 0.4,
-             "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 30.0, "y": 7.0, "width": 0.4, "height": 0.4,
-             "net": 2, "net_name": "USB_D-"},
-            {"number": "A5", "x": 30.0, "y": 9.0, "width": 0.4, "height": 0.4,
-             "net": 3, "net_name": "USB_CC1"},
-        ])
+        router.add_component(
+            "J1",
+            [
+                {
+                    "number": "A6",
+                    "x": 30.0,
+                    "y": 5.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 1,
+                    "net_name": "USB_D+",
+                },
+                {
+                    "number": "A7",
+                    "x": 30.0,
+                    "y": 7.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 2,
+                    "net_name": "USB_D-",
+                },
+                {
+                    "number": "A5",
+                    "x": 30.0,
+                    "y": 9.0,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "net": 3,
+                    "net_name": "USB_CC1",
+                },
+            ],
+        )
         return router
 
     def test_returns_empty_when_no_prerouted(self):
@@ -335,7 +473,7 @@ class TestFindConnectorSiblingsOfPreroutedNets:
         router = self._make_router_with_diffpair_and_sibling()
         result = router._find_connector_siblings_of_prerouted_nets(
             prerouted_nets={1, 2},  # USB_D+, USB_D-
-            candidate_nets=[3],     # USB_CC1
+            candidate_nets=[3],  # USB_CC1
         )
         assert result == {3}
 
@@ -361,19 +499,27 @@ class TestFindConnectorSiblingsOfPreroutedNets:
         }
         rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
         router = Autorouter(
-            width=40.0, height=20.0, rules=rules,
+            width=40.0,
+            height=20.0,
+            rules=rules,
             net_class_map=net_class_map,
         )
-        router.add_component("U1", [
-            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-            {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
-        ])
-        router.add_component("J1", [
-            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-            {"number": "A5", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+                {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+            ],
+        )
+        router.add_component(
+            "J1",
+            [
+                {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+                {"number": "A5", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+            ],
+        )
         result = router._find_connector_siblings_of_prerouted_nets(
             prerouted_nets={1, 2}, candidate_nets=[3]
         )
@@ -391,22 +537,33 @@ class TestFindConnectorSiblingsOfPreroutedNets:
         }
         rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
         router = Autorouter(
-            width=60.0, height=40.0, rules=rules,
+            width=60.0,
+            height=40.0,
+            rules=rules,
             net_class_map=net_class_map,
         )
-        router.add_component("U1", [
-            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-            {"number": "3", "x": 5.0, "y": 20.0, "net": 4, "net_name": "JOY_X"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+                {"number": "3", "x": 5.0, "y": 20.0, "net": 4, "net_name": "JOY_X"},
+            ],
+        )
         # USB connector has D+/D- only; joystick connector has JOY_X only.
-        router.add_component("J1", [
-            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-        ])
-        router.add_component("J2", [
-            {"number": "1", "x": 50.0, "y": 20.0, "net": 4, "net_name": "JOY_X"},
-        ])
+        router.add_component(
+            "J1",
+            [
+                {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+            ],
+        )
+        router.add_component(
+            "J2",
+            [
+                {"number": "1", "x": 50.0, "y": 20.0, "net": 4, "net_name": "JOY_X"},
+            ],
+        )
         result = router._find_connector_siblings_of_prerouted_nets(
             prerouted_nets={1, 2}, candidate_nets=[4]
         )
@@ -426,8 +583,8 @@ class TestFindConnectorSiblingsOfPreroutedNets:
         field.
         """
         from kicad_tools.router.rules import (
-            NET_CLASS_HIGH_SPEED,
             NET_CLASS_DIGITAL,
+            NET_CLASS_HIGH_SPEED,
         )
 
         net_class_map = {
@@ -437,19 +594,27 @@ class TestFindConnectorSiblingsOfPreroutedNets:
         }
         rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
         router = Autorouter(
-            width=40.0, height=20.0, rules=rules,
+            width=40.0,
+            height=20.0,
+            rules=rules,
             net_class_map=net_class_map,
         )
-        router.add_component("U1", [
-            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-            {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_VBUS_DET"},
-        ])
-        router.add_component("J1", [
-            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-            {"number": "A4", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_VBUS_DET"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+                {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_VBUS_DET"},
+            ],
+        )
+        router.add_component(
+            "J1",
+            [
+                {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+                {"number": "A4", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_VBUS_DET"},
+            ],
+        )
         result = router._find_connector_siblings_of_prerouted_nets(
             prerouted_nets={1, 2}, candidate_nets=[3]
         )
@@ -480,50 +645,73 @@ class TestFindConnectorSiblingsOfPreroutedNets:
         }
         rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
         router = Autorouter(
-            width=60.0, height=20.0, rules=rules,
+            width=60.0,
+            height=20.0,
+            rules=rules,
             net_class_map=net_class_map,
         )
-        router.add_component("U1", [
-            {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-            {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
-        ])
-        router.add_component("J1", [
-            {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
-            {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
-            {"number": "A5", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "2", "x": 5.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+                {"number": "3", "x": 5.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+            ],
+        )
+        router.add_component(
+            "J1",
+            [
+                {"number": "A6", "x": 30.0, "y": 5.0, "net": 1, "net_name": "USB_D+"},
+                {"number": "A7", "x": 30.0, "y": 7.0, "net": 2, "net_name": "USB_D-"},
+                {"number": "A5", "x": 30.0, "y": 9.0, "net": 3, "net_name": "USB_CC1"},
+            ],
+        )
         # OTHER_HS lives between U2 and J3, no shared destination with the
         # USB nets.
-        router.add_component("U2", [
-            {"number": "1", "x": 5.0, "y": 15.0, "net": 4, "net_name": "OTHER_HS"},
-        ])
-        router.add_component("J3", [
-            {"number": "1", "x": 30.0, "y": 15.0, "net": 4, "net_name": "OTHER_HS"},
-        ])
+        router.add_component(
+            "U2",
+            [
+                {"number": "1", "x": 5.0, "y": 15.0, "net": 4, "net_name": "OTHER_HS"},
+            ],
+        )
+        router.add_component(
+            "J3",
+            [
+                {"number": "1", "x": 30.0, "y": 15.0, "net": 4, "net_name": "OTHER_HS"},
+            ],
+        )
 
         # Simulate the diff-pair prepass having routed nets 1, 2.
         prerouted_segs_d_plus = Segment(
-            x1=5.0, y1=5.0, x2=30.0, y2=5.0, width=0.2,
-            layer=Layer.F_CU, net=1, net_name="USB_D+",
+            x1=5.0,
+            y1=5.0,
+            x2=30.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="USB_D+",
         )
         prerouted_segs_d_minus = Segment(
-            x1=5.0, y1=7.0, x2=30.0, y2=7.0, width=0.2,
-            layer=Layer.F_CU, net=2, net_name="USB_D-",
+            x1=5.0,
+            y1=7.0,
+            x2=30.0,
+            y2=7.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="USB_D-",
         )
-        router.routes.append(Route(
-            net=1, net_name="USB_D+",
-            segments=[prerouted_segs_d_plus], vias=[]),
+        router.routes.append(
+            Route(net=1, net_name="USB_D+", segments=[prerouted_segs_d_plus], vias=[]),
         )
-        router.routes.append(Route(
-            net=2, net_name="USB_D-",
-            segments=[prerouted_segs_d_minus], vias=[]),
+        router.routes.append(
+            Route(net=2, net_name="USB_D-", segments=[prerouted_segs_d_minus], vias=[]),
         )
 
         # Replicate the ordering logic from route_all_negotiated.
         prerouted_nets = {r.net for r in router.routes}
-        net_order = sorted(router.nets.keys(),
-                           key=lambda n: router._get_net_priority(n))
+        net_order = sorted(router.nets.keys(), key=lambda n: router._get_net_priority(n))
         net_order = router._filter_pour_nets(net_order)
         net_order = [n for n in net_order if n != 0]
         net_order = [n for n in net_order if n not in prerouted_nets]

@@ -89,9 +89,7 @@ class SchematicValidationMixin:
                         {
                             "severity": "error",
                             "type": "duplicate_reference",
-                            "message": (
-                                f"Duplicate reference '{ref}' at ({sym.x}, {sym.y})"
-                            ),
+                            "message": (f"Duplicate reference '{ref}' at ({sym.x}, {sym.y})"),
                             "location": (sym.x, sym.y),
                             "fix_applied": False,
                         }
@@ -535,10 +533,9 @@ class SchematicValidationMixin:
             junc_pos = (round(junc.x, 2), round(junc.y, 2))
             # Connect junction to any wire segment it's on
             for seg_start, seg_end in wire_segments:
-                if self._point_on_segment(junc_pos, seg_start, seg_end):
-                    union(junc_pos, seg_start)
-                    union(junc_pos, seg_end)
-                elif junc_pos == seg_start or junc_pos == seg_end:
+                if junc_pos in (seg_start, seg_end) or self._point_on_segment(
+                    junc_pos, seg_start, seg_end
+                ):
                     union(junc_pos, seg_start)
                     union(junc_pos, seg_end)
 
@@ -549,10 +546,9 @@ class SchematicValidationMixin:
                 pos_rounded = (round(pos[0], 2), round(pos[1], 2))
                 # Check if this pin touches a wire endpoint
                 for seg_start, seg_end in wire_segments:
-                    if pos_rounded == seg_start or pos_rounded == seg_end:
-                        union(pos_rounded, seg_start)
-                        break
-                    elif self._point_on_segment(pos_rounded, seg_start, seg_end):
+                    if pos_rounded in (seg_start, seg_end) or self._point_on_segment(
+                        pos_rounded, seg_start, seg_end
+                    ):
                         union(pos_rounded, seg_start)
                         break
 
@@ -560,10 +556,9 @@ class SchematicValidationMixin:
         for pwr in self.power_symbols:
             pwr_pos = (round(pwr.x, 2), round(pwr.y, 2))
             for seg_start, seg_end in wire_segments:
-                if pwr_pos == seg_start or pwr_pos == seg_end:
-                    union(pwr_pos, seg_start)
-                    break
-                elif self._point_on_segment(pwr_pos, seg_start, seg_end):
+                if pwr_pos in (seg_start, seg_end) or self._point_on_segment(
+                    pwr_pos, seg_start, seg_end
+                ):
                     union(pwr_pos, seg_start)
                     break
 

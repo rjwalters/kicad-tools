@@ -393,7 +393,6 @@ class Netlist:
         }
 
 
-
 def _count_hierarchy_sheets(sch_path: Path, visited: set[Path] | None = None) -> int:
     """Count the total number of sheets in a schematic hierarchy.
 
@@ -629,15 +628,13 @@ def _collect_hierarchy_components(
     for entry in sheet_entries:
         sub_path = parent_dir / entry.filename
         sub_sheet_path = f"{sheet_path}{entry.filename}/"
-        sub_components, sub_nets = _collect_hierarchy_components(
-            sub_path, sub_sheet_path, visited
-        )
+        sub_components, sub_nets = _collect_hierarchy_components(sub_path, sub_sheet_path, visited)
         components.extend(sub_components)
 
         # Build a mapping from hierarchical label name -> parent net name
         # using the sheet pin positions in the parent's connectivity graph.
         hlabel_to_parent_net: dict[str, str] = {}
-        for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions):
+        for pin_name, pin_pos in zip(entry.pin_names, entry.pin_positions, strict=False):
             parent_net = _net_name_at(pin_pos)
             if parent_net:
                 hlabel_to_parent_net[pin_name] = parent_net
@@ -923,9 +920,7 @@ def export_netlist(
             py_components, _ = _collect_hierarchy_components(sch_path, "/")
             # Filter out power symbols (references starting with #) which
             # are not included in the kicad-cli netlist component list.
-            expected_count = sum(
-                1 for c in py_components if not c.reference.startswith("#")
-            )
+            expected_count = sum(1 for c in py_components if not c.reference.startswith("#"))
             exported_count = len(netlist.components)
             if exported_count < expected_count:
                 logger.warning(

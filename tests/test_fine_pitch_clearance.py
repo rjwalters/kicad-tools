@@ -178,12 +178,26 @@ class TestFinePitchClearanceReduction:
 
         # Add two adjacent pads at 0.65mm pitch
         pad1 = Pad(
-            x=0.0, y=0.0, width=0.35, height=1.2,
-            net=1, net_name="NET1", ref="U1", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=0.35,
+            height=1.2,
+            net=1,
+            net_name="NET1",
+            ref="U1",
+            pin="1",
+            layer=Layer.F_CU,
         )
         pad2 = Pad(
-            x=0.65, y=0.0, width=0.35, height=1.2,
-            net=2, net_name="NET2", ref="U1", pin="2", layer=Layer.F_CU,
+            x=0.65,
+            y=0.0,
+            width=0.35,
+            height=1.2,
+            net=2,
+            net_name="NET2",
+            ref="U1",
+            pin="2",
+            layer=Layer.F_CU,
         )
 
         # Add with fine pitch info
@@ -230,12 +244,26 @@ class TestFinePitchClearanceReduction:
 
         # Add two adjacent pads at 1.27mm pitch (standard SOIC)
         pad1 = Pad(
-            x=0.0, y=0.0, width=0.6, height=1.5,
-            net=1, net_name="NET1", ref="U2", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=0.6,
+            height=1.5,
+            net=1,
+            net_name="NET1",
+            ref="U2",
+            pin="1",
+            layer=Layer.F_CU,
         )
         pad2 = Pad(
-            x=1.27, y=0.0, width=0.6, height=1.5,
-            net=2, net_name="NET2", ref="U2", pin="2", layer=Layer.F_CU,
+            x=1.27,
+            y=0.0,
+            width=0.6,
+            height=1.5,
+            net=2,
+            net_name="NET2",
+            ref="U2",
+            pin="2",
+            layer=Layer.F_CU,
         )
 
         # Add with standard pitch info (above threshold)
@@ -262,8 +290,15 @@ class TestFinePitchClearanceReduction:
         )
 
         pad = Pad(
-            x=0.0, y=0.0, width=0.5, height=0.5,
-            net=1, net_name="NET1", ref="R1", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=0.5,
+            height=0.5,
+            net=1,
+            net_name="NET1",
+            ref="R1",
+            pin="1",
+            layer=Layer.F_CU,
         )
 
         # Add without pitch info - should use standard clearance
@@ -287,8 +322,15 @@ class TestFinePitchClearanceReduction:
 
         # Create pads with very small pitch
         pad1 = Pad(
-            x=0.0, y=0.0, width=0.25, height=0.8,
-            net=1, net_name="NET1", ref="U3", pin="1", layer=Layer.F_CU,
+            x=0.0,
+            y=0.0,
+            width=0.25,
+            height=0.8,
+            net=1,
+            net_name="NET1",
+            ref="U3",
+            pin="1",
+            layer=Layer.F_CU,
         )
 
         grid.add_pad(pad1, pin_pitch=0.5)

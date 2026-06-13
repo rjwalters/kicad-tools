@@ -217,7 +217,11 @@ class DebugHeader(CircuitBlock):
                 # (raises ``ValueError`` if both sides collide; see issue
                 # #3015).
                 _emit_pin_net_stub(
-                    sch, pin_pos, x, net_name, self.ports,
+                    sch,
+                    pin_pos,
+                    x,
+                    net_name,
+                    self.ports,
                     block_label="DebugHeader ",
                 )
 

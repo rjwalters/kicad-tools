@@ -542,8 +542,10 @@ def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
     if summary.manufacturer:
         non_blocking = summary.fab_acceptable_count + summary.warning_count + summary.cosmetic_count
         if non_blocking > 0 and summary.blocking_count > 0:
-            print(f"\n  Only {summary.blocking_count} of {summary.total_violations} "
-                  f"violations are blocking for {summary.manufacturer.upper()}")
+            print(
+                f"\n  Only {summary.blocking_count} of {summary.total_violations} "
+                f"violations are blocking for {summary.manufacturer.upper()}"
+            )
 
     print(f"\n{'=' * 60}")
     print(f"VERDICT: {summary.verdict}")

@@ -2,9 +2,9 @@
 
 from typing import TYPE_CHECKING
 
-from ..base import CircuitBlock
 from ...exceptions import PinNotFoundError
 from .._stub_helpers import _emit_pin_net_stub, _stub_endpoint_would_collide
+from ..base import CircuitBlock
 from ..interfaces import PowerPort
 
 if TYPE_CHECKING:
@@ -223,7 +223,11 @@ class LDOBlock(CircuitBlock):
             for pin_key, net_name in pin_nets.items():
                 pin_pos = self.ldo.pin_position(pin_key)
                 _emit_pin_net_stub(
-                    sch, pin_pos, x, net_name, self.ports,
+                    sch,
+                    pin_pos,
+                    x,
+                    net_name,
+                    self.ports,
                     block_label="LDOBlock ",
                 )
 
@@ -681,11 +685,10 @@ class BuckConverter(CircuitBlock):
                         label_x = pin_pos[0] + STUB
                     if self._fb_stub_would_collide(sch, label_x, pin_pos[1]):
                         vx, vy = self._vout_node
+                        sch.add_wire(pin_pos, (vx, pin_pos[1]), warn_on_collision=False)
                         sch.add_wire(
-                            pin_pos, (vx, pin_pos[1]), warn_on_collision=False
-                        )
-                        sch.add_wire(
-                            (vx, pin_pos[1]), self._vout_node,
+                            (vx, pin_pos[1]),
+                            self._vout_node,
                             warn_on_collision=False,
                         )
                         sch.add_junction(vx, vy)
@@ -698,7 +701,11 @@ class BuckConverter(CircuitBlock):
                 # ``_emit_pin_net_stub`` for the auto-shift / raise
                 # semantics.
                 _emit_pin_net_stub(
-                    sch, pin_pos, x, net_name, self.ports,
+                    sch,
+                    pin_pos,
+                    x,
+                    net_name,
+                    self.ports,
                     block_label="BuckConverter ",
                 )
 

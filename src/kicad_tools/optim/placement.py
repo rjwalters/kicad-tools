@@ -151,8 +151,8 @@ class PlacementOptimizer:
         Returns:
             True if GPU was enabled, False if not available.
         """
+        from kicad_tools.acceleration import BackendType, get_best_available_backend
         from kicad_tools.acceleration.kernels.placement import PlacementGPUAccelerator
-        from kicad_tools.acceleration import get_best_available_backend, BackendType
 
         backend = get_best_available_backend()
         if backend.backend_type == BackendType.CPU and not force:
@@ -415,8 +415,16 @@ class PlacementOptimizer:
             # Degenerate (collinear) -- fall back to a straight line
             return [((sx, sy), (ex, ey))]
 
-        ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / D
-        uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / D
+        ux = (
+            (ax * ax + ay * ay) * (by - cy)
+            + (bx * bx + by * by) * (cy - ay)
+            + (cx * cx + cy * cy) * (ay - by)
+        ) / D
+        uy = (
+            (ax * ax + ay * ay) * (cx - bx)
+            + (bx * bx + by * by) * (ax - cx)
+            + (cx * cx + cy * cy) * (bx - ax)
+        ) / D
 
         radius = math.sqrt((sx - ux) ** 2 + (sy - uy) ** 2)
 
@@ -1587,7 +1595,9 @@ class PlacementOptimizer:
         from kicad_tools.optim.cpp_backend import compute_boundary_forces_cpp
 
         return compute_boundary_forces_cpp(
-            self.components, self.board_outline, self.config,
+            self.components,
+            self.board_outline,
+            self.config,
             effective_boundary_charge=self._effective_boundary_charge(),
         )
 

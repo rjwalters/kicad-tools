@@ -13,10 +13,10 @@ from kicad_tools.validate.rules.base import DRC_TOLERANCE
 from kicad_tools.validate.rules.clearance import ClearanceRule
 from kicad_tools.validate.rules.dimensions import DimensionRules
 
-
 # ---------------------------------------------------------------------------
 # Mock objects (minimal, matching the interfaces used by the rules)
 # ---------------------------------------------------------------------------
+
 
 class MockDesignRules:
     def __init__(self, **kwargs):
@@ -56,8 +56,9 @@ class MockVia:
 
 
 class MockPad:
-    def __init__(self, position, size, layers, net_number, net_name="", number="1",
-                 type="smd", drill=0):
+    def __init__(
+        self, position, size, layers, net_number, net_name="", number="1", type="smd", drill=0
+    ):
         self.position = position
         self.size = size
         self.layers = layers
@@ -105,17 +106,19 @@ class MockPCB:
 # Tests for the DRC_TOLERANCE constant
 # ---------------------------------------------------------------------------
 
+
 class TestDRCToleranceConstant:
     def test_tolerance_is_positive(self):
         assert DRC_TOLERANCE > 0
 
     def test_tolerance_value(self):
-        assert DRC_TOLERANCE == pytest.approx(0.005)
+        assert pytest.approx(0.005) == DRC_TOLERANCE
 
 
 # ---------------------------------------------------------------------------
 # Tests for clearance tolerance (issue #1803 regression)
 # ---------------------------------------------------------------------------
+
 
 class TestClearanceRuleTolerance:
     """Verify the ClearanceRule respects DRC_TOLERANCE."""
@@ -135,12 +138,18 @@ class TestClearanceRuleTolerance:
         center_dist = gap_mm + (seg_width / 2) + (via_size / 2)
 
         seg = MockSegment(
-            start=(0.0, 0.0), end=(10.0, 0.0),
-            width=seg_width, layer="F.Cu", net_number=1,
+            start=(0.0, 0.0),
+            end=(10.0, 0.0),
+            width=seg_width,
+            layer="F.Cu",
+            net_number=1,
         )
         via = MockVia(
-            position=(5.0, center_dist), size=via_size, drill=0.3,
-            layers=["F.Cu", "B.Cu"], net_number=2,
+            position=(5.0, center_dist),
+            size=via_size,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=2,
         )
         nets = [MockNet(1, "VCC"), MockNet(2, "GND")]
         pcb = MockPCB(segments=[seg], vias=[via], nets=nets)
@@ -194,14 +203,18 @@ class TestClearanceRuleTolerance:
 # Tests for dimension tolerance
 # ---------------------------------------------------------------------------
 
+
 class TestDimensionRulesTolerance:
     """Verify DimensionRules respects DRC_TOLERANCE for all checks."""
 
     def test_trace_width_within_tolerance_passes(self):
         """Trace 0.124mm vs 0.127mm minimum -- 0.003mm short, within tolerance."""
         seg = MockSegment(
-            start=(0, 0), end=(10, 0), width=0.124,
-            layer="F.Cu", net_number=1,
+            start=(0, 0),
+            end=(10, 0),
+            width=0.124,
+            layer="F.Cu",
+            net_number=1,
         )
         pcb = MockPCB(segments=[seg], nets=[MockNet(1, "VCC")])
         rules = MockDesignRules(min_trace_width_mm=0.127)
@@ -212,8 +225,11 @@ class TestDimensionRulesTolerance:
     def test_trace_width_beyond_tolerance_fails(self):
         """Trace 0.110mm vs 0.127mm minimum -- 0.017mm short, should fail."""
         seg = MockSegment(
-            start=(0, 0), end=(10, 0), width=0.110,
-            layer="F.Cu", net_number=1,
+            start=(0, 0),
+            end=(10, 0),
+            width=0.110,
+            layer="F.Cu",
+            net_number=1,
         )
         pcb = MockPCB(segments=[seg], nets=[MockNet(1, "VCC")])
         rules = MockDesignRules(min_trace_width_mm=0.127)
@@ -224,12 +240,16 @@ class TestDimensionRulesTolerance:
     def test_via_drill_within_tolerance_passes(self):
         """Via drill 0.297mm vs 0.300mm minimum -- 0.003mm short, passes."""
         via = MockVia(
-            position=(5, 5), size=0.8, drill=0.297,
-            layers=["F.Cu", "B.Cu"], net_number=1,
+            position=(5, 5),
+            size=0.8,
+            drill=0.297,
+            layers=["F.Cu", "B.Cu"],
+            net_number=1,
         )
         pcb = MockPCB(vias=[via], nets=[MockNet(1, "VCC")])
-        rules = MockDesignRules(min_via_drill_mm=0.3, min_via_diameter_mm=0.6,
-                                min_annular_ring_mm=0.15)
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3, min_via_diameter_mm=0.6, min_annular_ring_mm=0.15
+        )
         result = DimensionRules().check(pcb, rules)
         drill_violations = [v for v in result.violations if v.rule_id == "dimension_via_drill"]
         assert len(drill_violations) == 0
@@ -237,12 +257,19 @@ class TestDimensionRulesTolerance:
     def test_drill_clearance_within_tolerance_passes(self):
         """Drill edge-to-edge 0.124mm vs 0.127mm min -- 0.003mm short, passes."""
         via1 = MockVia(
-            position=(0, 0), size=0.6, drill=0.3,
-            layers=["F.Cu", "B.Cu"], net_number=1,
+            position=(0, 0),
+            size=0.6,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=1,
         )
         via2 = MockVia(
-            position=(0.724, 0), size=0.6, drill=0.3,
-            layers=["F.Cu", "B.Cu"], net_number=2, uuid="via0002",
+            position=(0.724, 0),
+            size=0.6,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=2,
+            uuid="via0002",
         )
         # edge distance = 0.724 - 0.15 - 0.15 = 0.424 ... let me recalculate
         # edge = center_dist - r1 - r2 = 0.724 - 0.15 - 0.15 = 0.424
@@ -250,12 +277,17 @@ class TestDimensionRulesTolerance:
         # edge = center_dist - drill1/2 - drill2/2
         # Want edge = 0.124, drill = 0.3, so center = 0.124 + 0.15 + 0.15 = 0.424
         via2 = MockVia(
-            position=(0.424, 0), size=0.6, drill=0.3,
-            layers=["F.Cu", "B.Cu"], net_number=2, uuid="via0002",
+            position=(0.424, 0),
+            size=0.6,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=2,
+            uuid="via0002",
         )
         pcb = MockPCB(vias=[via1, via2], nets=[MockNet(1, "VCC"), MockNet(2, "GND")])
         rules = MockDesignRules(min_clearance_mm=0.127)
         result = DimensionRules().check(pcb, rules)
-        drill_violations = [v for v in result.violations
-                           if v.rule_id == "dimension_drill_clearance"]
+        drill_violations = [
+            v for v in result.violations if v.rule_id == "dimension_drill_clearance"
+        ]
         assert len(drill_violations) == 0

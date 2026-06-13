@@ -105,9 +105,7 @@ class TestSExpRoundTripWithKiCad:
         assert "user)" in output or "user " in output, "user keyword should not be quoted"
         assert "no)" in output or "no\n" in output, "no keyword should not be quoted"
         assert "none)" in output or "none\n" in output, "none keyword should not be quoted"
-        assert "default)" in output or "default\n" in output, (
-            "default keyword should not be quoted"
-        )
+        assert "default)" in output or "default\n" in output, "default keyword should not be quoted"
 
         # Check that layer names are quoted
         assert '"F.Cu"' in output, "Layer names should be quoted"

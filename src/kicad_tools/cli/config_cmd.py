@@ -175,12 +175,12 @@ def _print_native_backend_status() -> None:
             info = mod.get_backend_info()
             if info.get("available"):
                 version = info.get("version", "unknown")
-                print(f"{name} = \"cpp v{version}\"  # installed")
+                print(f'{name} = "cpp v{version}"  # installed')
             else:
-                print(f"{name} = \"python (fallback)\"  # NOT installed")
+                print(f'{name} = "python (fallback)"  # NOT installed')
                 any_missing = True
         except Exception:
-            print(f"{name} = \"python (fallback)\"  # NOT installed")
+            print(f'{name} = "python (fallback)"  # NOT installed')
             any_missing = True
     if any_missing:
         print("# Run 'kct build-native' for 10-100x faster routing/placement")

@@ -6,15 +6,11 @@ used by both stdio and HTTP transports.
 
 from __future__ import annotations
 
-import pytest
-
 from kicad_tools.mcp.tools.registry import (
     TOOL_REGISTRY,
     ToolSpec,
-    clear_registry,
     get_tool,
     list_tools,
-    register_tool,
 )
 
 

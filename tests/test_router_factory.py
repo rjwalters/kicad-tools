@@ -87,9 +87,7 @@ class TestBuildFactoryFromRouter:
     def test_uses_explicit_position(self):
         """When component_positions provided, that wins over centroid."""
         router = _two_pin_component_router()
-        factory = _build_factory_from_router(
-            router, component_positions={"U1": (50.0, 60.0, 90.0)}
-        )
+        factory = _build_factory_from_router(router, component_positions={"U1": (50.0, 60.0, 90.0)})
         assert factory.component_refs["U1"].base_x == pytest.approx(50.0)
         assert factory.component_refs["U1"].base_y == pytest.approx(60.0)
         assert factory.component_refs["U1"].base_rotation == pytest.approx(90.0)
@@ -195,12 +193,7 @@ class TestBuildPcbRouterFactory:
         """Smoke test: construct a factory from the simplest in-tree board."""
         from pathlib import Path
 
-        pcb_dir = (
-            Path(__file__).parent.parent
-            / "boards"
-            / "01-voltage-divider"
-            / "output"
-        )
+        pcb_dir = Path(__file__).parent.parent / "boards" / "01-voltage-divider" / "output"
         kicad_pcbs = list(pcb_dir.glob("*.kicad_pcb")) if pcb_dir.exists() else []
         if not kicad_pcbs:
             pytest.skip("No in-tree .kicad_pcb fixture available")
@@ -219,8 +212,7 @@ class TestBuildPcbRouterFactory:
         # Calling with the base positions should reproduce the original pad
         # coordinates (within FP tolerance) on the (in-place mutated) router.
         positions = {
-            ref: (cref.base_x, cref.base_y)
-            for ref, cref in factory.component_refs.items()
+            ref: (cref.base_x, cref.base_y) for ref, cref in factory.component_refs.items()
         }
         rotations = {ref: cref.base_rotation for ref, cref in factory.component_refs.items()}
         returned_router = factory(positions, rotations)

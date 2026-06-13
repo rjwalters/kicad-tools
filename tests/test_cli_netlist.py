@@ -545,7 +545,9 @@ class TestExportNetlistStaleCache:
         netlist_file.write_text(stale_content)
 
         # Mock find_kicad_cli so export_netlist proceeds to subprocess.run
-        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             # Mock subprocess to simulate kicad-cli not producing output (crash)
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
@@ -571,7 +573,9 @@ class TestExportNetlistStaleCache:
             )"""
         )
 
-        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
 
@@ -597,7 +601,9 @@ class TestExportNetlistStaleCache:
             )"""
         )
 
-        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = Mock(returncode=1, stderr="Some error message", stdout="")
 
@@ -630,7 +636,9 @@ class TestExportNetlistStaleCache:
             netlist_file.write_text(valid_netlist)
             return Mock(returncode=0, stderr="", stdout="")
 
-        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             with patch("subprocess.run", side_effect=create_netlist):
                 result = export_netlist(sch_file)
 
@@ -672,7 +680,9 @@ class TestExportNetlistStaleCache:
             netlist_file.write_text(fresh_netlist)
             return Mock(returncode=0, stderr="", stdout="")
 
-        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             with patch("subprocess.run", side_effect=track_and_create):
                 result = export_netlist(sch_file)
 
@@ -765,7 +775,9 @@ class TestExportNetlistPythonFallback:
             )"""
         )
 
-        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
 
@@ -1151,9 +1163,7 @@ class TestCmdExportFallbackHandling:
         mock_export.return_value = mock_netlist
 
         output_file = tmp_path / "output.kicad_net"
-        result = netlist_cmd.cmd_export(
-            Path("test.kicad_sch"), output_file, "kicad"
-        )
+        result = netlist_cmd.cmd_export(Path("test.kicad_sch"), output_file, "kicad")
 
         assert result == 0
         assert output_file.exists()
@@ -1174,9 +1184,7 @@ class TestCmdExportFallbackHandling:
         default_output.write_text("(export)")
 
         output_file = tmp_path / "custom_output.kicad_net"
-        result = netlist_cmd.cmd_export(
-            tmp_path / "test.kicad_sch", output_file, "kicad"
-        )
+        result = netlist_cmd.cmd_export(tmp_path / "test.kicad_sch", output_file, "kicad")
 
         assert result == 0
         captured = capsys.readouterr()

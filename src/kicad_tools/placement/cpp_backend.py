@@ -161,9 +161,7 @@ def compute_overlap_cpp(
     if not _CPP_AVAILABLE:
         raise RuntimeError("C++ placement backend not available")
 
-    xs, ys, widths, heights = _build_boxes_from_placements(
-        placements, footprint_sizes
-    )
+    xs, ys, widths, heights = _build_boxes_from_placements(placements, footprint_sizes)
 
     # Build AABB list for the C++ free function
     boxes = []
@@ -202,9 +200,7 @@ def compute_boundary_violation_cpp(
     if not _CPP_AVAILABLE:
         raise RuntimeError("C++ placement backend not available")
 
-    xs, ys, widths, heights = _build_boxes_from_placements(
-        placements, footprint_sizes
-    )
+    xs, ys, widths, heights = _build_boxes_from_placements(placements, footprint_sizes)
 
     boxes = []
     for i in range(len(xs)):
@@ -244,9 +240,7 @@ def compute_drc_violations_cpp(
     if not _CPP_AVAILABLE:
         raise RuntimeError("C++ placement backend not available")
 
-    xs, ys, widths, heights = _build_boxes_from_placements(
-        placements, footprint_sizes
-    )
+    xs, ys, widths, heights = _build_boxes_from_placements(placements, footprint_sizes)
 
     boxes = []
     for i in range(len(xs)):
@@ -300,7 +294,10 @@ class BatchCostEvaluatorWrapper:
 
         if self._use_cpp:
             self._cpp_evaluator = placement_cpp.BatchCostEvaluator(
-                board.min_x, board.min_y, board.max_x, board.max_y,
+                board.min_x,
+                board.min_y,
+                board.max_x,
+                board.max_y,
                 rules.min_clearance,
             )
         else:
@@ -331,9 +328,7 @@ class BatchCostEvaluatorWrapper:
             Tuple of (overlap, boundary, drc) costs.
         """
         if self._use_cpp and self._cpp_evaluator is not None:
-            xs, ys, widths, heights = _build_boxes_from_placements(
-                placements, footprint_sizes
-            )
+            xs, ys, widths, heights = _build_boxes_from_placements(placements, footprint_sizes)
             result = self._cpp_evaluator.evaluate(xs, ys, widths, heights)
             return result.overlap, result.boundary, result.drc
 
@@ -345,9 +340,7 @@ class BatchCostEvaluatorWrapper:
         )
 
         overlap = compute_overlap(placements, footprint_sizes)
-        boundary = compute_boundary_violation(
-            placements, self._board, footprint_sizes
-        )
+        boundary = compute_boundary_violation(placements, self._board, footprint_sizes)
         drc = compute_drc_violations(placements, self._rules, footprint_sizes)
         return overlap, boundary, drc
 
@@ -366,9 +359,7 @@ class BatchCostEvaluatorWrapper:
             Sum of pairwise overlap areas (mm^2).
         """
         if self._use_cpp and self._cpp_evaluator is not None:
-            xs, ys, widths, heights = _build_boxes_from_placements(
-                placements, footprint_sizes
-            )
+            xs, ys, widths, heights = _build_boxes_from_placements(placements, footprint_sizes)
             return self._cpp_evaluator.evaluate_overlap(xs, ys, widths, heights)
 
         from .cost import compute_overlap
@@ -390,16 +381,12 @@ class BatchCostEvaluatorWrapper:
             Sum of boundary violation depths (mm).
         """
         if self._use_cpp and self._cpp_evaluator is not None:
-            xs, ys, widths, heights = _build_boxes_from_placements(
-                placements, footprint_sizes
-            )
+            xs, ys, widths, heights = _build_boxes_from_placements(placements, footprint_sizes)
             return self._cpp_evaluator.evaluate_boundary(xs, ys, widths, heights)
 
         from .cost import compute_boundary_violation
 
-        return compute_boundary_violation(
-            placements, self._board, footprint_sizes
-        )
+        return compute_boundary_violation(placements, self._board, footprint_sizes)
 
     def evaluate_drc(
         self,
@@ -416,9 +403,7 @@ class BatchCostEvaluatorWrapper:
             Number of pairwise clearance violations.
         """
         if self._use_cpp and self._cpp_evaluator is not None:
-            xs, ys, widths, heights = _build_boxes_from_placements(
-                placements, footprint_sizes
-            )
+            xs, ys, widths, heights = _build_boxes_from_placements(placements, footprint_sizes)
             return self._cpp_evaluator.evaluate_drc(xs, ys, widths, heights)
 
         from .cost import compute_drc_violations

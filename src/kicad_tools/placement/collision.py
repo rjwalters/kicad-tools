@@ -63,9 +63,7 @@ class CollisionResult:
             "conflict_type": self.conflict_type.value if self.conflict_type else None,
             "required_clearance": self.required_clearance,
             "actual_clearance": self.actual_clearance,
-            "location": (
-                {"x": self.location.x, "y": self.location.y} if self.location else None
-            ),
+            "location": ({"x": self.location.x, "y": self.location.y} if self.location else None),
             "message": self.message,
         }
 
@@ -137,9 +135,7 @@ class PlacementCollision:
             "ref1": self.ref1,
             "ref2": self.ref2,
             "violation_type": self.violation_type.value,
-            "location": (
-                {"x": self.location.x, "y": self.location.y} if self.location else None
-            ),
+            "location": ({"x": self.location.x, "y": self.location.y} if self.location else None),
             "actual_clearance": self.actual_clearance,
             "required_clearance": self.required_clearance,
             "message": self.message,
@@ -220,9 +216,7 @@ class DRCViolation:
             "type": self.type.value,
             "severity": self.severity.value,
             "description": self.description,
-            "location": (
-                {"x": self.location.x, "y": self.location.y} if self.location else None
-            ),
+            "location": ({"x": self.location.x, "y": self.location.y} if self.location else None),
             "components": list(self.components),
             "actual_value": self.actual_value,
             "required_value": self.required_value,

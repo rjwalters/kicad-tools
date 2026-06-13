@@ -8,8 +8,6 @@ import pytest
 from kicad_tools.router.core import AdaptiveAutorouter, Autorouter, RoutingResult
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.heuristics import (
-    CongestionAwareHeuristic,
-    HeuristicContext,
     ManhattanHeuristic,
 )
 from kicad_tools.router.layers import Layer, LayerStack
@@ -273,7 +271,9 @@ class TestAutorouter:
 
         # Issue #1295: Pour nets (is_pour_net=True) return priority 99
         # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion)
-        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = (
+            router._get_net_priority(1)
+        )
         assert priority == 99  # Pour net pushed to back
 
     def test_get_net_priority_with_signal_net_class(self):
@@ -289,7 +289,9 @@ class TestAutorouter:
         )
 
         # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion)
-        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = (
+            router._get_net_priority(1)
+        )
         assert priority == 2  # Clock net has priority 2
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
@@ -306,7 +308,9 @@ class TestAutorouter:
         )
 
         # Issue #2278: Return is now 6-tuple (priority, complexity_tier, -constraint_score, pad_count, distance, -congestion)
-        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = router._get_net_priority(1)
+        priority, complexity_tier, neg_constraint, pad_count, distance, neg_congestion = (
+            router._get_net_priority(1)
+        )
         assert priority == 10  # Default low priority
         assert distance == 0.0  # Single pad has no distance
 
@@ -449,8 +453,8 @@ class TestAutorouter:
         mc = MonteCarloRouter(total_nets=4)
 
         priorities = {
-            1: (10, 0, 0.0, 2, 5.0, 0.0),   # default, simple
-            2: (10, 0, 0.0, 2, 6.0, 0.0),   # default, simple
+            1: (10, 0, 0.0, 2, 5.0, 0.0),  # default, simple
+            2: (10, 0, 0.0, 2, 6.0, 0.0),  # default, simple
             3: (10, 1, 0.0, 4, 20.0, 0.0),  # default, complex
             4: (10, 1, 0.0, 4, 25.0, 0.0),  # default, complex
         }
@@ -484,9 +488,7 @@ class TestAutorouter:
         random.seed(99)
         shuffled = mc.shuffle_within_tiers([1, 2, 3, 4], get_priority)
         random.seed(99)
-        promoted = mc.shuffle_with_promotions(
-            [1, 2, 3, 4], get_priority, promotion_rate=0.0
-        )
+        promoted = mc.shuffle_with_promotions([1, 2, 3, 4], get_priority, promotion_rate=0.0)
 
         assert shuffled == promoted
 
@@ -497,10 +499,10 @@ class TestAutorouter:
         mc = MonteCarloRouter(total_nets=4)
 
         priorities = {
-            1: (2, 0, 0.0, 2, 5.0, 0.0),   # clock, simple
+            1: (2, 0, 0.0, 2, 5.0, 0.0),  # clock, simple
             2: (2, 1, 0.0, 4, 20.0, 0.0),  # clock, complex
             3: (10, 0, 0.0, 2, 5.0, 0.0),  # default, simple
-            4: (10, 1, 0.0, 4, 20.0, 0.0), # default, complex
+            4: (10, 1, 0.0, 4, 20.0, 0.0),  # default, complex
         }
 
         # Run many times with full promotion to verify no cross-class mixing
@@ -862,8 +864,7 @@ class TestRouterPathfinder:
         # with the clamping fix it should check only in-bounds cells.
         blocked = router._is_trace_blocked(0, 0, 0, net=1)
         assert blocked is False, (
-            "Cell at grid corner (0,0) should not be blocked when "
-            "in-bounds cells are clear"
+            "Cell at grid corner (0,0) should not be blocked when in-bounds cells are clear"
         )
 
         # Cell at opposite corner
@@ -871,8 +872,7 @@ class TestRouterPathfinder:
         max_y = grid.rows - 1
         blocked = router._is_trace_blocked(max_x, max_y, 0, net=1)
         assert blocked is False, (
-            "Cell at grid corner (max,max) should not be blocked when "
-            "in-bounds cells are clear"
+            "Cell at grid corner (max,max) should not be blocked when in-bounds cells are clear"
         )
 
         # Block a cell adjacent to the corner -- the boundary cell
@@ -881,8 +881,7 @@ class TestRouterPathfinder:
         grid.grid[0][0][1].is_obstacle = True
         blocked = router._is_trace_blocked(0, 0, 0, net=1)
         assert blocked is True, (
-            "Cell at grid corner should be blocked when an adjacent "
-            "in-bounds cell is an obstacle"
+            "Cell at grid corner should be blocked when an adjacent in-bounds cell is an obstacle"
         )
 
     def test_router_is_via_blocked(self):

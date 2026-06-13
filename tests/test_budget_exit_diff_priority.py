@@ -22,7 +22,7 @@ unrelated routing changes.
 from __future__ import annotations
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED, NetClassRouting
+from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED
 
 
 def _build_minimal_autorouter() -> Autorouter:
@@ -43,32 +43,68 @@ def _build_minimal_autorouter() -> Autorouter:
     for name in ("USB3_TX1+", "USB3_TX1-", "USB3_RX1+"):
         ar.net_class_map[name] = NET_CLASS_HIGH_SPEED
     # Pads with sane geometry so the bounding-box diagonal is well-defined.
-    from kicad_tools.router.primitives import Pad
     from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
 
     ar.pads[("J1", "1")] = Pad(
-        x=0.0, y=0.0, width=0.3, height=0.3,
-        net=10, net_name="USB3_TX1+", layer=Layer.F_CU, ref="J1",
+        x=0.0,
+        y=0.0,
+        width=0.3,
+        height=0.3,
+        net=10,
+        net_name="USB3_TX1+",
+        layer=Layer.F_CU,
+        ref="J1",
     )
     ar.pads[("U1", "1")] = Pad(
-        x=2.0, y=0.0, width=0.3, height=0.3,
-        net=10, net_name="USB3_TX1+", layer=Layer.F_CU, ref="U1",
+        x=2.0,
+        y=0.0,
+        width=0.3,
+        height=0.3,
+        net=10,
+        net_name="USB3_TX1+",
+        layer=Layer.F_CU,
+        ref="U1",
     )
     ar.pads[("J1", "2")] = Pad(
-        x=0.0, y=1.0, width=0.3, height=0.3,
-        net=11, net_name="USB3_TX1-", layer=Layer.F_CU, ref="J1",
+        x=0.0,
+        y=1.0,
+        width=0.3,
+        height=0.3,
+        net=11,
+        net_name="USB3_TX1-",
+        layer=Layer.F_CU,
+        ref="J1",
     )
     ar.pads[("U1", "2")] = Pad(
-        x=2.0, y=1.0, width=0.3, height=0.3,
-        net=11, net_name="USB3_TX1-", layer=Layer.F_CU, ref="U1",
+        x=2.0,
+        y=1.0,
+        width=0.3,
+        height=0.3,
+        net=11,
+        net_name="USB3_TX1-",
+        layer=Layer.F_CU,
+        ref="U1",
     )
     ar.pads[("J1", "3")] = Pad(
-        x=0.0, y=2.0, width=0.3, height=0.3,
-        net=12, net_name="USB3_RX1+", layer=Layer.F_CU, ref="J1",
+        x=0.0,
+        y=2.0,
+        width=0.3,
+        height=0.3,
+        net=12,
+        net_name="USB3_RX1+",
+        layer=Layer.F_CU,
+        ref="J1",
     )
     ar.pads[("U1", "3")] = Pad(
-        x=2.0, y=2.0, width=0.3, height=0.3,
-        net=12, net_name="USB3_RX1+", layer=Layer.F_CU, ref="U1",
+        x=2.0,
+        y=2.0,
+        width=0.3,
+        height=0.3,
+        net=12,
+        net_name="USB3_RX1+",
+        layer=Layer.F_CU,
+        ref="U1",
     )
     return ar
 
@@ -87,9 +123,7 @@ def test_budget_exit_net_gets_complexity_tier_minus_1():
     for nid in (10, 11, 12):
         prio = ar._get_net_priority(nid)
         # priority class, complexity_tier are tuple[0] and tuple[1]
-        assert prio[1] == 0, (
-            f"Baseline priority for net {nid}: expected tier 0, got {prio}"
-        )
+        assert prio[1] == 0, f"Baseline priority for net {nid}: expected tier 0, got {prio}"
 
     # Promote net 10 (USB3_TX1+) to budget-exit.
     ar._budget_exit_diff_nets = {10}
@@ -123,8 +157,7 @@ def test_budget_exit_net_promotion_preserves_priority_class():
     ar._budget_exit_diff_nets = {10}
     prio = ar._get_net_priority(10)
     assert prio[0] == expected_class, (
-        f"Priority class must remain {expected_class} after tier "
-        f"promotion, got {prio[0]}"
+        f"Priority class must remain {expected_class} after tier promotion, got {prio[0]}"
     )
 
 

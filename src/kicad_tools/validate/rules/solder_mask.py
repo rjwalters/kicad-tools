@@ -8,7 +8,6 @@ This module implements validation rules for:
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 from ..violations import DRCResults, DRCViolation
@@ -30,10 +29,7 @@ class SolderMaskPadRules(DRCRule):
 
     rule_id = "solder_mask_pad"
     name = "Solder Mask & Pad Rules"
-    description = (
-        "Check solder mask clearance, minimum pad size, "
-        "and PTH pad annular ring"
-    )
+    description = "Check solder mask clearance, minimum pad size, and PTH pad annular ring"
 
     def check(
         self,
@@ -79,16 +75,12 @@ class SolderMaskPadRules(DRCRule):
         min_clearance = design_rules.min_solder_mask_clearance_mm
 
         # Board-level default mask clearance from PCB setup
-        board_mask_clearance = getattr(
-            getattr(pcb, "setup", None), "pad_to_mask_clearance", 0.0
-        )
+        board_mask_clearance = getattr(getattr(pcb, "setup", None), "pad_to_mask_clearance", 0.0)
 
         for fp in pcb.footprints:
             for pad in fp.pads:
                 # Only check pads that have mask layers
-                has_mask = any(
-                    layer.endswith(".Mask") for layer in pad.layers
-                )
+                has_mask = any(layer.endswith(".Mask") for layer in pad.layers)
                 if not has_mask:
                     continue
 

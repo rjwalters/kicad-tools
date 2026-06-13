@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
     from ..grid import RoutingGrid
-    from ..output import format_failed_nets_summary
     from ..pathfinder import Router
     from ..primitives import Pad, Route
     from ..rules import DesignRules
@@ -200,7 +199,6 @@ class TwoPhaseRouter:
         from ..global_router import GlobalRouter
         from ..output import format_failed_nets_summary
         from ..region_graph import RegionGraph
-        from ..sparse import Corridor
 
         if corridor_penalty is None:
             corridor_penalty = self.rules.cost_corridor_deviation
@@ -246,8 +244,7 @@ class TwoPhaseRouter:
         if pour_nets:
             pour_names = [self.net_names.get(n, f"Net {n}") for n in pour_nets]
             flush_print(
-                f"  Skipping {len(pour_nets)} pour net(s) "
-                f"(use zone fill instead): {pour_names}"
+                f"  Skipping {len(pour_nets)} pour net(s) (use zone fill instead): {pour_names}"
             )
         net_order = signal_nets
 
@@ -263,8 +260,7 @@ class TwoPhaseRouter:
                 multi_pad_nets.append(n)
         if single_pad_nets:
             flush_print(
-                f"  Skipping {len(single_pad_nets)} single-pad net(s) "
-                "(trivially connected)"
+                f"  Skipping {len(single_pad_nets)} single-pad net(s) (trivially connected)"
             )
         net_order = multi_pad_nets
 
@@ -428,11 +424,7 @@ class TwoPhaseRouter:
                 if pad_list:
                     net_pads[net_id] = pad_list
             connectivity = validate_net_connectivity(detailed_routes, net_pads)
-            connected_nets = sum(
-                1
-                for info in connectivity.values()
-                if info["connected"]
-            )
+            connected_nets = sum(1 for info in connectivity.values() if info["connected"])
 
         total_elapsed = time.time() - start_time
         print("\n=== Two-Phase Routing Complete ===")
@@ -441,8 +433,7 @@ class TwoPhaseRouter:
         print(f"  Detailed routing: {connected_nets} nets routed")
         if connected_nets < nets_with_segments:
             print(
-                f"    ({nets_with_segments - connected_nets} additional net(s) "
-                "have partial routes)"
+                f"    ({nets_with_segments - connected_nets} additional net(s) have partial routes)"
             )
         print(f"  Total time: {total_elapsed:.1f}s")
 
@@ -563,7 +554,9 @@ class TwoPhaseRouter:
             pct = (i / total_nets * 100) if total_nets > 0 else 0
             flush_print(f"  [{pct:5.1f}%] Routing {net_name}... ({elapsed_str()})")
 
-            routes = self._route_net_with_corridor(net, present_factor, per_net_timeout=per_net_timeout)
+            routes = self._route_net_with_corridor(
+                net, present_factor, per_net_timeout=per_net_timeout
+            )
             if routes:
                 net_routes[net] = routes
                 for route in routes:
@@ -606,9 +599,7 @@ class TwoPhaseRouter:
             grace_start = time.monotonic()
 
             def _grace_route(net: int, cap: float) -> list[Route]:
-                return self._route_net_with_corridor(
-                    net, present_factor, per_net_timeout=cap
-                )
+                return self._route_net_with_corridor(net, present_factor, per_net_timeout=cap)
 
             def _grace_commit(net: int, routes: list[Route]) -> None:
                 net_routes[net] = routes
@@ -617,7 +608,10 @@ class TwoPhaseRouter:
                     self.routes.append(route)
 
             graced, attempted, skipped = run_initial_pass_grace(
-                grace_nets, _grace_route, _grace_commit, per_net_timeout,
+                grace_nets,
+                _grace_route,
+                _grace_commit,
+                per_net_timeout,
                 budget_s=grace_fund,
             )
             flush_print(
@@ -665,9 +659,7 @@ class TwoPhaseRouter:
             pads_by_net_local = self._build_pads_by_net(net_order)
             partial_failed: set[int] = set()
             if self._get_partially_routed_nets is not None:
-                partial_failed = self._get_partially_routed_nets(
-                    net_routes, pads_by_net_local
-                )
+                partial_failed = self._get_partially_routed_nets(net_routes, pads_by_net_local)
             stall_failed = [
                 n
                 for n in net_order
@@ -691,9 +683,7 @@ class TwoPhaseRouter:
                 # ``--max-ripups-per-net`` (threaded through
                 # ``Autorouter.stall_ripup_budget``).
                 stall_budget = (
-                    self._stall_ripup_budget
-                    if self._stall_ripup_budget is not None
-                    else 3
+                    self._stall_ripup_budget if self._stall_ripup_budget is not None else 3
                 )
                 relief_attempted = 0
                 relief_resolved = 0
@@ -764,10 +754,7 @@ class TwoPhaseRouter:
                     # placed by the helper -- if rip-ups introduced overflow
                     # the iteration loop below will pick it up and converge.
                     overflow = self.grid.get_total_overflow()
-                    flush_print(
-                        f"  Post-recovery overflow: {overflow}"
-                    )
-
+                    flush_print(f"  Post-recovery overflow: {overflow}")
 
         # Issue #2317: Track overflow history for early-stop detection.
         overflow_history: list[int] = [overflow]
@@ -810,12 +797,14 @@ class TwoPhaseRouter:
         # escape-phase routes (lateral / in-pad helpers from PR #3070).
         _extra_init = self._collect_extra_routes_for_revalidation(net_routes)
         _init_seg_via = neg_router.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_init",),
             extra_routes=_extra_init,
         )
         _init_via_seg = neg_router.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_init",),
             extra_routes=_extra_init,
         )
@@ -826,13 +815,12 @@ class TwoPhaseRouter:
         # clearance_viol=0 and the loop has no reason to prefer a
         # layer-separated snapshot.
         _init_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_init",),
             extra_routes=_extra_init,
         )
-        best_clearance_violations = (
-            len(_init_seg_via) + len(_init_via_seg) + len(_init_seg_seg)
-        )
+        best_clearance_violations = len(_init_seg_via) + len(_init_via_seg) + len(_init_seg_seg)
         best_routes: list[Route] = copy.deepcopy(list(self.routes))
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_iteration = 0  # 0 = initial pass
@@ -871,9 +859,7 @@ class TwoPhaseRouter:
                         1.0 - self.rules.corridor_decay_rate * iteration,
                     )
                     for net, corridor in corridors.items():
-                        self.grid.set_corridor_preference(
-                            corridor, net, effective_penalty
-                        )
+                        self.grid.set_corridor_preference(corridor, net, effective_penalty)
 
                 overused = self.grid.find_overused_cells()
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
@@ -918,13 +904,15 @@ class TwoPhaseRouter:
                 # routes.
                 _extra_iter = self._collect_extra_routes_for_revalidation(net_routes)
                 seg_via_violators = neg_router.find_nets_with_segment_via_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
+                    net_routes,
+                    trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration - 1)
+                    if iteration > 1
+                    else ("two_phase_init",),
                     extra_routes=_extra_iter,
                 )
                 new_seg_via_violators = [
-                    v_net for v_net in seg_via_violators
-                    if v_net not in nets_to_reroute
+                    v_net for v_net in seg_via_violators if v_net not in nets_to_reroute
                 ]
                 for v_net in new_seg_via_violators:
                     nets_to_reroute.append(v_net)
@@ -935,8 +923,7 @@ class TwoPhaseRouter:
                 # working as intended.
                 if new_seg_via_violators:
                     violator_names = [
-                        self.net_names.get(n, f"Net_{n}")
-                        for n in new_seg_via_violators
+                        self.net_names.get(n, f"Net_{n}") for n in new_seg_via_violators
                     ]
                     flush_print(
                         f"  Including {len(new_seg_via_violators)} segment-vs-foreign-via "
@@ -949,20 +936,21 @@ class TwoPhaseRouter:
                 # :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
                 # for the board-04 SWDIO/BOOT0 case this catches.
                 via_seg_violators = neg_router.find_nets_with_via_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
+                    net_routes,
+                    trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration - 1)
+                    if iteration > 1
+                    else ("two_phase_init",),
                     extra_routes=_extra_iter,
                 )
                 new_via_seg_violators = [
-                    v_net for v_net in via_seg_violators
-                    if v_net not in nets_to_reroute
+                    v_net for v_net in via_seg_violators if v_net not in nets_to_reroute
                 ]
                 for v_net in new_via_seg_violators:
                     nets_to_reroute.append(v_net)
                 if new_via_seg_violators:
                     violator_names = [
-                        self.net_names.get(n, f"Net_{n}")
-                        for n in new_via_seg_violators
+                        self.net_names.get(n, f"Net_{n}") for n in new_via_seg_violators
                     ]
                     flush_print(
                         f"  Including {len(new_via_seg_violators)} via-vs-foreign-segment "
@@ -981,20 +969,21 @@ class TwoPhaseRouter:
                 # exactly how the committed-clean board resolves the SWD
                 # corridor).
                 seg_seg_violators = neg_router.find_nets_with_segment_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("two_phase_post", iteration - 1) if iteration > 1 else ("two_phase_init",),
+                    net_routes,
+                    trace_clearance=self.rules.trace_clearance,
+                    cache_key=("two_phase_post", iteration - 1)
+                    if iteration > 1
+                    else ("two_phase_init",),
                     extra_routes=_extra_iter,
                 )
                 new_seg_seg_violators = [
-                    v_net for v_net in seg_seg_violators
-                    if v_net not in nets_to_reroute
+                    v_net for v_net in seg_seg_violators if v_net not in nets_to_reroute
                 ]
                 for v_net in new_seg_seg_violators:
                     nets_to_reroute.append(v_net)
                 if new_seg_seg_violators:
                     violator_names = [
-                        self.net_names.get(n, f"Net_{n}")
-                        for n in new_seg_seg_violators
+                        self.net_names.get(n, f"Net_{n}") for n in new_seg_seg_violators
                     ]
                     flush_print(
                         f"  Including {len(new_seg_seg_violators)} segment-vs-foreign-segment "
@@ -1030,7 +1019,9 @@ class TwoPhaseRouter:
                         f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: "
                         f"{net_name}... ({elapsed_str()})"
                     )
-                    routes = self._route_net_with_corridor(net, present_factor, per_net_timeout=per_net_timeout)
+                    routes = self._route_net_with_corridor(
+                        net, present_factor, per_net_timeout=per_net_timeout
+                    )
                     if routes:
                         net_routes[net] = routes
                         for route in routes:
@@ -1042,9 +1033,7 @@ class TwoPhaseRouter:
                 # history snapshot, convergence/early-stop checks, and the
                 # next iteration so partial-state restore can run.
                 if timed_out:
-                    flush_print(
-                        f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})"
-                    )
+                    flush_print(f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})")
                     break
 
                 overflow = self.grid.get_total_overflow()
@@ -1061,12 +1050,14 @@ class TwoPhaseRouter:
                 # escape-phase routes for the end-of-iteration capture.
                 _extra_post = self._collect_extra_routes_for_revalidation(net_routes)
                 _post_seg_via = neg_router.find_nets_with_segment_via_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    net_routes,
+                    trace_clearance=self.rules.trace_clearance,
                     cache_key=("two_phase_post", iteration),
                     extra_routes=_extra_post,
                 )
                 _post_via_seg = neg_router.find_nets_with_via_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    net_routes,
+                    trace_clearance=self.rules.trace_clearance,
                     cache_key=("two_phase_post", iteration),
                     extra_routes=_extra_post,
                 )
@@ -1074,7 +1065,8 @@ class TwoPhaseRouter:
                 # capture so an iteration that separated overlapping
                 # traces wins the best-state comparator.
                 _post_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
+                    net_routes,
+                    trace_clearance=self.rules.trace_clearance,
                     cache_key=("two_phase_post", iteration),
                     extra_routes=_extra_post,
                 )
@@ -1112,13 +1104,8 @@ class TwoPhaseRouter:
                 # stagnates across iterations.  Reuses the battle-tested
                 # ``should_terminate_early()`` from the negotiated router
                 # (Issues #633, #1823, #2295, #2297).
-                if should_terminate_early(
-                    overflow_history, iteration, min_iterations=patience
-                ):
-                    flush_print(
-                        f"  Early stop: overflow not improving "
-                        f"(best={best_overflow})"
-                    )
+                if should_terminate_early(overflow_history, iteration, min_iterations=patience):
+                    flush_print(f"  Early stop: overflow not improving (best={best_overflow})")
                     break
 
                 # Issue #2597: Detect rip-up cohort stagnation that
@@ -1140,9 +1127,7 @@ class TwoPhaseRouter:
                     prev_ov = overflow_history[-2]
                     curr_ov = overflow_history[-1]
                     if prev_ov > 0:
-                        improvement_pct = (
-                            100.0 * (prev_ov - curr_ov) / prev_ov
-                        )
+                        improvement_pct = 100.0 * (prev_ov - curr_ov) / prev_ov
                     else:
                         improvement_pct = 0.0
                     flush_print(
@@ -1164,23 +1149,21 @@ class TwoPhaseRouter:
         # _capture_iteration_end.
         final_overflow = self.grid.get_total_overflow()
         final_route_count = sum(len(r) for r in net_routes.values())
-        final_via_count = sum(
-            len(route.vias)
-            for routes in net_routes.values()
-            for route in routes
-        )
+        final_via_count = sum(len(route.vias) for routes in net_routes.values() for route in routes)
         # Issue #3020: final comparator sums both directions of the
         # clearance matrix.
         # Issue #3077: extend the via/segment universe with
         # escape-phase routes for the post-loop best-vs-final compare.
         _extra_final = self._collect_extra_routes_for_revalidation(net_routes)
         _final_seg_via = neg_router.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_final", final_route_count, final_via_count),
             extra_routes=_extra_final,
         )
         _final_via_seg = neg_router.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_final", final_route_count, final_via_count),
             extra_routes=_extra_final,
         )
@@ -1188,13 +1171,12 @@ class TwoPhaseRouter:
         # best snapshot that resolved trace overlaps is never
         # overwritten by an overlapping final state.
         _final_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
+            net_routes,
+            trace_clearance=self.rules.trace_clearance,
             cache_key=("two_phase_final", final_route_count, final_via_count),
             extra_routes=_extra_final,
         )
-        final_clearance_violations = (
-            len(_final_seg_via) + len(_final_via_seg) + len(_final_seg_seg)
-        )
+        final_clearance_violations = len(_final_seg_via) + len(_final_via_seg) + len(_final_seg_seg)
         best_key = (best_clearance_violations, best_overflow)
         final_key = (final_clearance_violations, final_overflow)
         if best_key < final_key:
@@ -1244,9 +1226,7 @@ class TwoPhaseRouter:
                         if _route in self.routes:
                             self.routes.remove(_route)
                     net_routes[_net] = []
-                _victim_names = [
-                    self.net_names.get(n, f"Net_{n}") for n in _victims
-                ]
+                _victim_names = [self.net_names.get(n, f"Net_{n}") for n in _victims]
                 flush_print(
                     f"  ⚠ Demoted {len(_victims)} net(s) with physically "
                     f"overlapping copper to unrouted: {', '.join(_victim_names)}"

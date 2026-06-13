@@ -84,8 +84,7 @@ BOARD_04_RELPATH = "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_
 
 def _load_tolerance_yaml() -> dict:
     assert TOLERANCE_YAML.exists(), (
-        f"Tolerance YAML missing at {TOLERANCE_YAML}; the CI gate cannot "
-        f"function without it."
+        f"Tolerance YAML missing at {TOLERANCE_YAML}; the CI gate cannot function without it."
     )
     return yaml.safe_load(TOLERANCE_YAML.read_text()) or {}
 
@@ -124,9 +123,7 @@ def _run_kct_check(pcb_path: Path, manufacturer: str) -> dict:
     # out of sync with schematic").  The JSON payload starts at the first '{'.
     stdout = proc.stdout
     brace = stdout.find("{")
-    assert brace >= 0, (
-        f"kct check stdout has no JSON payload.  Full stdout:\n{stdout}"
-    )
+    assert brace >= 0, f"kct check stdout has no JSON payload.  Full stdout:\n{stdout}"
     try:
         return json.loads(stdout[brace:])
     except json.JSONDecodeError as exc:
@@ -161,9 +158,7 @@ def test_board_04_blocking_errors_within_ci_floor(board_04_mfr_check: dict) -> N
 
     # Count blocking (non-advisory) errors the same way the CI gate does.
     blocking = [
-        v
-        for v in violations
-        if v.get("severity") == "error" and v.get("rule_id") != "connectivity"
+        v for v in violations if v.get("severity") == "error" and v.get("rule_id") != "connectivity"
     ]
     blocking_count = len(blocking)
 
@@ -178,8 +173,7 @@ def test_board_04_blocking_errors_within_ci_floor(board_04_mfr_check: dict) -> N
         f"jlcpcb-tier1; the CI gate's allowlist floor is {floor}.\n\n"
         f"Blocking violations:\n"
         + "\n".join(
-            f"  - {v.get('rule_id')}: {v.get('message')} at {v.get('location')}"
-            for v in blocking
+            f"  - {v.get('rule_id')}: {v.get('message')} at {v.get('location')}" for v in blocking
         )
         + f"\n\nIf a router change has legitimately added a new error,"
         f" bump the floor in {TOLERANCE_YAML.relative_to(REPO_ROOT)} and"
@@ -230,10 +224,7 @@ def test_board_04_advisory_connectivity_does_not_balloon(
         f"event -- check the recent router changes for a regression in "
         f"escape, stitching, or rip-up handling.\n\n"
         f"Advisory findings:\n"
-        + "\n".join(
-            f"  - {v.get('message')} at items={v.get('items')}"
-            for v in connectivity
-        )
+        + "\n".join(f"  - {v.get('message')} at items={v.get('items')}" for v in connectivity)
     )
 
 
@@ -254,9 +245,7 @@ def test_board_04_tolerance_yaml_floor_matches_committed_state(
     """
     violations = board_04_mfr_check.get("violations", [])
     blocking = [
-        v
-        for v in violations
-        if v.get("severity") == "error" and v.get("rule_id") != "connectivity"
+        v for v in violations if v.get("severity") == "error" and v.get("rule_id") != "connectivity"
     ]
     blocking_count = len(blocking)
 

@@ -160,9 +160,7 @@ class ExplainedViolation:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
-        violation_dict = (
-            self.violation.to_dict() if hasattr(self.violation, "to_dict") else {}
-        )
+        violation_dict = self.violation.to_dict() if hasattr(self.violation, "to_dict") else {}
         return {
             "violation": violation_dict,
             "explanation": self.explanation.to_dict(),

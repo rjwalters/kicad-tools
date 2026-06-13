@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 _MINIMAL_PCB = """(kicad_pcb (version 20240108) (generator "test_fixture")
   (general (thickness 1.6))
   (paper "A4")
@@ -128,9 +127,7 @@ class TestCheckSinglePadNetCli:
             if v["nets"] == ["UART_TX"]:
                 assert v["severity"] == "error"
 
-    def test_info_severity_in_json_for_explicit_nc(
-        self, capsys, tmp_path: Path
-    ) -> None:
+    def test_info_severity_in_json_for_explicit_nc(self, capsys, tmp_path: Path) -> None:
         """An ``unconnected-(REF-PIN-PadN)`` singleton is reported at info severity.
 
         Issue #2613: KiCad-emitted explicit NCs are advisory only.

@@ -45,13 +45,9 @@ def _log_libgobject_hint(exc: BaseException) -> None:
     if sys.platform == "darwin":
         install_hint = "brew install glib pango cairo gdk-pixbuf libffi"
     elif sys.platform.startswith("linux"):
-        install_hint = (
-            "apt install libglib2.0-0 libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0"
-        )
+        install_hint = "apt install libglib2.0-0 libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0"
     else:
-        install_hint = (
-            "install glib/pango/cairo/gdk-pixbuf system libraries for your platform"
-        )
+        install_hint = "install glib/pango/cairo/gdk-pixbuf system libraries for your platform"
 
     logger.warning(
         "weasyprint unavailable: missing system library (likely libgobject). "
@@ -259,7 +255,7 @@ def _strip_yaml_front_matter(content: str) -> tuple[str, dict]:
         return content, {}
 
     front_matter = content[3:end].strip()
-    body = content[end + 4:]  # skip past "\n---"
+    body = content[end + 4 :]  # skip past "\n---"
 
     metadata: dict[str, str] = {}
     for line in front_matter.splitlines():
@@ -380,8 +376,8 @@ def _wrap_html(body: str, css: str, title: str = "KiCad Design Report") -> str:
 
 
 def render_interactive_html(
-    pcb_path: "Path",
-    drc_violations: "list[dict] | None" = None,
+    pcb_path: Path,
+    drc_violations: list[dict] | None = None,
     project_name: str | None = None,
     date: str | None = None,
 ) -> str:

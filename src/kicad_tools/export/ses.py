@@ -86,7 +86,7 @@ class SESToKiCadImporter:
         sections.
         """
         # Extract resolution if present
-        res_match = re.search(r'\(resolution\s+\w+\s+(\d+)\)', content)
+        res_match = re.search(r"\(resolution\s+\w+\s+(\d+)\)", content)
         if res_match:
             self._resolution = float(res_match.group(1))
 
@@ -162,7 +162,7 @@ class SESToKiCadImporter:
         coords_str = path_match.group(3).strip()
 
         # Parse coordinate pairs
-        nums = re.findall(r'[-+]?[\d.]+(?:e[-+]?\d+)?', coords_str)
+        nums = re.findall(r"[-+]?[\d.]+(?:e[-+]?\d+)?", coords_str)
         points: list[tuple[float, float]] = []
         for i in range(0, len(nums) - 1, 2):
             points.append((float(nums[i]), float(nums[i + 1])))

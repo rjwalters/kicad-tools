@@ -38,11 +38,10 @@ The contract this test suite pins:
 from __future__ import annotations
 
 import inspect
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
-
 
 # ---------------------------------------------------------------------------
 # Signature surface
@@ -226,8 +225,7 @@ def test_autoderive_emits_structured_log_signal(caplog):
         router.route_all_with_diffpairs(cfg, timeout=100.0)
 
     autoderive_records = [
-        r for r in caplog.records
-        if "DIFFPAIR_PER_PAIR_TIMEOUT_AUTODERIVED" in r.getMessage()
+        r for r in caplog.records if "DIFFPAIR_PER_PAIR_TIMEOUT_AUTODERIVED" in r.getMessage()
     ]
     assert autoderive_records, (
         "Auto-derived per-pair timeout must emit a structured log signal "
@@ -249,12 +247,10 @@ def test_autoderive_does_not_log_when_user_set_explicit_budget(caplog):
         router.route_all_with_diffpairs(cfg, timeout=100.0)
 
     autoderive_records = [
-        r for r in caplog.records
-        if "DIFFPAIR_PER_PAIR_TIMEOUT_AUTODERIVED" in r.getMessage()
+        r for r in caplog.records if "DIFFPAIR_PER_PAIR_TIMEOUT_AUTODERIVED" in r.getMessage()
     ]
     assert not autoderive_records, (
-        "Explicit --diffpair-per-pair-timeout must not trigger the "
-        "auto-derived log signal."
+        "Explicit --diffpair-per-pair-timeout must not trigger the auto-derived log signal."
     )
 
 
@@ -274,10 +270,7 @@ def test_cli_route_cmd_forwards_timeout_to_diffpair_callsite():
     """
     import pathlib
 
-    src = (
-        pathlib.Path(__file__).parent.parent
-        / "src/kicad_tools/cli/route_cmd.py"
-    ).read_text()
+    src = (pathlib.Path(__file__).parent.parent / "src/kicad_tools/cli/route_cmd.py").read_text()
 
     # Locate every ``router.route_all_with_diffpairs(`` call and inspect
     # the next few lines for a ``timeout=`` kwarg.

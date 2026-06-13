@@ -9,8 +9,6 @@ net merging, and handles edge cases gracefully.
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from kicad_tools.operations.netlist import (
     _collect_hierarchy_components,
     _count_hierarchy_sheets,
@@ -54,35 +52,27 @@ class TestCollectHierarchyComponents:
 
     def test_collects_root_components_only_for_leaf(self):
         """A leaf sheet (no sub-sheets) returns only its own components."""
-        components, _ = _collect_hierarchy_components(
-            FIXTURES / "sub_b.kicad_sch", "/"
-        )
+        components, _ = _collect_hierarchy_components(FIXTURES / "sub_b.kicad_sch", "/")
         refs = {c.reference for c in components}
         assert refs == {"R3", "R4"}
 
     def test_collects_nested_three_levels(self):
         """Root -> sub_a -> nested gives components from all three levels."""
-        components, _ = _collect_hierarchy_components(
-            FIXTURES / "root.kicad_sch", "/"
-        )
+        components, _ = _collect_hierarchy_components(FIXTURES / "root.kicad_sch", "/")
         refs = {c.reference for c in components}
         # Root: R1; sub_a: R2, C1; nested: C2; sub_b: R3, R4
         assert refs == {"R1", "R2", "C1", "C2", "R3", "R4"}
 
     def test_missing_subsheet_skipped_gracefully(self):
         """Missing sub-sheet files produce a warning, not a crash."""
-        components, _ = _collect_hierarchy_components(
-            FIXTURES / "root_shared.kicad_sch", "/"
-        )
+        components, _ = _collect_hierarchy_components(FIXTURES / "root_shared.kicad_sch", "/")
         # Should still collect components from root and accessible sub-sheets
         refs = {c.reference for c in components}
         assert "R1" in refs  # root component
 
     def test_sheet_path_propagated(self):
         """Components carry their sheet_path for hierarchy tracking."""
-        components, _ = _collect_hierarchy_components(
-            FIXTURES / "root.kicad_sch", "/"
-        )
+        components, _ = _collect_hierarchy_components(FIXTURES / "root.kicad_sch", "/")
         root_comp = next(c for c in components if c.reference == "R1")
         assert root_comp.sheet_path == "/"
 
@@ -259,9 +249,7 @@ class TestHierarchicalLabelNetMerging:
 
     def test_child_components_collected(self):
         """Components from child sheet with hierarchical labels are collected."""
-        netlist = build_netlist_from_schematic(
-            FIXTURES / "parent_with_pins.kicad_sch"
-        )
+        netlist = build_netlist_from_schematic(FIXTURES / "parent_with_pins.kicad_sch")
         refs = {c.reference for c in netlist.components}
         # Parent: R1; Child: R5, R6
         assert "R1" in refs
@@ -271,9 +259,7 @@ class TestHierarchicalLabelNetMerging:
 
     def test_hlabel_net_merged_with_parent_net(self):
         """Hierarchical label 'SDA' in child merges with parent's 'I2C_SDA' net."""
-        _, net_dict = _collect_hierarchy_components(
-            FIXTURES / "parent_with_pins.kicad_sch", "/"
-        )
+        _, net_dict = _collect_hierarchy_components(FIXTURES / "parent_with_pins.kicad_sch", "/")
         # The parent has a label "I2C_SDA" connected via wire to the sheet pin "SDA".
         # The child has a hierarchical_label "SDA" connected to R5 pin 1.
         # After merging, the child's "SDA" net should be unified under "I2C_SDA".
@@ -287,9 +273,7 @@ class TestHierarchicalLabelNetMerging:
 
     def test_component_count_matches_across_sheets(self):
         """Component count from hierarchy matches total placed symbols."""
-        components, _ = _collect_hierarchy_components(
-            FIXTURES / "parent_with_pins.kicad_sch", "/"
-        )
+        components, _ = _collect_hierarchy_components(FIXTURES / "parent_with_pins.kicad_sch", "/")
         # Parent: R1; Child: R5, R6
         assert len(components) == 3
 
@@ -299,7 +283,6 @@ class TestComponentCountValidation:
 
     def test_fallback_triggered_on_missing_components(self, tmp_path):
         """When kicad-cli output has fewer components, Python fallback is used."""
-        from kicad_tools.operations.netlist import Netlist, NetlistComponent
 
         # Create a simple flat schematic for testing
         sch_file = tmp_path / "test.kicad_sch"
@@ -357,13 +340,16 @@ class TestComponentCountValidation:
             class Result:
                 returncode = 0
                 stderr = ""
+
             return Result()
 
-        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value="/usr/bin/kicad-cli"), \
-             patch("kicad_tools.operations.netlist.subprocess.run", side_effect=mock_run):
-            netlist = export_netlist(
-                sch_file, output_path=netlist_file, fallback=True
-            )
+        with (
+            patch(
+                "kicad_tools.operations.netlist.find_kicad_cli", return_value="/usr/bin/kicad-cli"
+            ),
+            patch("kicad_tools.operations.netlist.subprocess.run", side_effect=mock_run),
+        ):
+            netlist = export_netlist(sch_file, output_path=netlist_file, fallback=True)
 
         # Should have fallen back to Python extraction which finds both components
         assert len(netlist.components) == 2

@@ -285,7 +285,6 @@ class TestRoutingError:
         assert isinstance(err, KiCadToolsError)
 
 
-
 class TestConfigurationError:
     """Tests for ConfigurationError exception."""
 
@@ -405,8 +404,6 @@ class TestErrorCodes:
         assert err2.error_code == "CONFIG_INVALID"
 
 
-
-
 class TestSourcePosition:
     """Tests for the SourcePosition dataclass."""
 
@@ -513,9 +510,6 @@ class TestSourcePosition:
         parsed = json.loads(json_str)
         assert parsed["line"] == 10
         assert parsed["position_mm"]["x"] == 1.0
-
-
-
 
 
 class TestRichConsoleRendering:

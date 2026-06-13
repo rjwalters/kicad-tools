@@ -423,9 +423,7 @@ class TestUpdatePcbLayerStackupPowerLayers:
 )"""
         # Targeting 4 layers on a board that already has 4 => no change
         result = update_pcb_layer_stackup(pcb_content, 4)
-        assert result == pcb_content, (
-            "4-layer board with power-typed In2.Cu should NOT be upgraded"
-        )
+        assert result == pcb_content, "4-layer board with power-typed In2.Cu should NOT be upgraded"
 
     def test_mixed_type_keywords_all_counted(self):
         """Board with signal, power, and mixed type keywords all counted correctly."""
@@ -444,9 +442,7 @@ class TestUpdatePcbLayerStackupPowerLayers:
 )"""
         # Already has 6 copper layers => no change when targeting 6
         result = update_pcb_layer_stackup(pcb_content, 6)
-        assert result == pcb_content, (
-            "6-layer board with mixed types should NOT be upgraded"
-        )
+        assert result == pcb_content, "6-layer board with mixed types should NOT be upgraded"
 
     def test_noop_when_power_layers_sufficient(self):
         """4-layer board with power-typed inner layers targeting 4 returns unchanged."""
@@ -581,9 +577,7 @@ class TestLayerStackupParenBalance:
 
         result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 4)
 
-        assert _validate_sexp_parentheses(result), (
-            "Output has unbalanced parentheses"
-        )
+        assert _validate_sexp_parentheses(result), "Output has unbalanced parentheses"
         assert '"In1.Cu"' in result
         assert '"In2.Cu"' in result
         assert '"F.Cu"' in result
@@ -598,9 +592,7 @@ class TestLayerStackupParenBalance:
 
         result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 6)
 
-        assert _validate_sexp_parentheses(result), (
-            "Output has unbalanced parentheses"
-        )
+        assert _validate_sexp_parentheses(result), "Output has unbalanced parentheses"
         assert '"In1.Cu"' in result
         assert '"In4.Cu"' in result
 
@@ -611,14 +603,22 @@ class TestLayerStackupParenBalance:
         result = update_pcb_layer_stackup(self.REALISTIC_2L_PCB, 4)
 
         for layer_name in [
-            "B.Adhes", "F.Adhes", "B.Paste", "F.Paste",
-            "B.SilkS", "F.SilkS", "B.Mask", "F.Mask",
-            "Edge.Cuts", "Margin", "B.CrtYd", "F.CrtYd",
-            "B.Fab", "F.Fab",
+            "B.Adhes",
+            "F.Adhes",
+            "B.Paste",
+            "F.Paste",
+            "B.SilkS",
+            "F.SilkS",
+            "B.Mask",
+            "F.Mask",
+            "Edge.Cuts",
+            "Margin",
+            "B.CrtYd",
+            "F.CrtYd",
+            "B.Fab",
+            "F.Fab",
         ]:
-            assert layer_name in result, (
-                f"Non-copper layer {layer_name!r} was lost during upgrade"
-            )
+            assert layer_name in result, f"Non-copper layer {layer_name!r} was lost during upgrade"
 
     def test_content_outside_layers_block_preserved(self):
         """Content after the (layers ...) block is not corrupted."""
@@ -871,35 +871,35 @@ class TestEarlyTermination:
 
     def _make_args(self, **overrides):
         """Create minimal args for route_with_layer_escalation."""
-        defaults = dict(
-            backend="python",
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            fine_pitch_clearance=None,
-            skip_nets=None,
-            auto_pour=False,
-            max_layers=6,
-            min_completion=0.95,
-            strategy="negotiated",
-            verbose=False,
-            force=False,
-            timeout=60,
-            iterations=3,
-            per_net_timeout=None,
-            batch_routing=False,
-            high_performance=False,
-            hierarchical=False,
-            perturbation=True,
-            two_phase=False,
-            multi_resolution=False,
-            edge_clearance=0.25,
-            escape_routing=None,
-            no_optimize=True,
-            dry_run=True,
-        )
+        defaults = {
+            "backend": "python",
+            "grid": 0.25,
+            "trace_width": 0.2,
+            "clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "fine_pitch_clearance": None,
+            "skip_nets": None,
+            "auto_pour": False,
+            "max_layers": 6,
+            "min_completion": 0.95,
+            "strategy": "negotiated",
+            "verbose": False,
+            "force": False,
+            "timeout": 60,
+            "iterations": 3,
+            "per_net_timeout": None,
+            "batch_routing": False,
+            "high_performance": False,
+            "hierarchical": False,
+            "perturbation": True,
+            "two_phase": False,
+            "multi_resolution": False,
+            "edge_clearance": 0.25,
+            "escape_routing": None,
+            "no_optimize": True,
+            "dry_run": True,
+        }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
@@ -928,9 +928,7 @@ class TestEarlyTermination:
                 route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
 
         # Should stop after 1 attempt (zero overflow => no point escalating)
-        assert call_count == 1, (
-            f"Expected 1 attempt (zero-overflow early stop), got {call_count}"
-        )
+        assert call_count == 1, f"Expected 1 attempt (zero-overflow early stop), got {call_count}"
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
@@ -957,9 +955,7 @@ class TestEarlyTermination:
                 route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
 
         # Should stop after 2 attempts (stagnation: 2nd == 1st)
-        assert call_count == 2, (
-            f"Expected 2 attempts (stagnation early stop), got {call_count}"
-        )
+        assert call_count == 2, f"Expected 2 attempts (stagnation early stop), got {call_count}"
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
@@ -977,7 +973,7 @@ class TestEarlyTermination:
             (1, 5, 20),  # 2L: 1/5 routed, overflow=20
             (2, 5, 15),  # 4L sig_gnd_pwr_sig: 2/5, overflow=15
             (3, 5, 10),  # 4L all_signal: 3/5, overflow=10
-            (4, 5, 5),   # 6L: 4/5, overflow=5
+            (4, 5, 5),  # 6L: 4/5, overflow=5
         ]
         call_count = 0
 
@@ -992,9 +988,7 @@ class TestEarlyTermination:
                 route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
 
         # All 4 configs tried because each improves
-        assert call_count == 4, (
-            f"Expected 4 attempts (continuous improvement), got {call_count}"
-        )
+        assert call_count == 4, f"Expected 4 attempts (continuous improvement), got {call_count}"
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
@@ -1023,13 +1017,9 @@ class TestEarlyTermination:
             with patch("kicad_tools.router.is_cpp_available", return_value=False):
                 with patch("kicad_tools.router.show_routing_summary"):
                     with patch("kicad_tools.cli.route_cmd.run_post_route_drc", return_value=False):
-                        result = route_with_layer_escalation(
-                            pcb, out, args, quiet=True
-                        )
+                        result = route_with_layer_escalation(pcb, out, args, quiet=True)
 
-        assert call_count == 1, (
-            f"Expected 1 attempt (success on first try), got {call_count}"
-        )
+        assert call_count == 1, f"Expected 1 attempt (success on first try), got {call_count}"
 
     def test_overflow_field_on_result(self):
         """LayerEscalationResult stores the overflow field."""
@@ -1078,9 +1068,7 @@ class TestEarlyTermination:
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_monte_carlo_skips_zero_overflow_heuristic(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_monte_carlo_skips_zero_overflow_heuristic(self, _esc_flag, _esc_use, _pour, tmp_path):
         """MC + auto-layers must escalate past 2L even with overflow=0.
 
         Regression for Issue #2634: ``run_monte_carlo`` calls basic A* per trial,
@@ -1173,9 +1161,7 @@ class TestEarlyTermination:
                     ):
                         route_with_layer_escalation(pcb, out, args, quiet=True)
 
-        assert call_count >= 2, (
-            f"Expected >=2 attempts with --strategy basic, got {call_count}"
-        )
+        assert call_count >= 2, f"Expected >=2 attempts with --strategy basic, got {call_count}"
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
@@ -1364,9 +1350,7 @@ class TestRegressionEarlyExit:
        cases (no regression on the existing fleet).
     """
 
-    def _make_mock_router(
-        self, nets_routed, nets_to_route, overflow, failure_causes=None
-    ):
+    def _make_mock_router(self, nets_routed, nets_to_route, overflow, failure_causes=None):
         """Create a mock router with predictable stats and optional failures.
 
         Args:
@@ -1378,9 +1362,7 @@ class TestRegressionEarlyExit:
         from unittest.mock import MagicMock
 
         router = MagicMock()
-        router.nets = {
-            i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)
-        }
+        router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
         router.grid.width = 50.0
         router.grid.height = 40.0
         router.grid.get_total_overflow.return_value = overflow
@@ -1459,9 +1441,7 @@ class TestRegressionEarlyExit:
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_two_consecutive_regressions_exit(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_two_consecutive_regressions_exit(self, _esc_flag, _esc_use, _pour, tmp_path):
         """Two consecutive regressions (each > tolerance) trigger exit.
 
         Mirrors the chorus-test-revA repro: attempt 1 = 20 nets, attempt 2
@@ -1500,16 +1480,13 @@ class TestRegressionEarlyExit:
         # Attempts: 1 (baseline), 2 (streak=1), 3 (streak=2 -> exit before 4)
         # The loop should break AFTER attempt 3, never calling load for #4.
         assert call_count == 3, (
-            f"Expected 3 attempts (two consecutive regressions trigger exit), "
-            f"got {call_count}"
+            f"Expected 3 attempts (two consecutive regressions trigger exit), got {call_count}"
         )
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_hard_drop_exits_immediately(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_hard_drop_exits_immediately(self, _esc_flag, _esc_use, _pour, tmp_path):
         """A single attempt with a >=5-net drop triggers immediate exit.
 
         AC3 in the curator-enhanced acceptance criteria.
@@ -1542,16 +1519,12 @@ class TestRegressionEarlyExit:
                 route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
 
         # Hard drop exits after attempt 2.
-        assert call_count == 2, (
-            f"Expected 2 attempts (hard-drop immediate exit), got {call_count}"
-        )
+        assert call_count == 2, f"Expected 2 attempts (hard-drop immediate exit), got {call_count}"
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_flicker_within_tolerance_does_not_exit(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_flicker_within_tolerance_does_not_exit(self, _esc_flag, _esc_use, _pour, tmp_path):
         """A small flicker (<= REGRESSION_TOLERANCE) must not trigger exit.
 
         AC2 in the curator-enhanced acceptance criteria.
@@ -1589,8 +1562,7 @@ class TestRegressionEarlyExit:
         # tolerance.  The default ladder is [2L, 4L_sgps, 4L_all_sig, 6L]
         # = 4 attempts.
         assert call_count == 4, (
-            f"Expected 4 attempts (flicker within tolerance, no exit), "
-            f"got {call_count}"
+            f"Expected 4 attempts (flicker within tolerance, no exit), got {call_count}"
         )
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
@@ -1633,25 +1605,19 @@ class TestRegressionEarlyExit:
                         "kicad_tools.cli.route_cmd.run_post_route_drc",
                         return_value=False,
                     ):
-                        route_with_layer_escalation(
-                            pcb, out, self._make_args(), quiet=True
-                        )
+                        route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
 
         # Confirm only the first two attempts ran (hard-drop after #2).
         # Note: the pre-regression best (20 routed) is selected by the
         # ``_is_better_result`` rule, which compares absolute nets_routed
         # (#2396).  We verify that by checking the loop terminated after
         # the second attempt rather than running attempts 3 and 4.
-        assert call_count == 2, (
-            f"Expected 2 attempts before hard-drop exit, got {call_count}"
-        )
+        assert call_count == 2, f"Expected 2 attempts before hard-drop exit, got {call_count}"
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_monotonic_improvement_no_early_exit(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_monotonic_improvement_no_early_exit(self, _esc_flag, _esc_use, _pour, tmp_path):
         """Monotonically improving runs must complete the full ladder.
 
         AC6 in the curator-enhanced acceptance criteria.  This is the
@@ -1684,16 +1650,12 @@ class TestRegressionEarlyExit:
                 route_with_layer_escalation(pcb, out, self._make_args(), quiet=True)
 
         # All 4 attempts run because each strictly improves on the prior.
-        assert call_count == 4, (
-            f"Expected 4 attempts on monotonic improvement, got {call_count}"
-        )
+        assert call_count == 4, f"Expected 4 attempts on monotonic improvement, got {call_count}"
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_chorus_pattern_exits_after_attempt_2(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_chorus_pattern_exits_after_attempt_2(self, _esc_flag, _esc_use, _pour, tmp_path):
         """The chorus-test-revA pattern (15% -> 12% -> 10%) triggers exit.
 
         AC1: synthesizes the chorus repro -- attempt 1 = 7/48 (15%),
@@ -1725,8 +1687,8 @@ class TestRegressionEarlyExit:
 
         attempt_results = [
             (10, 48, 5),  # 21% completion
-            (7, 48, 5),   # 15% (drop=3, streak=1)
-            (4, 48, 5),   # 8% (drop=3, streak=2 -> exit before attempt 4)
+            (7, 48, 5),  # 15% (drop=3, streak=1)
+            (4, 48, 5),  # 8% (drop=3, streak=2 -> exit before attempt 4)
             (1, 48, 5),
         ]
         call_count = 0
@@ -1870,20 +1832,20 @@ class TestPristineStatePerAttempt:
         """
         from kicad_tools.cli.route_cmd import main as route_main
 
-        with patch(
-            "kicad_tools.cli.route_cmd.route_with_layer_escalation"
-        ) as mock_escalation:
+        with patch("kicad_tools.cli.route_cmd.route_with_layer_escalation") as mock_escalation:
             mock_escalation.return_value = 0
 
             # --no-auto-layers should NOT call route_with_layer_escalation.
             # It will fail on PCB loading since we don't mock that, but the
             # key assertion is that escalation was never invoked.
             try:
-                route_main([
-                    "test.kicad_pcb",
-                    "--no-auto-layers",
-                    "--quiet",
-                ])
+                route_main(
+                    [
+                        "test.kicad_pcb",
+                        "--no-auto-layers",
+                        "--quiet",
+                    ]
+                )
             except (SystemExit, FileNotFoundError, Exception):
                 pass  # Expected -- PCB file doesn't exist
 
@@ -1910,7 +1872,7 @@ class TestCleanupBeforeStatistics:
         The selector must pick attempt 2 (the one with higher post-cleanup
         nets_routed).
         """
-        from unittest.mock import MagicMock, call
+        from unittest.mock import MagicMock
 
         from kicad_tools.cli.route_cmd import route_with_layer_escalation
 
@@ -1918,6 +1880,7 @@ class TestCleanupBeforeStatistics:
         out_path = "/tmp/test_cleanup_order_out.kicad_pcb"
 
         import os
+
         with open(pcb_path, "w") as f:
             f.write("(kicad_pcb (version 20240101))")
 
@@ -2006,13 +1969,15 @@ class TestCleanupBeforeStatistics:
 
         try:
             with patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], [])):
-                with patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False):
-                    with patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None):
+                with patch(
+                    "kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False
+                ):
+                    with patch(
+                        "kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None
+                    ):
                         with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
                             with patch("kicad_tools.router.is_cpp_available", return_value=False):
-                                route_with_layer_escalation(
-                                    pcb_path, out_path, args, quiet=True
-                                )
+                                route_with_layer_escalation(pcb_path, out_path, args, quiet=True)
         finally:
             for p in [pcb_path, out_path]:
                 if os.path.exists(p):
@@ -2083,43 +2048,43 @@ class TestPlacementFeedbackOnPartial:
 
     def _make_args(self, **overrides):
         """Minimal args that exercise the placement-feedback branch."""
-        defaults = dict(
-            backend="python",
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            fine_pitch_clearance=None,
-            skip_nets=None,
-            auto_pour=False,
-            max_layers=2,  # Single attempt — keeps the test fast.
-            min_completion=0.95,
-            strategy="negotiated",
-            verbose=False,
-            force=False,
-            timeout=60,
-            iterations=3,
-            per_net_timeout=None,
-            batch_routing=False,
-            high_performance=False,
-            hierarchical=False,
-            perturbation=True,
-            two_phase=False,
-            multi_resolution=False,
-            edge_clearance=0.25,
-            escape_routing=None,
-            no_optimize=True,
-            dry_run=True,
+        defaults = {
+            "backend": "python",
+            "grid": 0.25,
+            "trace_width": 0.2,
+            "clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "fine_pitch_clearance": None,
+            "skip_nets": None,
+            "auto_pour": False,
+            "max_layers": 2,  # Single attempt — keeps the test fast.
+            "min_completion": 0.95,
+            "strategy": "negotiated",
+            "verbose": False,
+            "force": False,
+            "timeout": 60,
+            "iterations": 3,
+            "per_net_timeout": None,
+            "batch_routing": False,
+            "high_performance": False,
+            "hierarchical": False,
+            "perturbation": True,
+            "two_phase": False,
+            "multi_resolution": False,
+            "edge_clearance": 0.25,
+            "escape_routing": None,
+            "no_optimize": True,
+            "dry_run": True,
             # placement-feedback flags (CLI defaults except where overridden)
-            placement_feedback=False,
-            placement_feedback_budget=3,
-            placement_feedback_max_movement=5.0,
-            placement_feedback_anchor=None,
-            placement_feedback_no_anchor=None,
-            placement_feedback_stagnation_patience=3,
-            placement_feedback_outer_timeout=None,
-        )
+            "placement_feedback": False,
+            "placement_feedback_budget": 3,
+            "placement_feedback_max_movement": 5.0,
+            "placement_feedback_anchor": None,
+            "placement_feedback_no_anchor": None,
+            "placement_feedback_stagnation_patience": 3,
+            "placement_feedback_outer_timeout": None,
+        }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
@@ -2323,9 +2288,7 @@ class TestLayerConfigsFilterForStackup:
         pcb = tmp_path / "two_layer.kicad_pcb"
         pcb.write_text(self.PCB_2L)
 
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=6, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=6, quiet=True)
 
         # The full 4-entry ladder must survive a 2L board.
         assert [n for n, _ in filtered] == [2, 4, 4, 6]
@@ -2345,14 +2308,11 @@ class TestLayerConfigsFilterForStackup:
         pcb = tmp_path / "four_layer.kicad_pcb"
         pcb.write_text(self.PCB_4L_NO_ZONES)
 
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=6, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=6, quiet=True)
 
         # 2L must be filtered out -- 4L is the floor.
         assert all(n >= 4 for n, _ in filtered), (
-            f"Expected ladder to start at 4L on a 4-copper board, got "
-            f"{[n for n, _ in filtered]}"
+            f"Expected ladder to start at 4L on a 4-copper board, got {[n for n, _ in filtered]}"
         )
         # First attempt must be a 4L config.
         assert filtered[0][0] == 4
@@ -2369,9 +2329,7 @@ class TestLayerConfigsFilterForStackup:
         pcb = tmp_path / "four_layer_planes.kicad_pcb"
         pcb.write_text(self.PCB_4L_PLANE_ZONES)
 
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=6, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=6, quiet=True)
 
         # No 2L entries.
         assert all(n >= 4 for n, _ in filtered)
@@ -2389,11 +2347,12 @@ class TestLayerConfigsFilterForStackup:
             "all-signal 4L variant must remain in the ladder as a fallback"
         )
         # Ordering: plane-aware before all-signal.
-        plane_idx = next(i for i, (_, s) in enumerate(filtered) if "ALL-SIG" not in s.name.upper() and _ == 4)
+        plane_idx = next(
+            i for i, (_, s) in enumerate(filtered) if "ALL-SIG" not in s.name.upper() and _ == 4
+        )
         all_sig_idx = next(i for i, (_, s) in enumerate(filtered) if "ALL-SIG" in s.name.upper())
         assert plane_idx < all_sig_idx, (
-            f"plane-aware 4L (index {plane_idx}) must precede all-signal "
-            f"(index {all_sig_idx})"
+            f"plane-aware 4L (index {plane_idx}) must precede all-signal (index {all_sig_idx})"
         )
 
     def test_max_layers_below_detected_emits_warning(self, tmp_path, capsys):
@@ -2420,8 +2379,7 @@ class TestLayerConfigsFilterForStackup:
         # explicit cap wins, so 2L is the only entry that survives.
         assert filtered, "Filter must not produce an empty ladder"
         assert all(n <= 2 for n, _ in filtered), (
-            f"With --max-layers=2 the ladder must respect the cap, got "
-            f"{[n for n, _ in filtered]}"
+            f"With --max-layers=2 the ladder must respect the cap, got {[n for n, _ in filtered]}"
         )
 
     def test_max_layers_below_detected_quiet_suppresses_warning(self, tmp_path, capsys):
@@ -2431,14 +2389,10 @@ class TestLayerConfigsFilterForStackup:
         pcb = tmp_path / "four_layer.kicad_pcb"
         pcb.write_text(self.PCB_4L_NO_ZONES)
 
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=2, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=2, quiet=True)
 
         captured = capsys.readouterr()
-        assert captured.out == "", (
-            f"quiet=True should suppress the warning, got: {captured.out!r}"
-        )
+        assert captured.out == "", f"quiet=True should suppress the warning, got: {captured.out!r}"
         # Cap still applied.
         assert all(n <= 2 for n, _ in filtered)
 
@@ -2453,9 +2407,7 @@ class TestLayerConfigsFilterForStackup:
         pcb = tmp_path / "four_layer_planes.kicad_pcb"
         pcb.write_text(self.PCB_4L_PLANE_ZONES)
 
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=4, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=4, quiet=True)
 
         # Exactly the two 4L variants.
         assert [n for n, _ in filtered] == [4, 4]
@@ -2470,9 +2422,7 @@ class TestLayerConfigsFilterForStackup:
         pcb = tmp_path / "six_layer.kicad_pcb"
         pcb.write_text(self.PCB_6L)
 
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=6, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=6, quiet=True)
 
         # Only 6L survives the floor.
         assert [n for n, _ in filtered] == [6]
@@ -2485,9 +2435,7 @@ class TestLayerConfigsFilterForStackup:
         pcb = tmp_path / "broken.kicad_pcb"
         pcb.write_text("(kicad_pcb (version 20240101))")
 
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=6, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=6, quiet=True)
 
         # Legacy behaviour: full ladder starting at 2L.
         assert [n for n, _ in filtered] == [2, 4, 4, 6]
@@ -2641,9 +2589,7 @@ class TestStartingLayersFloor:
         pcb.write_text(self.PCB_2L)
 
         # Note: NO starting_layers kwarg.  Default must be 2.
-        filtered = _filter_layer_configs_for_pcb(
-            self._full_ladder(), pcb, max_layers=6, quiet=True
-        )
+        filtered = _filter_layer_configs_for_pcb(self._full_ladder(), pcb, max_layers=6, quiet=True)
 
         assert [n for n, _ in filtered] == [2, 4, 4, 6]
 
@@ -2715,9 +2661,11 @@ class TestStartingLayersCLIParsing:
         """
         from kicad_tools.cli import route_cmd
 
-        parser = route_cmd._build_argument_parser() if hasattr(
-            route_cmd, "_build_argument_parser"
-        ) else None
+        parser = (
+            route_cmd._build_argument_parser()
+            if hasattr(route_cmd, "_build_argument_parser")
+            else None
+        )
         if parser is None:
             # The parser is built inline in main().  Drive it through a
             # short-circuit argv that exercises only the parsing layer.
@@ -2739,9 +2687,7 @@ class TestStartingLayersCLIParsing:
         import argparse
 
         parser = argparse.ArgumentParser()
-        parser.add_argument(
-            "--starting-layers", type=int, default=None, choices=[2, 4, 6]
-        )
+        parser.add_argument("--starting-layers", type=int, default=None, choices=[2, 4, 6])
 
         for value in (2, 4, 6):
             args = parser.parse_args(["--starting-layers", str(value)])
@@ -2752,9 +2698,7 @@ class TestStartingLayersCLIParsing:
         import argparse
 
         parser = argparse.ArgumentParser()
-        parser.add_argument(
-            "--starting-layers", type=int, default=None, choices=[2, 4, 6]
-        )
+        parser.add_argument("--starting-layers", type=int, default=None, choices=[2, 4, 6])
 
         with pytest.raises(SystemExit):
             parser.parse_args(["--starting-layers", "3"])
@@ -2764,9 +2708,7 @@ class TestStartingLayersCLIParsing:
         from kicad_tools.cli.parser import create_parser
 
         parser = create_parser()
-        args = parser.parse_args(
-            ["route", "dummy.kicad_pcb", "--starting-layers", "4"]
-        )
+        args = parser.parse_args(["route", "dummy.kicad_pcb", "--starting-layers", "4"])
         assert args.starting_layers == 4
 
     def test_outer_parser_default_starting_layers_is_none(self):
@@ -2786,10 +2728,10 @@ class TestStartingLayersPrecedence:
     """
 
     def _make_args(self, **overrides):
-        defaults = dict(
-            starting_layers=None,
-            max_layers=6,
-        )
+        defaults = {
+            "starting_layers": None,
+            "max_layers": 6,
+        }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
@@ -2864,10 +2806,7 @@ class TestStartingLayersPrecedence:
         """A project.kct without ``manufacturing.escalation`` uses the default."""
         from kicad_tools.cli.route_cmd import _resolve_starting_layers
 
-        (tmp_path / "project.kct").write_text(
-            "project:\n"
-            "  name: 'no escalation block'\n"
-        )
+        (tmp_path / "project.kct").write_text("project:\n  name: 'no escalation block'\n")
         pcb = tmp_path / "test.kicad_pcb"
         pcb.write_text("(kicad_pcb (version 20240101))")
 
@@ -2918,45 +2857,43 @@ class TestStartingLayersEndToEnd:
         return router
 
     def _make_args(self, **overrides):
-        defaults = dict(
-            backend="python",
-            grid=0.25,
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            fine_pitch_clearance=None,
-            skip_nets=None,
-            auto_pour=False,
-            max_layers=6,
-            starting_layers=None,
-            min_completion=0.95,
-            strategy="negotiated",
-            verbose=False,
-            force=False,
-            timeout=60,
-            iterations=3,
-            per_net_timeout=None,
-            batch_routing=False,
-            high_performance=False,
-            hierarchical=False,
-            perturbation=True,
-            two_phase=False,
-            multi_resolution=False,
-            edge_clearance=0.25,
-            escape_routing=None,
-            no_optimize=True,
-            dry_run=True,
-        )
+        defaults = {
+            "backend": "python",
+            "grid": 0.25,
+            "trace_width": 0.2,
+            "clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "fine_pitch_clearance": None,
+            "skip_nets": None,
+            "auto_pour": False,
+            "max_layers": 6,
+            "starting_layers": None,
+            "min_completion": 0.95,
+            "strategy": "negotiated",
+            "verbose": False,
+            "force": False,
+            "timeout": 60,
+            "iterations": 3,
+            "per_net_timeout": None,
+            "batch_routing": False,
+            "high_performance": False,
+            "hierarchical": False,
+            "perturbation": True,
+            "two_phase": False,
+            "multi_resolution": False,
+            "edge_clearance": 0.25,
+            "escape_routing": None,
+            "no_optimize": True,
+            "dry_run": True,
+        }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_starting_layers_4_skips_2l_attempt(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_starting_layers_4_skips_2l_attempt(self, _esc_flag, _esc_use, _pour, tmp_path):
         """With ``args.starting_layers=4`` on a 2L board, the first load is 4L.
 
         This is the canonical Issue #3400 end-to-end assertion: a board
@@ -3017,9 +2954,7 @@ class TestStartingLayersEndToEnd:
     @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
     @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
     @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
-    def test_starting_layers_default_starts_at_2l(
-        self, _esc_flag, _esc_use, _pour, tmp_path
-    ):
+    def test_starting_layers_default_starts_at_2l(self, _esc_flag, _esc_use, _pour, tmp_path):
         """Back-compat: default ``starting_layers=None`` keeps 2L-first behaviour."""
         from kicad_tools.cli.route_cmd import route_with_layer_escalation
 

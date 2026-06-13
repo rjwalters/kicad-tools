@@ -958,12 +958,20 @@ class TestLibrarySymbol:
             name="C_Small",
             pins=[
                 LibraryPin(
-                    number="1", name="~", type="passive",
-                    position=(0, 2.54), rotation=0, length=0,
+                    number="1",
+                    name="~",
+                    type="passive",
+                    position=(0, 2.54),
+                    rotation=0,
+                    length=0,
                 ),
                 LibraryPin(
-                    number="2", name="~", type="passive",
-                    position=(0, -2.54), rotation=0, length=0,
+                    number="2",
+                    name="~",
+                    type="passive",
+                    position=(0, -2.54),
+                    rotation=0,
+                    length=0,
                 ),
             ],
         )
@@ -971,9 +979,7 @@ class TestLibrarySymbol:
         # Pin 1 library (0, 2.54) -> rotate 90 CCW -> (-2.54, 0)
         #   -> negate Y -> (-2.54, 0)
         #   -> translate -> (180.34, 97.79)
-        pos1 = sym.get_pin_position(
-            "1", instance_pos=(182.88, 97.79), instance_rot=90
-        )
+        pos1 = sym.get_pin_position("1", instance_pos=(182.88, 97.79), instance_rot=90)
         assert pos1 is not None
         assert pos1[0] == pytest.approx(180.34, abs=0.01)
         assert pos1[1] == pytest.approx(97.79, abs=0.01)
@@ -981,9 +987,7 @@ class TestLibrarySymbol:
         # Pin 2 library (0, -2.54) -> rotate 90 CCW -> (2.54, 0)
         #   -> negate Y -> (2.54, 0)
         #   -> translate -> (185.42, 97.79)
-        pos2 = sym.get_pin_position(
-            "2", instance_pos=(182.88, 97.79), instance_rot=90
-        )
+        pos2 = sym.get_pin_position("2", instance_pos=(182.88, 97.79), instance_rot=90)
         assert pos2 is not None
         assert pos2[0] == pytest.approx(185.42, abs=0.01)
         assert pos2[1] == pytest.approx(97.79, abs=0.01)
@@ -1024,8 +1028,12 @@ class TestLibrarySymbol:
             name="C_Small",
             pins=[
                 LibraryPin(
-                    number="1", name="~", type="passive",
-                    position=(0, 2.54), rotation=0, length=0,
+                    number="1",
+                    name="~",
+                    type="passive",
+                    position=(0, 2.54),
+                    rotation=0,
+                    length=0,
                 ),
             ],
         )
@@ -1059,7 +1067,12 @@ class TestLibrarySymbol:
                     number="1", name="A", type="input", position=(2.54, 0), rotation=0, length=2.54
                 ),
                 LibraryPin(
-                    number="2", name="B", type="output", position=(-2.54, 0), rotation=0, length=2.54
+                    number="2",
+                    name="B",
+                    type="output",
+                    position=(-2.54, 0),
+                    rotation=0,
+                    length=2.54,
                 ),
             ],
         )

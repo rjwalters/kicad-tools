@@ -15,7 +15,6 @@ from kicad_tools.parts.composition import (
     UnitPin,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -174,9 +173,7 @@ class TestComposedPartStoreCRUD:
     def test_delete_not_found(self, store: ComposedPartStore):
         assert store.delete("nonexistent") is False
 
-    def test_save_with_base_part(
-        self, store: ComposedPartStore, resistor_entity: Entity
-    ):
+    def test_save_with_base_part(self, store: ComposedPartStore, resistor_entity: Entity):
         base = ComposedPart(
             id="base",
             entity=resistor_entity,
@@ -200,9 +197,7 @@ class TestComposedPartStoreCRUD:
         assert retrieved.base_part.id == "base"
         assert retrieved.base_part.manufacturer == "Yageo"
 
-    def test_save_with_pad_to_pin(
-        self, store: ComposedPartStore, resistor_entity: Entity
-    ):
+    def test_save_with_pad_to_pin(self, store: ComposedPartStore, resistor_entity: Entity):
         part = ComposedPart(
             id="mapped",
             entity=resistor_entity,
@@ -213,9 +208,7 @@ class TestComposedPartStoreCRUD:
         assert retrieved is not None
         assert retrieved.pad_to_pin == {"1": "1", "2": "2"}
 
-    def test_created_at_preserved(
-        self, store: ComposedPartStore, resistor_entity: Entity
-    ):
+    def test_created_at_preserved(self, store: ComposedPartStore, resistor_entity: Entity):
         ts = datetime(2026, 1, 15, 12, 0, 0)
         part = ComposedPart(id="ts-test", entity=resistor_entity, created_at=ts)
         store.save(part)
@@ -257,9 +250,7 @@ class TestParametricSearch:
         assert len(results) == 2  # 0402 and 0603 variants
 
     def test_find_by_multiple_params(self, populated_store: ComposedPartStore):
-        results = populated_store.find_parts(
-            params={"resistance": "10000", "tolerance": "1%"}
-        )
+        results = populated_store.find_parts(params={"resistance": "10000", "tolerance": "1%"})
         assert len(results) == 2
 
     def test_find_by_tag(self, populated_store: ComposedPartStore):

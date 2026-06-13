@@ -20,7 +20,6 @@ from typing import Any
 
 from kicad_tools.schema.pcb import PCB, Footprint
 
-
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -230,10 +229,7 @@ def _cell_occupied(
     cx = cell.x + cell.w / 2
     cy = cell.y + cell.h / 2
     for px, py, pw, ph in placed_positions:
-        if (
-            abs(cx - px) < (cell.w + pw) / 2
-            and abs(cy - py) < (cell.h + ph) / 2
-        ):
+        if abs(cx - px) < (cell.w + pw) / 2 and abs(cy - py) < (cell.h + ph) / 2:
             return True
     return False
 
@@ -322,8 +318,7 @@ def place_unplaced(
     bounds = _get_board_bounds(pcb)
     if bounds is None:
         raise ValueError(
-            f"No Edge.Cuts board outline found in {pcb_path}. "
-            "Cannot determine placement area."
+            f"No Edge.Cuts board outline found in {pcb_path}. Cannot determine placement area."
         )
 
     # Detect unplaced components

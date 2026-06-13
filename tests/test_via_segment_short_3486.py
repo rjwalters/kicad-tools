@@ -80,9 +80,7 @@ def _foreign_segment_route(
     width: float = 0.3,
 ) -> Route:
     r = Route(net=net, net_name=f"NET{net}")
-    r.segments.append(
-        Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=width, layer=layer, net=net)
-    )
+    r.segments.append(Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=width, layer=layer, net=net))
     return r
 
 
@@ -109,9 +107,7 @@ class TestWorstViaSegmentDeficitGeometry:
         clearance = 0.40 - 0.3 - 0.15 = -0.05mm; deficit = 0.2 - (-0.05)
         = 0.25mm.
         """
-        foreign = _foreign_segment_route(
-            net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0
-        )
+        foreign = _foreign_segment_route(net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0)
         grid.mark_route(foreign)
 
         via = _via(7.0, 12.4, net=3, layers=(Layer.F_CU, Layer.B_CU))
@@ -121,9 +117,7 @@ class TestWorstViaSegmentDeficitGeometry:
         assert loc == (7.0, 12.4)
 
     def test_clean_via_has_no_deficit(self, grid: RoutingGrid) -> None:
-        foreign = _foreign_segment_route(
-            net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0
-        )
+        foreign = _foreign_segment_route(net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0)
         grid.mark_route(foreign)
 
         # 2mm away from the trace -- comfortably clear.
@@ -135,9 +129,7 @@ class TestWorstViaSegmentDeficitGeometry:
 
     def test_same_net_segment_excluded(self, grid: RoutingGrid) -> None:
         """A via tight against its OWN net's trace never registers."""
-        own = _foreign_segment_route(
-            net=3, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0
-        )
+        own = _foreign_segment_route(net=3, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0)
         grid.mark_route(own)
 
         via = _via(7.0, 12.4, net=3, layers=(Layer.F_CU, Layer.B_CU))
@@ -145,9 +137,7 @@ class TestWorstViaSegmentDeficitGeometry:
 
         assert deficit == 0.0
 
-    def test_segment_on_layer_outside_barrel_span_ignored(
-        self, grid_4l: RoutingGrid
-    ) -> None:
+    def test_segment_on_layer_outside_barrel_span_ignored(self, grid_4l: RoutingGrid) -> None:
         """A barrel that does not reach the segment's layer cannot short it.
 
         A blind via spanning only F.Cu..In1.Cu must not flag an
@@ -190,9 +180,7 @@ class TestViaSegmentDemotionBackstop:
         router, _ = load_pcb_for_routing(str(FIXTURE), rules=rules, validate_drc=False)
 
         # Foreign-net (NET1) trace on F.Cu.
-        foreign = _foreign_segment_route(
-            net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0
-        )
+        foreign = _foreign_segment_route(net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0)
         router.grid.mark_route(foreign)
         router.routes.append(foreign)
 
@@ -216,9 +204,7 @@ class TestViaSegmentDemotionBackstop:
     def test_clean_via_route_is_not_demoted(self, rules: DesignRules) -> None:
         router, _ = load_pcb_for_routing(str(FIXTURE), rules=rules, validate_drc=False)
 
-        foreign = _foreign_segment_route(
-            net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0
-        )
+        foreign = _foreign_segment_route(net=1, layer=Layer.F_CU, x1=5.0, y1=12.0, x2=9.0, y2=12.0)
         router.grid.mark_route(foreign)
         router.routes.append(foreign)
 

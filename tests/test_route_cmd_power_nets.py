@@ -132,13 +132,10 @@ class TestEdgeClearanceForwardingUnit:
             )
             kwargs = mock_zone_gen_cls.from_pcb.call_args.kwargs
             assert kwargs.get("edge_clearance") == pytest.approx(0.3), (
-                "edge_clearance kwarg must equal args.edge_clearance "
-                f"(got {kwargs!r})"
+                f"edge_clearance kwarg must equal args.edge_clearance (got {kwargs!r})"
             )
 
-    def test_from_pcb_called_with_edge_clearance_from_jlcpcb_profile(
-        self, tmp_path: Path
-    ):
+    def test_from_pcb_called_with_edge_clearance_from_jlcpcb_profile(self, tmp_path: Path):
         """JLCPCB profile auto-injects edge_clearance=0.3 into args.
 
         Reproduces the original bug: even without ``--edge-clearance``, the
@@ -189,9 +186,7 @@ class TestEdgeClearanceForwardingUnit:
 # ---------------------------------------------------------------------------
 
 
-_POLY_PTS_RE = re.compile(
-    r"\(polygon\s*\(pts((?:\s*\(xy\s+-?[\d.]+\s+-?[\d.]+\))+)"
-)
+_POLY_PTS_RE = re.compile(r"\(polygon\s*\(pts((?:\s*\(xy\s+-?[\d.]+\s+-?[\d.]+\))+)")
 _XY_RE = re.compile(r"\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\)")
 
 
@@ -207,9 +202,7 @@ def _extract_zone_polygons(text: str) -> list[list[tuple[float, float]]]:
 class TestEdgeClearanceIntegration:
     """End-to-end: run route_cmd.main and inspect zone polygon vertices."""
 
-    def test_power_nets_zones_are_inset_with_jlcpcb_profile(
-        self, tmp_path: Path
-    ):
+    def test_power_nets_zones_are_inset_with_jlcpcb_profile(self, tmp_path: Path):
         """Zone polygons must be inset by ``edge_clearance`` from the outline.
 
         Board outline is the rectangle (100,100)-(130,125). With the
@@ -252,9 +245,7 @@ class TestEdgeClearanceIntegration:
             tmp_path / "routed_partial.kicad_pcb",
         ]
         produced = next((p for p in candidates if p.exists()), None)
-        assert produced is not None, (
-            "route command must produce some output PCB (full or partial)"
-        )
+        assert produced is not None, "route command must produce some output PCB (full or partial)"
 
         text = produced.read_text()
         polys = _extract_zone_polygons(text)
@@ -275,17 +266,14 @@ class TestEdgeClearanceIntegration:
                     f"(expected <= {130 - min_inset})"
                 )
                 assert y >= 100.0 + min_inset, (
-                    f"zone vertex Y={y} too close to top edge y=100 "
-                    f"(expected >= {100 + min_inset})"
+                    f"zone vertex Y={y} too close to top edge y=100 (expected >= {100 + min_inset})"
                 )
                 assert y <= 125.0 - min_inset, (
                     f"zone vertex Y={y} too close to bottom edge y=125 "
                     f"(expected <= {125 - min_inset})"
                 )
 
-    def test_power_nets_zones_at_outline_when_no_edge_clearance(
-        self, tmp_path: Path
-    ):
+    def test_power_nets_zones_at_outline_when_no_edge_clearance(self, tmp_path: Path):
         """Without an edge clearance, zones should reach the board edge.
 
         Uses a manufacturer with no edge-clearance constraint by passing

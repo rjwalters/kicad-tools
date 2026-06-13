@@ -71,7 +71,7 @@ def _make_soic8_pads(
     """
     pads: list[Pad] = []
     # Bottom row (pins 1-4), top row (pins 8-5, KiCad numbering)
-    half_pitch_span = ((pitch * (4 - 1)) / 2.0)
+    half_pitch_span = (pitch * (4 - 1)) / 2.0
     for i in range(4):
         x = cx - half_pitch_span + i * pitch
         # Bottom row pads
@@ -380,9 +380,7 @@ class TestDetectFinePitchRegions:
         """Custom radius is honoured."""
         rules = DesignRules(trace_width=0.30, trace_clearance=0.20)
         pads = _make_soic8_pads()
-        regions = detect_fine_pitch_regions(
-            pads, rules, mfr_limits=MFR_JLCPCB, radius_mm=3.0
-        )
+        regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB, radius_mm=3.0)
         assert len(regions) == 1
         assert regions[0].radius_mm == 3.0
 
@@ -409,9 +407,7 @@ class TestDetectFinePitchRegions:
 
     def test_manufacturer_resolved_from_rules(self):
         """When no explicit mfr_limits, rules.manufacturer is used as a fallback."""
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb")
         pads = _make_soic8_pads()
         regions = detect_fine_pitch_regions(pads, rules)
         assert len(regions) == 1
@@ -442,9 +438,7 @@ class TestDetectFinePitchRegions:
 
     def test_explicit_mfr_limits_overrides_rules_manufacturer(self):
         """An explicit ``mfr_limits`` argument wins over ``rules.manufacturer``."""
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb")
         pads = _make_soic8_pads()
         # Force the OSHPark default (0.152 + 0.013 = 0.165) instead of jlcpcb (0.140).
         regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_OSHPARK)
@@ -489,7 +483,7 @@ class TestPadAxisExtraction:
         for i in range(4):
             for col_offset, pin_offset in ((0, 0), (4, 0)):
                 y = 0.0 + i * 1.27
-                x = (0.0 if col_offset == 0 else 4.0)
+                x = 0.0 if col_offset == 0 else 4.0
                 pads.append(
                     Pad(
                         x=x,
@@ -528,7 +522,7 @@ class TestPadAxisExtraction:
                     width=0.25,
                     height=0.25,
                     net=i + 1,
-                    net_name=f"N{i+1}",
+                    net_name=f"N{i + 1}",
                     ref="U9",
                     pin=str(i + 1),
                 )
@@ -541,7 +535,7 @@ class TestPadAxisExtraction:
                     width=0.25,
                     height=0.25,
                     net=i + 5,
-                    net_name=f"N{i+5}",
+                    net_name=f"N{i + 5}",
                     ref="U9",
                     pin=str(i + 5),
                 )
@@ -554,7 +548,7 @@ class TestPadAxisExtraction:
                     width=0.25,
                     height=0.25,
                     net=i + 9,
-                    net_name=f"N{i+9}",
+                    net_name=f"N{i + 9}",
                     ref="U9",
                     pin=str(i + 9),
                 )
@@ -567,7 +561,7 @@ class TestPadAxisExtraction:
                     width=0.25,
                     height=0.25,
                     net=i + 13,
-                    net_name=f"N{i+13}",
+                    net_name=f"N{i + 13}",
                     ref="U9",
                     pin=str(i + 13),
                 )
@@ -597,26 +591,18 @@ class TestImpedanceGuard:
     def test_no_regions_no_net_class_falls_through_to_default(self):
         """Empty regions + no net class -> rules.trace_clearance."""
         rules = DesignRules(trace_width=0.30, trace_clearance=0.20)
-        pad = Pad(
-            x=10.0, y=10.0, width=0.30, height=1.55, net=1, net_name="N1", ref="U5", pin="1"
-        )
-        clearance = resolve_clearance_with_escape_region(
-            rules, pad, net_class=None, regions=None
-        )
+        pad = Pad(x=10.0, y=10.0, width=0.30, height=1.55, net=1, net_name="N1", ref="U5", pin="1")
+        clearance = resolve_clearance_with_escape_region(rules, pad, net_class=None, regions=None)
         assert clearance == pytest.approx(0.20, abs=1e-6)
 
     def test_regions_none_falls_through(self):
         """``regions=None`` behaves identically to empty list -- backward compat."""
         rules = DesignRules(trace_width=0.30, trace_clearance=0.20)
         nc = NetClassRouting(name="SIGNAL", clearance=0.20, escape_clearance=0.14)
-        pad = Pad(
-            x=10.0, y=10.0, width=0.30, height=1.55, net=1, net_name="N1", ref="U5", pin="1"
-        )
+        pad = Pad(x=10.0, y=10.0, width=0.30, height=1.55, net=1, net_name="N1", ref="U5", pin="1")
         # Without regions, the per-class escape_clearance still wins (via
         # the standard get_clearance_for_component net_class path).
-        clearance = resolve_clearance_with_escape_region(
-            rules, pad, net_class=nc, regions=None
-        )
+        clearance = resolve_clearance_with_escape_region(rules, pad, net_class=nc, regions=None)
         # Falls through to get_clearance_for_component which respects
         # nc.escape_clearance as the per-net-class override (P_FP1).
         assert clearance == pytest.approx(0.14, abs=1e-6)
@@ -742,8 +728,14 @@ class TestImpedanceGuard:
         regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB)
         # Pad sitting far from the U5 region.
         far_pad = Pad(
-            x=100.0, y=100.0, width=0.30, height=0.30,
-            net=2, net_name="N2", ref="R1", pin="1",
+            x=100.0,
+            y=100.0,
+            width=0.30,
+            height=0.30,
+            net=2,
+            net_name="N2",
+            ref="R1",
+            pin="1",
         )
         clearance = resolve_clearance_with_escape_region(
             rules, far_pad, net_class=nc, regions=regions
@@ -803,9 +795,7 @@ class TestNetClassThreading:
         clearances when no regions are installed.
         """
         rules = DesignRules(trace_width=0.30, trace_clearance=0.20)
-        pad = Pad(
-            x=10.0, y=10.0, width=0.30, height=1.55, net=1, net_name="N1", ref="U5", pin="1"
-        )
+        pad = Pad(x=10.0, y=10.0, width=0.30, height=1.55, net=1, net_name="N1", ref="U5", pin="1")
         # Pre-#3371 call shape:
         old = rules.get_clearance_for_component("U5", pin_pitch=1.27)
         # Post-#3371 call shape with empty regions:

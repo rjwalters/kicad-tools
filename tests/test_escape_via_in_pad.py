@@ -146,18 +146,12 @@ class TestInPadEscapeStrategy:
 
         # With strict component_clearances (0.4mm) all 28 pins defer at
         # surface; via-in-pad should rescue a strong majority.
-        assert len(escapes) >= 20, (
-            f"Expected >= 20 escapes with via-in-pad; got {len(escapes)}"
-        )
+        assert len(escapes) >= 20, f"Expected >= 20 escapes with via-in-pad; got {len(escapes)}"
 
         # At least 4 in-pad vias (the deferred-by-default pins).
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert len(in_pad_vias) >= 4, (
-            f"Expected >= 4 in-pad vias with via-in-pad enabled; "
-            f"got {len(in_pad_vias)}"
+            f"Expected >= 4 in-pad vias with via-in-pad enabled; got {len(in_pad_vias)}"
         )
 
         # Every in-pad via must sit dead-centre on its pad (within 1um).
@@ -181,13 +175,9 @@ class TestInPadEscapeStrategy:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert in_pad_vias == [], (
-            "Default JLCPCB profile must NOT produce in-pad vias "
-            "(would silently surcharge users)."
+            "Default JLCPCB profile must NOT produce in-pad vias (would silently surcharge users)."
         )
 
     def test_no_in_pad_escape_when_manufacturer_is_none(self):
@@ -201,10 +191,7 @@ class TestInPadEscapeStrategy:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert in_pad_vias == []
 
     def test_in_pad_escape_on_2layer_board(self):
@@ -218,13 +205,8 @@ class TestInPadEscapeStrategy:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
-        assert len(in_pad_vias) >= 1, (
-            "Expected at least one in-pad via on the 2-layer fixture."
-        )
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
+        assert len(in_pad_vias) >= 1, "Expected at least one in-pad via on the 2-layer fixture."
         for esc in in_pad_vias:
             assert esc.via is not None
             assert esc.via.layers[1] == Layer.B_CU
@@ -238,7 +220,9 @@ class TestInPadEscapeStrategy:
 
         # Tiny pads: 0.25 x 0.4 cannot host a 0.6mm-diameter via.
         pads = _make_dual_row_ssop(
-            pin_count=28, pad_width=0.25, pad_height=0.4,
+            pin_count=28,
+            pad_width=0.25,
+            pad_height=0.4,
         )
 
         package_info = escape_router.analyze_package(pads)
@@ -246,10 +230,7 @@ class TestInPadEscapeStrategy:
 
         # Whatever escapes do come out, NONE of them should be in-pad
         # because the geometry forbids it.
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert in_pad_vias == [], (
             "In-pad escape should bail out gracefully when pads are too small."
         )
@@ -273,16 +254,14 @@ class TestInPadEscapeStrategy:
 
         # We must have actually produced in-pad vias for this assertion to
         # be meaningful.
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert len(in_pad_vias) > 0
 
         # No "segment-to-pad clearance violation" warnings about the
         # in-pad escape's own pad.
         violation_msgs = [
-            r.message for r in caplog.records
+            r.message
+            for r in caplog.records
             if r.levelno >= logging.WARNING
             and "Escape segment-to-pad clearance violation" in r.message
         ]
@@ -324,8 +303,7 @@ class TestInPadEscapeStrategy:
         escapes = escape_router.generate_escapes(package_info)
 
         assert len(escapes) >= 26, (
-            f"PCM5122PW coverage with via-in-pad: expected >= 26/28, "
-            f"got {len(escapes)}/28"
+            f"PCM5122PW coverage with via-in-pad: expected >= 26/28, got {len(escapes)}/28"
         )
 
 
@@ -345,9 +323,7 @@ class TestChorusTestU5Regression:
     repo (CI may not have it).
     """
 
-    BOARD_PATH = Path(
-        "boards/external/chorus-test-revA/kicad/chorus-test-revA_v18.kicad_pcb"
-    )
+    BOARD_PATH = Path("boards/external/chorus-test-revA/kicad/chorus-test-revA_v18.kicad_pcb")
 
     def test_chorus_test_u5_escape_coverage_floor(self):
         if not self.BOARD_PATH.exists():
@@ -362,10 +338,7 @@ class TestChorusTestU5Regression:
         try:
             from kicad_tools.router.io import load_pads_from_pcb
         except ImportError:
-            pytest.skip(
-                "load_pads_from_pcb not available; cannot run chorus-test "
-                "U5 regression."
-            )
+            pytest.skip("load_pads_from_pcb not available; cannot run chorus-test U5 regression.")
 
         u5_pads = load_pads_from_pcb(self.BOARD_PATH, ref="U5")
         if not u5_pads:

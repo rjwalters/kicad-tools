@@ -554,27 +554,21 @@ class ReportDataCollector:
         single_pad_nets = sorted(n.net_name for n in result.nets if n.total_pads == 1)
 
         # Signal nets: everything that is not a plane net and not a single-pad net.
-        signal_nets = [
-            n for n in result.nets if not n.is_plane_net and n.total_pads != 1
-        ]
+        signal_nets = [n for n in result.nets if not n.is_plane_net and n.total_pads != 1]
         signal_net_count = len(signal_nets)
         signal_complete_count = sum(1 for n in signal_nets if n.status == "complete")
         signal_completion_percent = 0.0
         if signal_net_count > 0:
-            signal_completion_percent = round(
-                100.0 * signal_complete_count / signal_net_count, 1
-            )
+            signal_completion_percent = round(100.0 * signal_complete_count / signal_net_count, 1)
 
         # Collect names of nets that are not fully routed (incomplete or unrouted),
         # excluding zone-connected and single-pad nets since those are reported
         # separately.  Fall back to the full list for backward compatibility.
         zone_set = set(all_zone_nets)
         single_set = set(single_pad_nets)
-        incomplete_net_names = sorted(
-            n.net_name
-            for n in result.nets
-            if n.status != "complete"
-        )[: self._INCOMPLETE_NET_NAMES_CAP]
+        incomplete_net_names = sorted(n.net_name for n in result.nets if n.status != "complete")[
+            : self._INCOMPLETE_NET_NAMES_CAP
+        ]
 
         # Signal-only incomplete list for the new template section.
         signal_incomplete_net_names = sorted(
@@ -742,12 +736,14 @@ class ReportDataCollector:
             layer_type = getattr(layer, "type", "") or ""
             if layer_type not in _INCLUDE_TYPES:
                 continue
-            layers.append({
-                "name": getattr(layer, "name", ""),
-                "type": layer_type,
-                "thickness_mm": getattr(layer, "thickness", 0.0),
-                "material": getattr(layer, "material", ""),
-            })
+            layers.append(
+                {
+                    "name": getattr(layer, "name", ""),
+                    "type": layer_type,
+                    "thickness_mm": getattr(layer, "thickness", 0.0),
+                    "material": getattr(layer, "material", ""),
+                }
+            )
 
         return layers if layers else None
 
@@ -782,9 +778,7 @@ class ReportDataCollector:
 
         # --- Title-block narrative ---
         try:
-            result["design_narrative"] = self._extract_design_narrative(
-                sch, sch_path
-            )
+            result["design_narrative"] = self._extract_design_narrative(sch, sch_path)
         except Exception:
             logger.warning("Design narrative extraction failed", exc_info=True)
 
@@ -802,9 +796,7 @@ class ReportDataCollector:
 
         # --- Power architecture from symbols ---
         try:
-            result["power_architecture"] = self._extract_power_architecture(
-                sch, sch_path
-            )
+            result["power_architecture"] = self._extract_power_architecture(sch, sch_path)
         except Exception:
             logger.warning("Power architecture extraction failed", exc_info=True)
 
@@ -820,9 +812,7 @@ class ReportDataCollector:
     # Narrative sub-extractors
     # ------------------------------------------------------------------
 
-    def _extract_design_narrative(
-        self, sch: Any, sch_path: Path
-    ) -> str | None:
+    def _extract_design_narrative(self, sch: Any, sch_path: Path) -> str | None:
         """Build a narrative string from title-block comments.
 
         Concatenates the root title-block title and numbered comments,
@@ -917,9 +907,7 @@ class ReportDataCollector:
             return True
         return False
 
-    def _detect_interfaces(
-        self, sch: Any, sch_path: Path
-    ) -> list[dict[str, Any]] | None:
+    def _detect_interfaces(self, sch: Any, sch_path: Path) -> list[dict[str, Any]] | None:
         """Heuristically detect communication interfaces from label names.
 
         Scans global labels and local labels in the root schematic and
@@ -980,9 +968,7 @@ class ReportDataCollector:
                     matched.append(label_text)
                     break  # one match per pattern is enough
             if len(matched) >= 2:
-                detected.append(
-                    {"protocol": protocol, "signals": sorted(set(matched))}
-                )
+                detected.append({"protocol": protocol, "signals": sorted(set(matched))})
 
         return detected if detected else None
 
@@ -1012,9 +998,7 @@ class ReportDataCollector:
                         value = sym.properties["Value"].value
                     if value:
                         rails.add(value)
-                elif lib_id.startswith(
-                    ("Regulator_Linear:", "Regulator_Switching:")
-                ):
+                elif lib_id.startswith(("Regulator_Linear:", "Regulator_Switching:")):
                     ref = sym.reference or ""
                     value = ""
                     if "Value" in sym.properties:
@@ -1082,15 +1066,11 @@ class ReportDataCollector:
                     fine_pitch_parts.append(ref or fp_name)
 
             # Thermal pad detection
-            if re.search(
-                r"(ThermalVia|ExposedPad|Thermal)", fp_name, re.IGNORECASE
-            ):
+            if re.search(r"(ThermalVia|ExposedPad|Thermal)", fp_name, re.IGNORECASE):
                 thermal_pad_count += 1
 
             # Polarized component detection (electrolytic caps, diodes, LEDs)
-            if ref.startswith("D") or re.search(
-                r"(CP_Elec|Polarized|LED)", fp_name, re.IGNORECASE
-            ):
+            if ref.startswith("D") or re.search(r"(CP_Elec|Polarized|LED)", fp_name, re.IGNORECASE):
                 polarized_count += 1
 
         if fine_pitch_count == 0 and thermal_pad_count == 0 and polarized_count == 0:

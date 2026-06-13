@@ -127,10 +127,20 @@ class TestPrepareEvaluationData:
 
         # Create sample individuals
         ind1 = Individual(
-            positions={"U1": (25.0, 25.0), "U2": (75.0, 25.0), "R1": (50.0, 50.0), "R2": (50.0, 75.0)}
+            positions={
+                "U1": (25.0, 25.0),
+                "U2": (75.0, 25.0),
+                "R1": (50.0, 50.0),
+                "R2": (50.0, 75.0),
+            }
         )
         ind2 = Individual(
-            positions={"U1": (30.0, 30.0), "U2": (70.0, 30.0), "R1": (55.0, 55.0), "R2": (55.0, 70.0)}
+            positions={
+                "U1": (30.0, 30.0),
+                "U2": (70.0, 30.0),
+                "R1": (55.0, 55.0),
+                "R2": (55.0, 70.0),
+            }
         )
         population = [ind1, ind2]
 
@@ -145,19 +155,23 @@ class TestGPUKernels:
     def test_wire_lengths_batch(self, cpu_backend: ArrayBackend):
         """Test wire length computation."""
         # 2 individuals, 3 components
-        positions = cpu_backend.array([
-            [[0, 0], [10, 0], [5, 5]],  # Individual 1
-            [[0, 0], [20, 0], [10, 10]],  # Individual 2
-        ])
+        positions = cpu_backend.array(
+            [
+                [[0, 0], [10, 0], [5, 5]],  # Individual 1
+                [[0, 0], [20, 0], [10, 10]],  # Individual 2
+            ]
+        )
 
         # 2 springs connecting comp 0->1 and comp 1->2
         springs = cpu_backend.array([[0, 1], [1, 2]], dtype=cpu_backend.int32)
 
         # Pin offsets (all at component centers for simplicity)
-        pin_offsets = cpu_backend.array([
-            [[0, 0], [0, 0]],  # Spring 0: comp0.pin -> comp1.pin
-            [[0, 0], [0, 0]],  # Spring 1: comp1.pin -> comp2.pin
-        ])
+        pin_offsets = cpu_backend.array(
+            [
+                [[0, 0], [0, 0]],  # Spring 0: comp0.pin -> comp1.pin
+                [[0, 0], [0, 0]],  # Spring 1: comp1.pin -> comp2.pin
+            ]
+        )
 
         wire_lengths = _compute_wire_lengths_batch(positions, springs, pin_offsets, cpu_backend)
         result = cpu_backend.to_numpy(wire_lengths)
@@ -170,10 +184,12 @@ class TestGPUKernels:
     def test_overlaps_batch(self, cpu_backend: ArrayBackend):
         """Test overlap detection."""
         # 2 individuals, 3 components
-        positions = cpu_backend.array([
-            [[0, 0], [5, 0], [100, 100]],  # Individual 1: comp 0 and 1 overlap
-            [[0, 0], [50, 0], [100, 100]],  # Individual 2: no overlaps
-        ])
+        positions = cpu_backend.array(
+            [
+                [[0, 0], [5, 0], [100, 100]],  # Individual 1: comp 0 and 1 overlap
+                [[0, 0], [50, 0], [100, 100]],  # Individual 2: no overlaps
+            ]
+        )
 
         # All components are 10x10
         sizes = cpu_backend.array([[10, 10], [10, 10], [10, 10]])
@@ -188,15 +204,15 @@ class TestGPUKernels:
     def test_boundary_violations_batch(self, cpu_backend: ArrayBackend):
         """Test boundary violation detection."""
         # 2 individuals, 3 components
-        positions = cpu_backend.array([
-            [[50, 50], [50, 50], [50, 50]],  # All inside
-            [[50, 50], [50, 50], [150, 150]],  # One outside
-        ])
+        positions = cpu_backend.array(
+            [
+                [[50, 50], [50, 50], [50, 50]],  # All inside
+                [[50, 50], [50, 50], [150, 150]],  # One outside
+            ]
+        )
 
         # Simple square board 0-100
-        board_vertices = cpu_backend.array([
-            [0, 0], [100, 0], [100, 100], [0, 100]
-        ])
+        board_vertices = cpu_backend.array([[0, 0], [100, 0], [100, 100], [0, 100]])
 
         violations = _compute_boundary_violations_batch(positions, board_vertices, cpu_backend)
         result = cpu_backend.to_numpy(violations)
@@ -208,10 +224,12 @@ class TestGPUKernels:
     def test_routability_batch(self, cpu_backend: ArrayBackend):
         """Test routability score computation."""
         # 2 individuals, 3 components
-        positions = cpu_backend.array([
-            [[0, 0], [10, 0], [20, 0]],  # Tightly packed
-            [[0, 0], [50, 0], [100, 0]],  # Spread out
-        ])
+        positions = cpu_backend.array(
+            [
+                [[0, 0], [10, 0], [20, 0]],  # Tightly packed
+                [[0, 0], [50, 0], [100, 0]],  # Spread out
+            ]
+        )
 
         routability = _compute_routability_batch(positions, cpu_backend)
         result = cpu_backend.to_numpy(routability)
@@ -222,10 +240,12 @@ class TestGPUKernels:
     def test_pin_alignment_batch(self, cpu_backend: ArrayBackend):
         """Test pin alignment score computation."""
         # 2 individuals, 2 components
-        positions = cpu_backend.array([
-            [[0, 0], [10, 0]],  # Horizontally aligned
-            [[0, 0], [10, 10]],  # Diagonal (not aligned)
-        ])
+        positions = cpu_backend.array(
+            [
+                [[0, 0], [10, 0]],  # Horizontally aligned
+                [[0, 0], [10, 10]],  # Diagonal (not aligned)
+            ]
+        )
 
         springs = cpu_backend.array([[0, 1]], dtype=cpu_backend.int32)
         pin_offsets = cpu_backend.array([[[0, 0], [0, 0]]])  # Pins at centers
@@ -257,10 +277,13 @@ class TestEvaluatePopulationGPU:
         )
 
         # Create test population
-        positions = np.array([
-            [[25, 25], [50, 75], [50, 50], [75, 25]],  # Original positions (sorted by ref)
-            [[30, 30], [55, 70], [55, 55], [70, 30]],  # Moved positions
-        ], dtype=np.float32)
+        positions = np.array(
+            [
+                [[25, 25], [50, 75], [50, 50], [75, 25]],  # Original positions (sorted by ref)
+                [[30, 30], [55, 70], [55, 55], [70, 30]],  # Moved positions
+            ],
+            dtype=np.float32,
+        )
 
         weights = {
             "baseline": 1000.0,
@@ -320,7 +343,7 @@ class TestEvolutionaryOptimizerIntegration:
 
         for i in range(5):
             comp = Component(
-                ref=f"U{i+1}",
+                ref=f"U{i + 1}",
                 x=20 + i * 15,
                 y=50,
                 width=10,
@@ -353,7 +376,7 @@ class TestEvolutionaryOptimizerIntegration:
 
         for i in range(3):
             comp = Component(
-                ref=f"U{i+1}",
+                ref=f"U{i + 1}",
                 x=20 + i * 30,
                 y=50,
                 width=10,

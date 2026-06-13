@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.modify_schematic import set_symbol_flag_text
 from kicad_tools.cli.sch_set_symbol_property import (
     RECOGNIZED_FLAGS,
@@ -124,7 +122,9 @@ MINIMAL_SCHEMATIC_NO_EXCLUDE = """\
 """
 
 
-def _write_sch(tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch") -> Path:
+def _write_sch(
+    tmp_path: Path, content: str = MINIMAL_SCHEMATIC, name: str = "test.kicad_sch"
+) -> Path:
     p = tmp_path / name
     p.write_text(content)
     return p
@@ -176,25 +176,19 @@ class TestSetSymbolFlagText:
         assert '(property "Reference" "R1"' in modified
 
     def test_change_on_board_yes_to_no(self):
-        modified, success, msg = set_symbol_flag_text(
-            MINIMAL_SCHEMATIC, "R1", "on_board", "no"
-        )
+        modified, success, msg = set_symbol_flag_text(MINIMAL_SCHEMATIC, "R1", "on_board", "no")
         assert success
         assert "Changed R1 on_board" in msg
         # The power symbol should still have on_board no (its original value)
         # R1's on_board should now be no
 
     def test_change_in_bom(self):
-        modified, success, msg = set_symbol_flag_text(
-            MINIMAL_SCHEMATIC, "#PWR052", "in_bom", "no"
-        )
+        modified, success, msg = set_symbol_flag_text(MINIMAL_SCHEMATIC, "#PWR052", "in_bom", "no")
         assert success
         assert "Changed #PWR052 in_bom" in msg
 
     def test_change_dnp(self):
-        modified, success, msg = set_symbol_flag_text(
-            MINIMAL_SCHEMATIC, "R1", "dnp", "yes"
-        )
+        modified, success, msg = set_symbol_flag_text(MINIMAL_SCHEMATIC, "R1", "dnp", "yes")
         assert success
         assert "Changed R1 dnp" in msg
 
@@ -214,9 +208,7 @@ class TestSetSymbolFlagText:
         assert modified == MINIMAL_SCHEMATIC  # no change
 
     def test_symbol_not_found(self):
-        modified, success, msg = set_symbol_flag_text(
-            MINIMAL_SCHEMATIC, "U99", "on_board", "yes"
-        )
+        modified, success, msg = set_symbol_flag_text(MINIMAL_SCHEMATIC, "U99", "on_board", "yes")
         assert not success
         assert "not found" in msg
         assert modified == MINIMAL_SCHEMATIC
@@ -242,9 +234,7 @@ class TestSetSymbolFlagText:
 
     def test_only_target_symbol_changed(self):
         """Verify that changing on_board on #PWR052 doesn't affect R1."""
-        modified, success, _ = set_symbol_flag_text(
-            MINIMAL_SCHEMATIC, "#PWR052", "on_board", "yes"
-        )
+        modified, success, _ = set_symbol_flag_text(MINIMAL_SCHEMATIC, "#PWR052", "on_board", "yes")
         assert success
         # R1's symbol block should still have on_board yes
         # Find R1's uuid (unique to R1's block) and search backwards for on_board
@@ -466,7 +456,7 @@ class TestHierarchicalTraversal:
         sub_path = tmp_path / "subsheet.kicad_sch"
         sub_path.write_text(subsheet_content)
 
-        root_content = f"""\
+        root_content = """\
 (kicad_sch
   (version 20231120)
   (generator "test")
@@ -539,4 +529,4 @@ class TestHierarchicalTraversal:
 
 class TestRecognizedFlags:
     def test_contains_all_four(self):
-        assert RECOGNIZED_FLAGS == {"on_board", "in_bom", "dnp", "exclude_from_sim"}
+        assert {"on_board", "in_bom", "dnp", "exclude_from_sim"} == RECOGNIZED_FLAGS

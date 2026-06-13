@@ -38,11 +38,7 @@ from kicad_tools.schematic.models.schematic import Schematic
 # Path to the project-local DRV8301 symbol library shipped by PR #3388.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD05_SYMBOL_LIB = (
-    REPO_ROOT
-    / "boards"
-    / "05-bldc-motor-controller"
-    / "symbols"
-    / "board05_custom.kicad_sym"
+    REPO_ROOT / "boards" / "05-bldc-motor-controller" / "symbols" / "board05_custom.kicad_sym"
 )
 
 # The full board-05 DRV8301 schematic pin-net mapping.  Kept in lock-step
@@ -123,7 +119,11 @@ def _make_schematic() -> Schematic:
 def _add_u3(sch: Schematic, x: float = 355, y: float = 145):
     """Helper: add a DRV8301 instance at the same coords design.py uses."""
     return sch.add_symbol(
-        "board05_custom:DRV8301", x, y, "U3", "DRV8301",
+        "board05_custom:DRV8301",
+        x,
+        y,
+        "U3",
+        "DRV8301",
         footprint="Package_SO:HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm",
     )
 
@@ -191,18 +191,20 @@ class TestBoard05DRV8301PinNets:
         for pin_key, net in BOARD_05_DRV8301_PIN_NETS.items():
             pin_pos = u3.pin_position(pin_key)
             _emit_pin_net_stub(
-                sch, pin_pos, x_center, net, None,
+                sch,
+                pin_pos,
+                x_center,
+                net,
+                None,
                 block_label="U3 DRV8301 ",
             )
 
         n = len(BOARD_05_DRV8301_PIN_NETS)
         assert len(sch.wires) == n, (
-            f"expected {n} new wires (one per pin_nets entry), got "
-            f"{len(sch.wires)}"
+            f"expected {n} new wires (one per pin_nets entry), got {len(sch.wires)}"
         )
         assert len(sch.labels) == n, (
-            f"expected {n} new labels (one per pin_nets entry), got "
-            f"{len(sch.labels)}"
+            f"expected {n} new labels (one per pin_nets entry), got {len(sch.labels)}"
         )
 
         # Every label must sit on a wire endpoint (regression guard for
@@ -240,14 +242,34 @@ class TestBoard05DRV8301PinNets:
         # No pin maps to an unexpected net name.
         for pin_key, net in BOARD_05_DRV8301_PIN_NETS.items():
             assert net in {
-                "GND", "+3V3", "+5V", "+24V", "SW_OUT",
-                "BST_A", "BST_B", "BST_C",
-                "PWM_AH", "PWM_AL", "PWM_BH", "PWM_BL", "PWM_CH", "PWM_CL",
-                "GATE_AL", "GATE_BL", "GATE_CL",
-                "GATE_DRV_AH", "GATE_DRV_BH", "GATE_DRV_CH",
-                "PHASE_A", "PHASE_B", "PHASE_C",
-                "ISENSE_A+", "ISENSE_B+",
-                "ISENSE_A-", "ISENSE_B-", "ISENSE_C-",
+                "GND",
+                "+3V3",
+                "+5V",
+                "+24V",
+                "SW_OUT",
+                "BST_A",
+                "BST_B",
+                "BST_C",
+                "PWM_AH",
+                "PWM_AL",
+                "PWM_BH",
+                "PWM_BL",
+                "PWM_CH",
+                "PWM_CL",
+                "GATE_AL",
+                "GATE_BL",
+                "GATE_CL",
+                "GATE_DRV_AH",
+                "GATE_DRV_BH",
+                "GATE_DRV_CH",
+                "PHASE_A",
+                "PHASE_B",
+                "PHASE_C",
+                "ISENSE_A+",
+                "ISENSE_B+",
+                "ISENSE_A-",
+                "ISENSE_B-",
+                "ISENSE_C-",
             }, f"pin {pin_key!r} maps to unknown net {net!r}"
 
     def test_outputs_have_unique_nets(self) -> None:
@@ -285,7 +307,11 @@ class TestBoard05DRV8301PinNets:
         for pin_key, net in BOARD_05_DRV8301_PIN_NETS.items():
             pin_pos = u3.pin_position(pin_key)
             _emit_pin_net_stub(
-                sch, pin_pos, 355, net, None,
+                sch,
+                pin_pos,
+                355,
+                net,
+                None,
                 block_label="U3 DRV8301 ",
             )
         # Pin 57: vertical stub.

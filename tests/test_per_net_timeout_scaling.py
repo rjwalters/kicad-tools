@@ -89,12 +89,22 @@ def _make_blocked_grid(
 def _make_blocked_pads() -> tuple[Pad, Pad]:
     """Create source/destination pads on opposite sides of the wall."""
     start = Pad(
-        x=5.0, y=25.0, width=0.5, height=0.5,
-        net=1, net_name="BLOCKED_NET", layer=Layer.F_CU,
+        x=5.0,
+        y=25.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="BLOCKED_NET",
+        layer=Layer.F_CU,
     )
     end = Pad(
-        x=45.0, y=25.0, width=0.5, height=0.5,
-        net=1, net_name="BLOCKED_NET", layer=Layer.F_CU,
+        x=45.0,
+        y=25.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="BLOCKED_NET",
+        layer=Layer.F_CU,
     )
     return start, end
 
@@ -156,12 +166,22 @@ def _make_open_grid_pathological(
                 cell.is_obstacle = True
 
     start = Pad(
-        x=5.0, y=5.0, width=0.5, height=0.5,
-        net=1, net_name="UNREACHABLE_NET", layer=Layer.F_CU,
+        x=5.0,
+        y=5.0,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="UNREACHABLE_NET",
+        layer=Layer.F_CU,
     )
     end = Pad(
-        x=end_x, y=end_y, width=0.5, height=0.5,
-        net=1, net_name="UNREACHABLE_NET", layer=Layer.F_CU,
+        x=end_x,
+        y=end_y,
+        width=0.5,
+        height=0.5,
+        net=1,
+        net_name="UNREACHABLE_NET",
+        layer=Layer.F_CU,
     )
     return grid, rules, start, end
 
@@ -232,7 +252,9 @@ class TestCppDeadlineEnforcement:
         from kicad_tools.router import router_cpp
 
         grid, rules, start, end = _make_open_grid_pathological(
-            width=50.0, height=50.0, resolution=0.1,
+            width=50.0,
+            height=50.0,
+            resolution=0.1,
         )
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -263,15 +285,26 @@ class TestCppDeadlineEnforcement:
         timeout_target = 0.5
         t0 = time.monotonic()
         result = pf.route_resumable(
-            start.x, start.y, 0,
-            end.x, end.y, 0,
+            start.x,
+            start.y,
+            0,
+            end.x,
+            end.y,
+            0,
             start.net,
-            start_layers, end_layers,
-            False, 0.0, 1.0, 0, 0,
-            router_cpp.PadBounds(), router_cpp.PadBounds(),
-            -1, 0,
+            start_layers,
+            end_layers,
+            False,
+            0.0,
+            1.0,
+            0,
+            0,
+            router_cpp.PadBounds(),
+            router_cpp.PadBounds(),
+            -1,
+            0,
             timeout_target,  # per_net_timeout_seconds
-            0,               # max_search_iterations (use default)
+            0,  # max_search_iterations (use default)
         )
         dt = time.monotonic() - t0
         try:
@@ -282,8 +315,7 @@ class TestCppDeadlineEnforcement:
             # (the deadline is checked every 1024 iterations).  Pre-#2610
             # this would have run for tens of seconds.
             assert dt <= timeout_target + 1.0, (
-                f"C++ deadline not enforced: dt={dt:.2f}s for "
-                f"timeout_target={timeout_target}s"
+                f"C++ deadline not enforced: dt={dt:.2f}s for timeout_target={timeout_target}s"
             )
 
             # Failure reason should be TIMEOUT (or NO_PATH if the open set
@@ -308,7 +340,9 @@ class TestCppDeadlineEnforcement:
         from kicad_tools.router import router_cpp
 
         grid, rules, start, end = _make_open_grid_pathological(
-            width=50.0, height=50.0, resolution=0.1,
+            width=50.0,
+            height=50.0,
+            resolution=0.1,
         )
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -331,15 +365,26 @@ class TestCppDeadlineEnforcement:
             pf.set_routable_layers(cpp_grid.get_routable_indices())
             t0 = time.monotonic()
             result = pf.route_resumable(
-                start.x, start.y, 0,
-                end.x, end.y, 0,
+                start.x,
+                start.y,
+                0,
+                end.x,
+                end.y,
+                0,
                 start.net,
                 cpp_grid.get_routable_indices(),
                 cpp_grid.get_routable_indices(),
-                False, 0.0, 1.0, 0, 0,
-                router_cpp.PadBounds(), router_cpp.PadBounds(),
-                -1, 0,
-                deadline, 0,
+                False,
+                0.0,
+                1.0,
+                0,
+                0,
+                router_cpp.PadBounds(),
+                router_cpp.PadBounds(),
+                -1,
+                0,
+                deadline,
+                0,
             )
             dt = time.monotonic() - t0
             reason = result.failure_reason
@@ -428,21 +473,11 @@ class TestCppFailureReasonClassification:
             NegotiatedRouter.describe_failure_reason({"failure_reason": 3}),  # TIMEOUT
             NegotiatedRouter.describe_failure_reason({"failure_reason": 5}),  # VIA_VIA_BLOCKED
         }
-        assert len(labels) == 5, (
-            f"Failure labels must be distinct, got {labels}"
-        )
+        assert len(labels) == 5, f"Failure labels must be distinct, got {labels}"
         # The timeout label must contain a clue that this is wall-clock,
         # not iteration-cap, so log readers can tell which limit fired.
-        assert (
-            "timeout" in NegotiatedRouter.describe_failure_reason(
-                {"failure_reason": 3}
-            )
-        )
-        assert (
-            "iteration" in NegotiatedRouter.describe_failure_reason(
-                {"failure_reason": 2}
-            )
-        )
+        assert "timeout" in NegotiatedRouter.describe_failure_reason({"failure_reason": 3})
+        assert "iteration" in NegotiatedRouter.describe_failure_reason({"failure_reason": 2})
 
 
 @requires_cpp
@@ -493,7 +528,9 @@ class TestMaxSearchIterationsOverride:
         from kicad_tools.router import router_cpp
 
         grid, rules, start, end = _make_open_grid_pathological(
-            width=100.0, height=100.0, resolution=0.1,
+            width=100.0,
+            height=100.0,
+            resolution=0.1,
         )
         cpp_grid = CppGrid.from_routing_grid(grid)
 
@@ -517,25 +554,33 @@ class TestMaxSearchIterationsOverride:
         # almost immediately.
         t0 = time.monotonic()
         result = pf.route_resumable(
-            start.x, start.y, 0,
-            end.x, end.y, 0,
+            start.x,
+            start.y,
+            0,
+            end.x,
+            end.y,
+            0,
             start.net,
             cpp_grid.get_routable_indices(),
             cpp_grid.get_routable_indices(),
-            False, 0.0, 1.0, 0, 0,
-            router_cpp.PadBounds(), router_cpp.PadBounds(),
-            -1, 0,
-            0.0,    # no wall-clock deadline
-            1000,   # max_search_iterations (tiny -> cap fires fast)
+            False,
+            0.0,
+            1.0,
+            0,
+            0,
+            router_cpp.PadBounds(),
+            router_cpp.PadBounds(),
+            -1,
+            0,
+            0.0,  # no wall-clock deadline
+            1000,  # max_search_iterations (tiny -> cap fires fast)
         )
         dt = time.monotonic() - t0
         try:
             assert not result.success
             # The cap must fire fast; even on a slow CI machine 1000
             # iterations of A* expansion is sub-second.
-            assert dt < 1.0, (
-                f"max_search_iterations=1000 took {dt:.2f}s; cap should fire instantly"
-            )
+            assert dt < 1.0, f"max_search_iterations=1000 took {dt:.2f}s; cap should fire instantly"
             assert result.failure_reason == router_cpp.FAILURE_ITERATION_LIMIT
             assert pf.iterations >= 1000
         finally:

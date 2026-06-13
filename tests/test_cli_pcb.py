@@ -589,8 +589,9 @@ class TestPcbStrip:
 
     def test_strip_dry_run(self, minimal_pcb: Path, capsys):
         """Test strip command with dry run shows what would be removed."""
-        from kicad_tools.cli.commands.pcb import run_pcb_command
         from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
 
         args = Namespace(
             pcb=str(minimal_pcb),
@@ -612,8 +613,9 @@ class TestPcbStrip:
 
     def test_strip_creates_output_file(self, minimal_pcb: Path, tmp_path, capsys):
         """Test strip command creates output file."""
-        from kicad_tools.cli.commands.pcb import run_pcb_command
         from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
 
         output_file = tmp_path / "stripped.kicad_pcb"
         args = Namespace(
@@ -639,8 +641,9 @@ class TestPcbStrip:
 
     def test_strip_json_output(self, minimal_pcb: Path, tmp_path, capsys):
         """Test strip command with JSON output format."""
-        from kicad_tools.cli.commands.pcb import run_pcb_command
         from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
 
         output_file = tmp_path / "stripped.kicad_pcb"
         args = Namespace(
@@ -666,9 +669,10 @@ class TestPcbStrip:
 
     def test_strip_specific_nets(self, tmp_path, capsys):
         """Test stripping only specific nets via CLI."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         # Create a PCB with traces on multiple nets
         pcb = PCB.create(width=100, height=100)
@@ -711,9 +715,10 @@ class TestPcbStrip:
 
     def test_strip_removes_zones_when_requested(self, zone_test_pcb: Path, tmp_path, capsys):
         """Test stripping zones with --no-keep-zones."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         output_file = tmp_path / "stripped.kicad_pcb"
         args = Namespace(
@@ -736,8 +741,9 @@ class TestPcbStrip:
 
     def test_strip_file_not_found(self, tmp_path, capsys):
         """Test strip command with non-existent file."""
-        from kicad_tools.cli.commands.pcb import run_pcb_command
         from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
 
         args = Namespace(
             pcb=str(tmp_path / "nonexistent.kicad_pcb"),
@@ -757,8 +763,9 @@ class TestPcbStrip:
 
     def test_strip_default_output_suffix(self, minimal_pcb: Path, capsys):
         """Test that strip creates output with -stripped suffix when no output specified."""
-        from kicad_tools.cli.commands.pcb import run_pcb_command
         from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
 
         # minimal_pcb is already in tmp_path from the fixture
         args = Namespace(
@@ -781,9 +788,10 @@ class TestPcbStrip:
 
     def test_strip_layers_filter(self, tmp_path, capsys):
         """Test --layers filter strips only specified layers."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         pcb = PCB.create(width=100, height=100)
         pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="F.Cu", net="SIG_A")
@@ -820,9 +828,10 @@ class TestPcbStrip:
 
     def test_strip_layers_and_nets_combined_cli(self, tmp_path, capsys):
         """Test combined --layers and --nets filter via CLI."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         pcb = PCB.create(width=100, height=100)
         pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="AUDIO_R")
@@ -856,9 +865,10 @@ class TestPcbStrip:
 
     def test_strip_power_exclusion_cli(self, tmp_path, capsys):
         """Test that --layers excludes power nets by default in CLI."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         pcb = PCB.create(width=100, height=100)
         pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
@@ -898,9 +908,10 @@ class TestPcbStrip:
 
     def test_strip_include_power_cli(self, tmp_path, capsys):
         """Test --include-power overrides power exclusion."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         pcb = PCB.create(width=100, height=100)
         pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="GND")
@@ -932,9 +943,10 @@ class TestPcbStrip:
 
     def test_strip_json_output_includes_layers(self, tmp_path, capsys):
         """Test JSON output includes layer filter info."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         pcb = PCB.create(width=100, height=100)
         pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")
@@ -967,9 +979,10 @@ class TestPcbStrip:
 
     def test_strip_dry_run_with_layers(self, tmp_path, capsys):
         """Test --dry-run with --layers shows correct removal count."""
+        from argparse import Namespace
+
         from kicad_tools.cli.commands.pcb import run_pcb_command
         from kicad_tools.schema.pcb import PCB
-        from argparse import Namespace
 
         pcb = PCB.create(width=100, height=100)
         pcb.add_trace(start=(10, 10), end=(50, 10), width=0.25, layer="In1.Cu", net="SIG_A")

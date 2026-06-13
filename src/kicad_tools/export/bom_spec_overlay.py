@@ -107,13 +107,9 @@ class SpecOverlayReport:
         return [e.reference for e in self.entries if not e.matched]
 
     def summary_lines(self) -> list[str]:
-        lines = [
-            f"Spec overlay: {self.matched} applied, {self.unmatched} unmatched"
-        ]
+        lines = [f"Spec overlay: {self.matched} applied, {self.unmatched} unmatched"]
         if self.unmatched_refs:
-            lines.append(
-                f"  Unmatched spec refs: {', '.join(self.unmatched_refs)}"
-            )
+            lines.append(f"  Unmatched spec refs: {', '.join(self.unmatched_refs)}")
         return lines
 
 

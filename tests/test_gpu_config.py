@@ -5,8 +5,6 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.acceleration.config import should_use_gpu
 from kicad_tools.performance import (
     GpuConfig,
@@ -211,7 +209,7 @@ class TestPerformanceConfigLoadWithGpu:
         # Create a minimal config without GPU section
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "performance.toml"
-            config_path.write_text('''
+            config_path.write_text("""
 [calibration]
 date = "2024-01-01"
 cpu_cores = 8
@@ -223,7 +221,7 @@ parallel_workers = 7
 
 [grid]
 max_memory_mb = 500
-''')
+""")
             # We need to patch the config path
             import kicad_tools.performance as perf_module
 
@@ -244,7 +242,7 @@ max_memory_mb = 500
         """Test loading config file with GPU section."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "performance.toml"
-            config_path.write_text('''
+            config_path.write_text("""
 [calibration]
 date = "2024-01-01"
 cpu_cores = 8
@@ -267,7 +265,7 @@ min_grid_cells = 200000
 min_components = 100
 min_population = 50
 min_trace_pairs = 200
-''')
+""")
             import kicad_tools.performance as perf_module
 
             original_file = perf_module.PERFORMANCE_CONFIG_FILE

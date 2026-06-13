@@ -20,7 +20,6 @@ from kicad_tools.placement import (
 )
 from kicad_tools.schema import PCB
 
-
 # Test PCB with two components that can overlap
 TWO_RESISTORS_PCB = """(kicad_pcb
   (version 20240108)
@@ -329,9 +328,7 @@ class TestPlaceFootprintSafe:
         """Test that disabling auto-adjust causes failure on collision."""
         pcb = PCB.load(str(two_resistors_pcb))
 
-        success, pos, msg = pcb.place_footprint_safe(
-            "R1", x=105, y=100, auto_adjust=False
-        )
+        success, pos, msg = pcb.place_footprint_safe("R1", x=105, y=100, auto_adjust=False)
 
         assert not success
         assert pos is None

@@ -789,7 +789,6 @@ class TestRoundTrip:
         pad = footprint.find("pad")
         assert pad is not None
 
-
     def test_roundtrip_pcb_header_quoted_generator_version(self):
         """KiCad strict-typed string fields with numeric-looking values
         survive round-trip with their quotes intact.
@@ -800,7 +799,7 @@ class TestRoundTrip:
         """
         pcb_content = (
             "(kicad_pcb\n"
-            '\t(version 20240108)\n'
+            "\t(version 20240108)\n"
             '\t(generator "kicad_tools")\n'
             '\t(generator_version "9.0")\n'
             "\t(general\n"

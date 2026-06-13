@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -31,8 +31,6 @@ if TYPE_CHECKING:
 
 from kicad_tools.acceleration.backend import (
     ArrayBackend,
-    BackendType,
-    get_backend,
     get_best_available_backend,
 )
 
@@ -49,6 +47,7 @@ class BatchRouteRequest:
         target_pad: Target pad for routing
         priority: Priority for routing order (lower = higher priority)
     """
+
     net_id: int
     source_pad: Pad
     target_pad: Pad
@@ -66,6 +65,7 @@ class BatchRouteResult:
         cost: Total path cost
         nodes_explored: Number of A* nodes expanded
     """
+
     net_id: int
     success: bool
     path: list[tuple[int, int, int]] = field(default_factory=list)
@@ -127,20 +127,22 @@ class BatchPathfinder:
         # Pre-compute neighbor offsets for batch expansion
         # Format: (dx, dy, dlayer, cost_multiplier)
         self._neighbors_2d = [
-            (1, 0, 0, 1.0),   # Right
+            (1, 0, 0, 1.0),  # Right
             (-1, 0, 0, 1.0),  # Left
-            (0, 1, 0, 1.0),   # Down
+            (0, 1, 0, 1.0),  # Down
             (0, -1, 0, 1.0),  # Up
         ]
 
         if diagonal_routing:
             sqrt2 = math.sqrt(2)
-            self._neighbors_2d.extend([
-                (1, 1, 0, sqrt2),    # Down-Right
-                (-1, 1, 0, sqrt2),   # Down-Left
-                (1, -1, 0, sqrt2),   # Up-Right
-                (-1, -1, 0, sqrt2),  # Up-Left
-            ])
+            self._neighbors_2d.extend(
+                [
+                    (1, 1, 0, sqrt2),  # Down-Right
+                    (-1, 1, 0, sqrt2),  # Down-Left
+                    (1, -1, 0, sqrt2),  # Up-Right
+                    (-1, -1, 0, sqrt2),  # Up-Left
+                ]
+            )
 
         # Pre-compute as GPU arrays for batch operations
         self._neighbor_dx = self.backend.array(
@@ -256,12 +258,7 @@ class BatchPathfinder:
         x1_min, y1_min, x1_max, y1_max = box1
         x2_min, y2_min, x2_max, y2_max = box2
 
-        return not (
-            x1_max < x2_min or
-            x2_max < x1_min or
-            y1_max < y2_min or
-            y2_max < y1_min
-        )
+        return not (x1_max < x2_min or x2_max < x1_min or y1_max < y2_min or y2_max < y1_min)
 
     def route_batch(
         self,
@@ -305,11 +302,9 @@ class BatchPathfinder:
                 )
             else:
                 # Small batch, use sequential
-                batch_results = self._route_sequential(
-                    batch, negotiated_mode, present_cost_factor
-                )
+                batch_results = self._route_sequential(batch, negotiated_mode, present_cost_factor)
 
-            for req, result in zip(batch, batch_results):
+            for req, result in zip(batch, batch_results, strict=False):
                 request_to_result[req.net_id] = result
 
         # Return results in original request order
@@ -325,9 +320,7 @@ class BatchPathfinder:
         results = []
 
         for req in requests:
-            result = self._route_single(
-                req, negotiated_mode, present_cost_factor
-            )
+            result = self._route_single(req, negotiated_mode, present_cost_factor)
             results.append(result)
 
         return results
@@ -355,18 +348,18 @@ class BatchPathfinder:
         start_layer = 0  # Default to first layer
         end_layer = 0
 
-        if hasattr(source, 'layer') and source.layer is not None:
+        if hasattr(source, "layer") and source.layer is not None:
             start_layer = self.grid.layer_to_index(source.layer.value)
-        if hasattr(target, 'layer') and target.layer is not None:
+        if hasattr(target, "layer") and target.layer is not None:
             end_layer = self.grid.layer_to_index(target.layer.value)
 
         # Handle through-hole pads (can connect on any layer)
         start_layers = [start_layer]
         end_layers = [end_layer]
 
-        if getattr(source, 'through_hole', False):
+        if getattr(source, "through_hole", False):
             start_layers = self.grid.get_routable_indices()
-        if getattr(target, 'through_hole', False):
+        if getattr(target, "through_hole", False):
             end_layers = self.grid.get_routable_indices()
 
         # A* search using numpy arrays for efficiency
@@ -614,18 +607,18 @@ class BatchPathfinder:
         start_layer = 0
         end_layer = 0
 
-        if hasattr(source, 'layer') and source.layer is not None:
+        if hasattr(source, "layer") and source.layer is not None:
             start_layer = self.grid.layer_to_index(source.layer.value)
-        if hasattr(target, 'layer') and target.layer is not None:
+        if hasattr(target, "layer") and target.layer is not None:
             end_layer = self.grid.layer_to_index(target.layer.value)
 
         # Handle through-hole pads
         start_layers = [start_layer]
         end_layers = [end_layer]
 
-        if getattr(source, 'through_hole', False):
+        if getattr(source, "through_hole", False):
             start_layers = self.grid.get_routable_indices()
-        if getattr(target, 'through_hole', False):
+        if getattr(target, "through_hole", False):
             end_layers = self.grid.get_routable_indices()
 
         # Pre-compute GPU arrays for neighbor expansion
@@ -712,8 +705,10 @@ class BatchPathfinder:
 
                 # Bounds check (vectorized)
                 valid = (
-                    (neighbor_x >= 0) & (neighbor_x < self.grid.cols) &
-                    (neighbor_y >= 0) & (neighbor_y < self.grid.rows)
+                    (neighbor_x >= 0)
+                    & (neighbor_x < self.grid.cols)
+                    & (neighbor_y >= 0)
+                    & (neighbor_y < self.grid.rows)
                 )
 
                 # Process valid neighbors
@@ -732,7 +727,9 @@ class BatchPathfinder:
                         if self._is_blocked(nx, ny, nl, net, negotiated_mode):
                             continue
 
-                        move_cost = cost_mult[n_idx] * self.rules.cost_straight * self.grid.resolution
+                        move_cost = (
+                            cost_mult[n_idx] * self.rules.cost_straight * self.grid.resolution
+                        )
                         if negotiated_mode and present_cost_factor > 0:
                             move_cost += self._get_negotiated_cost(nx, ny, nl, present_cost_factor)
 
@@ -984,11 +981,13 @@ class BatchPathfinder:
         idx = goal_idx
 
         while idx >= 0:
-            path.append((
-                int(nodes_x[idx]),
-                int(nodes_y[idx]),
-                int(nodes_layer[idx]),
-            ))
+            path.append(
+                (
+                    int(nodes_x[idx]),
+                    int(nodes_y[idx]),
+                    int(nodes_layer[idx]),
+                )
+            )
             idx = nodes_parent[idx]
 
         path.reverse()

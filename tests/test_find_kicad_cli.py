@@ -20,9 +20,7 @@ class TestFindKicadCliUserApplications:
         built via Path.home(), not a literal '~' that Path() won't expand."""
         # We don't need kicad-cli to actually exist; we just need to
         # confirm the candidate list includes the expanded home path.
-        user_app_path = str(
-            Path.home() / "Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
-        )
+        user_app_path = str(Path.home() / "Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
 
         # Patch Path.exists so only the user-local path "exists"
         original_exists = Path.exists
@@ -56,9 +54,7 @@ class TestFindKicadCliUserApplications:
 
         # None of the checked paths should start with '~'
         for p in checked_paths:
-            assert not p.startswith("~"), (
-                f"Path starts with literal tilde (won't expand): {p}"
-            )
+            assert not p.startswith("~"), f"Path starts with literal tilde (won't expand): {p}"
 
 
 class TestSchValidateUsesFinderFunction:

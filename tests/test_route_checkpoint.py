@@ -355,9 +355,7 @@ class TestMakeCheckpointCallback:
             IterationMetrics(iteration=2, routed_count=2, overflow=0),
         )
         new_content = out_path.read_text()
-        assert new_content.count("(segment") == 2, (
-            "Second call after interval should write again"
-        )
+        assert new_content.count("(segment") == 2, "Second call after interval should write again"
 
 
 # =============================================================================

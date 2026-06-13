@@ -17,16 +17,16 @@ from kicad_tools.cli.drc_summary import (
     create_summary,
     get_severity,
 )
+from kicad_tools.core.types import Severity
 from kicad_tools.drc import DRCReport, ViolationCategory, ViolationType
 from kicad_tools.drc.checker import CheckResult, _check_violation
 from kicad_tools.drc.violation import DRCViolation, _extract_component_refs
-from kicad_tools.core.types import Severity
 from kicad_tools.manufacturers import get_profile
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_violation(
     vtype: ViolationType,
@@ -48,6 +48,7 @@ def _make_violation(
 # ---------------------------------------------------------------------------
 # _extract_component_refs
 # ---------------------------------------------------------------------------
+
 
 class TestExtractComponentRefs:
     """Tests for the _extract_component_refs helper."""
@@ -81,6 +82,7 @@ class TestExtractComponentRefs:
 # ---------------------------------------------------------------------------
 # ViolationCategory.category property
 # ---------------------------------------------------------------------------
+
 
 class TestViolationCategory:
     """Tests for DRCViolation.category property."""
@@ -178,6 +180,7 @@ class TestViolationCategory:
 # is_fine_pitch_inherent()
 # ---------------------------------------------------------------------------
 
+
 class TestIsFinePitchInherent:
     """Tests for DRCViolation.is_fine_pitch_inherent()."""
 
@@ -241,6 +244,7 @@ class TestIsFinePitchInherent:
 # ---------------------------------------------------------------------------
 # checker.py SOLDER_MASK_BRIDGE handler
 # ---------------------------------------------------------------------------
+
 
 class TestCheckerSolderMaskBridge:
     """Tests for _check_violation() handling SOLDER_MASK_BRIDGE."""
@@ -317,6 +321,7 @@ class TestCheckerSolderMaskBridge:
 # drc_summary fine-pitch bridge reclassification
 # ---------------------------------------------------------------------------
 
+
 class TestSummaryFinePitchSolderMask:
     """Tests for fine-pitch solder mask bridge reclassification in drc_summary."""
 
@@ -367,7 +372,9 @@ class TestSummaryFinePitchSolderMask:
 
         assert comparison is not None
         assert comparison.is_false_positive is True
-        assert "fine-pitch" in comparison.message.lower() or "inherent" in comparison.message.lower()
+        assert (
+            "fine-pitch" in comparison.message.lower() or "inherent" in comparison.message.lower()
+        )
 
     def test_compare_with_manufacturer_cross_component_smb_is_true_violation(self):
         """SMB between different components below minimum is a true violation."""
@@ -392,6 +399,7 @@ class TestSummaryFinePitchSolderMask:
 # ---------------------------------------------------------------------------
 # is_same_component_pad_clearance()
 # ---------------------------------------------------------------------------
+
 
 class TestIsSameComponentPadClearance:
     """Tests for DRCViolation.is_same_component_pad_clearance()."""
@@ -446,6 +454,7 @@ class TestIsSameComponentPadClearance:
 # checker.py CLEARANCE_PAD_PAD handler
 # ---------------------------------------------------------------------------
 
+
 class TestCheckerPadPadClearance:
     """Tests for _check_violation() handling CLEARANCE_PAD_PAD."""
 
@@ -486,6 +495,7 @@ class TestCheckerPadPadClearance:
 # ---------------------------------------------------------------------------
 # drc_summary CLEARANCE_PAD_PAD handling
 # ---------------------------------------------------------------------------
+
 
 class TestSummaryPadPadClearance:
     """Tests for same-component pad-pad clearance in drc_summary."""
@@ -537,7 +547,10 @@ class TestSummaryPadPadClearance:
 
         assert comparison is not None
         assert comparison.is_false_positive is True
-        assert "same-component" in comparison.message.lower() or "inherent" in comparison.message.lower()
+        assert (
+            "same-component" in comparison.message.lower()
+            or "inherent" in comparison.message.lower()
+        )
 
     def test_compare_with_manufacturer_different_component_is_true_violation(self):
         """Pad-pad between different components below limit is a true violation."""
@@ -557,6 +570,7 @@ class TestSummaryPadPadClearance:
 # ---------------------------------------------------------------------------
 # to_dict includes category
 # ---------------------------------------------------------------------------
+
 
 class TestViolationToDict:
     """Tests that to_dict() includes the category field."""

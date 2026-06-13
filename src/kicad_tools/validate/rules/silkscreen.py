@@ -305,9 +305,7 @@ def check_all_silkscreen(
     """
     results = DRCResults()
 
-    results.merge(
-        check_silkscreen_line_width(pcb, design_rules, suppress_library=suppress_library)
-    )
+    results.merge(check_silkscreen_line_width(pcb, design_rules, suppress_library=suppress_library))
     results.merge(
         check_silkscreen_text_height(pcb, design_rules, suppress_library=suppress_library)
     )

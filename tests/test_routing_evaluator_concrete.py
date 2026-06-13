@@ -302,9 +302,7 @@ class TestEvaluatorBehavior:
                 _FakeRoute(
                     net=1,
                     net_name="NET1",
-                    segments=[
-                        _FakeSegment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, net=1)
-                    ],
+                    segments=[_FakeSegment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, net=1)],
                     vias=[],
                 ),
             ]
@@ -351,9 +349,7 @@ class TestEvaluatorBehavior:
         monkeypatch.setattr(evo_mod, "run_evolutionary", _spy)
 
         cfg = RoutingEvaluatorConfig(seed=12345, num_workers=1)
-        ev = CppAstarRoutingEvaluator(
-            router_factory=lambda p, r: router, config=cfg
-        )
+        ev = CppAstarRoutingEvaluator(router_factory=lambda p, r: router, config=cfg)
         ev.evaluate_routability({}, {})
         assert seen_kwargs.get("seed") == 12345
         assert seen_kwargs.get("num_workers") == 1
@@ -380,9 +376,7 @@ class TestEvaluatorBehavior:
                 _FakeRoute(
                     net=1,
                     net_name="NET1",
-                    segments=[
-                        _FakeSegment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, net=1)
-                    ],
+                    segments=[_FakeSegment(x1=0.0, y1=0.0, x2=10.0, y2=0.0, net=1)],
                     vias=[],
                 ),
             ]
@@ -390,12 +384,8 @@ class TestEvaluatorBehavior:
         monkeypatch.setattr(evo_mod, "run_evolutionary", _deterministic_run)
 
         cfg = RoutingEvaluatorConfig(seed=999, num_workers=1)
-        ev1 = CppAstarRoutingEvaluator(
-            router_factory=lambda p, r: router, config=cfg
-        )
-        ev2 = CppAstarRoutingEvaluator(
-            router_factory=lambda p, r: router, config=cfg
-        )
+        ev1 = CppAstarRoutingEvaluator(router_factory=lambda p, r: router, config=cfg)
+        ev2 = CppAstarRoutingEvaluator(router_factory=lambda p, r: router, config=cfg)
         r1 = ev1.evaluate_routability({}, {})
         r2 = ev2.evaluate_routability({}, {})
         assert r1 == r2
@@ -450,9 +440,7 @@ class TestTimeoutRespected:
         monkeypatch.setattr(evo_mod, "run_evolutionary", _spy)
 
         cfg = RoutingEvaluatorConfig(timeout_seconds=0.5, num_workers=1)
-        ev = CppAstarRoutingEvaluator(
-            router_factory=lambda p, r: router, config=cfg
-        )
+        ev = CppAstarRoutingEvaluator(router_factory=lambda p, r: router, config=cfg)
         ev.evaluate_routability({}, {})
         assert seen.get("timeout") == 0.5
 
@@ -477,9 +465,7 @@ class TestTimeoutRespected:
         monkeypatch.setattr(evo_mod, "run_evolutionary", _slow_but_bounded)
 
         cfg = RoutingEvaluatorConfig(timeout_seconds=0.2, num_workers=1)
-        ev = CppAstarRoutingEvaluator(
-            router_factory=lambda p, r: router, config=cfg
-        )
+        ev = CppAstarRoutingEvaluator(router_factory=lambda p, r: router, config=cfg)
         start = time.monotonic()
         result = ev.evaluate_routability({}, {})
         elapsed = time.monotonic() - start

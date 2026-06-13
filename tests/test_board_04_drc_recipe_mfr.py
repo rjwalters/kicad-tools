@@ -165,10 +165,7 @@ def test_routed_drc_tolerance_yaml_still_declares_board_04_tier1() -> None:
     )
 
     text = tolerance_yaml.read_text()
-    expected_line = (
-        "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: "
-        "jlcpcb-tier1"
-    )
+    expected_line = "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: jlcpcb-tier1"
     assert expected_line in text, (
         f"{tolerance_yaml.name} no longer declares board 04 against "
         f"jlcpcb-tier1 in its manufacturers: block.  If the board was "

@@ -58,9 +58,8 @@ class TestComputeWirelengthDefaultWeight:
             weight=1.0,
         )
         assert net_default.weight == 1.0
-        assert (
-            compute_wirelength(placements, [net_default])
-            == compute_wirelength(placements, [net_explicit])
+        assert compute_wirelength(placements, [net_default]) == compute_wirelength(
+            placements, [net_explicit]
         )
 
     def test_compute_wirelength_matches_pre_weight_formula(self) -> None:

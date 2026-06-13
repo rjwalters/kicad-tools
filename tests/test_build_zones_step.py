@@ -1265,9 +1265,7 @@ class TestNetPadPositionsRotationConvention:
         assert canonical is not None, "U1 pad 1 not found via get_pad_position"
 
         zone_positions = _net_pad_positions_absolute(pcb, "SIG")
-        assert len(zone_positions) == 1, (
-            f"expected exactly 1 pad on SIG, got {len(zone_positions)}"
-        )
+        assert len(zone_positions) == 1, f"expected exactly 1 pad on SIG, got {len(zone_positions)}"
 
         zx, zy = zone_positions[0]
         cx, cy = canonical
@@ -1314,9 +1312,8 @@ class TestNetPadPositionsRotationConvention:
         # lost its discriminating power and the parametrized test above
         # would no longer protect against the bug.
         cx, cy = canonical
-        disagrees = (
-            not math.isclose(buggy_x, cx, abs_tol=1e-6)
-            or not math.isclose(buggy_y, cy, abs_tol=1e-6)
+        disagrees = not math.isclose(buggy_x, cx, abs_tol=1e-6) or not math.isclose(
+            buggy_y, cy, abs_tol=1e-6
         )
         assert disagrees, (
             "fixture failed to discriminate: buggy and canonical 90° transforms "

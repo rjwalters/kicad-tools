@@ -164,7 +164,6 @@ def placement_place_unplaced(
         ValueError: If the PCB has no ``Edge.Cuts`` board outline.
     """
     from kicad_tools.placement.place_unplaced import (
-        PlaceUnplacedResult,
         place_unplaced,
     )
 

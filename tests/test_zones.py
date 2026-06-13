@@ -893,7 +893,6 @@ class TestZoneFromSexpKiCad9:
 
     def test_fixup_net_numbers_for_zones(self, tmp_path):
         """_fixup_net_numbers should recover net_number for zones."""
-        from pathlib import Path
 
         from kicad_tools.schema.pcb import PCB
 

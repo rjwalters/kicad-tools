@@ -37,7 +37,6 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
@@ -223,8 +222,7 @@ class TestPerPadEscapeWidth:
             for seg in esc.segments
         ]
         assert len(usb_d_segments) > 0, (
-            "No USB_D+/USB_D- segments emitted -- per-pad escape did not "
-            "fire."
+            "No USB_D+/USB_D- segments emitted -- per-pad escape did not fire."
         )
         for seg in usb_d_segments:
             # 0.2mm HighSpeed, NOT 0.5mm Power (pre-#3278).
@@ -247,9 +245,7 @@ class TestPerPadEscapeWidth:
         grid = _make_grid(rules)
 
         # Mixed-class run (production behaviour after #3278).
-        mixed_router = EscapeRouter(
-            grid, rules, net_class_map=_make_mixed_class_net_map()
-        )
+        mixed_router = EscapeRouter(grid, rules, net_class_map=_make_mixed_class_net_map())
         mixed_info = mixed_router.analyze_package(pads)
         mixed_escapes = mixed_router.generate_escapes(mixed_info)
 

@@ -38,8 +38,7 @@ from kicad_tools.router.cpp_backend import (
     is_cpp_available,
 )
 from kicad_tools.router.grid import RoutingGrid
-from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Pad
+from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import DesignRules
 
 # Marker for tests requiring the C++ backend
@@ -97,7 +96,7 @@ class TestViaViaClearanceRegression:
             5.0,  # y_mm
             0.3,  # drill
             rules.via_diameter,  # diameter
-            2,    # net
+            2,  # net
         )
 
         # Pathfinder must refuse a candidate via for net 1 at any point
@@ -184,8 +183,7 @@ class TestViaViaClearanceRegression:
         # Mark cells around (5.0, 5.0) as if a route had committed a via,
         # AND register the via in stored_vias_ as the validator sees it.
         gx_via, gy_via = grid.world_to_grid(5.0, 5.0)
-        radius = math.ceil((rules.via_diameter / 2 + rules.via_clearance)
-                           / grid.resolution) + 1
+        radius = math.ceil((rules.via_diameter / 2 + rules.via_clearance) / grid.resolution) + 1
         cpp_grid._impl.mark_via(gx_via, gy_via, 2, radius)
         cpp_grid._impl.add_stored_via(5.0, 5.0, 0.3, rules.via_diameter, 2)
 
@@ -223,8 +221,7 @@ class TestViaViaClearanceRegression:
         #   * cells marked blocked on all layers around (4.0, 4.0);
         #   * stored_vias_ entry for the validator to see.
         gx_via, gy_via = grid.world_to_grid(4.0, 4.0)
-        radius = math.ceil((rules.via_diameter / 2 + rules.via_clearance)
-                           / grid.resolution) + 1
+        radius = math.ceil((rules.via_diameter / 2 + rules.via_clearance) / grid.resolution) + 1
         cpp_grid._impl.mark_via(gx_via, gy_via, 2, radius)
         cpp_grid._impl.add_stored_via(4.0, 4.0, 0.3, rules.via_diameter, 2)
 

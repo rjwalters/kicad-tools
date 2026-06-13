@@ -349,9 +349,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         # The zone's net is serialized as ``(net "NAME")`` by the
         # ``zones fill`` round-trip writer and as ``(net N)`` +
         # ``(net_name "NAME")`` by KiCad itself -- accept both.
-        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(
-            r'\(net "([^"]*)"\)', zone
-        )
+        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(r'\(net "([^"]*)"\)', zone)
         if not m or m.group(1) not in fills:
             continue
         net = m.group(1)
@@ -533,9 +531,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
     text = pcb_path.read_text()
-    net_id_by_name = {
-        name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)
-    }
+    net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
     id_to_name = {str(v): k for k, v in net_id_by_name.items()}
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
 
@@ -555,9 +551,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             y = fp.position[1] + ry + origin_y
             is_th = any("*" in str(layer) for layer in pad.layers)
             layers = (
-                all_layers
-                if is_th
-                else frozenset({l for l in pad.layers if l.endswith(".Cu")})
+                all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
             )
             # Conservative obstacle: circumscribed half-diagonal so square
             # pad corners are respected.  The CONNECTIVITY geometry uses
@@ -612,9 +606,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # Zone fills: net -> [(poly, layer)]
     fills_by_net: dict[str, list] = {n: [] for n in net_names}
     for zone in _find_sexp_blocks(text, "\n\t(zone") + _find_sexp_blocks(text, "\n  (zone"):
-        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(
-            r'\(net "([^"]*)"\)', zone
-        )
+        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(r'\(net "([^"]*)"\)', zone)
         if not m or m.group(1) not in fills_by_net:
             continue
         for block in _find_sexp_blocks(zone, "(filled_polygon"):
@@ -683,9 +675,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False
         return True
 
-    directions = [
-        (math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)
-    ]
+    directions = [(math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)]
     # Near offsets first (the BGA diagonal hollow sits at 0.898 mm); the
     # long tail handles lane escapes -- a pad boxed in by parallel
     # traces (board 06: U2.F1 between USB3_TX2+/TX2- on F.Cu with
@@ -703,7 +693,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         nonlocal vias_placed
         nid = net_id_by_name[net]
         via_lines.append(
-            f'  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) '
+            f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
             f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
         )
         via_index.append((Point(vx, vy), net, VIA_R))
@@ -742,9 +732,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 # Inscribed-circle copper for own-net union (matches the
                 # audit's conservative connectivity model).
                 own.append((inscribed, layers, f"pad:{name}"))
-        pad_center = {
-            entry[5]: entry[4] for entry in pad_index if entry[1] == net
-        }
+        pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
 
         # Union-find over own elements, built ONCE and maintained
         # incrementally as repair geometry is appended (a full O(n^2)
@@ -803,9 +791,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # Connect the largest not-yet-skipped secondary component; a
             # component that failed every strategy is set aside so the
             # remaining components still get their repair attempt.
-            candidates = [
-                idxs for idxs in live[1:] if _find(idxs[0]) not in skipped_roots
-            ]
+            candidates = [idxs for idxs in live[1:] if _find(idxs[0]) not in skipped_roots]
             if not candidates:
                 break
             target = candidates[0]
@@ -814,9 +800,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
             # Sub-stage A: lone SMD pad (or pad cluster) with no via -- try
             # an offset via + stub whose barrel lands on PRIMARY copper.
-            comp_pads = [
-                own[i][2][4:] for i in target if own[i][2].startswith("pad:")
-            ]
+            comp_pads = [own[i][2][4:] for i in target if own[i][2].startswith("pad:")]
             comp_has_via = any(own[i][2] == "via" for i in target)
             if comp_pads and not comp_has_via:
                 pad_name = comp_pads[0]
@@ -900,9 +884,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # first intersection with primary copper within 12 mm becomes
             # the bridge endpoint.
             if not merged:
-                ray_origins = [
-                    own[i][0].centroid for i in target if own[i][2] == "via"
-                ]
+                ray_origins = [own[i][0].centroid for i in target if own[i][2] == "via"]
                 for origin in ray_origins:
                     for dx, dy in directions:
                         ray = LineString(
@@ -984,12 +966,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                                 _emit_via(net, *va)
                                 _emit_via(net, *vb)
                                 _emit_seg(net, va, vb, lay, BRIDGE_W)
-                                _append_own(
-                                    (Point(va).buffer(VIA_R), all_layers, "via")
-                                )
-                                _append_own(
-                                    (Point(vb).buffer(VIA_R), all_layers, "via")
-                                )
+                                _append_own((Point(va).buffer(VIA_R), all_layers, "via"))
+                                _append_own((Point(vb).buffer(VIA_R), all_layers, "via"))
                                 _append_own(
                                     (
                                         LineString([va, vb]).buffer(BRIDGE_W / 2.0),
@@ -1011,8 +989,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             if not merged:
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
                 failed.append(
-                    f"{net}: cannot reconnect component "
-                    f"{[n[4:] for n in names] or '(fill island)'}"
+                    f"{net}: cannot reconnect component {[n[4:] for n in names] or '(fill island)'}"
                 )
                 skipped_roots.add(_find(target[0]))
 
@@ -1096,9 +1073,7 @@ def _repair_pair_overlap_solo(router, net_map: dict[str, int]) -> list[str]:
             continue
         _, _, p_segs = _net_geoms(p_id)
         _, _, n_segs = _net_geoms(n_id)
-        side_id, side_name = (
-            (n_id, n_name) if n_segs <= p_segs else (p_id, p_name)
-        )
+        side_id, side_name = (n_id, n_name) if n_segs <= p_segs else (p_id, p_name)
         partner_id = p_id if side_id == n_id else n_id
         print(
             f"   {p_name}/{n_name}: physically overlapping copper -- "
@@ -1133,10 +1108,7 @@ def _repair_pair_overlap_solo(router, net_map: dict[str, int]) -> list[str]:
             _rollback()
             continue
         if _sides_overlap(side_id, partner_id):
-            print(
-                f"   {side_name}: solo re-route still overlaps partner -- "
-                f"restoring original"
-            )
+            print(f"   {side_name}: solo re-route still overlaps partner -- restoring original")
             _rollback()
             continue
         # Issue #3507: the optimizer/nudge passes are now grid-
@@ -1171,16 +1143,13 @@ def _repair_pair_overlap_solo(router, net_map: dict[str, int]) -> list[str]:
                 break
             for v in other.vias:
                 ov = Point(v.x, v.y).buffer(v.diameter / 2.0)
-                if any(
-                    g.intersects(ov) for geoms in new_by_layer.values() for g in geoms
-                ) or any(w.intersects(ov) for w in new_vias):
+                if any(g.intersects(ov) for geoms in new_by_layer.values() for g in geoms) or any(
+                    w.intersects(ov) for w in new_vias
+                ):
                     cross = True
                     break
         if cross:
-            print(
-                f"   {side_name}: solo re-route contacts foreign copper -- "
-                f"restoring original"
-            )
+            print(f"   {side_name}: solo re-route contacts foreign copper -- restoring original")
             _rollback()
             continue
         repaired.append(side_name)

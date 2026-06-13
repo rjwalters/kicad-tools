@@ -7,14 +7,11 @@ the offending symbol lives on a child sheet.
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.erc.cross_sheet import (
     _build_symbol_sheet_map,
     _extract_identifiers_from_items,
     reattribute_symbol_violations,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixture schematic templates (same format as test_erc_cross_sheet.py)
@@ -106,13 +103,10 @@ def _make_hierarchy(tmp_path: Path) -> str:
     Returns path to root schematic.
     """
     root_symbols = _make_symbol("R1", "10k", uuid="root-r1")
-    root_sheets = (
-        _make_sheet("DAC", "dac.kicad_sch", uuid="sheet-dac")
-        + _make_sheet("Power", "power.kicad_sch", uuid="sheet-power")
+    root_sheets = _make_sheet("DAC", "dac.kicad_sch", uuid="sheet-dac") + _make_sheet(
+        "Power", "power.kicad_sch", uuid="sheet-power"
     )
-    root_content = _ROOT_TEMPLATE.format(
-        symbols=root_symbols, sheets=root_sheets
-    )
+    root_content = _ROOT_TEMPLATE.format(symbols=root_symbols, sheets=root_sheets)
 
     dac_symbols = _make_symbol("U3", "PCM5122", lib_id="Audio:PCM5122", uuid="dac-u3")
     dac_content = _SUBSHEET_TEMPLATE.format(uuid="dac-uuid-001", symbols=dac_symbols)

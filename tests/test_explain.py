@@ -15,17 +15,13 @@ import json
 import pytest
 
 from kicad_tools.explain import (
-    ExplainedViolation,
     ExplanationRegistry,
     ExplanationResult,
-    InterfaceSpec,
     RuleExplanation,
     SpecReference,
     explain,
     explain_net_constraints,
-    explain_violations,
     format_result,
-    format_violations,
     list_rules,
     search_rules,
 )
@@ -207,12 +203,15 @@ class TestExplainFunction:
 
     def test_explain_with_context(self):
         """Test explaining with context values."""
-        result = explain("trace_clearance", {
-            "value": 0.15,
-            "required_value": 0.2,
-            "net1": "USB_D+",
-            "net2": "GND",
-        })
+        result = explain(
+            "trace_clearance",
+            {
+                "value": 0.15,
+                "required_value": 0.2,
+                "net1": "USB_D+",
+                "net2": "GND",
+            },
+        )
         assert result.current_value == 0.15
         assert result.required_value == 0.2
         assert len(result.fix_suggestions) > 0

@@ -71,9 +71,7 @@ def run_remove_footprint(
     if not dry_run:
         success = pcb.remove_footprint(reference)
         if not success:
-            _print_error(
-                f"Failed to remove footprint {reference}", output_format
-            )
+            _print_error(f"Failed to remove footprint {reference}", output_format)
             return 1
 
         result["removed"] = True

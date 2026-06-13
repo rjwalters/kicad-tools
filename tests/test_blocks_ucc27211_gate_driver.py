@@ -32,14 +32,14 @@ def mock_schematic():
     # Pin layout mirrors the custom symbol file.  Offsets are relative
     # to the symbol's placement origin (x, y).
     ucc_pins = {
-        "1": (10, -7.62),    # HB
-        "2": (10, -5.08),    # HO
-        "3": (10, -2.54),    # HS
-        "4": (0, -12.7),     # VDD
-        "5": (-10, -5.08),   # HI
-        "6": (-10, -2.54),   # LI
-        "7": (0, 12.7),      # VSS / Kelvin
-        "8": (10, 5.08),     # LO
+        "1": (10, -7.62),  # HB
+        "2": (10, -5.08),  # HO
+        "3": (10, -2.54),  # HS
+        "4": (0, -12.7),  # VDD
+        "5": (-10, -5.08),  # HI
+        "6": (-10, -2.54),  # LI
+        "7": (0, 12.7),  # VSS / Kelvin
+        "8": (10, 5.08),  # LO
     }
     # Cap pins
     cap_pins = {"1": (0, -5), "2": (0, 5)}
@@ -85,8 +85,7 @@ class TestUCC27211GateDriver:
     def test_exposes_all_required_ports(self, mock_schematic):
         """All eight driver pins are reachable via .port()."""
         drv = UCC27211GateDriver(mock_schematic, x=100, y=100)
-        for port in ("VDD", "VSS", "LI", "HI", "LO", "HO", "HB", "HS",
-                     "KELVIN_SOURCE"):
+        for port in ("VDD", "VSS", "LI", "HI", "LO", "HO", "HB", "HS", "KELVIN_SOURCE"):
             assert port in drv.ports, f"Missing port {port!r}"
 
     def test_metadata_records_uvlo_and_peak_drive(self, mock_schematic):
@@ -123,7 +122,9 @@ class TestUCC27211GateDriver:
     def test_li_net_emits_one_label(self, mock_schematic):
         """``li_net`` triggers a single label at the LI stub endpoint."""
         UCC27211GateDriver(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             li_net="GATE_POS_B",
         )
         labels = [c.args[0] for c in mock_schematic.add_label.call_args_list]
@@ -132,7 +133,9 @@ class TestUCC27211GateDriver:
     def test_kelvin_source_net_emits_label(self, mock_schematic):
         """``kelvin_source_net`` labels the Kelvin tie point."""
         UCC27211GateDriver(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             kelvin_source_net="SRC_POS",
         )
         labels = [c.args[0] for c in mock_schematic.add_label.call_args_list]

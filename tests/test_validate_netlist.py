@@ -8,7 +8,6 @@ import pytest
 
 from kicad_tools.validate.rules.netlist import NetlistRule, _absolute_pad_position
 
-
 # ---------------------------------------------------------------------------
 # Lightweight stubs that satisfy the rule without loading a real PCB file
 # ---------------------------------------------------------------------------
@@ -108,7 +107,7 @@ class TestNetlistRule:
                         _StubPad(
                             number="2",
                             net_number=0,
-                            net_name='Net-(C3-Pad2)',
+                            net_name="Net-(C3-Pad2)",
                         ),
                     ],
                 ),
@@ -121,7 +120,7 @@ class TestNetlistRule:
         assert v.rule_id == "net_undeclared"
         assert v.severity == "warning"
         assert "C3-2" in v.message
-        assert 'Net-(C3-Pad2)' in v.message
+        assert "Net-(C3-Pad2)" in v.message
         assert v.items == ("C3-2",)
 
     def test_empty_net_name_skipped(self):

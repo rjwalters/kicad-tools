@@ -1530,8 +1530,14 @@ class TestOverflowTolerantCollisionChecker:
         from kicad_tools.router import Segment as RouteSegment
 
         seg = RouteSegment(
-            x1=3.0, y1=0.0, x2=3.0, y2=5.0,
-            width=0.2, layer=Layer.F_CU, net=net_id, net_name=f"NET{net_id}",
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net_id,
+            net_name=f"NET{net_id}",
         )
         route = Route(net=net_id, net_name=f"NET{net_id}", segments=[seg])
         grid.mark_route(route)
@@ -1545,8 +1551,13 @@ class TestOverflowTolerantCollisionChecker:
 
         checker = GridCollisionChecker(grid, ignore_overflow=False)
         result = checker.path_is_clear(
-            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         assert result is False
 
@@ -1568,8 +1579,13 @@ class TestOverflowTolerantCollisionChecker:
 
         checker = GridCollisionChecker(grid, ignore_overflow=True)
         result = checker.path_is_clear(
-            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         assert result is True
 
@@ -1584,8 +1600,13 @@ class TestOverflowTolerantCollisionChecker:
 
         checker = GridCollisionChecker(grid, ignore_overflow=True)
         result = checker.path_is_clear(
-            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         assert result is False
 
@@ -1603,8 +1624,13 @@ class TestOverflowTolerantCollisionChecker:
 
         checker = GridCollisionChecker(grid, ignore_overflow=True)
         result = checker.path_is_clear(
-            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         assert result is False
 
@@ -1616,12 +1642,22 @@ class TestOverflowTolerantCollisionChecker:
         checker_overflow = GridCollisionChecker(grid, ignore_overflow=True)
 
         result_normal = checker_normal.path_is_clear(
-            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         result_overflow = checker_overflow.path_is_clear(
-            x1=1.0, y1=2.5, x2=5.0, y2=2.5,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         assert result_normal == result_overflow == True  # noqa: E712
 
@@ -1639,10 +1675,12 @@ class TestOverflowTolerantCollisionChecker:
 
         # Create segments for net 1 that cross through the blocked area
         segments = [
-            Segment(x1=1.0, y1=2.5, x2=3.0, y2=2.5,
-                    width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"),
-            Segment(x1=3.0, y1=2.5, x2=5.0, y2=2.5,
-                    width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"),
+            Segment(
+                x1=1.0, y1=2.5, x2=3.0, y2=2.5, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+            ),
+            Segment(
+                x1=3.0, y1=2.5, x2=5.0, y2=2.5, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+            ),
         ]
 
         # With ignore_overflow=True, all segments should be preserved
@@ -1667,8 +1705,14 @@ class TestPullTight:
 
     def _seg(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
         return Segment(
-            x1=x1, y1=y1, x2=x2, y2=y2,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
         )
 
     def _total_length(self, segs: list[Segment]) -> float:
@@ -1792,7 +1836,7 @@ class TestPullTight:
 
         # Segments should not move at all
         assert len(result) == 3
-        for orig, res in zip(segments, result):
+        for orig, res in zip(segments, result, strict=False):
             assert abs(orig.x1 - res.x1) < 1e-4
             assert abs(orig.y1 - res.y1) < 1e-4
             assert abs(orig.x2 - res.x2) < 1e-4
@@ -1845,10 +1889,10 @@ class TestPullTight:
         # Check chain connectivity
         for i in range(len(result) - 1):
             assert abs(result[i].x2 - result[i + 1].x1) < 1e-3, (
-                f"Gap between segment {i} end and segment {i+1} start"
+                f"Gap between segment {i} end and segment {i + 1} start"
             )
             assert abs(result[i].y2 - result[i + 1].y1) < 1e-3, (
-                f"Gap between segment {i} end and segment {i+1} start"
+                f"Gap between segment {i} end and segment {i + 1} start"
             )
 
     def test_existing_optimizations_unchanged_with_pull_tight_disabled(self):
@@ -2038,9 +2082,7 @@ class TestYJunctionConnectivityPreserved:
         optimizer = TraceOptimizer()
         result = optimizer.optimize_route(route)
 
-        assert self._all_pads_reachable(
-            result.segments, [pad_a, pad_b, pad_c]
-        ), (
+        assert self._all_pads_reachable(result.segments, [pad_a, pad_b, pad_c]), (
             "All three pads of a Y-shaped route must remain connected "
             "after optimisation (issue #2389)."
         )
@@ -2067,9 +2109,7 @@ class TestYJunctionConnectivityPreserved:
         for chain in chains:
             endpoints = {chain[0].start, chain[-1].end}
             # One endpoint is a leaf, the other is the junction.
-            assert (endpoints & leaves), (
-                "Each branch should terminate at one of the pad leaves"
-            )
+            assert endpoints & leaves, "Each branch should terminate at one of the pad leaves"
             assert junction in endpoints
 
     def test_optimizer_guard_reverts_if_branch_dropped(self):
@@ -2100,7 +2140,7 @@ class TestYJunctionConnectivityPreserved:
 
         # Guard must have reverted to the original three segments so all
         # pads remain reachable from one another.
-        assert self._all_pads_reachable(
-            result.segments, [pad_a, pad_b, pad_c]
-        ), "Guard failed to revert when branches were dropped"
+        assert self._all_pads_reachable(result.segments, [pad_a, pad_b, pad_c]), (
+            "Guard failed to revert when branches were dropped"
+        )
         assert len(result.segments) == 3

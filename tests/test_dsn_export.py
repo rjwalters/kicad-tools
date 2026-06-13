@@ -7,9 +7,9 @@ import pytest
 
 from kicad_tools.export.dsn import (
     KiCadToDSNExporter,
+    _dsn_quote,
     mm_to_um,
     um_to_mm,
-    _dsn_quote,
 )
 
 # Path to the voltage divider test board
@@ -231,7 +231,7 @@ class TestDSNRoundTrip:
         exporter = KiCadToDSNExporter(str(VOLTAGE_DIVIDER_PCB))
 
         # Count place directives in DSN
-        place_count = len(re.findall(r'\(place\s', dsn_content))
+        place_count = len(re.findall(r"\(place\s", dsn_content))
         assert place_count == len(exporter.footprints)
 
     def test_layer_count_matches(self, dsn_content):
@@ -241,7 +241,7 @@ class TestDSNRoundTrip:
         exporter = KiCadToDSNExporter(str(VOLTAGE_DIVIDER_PCB))
 
         # Count (layer ...) in structure section
-        structure_match = re.search(r'\(structure(.*?)\n  \)', dsn_content, re.DOTALL)
+        structure_match = re.search(r"\(structure(.*?)\n  \)", dsn_content, re.DOTALL)
         assert structure_match
-        layer_count = len(re.findall(r'\(layer\s', structure_match.group(1)))
+        layer_count = len(re.findall(r"\(layer\s", structure_match.group(1)))
         assert layer_count == len(exporter.layers)

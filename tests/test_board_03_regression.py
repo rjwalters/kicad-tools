@@ -886,15 +886,9 @@ def test_parse_routed_net_count_still_handles_partial() -> None:
 def test_parse_routed_net_count_handles_legacy_drc_passed_banner() -> None:
     """The DRC-clean banner (``SUCCESS: All ... nets routed, DRC passed!``)
     must also parse, whether or not the word ``signal`` is present."""
-    legacy = (
-        "Nets routed:     13/13\n"
-        "SUCCESS: All nets routed, DRC passed!\n"
-    )
+    legacy = "Nets routed:     13/13\nSUCCESS: All nets routed, DRC passed!\n"
     assert _parse_routed_net_count(legacy) == (13, 13)
-    signal = (
-        "Nets routed:     13/13\n"
-        "SUCCESS: All signal nets routed, DRC passed!\n"
-    )
+    signal = "Nets routed:     13/13\nSUCCESS: All signal nets routed, DRC passed!\n"
     assert _parse_routed_net_count(signal) == (13, 13)
 
 

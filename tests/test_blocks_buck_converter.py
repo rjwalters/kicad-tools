@@ -70,9 +70,7 @@ def mock_schematic():
             pin_map = buck_pin_map_template
 
         comp.pin_position.side_effect = lambda name, _x=x, _y=y, _pm=pin_map: (
-            (_x + _pm[name][0], _y + _pm[name][1])
-            if name in _pm
-            else (_x, _y)
+            (_x + _pm[name][0], _y + _pm[name][1]) if name in _pm else (_x, _y)
         )
         return comp
 
@@ -95,7 +93,9 @@ class TestBuckConverterPinNets:
     def test_pin_nets_left_edge_pin_stubs_left(self, mock_schematic):
         """Pins to the left of the symbol center stub leftward."""
         block = BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"VIN": "VMOTOR"},
         )
 
@@ -115,7 +115,9 @@ class TestBuckConverterPinNets:
     def test_pin_nets_right_edge_pin_stubs_right(self, mock_schematic):
         """Pins to the right of the symbol center stub rightward."""
         BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"FB": "+5V"},
         )
 
@@ -132,7 +134,9 @@ class TestBuckConverterPinNets:
         """``pin_nets`` keys may be pin numbers, not just pin names."""
         # Our mock advertises "1" as an alias for VIN.
         BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"1": "VMOTOR"},
         )
         labels = [c.args[0] for c in mock_schematic.add_label.call_args_list]
@@ -146,7 +150,9 @@ class TestBuckConverterPinNets:
             "FB": "+5V",
         }
         BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets=pin_nets,
         )
 
@@ -158,7 +164,9 @@ class TestBuckConverterPinNets:
     def test_alias_ports_added_for_each_pin_net(self, mock_schematic):
         """Each ``pin_nets`` entry adds a port keyed by the net name."""
         block = BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"VIN": "VMOTOR", "FB": "+5V"},
         )
         assert "VMOTOR" in block.ports
@@ -171,7 +179,9 @@ class TestBuckConverterPinNets:
         original_gnd = block_no_nets.ports["GND"]
 
         block = BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"GND": "GND"},  # try to overwrite
         )
         # Original port survives.
@@ -184,7 +194,9 @@ class TestBuckConverterPinNets:
         KiCad's label-only connectivity treats it as floating.
         """
         BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={
                 "VIN": "VMOTOR",
                 "GND": "GND_NET",
@@ -212,7 +224,9 @@ class TestBuckConverterPinNets:
         """Block ports unchanged when ``pin_nets`` is ``None`` (back-compat)."""
         b1 = BuckConverter(mock_schematic, x=100, y=100)
         b2 = BuckConverter(
-            mock_schematic, x=100, y=100,
+            mock_schematic,
+            x=100,
+            y=100,
             pin_nets={"FB": "+5V"},
         )
         # Original placeholder ports survive in both blocks.

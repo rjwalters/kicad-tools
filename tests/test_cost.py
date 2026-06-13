@@ -1493,9 +1493,7 @@ class TestIsBasicPartWithCache:
         mock_part.is_basic = True
         mock_cache.get.return_value = mock_part
 
-        estimator = ManufacturingCostEstimator(
-            use_lcsc_pricing=False, parts_cache=mock_cache
-        )
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False, parts_cache=mock_cache)
         assert estimator._is_basic_part("C123456") is True
         mock_cache.get.assert_called_once_with("C123456", ignore_expiry=True)
 
@@ -1506,9 +1504,7 @@ class TestIsBasicPartWithCache:
         mock_part.is_basic = False
         mock_cache.get.return_value = mock_part
 
-        estimator = ManufacturingCostEstimator(
-            use_lcsc_pricing=False, parts_cache=mock_cache
-        )
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False, parts_cache=mock_cache)
         assert estimator._is_basic_part("C999999") is False
 
     def test_cache_miss_returns_false(self):
@@ -1516,9 +1512,7 @@ class TestIsBasicPartWithCache:
         mock_cache = MagicMock()
         mock_cache.get.return_value = None
 
-        estimator = ManufacturingCostEstimator(
-            use_lcsc_pricing=False, parts_cache=mock_cache
-        )
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False, parts_cache=mock_cache)
         assert estimator._is_basic_part("C000001") is False
 
     def test_assembly_cost_counts_extended_parts(self):
@@ -1541,9 +1535,7 @@ class TestIsBasicPartWithCache:
         group_extended = self._make_bom_group(lcsc="C200", ref="U1", qty=1, footprint="LQFP-48")
         mock_bom.grouped.return_value = [group_basic, group_extended]
 
-        estimator = ManufacturingCostEstimator(
-            use_lcsc_pricing=False, parts_cache=mock_cache
-        )
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False, parts_cache=mock_cache)
         assembly = estimator._estimate_assembly_cost(mock_bom, pcb=None, quantity=5)
 
         # extended_fee ($3.00 for 1 extended part) is folded into setup_cost.
@@ -1562,9 +1554,7 @@ class TestIsBasicPartWithCache:
         group = self._make_bom_group(lcsc="C200", ref="U1", qty=1, footprint="LQFP-48")
         mock_bom.grouped.return_value = [group]
 
-        estimator = ManufacturingCostEstimator(
-            use_lcsc_pricing=False, parts_cache=mock_cache
-        )
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False, parts_cache=mock_cache)
         costs = estimator._estimate_component_costs(mock_bom, quantity=1)
 
         assert len(costs) == 1
@@ -1577,8 +1567,6 @@ class TestIsBasicPartWithCache:
         basic_part.is_basic = True
         mock_cache.get.return_value = basic_part
 
-        estimator = ManufacturingCostEstimator(
-            use_lcsc_pricing=False, parts_cache=mock_cache
-        )
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False, parts_cache=mock_cache)
         # _is_basic_part should still query the cache
         assert estimator._is_basic_part("C100") is True

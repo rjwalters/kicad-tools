@@ -145,7 +145,9 @@ Examples:
     from kicad_tools.drc.violation import ViolationType
 
     clearance_count = len(report.by_type(ViolationType.CLEARANCE))
-    pad_pad_count = len(report.by_type(ViolationType.CLEARANCE_PAD_PAD)) if args.nudge_footprints else 0
+    pad_pad_count = (
+        len(report.by_type(ViolationType.CLEARANCE_PAD_PAD)) if args.nudge_footprints else 0
+    )
     total_count = clearance_count + pad_pad_count
     if total_count == 0:
         if not args.quiet:
@@ -418,9 +420,7 @@ def _print_nudge(nudge: NudgeResult) -> None:
         f"    Displacement: ({nudge.displacement_x:+.4f}, {nudge.displacement_y:+.4f}) mm "
         f"= {nudge.displacement_mm:.4f} mm"
     )
-    print(
-        f"    Clearance: {nudge.old_clearance_mm:.4f} -> {nudge.new_clearance_mm:.4f} mm"
-    )
+    print(f"    Clearance: {nudge.old_clearance_mm:.4f} -> {nudge.new_clearance_mm:.4f} mm")
 
 
 def _print_footprint_nudge(fn: FootprintNudgeResult) -> None:
@@ -431,9 +431,7 @@ def _print_footprint_nudge(fn: FootprintNudgeResult) -> None:
         f"    Displacement: ({fn.displacement_x:+.4f}, {fn.displacement_y:+.4f}) mm "
         f"= {fn.displacement_mm:.4f} mm"
     )
-    print(
-        f"    Clearance: {fn.old_clearance_mm:.4f} -> {fn.new_clearance_mm:.4f} mm"
-    )
+    print(f"    Clearance: {fn.old_clearance_mm:.4f} -> {fn.new_clearance_mm:.4f} mm")
 
 
 if __name__ == "__main__":

@@ -23,19 +23,11 @@ Example::
     print(f"Routed {result.routed_nets}/{result.total_nets} nets")
 """
 
-from .block_router import BlockRouter, BlockRoutingResult
-from .congestion_estimator import CongestionEstimator, NetBBox, TileGrid
-from .cache import (
-    CachedNetRoute,
-    CachedRoutingResult,
-    CachedSubProblem,
-    CacheKey,
-    RoutingCache,
-    SubProblemSignature,
-    compute_pad_positions_hash,
-    get_default_cache_path,
-    normalize_routes_to_origin,
-    transform_routes,
+from .adaptive_grid import (
+    AdaptiveGridResult,
+    AdaptiveGridRouter,
+    FinePitchEscapeFailure,
+    identify_fine_pitch_components,
 )
 from .analysis import (
     BlockingObstacle,
@@ -49,6 +41,7 @@ from .analysis import (
     RoutingSeverity,
     analyze_routing_failure,
 )
+from .block_router import BlockRouter, BlockRoutingResult
 from .bus import (
     BusGroup,
     BusRoutingConfig,
@@ -58,6 +51,19 @@ from .bus import (
     detect_bus_signals,
     group_buses,
 )
+from .cache import (
+    CachedNetRoute,
+    CachedRoutingResult,
+    CachedSubProblem,
+    CacheKey,
+    RoutingCache,
+    SubProblemSignature,
+    compute_pad_positions_hash,
+    get_default_cache_path,
+    normalize_routes_to_origin,
+    transform_routes,
+)
+from .congestion_estimator import CongestionEstimator, NetBBox, TileGrid
 from .core import AdaptiveAutorouter, Autorouter, RoutingFailure, RoutingResult
 from .cpp_backend import (
     CppGrid,
@@ -79,6 +85,7 @@ from .diffpair import (
     detect_differential_signals,
     group_differential_pairs,
 )
+from .drc_nudge import DRCNudgeResult, drc_verify_and_nudge
 from .escape import (
     EscapeDirection,
     EscapeRoute,
@@ -115,21 +122,8 @@ from .fine_pitch_escape import (
     get_default_escape_clearance,
     resolve_clearance_with_escape_region,
 )
+from .global_router import CorridorAssignment, GlobalRouter, GlobalRoutingResult
 from .grid import RoutingGrid
-from .adaptive_grid import (
-    AdaptiveGridResult,
-    AdaptiveGridRouter,
-    FinePitchEscapeFailure,
-    identify_fine_pitch_components,
-)
-from .subgrid import (
-    SubGridAnalysis,
-    SubGridEscape,
-    SubGridPad,
-    SubGridResult,
-    SubGridRouter,
-    compute_subgrid_resolution,
-)
 from .heuristics import (
     CongestionAwareHeuristic,
     DirectionBiasHeuristic,
@@ -138,12 +132,6 @@ from .heuristics import (
     HeuristicContext,
     ManhattanHeuristic,
     WeightedCongestionHeuristic,
-)
-from .drc_nudge import DRCNudgeResult, drc_verify_and_nudge
-from .preflight import (
-    OffGridReport,
-    PreflightOffGridPad,
-    check_pad_grid_alignment,
 )
 from .io import (
     ClearanceViolation,
@@ -214,11 +202,12 @@ from .net_class import (
 from .optimizer import (
     CollisionChecker,
     GridCollisionChecker,
-    VectorCollisionChecker,
     OptimizationConfig,
     OptimizationStats,
     TraceOptimizer,
+    VectorCollisionChecker,
 )  # noqa: F401 - optimizer is now a package
+from .orchestrator import RoutingOrchestrator
 from .output import (
     format_failed_nets_summary,
     get_routing_diagnostics_json,
@@ -243,7 +232,13 @@ from .placement_feedback import (
     PlacementFeedbackResult,
     detect_pf_stagnation,
 )
+from .preflight import (
+    OffGridReport,
+    PreflightOffGridPad,
+    check_pad_grid_alignment,
+)
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
+from .region_graph import Region, RegionEdge, RegionGraph
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     NET_CLASS_AUDIO,
@@ -260,9 +255,6 @@ from .rules import (
     ZoneRules,
     create_net_class_map,
 )
-from .global_router import CorridorAssignment, GlobalRouter, GlobalRoutingResult
-from .orchestrator import RoutingOrchestrator
-from .region_graph import Region, RegionEdge, RegionGraph
 from .sparse import SparseRouter, SparseRoutingGraph, Waypoint
 from .strategies import (
     AlternativeStrategy,
@@ -272,6 +264,14 @@ from .strategies import (
     RoutingMetrics,
     RoutingResult,
     RoutingStrategy,
+)
+from .subgrid import (
+    SubGridAnalysis,
+    SubGridEscape,
+    SubGridPad,
+    SubGridResult,
+    SubGridRouter,
+    compute_subgrid_resolution,
 )
 from .tuning import (
     COST_PROFILES,

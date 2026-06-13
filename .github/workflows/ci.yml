@@ -27,18 +27,20 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      # continue-on-error on both steps below is tracked by issue #3464
-      # (lint rot is invisible: ~860 ruff errors / ~510 unformatted files
-      # on main as of 2026-06-11). Removing it requires a repo-wide
-      # format/lint burn-down that is out of scope for #3436 (which
-      # un-masked the Test job).
+      # Issue #3464: continue-on-error was removed from both steps below.
+      # It made the "Lint & Format" check always green regardless of
+      # ruff's exit code, hiding ~860 lint errors / ~510 unformatted files
+      # on main. The repo-wide format/lint burn-down landed alongside this
+      # gate flip (512 files reformatted, ~725 errors auto-fixed, 8 F821
+      # defects fixed manually). A residual set of risky rules is baselined
+      # in pyproject.toml [tool.ruff.lint] ignore with burn-down tracked by
+      # #3663. These steps now GATE: if red, run `uv run ruff format .` and
+      # `uv run ruff check . --fix` -- do NOT re-add continue-on-error.
       - name: Check formatting
         run: uv run ruff format . --check
-        continue-on-error: true
 
       - name: Lint
         run: uv run ruff check .
-        continue-on-error: true
 
   typecheck:
     name: Type Check

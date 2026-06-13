@@ -13,14 +13,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from kicad_tools.router.adaptive import RoutingResult
 from kicad_tools.router.output import (
     get_routing_diagnostics_json,
     show_routing_summary,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -122,7 +119,7 @@ class TestCheckConvergenceSinglePad:
         router = MagicMock()
         router.nets = {
             0: [("U1", "GND")],
-            1: [("U1", "1")],           # single-pad
+            1: [("U1", "1")],  # single-pad
             2: [("U1", "2"), ("R1", "1")],  # multi-pad
         }
         route = MagicMock()
@@ -130,9 +127,7 @@ class TestCheckConvergenceSinglePad:
         router.routes = [route]
 
         result = adaptive._check_convergence(router, overflow=0)
-        assert result is True, (
-            "Convergence should be True when all multi-pad nets are routed"
-        )
+        assert result is True, "Convergence should be True when all multi-pad nets are routed"
 
     def test_no_convergence_when_multi_pad_unrouted(self):
         """When a multi-pad net is unrouted, convergence should be False."""
@@ -143,9 +138,9 @@ class TestCheckConvergenceSinglePad:
         router = MagicMock()
         router.nets = {
             0: [("U1", "GND")],
-            1: [("U1", "1")],                  # single-pad
-            2: [("U1", "2"), ("R1", "1")],      # multi-pad, routed
-            3: [("U1", "3"), ("R2", "1")],      # multi-pad, NOT routed
+            1: [("U1", "1")],  # single-pad
+            2: [("U1", "2"), ("R1", "1")],  # multi-pad, routed
+            3: [("U1", "3"), ("R2", "1")],  # multi-pad, NOT routed
         }
         route = MagicMock()
         route.net = 2

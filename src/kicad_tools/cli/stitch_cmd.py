@@ -59,9 +59,7 @@ def _count_copper_layers(pcb_path: Path) -> int:
         return 2
 
 
-def _resolve_mfr_via_dimensions(
-    mfr: str, layers: int, copper: float = 1.0
-) -> tuple[float, float]:
+def _resolve_mfr_via_dimensions(mfr: str, layers: int, copper: float = 1.0) -> tuple[float, float]:
     """Resolve via diameter and drill from a manufacturer YAML profile.
 
     Looks up the manufacturer's design rules for the actual stackup
@@ -336,7 +334,7 @@ DEFAULT_THERMAL_FOOTPRINT_PATTERNS: tuple[str, ...] = (
     "DFN-EP",
     "DFN_EP",
     "-EP_",  # Generic "exposed pad" suffix
-    "1EP",   # Generic "1 exposed pad" suffix (e.g. QFN-32-1EP_5x5mm)
+    "1EP",  # Generic "1 exposed pad" suffix (e.g. QFN-32-1EP_5x5mm)
     "_EP_",  # Underscore-bracketed EP marker
 )
 
@@ -406,11 +404,7 @@ def find_zones_for_net(sexp: SExp, net_name: str) -> list[str]:
 
 # Ordered list of KiCad copper layer names (front to back).
 # KiCad numbers inner layers 1..30 as In1.Cu .. In30.Cu.
-_COPPER_LAYER_ORDER = (
-    ["F.Cu"]
-    + [f"In{i}.Cu" for i in range(1, 31)]
-    + ["B.Cu"]
-)
+_COPPER_LAYER_ORDER = ["F.Cu"] + [f"In{i}.Cu" for i in range(1, 31)] + ["B.Cu"]
 
 
 def get_copper_layers(sexp: SExp) -> list[str]:
@@ -452,10 +446,7 @@ def get_copper_layers(sexp: SExp) -> list[str]:
 def _is_ground_net(net_name: str) -> bool:
     """Return True if the net name matches common ground naming patterns."""
     name_lower = net_name.lower()
-    return any(
-        g in name_lower
-        for g in ["gnd", "vss", "ground", "agnd", "dgnd", "gndd", "gnda"]
-    )
+    return any(g in name_lower for g in ["gnd", "vss", "ground", "agnd", "dgnd", "gndd", "gnda"])
 
 
 def infer_target_layer_from_stackup(
@@ -1331,12 +1322,7 @@ def is_pad_connected(
                 if fp.net_name != pad.net_name:
                     continue
                 # Fast bounding-box pre-filter
-                if (
-                    pad.x < fp.min_x
-                    or pad.x > fp.max_x
-                    or pad.y < fp.min_y
-                    or pad.y > fp.max_y
-                ):
+                if pad.x < fp.min_x or pad.x > fp.max_x or pad.y < fp.min_y or pad.y > fp.max_y:
                     continue
                 if point_in_polygon(pad.x, pad.y, fp.points):
                     return True
@@ -1488,8 +1474,7 @@ def identify_nearest_obstacle(
                 obstacle_x=pad.x,
                 obstacle_y=pad.y,
                 obstacle_net=fp.net_number,
-                reason=f"inside zone fill (net {fp.net_number} '{fp.net_name}') "
-                f"on {fp.layer}",
+                reason=f"inside zone fill (net {fp.net_number} '{fp.net_name}') on {fp.layer}",
             )
             best_dist = 0
             break
@@ -1697,8 +1682,14 @@ def calculate_via_position(
                 if other_net_pad_bboxes is not None:
                     for bmin_x, bmin_y, bmax_x, bmax_y, _pnet in other_net_pad_bboxes:
                         dist = _segment_to_rect_distance(
-                            pad.x, pad.y, via_x, via_y,
-                            bmin_x, bmin_y, bmax_x, bmax_y,
+                            pad.x,
+                            pad.y,
+                            via_x,
+                            via_y,
+                            bmin_x,
+                            bmin_y,
+                            bmax_x,
+                            bmax_y,
                         )
                         if dist < trace_half_width + clearance:
                             conflict = True
@@ -1708,7 +1699,12 @@ def calculate_via_position(
                     # model (back-compat with existing call sites).
                     for px, py, p_radius, _pnet in other_net_pads:
                         dist = point_to_segment_distance(
-                            px, py, pad.x, pad.y, via_x, via_y,
+                            px,
+                            py,
+                            pad.x,
+                            pad.y,
+                            via_x,
+                            via_y,
                         )
                         if dist < trace_half_width + p_radius + clearance:
                             conflict = True
@@ -2191,9 +2187,7 @@ def calculate_extended_escape_position(
 
         # Check other-net track clearance
         for seg in other_net_tracks:
-            dist = point_to_segment_distance(
-                vx, vy, seg.start_x, seg.start_y, seg.end_x, seg.end_y
-            )
+            dist = point_to_segment_distance(vx, vy, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
             if dist < via_radius + seg.width / 2 + clearance:
                 return False
 
@@ -2697,9 +2691,7 @@ def find_all_filled_polygons(
     return polygons
 
 
-def find_same_net_filled_polygons(
-    sexp: SExp, net_numbers: set[int]
-) -> list[FilledPolygon]:
+def find_same_net_filled_polygons(sexp: SExp, net_numbers: set[int]) -> list[FilledPolygon]:
     """Extract filled polygon geometry for specific nets (same-net connectivity).
 
     Similar to ``find_all_filled_polygons`` but includes only the specified nets,
@@ -3052,7 +3044,7 @@ def _matches_reference_prefix(reference: str, prefixes: tuple[str, ...]) -> bool
             # Require that the next char (if any) is a digit, so prefix "Q"
             # matches "Q1" / "Q12" but not "QFN1" (a footprint-like name as
             # reference).
-            rest = reference[len(prefix):]
+            rest = reference[len(prefix) :]
             if not rest or rest[0].isdigit():
                 return True
     return False
@@ -3313,7 +3305,7 @@ def generate_thermal_via_positions(
 
         # Pass 2: same ring at intermediate angles (N/E/S/W for n=4).
         for k in range(n):
-            theta = (2 * math.pi * k / n)
+            theta = 2 * math.pi * k / n
             x = pad.x + r_base * math.cos(theta)
             y = pad.y + r_base * math.sin(theta)
             positions.append((x, y))
@@ -3493,8 +3485,7 @@ def run_thermal_stitch(
         already_near = sum(
             1
             for (vx, vy) in existing_pad_vias
-            if abs(vx - pad.x) <= proximity_threshold
-            and abs(vy - pad.y) <= proximity_threshold
+            if abs(vx - pad.x) <= proximity_threshold and abs(vy - pad.y) <= proximity_threshold
         )
         if already_near >= vias_per_pad:
             result.already_connected += 1
@@ -3515,9 +3506,7 @@ def run_thermal_stitch(
         same_net_zones = zone_polys_by_net.get(net_name, [])
 
         # Per-net same-net via list (existing + newly placed on this net).
-        same_net_vias_for_pad = same_net_via_positions_by_net.setdefault(
-            pad_net, []
-        )
+        same_net_vias_for_pad = same_net_via_positions_by_net.setdefault(pad_net, [])
 
         # Cross-net obstacles: starting set + any vias we've placed on
         # other target nets during this run.
@@ -3578,9 +3567,7 @@ def run_thermal_stitch(
             # Diagnostic: no via could be placed for this thermal pad
             # candidate (likely all positions failed clearance or
             # fell outside the zone).
-            result.pads_skipped.append(
-                (pad, "thermal: no clear via position found")
-            )
+            result.pads_skipped.append((pad, "thermal: no clear via position found"))
 
     # Apply changes if not dry run.
     if not dry_run and result.vias_added:
@@ -3680,9 +3667,7 @@ def run_blanket_stitch(
                 result.detected_layers[net_name] = zone_layers[0]
             else:
                 # No zone or zones only on outer layers -- infer from stackup
-                inferred = infer_target_layer_from_stackup(
-                    copper_layers, net_name
-                )
+                inferred = infer_target_layer_from_stackup(copper_layers, net_name)
                 if inferred:
                     net_target_layer = inferred
                     result.detected_layers[net_name] = inferred
@@ -3833,9 +3818,7 @@ def run_stitch(
             else:
                 # No zone or zones only on outer layers for a multi-layer
                 # board.  Infer the correct inner layer from the stackup.
-                inferred = infer_target_layer_from_stackup(
-                    copper_layers, net_name
-                )
+                inferred = infer_target_layer_from_stackup(copper_layers, net_name)
                 if inferred:
                     net_target_layers[net_name] = inferred
                     result.detected_layers[net_name] = inferred
@@ -4059,9 +4042,7 @@ def run_stitch(
         cross_net_stitch_tracks = [
             seg for seg in placed_stitch_tracks if seg.net_number != pad.net_number
         ]
-        cross_net_stitch_vias = [
-            v for v in placed_stitch_vias if v[3] != pad.net_number
-        ]
+        cross_net_stitch_vias = [v for v in placed_stitch_vias if v[3] != pad.net_number]
         eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
         eff_other_net_vias = other_net_vias + cross_net_stitch_vias
 
@@ -4079,9 +4060,7 @@ def run_stitch(
         # Attempt placement against the cross-net-augmented obstacle lists
         # (issue #3633): just-placed foreign-net stitch geometry participates
         # so a stitch via on net B clears net A's just-placed stitch trace.
-        placement_result = _attempt_placement(
-            pad, eff_other_net_tracks, eff_other_net_vias
-        )
+        placement_result = _attempt_placement(pad, eff_other_net_tracks, eff_other_net_vias)
 
         if placement_result is None:
             # Every cross-net-clearing strategy is exhausted for this pad.
@@ -4098,9 +4077,7 @@ def run_stitch(
             # obstacle pool).  This restores the load-bearing via that existed
             # before the co-check tightened, accepting the marginal cross-net
             # band intrusion rather than leaving the pad disconnected.
-            fallback_result = _attempt_placement(
-                pad, other_net_tracks, other_net_vias
-            )
+            fallback_result = _attempt_placement(pad, other_net_tracks, other_net_vias)
             if fallback_result is None:
                 # Genuinely no placement even against pre-existing copper --
                 # this is a real obstruction, not a self-inflicted cross-net
@@ -4121,8 +4098,7 @@ def run_stitch(
                     f"all strategies up to {escape_distance}mm with micro-via "
                     f"{micro_via_size}mm also failed"
                     if micro_via
-                    else f"dog-leg and extended escape up to {escape_distance}mm "
-                    "also failed"
+                    else f"dog-leg and extended escape up to {escape_distance}mm also failed"
                 )
                 result.pads_skipped.append(
                     (
@@ -4305,9 +4281,7 @@ def run_stitch(
         for placement, trace in zip(result.vias_added, result.traces_added, strict=True):
             candidate_bboxes = bboxes_by_net.get(placement.pad.net_number, [])
             in_pad = any(
-                _via_drill_inside_pad_bbox(
-                    placement.via_x, placement.via_y, placement.drill, bbox
-                )
+                _via_drill_inside_pad_bbox(placement.via_x, placement.via_y, placement.drill, bbox)
                 for bbox in candidate_bboxes
             )
             if in_pad:
@@ -4526,9 +4500,7 @@ def output_result(
     if result.skip_details:
         obstacle_counts: dict[str, int] = {}
         for _pad, detail in result.skip_details:
-            obstacle_counts[detail.obstacle_type] = (
-                obstacle_counts.get(detail.obstacle_type, 0) + 1
-            )
+            obstacle_counts[detail.obstacle_type] = obstacle_counts.get(detail.obstacle_type, 0) + 1
         print("\n  Blocking obstacle breakdown:")
         for obs_type, count in sorted(obstacle_counts.items(), key=lambda x: -x[1]):
             print(f"    {obs_type}: {count}")
@@ -4552,9 +4524,7 @@ def output_result(
         print(f"    - {straight_traces} straight traces")
         print(f"    - {len(dogleg_traces)} dog-leg (L-shaped) traces for fine-pitch pads")
         if extended_traces:
-            print(
-                f"    - {len(extended_traces)} extended escape traces for dense IC pads"
-            )
+            print(f"    - {len(extended_traces)} extended escape traces for dense IC pads")
     if result.already_connected:
         print(f"  = {result.already_connected} pads already connected")
     if result.via_in_pad_filtered:

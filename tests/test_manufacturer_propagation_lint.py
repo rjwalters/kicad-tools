@@ -58,13 +58,13 @@ _SRC_ROOT = _REPO_ROOT / "src" / "kicad_tools"
 # Format: {relative_path: {line_number: reason}}
 _ALLOWLIST: dict[str, dict[int, str]] = {
     # Router core: default-constructed router (line ~398 is the
-    # ``rules_dict``-spread default in _route_with_seed; line ~809 is
+    # ``rules_dict``-spread default in _route_with_seed; line ~807 is
     # the constructor default).  Reaching either means the caller did
-    # not pass rules.  (Line numbers refreshed for issue #3588 — the
-    # IterationMetrics docstring/field/property shifted both sites down.)
+    # not pass rules.  (Line numbers refreshed for issue #3464 — the
+    # repo-wide ruff format reflowed both router/core.py sites.)
     "router/core.py": {
         398: "worker-process rules_dict-spread default (both calls on this line)",
-        809: "Autorouter.__init__ rules-arg default fallback",
+        807: "Autorouter.__init__ rules-arg default fallback",
     },
     # AdaptiveRouter default fallback — same pattern as Autorouter.
     "router/adaptive.py": {
@@ -74,8 +74,8 @@ _ALLOWLIST: dict[str, dict[int, str]] = {
     # the caller explicitly passes ``rules=None`` (no PCB rules either).
     # The CLI always supplies its own rules with manufacturer wired in.
     "router/io.py": {
-        2847: "route_pcb() fallback when caller passes rules=None",
-        3448: "load_pcb_for_routing() inner fallback when neither rules nor pcb_rules supplied",
+        2825: "route_pcb() fallback when caller passes rules=None",
+        3424: "load_pcb_for_routing() inner fallback when neither rules nor pcb_rules supplied",
     },
     # Benchmark/synthetic fixture generators — no real CLI context.
     "benchmark/runner.py": {
@@ -89,7 +89,7 @@ _ALLOWLIST: dict[str, dict[int, str]] = {
     # rules_dict to recreate router state across worker processes.  The
     # ``manufacturer`` field flows through ``rules_dict`` if present.
     "router/algorithms/evolutionary.py": {
-        222: "Evolutionary worker rules_dict-spread; manufacturer flows via dict",
+        224: "Evolutionary worker rules_dict-spread; manufacturer flows via dict",
     },
 }
 
@@ -199,11 +199,7 @@ def _imports_placement_design_rules(tree: ast.AST) -> bool:
 
 
 def _iter_python_files() -> list[Path]:
-    return [
-        p
-        for p in _SRC_ROOT.rglob("*.py")
-        if "__pycache__" not in p.parts
-    ]
+    return [p for p in _SRC_ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 
 
 _NOQA_RE = re.compile(r"#\s*noqa\s*:\s*MFR001\b", re.IGNORECASE)
@@ -234,17 +230,11 @@ def test_manufacturer_propagation_in_router_design_rules():
             continue
 
         # Skip files that don't import DesignRules at all.
-        if not (
-            _imports_router_design_rules(tree)
-            or "DesignRules(" in source
-        ):
+        if not (_imports_router_design_rules(tree) or "DesignRules(" in source):
             continue
 
         # If the file imports ONLY placement.DesignRules, skip it.
-        if (
-            _imports_placement_design_rules(tree)
-            and not _imports_router_design_rules(tree)
-        ):
+        if _imports_placement_design_rules(tree) and not _imports_router_design_rules(tree):
             continue
 
         finder = _DesignRulesCallFinder(tree)
@@ -275,9 +265,8 @@ def test_manufacturer_propagation_in_router_design_rules():
                 f'reason="..."` on the same line.'
             )
 
-    assert not violations, (
-        "manufacturer propagation regression (Issue #2708):\n  "
-        + "\n  ".join(violations)
+    assert not violations, "manufacturer propagation regression (Issue #2708):\n  " + "\n  ".join(
+        violations
     )
 
 
@@ -305,8 +294,7 @@ def test_allowlist_entries_resolve_to_actual_call_sites():
         for lineno in lines:
             if lineno not in site_lines:
                 stale.append(
-                    f"{rel}:{lineno}: no DesignRules() call at this line "
-                    f"(allowlist out of date)"
+                    f"{rel}:{lineno}: no DesignRules() call at this line (allowlist out of date)"
                 )
 
     assert not stale, "Stale entries in _ALLOWLIST:\n  " + "\n  ".join(stale)
@@ -335,9 +323,7 @@ def test_fixed_sites_pass_manufacturer(site_description):
     finder = _DesignRulesCallFinder(tree)
     finder.visit(tree)
 
-    sites_with_mfr = [
-        site for site in finder.sites if "manufacturer" in site[1]
-    ]
+    sites_with_mfr = [site for site in finder.sites if "manufacturer" in site[1]]
     assert sites_with_mfr, (
         f"{rel} ({description}): expected at least one DesignRules(...) "
         f"call passing manufacturer=, found none. Issue #2708 audit must "

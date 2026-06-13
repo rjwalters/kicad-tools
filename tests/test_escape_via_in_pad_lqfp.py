@@ -87,7 +87,7 @@ def _make_lqfp48_0p5mm(
             Pad(
                 x=-pad_center_offset,
                 y=y,
-                width=pad_long,    # long axis along X (perpendicular to edge)
+                width=pad_long,  # long axis along X (perpendicular to edge)
                 height=pad_short,  # short axis along Y (along edge)
                 net=start_net + pin_no - 1,
                 net_name=f"NET{start_net + pin_no - 1}",
@@ -198,10 +198,10 @@ class TestLqfp48InPadEscape:
 
         package_info = escape_router.analyze_package(pads)
         assert package_info.package_type in (
-            PackageType.QFP, PackageType.TQFP, PackageType.QFN,
-        ), (
-            f"Expected QFP-family classification, got {package_info.package_type}"
-        )
+            PackageType.QFP,
+            PackageType.TQFP,
+            PackageType.QFN,
+        ), f"Expected QFP-family classification, got {package_info.package_type}"
         assert package_info.pin_pitch <= 0.55, (
             f"Expected pin_pitch <= 0.55, got {package_info.pin_pitch}"
         )
@@ -227,10 +227,7 @@ class TestLqfp48InPadEscape:
         # We expect at least some in-pad vias since 0.5mm-pitch with
         # 0.2mm trace + 0.15mm clearance leaves no copper for parallel
         # arms of the alternating pattern.
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert len(in_pad_vias) >= 1, (
             f"Expected at least one in-pad via for 0.5mm-pitch LQFP-48 "
             f"with via-in-pad enabled; got {len(in_pad_vias)} of {len(escapes)} "
@@ -260,10 +257,7 @@ class TestLqfp48InPadEscape:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert in_pad_vias == [], (
             f"Default JLCPCB profile must NOT produce in-pad vias on "
             f"LQFP-48; got {len(in_pad_vias)}."
@@ -279,10 +273,7 @@ class TestLqfp48InPadEscape:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert in_pad_vias == []
 
     def test_in_pad_escape_uses_pcbway_when_supported(self):
@@ -297,10 +288,7 @@ class TestLqfp48InPadEscape:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert len(in_pad_vias) >= 1, (
             "PCBWay (also via_in_pad_supported=True) must trigger the "
             "in-pad rescue for LQFP-48 0.5mm-pitch inner pins."
@@ -319,10 +307,7 @@ class TestLqfp48InPadEscape:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         # At 0.65mm pitch the perpendicular-only scheme provides ample
         # room (0.65 - 0.2 - 0.15 = 0.30mm gap each side); no need for
         # via-in-pad and we should not pay for it.
@@ -342,10 +327,7 @@ class TestLqfp48InPadEscape:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert len(in_pad_vias) >= 1, (
             "Expected at least one in-pad via on the 2-layer LQFP fixture."
         )
@@ -365,10 +347,7 @@ class TestLqfp48InPadEscape:
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert in_pad_vias == [], (
             "In-pad escape should bail out gracefully when pads are too "
             "small for drill + annular ring."
@@ -393,10 +372,7 @@ class TestLqfp48InPadEscape:
         center_x, center_y = package_info.center
         escapes = escape_router.generate_escapes(package_info)
 
-        in_pad_vias = [
-            e for e in escapes
-            if e.via is not None and getattr(e.via, "in_pad", False)
-        ]
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
 
         # Categorise each in-pad via by which edge its pad sits on.
         edges: set[str] = set()

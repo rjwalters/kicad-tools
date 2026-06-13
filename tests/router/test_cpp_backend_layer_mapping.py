@@ -37,13 +37,11 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.rules import DesignRules
 
-
 _STACKS = [
     ("two_layer", LayerStack.two_layer()),
     ("four_layer_sig_gnd_pwr_sig", LayerStack.four_layer_sig_gnd_pwr_sig()),
     ("four_layer_all_signal", LayerStack.four_layer_all_signal()),
-    ("six_layer_sig_gnd_sig_sig_pwr_sig",
-     LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
+    ("six_layer_sig_gnd_sig_sig_pwr_sig", LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
 ]
 
 

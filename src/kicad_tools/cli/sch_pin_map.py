@@ -20,7 +20,7 @@ from collections import defaultdict
 
 from kicad_tools.cli.sch_connectivity import (
     Coord,
-    _point_on_segment,
+    _point_on_segment,  # noqa: F401  # re-exported for tests/test_sch_pin_map.py
     build_wire_graph,
     flood_fill_net,
     propagate_net_names,
@@ -289,9 +289,7 @@ def main(argv=None):
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument("--ref", help="Filter by symbol reference (e.g., U1)")
-    parser.add_argument(
-        "--sheet", help="Restrict to a specific sheet (name or path substring)"
-    )
+    parser.add_argument("--sheet", help="Restrict to a specific sheet (name or path substring)")
     parser.add_argument(
         "--format", choices=["table", "json"], default="json", help="Output format (default: json)"
     )

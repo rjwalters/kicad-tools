@@ -928,9 +928,7 @@ class TestFleetStatusAdvisoryDRCFilter:
             report["violations"] = violations
         (routed_pcb.parent / "drc_report.json").write_text(json.dumps(report))
 
-    def test_advisory_only_drc_suppresses_incomplete_blocker(
-        self, tmp_path: Path, capsys
-    ):
+    def test_advisory_only_drc_suppresses_incomplete_blocker(self, tmp_path: Path, capsys):
         """Issue #3363 acceptance: signal-net incomplete + advisory DRC -> YES.
 
         Mirrors board 04's post-#3286 state: NRST is a signal net the
@@ -969,9 +967,7 @@ class TestFleetStatusAdvisoryDRCFilter:
         assert b["drc"]["advisory_only"] is True
         assert b["drc"]["over_tolerance"] is False
 
-    def test_no_drc_report_preserves_incomplete_blocker(
-        self, tmp_path: Path, capsys
-    ):
+    def test_no_drc_report_preserves_incomplete_blocker(self, tmp_path: Path, capsys):
         """Without a ``drc_report.json`` the pre-fix behaviour persists.
 
         Mirrors the issue-#2932 backwards-compat rule for ``_detect_drc``:
@@ -997,9 +993,7 @@ class TestFleetStatusAdvisoryDRCFilter:
         data = json.loads(capsys.readouterr().out)
         b = data["boards"][0]
         assert b["ship_ready"] is False
-        assert any("incomplete routing" in blocker for blocker in b["blockers"]), b[
-            "blockers"
-        ]
+        assert any("incomplete routing" in blocker for blocker in b["blockers"]), b["blockers"]
         # No DRC report -> advisory_only stays False.
         assert b["drc"]["report_exists"] is False
         assert b["drc"]["advisory_only"] is False
@@ -1032,17 +1026,13 @@ class TestFleetStatusAdvisoryDRCFilter:
         b = data["boards"][0]
         assert b["ship_ready"] is False
         # Both the incomplete-routing AND the DRC blocker should be present.
-        assert any(
-            "incomplete routing" in blocker for blocker in b["blockers"]
-        ), b["blockers"]
+        assert any("incomplete routing" in blocker for blocker in b["blockers"]), b["blockers"]
         assert any("DRC errors" in blocker for blocker in b["blockers"]), b["blockers"]
         # advisory_only is False because there's a blocking error.
         assert b["drc"]["advisory_only"] is False
         assert b["drc"]["blocking_errors"] == 1
 
-    def test_legacy_summary_only_report_keeps_strict_gate(
-        self, tmp_path: Path, capsys
-    ):
+    def test_legacy_summary_only_report_keeps_strict_gate(self, tmp_path: Path, capsys):
         """Older reports without a ``violations`` array stay strict.
 
         Pre-#3363 ``drc_report.json`` files only carried ``summary.errors``.
@@ -1081,9 +1071,7 @@ class TestFleetStatusAdvisoryDRCFilter:
         # advisory_only is False because the violations array is missing.
         assert b["drc"]["advisory_only"] is False
 
-    def test_clean_drc_report_does_not_flip_incomplete_to_ship(
-        self, tmp_path: Path, capsys
-    ):
+    def test_clean_drc_report_does_not_flip_incomplete_to_ship(self, tmp_path: Path, capsys):
         """A 0-error DRC report does NOT suppress incomplete-routing.
 
         Defensive: ``advisory_only`` requires at least one advisory
@@ -1110,9 +1098,7 @@ class TestFleetStatusAdvisoryDRCFilter:
         assert result == 2
         data = json.loads(capsys.readouterr().out)
         b = data["boards"][0]
-        assert any(
-            "incomplete routing" in blocker for blocker in b["blockers"]
-        ), b["blockers"]
+        assert any("incomplete routing" in blocker for blocker in b["blockers"]), b["blockers"]
         assert b["drc"]["advisory_only"] is False
 
     def test_drc_status_to_dict_exposes_new_fields(self, tmp_path: Path):
@@ -1578,16 +1564,12 @@ class TestFleetStatusDriftFalsePositiveFixes:
         b = data["boards"][0]
 
         routing = b["routing"]
-        assert routing["source_stale"] is False, (
-            f"+3V3<->+3.3V should canonicalise; got {routing}"
-        )
+        assert routing["source_stale"] is False, f"+3V3<->+3.3V should canonicalise; got {routing}"
         # Raw counts are preserved for back-compat (issue #3302 AC).
         assert routing["schematic_net_count"] == 3
         assert routing["pcb_net_count"] == 3
         # No drift blocker.
-        assert not any(
-            "routed PCB stale" in blocker for blocker in b["blockers"]
-        ), b["blockers"]
+        assert not any("routed PCB stale" in blocker for blocker in b["blockers"]), b["blockers"]
 
     def test_two_unlabeled_local_nets_not_flagged(self, tmp_path: Path, capsys):
         """<= 2 added unlabeled local nets in PCB -> not source-stale.
@@ -1617,9 +1599,7 @@ class TestFleetStatusDriftFalsePositiveFixes:
         assert routing["schematic_net_count"] == 3
         assert routing["pcb_net_count"] == 5
         # No drift blocker -- only routing/manufacturing gates remain.
-        assert not any(
-            "routed PCB stale" in blocker for blocker in b["blockers"]
-        ), b["blockers"]
+        assert not any("routed PCB stale" in blocker for blocker in b["blockers"]), b["blockers"]
 
     def test_board03_style_three_adds_still_flagged(self, tmp_path: Path, capsys):
         """Three added non-alias nets -> still flagged (board 03 case).
@@ -1643,9 +1623,7 @@ class TestFleetStatusDriftFalsePositiveFixes:
 
         routing = b["routing"]
         assert routing["source_stale"] is True
-        assert any(
-            "routed PCB stale" in blocker for blocker in b["blockers"]
-        ), b["blockers"]
+        assert any("routed PCB stale" in blocker for blocker in b["blockers"]), b["blockers"]
 
     def test_removal_always_flagged(self, tmp_path: Path, capsys):
         """A removed schematic label is ALWAYS a real signal.
@@ -1731,12 +1709,15 @@ class TestExtractSchematicNets:
     def test_label_extraction(self, tmp_path):
         from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
 
-        sch = self._write_sch(tmp_path, """(kicad_sch
+        sch = self._write_sch(
+            tmp_path,
+            """(kicad_sch
           (label "SIG1" (at 10 10 0))
           (label "SIG2" (at 10 20 0))
           (global_label "GLOBAL_SIG" (at 10 30 0))
           (hierarchical_label "HIER_SIG" (at 10 40 0))
-        )""")
+        )""",
+        )
         names = _extract_schematic_nets(sch)
         assert names == {"SIG1", "SIG2", "GLOBAL_SIG", "HIER_SIG"}
 
@@ -1744,12 +1725,15 @@ class TestExtractSchematicNets:
         """``power:+24V`` -> ``+24V`` implicit global."""
         from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
 
-        sch = self._write_sch(tmp_path, """(kicad_sch
+        sch = self._write_sch(
+            tmp_path,
+            """(kicad_sch
           (symbol (lib_id "power:+24V") (at 10 10 0))
           (symbol (lib_id "power:GND") (at 10 20 0))
           (symbol (lib_id "power:+3V3") (at 10 30 0))
           (label "SIG1" (at 10 40 0))
-        )""")
+        )""",
+        )
         names = _extract_schematic_nets(sch)
         assert names == {"+24V", "GND", "+3V3", "SIG1"}
 
@@ -1757,11 +1741,14 @@ class TestExtractSchematicNets:
         """``power:PWR_FLAG`` is an ERC marker, not a net publisher."""
         from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
 
-        sch = self._write_sch(tmp_path, """(kicad_sch
+        sch = self._write_sch(
+            tmp_path,
+            """(kicad_sch
           (symbol (lib_id "power:PWR_FLAG") (at 10 10 0))
           (symbol (lib_id "power:VCC") (at 10 20 0))
           (label "SIG1" (at 10 30 0))
-        )""")
+        )""",
+        )
         names = _extract_schematic_nets(sch)
         assert "PWR_FLAG" not in names
         assert names == {"VCC", "SIG1"}
@@ -1770,10 +1757,13 @@ class TestExtractSchematicNets:
         """``Net-(...)`` label placeholders are dropped."""
         from kicad_tools.cli.fleet_cmd import _extract_schematic_nets
 
-        sch = self._write_sch(tmp_path, """(kicad_sch
+        sch = self._write_sch(
+            tmp_path,
+            """(kicad_sch
           (label "Net-(R1-Pad2)" (at 10 10 0))
           (label "SIG1" (at 10 20 0))
-        )""")
+        )""",
+        )
         names = _extract_schematic_nets(sch)
         assert names == {"SIG1"}
 
@@ -1802,7 +1792,9 @@ class TestExtractPcbNamedNets:
     def test_pad_attached_nets_kept(self, tmp_path):
         from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
 
-        pcb = self._write_pcb(tmp_path, """(kicad_pcb
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
           (net 0 "")
           (net 1 "VCC")
           (net 2 "GND")
@@ -1810,7 +1802,8 @@ class TestExtractPcbNamedNets:
             (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
             (pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
           )
-        )""")
+        )""",
+        )
         names = _extract_pcb_named_nets(pcb)
         assert names == {"VCC", "GND"}
 
@@ -1824,7 +1817,9 @@ class TestExtractPcbNamedNets:
         """
         from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
 
-        pcb = self._write_pcb(tmp_path, """(kicad_pcb
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
           (net 0 "")
           (net 1 "VCC")
           (net 2 "GND")
@@ -1834,7 +1829,8 @@ class TestExtractPcbNamedNets:
             (pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
           )
           (segment (start 0 0) (end 1 1) (width 0.25) (layer "F.Cu") (net 3))
-        )""")
+        )""",
+        )
         names = _extract_pcb_named_nets(pcb)
         assert "STALE_SEG_NET" not in names
         assert names == {"VCC", "GND"}
@@ -1843,7 +1839,9 @@ class TestExtractPcbNamedNets:
         """``Net-(...)`` and ``unconnected-(...)`` names are dropped."""
         from kicad_tools.cli.fleet_cmd import _extract_pcb_named_nets
 
-        pcb = self._write_pcb(tmp_path, """(kicad_pcb
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
           (net 0 "")
           (net 1 "VCC")
           (net 2 "Net-(R1-Pad2)")
@@ -1855,7 +1853,8 @@ class TestExtractPcbNamedNets:
           (footprint "QFN-32"
             (pad "5" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 3 "unconnected-(U1-NC-Pad5)"))
           )
-        )""")
+        )""",
+        )
         names = _extract_pcb_named_nets(pcb)
         assert names == {"VCC"}
 

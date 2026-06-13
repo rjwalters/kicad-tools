@@ -157,9 +157,7 @@ class TestRunLockFootprints:
         # 0.1mm tolerance — only footprints whose bbox literally touches
         # the edge.  J1 bbox: x in [-0.5, 0.5] → touches x=0; J2 bbox
         # y in [-0.5, 0.5] → touches y=0.
-        rc = run_lock_footprints(
-            pcb, all_perimeter=True, perimeter_margin=0.1
-        )
+        rc = run_lock_footprints(pcb, all_perimeter=True, perimeter_margin=0.1)
         assert rc == 0
         board = PCB.load(pcb)
         assert board.get_footprint("J1").locked is True
@@ -268,9 +266,7 @@ class TestCliEntryPoint:
 
         pcb = _write_pcb(tmp_path)
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "lock-footprints", str(pcb), "--refs", "J1,J2"
-        ])
+        args = parser.parse_args(["pcb", "lock-footprints", str(pcb), "--refs", "J1,J2"])
         rc = run_pcb_command(args)
         assert rc == 0
 
@@ -290,9 +286,7 @@ class TestCliEntryPoint:
         assert run_lock_footprints(pcb, refs=["J1"]) == 0
 
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "unlock-footprints", str(pcb), "--refs", "J1"
-        ])
+        args = parser.parse_args(["pcb", "unlock-footprints", str(pcb), "--refs", "J1"])
         rc = run_pcb_command(args)
         assert rc == 0
 
@@ -307,9 +301,7 @@ class TestCliEntryPoint:
 
         pcb = _write_pcb(tmp_path)
         parser = create_parser()
-        args = parser.parse_args([
-            "pcb", "lock-footprints", str(pcb), "--refs", " J1 , J2 "
-        ])
+        args = parser.parse_args(["pcb", "lock-footprints", str(pcb), "--refs", " J1 , J2 "])
         rc = run_pcb_command(args)
         assert rc == 0
 

@@ -1341,12 +1341,9 @@ class TestCleanupWires:
         dangling = [i for i in issues if i.reason == "dangling"]
         stubs = [i for i in issues if i.reason == "stub"]
         assert len(dangling) == 0, (
-            f"Expected no dangling wires but found: "
-            f"{[(d.start, d.end) for d in dangling]}"
+            f"Expected no dangling wires but found: {[(d.start, d.end) for d in dangling]}"
         )
-        assert len(stubs) == 0, (
-            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
-        )
+        assert len(stubs) == 0, f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
 
     # --- tighter quantization tests ---
 
@@ -1432,8 +1429,10 @@ class TestCleanupWires:
         from kicad_tools.cli.sch_cleanup_wires import _is_collinear_overlap
 
         assert _is_collinear_overlap(
-            (0.0, 0.0), (10.0, 0.0),  # long
-            (2.0, 0.0), (8.0, 0.0),   # short, inside
+            (0.0, 0.0),
+            (10.0, 0.0),  # long
+            (2.0, 0.0),
+            (8.0, 0.0),  # short, inside
         )
 
     def test_collinear_overlap_not_enclosed(self):
@@ -1441,8 +1440,10 @@ class TestCleanupWires:
         from kicad_tools.cli.sch_cleanup_wires import _is_collinear_overlap
 
         assert not _is_collinear_overlap(
-            (0.0, 0.0), (10.0, 0.0),  # long
-            (5.0, 0.0), (15.0, 0.0),  # extends beyond
+            (0.0, 0.0),
+            (10.0, 0.0),  # long
+            (5.0, 0.0),
+            (15.0, 0.0),  # extends beyond
         )
 
     def test_collinear_overlap_parallel_not_collinear(self):
@@ -1450,8 +1451,10 @@ class TestCleanupWires:
         from kicad_tools.cli.sch_cleanup_wires import _is_collinear_overlap
 
         assert not _is_collinear_overlap(
-            (0.0, 0.0), (10.0, 0.0),
-            (2.0, 1.0), (8.0, 1.0),  # same direction but 1mm apart
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (2.0, 1.0),
+            (8.0, 1.0),  # same direction but 1mm apart
         )
 
     # --- ERC stub detection tests (wire-body false connectivity) ---
@@ -1539,9 +1542,7 @@ class TestCleanupWires:
         issues = find_cleanup_candidates(sch)
 
         stubs = [i for i in issues if i.reason == "stub"]
-        assert len(stubs) == 0, (
-            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
-        )
+        assert len(stubs) == 0, f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
 
     def test_micro_stub_removal(self, tmp_path):
         """Micro-stub-flagged wires are removed and wire count decreases."""
@@ -1576,9 +1577,7 @@ class TestCleanupWires:
         issues = find_cleanup_candidates(sch)
 
         stubs = [i for i in issues if i.reason == "stub"]
-        assert len(stubs) == 0, (
-            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
-        )
+        assert len(stubs) == 0, f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
 
     def test_label_at_endpoint_with_micron_drift_not_flagged(self, tmp_path):
         """A label whose position is within _ANCHOR_EPS of a wire endpoint
@@ -1595,9 +1594,7 @@ class TestCleanupWires:
         issues = find_cleanup_candidates(sch)
 
         stubs = [i for i in issues if i.reason == "stub"]
-        assert len(stubs) == 0, (
-            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
-        )
+        assert len(stubs) == 0, f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
 
     def test_short_wire_to_pin_not_flagged(self, tmp_path):
         """A short wire whose endpoint sits on a symbol pin is NOT a stub.
@@ -1613,9 +1610,7 @@ class TestCleanupWires:
         issues = find_cleanup_candidates(sch)
 
         stubs = [i for i in issues if i.reason == "stub"]
-        assert len(stubs) == 0, (
-            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
-        )
+        assert len(stubs) == 0, f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
 
     def test_short_wire_to_sheet_pin_not_flagged(self, tmp_path):
         """A short wire whose endpoint sits on a hierarchical sheet pin is
@@ -1632,9 +1627,7 @@ class TestCleanupWires:
         issues = find_cleanup_candidates(sch)
 
         stubs = [i for i in issues if i.reason == "stub"]
-        assert len(stubs) == 0, (
-            f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
-        )
+        assert len(stubs) == 0, f"Expected no stubs but found: {[(s.start, s.end) for s in stubs]}"
 
     def test_collect_strong_anchors_includes_all_kinds(self, tmp_path):
         """The strong-anchor enumeration covers labels, no-connects, sheet
@@ -1647,17 +1640,15 @@ class TestCleanupWires:
         anchors = _collect_strong_anchors(sch)
 
         # Sheet pin at (170, 100) must be in the list
-        assert any(
-            abs(x - 170.0) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in anchors
-        ), f"sheet pin (170, 100) missing from anchors: {anchors}"
+        assert any(abs(x - 170.0) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in anchors), (
+            f"sheet pin (170, 100) missing from anchors: {anchors}"
+        )
         # Label at (150, 100) must be in the list
-        assert any(
-            abs(x - 150.0) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in anchors
-        ), f"label (150, 100) missing from anchors: {anchors}"
+        assert any(abs(x - 150.0) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in anchors), (
+            f"label (150, 100) missing from anchors: {anchors}"
+        )
 
-    def test_perpendicular_stub_removable_after_cleanup_preserves_label(
-        self, tmp_path
-    ):
+    def test_perpendicular_stub_removable_after_cleanup_preserves_label(self, tmp_path):
         """After running cleanup-wires on the J2.24 fixture, the label-
         anchored wire and the label itself both remain in the schematic.
 
@@ -1670,9 +1661,7 @@ class TestCleanupWires:
             remove_wires,
         )
 
-        path = _write_sch(
-            tmp_path, SCHEMATIC_WITH_PERPENDICULAR_LABEL_ANCHORED_STUB
-        )
+        path = _write_sch(tmp_path, SCHEMATIC_WITH_PERPENDICULAR_LABEL_ANCHORED_STUB)
         sch = Schematic.load(path)
 
         initial_wires = len(list(sch.sexp.find_all("wire")))
@@ -2124,9 +2113,9 @@ class TestRemoveWire:
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
 
-        result = main([
-            str(path), "--from", "100", "50", "--to", "150", "50", "--near", "125", "50"
-        ])
+        result = main(
+            [str(path), "--from", "100", "50", "--to", "150", "50", "--near", "125", "50"]
+        )
         assert result == 1
 
     def test_no_match_returns_error(self, tmp_path):
@@ -2145,10 +2134,7 @@ class TestRemoveWire:
         from kicad_tools.cli.sch_remove_wire import main
 
         path = _write_sch(tmp_path, MINIMAL_SCHEMATIC)
-        result = main([
-            str(path), "--from", "100", "50", "--to", "150", "50",
-            "--format", "json"
-        ])
+        result = main([str(path), "--from", "100", "50", "--to", "150", "50", "--format", "json"])
         assert result == 0
 
         captured = capsys.readouterr()

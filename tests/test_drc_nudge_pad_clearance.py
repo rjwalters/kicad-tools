@@ -69,10 +69,26 @@ def _make_router_with_skipped_pour_pad() -> Autorouter:
     router.add_component(
         "U1",
         [
-            {"number": "1", "x": 1.0, "y": 1.0, "width": 0.5, "height": 0.5,
-             "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
-            {"number": "2", "x": 8.0, "y": 1.0, "width": 0.5, "height": 0.5,
-             "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
+            {
+                "number": "1",
+                "x": 1.0,
+                "y": 1.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "SIG",
+                "layer": Layer.F_CU,
+            },
+            {
+                "number": "2",
+                "x": 8.0,
+                "y": 1.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "SIG",
+                "layer": Layer.F_CU,
+            },
         ],
     )
     router.net_names[1] = "SIG"
@@ -80,15 +96,29 @@ def _make_router_with_skipped_pour_pad() -> Autorouter:
     router.add_component(
         "U2",
         [
-            {"number": "1", "x": 5.0, "y": 1.3, "width": 1.0, "height": 1.0,
-             "net": 0, "net_name": "GND", "layer": Layer.F_CU},
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 1.3,
+                "width": 1.0,
+                "height": 1.0,
+                "net": 0,
+                "net_name": "GND",
+                "layer": Layer.F_CU,
+            },
         ],
     )
 
     # Manually add a trace that grazes the GND pad.
     seg = Segment(
-        x1=1.0, y1=1.0, x2=8.0, y2=1.0,
-        layer=Layer.F_CU, width=0.2, net=1, net_name="SIG",
+        x1=1.0,
+        y1=1.0,
+        x2=8.0,
+        y2=1.0,
+        layer=Layer.F_CU,
+        width=0.2,
+        net=1,
+        net_name="SIG",
     )
     router.routes.append(Route(net=1, net_name="SIG", segments=[seg], vias=[]))
     return router
@@ -138,10 +168,26 @@ class TestValidateRoutesSkippedPourPad:
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 1.0, "y": 1.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
-                {"number": "2", "x": 8.0, "y": 1.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 1.0,
+                    "y": 1.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
+                {
+                    "number": "2",
+                    "x": 8.0,
+                    "y": 1.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
         router.net_names[1] = "SIG"
@@ -149,12 +195,21 @@ class TestValidateRoutesSkippedPourPad:
         router.add_component(
             "U2",
             [
-                {"number": "1", "x": 5.0, "y": 1.3, "width": 1.0, "height": 1.0,
-                 "net": 0, "net_name": "", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 1.3,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 0,
+                    "net_name": "",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
-        seg = Segment(x1=1.0, y1=1.0, x2=8.0, y2=1.0,
-                      layer=Layer.F_CU, width=0.2, net=1, net_name="SIG")
+        seg = Segment(
+            x1=1.0, y1=1.0, x2=8.0, y2=1.0, layer=Layer.F_CU, width=0.2, net=1, net_name="SIG"
+        )
         router.routes.append(Route(net=1, net_name="SIG", segments=[seg], vias=[]))
 
         violations = validate_routes(router)
@@ -179,17 +234,42 @@ class TestValidateRoutesSkippedPourPad:
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 1.0, "y": 1.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
-                {"number": "2", "x": 8.0, "y": 1.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
-                {"number": "3", "x": 5.0, "y": 1.3, "width": 1.0, "height": 1.0,
-                 "net": 0, "net_name": "GND", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 1.0,
+                    "y": 1.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
+                {
+                    "number": "2",
+                    "x": 8.0,
+                    "y": 1.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
+                {
+                    "number": "3",
+                    "x": 5.0,
+                    "y": 1.3,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 0,
+                    "net_name": "GND",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
         router.net_names[1] = "SIG"
-        seg = Segment(x1=1.0, y1=1.0, x2=8.0, y2=1.0,
-                      layer=Layer.F_CU, width=0.2, net=1, net_name="SIG")
+        seg = Segment(
+            x1=1.0, y1=1.0, x2=8.0, y2=1.0, layer=Layer.F_CU, width=0.2, net=1, net_name="SIG"
+        )
         router.routes.append(Route(net=1, net_name="SIG", segments=[seg], vias=[]))
 
         violations = validate_routes(router)
@@ -210,10 +290,26 @@ class TestValidateRoutesSkippedPourPad:
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 1.0, "y": 1.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
-                {"number": "2", "x": 8.0, "y": 1.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 1.0,
+                    "y": 1.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
+                {
+                    "number": "2",
+                    "x": 8.0,
+                    "y": 1.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
         router.net_names[1] = "SIG"
@@ -221,12 +317,21 @@ class TestValidateRoutesSkippedPourPad:
         router.add_component(
             "U2",
             [
-                {"number": "1", "x": 5.0, "y": 5.0, "width": 1.0, "height": 1.0,
-                 "net": 0, "net_name": "GND", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 5.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 0,
+                    "net_name": "GND",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
-        seg = Segment(x1=1.0, y1=1.0, x2=8.0, y2=1.0,
-                      layer=Layer.F_CU, width=0.2, net=1, net_name="SIG")
+        seg = Segment(
+            x1=1.0, y1=1.0, x2=8.0, y2=1.0, layer=Layer.F_CU, width=0.2, net=1, net_name="SIG"
+        )
         router.routes.append(Route(net=1, net_name="SIG", segments=[seg], vias=[]))
 
         violations = validate_routes(router)
@@ -254,8 +359,16 @@ class TestCollisionCheckerPadBlocked:
         router.add_component(
             "U2",
             [
-                {"number": "1", "x": 5.0, "y": 1.0, "width": 1.0, "height": 1.0,
-                 "net": 0, "net_name": "GND", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 5.0,
+                    "y": 1.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 0,
+                    "net_name": "GND",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
         return router
@@ -268,12 +381,16 @@ class TestCollisionCheckerPadBlocked:
 
         # Path that walks through GND pad center
         clear = checker.path_is_clear(
-            x1=1.0, y1=1.0, x2=9.0, y2=1.0,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,  # our route is net 1
+            x1=1.0,
+            y1=1.0,
+            x2=9.0,
+            y2=1.0,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,  # our route is net 1
         )
         assert clear is False, (
-            "Path through GND pad metal must be blocked even though "
-            "pad.net == 0 (Issue #2757)"
+            "Path through GND pad metal must be blocked even though pad.net == 0 (Issue #2757)"
         )
 
     def test_grid_collision_allows_path_clear_of_gnd_pad(self):
@@ -284,8 +401,13 @@ class TestCollisionCheckerPadBlocked:
 
         # Path well above the pad (Y=4 vs pad at Y=1, pad half=0.5, clearance=0.2)
         clear = checker.path_is_clear(
-            x1=1.0, y1=4.0, x2=9.0, y2=4.0,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=4.0,
+            x2=9.0,
+            y2=4.0,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         assert clear is True
 
@@ -299,20 +421,39 @@ class TestCollisionCheckerPadBlocked:
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 1.0, "y": 1.0, "width": 1.0, "height": 1.0,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
-                {"number": "2", "x": 5.0, "y": 1.0, "width": 1.0, "height": 1.0,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 1.0,
+                    "y": 1.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
+                {
+                    "number": "2",
+                    "x": 5.0,
+                    "y": 1.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
         checker = GridCollisionChecker(router.grid)
         clear = checker.path_is_clear(
-            x1=1.0, y1=1.0, x2=5.0, y2=1.0,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=1.0,
+            x2=5.0,
+            y2=1.0,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
-        assert clear is True, (
-            "Own-net path through own-net pad metal must remain clear"
-        )
+        assert clear is True, "Own-net path through own-net pad metal must remain clear"
 
     def test_vector_collision_blocks_path_through_gnd_pad(self):
         """``VectorCollisionChecker._check_obstacles_clear`` must also block
@@ -321,8 +462,13 @@ class TestCollisionCheckerPadBlocked:
         checker = VectorCollisionChecker(router.grid)
 
         clear = checker.path_is_clear(
-            x1=1.0, y1=1.0, x2=9.0, y2=1.0,
-            layer=Layer.F_CU, width=0.2, exclude_net=1,
+            x1=1.0,
+            y1=1.0,
+            x2=9.0,
+            y2=1.0,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
         )
         assert clear is False
 
@@ -352,10 +498,26 @@ class TestOptimizerDoesNotChamferThroughGndPad:
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 2.0, "y": 2.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
-                {"number": "2", "x": 10.0, "y": 10.0, "width": 0.5, "height": 0.5,
-                 "net": 1, "net_name": "SIG", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 2.0,
+                    "y": 2.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
+                {
+                    "number": "2",
+                    "x": 10.0,
+                    "y": 10.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "SIG",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
         router.net_names[1] = "SIG"
@@ -363,18 +525,35 @@ class TestOptimizerDoesNotChamferThroughGndPad:
         router.add_component(
             "U2",
             [
-                {"number": "1", "x": 6.0, "y": 6.0, "width": 1.0, "height": 1.0,
-                 "net": 0, "net_name": "GND", "layer": Layer.F_CU},
+                {
+                    "number": "1",
+                    "x": 6.0,
+                    "y": 6.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 0,
+                    "net_name": "GND",
+                    "layer": Layer.F_CU,
+                },
             ],
         )
 
         # L-shaped route that goes around the GND pad with 90-deg corners.
         # If chamfered, the diagonal would cut through (6, 6).
         segs = [
-            Segment(x1=2.0, y1=2.0, x2=2.0, y2=10.0,
-                    layer=Layer.F_CU, width=0.2, net=1, net_name="SIG"),
-            Segment(x1=2.0, y1=10.0, x2=10.0, y2=10.0,
-                    layer=Layer.F_CU, width=0.2, net=1, net_name="SIG"),
+            Segment(
+                x1=2.0, y1=2.0, x2=2.0, y2=10.0, layer=Layer.F_CU, width=0.2, net=1, net_name="SIG"
+            ),
+            Segment(
+                x1=2.0,
+                y1=10.0,
+                x2=10.0,
+                y2=10.0,
+                layer=Layer.F_CU,
+                width=0.2,
+                net=1,
+                net_name="SIG",
+            ),
         ]
         route = Route(net=1, net_name="SIG", segments=segs, vias=[])
         router.routes.append(route)
@@ -395,6 +574,7 @@ class TestOptimizerDoesNotChamferThroughGndPad:
         # passes through the GND pad metal.  We check by walking each
         # segment and computing point-to-segment distance from the pad.
         from kicad_tools.router.geometry import point_to_segment_distance
+
         for seg in optimized.segments:
             d = point_to_segment_distance(6.0, 6.0, seg.x1, seg.y1, seg.x2, seg.y2)
             # Pad half-width + trace half-width = 0.5 + 0.1 = 0.6

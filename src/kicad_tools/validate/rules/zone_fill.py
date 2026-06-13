@@ -23,9 +23,7 @@ def _zone_bounding_box(zone: Zone) -> str:
         return "no boundary"
     xs = [p[0] for p in zone.polygon]
     ys = [p[1] for p in zone.polygon]
-    return (
-        f"({min(xs):.2f}, {min(ys):.2f}) to ({max(xs):.2f}, {max(ys):.2f}) mm"
-    )
+    return f"({min(xs):.2f}, {min(ys):.2f}) to ({max(xs):.2f}, {max(ys):.2f}) mm"
 
 
 def _zone_center(zone: Zone) -> tuple[float, float] | None:
@@ -93,10 +91,7 @@ class ZoneFillRule(DRCRule):
                     DRCViolation(
                         rule_id="zone_fill_disabled",
                         severity="warning",
-                        message=(
-                            f"Zone fill disabled for net '{net_label}' "
-                            f"on {layer} [{bbox}]"
-                        ),
+                        message=(f"Zone fill disabled for net '{net_label}' on {layer} [{bbox}]"),
                         location=center,
                         layer=layer,
                         items=(f"net:{net_label}",),
@@ -124,9 +119,7 @@ class ZoneFillRule(DRCRule):
                     DRCViolation(
                         rule_id="zone_no_net",
                         severity="warning",
-                        message=(
-                            f"Zone on {layer} has no net assigned [{bbox}]"
-                        ),
+                        message=(f"Zone on {layer} has no net assigned [{bbox}]"),
                         location=center,
                         layer=layer,
                     )

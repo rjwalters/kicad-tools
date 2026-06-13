@@ -9,7 +9,6 @@ This module tests the RSMT implementation in steiner.py, covering:
 - Integration with Pad objects via build_rsmt()
 """
 
-
 from kicad_tools.router.algorithms.steiner import (
     _build_mst_edges,
     _hanan_grid,
@@ -38,14 +37,9 @@ def _make_pad(x: float, y: float, net: int = 1) -> Pad:
     )
 
 
-def _total_wirelength(
-    points: list[tuple[float, float]], edges: list[tuple[int, int]]
-) -> float:
+def _total_wirelength(points: list[tuple[float, float]], edges: list[tuple[int, int]]) -> float:
     """Compute total Manhattan wirelength of edges."""
-    return sum(
-        _manhattan(points[i][0], points[i][1], points[j][0], points[j][1])
-        for i, j in edges
-    )
+    return sum(_manhattan(points[i][0], points[i][1], points[j][0], points[j][1]) for i, j in edges)
 
 
 class TestManhattanDistance:
@@ -210,9 +204,7 @@ class TestIterativeOneSteiner:
         """Larger nets complete with bounded iterations."""
         # 15 terminals in a grid-like arrangement
         terminals = [(float(i), float(j)) for i in range(5) for j in range(3)]
-        all_points, edges = _iterative_one_steiner(
-            terminals, max_iterations=15
-        )
+        all_points, edges = _iterative_one_steiner(terminals, max_iterations=15)
         # Must form a spanning tree
         assert len(edges) == len(all_points) - 1
 
@@ -228,9 +220,7 @@ class TestIterativeOneSteiner:
         def weighted_cost(x1, y1, x2, y2):
             return abs(x1 - x2) + 2 * abs(y1 - y2)
 
-        all_points, edges = _iterative_one_steiner(
-            terminals, cost_fn=weighted_cost
-        )
+        all_points, edges = _iterative_one_steiner(terminals, cost_fn=weighted_cost)
         assert len(edges) == len(all_points) - 1
 
 
@@ -303,8 +293,7 @@ class TestBuildRsmt:
         extended, edges = build_rsmt(pads)
 
         rsmt_cost = sum(
-            _manhattan(extended[i].x, extended[i].y, extended[j].x, extended[j].y)
-            for i, j in edges
+            _manhattan(extended[i].x, extended[i].y, extended[j].x, extended[j].y) for i, j in edges
         )
         terminals = [(p.x, p.y) for p in pads]
         mst_cost = _mst_cost(terminals)
@@ -339,8 +328,7 @@ class TestBuildRsmt:
         extended, edges = build_rsmt(pads)
 
         rsmt_cost = sum(
-            _manhattan(extended[i].x, extended[i].y, extended[j].x, extended[j].y)
-            for i, j in edges
+            _manhattan(extended[i].x, extended[i].y, extended[j].x, extended[j].y) for i, j in edges
         )
         terminals = [(p.x, p.y) for p in pads]
         mst_cost = _mst_cost(terminals)
@@ -356,8 +344,7 @@ class TestBuildRsmt:
         assert len(edges) == len(extended) - 1
 
         rsmt_cost = sum(
-            _manhattan(extended[i].x, extended[i].y, extended[j].x, extended[j].y)
-            for i, j in edges
+            _manhattan(extended[i].x, extended[i].y, extended[j].x, extended[j].y) for i, j in edges
         )
         terminals = [(p.x, p.y) for p in pads]
         mst_cost = _mst_cost(terminals)
@@ -425,8 +412,7 @@ class TestBuildRsmtCongestionFn:
             for i, j in edges_base
         )
         fn_cost = sum(
-            _manhattan(ext_fn[i].x, ext_fn[i].y, ext_fn[j].x, ext_fn[j].y)
-            for i, j in edges_fn
+            _manhattan(ext_fn[i].x, ext_fn[i].y, ext_fn[j].x, ext_fn[j].y) for i, j in edges_fn
         )
         assert abs(base_cost - fn_cost) < 1e-9
 
@@ -519,10 +505,7 @@ class TestRelocateBlockedPoint:
 
     def test_relocation_is_deterministic(self):
         blocked = {(5, 5)}
-        results = {
-            relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked)
-            for _ in range(10)
-        }
+        results = {relocate_blocked_point(5, 5, lambda x, y: (x, y) in blocked) for _ in range(10)}
         assert len(results) == 1
 
     def test_ring_scan_finds_nearest_ring(self):
@@ -533,9 +516,7 @@ class TestRelocateBlockedPoint:
         assert max(abs(gx - 5), abs(gy - 5)) == 2
 
     def test_all_blocked_returns_original(self):
-        gx, gy = relocate_blocked_point(
-            5, 5, lambda x, y: True, max_radius=3
-        )
+        gx, gy = relocate_blocked_point(5, 5, lambda x, y: True, max_radius=3)
         assert (gx, gy) == (5, 5)
 
     def test_build_rsmt_snap_fn_can_relocate(self):
@@ -553,9 +534,7 @@ class TestRelocateBlockedPoint:
 
         def snap(x: float, y: float) -> tuple[float, float]:
             gx, gy = round(x), round(y)  # 1mm grid for the test
-            gx, gy = relocate_blocked_point(
-                gx, gy, lambda cx, cy: (cx, cy) == blocked_cell
-            )
+            gx, gy = relocate_blocked_point(gx, gy, lambda cx, cy: (cx, cy) == blocked_cell)
             return float(gx), float(gy)
 
         extended, _edges = build_rsmt(pads, snap_fn=snap)
@@ -603,9 +582,7 @@ class TestMakeBlockedCellPredicate:
     def test_margin_window_blocks_neighbours(self):
         """With a 1-cell margin, a point ADJACENT to blocked copper is
         unusable too (a trace cannot be centered there)."""
-        fn = make_blocked_cell_predicate(
-            _FakeOccupancyGrid({(5, 5)}), _FakeRules(), 1
-        )
+        fn = make_blocked_cell_predicate(_FakeOccupancyGrid({(5, 5)}), _FakeRules(), 1)
         assert fn is not None
         assert fn(5, 5) is True
         assert fn(6, 6) is True  # margin window includes (5, 5)
@@ -665,9 +642,7 @@ class TestMSTRouterSteinerRelocation:
         assert steiner, "cross topology must produce a Steiner point"
         for p in steiner:
             cell = (round(p.x), round(p.y))
-            assert cell not in blocked, (
-                f"Steiner point {cell} left on blocked copper"
-            )
+            assert cell not in blocked, f"Steiner point {cell} left on blocked copper"
 
     def test_terminals_keep_exact_coordinates(self):
         from kicad_tools.router.algorithms.mst import MSTRouter
@@ -692,9 +667,5 @@ class TestMSTRouterSteinerRelocation:
         mst.route_net(pads, mark_route_callback=lambda r: None)
 
         originals = {(40.0, 50.0), (60.0, 50.0), (50.0, 40.0), (50.0, 60.0)}
-        terminal_coords = {
-            (p.x, p.y)
-            for p in seen_pads
-            if not getattr(p, "steiner_point", False)
-        }
+        terminal_coords = {(p.x, p.y) for p in seen_pads if not getattr(p, "steiner_point", False)}
         assert originals <= terminal_coords

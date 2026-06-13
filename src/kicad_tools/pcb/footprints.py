@@ -578,7 +578,7 @@ def get_footprint_pads(footprint: str) -> dict[str, tuple]:
 # Matches -N or _N patterns like SOT-23-5, TSSOP-20, QFN-48, DIP-8.
 # The lookahead ensures the digits are followed by a separator, end-of-string,
 # or a non-digit character (to avoid matching embedded dimensions like "5x5mm").
-_FP_PAD_COUNT_RE = re.compile(r'[-_](\d+)(?=[-_]|$)')
+_FP_PAD_COUNT_RE = re.compile(r"[-_](\d+)(?=[-_]|$)")
 
 
 def get_pad_count(footprint: str) -> int | None:

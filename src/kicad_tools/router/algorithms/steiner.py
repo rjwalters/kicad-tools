@@ -129,9 +129,7 @@ def make_blocked_cell_predicate(
         if res > 0 and rules is not None:
             margin_cells = max(
                 1,
-                math.ceil(
-                    (rules.trace_width / 2.0 + rules.trace_clearance) / res
-                ),
+                math.ceil((rules.trace_width / 2.0 + rules.trace_clearance) / res),
             )
     except Exception:
         # Fixture/mock rules without these attributes: keep the 1-cell
@@ -144,9 +142,7 @@ def make_blocked_cell_predicate(
                 layer_ok = True
                 for dy in range(-margin_cells, margin_cells + 1):
                     for dx in range(-margin_cells, margin_cells + 1):
-                        if grid.is_blocked_for_net(
-                            gx + dx, gy + dy, layer_idx, net
-                        ):
+                        if grid.is_blocked_for_net(gx + dx, gy + dy, layer_idx, net):
                             layer_ok = False
                             break
                     if not layer_ok:
@@ -338,9 +334,7 @@ def _solve_3_terminal(
         return list(terminals), mst_edges
 
     # Cost with Steiner point: connect each terminal to the Steiner point
-    steiner_cost = sum(
-        dist_fn(t[0], t[1], steiner[0], steiner[1]) for t in terminals
-    )
+    steiner_cost = sum(dist_fn(t[0], t[1], steiner[0], steiner[1]) for t in terminals)
 
     if steiner_cost < mst_cost:
         all_points = list(terminals) + [steiner]
@@ -406,9 +400,7 @@ def build_rsmt(
     if n == 3:
         all_points, edges = _solve_3_terminal(terminals, congestion_fn)
     elif n <= 9:
-        all_points, edges = _iterative_one_steiner(
-            terminals, congestion_fn, max_iterations=50
-        )
+        all_points, edges = _iterative_one_steiner(terminals, congestion_fn, max_iterations=50)
     else:
         # Larger nets: limit iterations to keep runtime bounded
         all_points, edges = _iterative_one_steiner(

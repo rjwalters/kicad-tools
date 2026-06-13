@@ -7,9 +7,7 @@ nets in parallel using GPU acceleration.
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 
 from kicad_tools.acceleration import BackendType, get_backend, get_best_available_backend
@@ -63,42 +61,114 @@ def sample_pads():
 
     # Net 1: pads at (2, 2) and (8, 8)
     pads.append(
-        Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1, net_name="NET1",
-            layer=Layer.F_CU, ref="U1", pin="1")
+        Pad(
+            x=2.0,
+            y=2.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
+        )
     )
     pads.append(
-        Pad(x=8.0, y=8.0, width=1.0, height=1.0, net=1, net_name="NET1",
-            layer=Layer.F_CU, ref="U2", pin="1")
+        Pad(
+            x=8.0,
+            y=8.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="NET1",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="1",
+        )
     )
 
     # Net 2: pads at (2, 18) and (8, 12) - independent of net 1
     pads.append(
-        Pad(x=2.0, y=18.0, width=1.0, height=1.0, net=2, net_name="NET2",
-            layer=Layer.F_CU, ref="U1", pin="2")
+        Pad(
+            x=2.0,
+            y=18.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="NET2",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="2",
+        )
     )
     pads.append(
-        Pad(x=8.0, y=12.0, width=1.0, height=1.0, net=2, net_name="NET2",
-            layer=Layer.F_CU, ref="U2", pin="2")
+        Pad(
+            x=8.0,
+            y=12.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="NET2",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="2",
+        )
     )
 
     # Net 3: pads at (12, 2) and (18, 8) - independent of nets 1, 2
     pads.append(
-        Pad(x=12.0, y=2.0, width=1.0, height=1.0, net=3, net_name="NET3",
-            layer=Layer.F_CU, ref="U3", pin="1")
+        Pad(
+            x=12.0,
+            y=2.0,
+            width=1.0,
+            height=1.0,
+            net=3,
+            net_name="NET3",
+            layer=Layer.F_CU,
+            ref="U3",
+            pin="1",
+        )
     )
     pads.append(
-        Pad(x=18.0, y=8.0, width=1.0, height=1.0, net=3, net_name="NET3",
-            layer=Layer.F_CU, ref="U4", pin="1")
+        Pad(
+            x=18.0,
+            y=8.0,
+            width=1.0,
+            height=1.0,
+            net=3,
+            net_name="NET3",
+            layer=Layer.F_CU,
+            ref="U4",
+            pin="1",
+        )
     )
 
     # Net 4: pads at (12, 18) and (18, 12) - independent of others
     pads.append(
-        Pad(x=12.0, y=18.0, width=1.0, height=1.0, net=4, net_name="NET4",
-            layer=Layer.F_CU, ref="U3", pin="2")
+        Pad(
+            x=12.0,
+            y=18.0,
+            width=1.0,
+            height=1.0,
+            net=4,
+            net_name="NET4",
+            layer=Layer.F_CU,
+            ref="U3",
+            pin="2",
+        )
     )
     pads.append(
-        Pad(x=18.0, y=12.0, width=1.0, height=1.0, net=4, net_name="NET4",
-            layer=Layer.F_CU, ref="U4", pin="2")
+        Pad(
+            x=18.0,
+            y=12.0,
+            width=1.0,
+            height=1.0,
+            net=4,
+            net_name="NET4",
+            layer=Layer.F_CU,
+            ref="U4",
+            pin="2",
+        )
     )
 
     return pads
@@ -199,21 +269,55 @@ class TestBatchPathfinder:
         total_in_batches = sum(len(b) for b in batches)
         assert total_in_batches == 4
 
-    def test_find_independent_nets_overlapping(
-        self, routing_grid, design_rules, cpu_backend
-    ):
+    def test_find_independent_nets_overlapping(self, routing_grid, design_rules, cpu_backend):
         """Test finding independent nets with overlapping routes."""
         pathfinder = BatchPathfinder(routing_grid, design_rules, cpu_backend)
 
         # Create overlapping pads (routes will cross)
-        pad1 = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=1, net_name="N1",
-                   layer=Layer.F_CU, ref="U1", pin="1")
-        pad2 = Pad(x=15.0, y=15.0, width=1.0, height=1.0, net=1, net_name="N1",
-                   layer=Layer.F_CU, ref="U2", pin="1")
-        pad3 = Pad(x=5.0, y=15.0, width=1.0, height=1.0, net=2, net_name="N2",
-                   layer=Layer.F_CU, ref="U3", pin="1")
-        pad4 = Pad(x=15.0, y=5.0, width=1.0, height=1.0, net=2, net_name="N2",
-                   layer=Layer.F_CU, ref="U4", pin="1")
+        pad1 = Pad(
+            x=5.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N1",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
+        )
+        pad2 = Pad(
+            x=15.0,
+            y=15.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="N1",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="1",
+        )
+        pad3 = Pad(
+            x=5.0,
+            y=15.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="N2",
+            layer=Layer.F_CU,
+            ref="U3",
+            pin="1",
+        )
+        pad4 = Pad(
+            x=15.0,
+            y=5.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="N2",
+            layer=Layer.F_CU,
+            ref="U4",
+            pin="1",
+        )
 
         requests = [
             BatchRouteRequest(net_id=1, source_pad=pad1, target_pad=pad2),  # Diagonal SW-NE
@@ -233,9 +337,7 @@ class TestBatchPathfinder:
         results = pathfinder.route_batch([])
         assert results == []
 
-    def test_route_single_net(
-        self, routing_grid, design_rules, sample_pads, cpu_backend
-    ):
+    def test_route_single_net(self, routing_grid, design_rules, sample_pads, cpu_backend):
         """Test routing a single net."""
         pathfinder = BatchPathfinder(routing_grid, design_rules, cpu_backend)
 
@@ -276,11 +378,9 @@ class TestBatchPathfinder:
         assert len(results) == 4
         for i, result in enumerate(results):
             assert result.net_id == i + 1
-            assert result.success, f"Net {i+1} failed to route"
+            assert result.success, f"Net {i + 1} failed to route"
 
-    def test_statistics_tracking(
-        self, routing_grid, design_rules, sample_pads, cpu_backend
-    ):
+    def test_statistics_tracking(self, routing_grid, design_rules, sample_pads, cpu_backend):
         """Test that statistics are tracked correctly."""
         pathfinder = BatchPathfinder(routing_grid, design_rules, cpu_backend)
 
@@ -328,12 +428,30 @@ class TestBatchRoutingPerformance:
             y2 = y1 + 8.0
 
             pads.append(
-                Pad(x=x1, y=y1, width=1.0, height=1.0, net=i+1, net_name=f"NET{i+1}",
-                    layer=Layer.F_CU, ref=f"U{i+1}", pin="1")
+                Pad(
+                    x=x1,
+                    y=y1,
+                    width=1.0,
+                    height=1.0,
+                    net=i + 1,
+                    net_name=f"NET{i + 1}",
+                    layer=Layer.F_CU,
+                    ref=f"U{i + 1}",
+                    pin="1",
+                )
             )
             pads.append(
-                Pad(x=x2, y=y2, width=1.0, height=1.0, net=i+1, net_name=f"NET{i+1}",
-                    layer=Layer.F_CU, ref=f"U{i+1}", pin="2")
+                Pad(
+                    x=x2,
+                    y=y2,
+                    width=1.0,
+                    height=1.0,
+                    net=i + 1,
+                    net_name=f"NET{i + 1}",
+                    layer=Layer.F_CU,
+                    ref=f"U{i + 1}",
+                    pin="2",
+                )
             )
             grid.add_pad(pads[-2])
             grid.add_pad(pads[-1])
@@ -347,9 +465,9 @@ class TestBatchRoutingPerformance:
         for i in range(8):
             requests.append(
                 BatchRouteRequest(
-                    net_id=i+1,
-                    source_pad=pads[i*2],
-                    target_pad=pads[i*2+1],
+                    net_id=i + 1,
+                    source_pad=pads[i * 2],
+                    target_pad=pads[i * 2 + 1],
                 )
             )
 
@@ -364,7 +482,7 @@ class TestBatchRoutingPerformance:
 
         # Print performance info
         stats = pathfinder.get_statistics()
-        print(f"\nBatch routing performance:")
+        print("\nBatch routing performance:")
         print(f"  Backend: {stats['backend']} (GPU: {stats['is_gpu']})")
         print(f"  Nets routed: {success_count}/8")
         print(f"  Time: {batch_time:.3f}s")

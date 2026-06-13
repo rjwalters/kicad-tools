@@ -945,9 +945,7 @@ class TestAutoFixStructuredStatus:
         dummy_pcb.write_text("(kicad_pcb)\n")
 
         with patch("kicad_tools.cli.fix_drc_cmd.main") as mock_fix:
-            result = _run_auto_fix(
-                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
-            )
+            result = _run_auto_fix(output_path=dummy_pcb, max_passes=2, quiet=True, args=args)
             mock_fix.assert_not_called()
             assert result == 1
             assert args._auto_fix_status == "skipped_deadline"
@@ -966,9 +964,7 @@ class TestAutoFixStructuredStatus:
         dummy_pcb.write_text("(kicad_pcb)\n")
 
         with patch("kicad_tools.cli.fix_drc_cmd.main", return_value=0) as mock_fix:
-            result = _run_auto_fix(
-                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
-            )
+            result = _run_auto_fix(output_path=dummy_pcb, max_passes=2, quiet=True, args=args)
             mock_fix.assert_called_once()
             assert result == 0
             assert args._auto_fix_status == "ran"
@@ -991,9 +987,7 @@ class TestAutoFixStructuredStatus:
         dummy_pcb.write_text("(kicad_pcb)\n")
 
         with patch("kicad_tools.cli.fix_drc_cmd.main"):
-            _run_auto_fix(
-                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
-            )
+            _run_auto_fix(output_path=dummy_pcb, max_passes=2, quiet=True, args=args)
 
         captured = capsys.readouterr()
         # The token must appear on stderr (machine-readable signal).
@@ -1022,9 +1016,7 @@ class TestAutoFixStructuredStatus:
         dummy_pcb.write_text("(kicad_pcb)\n")
 
         with patch("kicad_tools.cli.fix_drc_cmd.main", return_value=0) as mock_fix:
-            result = _run_auto_fix(
-                output_path=dummy_pcb, max_passes=2, quiet=True, args=args
-            )
+            result = _run_auto_fix(output_path=dummy_pcb, max_passes=2, quiet=True, args=args)
             # Auto-fix should run because the wall-clock deadline still
             # has the reserved 300s, even though routing deadline is past.
             mock_fix.assert_called_once()

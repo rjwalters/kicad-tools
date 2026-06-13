@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _find_protocol,
     _is_generic_pin_name,
     _is_mcu,
@@ -16,7 +13,6 @@ from kicad_tools.cli.sch_validate import (
     _tokenize_name,
     check_pin_net_semantic_mismatch,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics
@@ -64,13 +60,15 @@ def _make_ic_lib_symbol(
 
 
 def _make_symbol_instance(
-    ref: str, lib_id: str, pins: list[tuple[str, str, str]], x: float, y: float,
+    ref: str,
+    lib_id: str,
+    pins: list[tuple[str, str, str]],
+    x: float,
+    y: float,
     dnp: str = "no",
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     return f"""(symbol
         (lib_id "{lib_id}")
         (at {x} {y} 0)
@@ -83,7 +81,7 @@ def _make_symbol_instance(
             (at {x + 2} {y - 2} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
-        (property "Value" "{lib_id.split(':')[-1]}"
+        (property "Value" "{lib_id.split(":")[-1]}"
             (at {x + 2} {y} 0)
             (effects (font (size 1.27 1.27)) (justify left))
         )
@@ -295,8 +293,7 @@ class TestCheckPinNetSemanticMismatch:
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         assert len(pin_issues) >= 1
         # Should mention the ref and pin name
@@ -318,10 +315,10 @@ class TestCheckPinNetSemanticMismatch:
         pin_nets = {
             "1": "MODE1_NET",
             "2": "MODE2_NET",
-            "3": "I2S_BCLK",   # should be on pin 1
+            "3": "I2S_BCLK",  # should be on pin 1
             "4": "I2S_LRCLK",  # should be on pin 2
-            "5": "I2S_DIN",    # should be on pin 3
-            "6": "I2S_DOUT",   # should be on pin 4
+            "5": "I2S_DIN",  # should be on pin 3
+            "6": "I2S_DOUT",  # should be on pin 4
         }
         sch_text = _make_schematic("Audio_Codec:DAC5678", pins, pin_nets)
         sch_path = tmp_path / "offset.kicad_sch"
@@ -329,8 +326,7 @@ class TestCheckPinNetSemanticMismatch:
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         error_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "error"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "error"
         ]
         assert len(error_issues) >= 1
         assert any("systematic wiring offset" in i.message for i in error_issues)
@@ -428,10 +424,7 @@ class TestCheckPinNetSemanticMismatch:
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
-        pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment"
-        ]
+        pin_issues = [i for i in issues if i.category == "pin_assignment"]
         # Both have SPI keywords but MOSI != MISO -- should flag
         assert len(pin_issues) >= 1
 
@@ -534,15 +527,17 @@ class TestMcuGpioSuppression:
             "3": "SPI_MOSI",
         }
         sch_text = _make_schematic(
-            "MCU_ST_STM32:STM32C011F6Px", pins, pin_nets, ref="U1",
+            "MCU_ST_STM32:STM32C011F6Px",
+            pins,
+            pin_nets,
+            ref="U1",
         )
         sch_path = tmp_path / "mcu_spi.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
 
@@ -557,15 +552,17 @@ class TestMcuGpioSuppression:
             "2": "I2C_SDA",
         }
         sch_text = _make_schematic(
-            "MCU_ST_STM32:STM32F401CCU6", pins, pin_nets, ref="U1",
+            "MCU_ST_STM32:STM32F401CCU6",
+            pins,
+            pin_nets,
+            ref="U1",
         )
         sch_path = tmp_path / "mcu_i2c.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
 
@@ -582,15 +579,17 @@ class TestMcuGpioSuppression:
             "3": "I2S_DIN",
         }
         sch_text = _make_schematic(
-            "MCU_ST_STM32:STM32F401CCU6", pins, pin_nets, ref="U1",
+            "MCU_ST_STM32:STM32F401CCU6",
+            pins,
+            pin_nets,
+            ref="U1",
         )
         sch_path = tmp_path / "mcu_i2s.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
 
@@ -605,15 +604,17 @@ class TestMcuGpioSuppression:
             "2": "I2S_BCLK",
         }
         sch_text = _make_schematic(
-            "Audio_Codec:PCM5122", pins, pin_nets, ref="U1",
+            "Audio_Codec:PCM5122",
+            pins,
+            pin_nets,
+            ref="U1",
         )
         sch_path = tmp_path / "codec_mode.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         # MODE pin on non-MCU connected to I2S_DIN should still warn
         assert len(pin_issues) >= 1
@@ -630,15 +631,17 @@ class TestMcuGpioSuppression:
             "2": "I2C_SDA",
         }
         sch_text = _make_schematic(
-            "MCU_ST_STM32:STM32C011F6Px", pins, pin_nets, ref="U1",
+            "MCU_ST_STM32:STM32C011F6Px",
+            pins,
+            pin_nets,
+            ref="U1",
         )
         sch_path = tmp_path / "mcu_nrst.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         # NRST and BOOT0 are not GPIO pins, so should still warn
         assert len(pin_issues) >= 1
@@ -656,15 +659,17 @@ class TestMcuGpioSuppression:
             "3": "SPI_MISO",
         }
         sch_text = _make_schematic(
-            "MCU_Espressif:ESP32-S3", pins, pin_nets, ref="U1",
+            "MCU_Espressif:ESP32-S3",
+            pins,
+            pin_nets,
+            ref="U1",
         )
         sch_path = tmp_path / "esp_spi.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         assert pin_issues == [], f"Unexpected warnings: {pin_issues}"
 
@@ -679,14 +684,16 @@ class TestMcuGpioSuppression:
             "2": "UART_RX",
         }
         sch_text = _make_schematic(
-            "MCU_Espressif:ESP32-C3", pins, pin_nets, ref="U1",
+            "MCU_Espressif:ESP32-C3",
+            pins,
+            pin_nets,
+            ref="U1",
         )
         sch_path = tmp_path / "esp_uart.kicad_sch"
         sch_path.write_text(sch_text)
 
         issues = check_pin_net_semantic_mismatch(str(sch_path))
         pin_issues = [
-            i for i in issues
-            if i.category == "pin_assignment" and i.severity == "warning"
+            i for i in issues if i.category == "pin_assignment" and i.severity == "warning"
         ]
         assert pin_issues == [], f"Unexpected warnings: {pin_issues}"

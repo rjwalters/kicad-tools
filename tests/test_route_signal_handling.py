@@ -63,9 +63,7 @@ class TestAdaptiveRulesSignalRegistration:
         # Both SIGINT and SIGTERM should have been registered with _handle_interrupt
         sigint_handlers = [h for s, h in registered if s == signal.SIGINT]
         sigterm_handlers = [h for s, h in registered if s == signal.SIGTERM]
-        assert any(h == _handle_interrupt for h in sigint_handlers), (
-            "SIGINT handler not registered"
-        )
+        assert any(h == _handle_interrupt for h in sigint_handlers), "SIGINT handler not registered"
         assert any(h == _handle_interrupt for h in sigterm_handlers), (
             "SIGTERM handler not registered"
         )
@@ -98,9 +96,7 @@ class TestAdaptiveRulesSignalRegistration:
 
         sigint_handlers = [h for s, h in registered if s == signal.SIGINT]
         sigterm_handlers = [h for s, h in registered if s == signal.SIGTERM]
-        assert any(h == _handle_interrupt for h in sigint_handlers), (
-            "SIGINT handler not registered"
-        )
+        assert any(h == _handle_interrupt for h in sigint_handlers), "SIGINT handler not registered"
         assert any(h == _handle_interrupt for h in sigterm_handlers), (
             "SIGTERM handler not registered"
         )
@@ -240,37 +236,37 @@ def _make_args(**overrides):
     """Build a minimal args namespace for routing functions."""
     from types import SimpleNamespace
 
-    defaults = dict(
-        trace_width=0.25,
-        clearance=0.2,
-        via_drill=0.3,
-        via_diameter=0.6,
-        manufacturer="generic",
-        min_trace=None,
-        min_clearance_floor=None,
-        grid=0.1,
-        layers="auto",
-        backend="python",
-        skip_nets=None,
-        strategy="basic",
-        timeout=None,
-        iterations=1,
-        min_completion=0.95,
-        verbose=False,
-        no_optimize=True,
-        skip_drc=True,
-        dry_run=False,
-        force=True,
-        edge_clearance=0.5,
-        mc_trials=3,
-        multi_resolution=False,
-        two_phase=False,
-        batch_routing=False,
-        high_performance=False,
-        hierarchical=False,
-        perturbation=True,
-        pcb="test.kicad_pcb",
-        max_layers=6,
-    )
+    defaults = {
+        "trace_width": 0.25,
+        "clearance": 0.2,
+        "via_drill": 0.3,
+        "via_diameter": 0.6,
+        "manufacturer": "generic",
+        "min_trace": None,
+        "min_clearance_floor": None,
+        "grid": 0.1,
+        "layers": "auto",
+        "backend": "python",
+        "skip_nets": None,
+        "strategy": "basic",
+        "timeout": None,
+        "iterations": 1,
+        "min_completion": 0.95,
+        "verbose": False,
+        "no_optimize": True,
+        "skip_drc": True,
+        "dry_run": False,
+        "force": True,
+        "edge_clearance": 0.5,
+        "mc_trials": 3,
+        "multi_resolution": False,
+        "two_phase": False,
+        "batch_routing": False,
+        "high_performance": False,
+        "hierarchical": False,
+        "perturbation": True,
+        "pcb": "test.kicad_pcb",
+        "max_layers": 6,
+    }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

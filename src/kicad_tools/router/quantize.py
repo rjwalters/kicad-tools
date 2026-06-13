@@ -210,9 +210,7 @@ def _derive_dogleg_uuid(parent_uuid: str, seen_uuids: set[str]) -> str:
     n = 1
     while candidate in seen_uuids:
         n += 1
-        candidate = str(
-            _uuid.uuid5(_uuid.NAMESPACE_OID, f"{parent_uuid}:dogleg:{n}")
-        )
+        candidate = str(_uuid.uuid5(_uuid.NAMESPACE_OID, f"{parent_uuid}:dogleg:{n}"))
     seen_uuids.add(candidate)
     return candidate
 
@@ -366,16 +364,8 @@ def quantize_pcb_file(
         # Collision-proof: if the base derivation already exists in the
         # file (stale sibling from a previous quantization of the same
         # parent), the suffix is extended deterministically.
-        second_uuid = (
-            _derive_dogleg_uuid(seg_uuid, seen_uuids)
-            if seg_uuid is not None
-            else None
-        )
-        return (
-            _block(x1, y1, mx, my, seg_uuid)
-            + "\n"
-            + _block(mx, my, x2, y2, second_uuid)
-        )
+        second_uuid = _derive_dogleg_uuid(seg_uuid, seen_uuids) if seg_uuid is not None else None
+        return _block(x1, y1, mx, my, seg_uuid) + "\n" + _block(mx, my, x2, y2, second_uuid)
 
     new_text = _SEGMENT_BLOCK_RE.sub(_rewrite, text)
     if replaced and not dry_run:

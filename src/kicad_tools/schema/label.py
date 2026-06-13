@@ -6,9 +6,8 @@ Labels assign names to nets and enable connections across the schematic.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import uuid as uuid_mod
+from dataclasses import dataclass
 
 from kicad_tools.sexp import SExp
 

@@ -227,9 +227,7 @@ def run_assign_footprints(
         return 1
 
     paths = detect_kicad_library_path(config_override)
-    project_table = (
-        find_project_fp_lib_table(schematic_path) if not no_project_lib else None
-    )
+    project_table = find_project_fp_lib_table(schematic_path) if not no_project_lib else None
     if not paths.found and project_table is None:
         print(
             "Error: No KiCad footprint library found. "
@@ -294,9 +292,7 @@ def run_assign_footprints(
         report = {
             "schematic": str(schematic_path),
             "library_source": library_source,
-            "project_lib_table": (
-                str(project_table) if project_table is not None else None
-            ),
+            "project_lib_table": (str(project_table) if project_table is not None else None),
             "scanned": len(records),
             "assigned": [
                 {

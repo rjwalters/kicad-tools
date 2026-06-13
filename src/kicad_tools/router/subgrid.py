@@ -165,10 +165,7 @@ class SubGridAnalysis:
             for ref, pads in sorted(by_ref.items()):
                 offsets = [max(abs(p.offset_x), abs(p.offset_y)) for p in pads]
                 avg_offset = sum(offsets) / len(offsets)
-                lines.append(
-                    f"  {ref}: {len(pads)} off-grid pads, "
-                    f"avg offset {avg_offset:.3f}mm"
-                )
+                lines.append(f"  {ref}: {len(pads)} off-grid pads, avg offset {avg_offset:.3f}mm")
         return "\n".join(lines)
 
 
@@ -210,7 +207,8 @@ class SubGridResult:
         for pad in self.failed_pads:
             ref = pad.ref or "<unknown>"
             reason = self.failure_reasons.get(
-                (pad.ref, pad.pin), "unknown",
+                (pad.ref, pad.pin),
+                "unknown",
             )
             if ref not in by_ref:
                 by_ref[ref] = {}
@@ -237,12 +235,9 @@ class SubGridResult:
                 total_failed = sum(reasons.values())
                 total_attempted = attempted_by_ref.get(ref, total_failed)
                 escaped = total_attempted - total_failed
-                reason_parts = [
-                    f"{reason}: {cnt}" for reason, cnt in sorted(reasons.items())
-                ]
+                reason_parts = [f"{reason}: {cnt}" for reason, cnt in sorted(reasons.items())]
                 lines.append(
-                    f"  {ref}: {escaped}/{total_attempted} pads escaped "
-                    f"({', '.join(reason_parts)})"
+                    f"  {ref}: {escaped}/{total_attempted} pads escaped ({', '.join(reason_parts)})"
                 )
         return "\n".join(lines)
 
@@ -430,12 +425,13 @@ class SubGridRouter:
                 total_failed = sum(reasons.values())
                 total_attempted = attempted_by_ref.get(ref, total_failed)
                 escaped = total_attempted - total_failed
-                reason_parts = [
-                    f"{reason}: {cnt}" for reason, cnt in sorted(reasons.items())
-                ]
+                reason_parts = [f"{reason}: {cnt}" for reason, cnt in sorted(reasons.items())]
                 logger.warning(
                     "%s: %d/%d pads escaped (%s)",
-                    ref, escaped, total_attempted, ", ".join(reason_parts),
+                    ref,
+                    escaped,
+                    total_attempted,
+                    ", ".join(reason_parts),
                 )
 
         return result
@@ -496,10 +492,13 @@ class SubGridRouter:
                         unblocked += 1
                         if prev_net != pad.net and prev_net != 0:
                             logger.debug(
-                                "Overriding clearance cell (%d,%d) net %d -> "
-                                "%d for %s.%s escape",
-                                gx, gy, prev_net, pad.net,
-                                pad.ref, pad.pin,
+                                "Overriding clearance cell (%d,%d) net %d -> %d for %s.%s escape",
+                                gx,
+                                gy,
+                                prev_net,
+                                pad.net,
+                                pad.ref,
+                                pad.pin,
                             )
                     elif not cell.blocked:
                         # Already unblocked, just ensure net assignment
@@ -600,7 +599,7 @@ class SubGridRouter:
         zone = self._get_pad_fine_zone(pad)
         return zone.resolution if zone is not None else None
 
-    def _get_pad_fine_zone(self, pad: Pad) -> "FineZone | None":
+    def _get_pad_fine_zone(self, pad: Pad) -> FineZone | None:
         """Return the finest FineZone containing the pad, or None.
 
         When a pad falls inside multiple zones (overlapping fine zones from
@@ -616,7 +615,7 @@ class SubGridRouter:
             The finest containing FineZone, or None if the pad is outside
             every fine zone.
         """
-        best: "FineZone | None" = None
+        best: FineZone | None = None
         for zone in self.fine_zones:
             if zone.contains(pad.x, pad.y):
                 if best is None or zone.resolution < best.resolution:
@@ -691,13 +690,11 @@ class SubGridRouter:
             # Snap the centre to the fine grid defined by (x_offset, y_offset).
             anchor_x = (
                 zone.x_offset
-                + round((sgp.snap_x - zone.x_offset) / fine_resolution)
-                * fine_resolution
+                + round((sgp.snap_x - zone.x_offset) / fine_resolution) * fine_resolution
             )
             anchor_y = (
                 zone.y_offset
-                + round((sgp.snap_y - zone.y_offset) / fine_resolution)
-                * fine_resolution
+                + round((sgp.snap_y - zone.y_offset) / fine_resolution) * fine_resolution
             )
         else:
             anchor_x = sgp.snap_x
@@ -734,10 +731,7 @@ class SubGridRouter:
                 accessible = False
                 for layer_idx in check_layers:
                     cell = self.grid.grid[layer_idx][gy][gx]
-                    if not cell.blocked:
-                        accessible = True
-                        break
-                    elif not cell.pad_blocked:
+                    if not cell.blocked or not cell.pad_blocked:
                         accessible = True
                         break
                 if not accessible:
@@ -765,7 +759,11 @@ class SubGridRouter:
                 # trace, so candidates between pads must be eliminated early
                 # rather than merely penalized.
                 neighbor_clearance = self._min_clearance_to_neighbors(
-                    fx, fy, half_width, pad.net, check_layers[0],
+                    fx,
+                    fy,
+                    half_width,
+                    pad.net,
+                    check_layers[0],
                 )
                 if neighbor_clearance < required_clearance:
                     continue  # Physically impossible -- skip
@@ -774,9 +772,7 @@ class SubGridRouter:
                 if self.clearance_weight > 0:
                     threshold = required_clearance * 2
                     if neighbor_clearance < threshold:
-                        clearance_penalty = (
-                            (threshold - neighbor_clearance) * self.clearance_weight
-                        )
+                        clearance_penalty = (threshold - neighbor_clearance) * self.clearance_weight
                         score += clearance_penalty
 
                 candidates.append((score, gx, gy, fx, fy))
@@ -880,7 +876,11 @@ class SubGridRouter:
                 # Hard-reject coarse candidates that violate minimum
                 # clearance against neighboring pads (Issue #1834).
                 neighbor_clearance = self._min_clearance_to_neighbors(
-                    snap_x, snap_y, width / 2, pad.net, check_layers[0],
+                    snap_x,
+                    snap_y,
+                    width / 2,
+                    pad.net,
+                    check_layers[0],
                 )
                 if neighbor_clearance < required_clearance:
                     continue  # Physically impossible -- skip
@@ -889,9 +889,7 @@ class SubGridRouter:
                 if self.clearance_weight > 0:
                     threshold = required_clearance * 2
                     if neighbor_clearance < threshold:
-                        clearance_penalty = (
-                            (threshold - neighbor_clearance) * self.clearance_weight
-                        )
+                        clearance_penalty = (threshold - neighbor_clearance) * self.clearance_weight
                         score += clearance_penalty
 
                 candidates.append((score, gx, gy, snap_x, snap_y))
@@ -969,7 +967,9 @@ class SubGridRouter:
                 # pads using the reduced threshold, bypassing per-component
                 # clearance overrides that would use the stricter value.
                 is_valid = self._validate_segment_relaxed(
-                    segment, pad.net, min_clearance,
+                    segment,
+                    pad.net,
+                    min_clearance,
                 )
                 violation_loc = None
             else:
@@ -1044,7 +1044,12 @@ class SubGridRouter:
 
             pad_radius = max(pad.width, pad.height) / 2
             dist = self.grid._point_to_segment_distance(
-                pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2,
+                pad.x,
+                pad.y,
+                seg.x1,
+                seg.y1,
+                seg.x2,
+                seg.y2,
             )
             clearance = dist - seg_half_width - pad_radius
 
@@ -1054,7 +1059,8 @@ class SubGridRouter:
         return True
 
     def _find_escape_for_pad(
-        self, sgp: SubGridPad,
+        self,
+        sgp: SubGridPad,
     ) -> tuple[SubGridEscape | None, str]:
         """Find the best escape point for a single off-grid pad.
 
@@ -1113,7 +1119,10 @@ class SubGridRouter:
         # --- Phase 1: Normal search radius with full clearance ---
         radius = self.escape_search_radius
         candidates = self._collect_coarse_candidates(
-            sgp, radius, check_layers, width,
+            sgp,
+            radius,
+            check_layers,
+            width,
         )
 
         # Issue #1828: When the pad falls within a fine zone, generate
@@ -1125,7 +1134,8 @@ class SubGridRouter:
             logger.debug(
                 "Fine-zone escape for %s.%s: %d fine candidates + %d coarse candidates "
                 "(fine_res=%.4fmm)",
-                pad.ref, pad.pin,
+                pad.ref,
+                pad.pin,
                 len(fine_candidates),
                 len(candidates) - len(fine_candidates),
                 fine_res,
@@ -1139,7 +1149,11 @@ class SubGridRouter:
             candidates = self._deduplicate_candidates(candidates)
 
             escape = self._try_candidates_with_clearance(
-                sgp, candidates, width, layer, component_pitches,
+                sgp,
+                candidates,
+                width,
+                layer,
+                component_pitches,
             )
             if escape is not None:
                 return escape, "ok"
@@ -1150,25 +1164,32 @@ class SubGridRouter:
         # reaches grid points beyond the congested zone.
         expanded_radius = radius * 2
         expanded_candidates = self._collect_coarse_candidates(
-            sgp, expanded_radius, check_layers, width,
+            sgp,
+            expanded_radius,
+            check_layers,
+            width,
         )
 
         # Include fine-grid candidates at expanded radius if applicable
         if fine_res is not None and fine_res < self.grid.resolution:
-            expanded_candidates.extend(
-                self._generate_fine_grid_candidates(sgp, fine_res)
-            )
+            expanded_candidates.extend(self._generate_fine_grid_candidates(sgp, fine_res))
 
         if expanded_candidates:
             expanded_candidates = self._deduplicate_candidates(expanded_candidates)
 
             escape = self._try_candidates_with_clearance(
-                sgp, expanded_candidates, width, layer, component_pitches,
+                sgp,
+                expanded_candidates,
+                width,
+                layer,
+                component_pitches,
             )
             if escape is not None:
                 logger.debug(
                     "Escape for %s.%s succeeded with expanded radius %d",
-                    pad.ref, pad.pin, expanded_radius,
+                    pad.ref,
+                    pad.pin,
+                    expanded_radius,
                 )
                 return escape, "ok"
 
@@ -1185,14 +1206,19 @@ class SubGridRouter:
         # Re-collect candidates with relaxed clearance for the hard-reject
         # filter so previously rejected candidates are now included.
         relaxed_candidates = self._collect_coarse_candidates(
-            sgp, expanded_radius, check_layers, width,
+            sgp,
+            expanded_radius,
+            check_layers,
+            width,
             min_clearance_factor=factor,
         )
         if fine_res is not None and fine_res < self.grid.resolution:
             # Generate fine-grid candidates with relaxed clearance
             relaxed_candidates.extend(
                 self._generate_fine_grid_candidates(
-                    sgp, fine_res, min_clearance_factor=factor,
+                    sgp,
+                    fine_res,
+                    min_clearance_factor=factor,
                 )
             )
 
@@ -1200,15 +1226,20 @@ class SubGridRouter:
             relaxed_candidates = self._deduplicate_candidates(relaxed_candidates)
 
             escape = self._try_candidates_with_clearance(
-                sgp, relaxed_candidates, width, layer, component_pitches,
+                sgp,
+                relaxed_candidates,
+                width,
+                layer,
+                component_pitches,
                 min_clearance=relaxed_clearance,
             )
             if escape is not None:
                 logger.debug(
-                    "Escape for %s.%s succeeded with relaxed clearance "
-                    "(%.3fmm vs normal %.3fmm)",
-                    pad.ref, pad.pin,
-                    relaxed_clearance, self.rules.trace_clearance,
+                    "Escape for %s.%s succeeded with relaxed clearance (%.3fmm vs normal %.3fmm)",
+                    pad.ref,
+                    pad.pin,
+                    relaxed_clearance,
+                    self.rules.trace_clearance,
                 )
                 return escape, "ok"
 
@@ -1219,12 +1250,17 @@ class SubGridRouter:
         # second hop connects from that intermediate point to a free grid
         # point the main router can reach.
         escape = self._try_multi_hop_escape(
-            sgp, check_layers, width, layer, component_pitches,
+            sgp,
+            check_layers,
+            width,
+            layer,
+            component_pitches,
         )
         if escape is not None:
             logger.debug(
                 "Escape for %s.%s succeeded via multi-hop",
-                pad.ref, pad.pin,
+                pad.ref,
+                pad.pin,
             )
             return escape, "ok"
 
@@ -1246,9 +1282,9 @@ class SubGridRouter:
         in_pad_escape = self._try_in_pad_via_rescue(sgp)
         if in_pad_escape is not None:
             logger.debug(
-                "Escape for %s.%s succeeded via in-pad via rescue "
-                "(Issue #3385)",
-                pad.ref, pad.pin,
+                "Escape for %s.%s succeeded via in-pad via rescue (Issue #3385)",
+                pad.ref,
+                pad.pin,
             )
             return in_pad_escape, "ok"
 
@@ -1264,7 +1300,9 @@ class SubGridRouter:
         logger.debug(
             "All escape strategies failed for %s.%s "
             "(normal, expanded, relaxed, multi-hop, in-pad-via): %s",
-            pad.ref, pad.pin, reason,
+            pad.ref,
+            pad.pin,
+            reason,
         )
         return None, reason
 
@@ -1382,9 +1420,12 @@ class SubGridRouter:
                     "In-pad via rescue for %s.%s skipped: pad %.3fx%.3fmm "
                     "too small for even micro-via drill=%.3fmm + 2x "
                     "annular=%.3fmm",
-                    pad.ref, pad.pin,
-                    pad.width, pad.height,
-                    mv_drill, mv_annular,
+                    pad.ref,
+                    pad.pin,
+                    pad.width,
+                    pad.height,
+                    mv_drill,
+                    mv_annular,
                 )
                 return None
             via_diameter = mv_diameter
@@ -1430,7 +1471,8 @@ class SubGridRouter:
             logger.debug(
                 "In-pad via rescue for %s.%s skipped: no landing layer "
                 "available (single-layer grid?)",
-                pad.ref, pad.pin,
+                pad.ref,
+                pad.pin,
             )
             return None
         landing_cell = self.grid.grid[landing_layer_idx][sgp.grid_y][sgp.grid_x]
@@ -1441,8 +1483,11 @@ class SubGridRouter:
             logger.debug(
                 "In-pad via rescue for %s.%s skipped: inner-layer cell "
                 "(%d,%d) on layer %d is occupied",
-                pad.ref, pad.pin,
-                sgp.grid_x, sgp.grid_y, landing_layer_idx,
+                pad.ref,
+                pad.pin,
+                sgp.grid_x,
+                sgp.grid_y,
+                landing_layer_idx,
             )
             return None
 
@@ -1485,10 +1530,13 @@ class SubGridRouter:
             "In-pad via rescue for %s.%s (net %s): %.2fmm via "
             "%sat pad centre (%.3f, %.3f); landing on layer %d "
             "(Issue #3385)",
-            pad.ref, pad.pin, pad.net_name,
+            pad.ref,
+            pad.pin,
+            pad.net_name,
             via_diameter,
             "(micro) " if is_micro else "",
-            pad.x, pad.y,
+            pad.x,
+            pad.y,
             landing_layer_idx,
         )
 
@@ -1525,10 +1573,7 @@ class SubGridRouter:
                 inner_indices = layer_stack.get_inner_layer_indices()
                 for idx in inner_indices:
                     layer_def = layer_stack.get_layer(idx)
-                    if (
-                        layer_def is not None
-                        and layer_def.layer_type == LayerType.SIGNAL
-                    ):
+                    if layer_def is not None and layer_def.layer_type == LayerType.SIGNAL:
                         # Use the layer's grid index when it differs
                         # from the layer-stack index; on this code
                         # path they match in practice but the explicit
@@ -1631,13 +1676,19 @@ class SubGridRouter:
                 # Check that the first hop (pad -> intermediate) passes
                 # relaxed clearance (using flat threshold, not per-component)
                 hop1 = Segment(
-                    x1=pad.x, y1=pad.y,
-                    x2=mid_x, y2=mid_y,
-                    width=width, layer=layer,
-                    net=pad.net, net_name=pad.net_name,
+                    x1=pad.x,
+                    y1=pad.y,
+                    x2=mid_x,
+                    y2=mid_y,
+                    width=width,
+                    layer=layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
                 )
                 if not self._validate_segment_relaxed(
-                    hop1, pad.net, relaxed_clearance,
+                    hop1,
+                    pad.net,
+                    relaxed_clearance,
                 ):
                     continue
 

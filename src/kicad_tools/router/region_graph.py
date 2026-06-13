@@ -360,7 +360,7 @@ class RegionGraph:
         """
         if self.num_layers <= 1:
             return {}
-        return {layer: per_layer_cap for layer in range(self.num_layers)}
+        return dict.fromkeys(range(self.num_layers), per_layer_cap)
 
     def _build_edges(self) -> None:
         """Build edges between adjacent regions (4-connected: up/down/left/right)."""
@@ -395,9 +395,7 @@ class RegionGraph:
                         per_layer_cap = self.base_capacity
 
                     layer_cap = self._make_layer_capacity(per_layer_cap)
-                    layer_util: dict[int, int] = (
-                        {l: 0 for l in layer_cap} if layer_cap else {}
-                    )
+                    layer_util: dict[int, int] = dict.fromkeys(layer_cap, 0) if layer_cap else {}
 
                     self.edges[region_id].append(
                         RegionEdge(
@@ -440,9 +438,7 @@ class RegionGraph:
                         per_layer_cap = self.base_capacity
 
                     layer_cap = self._make_layer_capacity(per_layer_cap)
-                    layer_util = (
-                        {l: 0 for l in layer_cap} if layer_cap else {}
-                    )
+                    layer_util = dict.fromkeys(layer_cap, 0) if layer_cap else {}
 
                     self.edges[region_id].append(
                         RegionEdge(
@@ -600,8 +596,7 @@ class RegionGraph:
 
         source = self.regions[source_id]
         h = math.sqrt(
-            (source.center_x - target.center_x) ** 2
-            + (source.center_y - target.center_y) ** 2
+            (source.center_x - target.center_x) ** 2 + (source.center_y - target.center_y) ** 2
         )
         start_node = _GlobalSearchNode(f_score=h, g_score=0.0, region_id=source_id)
         heapq.heappush(open_set, start_node)
@@ -841,9 +836,7 @@ class RegionGraph:
         """
         total_utilization = sum(r.utilization for r in self.regions.values())
         total_capacity = sum(r.capacity for r in self.regions.values())
-        max_utilization = (
-            max(r.utilization for r in self.regions.values()) if self.regions else 0
-        )
+        max_utilization = max(r.utilization for r in self.regions.values()) if self.regions else 0
 
         return {
             "num_regions": len(self.regions),
@@ -853,7 +846,5 @@ class RegionGraph:
             "total_capacity": total_capacity,
             "total_utilization": total_utilization,
             "max_utilization": max_utilization,
-            "regions_with_obstacles": sum(
-                1 for r in self.regions.values() if r.obstacle_count > 0
-            ),
+            "regions_with_obstacles": sum(1 for r in self.regions.values() if r.obstacle_count > 0),
         }

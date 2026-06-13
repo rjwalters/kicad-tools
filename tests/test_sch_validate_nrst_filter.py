@@ -4,17 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.cli.sch_validate import (
-    ValidationIssue,
     _is_capacitor,
     _is_nrst_pin,
     _is_stm32,
     _parse_capacitance,
     check_nrst_filter_cap,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for helper functions
@@ -195,9 +191,7 @@ def _make_symbol_instance(
     value: str | None = None,
 ) -> str:
     """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(
-        f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins
-    )
+    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
     val = value if value is not None else lib_id.split(":")[-1]
     return f"""(symbol
         (lib_id "{lib_id}")
@@ -289,7 +283,7 @@ def _make_nrst_schematic(
 
         # Wire cap pin 1 to NRST net
         wires.append(
-            f"""(wire
+            """(wire
         (pts (xy 130.00 50.00) (xy 140.00 50.00))
         (stroke (width 0) (type default))
         (uuid "wire-cap-1")

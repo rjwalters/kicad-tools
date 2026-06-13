@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -16,7 +14,6 @@ from kicad_tools.sexp.parser import SExp
 shapely = pytest.importorskip("shapely", reason="Shapely required for panel tests")
 
 from kicad_tools.panel.config import (  # noqa: E402
-    CutMethod,
     MousebiteConfig,
     PanelConfig,
     TabConfig,
@@ -316,7 +313,8 @@ class TestSExpHelpers:
 
     def test_deep_copy_preserves_structure(self):
         """Deep copy creates independent tree with same structure."""
-        original = SExp.list("test",
+        original = SExp.list(
+            "test",
             SExp.list("child", "value"),
             SExp.list("uuid", "original-uuid"),
         )
@@ -331,9 +329,11 @@ class TestSExpHelpers:
 
     def test_remap_uuids(self):
         """UUID remapping replaces all uuid nodes with fresh values."""
-        node = SExp.list("footprint",
+        node = SExp.list(
+            "footprint",
             SExp.list("uuid", "old-uuid-1"),
-            SExp.list("pad",
+            SExp.list(
+                "pad",
                 SExp.list("uuid", "old-uuid-2"),
             ),
         )
@@ -348,7 +348,8 @@ class TestSExpHelpers:
 
     def test_offset_positions(self):
         """Position offset applies to at, start, end nodes."""
-        node = SExp.list("segment",
+        node = SExp.list(
+            "segment",
             SExp.list("start", 10.0, 20.0),
             SExp.list("end", 30.0, 40.0),
         )
@@ -365,9 +366,9 @@ class TestSExpHelpers:
 
     def test_remap_reference(self):
         """Reference designator gets board index prefix."""
-        fp = SExp.list("footprint",
-            SExp.list("property", "Reference", "R1",
-                SExp.list("at", 0, 0)),
+        fp = SExp.list(
+            "footprint",
+            SExp.list("property", "Reference", "R1", SExp.list("at", 0, 0)),
         )
 
         _remap_reference(fp, 2)
@@ -409,8 +410,7 @@ class TestNetRemapping:
         sexp = panel.build()
 
         net_nodes = sexp.find_children("net")
-        prefixed = [n for n in net_nodes
-                     if n.get_string(1) and n.get_string(1).startswith("B")]
+        prefixed = [n for n in net_nodes if n.get_string(1) and n.get_string(1).startswith("B")]
         # Should have prefixed nets (all non-zero nets)
         assert len(prefixed) > 0
 
@@ -500,7 +500,8 @@ class TestPanelIntegration:
         # Should have gr_line nodes on Edge.Cuts
         gr_lines = sexp.find_children("gr_line")
         edge_cuts = [
-            l for l in gr_lines
+            l
+            for l in gr_lines
             if l.find_child("layer") and l.find_child("layer").get_string(0) == "Edge.Cuts"
         ]
         assert len(edge_cuts) > 0
@@ -519,7 +520,8 @@ class TestPanelIntegration:
 
         gr_lines = sexp.find_children("gr_line")
         edge_cuts = [
-            l for l in gr_lines
+            l
+            for l in gr_lines
             if l.find_child("layer") and l.find_child("layer").get_string(0) == "Edge.Cuts"
         ]
         # Frame adds 8 lines (4 outer + 4 inner) + board outlines + tab lines

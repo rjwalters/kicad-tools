@@ -99,9 +99,7 @@ class TestFindPadRefAt:
         _add_block_at(routing_grid, "U1", 10.0, 10.0, 2.0, 2.0)
         assert routing_grid.find_pad_ref_at(20.0, 20.0, layer_idx=0) is None
 
-    def test_picks_nearest_when_envelopes_overlap(
-        self, routing_grid: RoutingGrid
-    ):
+    def test_picks_nearest_when_envelopes_overlap(self, routing_grid: RoutingGrid):
         _add_block_at(routing_grid, "U1", 10.0, 10.0, 2.0, 2.0)
         _add_block_at(routing_grid, "U2", 12.0, 10.0, 2.0, 2.0)
         # Point closer to U1 should resolve to U1
@@ -109,9 +107,7 @@ class TestFindPadRefAt:
         # Point closer to U2 should resolve to U2
         assert routing_grid.find_pad_ref_at(11.5, 10.0, layer_idx=0) == "U2"
 
-    def test_layer_filter_smd(
-        self, routing_grid: RoutingGrid, two_layer_stack: LayerStack
-    ):
+    def test_layer_filter_smd(self, routing_grid: RoutingGrid, two_layer_stack: LayerStack):
         """SMD pads only affect their own layer."""
         # Manually add an SMD pad on B_CU and confirm it isn't found on F_CU
         pad = Pad(
@@ -156,9 +152,7 @@ class TestFindPadRefAt:
 class TestBlockingElementRefPopulation:
     """Tests that ``_find_blocking_elements`` populates ``ref`` correctly."""
 
-    def test_component_blocker_has_populated_ref(
-        self, routing_grid: RoutingGrid
-    ):
+    def test_component_blocker_has_populated_ref(self, routing_grid: RoutingGrid):
         """The fix for Issue #2604: ref must NOT be None for component blockers."""
         # Place U1 directly between the start and end points so it lands
         # inside the routing corridor.
@@ -173,9 +167,7 @@ class TestBlockingElementRefPopulation:
             layer=0,
         )
 
-        component_blockers = [
-            b for b in analysis.blocking_elements if b.type == "component"
-        ]
+        component_blockers = [b for b in analysis.blocking_elements if b.type == "component"]
         assert component_blockers, "Expected at least one component blocker"
         # Every component blocker must have a non-None ref now.
         for b in component_blockers:
@@ -187,9 +179,7 @@ class TestBlockingElementRefPopulation:
         refs = {b.ref for b in component_blockers}
         assert "U1" in refs
 
-    def test_has_movable_blockers_implies_refs_present(
-        self, routing_grid: RoutingGrid
-    ):
+    def test_has_movable_blockers_implies_refs_present(self, routing_grid: RoutingGrid):
         """If has_movable_blockers is True, at least one blocker must have a ref.
 
         This is the invariant the strategy generator relies on.  If an
@@ -240,9 +230,7 @@ class TestBlockingElementRefPopulation:
             pytest.skip("No component blockers detected in this fixture")
         assert analysis.nearby_component is not None
 
-    def test_zone_blockers_still_have_none_ref(
-        self, routing_grid: RoutingGrid
-    ):
+    def test_zone_blockers_still_have_none_ref(self, routing_grid: RoutingGrid):
         """Zones legitimately have ref=None -- verify we didn't break that."""
         # Build a synthetic zone-blocker test by directly checking the
         # element-type classification: a zone cell must remain ref=None.

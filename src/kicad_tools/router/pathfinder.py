@@ -633,7 +633,7 @@ class Router:
         layer = layers[0]
         r_min, r_max = self._ESCAPE_HINT_RADIUS_MIN, self._ESCAPE_HINT_RADIUS_MAX
         dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        counts: dict[tuple[int, int], int] = {d: 0 for d in dirs}
+        counts: dict[tuple[int, int], int] = dict.fromkeys(dirs, 0)
 
         for d in dirs:
             dx, dy = d
@@ -1744,9 +1744,7 @@ class Router:
             # halos, keepouts) stay non-negotiable even at usage > 0.
             grid_static = getattr(self.grid, "_static_blocked", None)
             static_arr = (
-                grid_static[layer, blocked_cy, blocked_cx]
-                if grid_static is not None
-                else None
+                grid_static[layer, blocked_cy, blocked_cx] if grid_static is not None else None
             )
 
             for i in range(len(blocked_indices)):

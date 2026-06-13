@@ -337,9 +337,7 @@ class DiffPairRoutingContinuityRule(DRCRule):
             frac_b = min(b_coupled / b_total, 1.0)
             coupled_fraction = (frac_a + frac_b) / 2.0
 
-            threshold = self._threshold_map.get(
-                (net_a, net_b), self._default_threshold
-            )
+            threshold = self._threshold_map.get((net_a, net_b), self._default_threshold)
             if coupled_fraction + 1e-9 < threshold:
                 results.add(
                     self._make_violation(

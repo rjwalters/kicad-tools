@@ -69,13 +69,16 @@ from kicad_tools.exceptions import RoutingError
 
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
+)
+from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
+)
+from .geometry import (
     segments_intersect as _geom_segments_intersect,
 )
 from .layers import Layer, LayerStack
 from .primitives import Obstacle, Pad, Route, Segment, Via
 from .rules import DesignRules
-
 
 # Issue #2908: Plane-net name patterns for same-component validator carve-out.
 #
@@ -103,37 +106,39 @@ from .rules import DesignRules
 _PLANE_NET_PREFIXES: tuple[str, ...] = (
     "+",  # +3.3V, +5V, +12V, +1V2, +0V9, etc.
 )
-_PLANE_NET_EXACT: frozenset[str] = frozenset({
-    "GND",
-    "GROUND",
-    "EARTH",
-    "AGND",
-    "DGND",
-    "PGND",
-    "SGND",
-    "VSS",
-    "VSSA",
-    "AVSS",
-    "DVSS",
-    "VCC",
-    "VCCA",
-    "AVCC",
-    "DVCC",
-    "VDD",
-    "VDDA",
-    "VDDIO",
-    "AVDD",
-    "DVDD",
-    "VEE",
-    "VBAT",
-    "VAA",
-})
+_PLANE_NET_EXACT: frozenset[str] = frozenset(
+    {
+        "GND",
+        "GROUND",
+        "EARTH",
+        "AGND",
+        "DGND",
+        "PGND",
+        "SGND",
+        "VSS",
+        "VSSA",
+        "AVSS",
+        "DVSS",
+        "VCC",
+        "VCCA",
+        "AVCC",
+        "DVCC",
+        "VDD",
+        "VDDA",
+        "VDDIO",
+        "AVDD",
+        "DVDD",
+        "VEE",
+        "VBAT",
+        "VAA",
+    }
+)
 
 
 def _sync_pad_to_cpp_grid(
-    py_grid: "RoutingGrid",
+    py_grid: RoutingGrid,
     cpp_grid: Any,
-    pad: "Pad",
+    pad: Pad,
     pin_pitch: float | None,
 ) -> None:
     """Push a single pad's geometry into the paired C++ grid's validator state.
@@ -206,7 +211,7 @@ def _sync_pad_to_cpp_grid(
 
 
 def _sync_pad_cells_to_cpp_grid(
-    py_grid: "RoutingGrid",
+    py_grid: RoutingGrid,
     cpp_grid: Any,
     layers_to_block: list[int],
     gx1: int,
@@ -298,7 +303,7 @@ def _sync_pad_cells_to_cpp_grid(
                 )
 
 
-def _is_plane_net_pad(pad: "Pad") -> bool:
+def _is_plane_net_pad(pad: Pad) -> bool:
     """Return True if ``pad`` belongs to a plane net (power/ground topology).
 
     Issue #2908: Used by ``validate_segment_clearance`` to decide whether
@@ -347,10 +352,7 @@ def _is_plane_net_pad(pad: "Pad") -> bool:
         return False
     if name in _PLANE_NET_EXACT:
         return True
-    for prefix in _PLANE_NET_PREFIXES:
-        if name.startswith(prefix):
-            return True
-    return False
+    return any(name.startswith(prefix) for prefix in _PLANE_NET_PREFIXES)
 
 
 def _rect_segment_centerline_distance(
@@ -460,6 +462,7 @@ def _rect_segment_centerline_distance(
 
     return min(candidates)
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -471,12 +474,12 @@ class RoutedNetsUnblocker:
     by routed traces are cleared on entry and restored on exit.
     """
 
-    def __init__(self, grid: "RoutingGrid") -> None:
+    def __init__(self, grid: RoutingGrid) -> None:
         self._grid = grid
         self._saved_blocked: np.ndarray | None = None
         self._saved_net: np.ndarray | None = None
 
-    def __enter__(self) -> "RoutedNetsUnblocker":
+    def __enter__(self) -> RoutedNetsUnblocker:
         # Save full copies of the blocked and net arrays
         self._saved_blocked = self._grid._blocked.copy()
         self._saved_net = self._grid._net.copy()
@@ -504,7 +507,7 @@ class _CellView:
 
     __slots__ = ("_grid", "_x", "_y", "_layer")
 
-    def __init__(self, grid: "RoutingGrid", x: int, y: int, layer: int):
+    def __init__(self, grid: RoutingGrid, x: int, y: int, layer: int):
         self._grid = grid
         self._x = x
         self._y = y
@@ -608,11 +611,11 @@ class _LayerView:
 
     __slots__ = ("_grid", "_layer")
 
-    def __init__(self, grid: "RoutingGrid", layer: int):
+    def __init__(self, grid: RoutingGrid, layer: int):
         self._grid = grid
         self._layer = layer
 
-    def __getitem__(self, y: int) -> "_RowView":
+    def __getitem__(self, y: int) -> _RowView:
         return _RowView(self._grid, self._layer, y)
 
 
@@ -621,7 +624,7 @@ class _RowView:
 
     __slots__ = ("_grid", "_layer", "_y")
 
-    def __init__(self, grid: "RoutingGrid", layer: int, y: int):
+    def __init__(self, grid: RoutingGrid, layer: int, y: int):
         self._grid = grid
         self._layer = layer
         self._y = y
@@ -635,7 +638,7 @@ class _GridView:
 
     __slots__ = ("_grid",)
 
-    def __init__(self, grid: "RoutingGrid"):
+    def __init__(self, grid: RoutingGrid):
         self._grid = grid
 
     def __getitem__(self, layer: int) -> _LayerView:
@@ -1110,7 +1113,7 @@ class RoutingGrid:
         return self._thread_safe
 
     @contextmanager
-    def locked(self) -> Iterator["RoutingGrid"]:
+    def locked(self) -> Iterator[RoutingGrid]:
         """Context manager for exclusive grid access.
 
         Use this when performing multiple grid operations that must be atomic.
@@ -1257,7 +1260,7 @@ class RoutingGrid:
     def _clearance_for_pin_pitch(
         self,
         pin_pitch: float | None,
-        pad: "Pad | None" = None,
+        pad: Pad | None = None,
     ) -> float:
         """Return the grid-level clearance halo to apply around a pad.
 
@@ -1415,9 +1418,7 @@ class RoutingGrid:
                     ):
                         shrunk = self.rules.min_trace_width / 2
                         eff_legacy = pin_pitch - 2.0 * shrunk - self.rules.trace_width
-                        req_legacy = (
-                            2.0 * self.rules.trace_clearance + self.rules.trace_width
-                        )
+                        req_legacy = 2.0 * self.rules.trace_clearance + self.rules.trace_width
                         if eff_legacy >= req_legacy:
                             return min(escape_halo, shrunk)
                     return escape_halo
@@ -1454,7 +1455,7 @@ class RoutingGrid:
             # not try to thread between these pads.
         return standard
 
-    def _region_clearance_for_pad(self, pad: "Pad") -> float | None:
+    def _region_clearance_for_pad(self, pad: Pad) -> float | None:
         """Return the fine-pitch escape clearance for ``pad`` if a region applies.
 
         Issue #3371 / P_FP3 -- helper used by
@@ -1701,9 +1702,7 @@ class RoutingGrid:
                         # (#2452) can still unblock them for adjacent
                         # different-net same-component traces -- preserving
                         # fine-pitch escape routing on LQFP/QFN packages.
-                        is_pad_blocked_band = (
-                            pad_gx1 <= gx <= pad_gx2 and pad_gy1 <= gy <= pad_gy2
-                        )
+                        is_pad_blocked_band = pad_gx1 <= gx <= pad_gx2 and pad_gy1 <= gy <= pad_gy2
                         is_metal_area = (
                             metal_gx1 <= gx <= metal_gx2 and metal_gy1 <= gy <= metal_gy2
                         )
@@ -1936,9 +1935,7 @@ class RoutingGrid:
         # what we sync here.
         cpp_grid = self._cpp_grid
         if cpp_grid is not None:
-            _sync_pad_cells_to_cpp_grid(
-                self, cpp_grid, layers_to_block, gx1, gy1, gx2, gy2
-            )
+            _sync_pad_cells_to_cpp_grid(self, cpp_grid, layers_to_block, gx1, gy1, gx2, gy2)
 
     def _apply_stitch_via_halo(
         self,
@@ -2788,14 +2785,18 @@ class RoutingGrid:
             is_circular_pad = abs(pad.width - pad.height) < 0.001
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
-                dist = self._point_to_segment_distance(
-                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2
-                )
+                dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
                 clearance = dist - seg_half_width - pad_radius
             else:
                 center_dist = _rect_segment_centerline_distance(
-                    pad.x, pad.y, pad.width, pad.height,
-                    seg.x1, seg.y1, seg.x2, seg.y2,
+                    pad.x,
+                    pad.y,
+                    pad.width,
+                    pad.height,
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
                 )
                 clearance = center_dist - seg_half_width
 
@@ -2893,8 +2894,14 @@ class RoutingGrid:
                 # Degenerate (point) segment: distance from the pad rect
                 # boundary to the via center.
                 center_dist = _rect_segment_centerline_distance(
-                    pad.x, pad.y, pad.width, pad.height,
-                    via.x, via.y, via.x, via.y,
+                    pad.x,
+                    pad.y,
+                    pad.width,
+                    pad.height,
+                    via.x,
+                    via.y,
+                    via.x,
+                    via.y,
                 )
                 clearance = center_dist - via_radius
 
@@ -2912,7 +2919,7 @@ class RoutingGrid:
         self,
         via: Via,
         exclude_net: int,
-        extra_routes: list["Route"] | None = None,
+        extra_routes: list[Route] | None = None,
         foreign_routes: list[Route] | None = None,
     ) -> tuple[float, tuple[float, float] | None]:
         """Worst via-vs-FOREIGN-net committed-segment clearance deficit.
@@ -3001,9 +3008,7 @@ class RoutingGrid:
                 seg_layer_idx = self.layer_to_index(seg.layer.value)
                 if not (via_lo <= seg_layer_idx <= via_hi):
                     continue
-                dist = self._point_to_segment_distance(
-                    via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
-                )
+                dist = self._point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
                 clearance = dist - via_radius - seg.width / 2
                 deficit = min_clearance - clearance
                 if deficit > worst_deficit:
@@ -3059,7 +3064,6 @@ class RoutingGrid:
             - actual_clearance: Minimum clearance found (negative if overlapping)
             - violation_location: (x, y) of worst violation, or None if valid
         """
-        import math
 
         if min_clearance is None:
             min_clearance = self.rules.trace_clearance
@@ -3183,9 +3187,7 @@ class RoutingGrid:
             is_circular_pad = abs(pad.width - pad.height) < 0.001
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
-                dist = self._point_to_segment_distance(
-                    pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2
-                )
+                dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
                 clearance = dist - seg_half_width - pad_radius
             else:
                 # Rect-aware: signed centerline-to-rect distance.  Negative
@@ -3193,8 +3195,14 @@ class RoutingGrid:
                 # (a real DRC defect; the magnitude is the deepest signed
                 # depth).
                 center_dist = _rect_segment_centerline_distance(
-                    pad.x, pad.y, pad.width, pad.height,
-                    seg.x1, seg.y1, seg.x2, seg.y2,
+                    pad.x,
+                    pad.y,
+                    pad.width,
+                    pad.height,
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
                 )
                 clearance = center_dist - seg_half_width
 
@@ -3432,7 +3440,7 @@ class RoutingGrid:
 
     def validate_via_clearance(
         self,
-        via: "Via",
+        via: Via,
         exclude_net: int,
         min_clearance: float | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
@@ -3504,7 +3512,7 @@ class RoutingGrid:
 
     def validate_via_to_via_clearance(
         self,
-        via: "Via",
+        via: Via,
         exclude_net: int,
         min_clearance: float | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
@@ -3561,7 +3569,7 @@ class RoutingGrid:
 
     def validate_same_net_drill_spacing(
         self,
-        via: "Via",
+        via: Via,
         same_net: int,
         min_drill_clearance: float | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
@@ -3855,9 +3863,7 @@ class RoutingGrid:
         return self.rules.max_clearance + max_trace / 2
 
     @staticmethod
-    def _via_envelope(
-        via: Via, extra_inflation: float
-    ) -> tuple[float, float, float, float]:
+    def _via_envelope(via: Via, extra_inflation: float) -> tuple[float, float, float, float]:
         """Compute the inflated AABB for a via.
 
         Args:
@@ -5278,10 +5284,7 @@ class RoutingGrid:
                 # a per-step penalty instead (min-conflict probe).  Net-0
                 # static blockage (keepouts, board obstacles) stays hard.
                 static_blocks = (
-                    self._blocked
-                    & ~self._is_obstacle
-                    & (self._net == 0)
-                    & (self._usage_count == 0)
+                    self._blocked & ~self._is_obstacle & (self._net == 0) & (self._usage_count == 0)
                 )
             else:
                 # Issue #3545: statically blocked cells (pad clearance
@@ -5439,7 +5442,7 @@ class RoutingGrid:
     # NEIGHBORHOOD RIP-UP SUPPORT (Issue #2274)
     # =========================================================================
 
-    def temporarily_unblock_routed_nets(self) -> "RoutedNetsUnblocker":
+    def temporarily_unblock_routed_nets(self) -> RoutedNetsUnblocker:
         """Return a context manager that temporarily unblocks routed-net cells.
 
         Static obstacles (pads, board edges, zones marked with ``pad_blocked``)
@@ -5461,7 +5464,7 @@ class RoutingGrid:
 
     def add_zone_cells(
         self,
-        zone: "Zone",
+        zone: Zone,
         filled_cells: set[tuple[int, int]],
         layer_index: int,
     ) -> None:
@@ -5778,8 +5781,8 @@ class RoutingGrid:
         rules: DesignRules,
         origin_x: float = 0,
         origin_y: float = 0,
-        layer_stack: "LayerStack | None" = None,
-    ) -> "RoutingGrid":
+        layer_stack: LayerStack | None = None,
+    ) -> RoutingGrid:
         """Create a grid with expanded obstacles for faster routing.
 
         This factory method creates a grid optimized for performance:
@@ -5819,9 +5822,9 @@ class RoutingGrid:
         rules: DesignRules,
         origin_x: float = 0,
         origin_y: float = 0,
-        layer_stack: "LayerStack | None" = None,
+        layer_stack: LayerStack | None = None,
         target_cells: int = 500000,
-    ) -> "RoutingGrid":
+    ) -> RoutingGrid:
         """Create a grid with adaptive resolution based on board size.
 
         Automatically calculates resolution to keep total cells near target,

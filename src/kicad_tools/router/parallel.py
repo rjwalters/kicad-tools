@@ -526,7 +526,7 @@ class GridRegion:
         """Check if a grid point is within this region."""
         return self.min_gx <= gx < self.max_gx and self.min_gy <= gy < self.max_gy
 
-    def is_adjacent(self, other: "GridRegion") -> bool:
+    def is_adjacent(self, other: GridRegion) -> bool:
         """Check if this region is adjacent to another (shares an edge)."""
         # Adjacent means sharing a boundary (not diagonal)
         same_row = self.row == other.row
@@ -626,7 +626,7 @@ def classify_nets_by_region(
     nets: dict[int, list[tuple[str, str]]],
     pad_dict: dict[tuple[str, str], Pad],
     partition: RegionPartition,
-    grid: "RoutingGrid",
+    grid: RoutingGrid,
 ) -> tuple[dict[int, list[int]], list[int]]:
     """Classify nets by their primary region based on pad locations.
 
@@ -710,7 +710,7 @@ class RegionBasedNegotiatedRouter:
 
     def __init__(
         self,
-        router: "Autorouter",
+        router: Autorouter,
         partition_rows: int = 2,
         partition_cols: int = 2,
         max_workers: int = 4,
@@ -863,9 +863,7 @@ class RegionBasedNegotiatedRouter:
 
         # Route nets from non-adjacent regions in parallel
         # Since regions are non-adjacent, their nets won't conflict
-        with ThreadPoolExecutor(
-            max_workers=min(self.max_workers, len(nets_for_group))
-        ) as executor:
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(nets_for_group))) as executor:
             # Submit all routing tasks
             futures = {
                 executor.submit(self._route_net_with_lock, net, present_factor, route_fn): (

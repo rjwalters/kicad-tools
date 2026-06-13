@@ -668,9 +668,7 @@ def decode_with_blocks(
             comp_def = comp_map.get(m.reference)
             pads: tuple[TransformedPad, ...] = ()
             if comp_def is not None:
-                pads = tuple(
-                    _transform_pad(pad, cx, cy, crot, side) for pad in comp_def.pads
-                )
+                pads = tuple(_transform_pad(pad, cx, cy, crot, side) for pad in comp_def.pads)
 
             result_map[m.reference] = PlacedComponent(
                 reference=m.reference,

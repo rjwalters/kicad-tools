@@ -5,21 +5,27 @@ disconnected nets by re-parsing S-expression output.
 """
 
 from kicad_tools.router.io import verify_output_connectivity
-from kicad_tools.router.primitives import Layer, Pad, Segment, Via
+from kicad_tools.router.primitives import Pad
 
 
 def _pad(x: float, y: float, net: int, ref: str = "U1", pin: str = "1") -> Pad:
     """Create a minimal Pad for testing."""
     return Pad(
-        x=x, y=y, width=0.5, height=0.5,
-        net=net, net_name=f"NET{net}", ref=ref, pin=pin,
+        x=x,
+        y=y,
+        width=0.5,
+        height=0.5,
+        net=net,
+        net_name=f"NET{net}",
+        ref=ref,
+        pin=pin,
     )
 
 
 def _seg_sexp(x1: float, y1: float, x2: float, y2: float, net: int) -> str:
     """Generate a segment S-expression string."""
     return (
-        f'(segment (start {x1:.4f} {y1:.4f}) (end {x2:.4f} {y2:.4f}) '
+        f"(segment (start {x1:.4f} {y1:.4f}) (end {x2:.4f} {y2:.4f}) "
         f'(width 0.2) (layer "F.Cu") (net {net}) (uuid "test-uuid"))'
     )
 
@@ -27,7 +33,7 @@ def _seg_sexp(x1: float, y1: float, x2: float, y2: float, net: int) -> str:
 def _via_sexp(x: float, y: float, net: int) -> str:
     """Generate a via S-expression string."""
     return (
-        f'(via (at {x:.4f} {y:.4f}) (size 0.6) (drill 0.3) '
+        f"(via (at {x:.4f} {y:.4f}) (size 0.6) (drill 0.3) "
         f'(layers "F.Cu" "B.Cu") (net {net}) (uuid "test-uuid"))'
     )
 
@@ -86,10 +92,12 @@ class TestVerifyOutputConnectivity:
 
     def test_chain_of_segments(self):
         """Three pads connected by a chain of segments are all connected."""
-        segments = "\n".join([
-            _seg_sexp(0.0, 0.0, 5.0, 0.0, 1),
-            _seg_sexp(5.0, 0.0, 10.0, 0.0, 1),
-        ])
+        segments = "\n".join(
+            [
+                _seg_sexp(0.0, 0.0, 5.0, 0.0, 1),
+                _seg_sexp(5.0, 0.0, 10.0, 0.0, 1),
+            ]
+        )
         pcb = _wrap_pcb(segments)
         pads = [
             _pad(0.0, 0.0, 1, "U1", "1"),
@@ -105,10 +113,12 @@ class TestVerifyOutputConnectivity:
 
     def test_multiple_nets_independent(self):
         """Connectivity is validated per-net independently."""
-        segments = "\n".join([
-            _seg_sexp(0.0, 0.0, 5.0, 0.0, 1),
-            # Net 2 has no segments
-        ])
+        segments = "\n".join(
+            [
+                _seg_sexp(0.0, 0.0, 5.0, 0.0, 1),
+                # Net 2 has no segments
+            ]
+        )
         pcb = _wrap_pcb(segments)
         net1_pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(5.0, 0.0, 1, "U1", "2")]
         net2_pads = [_pad(0.0, 5.0, 2, "U1", "3"), _pad(5.0, 5.0, 2, "U1", "4")]
@@ -120,11 +130,13 @@ class TestVerifyOutputConnectivity:
 
     def test_via_connects_segments(self):
         """A via at the junction of two segments connects them."""
-        segments = "\n".join([
-            _seg_sexp(0.0, 0.0, 5.0, 0.0, 1),
-            _seg_sexp(5.0, 0.0, 10.0, 0.0, 1),
-            _via_sexp(5.0, 0.0, 1),
-        ])
+        segments = "\n".join(
+            [
+                _seg_sexp(0.0, 0.0, 5.0, 0.0, 1),
+                _seg_sexp(5.0, 0.0, 10.0, 0.0, 1),
+                _via_sexp(5.0, 0.0, 1),
+            ]
+        )
         pcb = _wrap_pcb(segments)
         pads = [
             _pad(0.0, 0.0, 1, "U1", "1"),
@@ -140,9 +152,7 @@ class TestVerifyOutputConnectivity:
         pcb = _wrap_pcb(_seg_sexp(0.0, 0.0, 5.0, 0.0, 1))
         pads = [_pad(0.0, 0.0, 1, "U1", "1"), _pad(5.0, 0.0, 1, "U1", "2")]
 
-        result = verify_output_connectivity(
-            pcb, {1: pads}, net_names={1: "SPI_CLK"}
-        )
+        result = verify_output_connectivity(pcb, {1: pads}, net_names={1: "SPI_CLK"})
 
         assert result[1]["net_name"] == "SPI_CLK"
 

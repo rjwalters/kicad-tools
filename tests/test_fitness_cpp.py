@@ -12,16 +12,14 @@ fallback tests still run.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from kicad_tools.optim.evolutionary import (
-    Individual,
-    _EvaluationContext,
     _PLACEMENT_CPP_AVAILABLE,
+    Individual,
     _evaluate_fitness_worker,
     _evaluate_fitness_worker_python,
+    _EvaluationContext,
 )
 
 # Tolerance for floating point comparison
@@ -234,9 +232,7 @@ class TestCrossCheckFitness:
 
         py = _evaluate_fitness_worker_python((ind, ctx))
         cpp = _evaluate_fitness_worker_cpp((ind, ctx))
-        assert abs(py - cpp) < TOLERANCE, (
-            f"Mismatch: Python={py}, C++={cpp}, diff={abs(py - cpp)}"
-        )
+        assert abs(py - cpp) < TOLERANCE, f"Mismatch: Python={py}, C++={cpp}, diff={abs(py - cpp)}"
 
     def test_empty_components(self):
         """Empty component list matches."""
@@ -344,7 +340,7 @@ class TestCrossCheckFitness:
             h = random.uniform(2, 6)
             n_pins = random.randint(1, 4)
             pins = [
-                (random.uniform(-w/2, w/2), random.uniform(-h/2, h/2), str(p))
+                (random.uniform(-w / 2, w / 2), random.uniform(-h / 2, h / 2), str(p))
                 for p in range(n_pins)
             ]
             components[ref] = (x, y, rot, w, h, pins)
@@ -471,10 +467,7 @@ class TestEdgeCasesFitness:
 
     def test_identical_positions(self):
         """All components at same position: maximum conflicts."""
-        components = {
-            f"C{i}": (50.0, 50.0, 0.0, 5.0, 5.0, [])
-            for i in range(5)
-        }
+        components = {f"C{i}": (50.0, 50.0, 0.0, 5.0, 5.0, []) for i in range(5)}
         ctx = _make_context(components=components)
         ind = Individual(
             positions={f"C{i}": (50.0, 50.0) for i in range(5)},

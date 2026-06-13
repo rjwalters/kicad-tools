@@ -143,9 +143,7 @@ class TestMstRouteNetPerNetTimeout:
         ``per_net_timeout`` (the shrinking remainder), not ``None``."""
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=0.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(4)  # 3 MST edges
         mst.route_net(
@@ -166,9 +164,7 @@ class TestMstRouteNetPerNetTimeout:
         after ~2 edges, NOT run all edges for 25s each."""
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=25.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(6)  # 5 MST edges
         start = clock.now
@@ -199,9 +195,7 @@ class TestMstRouteNetPerNetTimeout:
         the rip-up/retry layer still sees them."""
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=40.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(5)  # 4 MST edges
         failed: list[tuple[Pad, Pad]] = []
@@ -223,9 +217,7 @@ class TestMstRouteNetPerNetTimeout:
         """Routes produced before the deadline are not discarded."""
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=4.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(6)  # 5 MST edges
         routes = mst.route_net(
@@ -244,9 +236,7 @@ class TestMstRouteNetPerNetTimeout:
         no deadline bookkeeping)."""
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=100.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(5)  # 4 MST edges
         routes = mst.route_net(
@@ -266,9 +256,7 @@ class TestMstRouteNetPerNetTimeout:
         """The 2-pin path forwards the full budget verbatim to its single A*."""
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=0.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(2)
         mst.route_net(
@@ -291,9 +279,7 @@ class TestMstRouteNetStarPerNetTimeout:
     def test_star_cumulative_deadline_bounds_whole_net(self, monkeypatch):
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=25.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(6)  # star: 5 spokes from pad 0
         mst.route_net_star(
@@ -312,9 +298,7 @@ class TestMstRouteNetStarPerNetTimeout:
     def test_star_no_timeout_runs_all_spokes(self, monkeypatch):
         clock = _FakeClock()
         mst, captured = _build_mst_router(clock, per_edge_burn=0.0)
-        monkeypatch.setattr(
-            "kicad_tools.router.algorithms.mst.time.monotonic", clock
-        )
+        monkeypatch.setattr("kicad_tools.router.algorithms.mst.time.monotonic", clock)
 
         pads = _colinear_pads(4)  # 3 spokes
         mst.route_net_star(

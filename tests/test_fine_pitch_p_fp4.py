@@ -35,7 +35,6 @@ import pytest
 from kicad_tools.router.escape import EscapeRouter
 from kicad_tools.router.fine_pitch_escape import (
     DEFAULT_ESCAPE_REGION_RADIUS_MM,
-    FinePitchRegion,
     detect_fine_pitch_regions,
 )
 from kicad_tools.router.grid import RoutingGrid
@@ -43,7 +42,6 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.mfr_limits import MFR_JLCPCB_TIER1
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
-
 
 # ============================================================================
 # Helpers
@@ -140,9 +138,7 @@ class TestAdaptiveRadius:
         (3 pin pitches + 4mm row gap), diagonal ~5.5mm, half = 2.75mm.
         So the default 5mm wins.
         """
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1")
         pads = _ucc27211_pads()
         regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB_TIER1)
         assert len(regions) == 1
@@ -158,9 +154,7 @@ class TestAdaptiveRadius:
         regression-floor test ensuring the adaptive formula does not
         regress small/medium packages.
         """
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1")
         pads = _soic14_pads()
         regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB_TIER1)
         assert len(regions) == 1
@@ -170,9 +164,7 @@ class TestAdaptiveRadius:
     def test_radius_grows_beyond_default_for_oversized_package(self) -> None:
         """A synthetic 20mm-wide package proves the adaptive formula fires."""
         # 20-pin SOIC at 1.27mm pitch (~12.7mm body length, 6mm rows apart).
-        rules = DesignRules(
-            trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1"
-        )
+        rules = DesignRules(trace_width=0.30, trace_clearance=0.20, manufacturer="jlcpcb-tier1")
         pads: list[Pad] = []
         for i in range(10):
             pads.append(
@@ -205,9 +197,7 @@ class TestAdaptiveRadius:
         assert len(regions) == 1
         # bbox is 11.43mm x 10mm, diagonal ~15.2mm, half ~7.6mm -> radius grows.
         assert regions[0].radius_mm > DEFAULT_ESCAPE_REGION_RADIUS_MM
-        assert regions[0].radius_mm == pytest.approx(
-            ((11.43**2 + 10.0**2) ** 0.5) / 2.0, rel=0.05
-        )
+        assert regions[0].radius_mm == pytest.approx(((11.43**2 + 10.0**2) ** 0.5) / 2.0, rel=0.05)
 
 
 # ============================================================================
@@ -233,9 +223,7 @@ class TestEscapeClearanceForRef:
         )
         pads = _ucc27211_pads()
         if install_regions:
-            regions = detect_fine_pitch_regions(
-                pads, rules, mfr_limits=MFR_JLCPCB_TIER1
-            )
+            regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB_TIER1)
             grid.set_fine_pitch_regions(regions)
 
         escape_router = EscapeRouter(grid=grid, rules=rules, manufacturer="jlcpcb-tier1")

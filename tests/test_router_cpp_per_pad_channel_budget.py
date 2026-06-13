@@ -176,8 +176,12 @@ class TestRouteResumableHonorsBudget:
 
         # Baseline path metrics (no budget).
         result_baseline = pathfinder._impl.route_resumable(
-            2.0, 5.0, 0,
-            8.0, 5.0, 0,
+            2.0,
+            5.0,
+            0,
+            8.0,
+            5.0,
+            0,
             1,
         )
         assert result_baseline.success
@@ -199,8 +203,12 @@ class TestRouteResumableHonorsBudget:
         budget.overflow_penalty = 50.0
 
         result_with_budget = pathfinder._impl.route_resumable(
-            2.0, 5.0, 0,
-            8.0, 5.0, 0,
+            2.0,
+            5.0,
+            0,
+            8.0,
+            5.0,
+            0,
             1,
             pad_channel_budgets=[budget],
         )
@@ -214,9 +222,8 @@ class TestRouteResumableHonorsBudget:
         # accept either: (a) the search explored more nodes hunting a
         # cheaper detour, or (b) the path got measurably longer (more
         # segments).  Both indicate the budget is being honored.
-        path_changed = (
-            with_budget_iter != baseline_iter
-            or len(result_with_budget.segments) != len(result_baseline.segments)
+        path_changed = with_budget_iter != baseline_iter or len(result_with_budget.segments) != len(
+            result_baseline.segments
         )
         assert path_changed, (
             f"Budget must change A* behavior. "
@@ -237,8 +244,12 @@ class TestRouteResumableHonorsBudget:
 
         # Without explicit budget kwarg (uses C++ default empty vector).
         result_no_arg = pathfinder._impl.route_resumable(
-            2.0, 5.0, 0,
-            8.0, 5.0, 0,
+            2.0,
+            5.0,
+            0,
+            8.0,
+            5.0,
+            0,
             1,
         )
         assert result_no_arg.success
@@ -248,8 +259,12 @@ class TestRouteResumableHonorsBudget:
 
         # With explicit empty list -- must be identical.
         result_empty = pathfinder._impl.route_resumable(
-            2.0, 5.0, 0,
-            8.0, 5.0, 0,
+            2.0,
+            5.0,
+            0,
+            8.0,
+            5.0,
+            0,
             1,
             pad_channel_budgets=[],
         )
@@ -258,12 +273,8 @@ class TestRouteResumableHonorsBudget:
         empty_iter = pathfinder._impl.iterations
         pathfinder._impl.clear_search_state()
 
-        assert no_arg_segs == empty_segs, (
-            "Empty budget list must produce identical segment count"
-        )
-        assert no_arg_iter == empty_iter, (
-            "Empty budget list must produce identical iteration count"
-        )
+        assert no_arg_segs == empty_segs, "Empty budget list must produce identical segment count"
+        assert no_arg_iter == empty_iter, "Empty budget list must produce identical iteration count"
 
     def test_zero_penalty_budget_is_inert(self):
         """A budget with ``overflow_penalty == 0.0`` must produce zero
@@ -276,8 +287,12 @@ class TestRouteResumableHonorsBudget:
         pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
 
         result_baseline = pathfinder._impl.route_resumable(
-            2.0, 5.0, 0,
-            8.0, 5.0, 0,
+            2.0,
+            5.0,
+            0,
+            8.0,
+            5.0,
+            0,
             1,
         )
         assert result_baseline.success
@@ -297,8 +312,12 @@ class TestRouteResumableHonorsBudget:
         inert_budget.overflow_penalty = 0.0
 
         result_inert = pathfinder._impl.route_resumable(
-            2.0, 5.0, 0,
-            8.0, 5.0, 0,
+            2.0,
+            5.0,
+            0,
+            8.0,
+            5.0,
+            0,
             1,
             pad_channel_budgets=[inert_budget],
         )
@@ -346,8 +365,12 @@ class TestContestedChannelDiversion:
         # Route net 1 along the contested channel (no budget).  This
         # establishes what "natural" behavior looks like.
         baseline_net_1 = pathfinder._impl.route_resumable(
-            2.0, 6.0, 0,
-            10.0, 6.0, 0,
+            2.0,
+            6.0,
+            0,
+            10.0,
+            6.0,
+            0,
             1,
         )
         assert baseline_net_1.success
@@ -357,8 +380,12 @@ class TestContestedChannelDiversion:
         # Route the same endpoints with the contested-channel budget.
         # The search should detour (more segments OR more iterations).
         with_budget_net_1 = pathfinder._impl.route_resumable(
-            2.0, 6.0, 0,
-            10.0, 6.0, 0,
+            2.0,
+            6.0,
+            0,
+            10.0,
+            6.0,
+            0,
             1,
             pad_channel_budgets=[contested],
         )
@@ -369,16 +396,13 @@ class TestContestedChannelDiversion:
         # We expect SOMETHING to differ.  Either iteration count, segment
         # count, or total path length should reflect the diversion.
         baseline_total = sum(
-            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
-            for s in baseline_net_1.segments
+            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in baseline_net_1.segments
         )
         with_budget_total = sum(
-            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
-            for s in with_budget_net_1.segments
+            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in with_budget_net_1.segments
         )
-        diverged = (
-            baseline_seg_count != with_budget_seg_count
-            or baseline_total != pytest.approx(with_budget_total, abs=0.05)
+        diverged = baseline_seg_count != with_budget_seg_count or baseline_total != pytest.approx(
+            with_budget_total, abs=0.05
         )
         assert diverged, (
             "Contested-channel budget must diversify route. "
@@ -476,20 +500,21 @@ class TestSoftstartRealisticCluster:
         baseline_results = []
         for n in nets:
             r = pathfinder._impl.route_resumable(
-                n["start_x"], n["start_y"], 0,
-                n["end_x"], n["end_y"], 0,
+                n["start_x"],
+                n["start_y"],
+                0,
+                n["end_x"],
+                n["end_y"],
+                0,
                 n["net_id"],
             )
-            assert r.success, (
-                f"Baseline net {n['net_id']} must succeed (no budget)"
-            )
+            assert r.success, f"Baseline net {n['net_id']} must succeed (no budget)"
             baseline_results.append(
                 {
                     "seg_count": len(r.segments),
                     "iter": pathfinder._impl.iterations,
                     "length": sum(
-                        ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
-                        for s in r.segments
+                        ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in r.segments
                     ),
                 }
             )
@@ -523,26 +548,26 @@ class TestSoftstartRealisticCluster:
         # excluding the originating net's budget from each call.
         with_budget_results = []
         for n in nets:
-            net_filtered_budgets = [
-                b for b in budgets if b.source_net != n["net_id"]
-            ]
+            net_filtered_budgets = [b for b in budgets if b.source_net != n["net_id"]]
             r = pathfinder._impl.route_resumable(
-                n["start_x"], n["start_y"], 0,
-                n["end_x"], n["end_y"], 0,
+                n["start_x"],
+                n["start_y"],
+                0,
+                n["end_x"],
+                n["end_y"],
+                0,
                 n["net_id"],
                 pad_channel_budgets=net_filtered_budgets,
             )
             assert r.success, (
-                f"Net {n['net_id']} must still succeed with budget "
-                "(soft penalty, not hard block)"
+                f"Net {n['net_id']} must still succeed with budget (soft penalty, not hard block)"
             )
             with_budget_results.append(
                 {
                     "seg_count": len(r.segments),
                     "iter": pathfinder._impl.iterations,
                     "length": sum(
-                        ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
-                        for s in r.segments
+                        ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in r.segments
                     ),
                 }
             )
@@ -553,7 +578,7 @@ class TestSoftstartRealisticCluster:
         # as ``_build_pad_channel_budgets`` intersects the contested
         # cells on a softstart-style cluster.
         any_diverged = False
-        for i, (b, w) in enumerate(zip(baseline_results, with_budget_results)):
+        for i, (b, w) in enumerate(zip(baseline_results, with_budget_results, strict=False)):
             if (
                 b["seg_count"] != w["seg_count"]
                 or b["iter"] != w["iter"]
@@ -653,8 +678,12 @@ class TestSoftstartRealisticCluster:
 
         # Pre-#3201 fixed-thickness strip baseline.
         r_fixed = pathfinder._impl.route_resumable(
-            start_x, start_y, 0,
-            end_x, end_y, 0,
+            start_x,
+            start_y,
+            0,
+            end_x,
+            end_y,
+            0,
             1,
             pad_channel_budgets=[fixed_strip],
         )
@@ -664,8 +693,12 @@ class TestSoftstartRealisticCluster:
 
         # Post-#3201 endpoint-extended strip.
         r_extended = pathfinder._impl.route_resumable(
-            start_x, start_y, 0,
-            end_x, end_y, 0,
+            start_x,
+            start_y,
+            0,
+            end_x,
+            end_y,
+            0,
             1,
             pad_channel_budgets=[extended_strip],
         )
@@ -681,12 +714,10 @@ class TestSoftstartRealisticCluster:
         fixed_seg_count = len(r_fixed.segments)
         extended_seg_count = len(r_extended.segments)
         fixed_length = sum(
-            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
-            for s in r_fixed.segments
+            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in r_fixed.segments
         )
         extended_length = sum(
-            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5
-            for s in r_extended.segments
+            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in r_extended.segments
         )
         diverged = (
             fixed_seg_count != extended_seg_count
@@ -788,9 +819,7 @@ class TestSoftstartRealisticCluster:
         router._escape_pad_overrides[("U1", "11")] = virtual
 
         budgets = router._build_pad_channel_budgets([package])
-        assert len(budgets) == 1, (
-            f"Expected exactly one budget, got {len(budgets)}."
-        )
+        assert len(budgets) == 1, f"Expected exactly one budget, got {len(budgets)}."
         b = budgets[0]
 
         # Compute the expected gx1 / gx2 if the floor applied (4-cell
@@ -916,8 +945,7 @@ class TestSoftstartRealisticCluster:
         )
         # The strip must still start one cell outside the package edge.
         assert b.gx1 == edge_gx + 1, (
-            f"F_CU budget gx1={b.gx1} should anchor at "
-            f"(package_edge_gx + 1) = {edge_gx + 1}."
+            f"F_CU budget gx1={b.gx1} should anchor at (package_edge_gx + 1) = {edge_gx + 1}."
         )
         # And the strip must cover MORE cells than the 4-cell floor.
         thickness = b.gx2 - b.gx1 + 1
@@ -1136,8 +1164,7 @@ class TestBuildPadChannelBudgetsU1Mirror:
         budgets = router._build_pad_channel_budgets([package])
         signal_pads = [p for p in package.pads if p.net != 0]
         assert len(budgets) == len(signal_pads), (
-            f"Expected one budget per signal pad ({len(signal_pads)}), "
-            f"got {len(budgets)}."
+            f"Expected one budget per signal pad ({len(signal_pads)}), got {len(budgets)}."
         )
 
     def test_nc_pads_do_not_produce_budgets(self):
@@ -1200,18 +1227,12 @@ class TestBuildPadChannelBudgetsU1Mirror:
 
         # The package east edge is at x = center_x + 2.85 = 217.85.
         # Convert to grid cells.
-        edge_gx, _ = router.grid.world_to_grid(
-            package.bounding_box[2], package.center[1]
-        )
+        edge_gx, _ = router.grid.world_to_grid(package.bounding_box[2], package.center[1])
 
-        east_pad_nets = {
-            p.net for p in package.pads
-            if p.x > package.center[0] and p.net != 0
-        }
+        east_pad_nets = {p.net for p in package.pads if p.x > package.center[0] and p.net != 0}
         east_budgets = [b for b in budgets if b.source_net in east_pad_nets]
         assert len(east_budgets) == len(east_pad_nets), (
-            f"Expected {len(east_pad_nets)} east-side budgets, got "
-            f"{len(east_budgets)}."
+            f"Expected {len(east_pad_nets)} east-side budgets, got {len(east_budgets)}."
         )
         for b in east_budgets:
             assert b.gx1 > edge_gx, (
@@ -1230,19 +1251,12 @@ class TestBuildPadChannelBudgetsU1Mirror:
         budgets = router._build_pad_channel_budgets([package])
 
         # Convert package y-range to grid cells.
-        _gx_lo, pkg_gy_min = router.grid.world_to_grid(
-            package.center[0], package.bounding_box[1]
-        )
-        _gx_hi, pkg_gy_max = router.grid.world_to_grid(
-            package.center[0], package.bounding_box[3]
-        )
+        _gx_lo, pkg_gy_min = router.grid.world_to_grid(package.center[0], package.bounding_box[1])
+        _gx_hi, pkg_gy_max = router.grid.world_to_grid(package.center[0], package.bounding_box[3])
         min_pkg_gy = min(pkg_gy_min, pkg_gy_max)
         max_pkg_gy = max(pkg_gy_min, pkg_gy_max)
 
-        east_pad_nets = {
-            p.net for p in package.pads
-            if p.x > package.center[0] and p.net != 0
-        }
+        east_pad_nets = {p.net for p in package.pads if p.x > package.center[0] and p.net != 0}
         east_budgets = [b for b in budgets if b.source_net in east_pad_nets]
         assert east_budgets, "Expected east-side budgets"
         for b in east_budgets:
@@ -1300,8 +1314,7 @@ class TestBuildPadChannelBudgetsU1Mirror:
         assert budgets, "Expected non-empty budget list"
         for b in budgets:
             assert b.layer == -1, (
-                f"Budget targets layer {b.layer}, expected -1 (all "
-                "routable layers)."
+                f"Budget targets layer {b.layer}, expected -1 (all routable layers)."
             )
 
     def test_budgets_carry_originating_pad_net(self):
@@ -1420,37 +1433,45 @@ class TestPythonBackendReachParity:
         cpp_pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
         cpp_pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
         cpp_result = cpp_pathfinder._impl.route_resumable(
-            2.0, 5.0, 0,
-            8.0, 5.0, 0,
+            2.0,
+            5.0,
+            0,
+            8.0,
+            5.0,
+            0,
             1,
         )
         cpp_pathfinder._impl.clear_search_state()
         assert cpp_result.success, "C++ baseline must route the fixture"
-        assert len(cpp_result.segments) >= 1, (
-            "C++ baseline produced no segments"
-        )
+        assert len(cpp_result.segments) >= 1, "C++ baseline produced no segments"
 
         # Python pathway -- import and exercise the higher-level
         # ``Router.route()`` API with the same endpoints.  This is the
         # AC7 strengthened assertion: the no-budget path must produce a
         # Route on the Python backend too.
+        from kicad_tools.router.layers import Layer as PyLayer
         from kicad_tools.router.pathfinder import Router as PyRouter
         from kicad_tools.router.primitives import Pad as PyPad
-        from kicad_tools.router.layers import Layer as PyLayer
 
         py_router = PyRouter(grid, rules, diagonal_routing=True)
         # Construct minimal Pad objects -- net 1, F.Cu layer, small
         # width/height (single-cell pads are the test convention).
         start_pad = PyPad(
-            x=2.0, y=5.0,
-            width=0.2, height=0.2,
-            net=1, net_name="TEST",
+            x=2.0,
+            y=5.0,
+            width=0.2,
+            height=0.2,
+            net=1,
+            net_name="TEST",
             layer=PyLayer.F_CU,
         )
         end_pad = PyPad(
-            x=8.0, y=5.0,
-            width=0.2, height=0.2,
-            net=1, net_name="TEST",
+            x=8.0,
+            y=5.0,
+            width=0.2,
+            height=0.2,
+            net=1,
+            net_name="TEST",
             layer=PyLayer.F_CU,
         )
         py_route = py_router.route(start_pad, end_pad)
@@ -1462,6 +1483,4 @@ class TestPythonBackendReachParity:
             "the C++ PadChannelBudget binding addition must not regress "
             "the Python pathway."
         )
-        assert len(py_route.segments) >= 1, (
-            "Python route has no segments; reach-parity violated."
-        )
+        assert len(py_route.segments) >= 1, "Python route has no segments; reach-parity violated."

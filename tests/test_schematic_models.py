@@ -787,9 +787,7 @@ class TestSymbolInstance:
                 ),
             ],
         )
-        ref_pos = ref_sym.get_pin_position(
-            "2", instance_pos=(50.0, 80.0), instance_rot=0
-        )
+        ref_pos = ref_sym.get_pin_position("2", instance_pos=(50.0, 80.0), instance_rot=0)
         assert ref_pos is not None
         assert j1_pin2 == pytest.approx(ref_pos, abs=0.01), (
             f"pin_position() {j1_pin2} disagrees with LibrarySymbol.get_pin_position "
@@ -2279,24 +2277,38 @@ class TestSchematicValidationAdvanced:
             raw_sexp="",
             pins=[
                 # Unit 1 (channel A)
-                Pin(name="-", number="2", x=0, y=0, angle=0, length=0,
-                    pin_type="input", unit=1),
-                Pin(name="+", number="3", x=0, y=0, angle=0, length=0,
-                    pin_type="input", unit=1),
-                Pin(name="OUT_A", number="1", x=0, y=0, angle=0, length=0,
-                    pin_type="open_collector", unit=1),
+                Pin(name="-", number="2", x=0, y=0, angle=0, length=0, pin_type="input", unit=1),
+                Pin(name="+", number="3", x=0, y=0, angle=0, length=0, pin_type="input", unit=1),
+                Pin(
+                    name="OUT_A",
+                    number="1",
+                    x=0,
+                    y=0,
+                    angle=0,
+                    length=0,
+                    pin_type="open_collector",
+                    unit=1,
+                ),
                 # Unit 2 (channel B)
-                Pin(name="-", number="6", x=0, y=0, angle=0, length=0,
-                    pin_type="input", unit=2),
-                Pin(name="+", number="5", x=0, y=0, angle=0, length=0,
-                    pin_type="input", unit=2),
-                Pin(name="OUT_B", number="7", x=0, y=0, angle=0, length=0,
-                    pin_type="open_collector", unit=2),
+                Pin(name="-", number="6", x=0, y=0, angle=0, length=0, pin_type="input", unit=2),
+                Pin(name="+", number="5", x=0, y=0, angle=0, length=0, pin_type="input", unit=2),
+                Pin(
+                    name="OUT_B",
+                    number="7",
+                    x=0,
+                    y=0,
+                    angle=0,
+                    length=0,
+                    pin_type="open_collector",
+                    unit=2,
+                ),
                 # Unit 3 (package power)
-                Pin(name="V+", number="8", x=0, y=0, angle=0, length=0,
-                    pin_type="power_in", unit=3),
-                Pin(name="V-", number="4", x=0, y=0, angle=0, length=0,
-                    pin_type="power_in", unit=3),
+                Pin(
+                    name="V+", number="8", x=0, y=0, angle=0, length=0, pin_type="power_in", unit=3
+                ),
+                Pin(
+                    name="V-", number="4", x=0, y=0, angle=0, length=0, pin_type="power_in", unit=3
+                ),
             ],
         )
 
@@ -2317,8 +2329,13 @@ class TestSchematicValidationAdvanced:
         # Place ONLY unit 1 (channel A) at the origin.  Add wires for
         # this unit's three pins so they're connected.
         inst1 = SymbolInstance(
-            symbol_def=sym_def, x=100.0, y=100.0, rotation=0,
-            reference="U7", value="LM393", unit=1,
+            symbol_def=sym_def,
+            x=100.0,
+            y=100.0,
+            rotation=0,
+            reference="U7",
+            value="LM393",
+            unit=1,
         )
         sch.symbols.append(inst1)
         # All unit-1 pins are colocated at (100, 100) per the test
@@ -2329,10 +2346,7 @@ class TestSchematicValidationAdvanced:
         # The validator must not report unit-2 or unit-3 pins (V+, V-,
         # channel B inputs/outputs) on this instance — those belong to
         # placements that haven't been added yet.
-        u7_unconnected = [
-            i for i in issues
-            if "unconnected" in i["type"] and "U7" in i["message"]
-        ]
+        u7_unconnected = [i for i in issues if "unconnected" in i["type"] and "U7" in i["message"]]
         assert u7_unconnected == [], (
             "Validator flagged pins from non-placed units of multi-unit "
             f"symbol U7: {[i['message'] for i in u7_unconnected]}"
@@ -2361,14 +2375,10 @@ class TestSchematicValidationAdvanced:
                 )
             )
             # Wire at the placement point to connect that unit's pins.
-            sch.add_wire((100.0 + unit * 10, 100), (100.0 + unit * 10, 50),
-                         snap=False)
+            sch.add_wire((100.0 + unit * 10, 100), (100.0 + unit * 10, 50), snap=False)
 
         issues = sch._check_unconnected_pins()
-        u7_unconnected = [
-            i for i in issues
-            if "unconnected" in i["type"] and "U7" in i["message"]
-        ]
+        u7_unconnected = [i for i in issues if "unconnected" in i["type"] and "U7" in i["message"]]
         assert u7_unconnected == [], (
             "All units of multi-unit symbol U7 are connected; expected 0 "
             f"unconnected pin issues, got: {[i['message'] for i in u7_unconnected]}"

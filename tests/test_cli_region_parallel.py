@@ -29,7 +29,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers (mirrors the drift-test pattern from tests/test_cli_parser_drift.py
 # so the test files stay structurally similar and easy to maintain together).
@@ -163,9 +162,7 @@ def test_inner_parser_declares_region_parallel_flags():
     )
     assert "--partition-rows" in inner, "--partition-rows missing from inner parser"
     assert "--partition-cols" in inner, "--partition-cols missing from inner parser"
-    assert "--max-parallel-workers" in inner, (
-        "--max-parallel-workers missing from inner parser"
-    )
+    assert "--max-parallel-workers" in inner, "--max-parallel-workers missing from inner parser"
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +298,7 @@ def test_all_route_all_negotiated_calls_forward_region_parallel():
                 if depth == 0:
                     break
             i += 1
-        assert depth == 0, (
-            f"unbalanced parens around route_all_negotiated call near offset {idx}"
-        )
+        assert depth == 0, f"unbalanced parens around route_all_negotiated call near offset {idx}"
         body = text[idx:i]
         if "region_parallel=" in body:
             forwarded += 1

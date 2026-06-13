@@ -18,16 +18,17 @@ from kicad_tools.validate.rules.edge import _CLEARANCE_EPSILON_MM, EdgeClearance
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _outline_segments() -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """A simple 50x30 rectangular board outline centred at (25, 15).
 
     Segments returned as (start, end) tuples forming the rectangle.
     """
     return [
-        ((0.0, 0.0), (50.0, 0.0)),   # bottom edge
+        ((0.0, 0.0), (50.0, 0.0)),  # bottom edge
         ((50.0, 0.0), (50.0, 30.0)),  # right edge
         ((50.0, 30.0), (0.0, 30.0)),  # top edge
-        ((0.0, 30.0), (0.0, 0.0)),    # left edge
+        ((0.0, 30.0), (0.0, 0.0)),  # left edge
     ]
 
 
@@ -64,6 +65,7 @@ def _make_pcb(
 # Tests: _CLEARANCE_EPSILON_MM constant
 # ---------------------------------------------------------------------------
 
+
 class TestEpsilonConstant:
     """Sanity-checks on the epsilon constant itself."""
 
@@ -79,12 +81,17 @@ class TestEpsilonConstant:
 # Tests: _check_segments
 # ---------------------------------------------------------------------------
 
+
 class TestCheckSegmentsEpsilon:
     """Edge clearance for trace segments with boundary-exact distances."""
 
     def _segment(self, start, end, width=0.2):
         return SimpleNamespace(
-            start=start, end=end, width=width, layer="F.Cu", net_number=1,
+            start=start,
+            end=end,
+            width=width,
+            layer="F.Cu",
+            net_number=1,
         )
 
     def test_segment_at_exact_clearance_passes(self):
@@ -98,6 +105,7 @@ class TestCheckSegmentsEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_segments(
             _make_pcb(segments=[seg]),
@@ -117,6 +125,7 @@ class TestCheckSegmentsEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_segments(
             _make_pcb(segments=[seg]),
@@ -136,6 +145,7 @@ class TestCheckSegmentsEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_segments(
             _make_pcb(segments=[seg]),
@@ -150,13 +160,17 @@ class TestCheckSegmentsEpsilon:
 # Tests: _check_vias
 # ---------------------------------------------------------------------------
 
+
 class TestCheckViasEpsilon:
     """Edge clearance for vias with boundary-exact distances."""
 
     def _via(self, position, size=0.6, drill=0.3):
         return SimpleNamespace(
-            position=position, size=size, drill=drill,
-            layers=["F.Cu", "B.Cu"], net_number=1,
+            position=position,
+            size=size,
+            drill=drill,
+            layers=["F.Cu", "B.Cu"],
+            net_number=1,
         )
 
     def test_via_at_exact_clearance_passes(self):
@@ -167,6 +181,7 @@ class TestCheckViasEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_vias(
             _make_pcb(vias=[via]),
@@ -184,6 +199,7 @@ class TestCheckViasEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_vias(
             _make_pcb(vias=[via]),
@@ -198,17 +214,23 @@ class TestCheckViasEpsilon:
 # Tests: _check_pads
 # ---------------------------------------------------------------------------
 
+
 class TestCheckPadsEpsilon:
     """Edge clearance for pads with boundary-exact distances."""
 
     def _footprint_with_pad(self, pad_x, pad_size=0.8, pad_type="smd"):
         pad = SimpleNamespace(
-            position=(0.0, 0.0), size=(pad_size, pad_size),
-            type=pad_type, number="1",
+            position=(0.0, 0.0),
+            size=(pad_size, pad_size),
+            type=pad_type,
+            number="1",
         )
         fp = SimpleNamespace(
-            position=(pad_x, 15.0), rotation=0.0,
-            layer="F.Cu", reference="U1", pads=[pad],
+            position=(pad_x, 15.0),
+            rotation=0.0,
+            layer="F.Cu",
+            reference="U1",
+            pads=[pad],
         )
         return fp
 
@@ -220,6 +242,7 @@ class TestCheckPadsEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_pads(
             _make_pcb(footprints=[fp]),
@@ -237,6 +260,7 @@ class TestCheckPadsEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_pads(
             _make_pcb(footprints=[fp]),
@@ -250,6 +274,7 @@ class TestCheckPadsEpsilon:
 # ---------------------------------------------------------------------------
 # Tests: _check_zones
 # ---------------------------------------------------------------------------
+
 
 class TestCheckZonesEpsilon:
     """Edge clearance for zones with boundary-exact distances."""
@@ -278,6 +303,7 @@ class TestCheckZonesEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_zones(
             _make_pcb(zones=[zone]),
@@ -301,6 +327,7 @@ class TestCheckZonesEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_zones(
             _make_pcb(zones=[zone]),
@@ -324,6 +351,7 @@ class TestCheckZonesEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_zones(
             _make_pcb(zones=[zone]),
@@ -347,6 +375,7 @@ class TestCheckZonesEpsilon:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_zones(
             _make_pcb(zones=[zone]),
@@ -469,9 +498,9 @@ class TestCheckPadsRotationSignConvention:
     @pytest.mark.parametrize(
         "rotation, fp_x, expect_canonical_violation",
         [
-            (45.0,  -1.9, True),
-            (90.0,   0.6, True),
-            (270.0,  0.6, False),
+            (45.0, -1.9, True),
+            (90.0, 0.6, True),
+            (270.0, 0.6, False),
         ],
     )
     def test_violation_count_matches_canonical_convention(
@@ -494,6 +523,7 @@ class TestCheckPadsRotationSignConvention:
 
         rule = EdgeClearanceRule()
         from kicad_tools.validate.violations import DRCResults
+
         results = DRCResults()
         rule._check_pads(
             _make_pcb(footprints=[fp]),
@@ -535,25 +565,30 @@ class TestCheckPadsRotationSignConvention:
 # Tests: all four methods use epsilon (code-level verification)
 # ---------------------------------------------------------------------------
 
+
 class TestAllMethodsUseEpsilon:
     """Verify that the source code of all four check methods references epsilon."""
 
     def test_check_segments_uses_epsilon(self):
         import inspect
+
         src = inspect.getsource(EdgeClearanceRule._check_segments)
         assert "_CLEARANCE_EPSILON_MM" in src
 
     def test_check_vias_uses_epsilon(self):
         import inspect
+
         src = inspect.getsource(EdgeClearanceRule._check_vias)
         assert "_CLEARANCE_EPSILON_MM" in src
 
     def test_check_pads_uses_epsilon(self):
         import inspect
+
         src = inspect.getsource(EdgeClearanceRule._check_pads)
         assert "_CLEARANCE_EPSILON_MM" in src
 
     def test_check_zones_uses_epsilon(self):
         import inspect
+
         src = inspect.getsource(EdgeClearanceRule._check_zones)
         assert "_CLEARANCE_EPSILON_MM" in src

@@ -65,8 +65,7 @@ def main() -> int:
 
     if not args.classifier.exists():
         logger.error(
-            "Classifier not found at %s. Train + save it first with "
-            "train_phase0_classifier.py.",
+            "Classifier not found at %s. Train + save it first with train_phase0_classifier.py.",
             args.classifier,
         )
         return 1

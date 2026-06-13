@@ -47,9 +47,7 @@ from kicad_tools.router.path import calculate_route_length
 from kicad_tools.router.primitives import Route, Segment
 
 
-def _make_horizontal_route(
-    net_id: int, net_name: str, y: float, length: float = 10.0
-) -> Route:
+def _make_horizontal_route(net_id: int, net_name: str, y: float, length: float = 10.0) -> Route:
     """Build a single-segment horizontal route at the given y, from x=0 to x=length."""
     route = Route(net=net_id, net_name=net_name)
     route.segments.append(
@@ -275,9 +273,7 @@ class TestMatchPairLengthsClearanceAware:
         p_route = _make_horizontal_route(net_id=1, net_name="P", y=0.0, length=12.0)
         n_route = _make_horizontal_route(net_id=2, net_name="N", y=1.0, length=10.0)
 
-        result = match_pair_lengths(
-            p_route, n_route, max_delta=1.0, add_serpentines=True
-        )
+        result = match_pair_lengths(p_route, n_route, max_delta=1.0, add_serpentines=True)
 
         # 2mm mismatch, max_delta=1mm -> serpentine added on shorter (n).
         assert result is True

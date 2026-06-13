@@ -285,9 +285,7 @@ class TestU10PinEmission:
             f"_connect_mcu_pin_to_label (issue #3379)."
         )
 
-    def test_swdio_not_bridged_to_phase_a(
-        self, u10_netlist: dict[str, str]
-    ) -> None:
+    def test_swdio_not_bridged_to_phase_a(self, u10_netlist: dict[str, str]) -> None:
         """U10.23 (SWDIO) must NOT be bridged to PHASE_A.
 
         Pre-fix symptom: the SWDIO stub-and-label at (247.65, 177.80)
@@ -299,9 +297,7 @@ class TestU10PinEmission:
             "U10.23 (SWDIO) is bridged to PHASE_A -- regression of #3379"
         )
 
-    def test_swclk_not_bridged_to_phase_b(
-        self, u10_netlist: dict[str, str]
-    ) -> None:
+    def test_swclk_not_bridged_to_phase_b(self, u10_netlist: dict[str, str]) -> None:
         """U10.24 (SWCLK) must NOT be bridged to PHASE_B.
 
         Pre-fix symptom: the SWCLK stub-and-label at (247.65, 180.34)
@@ -331,9 +327,7 @@ class TestU10PinEmission:
         )
 
     @pytest.mark.parametrize("pin", ["14", "16", "32"])
-    def test_gnd_pins_not_bridged_to_power(
-        self, u10_netlist: dict[str, str], pin: str
-    ) -> None:
+    def test_gnd_pins_not_bridged_to_power(self, u10_netlist: dict[str, str], pin: str) -> None:
         """U10.14/16/32 (VSS/VSSA) must resolve to GND, not +3V3.
 
         Pre-fix symptom: the GND label for VDD pin 14 at (227.33,
@@ -343,13 +337,10 @@ class TestU10PinEmission:
         """
         actual = u10_netlist.get(pin, "MISSING")
         assert actual == "GND", (
-            f"U10.{pin} (GND) resolved to {actual!r} -- the original "
-            f"#3379 silent bridge into +3V3."
+            f"U10.{pin} (GND) resolved to {actual!r} -- the original #3379 silent bridge into +3V3."
         )
 
-    def test_no_pre_fix_bridge_victims_remain(
-        self, u10_netlist: dict[str, str]
-    ) -> None:
+    def test_no_pre_fix_bridge_victims_remain(self, u10_netlist: dict[str, str]) -> None:
         """End-to-end summary check: every pin in the original #3379
         bridge-victim set has moved off the wrong-net it was on
         before the fix.

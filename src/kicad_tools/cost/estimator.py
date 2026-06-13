@@ -245,7 +245,7 @@ class ManufacturingCostEstimator:
         self,
         manufacturer: str = "jlcpcb",
         use_lcsc_pricing: bool = True,
-        parts_cache: "PartsCache | None" = None,
+        parts_cache: PartsCache | None = None,
     ):
         """
         Initialize cost estimator.

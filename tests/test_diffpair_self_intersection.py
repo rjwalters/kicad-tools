@@ -71,9 +71,7 @@ def test_legacy_callers_unaffected_when_no_visited_sets():
     """
     pf = _make_pathfinder()
     state = CoupledState(GridPos(5, 5, 0), GridPos(7, 5, 0), (0, 0))
-    neighbors = pf._get_coupled_neighbors(
-        state, p_net=1, n_net=2, target_spacing_cells=2
-    )
+    neighbors = pf._get_coupled_neighbors(state, p_net=1, n_net=2, target_spacing_cells=2)
     # At least one symmetric move (right/left/up/down preserving 2-cell
     # spacing) must exist for the legacy permissive path.
     assert len(neighbors) > 0
@@ -105,9 +103,7 @@ def test_symmetric_move_rejected_when_p_lands_on_n_trail():
         n_visited=n_visited,
     )
     plus_x_moves = [
-        (s, c, v)
-        for (s, c, v) in neighbors
-        if not v and s.p_pos.x == 6 and s.p_pos.y == 5
+        (s, c, v) for (s, c, v) in neighbors if not v and s.p_pos.x == 6 and s.p_pos.y == 5
     ]
     assert plus_x_moves == [], (
         f"+x symmetric move with P landing on N's past trail must be "
@@ -130,9 +126,7 @@ def test_symmetric_move_rejected_when_n_lands_on_p_trail():
         n_visited=frozenset(),
     )
     plus_x_moves = [
-        (s, c, v)
-        for (s, c, v) in neighbors
-        if not v and s.n_pos.x == 8 and s.n_pos.y == 5
+        (s, c, v) for (s, c, v) in neighbors if not v and s.n_pos.x == 8 and s.n_pos.y == 5
     ]
     assert plus_x_moves == []
 
@@ -217,15 +211,10 @@ def test_p_advance_self_loop_rejected_non_endpoint():
     looping = [
         (s, c, v)
         for (s, c, v) in neighbors
-        if not v
-        and s.p_pos.x == 6
-        and s.p_pos.y == 5
-        and s.n_pos.x == 7
-        and s.n_pos.y == 5
+        if not v and s.p_pos.x == 6 and s.p_pos.y == 5 and s.n_pos.x == 7 and s.n_pos.y == 5
     ]
     assert looping == [], (
-        f"P-advance into own past trail at non-endpoint cell must be "
-        f"rejected; got {looping}"
+        f"P-advance into own past trail at non-endpoint cell must be rejected; got {looping}"
     )
 
 
@@ -253,11 +242,7 @@ def test_p_advance_rejected_when_lands_on_n_trail():
     cross_trail = [
         (s, c, v)
         for (s, c, v) in neighbors
-        if not v
-        and s.p_pos.x == 6
-        and s.p_pos.y == 5
-        and s.n_pos.x == 7
-        and s.n_pos.y == 5
+        if not v and s.p_pos.x == 6 and s.p_pos.y == 5 and s.n_pos.x == 7 and s.n_pos.y == 5
     ]
     assert cross_trail == []
 
@@ -289,15 +274,10 @@ def test_n_advance_self_loop_rejected_non_endpoint():
     looping = [
         (s, c, v)
         for (s, c, v) in neighbors
-        if not v
-        and s.p_pos.x == 5
-        and s.p_pos.y == 5
-        and s.n_pos.x == 8
-        and s.n_pos.y == 5
+        if not v and s.p_pos.x == 5 and s.p_pos.y == 5 and s.n_pos.x == 8 and s.n_pos.y == 5
     ]
     assert looping == [], (
-        f"N-advance into own past trail at non-endpoint cell must be "
-        f"rejected; got {looping}"
+        f"N-advance into own past trail at non-endpoint cell must be rejected; got {looping}"
     )
 
 
@@ -323,11 +303,7 @@ def test_n_advance_rejected_when_lands_on_p_trail():
     cross_trail = [
         (s, c, v)
         for (s, c, v) in neighbors
-        if not v
-        and s.p_pos.x == 5
-        and s.p_pos.y == 5
-        and s.n_pos.x == 8
-        and s.n_pos.y == 5
+        if not v and s.p_pos.x == 5 and s.p_pos.y == 5 and s.n_pos.x == 8 and s.n_pos.y == 5
     ]
     assert cross_trail == []
 
@@ -372,15 +348,9 @@ def test_endpoint_exemption_allows_landing_on_partner_trail():
     landing = [
         (s, c, v)
         for (s, c, v) in neighbors
-        if not v
-        and s.p_pos.x == 6
-        and s.p_pos.y == 5
-        and s.n_pos.x == 8
-        and s.n_pos.y == 5
+        if not v and s.p_pos.x == 6 and s.p_pos.y == 5 and s.n_pos.x == 8 and s.n_pos.y == 5
     ]
-    assert len(landing) == 1, (
-        f"Endpoint landing must bypass path-history guard; got {len(landing)}"
-    )
+    assert len(landing) == 1, f"Endpoint landing must bypass path-history guard; got {len(landing)}"
 
 
 # ---------------------------------------------------------------------------
@@ -411,19 +381,39 @@ def test_route_coupled_simple_pair_no_self_intersection():
     # N pad start at (2.0, 5.4), end at (10.0, 5.4).
     # 2-cell spacing at the default grid resolution.
     p_start = Pad(
-        x=2.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+",
+        x=2.0,
+        y=5.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="DP+",
         layer=Layer.F_CU,
     )
     p_end = Pad(
-        x=10.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+",
+        x=10.0,
+        y=5.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="DP+",
         layer=Layer.F_CU,
     )
     n_start = Pad(
-        x=2.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-",
+        x=2.0,
+        y=5.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="DP-",
         layer=Layer.F_CU,
     )
     n_end = Pad(
-        x=10.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-",
+        x=10.0,
+        y=5.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="DP-",
         layer=Layer.F_CU,
     )
 
@@ -473,19 +463,39 @@ def test_route_coupled_segment_count_balance_simple_pair():
     )
 
     p_start = Pad(
-        x=2.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+",
+        x=2.0,
+        y=5.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="DP+",
         layer=Layer.F_CU,
     )
     p_end = Pad(
-        x=10.0, y=5.0, width=0.2, height=0.2, net=1, net_name="DP+",
+        x=10.0,
+        y=5.0,
+        width=0.2,
+        height=0.2,
+        net=1,
+        net_name="DP+",
         layer=Layer.F_CU,
     )
     n_start = Pad(
-        x=2.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-",
+        x=2.0,
+        y=5.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="DP-",
         layer=Layer.F_CU,
     )
     n_end = Pad(
-        x=10.0, y=5.4, width=0.2, height=0.2, net=2, net_name="DP-",
+        x=10.0,
+        y=5.4,
+        width=0.2,
+        height=0.2,
+        net=2,
+        net_name="DP-",
         layer=Layer.F_CU,
     )
 

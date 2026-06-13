@@ -48,7 +48,6 @@ from tests.fixtures.strict_in_pad_min import (
     make_rules,
 )
 
-
 # ----------------------------------------------------------------------------
 # Helpers
 #
@@ -221,19 +220,14 @@ class TestLateralRecoverySucceeds:
             f"{route.via.y} >= primary.y={primary.y}"
         )
         # Via should not be inside the pad copper (purpose of lateral)
-        assert route.via.in_pad is False, (
-            "Lateral via must have in_pad=False (it sits off the pad)"
-        )
+        assert route.via.in_pad is False, "Lateral via must have in_pad=False (it sits off the pad)"
         # Route must have BOTH segments: surface stub + inner escape.
         assert len(route.segments) == 2, (
-            f"Lateral route should have 2 segments (stub + inner); "
-            f"got {len(route.segments)}"
+            f"Lateral route should have 2 segments (stub + inner); got {len(route.segments)}"
         )
         # First segment is the surface stub from pad to via.
         stub = route.segments[0]
-        assert stub.layer == primary.layer, (
-            "Surface stub must stay on the pad's layer"
-        )
+        assert stub.layer == primary.layer, "Surface stub must stay on the pad's layer"
         assert abs(stub.x1 - primary.x) < 1e-6 and abs(stub.y1 - primary.y) < 1e-6, (
             "Surface stub must start at the pad center"
         )
@@ -247,12 +241,12 @@ class TestLateralRecoverySucceeds:
         )
         # Diagnostic INFO log line should be present.
         info_records = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.levelno == logging.INFO and "Lateral via-escape rescue" in r.message
         ]
-        assert info_records, (
-            "Expected the 'Lateral via-escape rescue' INFO log line; "
-            "saw: " + str([r.message for r in caplog.records])
+        assert info_records, "Expected the 'Lateral via-escape rescue' INFO log line; saw: " + str(
+            [r.message for r in caplog.records]
         )
 
     def test_lateral_recovery_picks_smallest_valid_offset(self):
@@ -312,7 +306,8 @@ class TestLateralRecoveryNecksStubWidthForChannelClearance:
 
     @pytest.mark.parametrize("strict", [True, False])
     def test_lateral_stub_necks_to_min_trace_when_full_width_collides(
-        self, strict: bool,
+        self,
+        strict: bool,
     ):
         """When the dispatcher passes a wide ``escape_width`` (0.5mm
         net trace) that does NOT fit the channel between same-row
@@ -392,8 +387,7 @@ class TestLateralRecoveryNecksStubWidthForChannelClearance:
         assert route is not None
         stub = route.segments[0]
         assert stub.width == pytest.approx(0.2, abs=1e-6), (
-            f"Dispatcher width that already fits the channel must be "
-            f"preserved; got {stub.width}mm"
+            f"Dispatcher width that already fits the channel must be preserved; got {stub.width}mm"
         )
 
 
@@ -521,19 +515,13 @@ class TestLateralRecoveryWithStrictDisabled:
                 skip_on_clearance_violation=router.strict_in_pad_clearance,
             )
 
-        assert route is not None, (
-            "Legacy (strict=False) path must commit the violating via"
-        )
+        assert route is not None, "Legacy (strict=False) path must commit the violating via"
         # We did not invoke the lateral helper directly here -- we called
         # ``_try_in_pad_escape`` in isolation, so it can't have logged.
-        lateral_logs = [
-            r for r in caplog.records
-            if "Lateral via-escape rescue" in r.message
-        ]
+        lateral_logs = [r for r in caplog.records if "Lateral via-escape rescue" in r.message]
         assert not lateral_logs, (
             "Direct _try_in_pad_escape call must not log the lateral "
-            "rescue line; got: "
-            + str([r.message for r in lateral_logs])
+            "rescue line; got: " + str([r.message for r in lateral_logs])
         )
 
 

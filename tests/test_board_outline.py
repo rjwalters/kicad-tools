@@ -8,18 +8,13 @@ Verifies that:
 - gr_line_node builder produces valid KiCad S-expressions
 """
 
-import tempfile
 import textwrap
-from pathlib import Path
 
-import pytest
-
-from kicad_tools.cli.build_cmd import BuildContext, BuildResult, _run_step_outline
+from kicad_tools.cli.build_cmd import BuildContext, _run_step_outline
 from kicad_tools.pcb.editor import PCBEditor
 from kicad_tools.sexp.builders import gr_line_node
 from kicad_tools.spec.schema import (
     MechanicalRequirements,
-    MountingHole,
     ProjectMetadata,
     ProjectSpec,
     Requirements,

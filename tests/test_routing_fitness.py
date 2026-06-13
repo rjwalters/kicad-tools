@@ -19,7 +19,6 @@ from kicad_tools.optim.evolutionary import (
     RoutingEvaluator,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -32,9 +31,7 @@ def _make_optimizer(
     """Create a small optimizer with two components and one spring."""
     board = Polygon.rectangle(50, 50, 100, 80)
     config = config or EvolutionaryConfig()
-    opt = EvolutionaryPlacementOptimizer(
-        board, config, routing_evaluator=routing_evaluator
-    )
+    opt = EvolutionaryPlacementOptimizer(board, config, routing_evaluator=routing_evaluator)
 
     comp1 = Component(
         ref="U1",
@@ -278,9 +275,7 @@ class TestEdgeCases:
     def test_zero_components(self):
         board = Polygon.rectangle(50, 50, 100, 80)
         evaluator = _MockRoutingEvaluator(completion_rate=0.5)
-        opt = EvolutionaryPlacementOptimizer(
-            board, routing_evaluator=evaluator
-        )
+        opt = EvolutionaryPlacementOptimizer(board, routing_evaluator=evaluator)
         score = opt._estimate_routability()
         # 0 components => 100.0 (short-circuit before evaluator)
         assert score == pytest.approx(100.0)
@@ -289,9 +284,7 @@ class TestEdgeCases:
     def test_one_component(self):
         board = Polygon.rectangle(50, 50, 100, 80)
         evaluator = _MockRoutingEvaluator(completion_rate=0.5)
-        opt = EvolutionaryPlacementOptimizer(
-            board, routing_evaluator=evaluator
-        )
+        opt = EvolutionaryPlacementOptimizer(board, routing_evaluator=evaluator)
         comp = Component(ref="U1", x=50.0, y=50.0, width=5.0, height=5.0)
         opt.add_component(comp)
         score = opt._estimate_routability()
