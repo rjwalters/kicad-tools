@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 12
+_REQUIRED_CPP_BUILD_VERSION = 13
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -838,6 +838,15 @@ class CppPathfinder:
         # Fallback statistics
         self._fallback_count: int = 0
         self._fallback_nets: list[str] = []
+        # Issue #3456: per-net fallback reasons + warn-once bookkeeping.
+        # ``_fallback_reasons`` records WHY the C++ search handed each net
+        # to the Python fallback (first reason per net, including attempts
+        # where the Python fallback ultimately failed too).
+        # ``_fallback_warned`` dedupes the loud per-net WARNING so
+        # negotiated-mode rip-up retries of the same net do not spam the
+        # log -- each net warns at most once per run.
+        self._fallback_reasons: dict[str, str] = {}
+        self._fallback_warned: set[str] = set()
 
         # Issue #3545: lazy cache for ``compute_component_pitches`` used
         # by the net-aware same-component carve-out gate in
@@ -1526,10 +1535,11 @@ class CppPathfinder:
                     per_net_timeout=per_net_timeout,
                     extra_goal_cells=extra_goal_cells,
                     deadline=route_deadline,
+                    reason=self._describe_cpp_failure(result),
                 )
 
             for attempt in range(max_resume_attempts + 1):
-                route = self._convert_result_to_route(result, start, net_class)
+                route = self._convert_result_to_route(result, start, end, net_class)
 
                 # Issue #3438: relief PROBES deliberately cross foreign
                 # copper/halos -- post-route clearance validation would
@@ -1576,6 +1586,10 @@ class CppPathfinder:
                         per_net_timeout=per_net_timeout,
                         extra_goal_cells=extra_goal_cells,
                         deadline=route_deadline,
+                        reason=(
+                            "post-route clearance validation failed; "
+                            f"exhausted {max_resume_attempts} resume attempts"
+                        ),
                     )
 
                 # Find the goal cell of the failed path and reject it.
@@ -1610,6 +1624,10 @@ class CppPathfinder:
                         per_net_timeout=per_net_timeout,
                         extra_goal_cells=extra_goal_cells,
                         deadline=route_deadline,
+                        reason=(
+                            "resume after rejected goal cell failed: "
+                            + self._describe_cpp_failure(result)
+                        ),
                     )
 
             return None
@@ -1664,6 +1682,40 @@ class CppPathfinder:
             "iterations": iterations,
         }
 
+    def _describe_cpp_failure(self, result: router_cpp.RouteResult) -> str:
+        """Return a human-readable description of a failed C++ route result.
+
+        Issue #3456: Used to surface WHY a net is being handed to the
+        10-100x-slower Python fallback.  Maps the ``FAILURE_*`` constants
+        from ``types.hpp`` to short explanations; unknown/absent reasons
+        degrade to a generic message rather than raising.
+        """
+        if router_cpp is None:
+            return "C++ backend unavailable"
+
+        reason = int(getattr(result, "failure_reason", router_cpp.FAILURE_NONE))
+        descriptions = {
+            int(router_cpp.FAILURE_NO_PATH): (
+                "no path (C++ A* open set exhausted)"
+            ),
+            int(router_cpp.FAILURE_ITERATION_LIMIT): (
+                "iteration limit reached (memory backstop cap)"
+            ),
+            int(router_cpp.FAILURE_TIMEOUT): (
+                "per-net wall-clock deadline exceeded"
+            ),
+            int(router_cpp.FAILURE_VIA_VIA_BLOCKED): (
+                "all via candidates blocked by stored-via geometry"
+            ),
+        }
+        desc = descriptions.get(reason)
+        if desc is None:
+            return f"C++ search failed (failure_reason={reason})"
+        blocking_net = int(getattr(result, "blocking_via_net", 0))
+        if reason == int(router_cpp.FAILURE_VIA_VIA_BLOCKED) and blocking_net:
+            desc += f" (blocking net id {blocking_net})"
+        return desc
+
     def get_last_failure_info(self) -> dict | None:
         """Return structured failure diagnostics from the most recent failed route().
 
@@ -1680,10 +1732,33 @@ class CppPathfinder:
         """
         return self._last_failure_info
 
+    def _get_component_pitches(self) -> dict[str, float]:
+        """Lazily compute and cache per-component pin pitches.
+
+        Shared by the same-component carve-out gate (Issue #3545) and the
+        Issue #1018 neck-down post-processing in
+        :meth:`_convert_result_to_route`.  Returns an empty dict (without
+        caching) when no Python source grid is attached, so a later
+        attachment can still populate the cache.
+        """
+        pitches = self._component_pitches_cache
+        if pitches is not None:
+            return pitches
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is None:
+            return {}
+        try:
+            pitches = py_grid.compute_component_pitches()
+        except Exception:
+            pitches = {}
+        self._component_pitches_cache = pitches
+        return pitches
+
     def _convert_result_to_route(
         self,
         result: "router_cpp.RouteResult",
         start: "Pad",
+        end: "Pad",
         net_class: "NetClassRouting | None",
     ) -> "Route":
         """Convert a C++ RouteResult to a Python Route object.
@@ -1691,6 +1766,7 @@ class CppPathfinder:
         Args:
             result: C++ route result with segments and vias.
             start: Source pad (provides net and net_name).
+            end: Destination pad (needed for Issue #1018 neck-down taper).
             net_class: Optional net class for trace width override.
 
         Returns:
@@ -1702,12 +1778,59 @@ class CppPathfinder:
 
         route = Route(net=start.net, net_name=start.net_name)
 
-        # Issue #1543: Apply net-class-aware trace width to segments.
-        # Issue #3130: As of #3130 the C++ pathfinder also accepts per-net
-        # emit widths and writes them into ``cpp_seg.width``, so this Python
-        # override is now a defensive fallback (e.g. when the call path
-        # passes a zero ``emit_trace_width``).
-        trace_width = net_class.trace_width if net_class else None
+        # Issue #3456 follow-up: echo the requested float64 trace width
+        # verbatim instead of reading back ``cpp_seg.width``.  The C++
+        # Segment stores float32, so a requested 0.2 mm would round-trip
+        # as 0.20000000298023224.  The width the C++ search emitted is
+        # always known on the Python side: the per-net-class width when a
+        # class is mapped (forwarded as ``emit_trace_width``, Issue #3130),
+        # else the global ``rules.trace_width`` (the C++ ``rules_`` default
+        # was populated from this same Python value).  This mirrors the
+        # Python backend's ``_get_trace_width_for_net`` (Issue #1543).
+        base_trace_width = float(net_class.trace_width if net_class else self._rules.trace_width)
+
+        # Issue #1018 parity: the C++ pathfinder has no neck-down support.
+        # Apply the same width taper as the Python backend
+        # (``PathFinder._convert_path_to_route``) as post-processing on the
+        # C++-returned segments.  Semantics match exactly: per-segment
+        # width is the minimum over both pads of
+        # ``rules.get_neck_down_width(min endpoint distance, pitch,
+        # base_width=net-class width)``, gated per pad by
+        # ``rules.should_apply_neck_down``.
+        pitches = self._get_component_pitches()
+        start_pitch = pitches.get(start.ref) if start.ref else None
+        end_pitch = pitches.get(end.ref) if end.ref else None
+        start_needs_neckdown = self._rules.should_apply_neck_down(start.ref, start_pitch)
+        end_needs_neckdown = self._rules.should_apply_neck_down(end.ref, end_pitch)
+
+        def _segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
+            """Trace width for one segment, with Issue #1018 neck-down taper."""
+            if not start_needs_neckdown and not end_needs_neckdown:
+                return base_trace_width
+            min_width = base_trace_width
+            if start_needs_neckdown:
+                min_dist_start = min(
+                    math.hypot(x1 - start.x, y1 - start.y),
+                    math.hypot(x2 - start.x, y2 - start.y),
+                )
+                min_width = min(
+                    min_width,
+                    self._rules.get_neck_down_width(
+                        min_dist_start, start_pitch, base_width=base_trace_width
+                    ),
+                )
+            if end_needs_neckdown:
+                min_dist_end = min(
+                    math.hypot(x1 - end.x, y1 - end.y),
+                    math.hypot(x2 - end.x, y2 - end.y),
+                )
+                min_width = min(
+                    min_width,
+                    self._rules.get_neck_down_width(
+                        min_dist_end, end_pitch, base_width=base_trace_width
+                    ),
+                )
+            return min_width
 
         for cpp_seg in result.segments:
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
@@ -1724,6 +1847,16 @@ class CppPathfinder:
                 float(cpp_seg.x2),
                 float(cpp_seg.y2),
             )
+            # Issue #1018: compute the (possibly necked-down) width once per
+            # C++ segment, BEFORE the dogleg split -- matching the Python
+            # backend, where ``_emit_segment`` computes the width on the
+            # merged segment endpoints and applies it to both dogleg legs.
+            seg_width = _segment_width(
+                float(cpp_seg.x1),
+                float(cpp_seg.y1),
+                float(cpp_seg.x2),
+                float(cpp_seg.y2),
+            )
             for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
                 if sx == ex and sy == ey:
                     continue
@@ -1732,7 +1865,7 @@ class CppPathfinder:
                     y1=sy,
                     x2=ex,
                     y2=ey,
-                    width=trace_width if trace_width is not None else cpp_seg.width,
+                    width=seg_width,
                     layer=Layer(layer_enum_value),
                     net=cpp_seg.net,
                     net_name=start.net_name,
@@ -1742,12 +1875,16 @@ class CppPathfinder:
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
         # regardless of net class; this caused POWER-class nets (which declare
-        # ``via_size=0.8mm``) to emit vias at the global default.  With #3130
-        # the C++ side also honors ``emit_via_diameter``, so this is also
-        # a defensive fallback when called with ``emit_via_diameter == 0``.
-        # ``via_drill`` is not yet a per-net attribute on ``NetClassRouting``;
-        # fall back to ``cpp_via.drill`` for now.
-        via_diameter = net_class.via_size if net_class else None
+        # ``via_size=0.8mm``) to emit vias at the global default.
+        # Issue #3456 follow-up: like segment widths, echo the requested
+        # float64 values verbatim instead of the C++ float32 round-trip.
+        # Both are always known on the Python side: the per-net-class
+        # ``via_size`` (forwarded as ``emit_via_diameter``) or the global
+        # ``rules.via_diameter``; ``via_drill`` is not yet a per-net
+        # attribute, so the C++ always emits ``rules_.via_drill`` (populated
+        # from ``rules.via_drill``).
+        via_diameter = float(net_class.via_size if net_class else self._rules.via_diameter)
+        via_drill = float(self._rules.via_drill)
 
         for cpp_via in result.vias:
             layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
@@ -1755,8 +1892,8 @@ class CppPathfinder:
             via = Via(
                 x=cpp_via.x,
                 y=cpp_via.y,
-                drill=cpp_via.drill,
-                diameter=via_diameter if via_diameter is not None else cpp_via.diameter,
+                drill=via_drill,
+                diameter=via_diameter,
                 layers=(Layer(layer_from_value), Layer(layer_to_value)),
                 net=cpp_via.net,
                 net_name=start.net_name,
@@ -1794,14 +1931,7 @@ class CppPathfinder:
         relaxed_refs = getattr(py_grid, "_relaxed_clearance_refs", None)
         if relaxed_refs and ref in relaxed_refs:
             return True
-        pitches = self._component_pitches_cache
-        if pitches is None:
-            try:
-                pitches = py_grid.compute_component_pitches()
-            except Exception:
-                pitches = {}
-            self._component_pitches_cache = pitches
-        pitch = pitches.get(ref)
+        pitch = self._get_component_pitches().get(ref)
         required = self._rules.get_clearance_for_component(ref, pitch)
         if required < self._rules.trace_clearance:
             return True
@@ -1988,6 +2118,7 @@ class CppPathfinder:
         per_net_timeout: float | None = None,
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
         deadline: float | None = None,
+        reason: str = "unknown",
     ) -> Route | None:
         """Attempt to route using the Python pathfinder as a fallback.
 
@@ -2015,6 +2146,10 @@ class CppPathfinder:
                 search left unspent; when none remains it is skipped so a
                 single ``route()`` call can never double-spend its per-net
                 cap inside the 10-100x-slower Python A*.
+            reason: Human-readable explanation of WHY the C++ search
+                handed this net to the Python fallback (issue #3456).
+                Surfaced in the once-per-net WARNING and recorded in
+                ``fallback_stats['fallback_reasons']``.
 
         Returns:
             Route object if fallback succeeds, None if also fails (or the
@@ -2024,6 +2159,17 @@ class CppPathfinder:
         if py_grid is None:
             return None
 
+        # Issue #3456: the silent C++ -> Python downgrade is the bug.
+        # A net grinding 3-7 minutes in the pure-Python A* is otherwise
+        # indistinguishable from "router is slow" at default verbosity.
+        # Warn LOUDLY, once per net per run (negotiated rip-up retries
+        # the same net many times -- dedupe keeps the log readable), and
+        # record the reason for ``fallback_stats`` consumers.  Skipped in
+        # relief-probe mode: probes deliberately stress the search, are
+        # never committed, and a probe-time fallback is not a
+        # user-facing performance event.
+        net_name = getattr(start, "net_name", "?")
+
         # Issue #3474 R1: clamp the fallback budget to the unspent
         # remainder of the shared per-net deadline.
         if deadline is not None:
@@ -2032,7 +2178,7 @@ class CppPathfinder:
                 logger.debug(
                     "Net %s: per-net budget exhausted by C++ search; "
                     "skipping Python fallback (issue #3474)",
-                    getattr(start, "net_name", "?"),
+                    net_name,
                 )
                 return None
             per_net_timeout = (
@@ -2040,6 +2186,25 @@ class CppPathfinder:
                 if per_net_timeout is not None
                 else remaining
             )
+
+        # The fallback is actually going to run -- make it LOUD.  This
+        # sits after the deadline-exhaustion early-return above so a
+        # skipped fallback (no grind) stays quiet, and is suppressed in
+        # relief-probe mode (probes deliberately stress the search, are
+        # never committed, and a probe-time fallback is not a
+        # user-facing performance event).
+        if not self._relief_mode:
+            self._fallback_reasons.setdefault(net_name, reason)
+            if net_name not in self._fallback_warned:
+                self._fallback_warned.add(net_name)
+                logger.warning(
+                    "Net %s: C++ pathfinder gave up (%s); falling back to "
+                    "the pure-Python A* (typically 10-100x slower -- this "
+                    "net may take minutes). See "
+                    "router.backend_info['fallback_stats'] for details.",
+                    net_name,
+                    reason,
+                )
 
         # Lazy-construct the Python Router on first fallback
         if self._py_router is None:
@@ -2071,7 +2236,6 @@ class CppPathfinder:
         )
         dt = time.monotonic() - t0
 
-        net_name = getattr(start, "net_name", "?")
         if route is not None:
             self._fallback_count += 1
             self._fallback_nets.append(net_name)
@@ -2116,10 +2280,17 @@ class CppPathfinder:
             Dictionary with:
                 - fallback_count: Number of nets routed via Python fallback
                 - fallback_nets: List of net names that used fallback
+                - fallback_reasons: Mapping of net name -> human-readable
+                  reason the C++ search handed that net to the Python
+                  fallback (issue #3456).  Includes nets where the Python
+                  fallback was attempted but ALSO failed (those do not
+                  appear in ``fallback_nets``), so slow failed grinds are
+                  attributable too.
         """
         return {
             "fallback_count": self._fallback_count,
             "fallback_nets": list(self._fallback_nets),
+            "fallback_reasons": dict(self._fallback_reasons),
         }
 
     @property

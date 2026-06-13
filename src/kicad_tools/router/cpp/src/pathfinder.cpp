@@ -267,7 +267,21 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                     return true;
                 }
             } else {
-                if (cell.is_obstacle || cell.net != net) {
+                // Issue #3456: same-net cells are passable in standard
+                // mode regardless of the obstacle flag -- parity with
+                // the Python ``_is_trace_blocked`` standard branch
+                // (Issue #864: ``blocked & (net != net)``).  Pre-fix,
+                // ``cell.is_obstacle`` here rejected every trace
+                // centerline within trace-half-width of the net's OWN
+                // pad copper, sealing dense connector pad pockets
+                // (board 03's J1 USB-C at 0.05mm grid: standard-mode
+                // open set exhausted in ~800 iterations on the J1->U1
+                // USB edges) and silently handing those nets to the
+                // 10-100x-slower Python fallback.  This predicate --
+                // not ``is_diagonal_blocked`` -- was the operative
+                // board-03 seal; post-fix the board routes with zero
+                // fallbacks.
+                if (cell.net != net) {
                     return true;
                 }
             }
@@ -323,7 +337,9 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                     return true;
                 }
             } else {
-                if (cell.is_obstacle || cell.net != net) {
+                // Issue #3456: same-net cells passable in standard mode
+                // (Python #864 parity -- see fast path above).
+                if (cell.net != net) {
                     return true;
                 }
             }
@@ -439,7 +455,17 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
                     return true;
                 }
             } else {
-                if (cell.is_obstacle || cell.net != net) {
+                // Issue #3456: same-net cells are passable regardless of
+                // the obstacle flag -- parity with the Python
+                // ``_is_diagonal_corner_blocked`` standard-mode branch
+                // (Issue #864 semantics) and the sibling sharing-mode fix
+                // from Issue #2989 above.  Pre-fix, ``cell.is_obstacle``
+                // here rejected diagonal moves adjacent to the net's OWN
+                // pad copper.  (The operative board-03 seal was the
+                // matching divergence in ``is_trace_blocked`` -- see the
+                // comment there -- but this predicate shares the exact
+                // same Issue #864 parity contract.)
+                if (cell.net != net) {
                     return true;
                 }
             }

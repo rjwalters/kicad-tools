@@ -309,6 +309,23 @@ NB_MODULE(router_cpp, m) {
              "Check if a via placement at (x, y) is blocked. "
              "Includes both grid-cell blocking and geometric via-vs-via "
              "clearance against stored_vias_ (Issue #2466).")
+        .def("is_diagonal_blocked", &Pathfinder::is_diagonal_blocked,
+             "x"_a, "y"_a, "dx"_a, "dy"_a, "layer"_a, "net"_a,
+             "allow_sharing"_a,
+             "Check if a diagonal move from (x, y) toward (dx, dy) would "
+             "cut through obstacle corners.  Exposed for the Issue #3456 "
+             "regression tests: same-net cells must be passable in "
+             "standard mode regardless of the obstacle flag (parity with "
+             "the Python _is_diagonal_corner_blocked, Issue #864).")
+        .def("is_trace_blocked", &Pathfinder::is_trace_blocked,
+             "x"_a, "y"_a, "layer"_a, "net"_a, "allow_sharing"_a,
+             "radius_override"_a = 0, "partner_net"_a = -1,
+             "partner_radius"_a = 0,
+             "Check if a trace placement at (x, y, layer) is blocked, "
+             "accounting for trace width.  Exposed for the Issue #3456 "
+             "regression tests: same-net cells must be passable in "
+             "standard mode regardless of the obstacle flag (parity with "
+             "the Python _is_trace_blocked, Issue #864).")
         .def("is_foreign_pad_metal_within_radius",
              &Pathfinder::is_foreign_pad_metal_within_radius,
              "x"_a, "y"_a, "layer"_a, "net"_a, "radius"_a,

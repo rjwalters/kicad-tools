@@ -90,7 +90,26 @@ namespace router {
 // signal pad whose metal overlaps an adjacent net=0 pad (the #1764
 // reachability guarantee). Foreign signal pads keep the strict >= 0
 // guard (#2933).
-constexpr int ROUTER_CPP_BUILD_VERSION = 12;
+//
+// Version 13 (Issue #3456): standard-mode own-net-obstacle parity with
+// the Python pathfinder (Issue #864 semantics: same-net cells are
+// passable regardless of the obstacle flag).  Fixed in BOTH
+// ``is_trace_blocked`` (fast + slow paths) and ``is_diagonal_blocked``;
+// both are exposed on the binding surface for the parity regression
+// tests (tests/test_router_cpp_fallback_warning_3456.py).  The
+// ``is_trace_blocked`` divergence was the operative bug: a trace
+// centerline within trace-half-width of the net's OWN ``is_obstacle``
+// pad copper was rejected, sealing dense connector pad pockets (board
+// 03's J1 USB-C at 0.05mm grid -- C++ open set exhausted within ~800
+// iterations on the J1->U1 USB edges, and JOY/BTN nets burned up to
+// 6M iterations before FAILURE_NO_PATH) and silently handing those
+// nets to the 10-100x-slower Python fallback.  Post-fix, board 03's
+// canonical recipe routes with ZERO Python fallbacks.
+// ``is_via_blocked`` standard mode intentionally keeps the strict
+// own-net-obstacle reject pinned by
+// tests/test_cpp_pathfinder_own_net_obstacle.py (verified NOT needed
+// for the board-03 fallbacks).
+constexpr int ROUTER_CPP_BUILD_VERSION = 13;
 
 // Grid cell state
 struct GridCell {
