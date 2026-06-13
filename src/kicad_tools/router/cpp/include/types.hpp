@@ -109,7 +109,26 @@ namespace router {
 // own-net-obstacle reject pinned by
 // tests/test_cpp_pathfinder_own_net_obstacle.py (verified NOT needed
 // for the board-03 fallbacks).
-constexpr int ROUTER_CPP_BUILD_VERSION = 13;
+//
+// Version 14 (Issue #3622): complete the standard-mode own-net-obstacle
+// parity family by aligning the THIRD sibling predicate,
+// ``Pathfinder::is_via_blocked`` (both the cached fast path and the
+// per-net-radius slow path), with the Python ``_is_via_blocked``
+// standard branch (Issue #864: "same-net passable, different nets
+// block"; it does NOT consult ``is_obstacle``).  Pre-#3622 the standard
+// arm rejected a via candidate whose Euclidean disc touched the routing
+// net's OWN ``is_obstacle`` pad copper (``cell.is_obstacle ||
+// cell.net != net``); a board that routes a via through its own
+// destination pad in the Python fallback but not in C++ is another
+// silent-fallback seed of the #3456 class.  Both backends now read
+// ``if (cell.net != net) return true;`` for the standard via predicate.
+// The single-layer (``allowed_layers``) invariant is preserved by a
+// Python-side routable-layer guard in
+// ``cpp_backend.py::CppPathfinder._apply_allowed_layers_to_routable``
+// (a via needs >= 2 routable layers), and fine-pitch neck-down survives
+// via the #1018 post-processing #3456/PR #3623 added to
+// ``cpp_backend.py::_convert_result_to_route``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 14;
 
 // Grid cell state
 struct GridCell {
