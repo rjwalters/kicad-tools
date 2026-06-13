@@ -760,9 +760,16 @@ class TestBoard06StrictGateGuard:
     corridor moved to clear the USB2_D- via barrel and the GND In1.Cu
     fill was regenerated via ``kct zones fill``, retiring both
     ``clearance_segment_zone`` findings.  22 -> 20.
+
+    Re-baselined 2026-06-13 (Issue #3556): the new ``clearance_pad_zone``
+    rule (the via/pad sibling of #3527's segment-vs-zone-fill rule)
+    surfaces 1 pre-existing finding -- a GND pad 0.093mm from the +3V3
+    fill (< 0.102mm jlcpcb minimum), a stale-pour-carve that was invisible
+    because no gate compared pad copper to zone fill.  20 -> 21; the
+    tolerance floor in .github/routed-drc-tolerance.yml rises to match.
     """
 
-    EXPECTED_STRICT_GATE_ERRORS = 20
+    EXPECTED_STRICT_GATE_ERRORS = 21
     EXPECTED_ADVISORY_CONNECTIVITY = 2
 
     @pytest.fixture(scope="class")
