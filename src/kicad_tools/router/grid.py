@@ -2908,6 +2908,110 @@ class RoutingGrid:
 
         return worst_deficit, worst_loc
 
+    def worst_via_segment_deficit(
+        self,
+        via: Via,
+        exclude_net: int,
+        extra_routes: list["Route"] | None = None,
+        foreign_routes: list[Route] | None = None,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """Worst via-vs-FOREIGN-net committed-segment clearance deficit.
+
+        Issue #3486 (finalization backstop, via-vs-segment quadrant):
+        sibling of :meth:`worst_via_pad_deficit` for the via-vs-segment
+        direction.  A through-via barrel is physical copper on EVERY
+        layer it spans, so a candidate via placed within
+        ``via_radius + seg.width/2 + via_clearance`` of a foreign-net
+        trace centreline is a cross-net SHORT -- and the same-net
+        connectivity audit cannot see it (it unions same-net copper
+        only, issue #3487).
+
+        The negotiated loop's post-iteration
+        :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
+        hook (#3020) feeds such violators back into the rip-up cohort,
+        but when the loop EXITS (converged / stagnated / timed out)
+        still holding a residual via-vs-foreign-segment violation,
+        nothing strips it -- it ships as a physical short.  This method
+        is the geometry primitive consumed by
+        ``Autorouter._demote_via_segment_violation_nets`` so the
+        finalization contract covers this quadrant the same way #3545 /
+        #3566 cover foreign pads and #3433 covers seg-seg overlap.
+
+        Geometry is the STANDARD threshold of
+        :func:`kicad_tools.router.via_clearance.via_clears_foreign_segment`
+        (``dist >= via_radius + seg.width/2 + via_clearance``) computed
+        per layer the barrel spans, so the predicate and the demotion
+        backstop agree bit-for-bit.
+
+        Args:
+            via: The committed via to check.
+            exclude_net: The via's net (same-net segments are skipped).
+            extra_routes: Optional Route objects whose segments extend
+                the foreign-segment universe but are NOT in
+                ``self.routes`` (escape-phase stubs etc, mirrors the
+                #3077 ``extra_routes`` of the post-iteration hook).
+            foreign_routes: Issue #3486 (stale-grid-universe guard).
+                When provided, the foreign-segment universe is drawn
+                from THIS explicit route list instead of the grid's own
+                ``self.routes``.  The finalization backstop
+                ``Autorouter._demote_via_segment_violation_nets`` passes
+                the AUTHORITATIVE committed ``net_routes`` here so the
+                deficit is computed against the exact same route set the
+                negotiated loop's in-loop
+                :meth:`NegotiatedRouter.find_nets_with_via_segment_violations`
+                hook trusts.  This matters because the best-iteration
+                restore (core.py #2540/#2803) re-syncs ``net_routes``
+                and the per-cell usage grid, but rewinds ``self.routes``
+                via the ``*_usage`` calls only -- so the grid's
+                ``self.routes`` list can still hold a STALE (worse)
+                iteration's geometry after a restore.  Measuring against
+                the stale grid list produced false-positive shorts
+                (board-02 NODE_B/NODE_C vias that the committed
+                ``net_routes`` does NOT actually short), demoting clean
+                nets and forcing a +9-via / +25 mm layer escalation.
+                ``extra_routes`` still extends whichever universe is
+                selected.
+
+        Returns:
+            ``(worst_deficit, worst_location)`` where ``worst_deficit``
+            is ``max(required_clearance - actual_clearance)`` over all
+            checked foreign segments (<= 0 means no violation) and
+            ``worst_location`` is the via center (or ``None``).
+        """
+        min_clearance = self.rules.via_clearance
+        via_radius = via.diameter / 2
+        worst_deficit = 0.0
+        worst_loc: tuple[float, float] | None = None
+
+        # Layer span of the via (indices, inclusive).  A segment on a
+        # layer outside this span never touches the via barrel.
+        via_idx_a = self.layer_to_index(via.layers[0].value)
+        via_idx_b = self.layer_to_index(via.layers[1].value)
+        via_lo, via_hi = min(via_idx_a, via_idx_b), max(via_idx_a, via_idx_b)
+
+        base_routes = self.routes if foreign_routes is None else foreign_routes
+        routes_iter = list(base_routes)
+        if extra_routes:
+            routes_iter.extend(extra_routes)
+
+        for route in routes_iter:
+            if route.net == exclude_net:
+                continue
+            for seg in route.segments:
+                seg_layer_idx = self.layer_to_index(seg.layer.value)
+                if not (via_lo <= seg_layer_idx <= via_hi):
+                    continue
+                dist = self._point_to_segment_distance(
+                    via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+                clearance = dist - via_radius - seg.width / 2
+                deficit = min_clearance - clearance
+                if deficit > worst_deficit:
+                    worst_deficit = deficit
+                    worst_loc = (via.x, via.y)
+
+        return worst_deficit, worst_loc
+
     def validate_segment_clearance(
         self,
         seg: Segment,
