@@ -38,6 +38,7 @@ from .diffpair_detection import (
     detect_diff_pairs as _layered_detect_diff_pairs,
 )
 from .layers import Layer
+from .observability import validate_net_connectivity
 from .path import calculate_route_length
 from .primitives import Pad, Route, Segment, Via
 
@@ -4625,6 +4626,81 @@ class DiffPairRouter:
                 elif r.net == pair.negative.net_id:
                     n_routes.append(r)
                 routes.append(r)
+
+        # Issue #3540: transactional pad-connectivity claim.  The shadow
+        # constructor (and its rescue-tail / stub-edge machinery) can
+        # commit copper that fails to actually REACH a goal pad -- a
+        # parallel-offset tail that exhausts its anchor-stepping budget,
+        # or a stub edge that the independent router could not land --
+        # while the per-spec commit above has already marked that copper
+        # on the grid.  Left as-is the caller claims the pair's nets
+        # (#2464 reserve), the negotiated main strategy skips them, and
+        # the stranded pads are unreachable for the rest of the pipeline
+        # (measured board 06 run-4: USB3_RX1+/USB3_RX2+ shipped "1 of 2
+        # pads stranded" with no warning).  A pair that claims-but-strands
+        # costs REACH; a pair that defers cleanly costs only QUALITY --
+        # and reach is the asserted contract.  So before returning the
+        # pair's routes (which is what the caller turns into a net claim),
+        # verify every pad of BOTH nets is in a single connected component
+        # of the committed copper.  On any gap, rip the pair's copper off
+        # the grid + route list and defer the WHOLE pair: return
+        # ``([], None)`` (the caller never claims) or fall through to the
+        # single-ended independent router (``coupled_only=False``).
+        #
+        # Gated on ``enable_shadow_construction`` so a flag-off run -- whose
+        # contract is "may only defer, never commit where main would
+        # defer" -- is behaviourally unchanged: with the flag off the
+        # shadow/rescue paths are inert, so the committed routes here are
+        # the coupled body that already passed the #3320 severe-overlap
+        # gate, and re-deferring a clean body would needlessly lose reach.
+        if self.enable_shadow_construction and routes:
+            net_pads_for_check: dict[int, list[Pad]] = {}
+            for net_id in (pair.positive.net_id, pair.negative.net_id):
+                pad_keys = self.autorouter.nets.get(net_id, [])
+                net_pads_for_check[net_id] = [
+                    self.autorouter.pads[k] for k in pad_keys if k in self.autorouter.pads
+                ]
+            conn = validate_net_connectivity(routes, net_pads_for_check)
+            stranded_nets = [
+                net_id for net_id, info in conn.items() if not info.get("connected", False)
+            ]
+            if stranded_nets:
+                for net_id in stranded_nets:
+                    info = conn[net_id]
+                    print(
+                        f"    WARNING: [coupled-shadow] pair {pair.name} net "
+                        f"{net_id} stranded "
+                        f"({info.get('connected_pads', 0)}/"
+                        f"{info.get('total_pads', 0)} pads reached); "
+                        "ripping pair copper and deferring the whole pair."
+                    )
+                    logger.warning(
+                        "diffpair shadow claim NOT transactional -- rolling back: "
+                        "pair=%r net=%r connected_pads=%d total_pads=%d",
+                        pair.name,
+                        net_id,
+                        info.get("connected_pads", 0),
+                        info.get("total_pads", 0),
+                    )
+                # Roll back: unmark every committed route for this pair and
+                # drop it from the autorouter's route list, leaving a clean
+                # grid for whichever fallback handles the pair next.  No
+                # net is claimed because we return without the pair's
+                # routes.
+                for committed in routes:
+                    try:
+                        self.autorouter.grid.unmark_route(committed)
+                    except Exception:
+                        pass
+                    if committed in self.autorouter.routes:
+                        self.autorouter.routes.remove(committed)
+                if coupled_only:
+                    print(
+                        "    Skipping diff-pair pre-pass: shadow-constructed "
+                        "pair stranded goal pads (transactional rollback)."
+                    )
+                    return [], None
+                return self.route_differential_pair_independent(pair, spacing)
 
         # Calculate lengths
         p_length = calculate_route_length(p_routes)
