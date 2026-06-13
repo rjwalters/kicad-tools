@@ -83,7 +83,21 @@ namespace router {
 // through J1-1's halo at 0.127mm actual vs 0.200mm required).
 // ``mark_blocked`` also began recording ``original_net`` for ALL static
 // cells (previously pad-metal only) so the restore has the owner net.
-constexpr int ROUTER_CPP_BUILD_VERSION = 11;
+//
+// Bump to 12 for Issue #3622 (standard-mode own-net-obstacle parity in
+// ``is_via_blocked``).  The standard (non-negotiated) arm of
+// ``Pathfinder::is_via_blocked_diag`` (both the cached fast path and the
+// per-net-radius slow path) rejected a via candidate whose Euclidean disc
+// touched the routing net's OWN ``is_obstacle`` pad copper
+// (``cell.is_obstacle || cell.net != net``), diverging from the Python
+// ``_is_via_blocked`` standard branch (Issue #864 semantics: same-net
+// cells passable regardless of the obstacle flag) and from the sibling
+// ``is_trace_blocked`` / ``is_diagonal_blocked`` standard predicates.  A
+// board that places a via through its own destination pad in the Python
+// fallback but not in C++ is another silent-fallback seed of the #3456
+// class, so both backends are now aligned and the standard branch
+// reads ``if (cell.net != net) return true;``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 12;
 
 // Grid cell state
 struct GridCell {

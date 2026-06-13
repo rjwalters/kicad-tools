@@ -546,7 +546,19 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     }
                     // Allow with cost for routed cells / own-net obstacle.
                 } else {
-                    if (cell.is_obstacle || cell.net != net) {
+                    // Issue #3622: same-net cells are passable in standard
+                    // mode regardless of the obstacle flag -- parity with
+                    // the Python ``_is_via_blocked`` standard branch
+                    // (Issue #864: ``blocked & (net != net)``) and with
+                    // the sibling ``is_trace_blocked`` / ``is_diagonal_blocked``
+                    // standard-mode predicates aligned in Issue #3456.
+                    // Pre-fix, ``cell.is_obstacle`` here rejected a via
+                    // candidate whose disc touched the routing net's OWN
+                    // ``is_obstacle`` pad copper, so a board that routes a
+                    // via through its own destination pad in the Python
+                    // fallback would FAIL in C++ and silently fall back
+                    // (the exact #3456-class silent-fallback seed).
+                    if (cell.net != net) {
                         return true;
                     }
                 }
@@ -594,7 +606,9 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                             return true;
                         }
                     } else {
-                        if (cell.is_obstacle || cell.net != net) {
+                        // Issue #3622: same-net cells passable in standard
+                        // mode (Python #864 parity -- see fast path above).
+                        if (cell.net != net) {
                             return true;
                         }
                     }

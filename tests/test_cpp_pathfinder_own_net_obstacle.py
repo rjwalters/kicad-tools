@@ -143,11 +143,21 @@ class TestIsViaBlockedOwnNetObstacle:
             "the via (preserves PR #2928's invariant)."
         )
 
-    def test_own_net_obstacle_rejects_via_standard(self) -> None:
-        """In standard (non-negotiated) mode, obstacle cells reject
-        the via even for the own net -- the standard branch retains
-        the strict pre-negotiation contract.  Only the negotiated
-        branch needed the own-net gate.
+    def test_own_net_obstacle_admits_via_standard(self) -> None:
+        """Issue #3622: In standard (non-negotiated) mode an own-net
+        ``is_obstacle`` cell must NOT reject the via -- parity with the
+        Python ``_is_via_blocked`` standard branch (Issue #864: same-net
+        cells are passable regardless of the obstacle flag) and with the
+        sibling ``is_trace_blocked`` / ``is_diagonal_blocked`` standard
+        predicates aligned in #3456.
+
+        This flips the previously-pinned strict-reject contract.  Its
+        rationale ("A* in standard mode never enters obstacle metal
+        anyway") was shown false during #3456 -- standard-mode
+        ``route_all`` does traverse own-pad copper -- so a board that
+        routes a via through its own destination pad in the Python
+        fallback but not in C++ was a silent-fallback seed of exactly
+        the #3456 class.  Both backends now agree.
         """
         grid, rules = _make_grid_and_rules()
         cpp_grid = CppGrid.from_routing_grid(grid)
@@ -158,12 +168,35 @@ class TestIsViaBlockedOwnNetObstacle:
         gx, gy = cpp_grid._impl.world_to_grid(2.5, 2.5)
         _paint_own_net_obstacle(cpp_grid, gx, gy, pad_net)
 
-        # Standard mode keeps the strict reject -- A* in standard mode
-        # never enters obstacle metal anyway (escape probes use the
-        # negotiated path).
-        assert pathfinder._impl.is_via_blocked(
+        # Standard mode now admits the own-net via, matching the Python
+        # ``_is_via_blocked`` standard branch (same-net passable).
+        assert not pathfinder._impl.is_via_blocked(
             gx, gy, pad_net, False, 0
         ), (
-            "Standard-mode via probe at any obstacle cell stays "
-            "conservative; only negotiated mode admits own-net obstacles."
+            "Issue #3622: standard-mode via probe at an own-net "
+            "is_obstacle cell must be admitted (Python #864 parity); "
+            "foreign-net obstacles still reject."
+        )
+
+    def test_foreign_net_obstacle_rejects_via_standard(self) -> None:
+        """Counterpart to the own-net admit case above: in standard mode
+        a FOREIGN-net cell must still reject the via.  The #3622 fix is a
+        same-net relaxation, not a blanket one -- foreign metal continues
+        to hard-block.
+        """
+        grid, rules = _make_grid_and_rules()
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
+
+        obstacle_net = 7
+        probe_net = 99
+        gx, gy = cpp_grid._impl.world_to_grid(2.5, 2.5)
+        _paint_own_net_obstacle(cpp_grid, gx, gy, obstacle_net)
+
+        assert pathfinder._impl.is_via_blocked(
+            gx, gy, probe_net, False, 0
+        ), (
+            "Issue #3622: foreign-net cells must still reject the via in "
+            "standard mode (same-net relaxation only)."
         )
