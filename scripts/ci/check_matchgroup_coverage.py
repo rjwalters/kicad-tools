@@ -246,13 +246,17 @@ def _import_module_from_path(module_name: str, path: Path):
     return module
 
 
-def build_net_class_map_for_board(board_dir: Path) -> dict | None:
-    """Import ``generate_design.build_net_class_map()`` from a board dir.
+def load_board_recipe_module(board_dir: Path):
+    """Import a board's ``generate_design.py`` module by path.
 
-    Returns ``None`` if the board's ``generate_design.py`` does not
-    expose a ``build_net_class_map`` function.  In that case the
-    match-group rule will degrade to a no-op (the design doesn't declare
-    any match groups).
+    Returns ``None`` when the board has no ``generate_design.py``.  The
+    imported module exposes the board's declarative routing contract:
+    ``build_net_class_map()`` and -- Issue #3617 -- the optional
+    ``POUR_NETS`` / ``REQUIRE_POUR_CONNECTIVITY`` constants + the
+    ``_audit_pour_nets`` copper-union audit the pour-connectivity gate
+    term consumes.  Mirrors ``net_class_map_resolver.load_board_recipe_module``
+    (kept local to this gate to preserve the byte-for-byte sibling
+    convention with ``check_diffpair_coverage.py``).
     """
     script = board_dir / "generate_design.py"
     if not script.is_file():
@@ -264,14 +268,90 @@ def build_net_class_map_for_board(board_dir: Path) -> dict | None:
     saved_path = list(sys.path)
     sys.path.insert(0, str(board_dir))
     try:
-        mod = _import_module_from_path(
+        return _import_module_from_path(
             f"_matchgroup_coverage_generate_design_{board_dir.name.replace('-', '_')}",
             script,
         )
     finally:
         sys.path[:] = saved_path
 
+
+def build_net_class_map_for_board(board_dir: Path) -> dict | None:
+    """Import ``generate_design.build_net_class_map()`` from a board dir.
+
+    Returns ``None`` if the board's ``generate_design.py`` does not
+    expose a ``build_net_class_map`` function.  In that case the
+    match-group rule will degrade to a no-op (the design doesn't declare
+    any match groups).
+    """
+    mod = load_board_recipe_module(board_dir)
+    if mod is None:
+        return None
     return getattr(mod, "build_net_class_map", lambda: None)()
+
+
+def measure_pour_connectivity(
+    recipe_mod, pcb_path: Path, pour_nets: set[str]
+) -> list[str]:
+    """Run the board recipe's copper-union pour audit on a routed PCB.
+
+    Issue #3617 (sibling of board 06's #3509): board 07's recipe runs a
+    shapely copper-union audit (``_audit_pour_nets``) at the end of its
+    pour pipeline and prints PASS/FAIL -- but until this gate term the
+    job never consumed that verdict, so a re-route whose pours failed the
+    audit (or never filled at all) still went green.  Boards opt in by
+    declaring ``REQUIRE_POUR_CONNECTIVITY = True`` next to their
+    ``POUR_NETS`` contract; the gate then re-runs the audit against the
+    routed artifact and fails the job on any disjoint pour net or
+    zero-fill zone.
+
+    Args:
+        recipe_mod: The board's imported ``generate_design`` module (must
+            expose ``_audit_pour_nets(pcb_path, net_names)``).
+        pcb_path: Routed PCB to audit.
+        pour_nets: The board's ``POUR_NETS`` set.
+
+    Returns:
+        List of human-readable failure strings; empty means every pour
+        net is one copper component with real fill geometry.
+
+    Raises:
+        RuntimeError: When the audit cannot run at all (missing
+            ``_audit_pour_nets``, shapely unavailable, audit crash).
+            Callers must treat this as a tool failure (exit 1), NOT a
+            pass -- a silent skip is how dead pours shipped in the first
+            place (PR #3481).
+    """
+    audit_fn = getattr(recipe_mod, "_audit_pour_nets", None)
+    if audit_fn is None:
+        raise RuntimeError(
+            "Board declares REQUIRE_POUR_CONNECTIVITY but its "
+            "generate_design module does not expose _audit_pour_nets()."
+        )
+    try:
+        audit = audit_fn(pcb_path, sorted(pour_nets))
+    except Exception as e:
+        raise RuntimeError(f"Pour-connectivity audit crashed: {e}") from e
+
+    failures: list[str] = []
+    for net in sorted(pour_nets):
+        info = audit.get(net)
+        if info is None:
+            failures.append(f"{net}: missing from audit result")
+            continue
+        n_pads = sum(len(g) for g in info["pad_groups"])
+        if not info["connected"]:
+            largest = len(info["pad_groups"][0]) if info["pad_groups"] else 0
+            failures.append(
+                f"{net}: {len(info['pad_groups'])} disjoint pad groups "
+                f"(largest {largest}/{n_pads})"
+            )
+        if info.get("zero_fill_zones"):
+            failures.append(
+                f"{net}: {info['zero_fill_zones']} fill-enabled zone(s) "
+                f"with ZERO filled polygons (dead pour)"
+            )
+    return failures
 
 
 def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
@@ -480,6 +560,26 @@ def check_board(
         )
         return 1
 
+    # Issue #3617: read the board's pour-connectivity contract.  Boards
+    # that declare ``REQUIRE_POUR_CONNECTIVITY = True`` get a hard
+    # copper-union pour audit; boards without it skip the term.
+    pour_nets: set[str] = set()
+    require_pour_connectivity = False
+    recipe_mod = None
+    try:
+        recipe_mod = load_board_recipe_module(board_dir)
+        if recipe_mod is not None:
+            pour_nets = set(getattr(recipe_mod, "POUR_NETS", ()) or ())
+            require_pour_connectivity = bool(
+                getattr(recipe_mod, "REQUIRE_POUR_CONNECTIVITY", False)
+            )
+    except Exception as e:
+        annotate_error(
+            str(board_dir),
+            f"Failed to read pour contract from {board_dir}: {e}",
+        )
+        return 1
+
     # Compute the allowlist key in the same way check_routed_drc.py does:
     # repo-relative path string.
     try:
@@ -540,6 +640,44 @@ def check_board(
             f"[matchgroup-coverage] OK: all {len(MATCHGROUP_RULE_IDS)} match-group "
             "rule(s) exercised."
         )
+
+    # Issue #3617: pour-connectivity assertion.  The board recipe's
+    # copper-union audit verdict was previously informational only -- the
+    # recipe never even filled its pours, so the routed artifact shipped
+    # zone outlines with zero fill geometry and this gate stayed green.
+    # Boards opting in via REQUIRE_POUR_CONNECTIVITY get the audit re-run
+    # here against the routed artifact; failures gate (exit 2).  An audit
+    # that cannot run at all is a tool failure (exit 1) -- never a silent
+    # pass.
+    if require_pour_connectivity:
+        try:
+            pour_failures = measure_pour_connectivity(
+                recipe_mod, routed_pcb, pour_nets
+            )
+        except RuntimeError as e:
+            annotate_error(
+                str(routed_pcb),
+                f"Pour-connectivity audit could not run: {e}  (A skipped "
+                "audit must be a tool failure, never a silent pass.)",
+            )
+            return 1
+        if pour_failures:
+            annotate_error(
+                str(routed_pcb),
+                f"Pour-connectivity regression on re-routed {routed_pcb}: "
+                f"{'; '.join(pour_failures)}.  Every pour net must be ONE "
+                "copper component with non-empty zone fills (copper-union "
+                "audit, Issue #3617).  See the recipe's pour pipeline in "
+                f"{board_dir.name}/generate_design.py (zone fill + stitch + "
+                "repair loop); if the fill log shows 'kicad-cli not found', "
+                "the CI environment lost its KiCad container.",
+            )
+            failed = True
+        else:
+            print(
+                f"[matchgroup-coverage] OK: pour connectivity "
+                f"({len(pour_nets)} pour nets, copper-union audit)."
+            )
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
     if error_count > allowed:

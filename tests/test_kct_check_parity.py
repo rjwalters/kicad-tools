@@ -68,28 +68,40 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 )
 
 # Expected per-family counts on board 07's committed routed artifact.
-# Re-baselined 2026-06-10 (Issue #3440) after the match-group tuner fixes
-# (reference auto-promotion, exact-fit distributed meanders, routes_by_net
-# staleness + commit-back fixes) brought ADDR_BUS skew 15.395mm -> 0.004mm
-# and DDR_DATA_BYTE_0 within its 0.1mm tolerance: BOTH
-# match_group_length_skew errors are gone (5+5+2=12 -> 5+5+0=10 delta,
-# with-sidecar totals 21 -> 19, blocking 16 -> 14).  The rule still FIRES
-# (rules_checked_by_rule >= 1) -- the matchgroup CI gate pins engagement
-# independently of the error count.  These pins measure the COMMITTED
-# artifact and are deterministic; the allowlist floor in
-# .github/routed-drc-tolerance.yml is 34 (Issue #3533) because the
-# Match-Group gate RE-ROUTES from source and the re-route DRC profile
-# varies with machine load and platform (the #3466 wall-clock-budget
-# cliff; measured band 25..33 across CI ubuntu-latest and local
-# macOS arm64 at the same seed/code).
 #
-# Previous re-baselines: 2026-06-09 (issue #3458 inventory, PR #3462:
-# 5+5+2=12 delta, blocking 16); 2026-06-06 (Issue #3263: 5+5+1=11 delta,
-# blocking 17).
+# Re-baselined 2026-06-13 (Issue #3617 / PR #3632, doctor pass) for the
+# FILLED committed artifact.  Until #3617 the committed routed PCB carried
+# zone OUTLINES with zero ``filled_polygon`` copper -- a dead pour (#3482
+# boundary-test illusion).  #3617 wires the fill -> stitch -> repair loop
+# into the recipe and commits the genuinely-filled artifact, so the
+# committed file these pins measure is now the post-fill PCB.
+#
+# Two things change as a direct, MEASURED consequence of filling the pour:
+#   * The net-class-gated delta rises 5+5+0 -> 7+7+1 (=15).  This is
+#     ENGAGEMENT-over-silence, not a regression: the filled pour completes
+#     two more diff pairs and the ADDR_BUS group end-to-end, so two more
+#     pairs/the group get HONESTLY measured by the skew/continuity/
+#     match-group rules (the dead-pour artifact left them disconnected, so
+#     they contributed only advisory ``connectivity``).
+#   * Advisory ``connectivity`` drops 5 -> 1: the filled pour + stitch +
+#     repair geometry physically connects the pads the analyzer previously
+#     reported as floating.
+#
+# These pins measure the COMMITTED artifact and are deterministic across
+# machines (no re-route -- ``kct check`` on a fixed file).  The allowlist
+# floor in .github/routed-drc-tolerance.yml is a SEPARATE, larger number
+# (it gates the seed-42 RE-ROUTE, whose DRC profile varies with machine
+# load + platform per the #3466 wall-clock-budget cliff, and which now
+# also carries the stitcher's cross-net clearance residual -- see the
+# board-07 entry in that file for the full forensic breakdown).
+#
+# Previous re-baselines: 2026-06-10 (Issue #3440: 5+5+0=10 delta, blocking
+# 14); 2026-06-09 (issue #3458 inventory, PR #3462: 5+5+2=12, blocking 16);
+# 2026-06-06 (Issue #3263: 5+5+1=11, blocking 17).
 BOARD_07_EXPECTED_FAMILY_DELTA: dict[str, int] = {
-    "diffpair_length_skew": 5,
-    "diffpair_routing_continuity": 5,
-    "match_group_length_skew": 0,
+    "diffpair_length_skew": 7,
+    "diffpair_routing_continuity": 7,
+    "match_group_length_skew": 1,
 }
 
 
@@ -369,24 +381,37 @@ class TestCiGateCountsGatedFamilies:
         """``check_routed_drc.count_errors`` on board 07 includes the families.
 
         Before #3151 the gate ran bare and saw 11 blocking errors; now it
-        resolves the sidecar and sees the gated-family errors too
-        (currently +12 = 5+5+2, see ``BOARD_07_EXPECTED_FAMILY_DELTA``).
+        resolves the sidecar and sees the gated-family errors too.
 
-        Re-baselined 2026-06-10 (Issue #3440) after the match-group tuner
-        fixes (reference auto-promotion, exact-fit distributed meanders,
-        routes_by_net staleness + commit-back fixes) eliminated both
-        ``match_group_length_skew`` errors: 19 total - 5 advisory
-        connectivity = 14 blocking (was 21 - 5 = 16).
+        Re-baselined 2026-06-13 (Issue #3617 / PR #3632, doctor pass 2) for
+        the FILLED + 45-QUANTIZED committed artifact: 70 total - 1 advisory
+        connectivity = 69 blocking.  Doctor pass 1 (straight-chord filled
+        artifact) was 61 total / 60 blocking; pass 2 routes the pour-repair
+        stubs/bridges through the #3532 quantizer so the committed artifact
+        passes tests/test_fleet_45_census.py.  The +9 (+8 blocking) is the
+        quantization doglegs grazing the 0.10mm-clearance DDR/MIPI/HDMI
+        copper (+4 clearance_pad_segment, +3 clearance_segment_segment, +2
+        clearance_segment_via); no new family, gated diff-pair/match-group
+        families (15) and the connectivity advisory (1) unchanged.  See the
+        board-07 entry in .github/routed-drc-tolerance.yml (note 4) for the
+        per-family forensics and the #3633 interleave-fix exit clause.
 
-        Previous re-baselines: 2026-06-09 (issue #3458 inventory, PR
-        #3462: 21 - 5 = 16); 2026-06-06 (Issue #3263: 23 - 6 = 17).
+        Earlier in this PR: the dead-pour artifact measured 19 total - 5
+        advisory = 14 blocking; filling the pour completes more nets (honest
+        diff-pair/match-group measurement) and physically connects the
+        formerly-floating pads (advisory connectivity 5 -> 1).
+
+        Previous re-baselines: 2026-06-13 pass 1 (Issue #3617: 60 blocking);
+        2026-06-10 (Issue #3440: 14 blocking); 2026-06-09 (issue #3458
+        inventory, PR #3462: 16); 2026-06-06 (Issue #3263: 17).
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # 19 total - 5 advisory connectivity = 14 blocking.
-        assert blocking == 14, (
-            f"expected 14 blocking errors with net_class_map awareness, got {blocking}"
+        # 70 total - 1 advisory connectivity = 69 blocking (filled +
+        # 45-quantized artifact).
+        assert blocking == 69, (
+            f"expected 69 blocking errors with net_class_map awareness, got {blocking}"
         )
-        assert advisory.get("connectivity", 0) == 5
+        assert advisory.get("connectivity", 0) == 1
