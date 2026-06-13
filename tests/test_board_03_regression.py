@@ -801,25 +801,106 @@ def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
 
         PARTIAL: Routed 11/13 signal nets
 
-    or::
+    or, on full completion (issue #3453 closed board 03 to 13/13)::
 
-        SUCCESS: All nets routed, DRC passed!
+        Nets routed:     13/13
+           SUCCESS: All signal nets routed!
+
+    Note the 100%-success wording inserts the word ``signal``
+    ("All **signal** nets routed!"), so a literal match on
+    "All nets routed" misses it (issue #3655).
 
     Returns ``(routed, total)`` or ``None`` if no match.
     """
     partial = re.search(r"Routed\s+(\d+)/(\d+)(?:\s+\w+)?\s+nets", stdout)
     if partial:
         return int(partial.group(1)), int(partial.group(2))
-    if "SUCCESS: All nets routed" in stdout:
-        # All-success branch: count totals from the breakdown above.
-        # ``Nets to route: N`` or ``Nets routed: N`` appears once in the
-        # load / final-results section.
+    # Full-completion branch.  The recipe emits the 100%-success banner
+    # with the word ``signal`` inserted ("All signal nets routed!") and
+    # may omit any explicit "Routed N/M" line, so recover the count from
+    # the ``Nets routed: N/M`` breakdown that the echoed ``kct route``
+    # output always prints (issue #3655).
+    if re.search(r"SUCCESS: All (?:signal )?nets routed", stdout):
+        # Prefer an explicit ``Nets routed: N/M`` pair (last occurrence
+        # reflects the final saved state under escalation mode).
+        nm_matches = re.findall(r"Nets routed:\s+(\d+)/(\d+)", stdout)
+        if nm_matches:
+            return int(nm_matches[-1][0]), int(nm_matches[-1][1])
+        # Fall back to a single-count breakdown line: on full success
+        # routed == total.
         for pattern in (r"Nets to route:\s+(\d+)", r"Nets routed:\s+(\d+)"):
             m = re.search(pattern, stdout)
             if m:
                 total = int(m.group(1))
                 return total, total
     return None
+
+
+# ---------------------------------------------------------------------------
+# Issue #3655: parser unit tests (fast — no router run)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_routed_net_count_recognizes_100pct_signal_success() -> None:
+    """Issue #3655: the 100%-success banner says "All *signal* nets routed!".
+
+    Once board 03 reaches full completion (#3453, 13/13) the recipe emits
+    ``SUCCESS: All signal nets routed!`` (note the inserted word
+    ``signal``) and no ``PARTIAL: Routed N/M`` line.  The pre-fix parser
+    only matched the literal ``"SUCCESS: All nets routed"`` and returned
+    ``None`` here, so the slow completion test failed even though routing
+    succeeded.  The count must be recovered from the echoed ``kct route``
+    ``Nets routed: N/M`` breakdown.
+    """
+    stdout = (
+        "Routing board...\n"
+        "Nets to route: 13\n"
+        "Nets routed:     13/13\n"
+        "\n   SUCCESS: All signal nets routed!\n"
+        "WARNING: All nets routed, but 14 DRC violation(s) detected!\n"
+    )
+    assert _parse_routed_net_count(stdout) == (13, 13)
+
+
+def test_parse_routed_net_count_uses_last_nets_routed_under_escalation() -> None:
+    """Escalation mode emits several ``Nets routed: N/M`` lines.
+
+    The final saved state is the LAST occurrence, so the parser must
+    return that one when the 100%-success banner is present.
+    """
+    stdout = (
+        "Nets routed:     11/13\n"
+        "Escalating grid resolution...\n"
+        "Nets routed:     13/13\n"
+        "   SUCCESS: All signal nets routed!\n"
+    )
+    assert _parse_routed_net_count(stdout) == (13, 13)
+
+
+def test_parse_routed_net_count_still_handles_partial() -> None:
+    """Issue #3655 AC: partial wording must keep working post-fix."""
+    stdout = "   PARTIAL: Routed 11/13 signal nets\n"
+    assert _parse_routed_net_count(stdout) == (11, 13)
+
+
+def test_parse_routed_net_count_handles_legacy_drc_passed_banner() -> None:
+    """The DRC-clean banner (``SUCCESS: All ... nets routed, DRC passed!``)
+    must also parse, whether or not the word ``signal`` is present."""
+    legacy = (
+        "Nets routed:     13/13\n"
+        "SUCCESS: All nets routed, DRC passed!\n"
+    )
+    assert _parse_routed_net_count(legacy) == (13, 13)
+    signal = (
+        "Nets routed:     13/13\n"
+        "SUCCESS: All signal nets routed, DRC passed!\n"
+    )
+    assert _parse_routed_net_count(signal) == (13, 13)
+
+
+def test_parse_routed_net_count_returns_none_without_summary() -> None:
+    """No summary line at all (router crashed) -> ``None``."""
+    assert _parse_routed_net_count("Routing board...\nsegfault\n") is None
 
 
 @pytest.mark.slow
