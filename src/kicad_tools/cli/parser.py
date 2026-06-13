@@ -2659,6 +2659,24 @@ def _add_route_parser(subparsers) -> None:
             "aborts so you can tell which limit fired."
         ),
     )
+    # Issue #3538: bound routing work by an iteration budget instead of
+    # wall-clock time so the routed output (and its DRC count) is reproducible
+    # across machines.  Forwarded to the inner route_cmd parser by
+    # ``commands/routing.py``; both sites declare it (enforced by
+    # ``tests/test_cli_parser_drift.py``).
+    route_parser.add_argument(
+        "--deterministic-budget",
+        action="store_true",
+        help=(
+            "Bound routing work by an ITERATION budget instead of wall-clock "
+            "time so the routed output is reproducible across machines "
+            "regardless of runner speed/load (Issue #3538). Disables the "
+            "per-net wall-clock cutoff (--per-net-timeout 0) and pins the C++ "
+            "A* iteration backstop (--max-search-iterations) to a fixed "
+            "node-expansion count. --timeout is kept only as a safety "
+            "backstop. Combine with --seed for byte-stable re-routes."
+        ),
+    )
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
     route_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")

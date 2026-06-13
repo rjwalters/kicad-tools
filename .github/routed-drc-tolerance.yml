@@ -1450,7 +1450,12 @@ tolerances:
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a
   # strict 0-blocking-error state at jlcpcb-tier1 (the manufacturers:
-  # override below keeps it on tier-1).
+  # override below keeps it on tier-1).  In particular the hard cross-net
+  # trace-overlap families that Issue #3444 reported on the OLD
+  # ``--backend python --layers 2`` re-route path (which had churned this
+  # entry 6 -> 20) are 0 on the cpp/tier1/4L production snapshot, so #3444
+  # required no python-backend overlap fix -- the recipe moved off that
+  # path (#3425).  The entry below is NOT those overlap families.
   #
   # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone`` /
   # ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
