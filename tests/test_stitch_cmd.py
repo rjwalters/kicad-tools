@@ -44,6 +44,7 @@ from kicad_tools.cli.stitch_cmd import (
     run_post_stitch_drc,
     run_stitch,
     segment_to_segment_distance,
+    trace_to_track_segments,
 )
 from kicad_tools.core.sexp_file import load_pcb
 
@@ -439,15 +440,31 @@ class TestRunStitch:
         assert result.already_connected >= 1
 
     def test_run_stitch_multiple_nets(self, stitch_test_pcb: Path):
-        """Should handle multiple nets."""
+        """Should handle multiple nets and co-check cross-net stitch geometry.
+
+        Issue #3633: the four GND pads stitch first (one via each, placed at
+        x+0.31 alongside each pad row).  Each 0402 cap's +3.3V pad sits only
+        0.20mm from the GND via just placed on the same package, so a +3.3V
+        stitch via/trace would land inside the manufacturer clearance band of
+        that foreign-net GND via.  Before #3633 the GND traces were emitted in
+        a separate later pass, so the +3.3V placements were checked only
+        against pre-existing copper and all 7 vias were (incorrectly) placed
+        within clearance of each other.  With the in-pass cross-net co-check
+        the 3 conflicting +3.3V vias are correctly dropped, leaving the 4 GND
+        vias whose geometry is jlcpcb-legal.
+        """
         result = run_stitch(
             pcb_path=stitch_test_pcb,
             net_names=["GND", "+3.3V"],
             dry_run=True,
         )
 
-        # 4 GND + 3 +3.3V = 7 vias
-        assert len(result.vias_added) == 7
+        # 4 GND vias placed; the 3 +3.3V vias are dropped because each would
+        # violate cross-net clearance against the adjacent GND stitch via.
+        assert len(result.vias_added) == 4
+        assert {v.pad.net_name for v in result.vias_added} == {"GND"}
+        assert len(result.pads_skipped) == 3
+        assert all(pad.net_name == "+3.3V" for pad, _ in result.pads_skipped)
 
     def test_run_stitch_custom_via_size(self, stitch_test_pcb: Path):
         """Should use custom via size."""
@@ -5562,3 +5579,253 @@ class TestAvoidPadOverlapCli:
         # pad was found and ``avoid_pad_overlap`` is the documented "no via
         # produced for this pad" path.
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #3633: cross-net co-check of just-placed stitch geometry.
+#
+# ``run_stitch`` threads cross-net placed *vias* into each subsequent pad's
+# clearance check but historically emitted the pad-to-via *traces* in a
+# separate later pass.  As a result a stitch via on net B was never checked
+# against net A's just-placed stitch trace, so foreign-net stitch geometry
+# could land inside the manufacturer clearance floor without being flagged at
+# placement time.  On board 07 (DDR/MIPI/HDMI at 0.10mm vs the jlcpcb
+# 0.1016mm 4-layer floor) this produced ~18 residual cross-net clearance DRC
+# violations attributable to drill-0.2 stitch vias.
+# ---------------------------------------------------------------------------
+
+
+# Two footprints on independent nets, arranged so NETB's pad can only escape
+# *toward* NETA's stitch trace.  NETA stitches first (footprint order), laying
+# a long horizontal trace at y=100.  NETB is boxed in on three sides by
+# foreign-net pads, leaving the -y direction (straight onto NETA's trace) as
+# the only short escape -- exactly the geometry that the trace co-check must
+# catch.
+STITCH_CROSS_NET_TRACE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator pcbnew)
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NETA")
+  (net 2 "NETB")
+  (net 9 "BLOCK")
+  (gr_line (start 95 95) (end 110 95) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 110 95) (end 110 110) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 110 110) (end 95 110) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 95 110) (end 95 95) (layer "Edge.Cuts") (width 0.1))
+  (footprint "Resistor_SMD:R_0805_2012Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000a1")
+    (at 100 100)
+    (property "Reference" "UA" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-ua"))
+    (pad "1" smd roundrect (at 0 0) (size 2.0 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NETA"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000b1")
+    (at 100.6 100.7)
+    (property "Reference" "UB" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-ub"))
+    (pad "1" smd roundrect (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "NETB"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c1")
+    (at 101.6 100.7)
+    (property "Reference" "BR" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-br"))
+    (pad "1" smd roundrect (at 0 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 9 "BLOCK"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c2")
+    (at 99.6 100.7)
+    (property "Reference" "BL" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-bl"))
+    (pad "1" smd roundrect (at 0 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 9 "BLOCK"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c3")
+    (at 100.6 101.7)
+    (property "Reference" "BU" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-bu"))
+    (pad "1" smd roundrect (at 0 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 9 "BLOCK"))
+  )
+)
+"""
+
+
+class TestTraceToTrackSegments:
+    """Unit tests for the trace decomposition helper (issue #3633)."""
+
+    def _pad(self) -> PadInfo:
+        return PadInfo("U1", "1", 7, "SIG", 10.0, 20.0, "F.Cu", 0.5, 0.5)
+
+    def test_straight_trace_single_segment(self) -> None:
+        trace = TraceSegment(pad=self._pad(), via_x=11.0, via_y=20.0, width=0.2, layer="F.Cu")
+        segs = trace_to_track_segments(trace)
+        assert len(segs) == 1
+        seg = segs[0]
+        assert (seg.start_x, seg.start_y) == (10.0, 20.0)
+        assert (seg.end_x, seg.end_y) == (11.0, 20.0)
+        assert seg.width == 0.2
+        assert seg.net_number == 7
+
+    def test_dogleg_trace_two_segments(self) -> None:
+        trace = TraceSegment(
+            pad=self._pad(),
+            via_x=12.0,
+            via_y=21.0,
+            width=0.2,
+            layer="F.Cu",
+            intermediate_x=11.0,
+            intermediate_y=20.0,
+        )
+        segs = trace_to_track_segments(trace)
+        assert len(segs) == 2
+        # pad -> corner -> via
+        assert (segs[0].start_x, segs[0].start_y) == (10.0, 20.0)
+        assert (segs[0].end_x, segs[0].end_y) == (11.0, 20.0)
+        assert (segs[1].start_x, segs[1].start_y) == (11.0, 20.0)
+        assert (segs[1].end_x, segs[1].end_y) == (12.0, 21.0)
+        assert all(s.net_number == 7 for s in segs)
+
+    def test_extended_escape_trace_multiple_segments(self) -> None:
+        trace = TraceSegment(
+            pad=self._pad(),
+            via_x=13.0,
+            via_y=23.0,
+            width=0.2,
+            layer="F.Cu",
+            waypoints=[(11.0, 20.0), (12.0, 22.0)],
+        )
+        segs = trace_to_track_segments(trace)
+        # pad -> wp1 -> wp2 -> via == 3 segments
+        assert len(segs) == 3
+        assert (segs[0].start_x, segs[0].start_y) == (10.0, 20.0)
+        assert (segs[-1].end_x, segs[-1].end_y) == (13.0, 23.0)
+        assert all(s.net_number == 7 for s in segs)
+
+
+class TestCrossNetTraceCoCheck:
+    """Issue #3633: a stitch via that clears another net's stitch *via* but
+    would violate that net's stitch *trace* must be caught/avoided."""
+
+    def test_via_clears_foreign_via_but_violates_foreign_trace(self) -> None:
+        """Function-level proof that the *trace* (not the via) does the work.
+
+        NETA stitches to a via offset far to the right, laying a horizontal
+        trace at y=100.  NETB is boxed in so its only short escape is straight
+        down onto that trace.  The NETB via candidate clears the NETA *via*
+        (so the via-only check passes in both cases), but lands on the NETA
+        *trace*.  Without the trace co-check the via is placed on top of the
+        foreign trace (the bug); with the trace co-check it is rejected and a
+        different, clearing position is chosen.
+        """
+        neta_pad = PadInfo("UA", "1", 1, "NETA", 100.0, 100.0, "F.Cu", 2.0, 0.5)
+        # NETA stitch result: via far right, straight trace along y=100.
+        via_a = (101.5, 100.0)
+        trace_a = TraceSegment(
+            pad=neta_pad, via_x=via_a[0], via_y=via_a[1], width=0.2, layer="F.Cu"
+        )
+        trace_a_segments = trace_to_track_segments(trace_a)
+        other_net_vias = [(via_a[0], via_a[1], 0.45, 1)]
+
+        netb_pad = PadInfo("UB", "1", 2, "NETB", 100.6, 100.7, "F.Cu", 0.5, 0.5)
+        # Box NETB in on +x / -x / +y so the only short escape is -y (onto
+        # the NETA trace).
+        blockers = [
+            (101.6, 100.7, 0.4, 9),
+            (99.6, 100.7, 0.4, 9),
+            (100.6, 101.7, 0.4, 9),
+        ]
+
+        # The via-only model (no trace) lets NETB drop straight onto the trace.
+        pos_without_trace = calculate_via_position(
+            netb_pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[(via_a[0], via_a[1], 1)],
+            clearance=0.2,
+            other_net_tracks=[],
+            other_net_vias=other_net_vias,
+            other_net_pads=blockers,
+            trace_width=0.2,
+        )
+        assert pos_without_trace is not None
+        # It lands within clearance of the foreign trace line (y == 100): this
+        # is precisely the DRC-violating placement #3633 is about.
+        dist_to_trace = abs(pos_without_trace[1] - 100.0)
+        required = 0.45 / 2 + 0.2 / 2 + 0.2  # via_radius + trace_half + clearance
+        assert dist_to_trace < required
+
+        # Feeding the foreign-net stitch trace into the co-check forces NETB to
+        # a position that clears the trace.
+        pos_with_trace = calculate_via_position(
+            netb_pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[(via_a[0], via_a[1], 1)],
+            clearance=0.2,
+            other_net_tracks=trace_a_segments,
+            other_net_vias=other_net_vias,
+            other_net_pads=blockers,
+            trace_width=0.2,
+        )
+        # Either a clearing position is found, or the pad is left unstitched --
+        # both are acceptable; what matters is it is NOT the trace-violating
+        # spot.
+        if pos_with_trace is not None:
+            assert pos_with_trace != pos_without_trace
+            # The new via clears the foreign trace.
+            assert point_to_segment_distance(
+                pos_with_trace[0],
+                pos_with_trace[1],
+                trace_a_segments[0].start_x,
+                trace_a_segments[0].start_y,
+                trace_a_segments[0].end_x,
+                trace_a_segments[0].end_y,
+            ) >= required
+
+    def test_run_stitch_co_checks_trace_in_same_pass(self, tmp_path: Path) -> None:
+        """End-to-end: ``run_stitch`` must not place a NETB via on top of the
+        NETA stitch trace laid earlier in the same pass."""
+        pcb = tmp_path / "cross_net_trace.kicad_pcb"
+        pcb.write_text(STITCH_CROSS_NET_TRACE_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb,
+            net_names=["NETA", "NETB"],
+            clearance=0.2,
+            trace_width=0.2,
+            dry_run=True,
+        )
+
+        # NETA always stitches (open space to the right).
+        neta_vias = [v for v in result.vias_added if v.pad.net_name == "NETA"]
+        assert len(neta_vias) == 1
+        neta = neta_vias[0]
+
+        # Reconstruct NETA's trace legs and assert every placed NETB via clears
+        # them by the manufacturer clearance band.  Before #3633 a NETB via
+        # would land straight on this trace.
+        neta_trace = next(
+            t for t in result.traces_added if t.pad.net_name == "NETA"
+        )
+        neta_segments = trace_to_track_segments(neta_trace)
+        required = neta.size / 2 + neta_trace.width / 2 + 0.2
+
+        netb_vias = [v for v in result.vias_added if v.pad.net_name == "NETB"]
+        for vb in netb_vias:
+            for seg in neta_segments:
+                dist = point_to_segment_distance(
+                    vb.via_x, vb.via_y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
+                )
+                assert dist >= required, (
+                    f"NETB via at ({vb.via_x}, {vb.via_y}) violates NETA stitch "
+                    f"trace clearance: {dist:.4f} < {required:.4f}"
+                )

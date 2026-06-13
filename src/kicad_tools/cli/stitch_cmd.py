@@ -2546,6 +2546,59 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
         sexp.append(seg)
 
 
+def trace_to_track_segments(trace: TraceSegment) -> list[TrackSegment]:
+    """Decompose a pad-to-via :class:`TraceSegment` into its constituent
+    :class:`TrackSegment` legs.
+
+    This mirrors the geometry emitted by :func:`add_trace_to_pcb` (straight,
+    dog-leg, and extended-escape forms) so the same copper that will be
+    written to the PCB can be fed back into the clearance checks of
+    *subsequent* stitch placements.  Each returned segment carries the
+    originating pad's net number so callers can filter by net (cross-net
+    co-check) when assembling obstacle lists.
+
+    See issue #3633: ``run_stitch`` placed cross-net stitch vias into the
+    clearance loop but emitted the pad-to-via traces in a separate later
+    pass, so a stitch via on net B was never checked against net A's
+    just-placed stitch trace.  Decomposing the trace here lets the placement
+    loop co-check trace-vs-via and trace-vs-trace within the same pass.
+    """
+    net = trace.pad.net_number
+    width = trace.width
+    layer = trace.layer
+
+    # Build the ordered path of points the trace passes through.
+    if trace.is_extended_escape:
+        points: list[tuple[float, float]] = [(trace.pad.x, trace.pad.y)]
+        points.extend(trace.waypoints or [])
+        points.append((trace.via_x, trace.via_y))
+    elif trace.is_dogleg:
+        points = [
+            (trace.pad.x, trace.pad.y),
+            (trace.intermediate_x, trace.intermediate_y),
+            (trace.via_x, trace.via_y),
+        ]
+    else:
+        points = [(trace.pad.x, trace.pad.y), (trace.via_x, trace.via_y)]
+
+    segments: list[TrackSegment] = []
+    for i in range(len(points) - 1):
+        sx, sy = points[i]
+        ex, ey = points[i + 1]
+        segments.append(
+            TrackSegment(
+                start_x=sx,
+                start_y=sy,
+                end_x=ex,
+                end_y=ey,
+                width=width,
+                layer=layer,
+                net_number=net,
+            )
+        )
+    return segments
+
+
 def find_all_filled_polygons(
     sexp: SExp, exclude_nets: set[int] | None = None
 ) -> list[FilledPolygon]:
@@ -3818,8 +3871,53 @@ def run_stitch(
     # diagonal grazing the GND pad).
     obstacle_net_map = get_net_map(sexp)
 
+    # Issue #3633: cross-net co-check of just-placed stitch geometry.
+    #
+    # ``other_net_tracks`` / ``other_net_vias`` above are pre-filtered to
+    # exclude *all* stitch nets, so pre-existing routed copper on a sibling
+    # stitch net does not block placement.  But the stitch step also EMITS
+    # new copper (a via plus a pad-to-via trace) for every pad it processes.
+    # Previously the placed via was appended to ``existing_vias`` (checked
+    # only for same-net via-to-via spacing) and the trace was buffered in
+    # ``result.traces_added`` for a separate later write pass -- so a stitch
+    # via/trace on net B was never checked against net A's just-placed stitch
+    # trace.  On dense boards routing near the manufacturer clearance floor
+    # (board 07: DDR/MIPI/HDMI at 0.10mm vs the jlcpcb 4-layer 0.1016mm
+    # floor) this let foreign-net stitch geometry land inside the clearance
+    # band, producing cross-net clearance DRC violations only visible once
+    # real pour copper existed.
+    #
+    # We track each placed via and the constituent legs of each placed trace,
+    # tagged with their net number, and feed the OTHER-net subset of that
+    # geometry into the obstacle lists for every subsequent placement.  The
+    # placement helpers treat their ``other_net_*`` arguments as flat
+    # obstacle lists (no internal net filtering), so we filter by net here
+    # when assembling the per-pad augmented lists.
+    placed_stitch_tracks: list[TrackSegment] = []
+    placed_stitch_vias: list[tuple[float, float, float, int]] = []
+
+    def _record_placed(placement: ViaPlacement, trace: TraceSegment) -> None:
+        """Record a placed via + trace so later placements co-check against it."""
+        placed_stitch_vias.append(
+            (placement.via_x, placement.via_y, placement.size, placement.pad.net_number)
+        )
+        placed_stitch_tracks.extend(trace_to_track_segments(trace))
+
     # Process each pad
     for pad in pads:
+        # Assemble per-pad obstacle lists augmented with cross-net stitch
+        # geometry placed earlier in this same pass (issue #3633).  Only
+        # foreign-net geometry is included so a net's own earlier stitch
+        # trace/via never falsely blocks its later placements.
+        cross_net_stitch_tracks = [
+            seg for seg in placed_stitch_tracks if seg.net_number != pad.net_number
+        ]
+        cross_net_stitch_vias = [
+            v for v in placed_stitch_vias if v[3] != pad.net_number
+        ]
+        eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
+        eff_other_net_vias = other_net_vias + cross_net_stitch_vias
+
         # Check if already connected
         if is_pad_connected(
             pad,
@@ -3839,8 +3937,8 @@ def run_stitch(
             via_size=via_size,
             existing_vias=existing_vias,
             clearance=clearance,
-            other_net_tracks=other_net_tracks,
-            other_net_vias=other_net_vias,
+            other_net_tracks=eff_other_net_tracks,
+            other_net_vias=eff_other_net_vias,
             other_net_pads=other_net_pads,
             trace_width=trace_width,
             other_net_filled_polygons=other_net_filled_polys,
@@ -3861,8 +3959,8 @@ def run_stitch(
                 via_size=via_size,
                 existing_vias=existing_vias,
                 clearance=clearance,
-                other_net_tracks=other_net_tracks,
-                other_net_vias=other_net_vias,
+                other_net_tracks=eff_other_net_tracks,
+                other_net_vias=eff_other_net_vias,
                 other_net_pads=other_net_pads,
                 trace_width=trace_width,
                 other_net_filled_polygons=other_net_filled_polys,
@@ -3879,8 +3977,8 @@ def run_stitch(
                     existing_vias=existing_vias,
                     clearance=clearance,
                     escape_distance=escape_distance,
-                    other_net_tracks=other_net_tracks,
-                    other_net_vias=other_net_vias,
+                    other_net_tracks=eff_other_net_tracks,
+                    other_net_vias=eff_other_net_vias,
                     other_net_pads=other_net_pads,
                     trace_width=trace_width,
                 )
@@ -3895,8 +3993,8 @@ def run_stitch(
                             via_size=micro_via_size,
                             existing_vias=existing_vias,
                             clearance=clearance,
-                            other_net_tracks=other_net_tracks,
-                            other_net_vias=other_net_vias,
+                            other_net_tracks=eff_other_net_tracks,
+                            other_net_vias=eff_other_net_vias,
                             other_net_pads=other_net_pads,
                             trace_width=trace_width,
                             other_net_filled_polygons=other_net_filled_polys,
@@ -3910,8 +4008,8 @@ def run_stitch(
                                 via_size=micro_via_size,
                                 existing_vias=existing_vias,
                                 clearance=clearance,
-                                other_net_tracks=other_net_tracks,
-                                other_net_vias=other_net_vias,
+                                other_net_tracks=eff_other_net_tracks,
+                                other_net_vias=eff_other_net_vias,
                                 other_net_pads=other_net_pads,
                                 trace_width=trace_width,
                                 other_net_filled_polygons=other_net_filled_polys,
@@ -3931,8 +4029,8 @@ def run_stitch(
                                     existing_vias=existing_vias,
                                     clearance=clearance,
                                     escape_distance=escape_distance,
-                                    other_net_tracks=other_net_tracks,
-                                    other_net_vias=other_net_vias,
+                                    other_net_tracks=eff_other_net_tracks,
+                                    other_net_vias=eff_other_net_vias,
                                     other_net_pads=other_net_pads,
                                     trace_width=trace_width,
                                 )
@@ -4057,6 +4155,9 @@ def run_stitch(
 
             # Add to existing vias list
             existing_vias.append((via_x, via_y, pad.net_number))
+            # Issue #3633: feed this stitch via + trace into the cross-net
+            # obstacle pool so later-placed foreign-net stitches clear it.
+            _record_placed(placement, trace)
         elif dogleg_pos is not None:
             # Dog-leg placement: (via_x, via_y, intermediate_x, intermediate_y)
             via_x, via_y, intermediate_x, intermediate_y = dogleg_pos
@@ -4089,6 +4190,9 @@ def run_stitch(
 
             # Add to existing vias list
             existing_vias.append((via_x, via_y, pad.net_number))
+            # Issue #3633: feed this stitch via + trace into the cross-net
+            # obstacle pool so later-placed foreign-net stitches clear it.
+            _record_placed(placement, trace)
         else:
             # Straight-line placement
             placement = ViaPlacement(
@@ -4117,6 +4221,9 @@ def run_stitch(
 
             # Add to existing vias list
             existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
+            # Issue #3633: feed this stitch via + trace into the cross-net
+            # obstacle pool so later-placed foreign-net stitches clear it.
+            _record_placed(placement, trace)
 
     # Issue #3271: pad-aware post-filter for manufacturers that forbid
     # via-in-pad (e.g. JLCPCB standard tier).
