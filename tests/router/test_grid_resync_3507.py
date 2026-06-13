@@ -310,35 +310,87 @@ class TestOptimizeRoutesGridSynced:
         assert router.grid.routes[0] is route
 
     def test_same_net_sibling_cells_survive_optimize_loop(self):
-        """Issue #3511: the incremental per-route unmark clears every cell
-        the OLD envelope owned, including cells a geometry-unchanged
-        same-net SIBLING route still occupies where the envelopes
-        overlapped.  The per-route ``mark_route`` only re-marks the
-        mutated route's NEW geometry, so without the batched
-        post-loop resync the sibling's cells in the old overlap region
-        stay blank.  The trailing ``resync_route_occupancy`` must
-        re-mark them."""
+        """Issue #3511 (load-bearing): the batched post-loop resync must
+        re-mark a same-net sibling's copper that the incremental per-route
+        ``unmark_route`` blanked.
+
+        This test is deliberately constructed so that reverting the
+        ``grid.resync_route_occupancy(mutated_pairs)`` call in
+        ``optimize_routes_grid_synced`` makes it FAIL.  The earlier
+        minimal geometry (a vertical sibling crossing a *collinear*
+        horizontal route the optimizer merges in place) was NOT
+        load-bearing: the merged route's new segment still passed through
+        the crossing column, so the per-route ``mark_route`` re-covered
+        the sibling cells and the assertion passed with or without the
+        batched resync.
+
+        The fix is to make the optimizer RELOCATE the mutated route off
+        the sibling's column by more than the clearance envelope width:
+
+        * The sibling is a vertical own-net trace at x=10 spanning
+          y=5..15 (centerline cells in grid column gx=100).
+        * The mutated route is a zigzag whose middle vertex bumps UP to
+          (10, 10): its OLD geometry runs along the sibling's column for
+          the y=5..10 stretch, so the old clearance envelope owns the
+          sibling's centerline cells there.
+        * ``merge_collinear`` + ``eliminate_zigzags`` + ``pull_tight``
+          collapse the zigzag to a single straight segment at y=5
+          (``[(5,5)-(20,5)]``).  The NEW geometry's envelope sits at y=5
+          and does NOT re-cover the sibling cells above ~y=5.6.
+
+        So the per-route ``unmark_route(old)`` clears the sibling's
+        column-100 cells across the y=5..10 overlap and the per-route
+        ``mark_route(new)`` only re-marks cells near y=5.  Without the
+        batched resync those ~45 sibling centerline cells stay UNMARKED;
+        the resync's affected-net (net 5) re-mark restores them.
+        """
         router = _make_router()
-        # A vertical sibling the optimizer cannot simplify (single
-        # segment) crossing a horizontal mutated route at (10, 10).
+        # Vertical own-net sibling; the optimizer never touches it
+        # (single segment, nothing to merge/straighten).
         sibling = _make_route(5, "E", [(10.0, 5.0), (10.0, 15.0)])
-        # Collinear 3-point horizontal route through the crossing point:
-        # merge_collinear collapses it to one segment from (5,10)-(20,10),
-        # so the route is MUTATED (new object) and its old envelope
-        # overlapped the sibling at (10, 10).
-        mutated = _make_route(5, "E", [(5.0, 10.0), (12.0, 10.0), (20.0, 10.0)])
+        # Zigzag whose middle vertex sits on the sibling's column at
+        # y=10; the optimizer collapses it to a straight run at y=5,
+        # relocating the trace off column gx=100 for y>~5.6.
+        mutated = _make_route(
+            5,
+            "E",
+            [(5.0, 5.0), (9.5, 5.0), (10.0, 10.0), (10.5, 5.0), (20.0, 5.0)],
+        )
         _commit(router, sibling)
         _commit(router, mutated)
 
-        optimizer = TraceOptimizer(config=OptimizationConfig(merge_collinear=True))
+        # Guard against a vacuous pass: the OLD mutated envelope must
+        # actually own sibling centerline cells in the y=5..10 overlap
+        # band that the relocated route will abandon.  Probe the sibling
+        # cells from the crossing (y=10) down toward y~6.
+        crossing_gy = router.grid.world_to_grid(10.0, 10.0)[1]
+        sibling_seg = sibling.segments[0]
+        overlap_cells = [
+            (gx, gy, li)
+            for (gx, gy, li) in _centerline_cells(router.grid, sibling_seg)
+            if crossing_gy - 35 <= gy <= crossing_gy
+        ]
+        assert overlap_cells, "test geometry produced no overlap cells to probe"
+        for gx, gy, li in overlap_cells:
+            assert router.grid.grid[li][gy][gx].blocked, (
+                "precondition: old envelope should own this sibling cell"
+            )
+
+        optimizer = TraceOptimizer(
+            config=OptimizationConfig(merge_collinear=True, eliminate_zigzags=True, pull_tight=True)
+        )
         optimize_routes_grid_synced(router, optimizer)
 
-        by_net_segments = {len(r.segments) for r in router.routes}
-        # The mutated route really did collapse (3 points -> 1 segment).
-        assert 1 in by_net_segments
-        # The unchanged sibling's copper -- including the crossing cell at
-        # (10, 10) the mutated route's old envelope also owned -- must
-        # still be marked after the loop's batched resync.
+        # The optimizer relocated the mutated route off the sibling's
+        # column: it is now a single straight segment along y=5.
+        mutated_now = next(r for r in router.routes if r is not sibling)
+        assert len(mutated_now.segments) == 1
+        assert mutated_now.segments[0].y1 == mutated_now.segments[0].y2 == 5.0
+
+        # The unchanged sibling's copper -- including the y=5..10 cells the
+        # relocated route abandoned -- must still be marked after the
+        # loop's batched resync.  This assertion FAILS without the #3511
+        # ``resync_route_occupancy(mutated_pairs)`` call.
         _assert_marked(router.grid, sibling)
         for r in router.routes:
             _assert_marked(router.grid, r)
@@ -456,9 +508,7 @@ class TestSkipNetsProtection:
         plain = _make_route(8, "SIG", [(5.0, 30.0), (12.0, 30.0), (20.0, 30.0)])
         _commit(router, protected)
         _commit(router, plain)
-        protected_geometry = [
-            (s.x1, s.y1, s.x2, s.y2) for s in protected.segments
-        ]
+        protected_geometry = [(s.x1, s.y1, s.x2, s.y2) for s in protected.segments]
 
         optimizer = TraceOptimizer(
             config=OptimizationConfig(merge_collinear=True, eliminate_zigzags=True)
@@ -468,9 +518,7 @@ class TestSkipNetsProtection:
         by_net = {r.net: r for r in router.routes}
         # The protected route is the SAME object with unchanged geometry.
         assert by_net[7] is protected
-        assert [
-            (s.x1, s.y1, s.x2, s.y2) for s in by_net[7].segments
-        ] == protected_geometry
+        assert [(s.x1, s.y1, s.x2, s.y2) for s in by_net[7].segments] == protected_geometry
         # The unprotected collinear pair was still merged.
         assert len(by_net[8].segments) == 1
         _assert_marked(router.grid, protected)
@@ -500,10 +548,10 @@ class TestSkipNetsProtection:
         # the geometry is bit-identical.
         assert result.initial_violations == 0
         assert result.segments_nudged == 0
-        assert [
-            (s.x1, s.y1, s.x2, s.y2) for s in router.routes[0].segments
-        ] == [(s.x1, s.y1, s.x2, s.y2) for s in a_geo.segments]
-        assert [
-            (s.x1, s.y1, s.x2, s.y2) for s in router.routes[1].segments
-        ] == [(s.x1, s.y1, s.x2, s.y2) for s in b_geo.segments]
+        assert [(s.x1, s.y1, s.x2, s.y2) for s in router.routes[0].segments] == [
+            (s.x1, s.y1, s.x2, s.y2) for s in a_geo.segments
+        ]
+        assert [(s.x1, s.y1, s.x2, s.y2) for s in router.routes[1].segments] == [
+            (s.x1, s.y1, s.x2, s.y2) for s in b_geo.segments
+        ]
         assert result.skipped.get("diffpair_protected_net", 0) >= 1
