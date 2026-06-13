@@ -341,6 +341,20 @@ def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
     and fail only through end-of-budget rip-up non-convergence —
     the #3470 rip-up-rollback signature.  Re-tighten the floor when
     #3470 lands.
+
+    Issue #3479 update (Jun 2026): the #3470 rip-up rollback +
+    #3438 transactional relief-rescue chain have since landed.  The
+    in-process harness now measures 23-24/26 (V_BANK_POS_SENSE is
+    fully rescued; the residual holdout is NRST, whose Q7.2 / U1.6
+    pads sit in a corridor the relief rescue cannot fully clear at
+    this 2-signal-layer placement).  Floor re-pinned 20 -> 22 to lock
+    in the relief-rescue gain while preserving ~1 net of run-to-run
+    headroom.  The PRODUCTION recipe closes NRST 8/8 by front-loading
+    it in ``ROUTE_FIRST_NETS`` (net-class priority 1) — see #3479 and
+    the ``ROUTE_FIRST_NETS`` comment in the recipe; this harness keeps
+    the default DEBUG-class ordering for SOT-23-escape regression
+    comparability and therefore measures the lower, un-front-loaded
+    number.
     """
     pcb_path = _regenerate_softstart_pcb(tmp_path / "softstart_reach")
 
@@ -360,16 +374,17 @@ def test_softstart_revb_reach_floor(tmp_path: Path) -> None:
     )
     print(f"\nSoftstart rev B reach: {routed_count}/{total} @ L=4")
 
-    # Issue #3343: measured 22/26 at this harness with the P-R1..P-R4
-    # changes (multiple same-session runs).  Run-to-run spread on this
-    # board is ±2-3, so a floor of 20 leaves 2 nets of headroom while
-    # still surfacing infrastructure regressions (the pre-#3343 state
-    # measured 17/26 at this denominator).  Tighten the floor once
-    # #3470 (rip-up rollback) lands.
-    floor = 20
+    # Issue #3479: with #3470 (rip-up rollback) + #3438 (transactional
+    # relief rescue) landed, this harness measures 23-24/26 across
+    # same-session ``PYTHONHASHSEED=0`` runs (baseline 23/26; the
+    # holdout is NRST — V_BANK_POS_SENSE is fully rescued).  Run-to-run
+    # spread on this board is ±1-2, so a floor of 22 leaves ~1 net of
+    # headroom while locking in the relief-rescue gain over the prior
+    # 20 floor and still surfacing infrastructure regressions.
+    floor = 22
     assert routed_count >= floor, (
         f"Softstart rev B reach {routed_count}/{total} below floor {floor}/{total} "
-        f"(L=4 measurement, Issues #3401/#3343)."
+        f"(L=4 measurement, Issues #3401/#3343/#3479)."
     )
 
 
