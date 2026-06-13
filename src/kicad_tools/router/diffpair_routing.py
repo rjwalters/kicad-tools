@@ -73,8 +73,23 @@ COUPLED_HEURISTIC_WEIGHT: float = float(
 # overridable for experimentation (KCT_COUPLED_FLAGOFF_MAX_ITERS).  Only
 # applied when no explicit ``per_pair_max_iterations`` was plumbed --
 # callers that set a budget (the re-route gate, board configs) keep it.
+#
+# Issue #3547 (doctor follow-up): the first cap (16000 total, 8000/phase)
+# was BELOW the classic-A* convergence floor for at least one flag-off
+# pair the search CAN solve -- the pitch-mismatch USB fixture
+# (test_diffpair_npad.py::test_pitch_mismatch_diff_pair_routes,
+# ``coupled_only=True`` so NO independent fallback) reached
+# ``best_progress=2`` (two grid cells from the joint goal) then bailed at
+# the 8000-iter corridor cap, returning ``[]``.  That changed the OUTCOME
+# (a pair that used to route coupled produced no routes) rather than
+# merely DEFERRING -- a flag-off contract violation.  Empirically the npad
+# fixture converges between 9000 and 12000 iters/phase; the DQS-like
+# deferring fixture grinds the full ``cols*rows*4`` (~75k) and lands ~5s
+# on the CI no-coverage path regardless.  40000 total (20000/phase) sits
+# in that wide window: ~1.7x above npad's convergence floor (npad passes
+# in ~1.3s) while DQS still bails comfortably under the 60s CI timeout.
 COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(
-    os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "16000")
+    os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "40000")
 )
 
 # Issue #3508: max joint remaining Manhattan distance (grid cells, max
