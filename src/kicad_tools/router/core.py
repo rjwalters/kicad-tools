@@ -7344,954 +7344,1213 @@ class Autorouter:
             )
 
         # Skip iteration loop if already timed out
-        if not timed_out:
-            for iteration in range(1, max_iterations + 1):
-                full_reorder_used_this_iter = False
-                if check_timeout():
-                    print(f"\n  ⚠ Timeout reached at iteration {iteration} ({elapsed_str()})")
-                    timed_out = True
-                    break
+        try:
+            if not timed_out:
+                for iteration in range(1, max_iterations + 1):
+                    full_reorder_used_this_iter = False
+                    if check_timeout():
+                        print(f"\n  ⚠ Timeout reached at iteration {iteration} ({elapsed_str()})")
+                        timed_out = True
+                        break
 
-                # Issue #2540 + #2803: Snapshot state at top of each iteration
-                # BEFORE any destructive ``rip_up_nets`` call.  If a
-                # mid-iteration timeout escapes the per-net reroute loop, the
-                # post-loop restore can fall back to this pre-rip-up snapshot
-                # of the previous iteration's stable result.
-                #
-                # Comparison is by the lex tuple ``(routed_count desc,
-                # overflow asc, iteration desc)`` so an iteration that
-                # produced equal route count with lower overflow is still
-                # preserved.
-                current_routed = sum(1 for r in net_routes.values() if r)
-                # Issue #3002 (PR #3006 follow-up): include clearance-
-                # violation count in the lex tuple at the top-of-iteration
-                # snapshot site too -- matches the end-of-iteration capture
-                # below.
-                # Issue #3002 (PR #3006 perf): cache_key for top-of-
-                # iteration snapshot.  State here equals the end-state
-                # of the prior iteration -> reuse the ``("post", K-1)``
-                # cache from the previous _capture_iteration_end call.
-                # Issue #3020: combine both directions of the
-                # clearance matrix in the lex tuple comparator.
-                # Issue #3077: extend the via/segment universe with
-                # escape-phase routes.
-                _extra_top = self._collect_extra_routes_for_revalidation(net_routes)
-                current_seg_via = neg_router.find_nets_with_segment_via_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("post", iteration - 1),
-                    extra_routes=_extra_top,
-                )
-                current_via_seg = neg_router.find_nets_with_via_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("post", iteration - 1),
-                    extra_routes=_extra_top,
-                )
-                # Issue #3433: seg-seg parity at the top-of-iteration
-                # snapshot site (matches the end-of-iteration capture).
-                current_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("post", iteration - 1),
-                    extra_routes=_extra_top,
-                )
-                current_violations = (
-                    len(current_seg_via) + len(current_via_seg) + len(current_seg_seg)
-                )
-                # Issue #3117: mirror the lex-tuple primary key at the
-                # top-of-iteration snapshot site so a prior iteration's
-                # end-state can still be promoted to "best" when it had
-                # more fully-connected nets than what
-                # ``_capture_iteration_end`` last recorded.
-                current_connected = _compute_nets_fully_connected()
-                current_metrics = IterationMetrics(
-                    iteration=iteration - 1,  # captured state is end of prior iter
-                    routed_count=current_routed,
-                    overflow=overflow,
-                    clearance_violations=current_violations,
-                    nets_fully_connected=current_connected,
-                )
-                if current_metrics.is_better_than(best_metrics):
-                    best_metrics = current_metrics
-                    best_routed_count = current_routed
-                    best_routes = copy.deepcopy(list(self.routes))
-                    best_net_routes = copy.deepcopy(net_routes)
-                    best_iteration = iteration - 1
-                    # Issue #3101: a top-of-iteration snapshot that strictly
-                    # improves the best metrics indicates the prior
-                    # iteration's stable state was actually an improvement
-                    # (e.g. a re-route hook fixed a clearance violation
-                    # after _capture_iteration_end recorded the metric).
-                    # Reset the patience counter so the loop gives the
-                    # rip-up phase fresh budget to keep improving.
-                    best_stall_count = 0
+                    # Issue #2540 + #2803: Snapshot state at top of each iteration
+                    # BEFORE any destructive ``rip_up_nets`` call.  If a
+                    # mid-iteration timeout escapes the per-net reroute loop, the
+                    # post-loop restore can fall back to this pre-rip-up snapshot
+                    # of the previous iteration's stable result.
+                    #
+                    # Comparison is by the lex tuple ``(routed_count desc,
+                    # overflow asc, iteration desc)`` so an iteration that
+                    # produced equal route count with lower overflow is still
+                    # preserved.
+                    current_routed = sum(1 for r in net_routes.values() if r)
+                    # Issue #3002 (PR #3006 follow-up): include clearance-
+                    # violation count in the lex tuple at the top-of-iteration
+                    # snapshot site too -- matches the end-of-iteration capture
+                    # below.
+                    # Issue #3002 (PR #3006 perf): cache_key for top-of-
+                    # iteration snapshot.  State here equals the end-state
+                    # of the prior iteration -> reuse the ``("post", K-1)``
+                    # cache from the previous _capture_iteration_end call.
+                    # Issue #3020: combine both directions of the
+                    # clearance matrix in the lex tuple comparator.
+                    # Issue #3077: extend the via/segment universe with
+                    # escape-phase routes.
+                    _extra_top = self._collect_extra_routes_for_revalidation(net_routes)
+                    current_seg_via = neg_router.find_nets_with_segment_via_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
+                        extra_routes=_extra_top,
+                    )
+                    current_via_seg = neg_router.find_nets_with_via_segment_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
+                        extra_routes=_extra_top,
+                    )
+                    # Issue #3433: seg-seg parity at the top-of-iteration
+                    # snapshot site (matches the end-of-iteration capture).
+                    current_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
+                        extra_routes=_extra_top,
+                    )
+                    current_violations = (
+                        len(current_seg_via) + len(current_via_seg) + len(current_seg_seg)
+                    )
+                    # Issue #3117: mirror the lex-tuple primary key at the
+                    # top-of-iteration snapshot site so a prior iteration's
+                    # end-state can still be promoted to "best" when it had
+                    # more fully-connected nets than what
+                    # ``_capture_iteration_end`` last recorded.
+                    current_connected = _compute_nets_fully_connected()
+                    current_metrics = IterationMetrics(
+                        iteration=iteration - 1,  # captured state is end of prior iter
+                        routed_count=current_routed,
+                        overflow=overflow,
+                        clearance_violations=current_violations,
+                        nets_fully_connected=current_connected,
+                    )
+                    if current_metrics.is_better_than(best_metrics):
+                        best_metrics = current_metrics
+                        best_routed_count = current_routed
+                        best_routes = copy.deepcopy(list(self.routes))
+                        best_net_routes = copy.deepcopy(net_routes)
+                        best_iteration = iteration - 1
+                        # Issue #3101: a top-of-iteration snapshot that strictly
+                        # improves the best metrics indicates the prior
+                        # iteration's stable state was actually an improvement
+                        # (e.g. a re-route hook fixed a clearance violation
+                        # after _capture_iteration_end recorded the metric).
+                        # Reset the patience counter so the loop gives the
+                        # rip-up phase fresh budget to keep improving.
+                        best_stall_count = 0
 
-                    # Issue #2808: fire checkpoint hook from the iteration-top
-                    # snapshot site too, not just _capture_iteration_end --
-                    # the pre-rip-up snapshot can replace ``best_routes`` if
-                    # the prior iteration's stable state ended up strictly
-                    # better than what we had tracked.
-                    if checkpoint_callback is not None:
-                        try:
-                            checkpoint_callback(best_routes, best_metrics)
-                        except Exception as exc:  # noqa: BLE001
+                        # Issue #2808: fire checkpoint hook from the iteration-top
+                        # snapshot site too, not just _capture_iteration_end --
+                        # the pre-rip-up snapshot can replace ``best_routes`` if
+                        # the prior iteration's stable state ended up strictly
+                        # better than what we had tracked.
+                        if checkpoint_callback is not None:
+                            try:
+                                checkpoint_callback(best_routes, best_metrics)
+                            except Exception as exc:  # noqa: BLE001
+                                flush_print(
+                                    f"  checkpoint: write failed ({exc!r}); continuing"
+                                )
+
+                    # Adaptive early termination check (Issue #633)
+                    # Issue #2334: When perturbation is enabled, activate it
+                    # instead of terminating early. Only terminate if
+                    # perturbation has already been active for 3+ iterations
+                    # without finding a new best.
+                    # Issue #3448: count empty-list entries (ripped up then
+                    # failed re-route) as unrouted -- ``len(net_routes)``
+                    # treats them as routed, which defeats the Issue #2297
+                    # "keep going at overflow==0 with unrouted nets" guard
+                    # inside ``should_terminate_early``.
+                    unrouted = total_nets - sum(1 for r in net_routes.values() if r)
+                    if adaptive and should_terminate_early(overflow_history, iteration, unrouted_count=unrouted):
+                        if perturbation and perturbation_stagnation_count < 3:
+                            # Activate perturbation instead of terminating
+                            perturbation_stagnation_count += 1
+                            self._activate_perturbation(perturbation_stagnation_count)
                             flush_print(
-                                f"  checkpoint: write failed ({exc!r}); continuing"
+                                f"  Perturbation activated (magnitude={self._perturbation_magnitude:.2f}, "
+                                f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
                             )
+                        else:
+                            # Issue #2515: Surface unroutable nets by name so the
+                            # operator can act on the diagnostic instead of guessing
+                            # what was dropped.
+                            unrouted_names = sorted(
+                                self.net_names.get(n, f"Net_{n}")
+                                for n in net_order
+                                if not net_routes.get(n) and n in pads_by_net
+                            )
+                            partial_at_term = self._get_partially_routed_nets(
+                                net_routes, pads_by_net
+                            )
+                            partial_names = sorted(
+                                self.net_names.get(n, f"Net_{n}") for n in partial_at_term
+                            )
+                            full_routed = sum(
+                                1 for n, r in net_routes.items()
+                                if r and n not in partial_at_term
+                            )
+                            print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
+                            print(f"    Overflow history: {overflow_history[-5:]}")
+                            print(
+                                f"    Routed: {full_routed}/{total_nets}, "
+                                f"unrouted: {len(unrouted_names)}, "
+                                f"partial: {len(partial_names)}"
+                            )
+                            if unrouted_names:
+                                print(f"    Unrouted nets: {', '.join(unrouted_names)}")
+                            if partial_names:
+                                print(f"    Partially routed nets: {', '.join(partial_names)}")
+                            self._reset_perturbation()
+                            break
 
-                # Adaptive early termination check (Issue #633)
-                # Issue #2334: When perturbation is enabled, activate it
-                # instead of terminating early. Only terminate if
-                # perturbation has already been active for 3+ iterations
-                # without finding a new best.
-                # Issue #3448: count empty-list entries (ripped up then
-                # failed re-route) as unrouted -- ``len(net_routes)``
-                # treats them as routed, which defeats the Issue #2297
-                # "keep going at overflow==0 with unrouted nets" guard
-                # inside ``should_terminate_early``.
-                unrouted = total_nets - sum(1 for r in net_routes.values() if r)
-                if adaptive and should_terminate_early(overflow_history, iteration, unrouted_count=unrouted):
-                    if perturbation and perturbation_stagnation_count < 3:
-                        # Activate perturbation instead of terminating
-                        perturbation_stagnation_count += 1
-                        self._activate_perturbation(perturbation_stagnation_count)
+                    # Issue #3101: Best-metric patience check.  Complements
+                    # ``should_terminate_early`` (which only sees the overflow
+                    # trajectory) by tripping when ``best_metrics`` has not
+                    # improved across the lex tuple
+                    # ``(routed_count, clearance_violations, overflow)`` for
+                    # ``best_stall_patience`` consecutive iterations.  Crucial
+                    # on dense boards (e.g. board-07 matchgroup-test) where
+                    # iter 0 already produced the high-water mark and the
+                    # subsequent rip-up iterations either regress or oscillate
+                    # for ~50 s/iter without finding a new best.  Iteration-0
+                    # persistence is preserved by the post-loop restore --
+                    # breaking here returns control to that restore site,
+                    # which guarantees ``best_routes``/``best_net_routes``
+                    # win over the regressed ``self.routes``.
+                    if (
+                        best_stall_patience is not None
+                        and best_stall_patience > 0
+                        and iteration >= best_stall_min_iterations
+                        and best_stall_count >= best_stall_patience
+                    ):
                         flush_print(
-                            f"  Perturbation activated (magnitude={self._perturbation_magnitude:.2f}, "
-                            f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
+                            f"\n  ⚠ Best-metric early-stop: no improvement "
+                            f"to (routed={best_metrics.routed_count}, "
+                            f"clearance_viol={best_metrics.clearance_violations}, "
+                            f"overflow={best_metrics.overflow}) for "
+                            f"{best_stall_count} consecutive iter(s); "
+                            f"patience={best_stall_patience} "
+                            f"(Issue #3101) ({elapsed_str()})"
                         )
-                    else:
-                        # Issue #2515: Surface unroutable nets by name so the
-                        # operator can act on the diagnostic instead of guessing
-                        # what was dropped.
-                        unrouted_names = sorted(
-                            self.net_names.get(n, f"Net_{n}")
-                            for n in net_order
-                            if not net_routes.get(n) and n in pads_by_net
-                        )
-                        partial_at_term = self._get_partially_routed_nets(
-                            net_routes, pads_by_net
-                        )
-                        partial_names = sorted(
-                            self.net_names.get(n, f"Net_{n}") for n in partial_at_term
-                        )
-                        full_routed = sum(
-                            1 for n, r in net_routes.items()
-                            if r and n not in partial_at_term
-                        )
-                        print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
-                        print(f"    Overflow history: {overflow_history[-5:]}")
-                        print(
-                            f"    Routed: {full_routed}/{total_nets}, "
-                            f"unrouted: {len(unrouted_names)}, "
-                            f"partial: {len(partial_names)}"
-                        )
-                        if unrouted_names:
-                            print(f"    Unrouted nets: {', '.join(unrouted_names)}")
-                        if partial_names:
-                            print(f"    Partially routed nets: {', '.join(partial_names)}")
                         self._reset_perturbation()
                         break
 
-                # Issue #3101: Best-metric patience check.  Complements
-                # ``should_terminate_early`` (which only sees the overflow
-                # trajectory) by tripping when ``best_metrics`` has not
-                # improved across the lex tuple
-                # ``(routed_count, clearance_violations, overflow)`` for
-                # ``best_stall_patience`` consecutive iterations.  Crucial
-                # on dense boards (e.g. board-07 matchgroup-test) where
-                # iter 0 already produced the high-water mark and the
-                # subsequent rip-up iterations either regress or oscillate
-                # for ~50 s/iter without finding a new best.  Iteration-0
-                # persistence is preserved by the post-loop restore --
-                # breaking here returns control to that restore site,
-                # which guarantees ``best_routes``/``best_net_routes``
-                # win over the regressed ``self.routes``.
-                if (
-                    best_stall_patience is not None
-                    and best_stall_patience > 0
-                    and iteration >= best_stall_min_iterations
-                    and best_stall_count >= best_stall_patience
-                ):
-                    flush_print(
-                        f"\n  ⚠ Best-metric early-stop: no improvement "
-                        f"to (routed={best_metrics.routed_count}, "
-                        f"clearance_viol={best_metrics.clearance_violations}, "
-                        f"overflow={best_metrics.overflow}) for "
-                        f"{best_stall_count} consecutive iter(s); "
-                        f"patience={best_stall_patience} "
-                        f"(Issue #3101) ({elapsed_str()})"
-                    )
-                    self._reset_perturbation()
-                    break
-
-                if progress_callback is not None:
-                    progress = iteration / (max_iterations + 1)
-                    if not progress_callback(
-                        progress,
-                        f"Iteration {iteration}/{max_iterations}: rip-up and reroute",
-                        True,
-                    ):
-                        break
-
-                flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
-
-                # Issue #3438: close the PREVIOUS iteration's
-                # corridor-reservation window (if any) so this iteration
-                # starts from exact Python/C++ grid parity -- the fix for
-                # the historical cross-iteration phantom accretion
-                # (Issue #3101).
-                self._flush_corridor_reservation(net_routes)
-
-                # Calculate adaptive parameters (Issue #633)
-                if adaptive:
-                    # Calculate congestion ratio for adaptive present cost
-                    total_cells = self.grid.cols * self.grid.rows * self.grid.num_layers
-                    overflow_ratio = overflow / max(total_cells, 1)
-
-                    # Issue #2333: Congestion-ratio-based auto-tuning
-                    iter_pres_fac_mult = pres_fac_mult
-                    iter_history_increment = history_increment
-                    if congestion_auto_tune:
-                        iter_pres_fac_mult, iter_history_increment = (
-                            calculate_congestion_tuned_params(
-                                overflow_ratio, pres_fac_mult, history_increment
-                            )
-                        )
-
-                    # Adaptive history increment based on convergence progress
-                    adaptive_history = calculate_history_increment(
-                        iteration, overflow_history, iter_history_increment
-                    )
-                    # Adaptive present cost based on iteration and congestion
-                    present_factor = calculate_present_cost(
-                        iteration, max_iterations, overflow_ratio, initial_present_factor,
-                        exponential=exponential_cost,
-                        pres_fac_mult=iter_pres_fac_mult,
-                        pres_fac_cap=pres_fac_cap,
-                    )
-                    print(
-                        f"  Adaptive params: history={adaptive_history:.2f}, present={present_factor:.2f}"
-                    )
-                    self.grid.update_history_costs(adaptive_history)
-
-                    # Issue #2333: EMA smoothing of per-cell present cost
-                    if ema_smoothing:
-                        self.grid.update_present_cost_ema(present_factor, alpha=ema_alpha)
-                else:
-                    present_factor += present_factor_increment
-                    self.grid.update_history_costs(history_increment)
-
-                    # Issue #2333: EMA smoothing in non-adaptive mode
-                    if ema_smoothing:
-                        self.grid.update_present_cost_ema(present_factor, alpha=ema_alpha)
-
-                # Issue #2334: Re-sort net order when perturbation is active
-                # so the rip-up iterations explore different orderings.
-                if self._perturbation_magnitude > 0:
-                    net_order = sorted(
-                        net_order, key=lambda n: self._get_net_priority(n)
-                    )
-
-                nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
-
-                # Issue #858: Also include nets that completely failed to route
-                # (not in net_routes) - these need recovery via targeted rip-up
-                # Issue #1605: Exclude structurally unroutable nets (PADS_OFF_GRID)
-                # Issue #2514: Exclude single-pad nets explicitly.  The previous
-                # ``n in pads_by_net`` clause silently dropped them but also
-                # masked legitimate failures whose pads were not yet in the
-                # ``pads_by_net`` cache.  We now make the structural-unroutable
-                # filter explicit via the ``single_pad_nets`` set built up front.
-                # Issue #3448: ``not net_routes.get(n)`` instead of
-                # ``n not in net_routes`` -- ``rip_up_nets`` leaves an empty
-                # list behind, so a ripped-then-failed net was invisible to
-                # this detector and never re-entered the recovery set.
-                failed_nets_to_recover = [
-                    n
-                    for n in net_order
-                    if not net_routes.get(n)
-                    and n not in single_pad_nets
-                    and n not in off_grid_nets
-                ]
-                if failed_nets_to_recover:
-                    # Add failed nets to reroute list if not already present
-                    for failed_net in failed_nets_to_recover:
-                        if failed_net not in nets_to_reroute:
-                            nets_to_reroute.append(failed_net)
-                    print(f"  Including {len(failed_nets_to_recover)} failed net(s) in recovery")
-
-                # Issue #2475: Also include partially routed nets — nets that
-                # appear in ``net_routes`` but failed to connect all of their
-                # pads (e.g. PHASE_B with 3/4 pads).  These nets have routes
-                # that may not pass through any overused cell, so the standard
-                # detector misses them entirely.  Without re-attempting them,
-                # they remain stuck at the connectivity gap forever.
-                partial_nets = self._get_partially_routed_nets(net_routes, pads_by_net)
-                if partial_nets:
-                    new_partial = [
-                        n for n in partial_nets
-                        if n not in nets_to_reroute and n not in off_grid_nets
-                    ]
-                    if new_partial:
-                        for partial_net in new_partial:
-                            nets_to_reroute.append(partial_net)
-                        partial_names = [
-                            self.net_names.get(n, f"Net_{n}") for n in new_partial
-                        ]
-                        flush_print(
-                            f"  Including {len(new_partial)} partially routed net(s) "
-                            f"in recovery: {', '.join(partial_names)}"
-                        )
-
-                # Issue #3002: Post-iteration live re-validation of
-                # committed segments against committed foreign-net vias.
-                # The pre-commit clearance gate sees only vias already
-                # in ``grid.routes`` at the moment a segment validates;
-                # cross-net ordering bugs (segment commits before a
-                # later foreign via lands in the same iteration) slip
-                # past the gate.  This hook walks every committed
-                # segment against every foreign-net via using the
-                # shared :func:`segment_clears_foreign_via` predicate
-                # (STANDARD threshold) and feeds violators back into
-                # ``nets_to_reroute`` so the next iteration retries
-                # them with up-to-date foreign-via context.
-                #
-                # Concrete failure this catches: board-04 SWDIO/BOOT0
-                # at PCB (143.8, 119.7) on B.Cu -- SWDIO's B.Cu
-                # segment clips BOOT0's via.
-                # Issue #3002 (PR #3006 perf): cache_key matches the
-                # top-of-iter snapshot since no mutations have occurred
-                # between this call site and the iteration boundary.
-                # Hot path: this is the third call within an iteration
-                # that reads the same ``("post", K-1)`` state.
-                # Issue #3077: extend the via universe with escape-phase
-                # routes (lateral / in-pad helpers from PR #3070 etc).
-                _extra_mid = self._collect_extra_routes_for_revalidation(net_routes)
-                seg_via_violators = neg_router.find_nets_with_segment_via_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("post", iteration - 1),
-                    extra_routes=_extra_mid,
-                )
-                if seg_via_violators:
-                    new_violators = [
-                        n for n in seg_via_violators
-                        if n not in nets_to_reroute and n not in off_grid_nets
-                    ]
-                    if new_violators:
-                        for v_net in new_violators:
-                            nets_to_reroute.append(v_net)
-                        violator_names = [
-                            self.net_names.get(n, f"Net_{n}") for n in new_violators
-                        ]
-                        flush_print(
-                            f"  Including {len(new_violators)} segment-vs-foreign-via "
-                            f"violator(s) in recovery: {', '.join(violator_names)}"
-                        )
-
-                # Issue #3020: Symmetric sibling of the segment-vs-via
-                # hook above -- walks every committed VIA against
-                # every foreign-net SEGMENT (including permanent
-                # escape segments) and feeds VIA-OWNING nets back
-                # into ``nets_to_reroute``.  Escape segments are
-                # non-rippable infrastructure (see
-                # ``_escape_pad_overrides`` policy at
-                # ``core.py:10123-10145``), so the fix MUST be on
-                # the via side -- A* will pick a different layer-
-                # transition point on the via's parent net.
-                #
-                # Concrete failure this catches: board-04
-                # SWDIO/BOOT0 at PCB (143.8, 119.7) on B.Cu.  SWDIO
-                # escape segment landed in escape phase; BOOT0's
-                # main-router via lands later on B.Cu within
-                # via_radius + half_seg_w + clearance of SWDIO's
-                # segment.  PR #3006 cannot see this because it
-                # gates on SEGMENT commit; this hook gates on VIA
-                # commit (post-iteration).
-                via_seg_violators = neg_router.find_nets_with_via_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("post", iteration - 1),
-                    extra_routes=_extra_mid,
-                )
-                if via_seg_violators:
-                    new_via_violators = [
-                        n for n in via_seg_violators
-                        if n not in nets_to_reroute and n not in off_grid_nets
-                    ]
-                    if new_via_violators:
-                        for v_net in new_via_violators:
-                            nets_to_reroute.append(v_net)
-                        violator_names = [
-                            self.net_names.get(n, f"Net_{n}") for n in new_via_violators
-                        ]
-                        flush_print(
-                            f"  Including {len(new_via_violators)} via-vs-foreign-segment "
-                            f"violator(s) in recovery: {', '.join(violator_names)}"
-                        )
-
-                # Issue #3433: Third quadrant -- segment-vs-foreign-
-                # segment violators.  Cross-net trace overlaps (board-04
-                # SWCLK/SWO committed coincident in the SWD corridor)
-                # are invisible to the two via hooks above AND can be
-                # missed by ``find_nets_through_overused_cells`` when
-                # the overflow attribution lands elsewhere -- the
-                # overlapping nets then never enter the rip-up cohort
-                # and the loop stagnates with the overlap committed.
-                # Feed BOTH nets of each violating pair back so the
-                # next iteration can separate them (typically by layer).
-                seg_seg_violators = neg_router.find_nets_with_segment_segment_violations(
-                    net_routes, trace_clearance=self.rules.trace_clearance,
-                    cache_key=("post", iteration - 1),
-                    extra_routes=_extra_mid,
-                )
-                if seg_seg_violators:
-                    new_seg_seg_violators = [
-                        n for n in seg_seg_violators
-                        if n not in nets_to_reroute and n not in off_grid_nets
-                    ]
-                    if new_seg_seg_violators:
-                        for v_net in new_seg_seg_violators:
-                            nets_to_reroute.append(v_net)
-                        violator_names = [
-                            self.net_names.get(n, f"Net_{n}")
-                            for n in new_seg_seg_violators
-                        ]
-                        flush_print(
-                            f"  Including {len(new_seg_seg_violators)} segment-vs-foreign-"
-                            f"segment violator(s) in recovery: {', '.join(violator_names)}"
-                        )
-
-                # Issue #2295: Per-net rip-up stall filtering.
-                # Track each net's overflow contribution across rip-up
-                # iterations.  If a net has been ripped up N consecutive times
-                # without its overflow improving, exclude it from future
-                # rip-up sets.  This prevents high-pad-count decoupling nets
-                # (e.g., C11-2 with 16 pads) from consuming ~200s per
-                # iteration on fruitless A* searches.
-                #
-                # Issue #2396: Nets that completely failed to route (not in
-                # net_routes) should not accumulate stall counts -- they
-                # have no overflow to improve.  Only nets that ARE routed
-                # but pass through overused cells should be stall-tracked.
-                current_overflow = self.grid.get_total_overflow()
-                failed_net_ids = set(failed_nets_to_recover)
-                for net in nets_to_reroute:
-                    if net in failed_net_ids:
-                        # Issue #2396: Skip stall tracking for unrouted nets.
-                        # They failed entirely and need fresh attempts, not
-                        # stall-based exclusion.
-                        continue
-                    prev = net_prev_overflow.get(net)
-                    if prev is not None:
-                        if current_overflow >= prev:
-                            # No improvement since last rip-up of this net
-                            net_ripup_stall[net] = net_ripup_stall.get(net, 0) + 1
-                        else:
-                            # Overflow improved -- reset stall counter
-                            net_ripup_stall[net] = 0
-                    net_prev_overflow[net] = current_overflow
-
-                # Filter out stalled nets
-                newly_stalled = [
-                    n for n in nets_to_reroute
-                    if net_ripup_stall.get(n, 0) >= max_net_stall_iterations
-                    and n not in stalled_nets
-                ]
-                if newly_stalled:
-                    stalled_nets.update(newly_stalled)
-                    stalled_names = [
-                        self.net_names.get(n, f"Net_{n}") for n in newly_stalled
-                    ]
-                    flush_print(
-                        f"  Excluding {len(newly_stalled)} stalled net(s) from rip-up: "
-                        f"{', '.join(stalled_names)}"
-                    )
-
-                # Issue #2515: Track the unfiltered rip-up cohort identity so
-                # we can detect non-zero overflow stagnation -- the same set
-                # of nets oscillating in a narrow overflow band but never
-                # converging.  Captured *before* the stalled-net filter so
-                # the cohort signature is stable when nets transition into
-                # ``stalled_nets``.
-                cohort_history.append(frozenset(nets_to_reroute))
-
-                # Issue #2515: Non-zero overflow stagnation recovery.
-                # When PHASE_A/B/C + SW_OUT compete for the same J2 pin field,
-                # the rip-up loop oscillates the same 4 nets indefinitely with
-                # overflow stuck in [2, 4, 7, 4, ...].  Eventually the per-net
-                # stall detector marks them all stalled and the iteration
-                # terminates with "No nets to rip up", silently leaving them
-                # unrouted.  Detect this case and fire a recovery pass that:
-                #
-                #   1. Re-enables stalled nets so they are not orphaned.
-                #   2. Rips up the entire cohort *plus* any same-tier
-                #      destination siblings (e.g. PHASE_*  on J2) that may
-                #      have reserved cells in the contended pin field.
-                #   3. Re-routes them with elevated ``present_factor`` to
-                #      bias the A* search toward unexplored corridors.
-                #
-                # Trigger condition: the unfiltered cohort has been
-                # identical (or a strict subset) for the last
-                # ``cohort_stagnation_window`` iterations, the overflow
-                # window has not improved, and the recovery budget has not
-                # been exhausted.
-                cohort_stagnation_window = 3
-                if (
-                    iteration >= cohort_stagnation_window
-                    and stagnation_recovery_count < max_stagnation_recoveries
-                    and len(cohort_history) >= cohort_stagnation_window
-                    and not timed_out
-                ):
-                    recent_cohorts = cohort_history[-cohort_stagnation_window:]
-                    base_cohort = recent_cohorts[0]
-                    # Same set OR subsequent cohorts are a subset of base
-                    # (handles the case where some nets get marked stalled
-                    # mid-window but the active subset stabilises).
-                    cohorts_stable = (
-                        bool(base_cohort)
-                        and all(c <= base_cohort and c for c in recent_cohorts)
-                    )
-                    overflow_stable = False
-                    if len(overflow_history) >= cohort_stagnation_window:
-                        recent_ov = overflow_history[-cohort_stagnation_window:]
-                        # All non-zero AND no new global minimum AND band <= 5
-                        if (
-                            min(recent_ov) > 0
-                            and min(recent_ov) >= min(overflow_history)
-                            and (max(recent_ov) - min(recent_ov)) <= 5
+                    if progress_callback is not None:
+                        progress = iteration / (max_iterations + 1)
+                        if not progress_callback(
+                            progress,
+                            f"Iteration {iteration}/{max_iterations}: rip-up and reroute",
+                            True,
                         ):
-                            overflow_stable = True
-                    if cohorts_stable and overflow_stable:
-                        stagnation_recovery_count += 1
-                        recovery_cohort = set(base_cohort)
-                        # Augment with same-tier destination siblings so the
-                        # contended pin-field reservations are also released.
-                        sibling_extension: set[int] = set()
-                        for n in recovery_cohort:
-                            sibling_extension |= self._find_same_tier_destination_siblings(
-                                n, list(net_routes.keys())
-                            )
-                        recovery_cohort |= sibling_extension
-                        # Re-enable previously stalled nets so they don't get
-                        # orphaned by the recovery sweep.
-                        if stalled_nets:
-                            recovery_cohort |= stalled_nets
-                            stalled_nets.clear()
-                            net_ripup_stall.clear()
-                        cohort_names = sorted(
-                            self.net_names.get(n, f"Net_{n}")
-                            for n in recovery_cohort
-                            if n in pads_by_net
-                        )
-                        flush_print(
-                            f"  Stagnation recovery #{stagnation_recovery_count}: "
-                            f"cohort stable for {cohort_stagnation_window} iter(s), "
-                            f"overflow band {overflow_history[-cohort_stagnation_window:]}, "
-                            f"rerouting {len(cohort_names)} net(s) with "
-                            f"elevated present_factor ({elapsed_str()})"
-                        )
-                        flush_print(f"    Cohort: {', '.join(cohort_names)}")
-                        # Rip up all cohort routes (only the ones currently routed)
-                        ripup_targets = [
-                            n for n in recovery_cohort if n in net_routes and net_routes[n]
-                        ]
-                        # Issue #3413: snapshot the ripped cohort so members
-                        # whose elevated-cost reroute fails are restored
-                        # verbatim.  Measured on board 06 (seed 42): the
-                        # recovery ripped 11 nets, re-landed 7, and left the
-                        # iteration with connected 19 -> 15 -- a strictly
-                        # worse state that also burned the wall budget the
-                        # later iterations needed.  Restoring failures keeps
-                        # the recovery monotone in reach: it can only swap
-                        # geometry, never lose a routed net.
-                        recovery_original_routes: dict[int, list[Route]] = {
-                            n: list(net_routes.get(n, [])) for n in ripup_targets
-                        }
-                        if ripup_targets:
-                            neg_router.rip_up_nets(ripup_targets, net_routes, self.routes)
-                        # Re-route each cohort member fresh with elevated cost
-                        recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
-                        recovered_count = 0
-                        for rn in sorted(recovery_cohort, key=lambda n: self._get_net_priority(n)):
-                            if check_timeout():
-                                timed_out = True
-                                break
-                            if rn not in pads_by_net:
-                                continue
-                            routes = self._route_net_negotiated(
-                                rn, recovery_factor, per_net_timeout=per_net_timeout
-                            )
-                            if routes:
-                                net_routes[rn] = routes
-                                for route in routes:
-                                    self.grid.mark_route_usage(route)
-                                    self.routes.append(route)
-                                recovered_count += 1
-                        # Issue #3413: no-net-loss restore for cohort members
-                        # that were ripped but did not re-land (reroute failed
-                        # or the timeout broke the loop mid-cohort).
-                        recovery_restored = 0
-                        for rn in ripup_targets:
-                            if not net_routes.get(rn) and recovery_original_routes.get(rn):
-                                restored = recovery_original_routes[rn]
-                                net_routes[rn] = restored
-                                for route in restored:
-                                    self._mark_route(route)
-                                    self.grid.mark_route_usage(route)
-                                    if route not in self.routes:
-                                        self.routes.append(route)
-                                recovery_restored += 1
-                        if recovery_restored:
-                            flush_print(
-                                f"  Stagnation recovery restored {recovery_restored} "
-                                f"net(s) whose reroute failed (no-net-loss)"
-                            )
-                        # Recompute overflow & cohort tracking after recovery
-                        current_overflow = self.grid.get_total_overflow()
-                        overused = self.grid.find_overused_cells()
-                        # Update the latest overflow_history entry to reflect
-                        # post-recovery state so subsequent oscillation
-                        # detection sees the recovery's effect.
-                        overflow_history[-1] = current_overflow
-                        # Reset cohort history so we don't immediately
-                        # re-trigger on the same window.
-                        cohort_history.clear()
-                        flush_print(
-                            f"  Stagnation recovery rerouted {recovered_count}/"
-                            f"{len(recovery_cohort)} net(s), overflow now: "
-                            f"{current_overflow} ({elapsed_str()})"
-                        )
-                        # Recompute nets_to_reroute for this iteration based
-                        # on post-recovery state.
-                        nets_to_reroute = neg_router.find_nets_through_overused_cells(
-                            net_routes, overused
-                        )
-                        # Re-add still-failed nets and partial nets after recovery
-                        # (Issue #3448: empty-list entries count as failed too)
-                        for fn in net_order:
-                            if (
-                                not net_routes.get(fn)
-                                and fn in pads_by_net
-                                and fn not in off_grid_nets
-                                and fn not in nets_to_reroute
-                            ):
-                                nets_to_reroute.append(fn)
-
-                if stalled_nets:
-                    nets_to_reroute = [
-                        n for n in nets_to_reroute if n not in stalled_nets
-                    ]
-
-                # Issue #2396: When overflow is 0 but nets remain unrouted,
-                # the rip-up loop has no overflow signal to act on.  Force
-                # a fresh A* attempt for each unrouted net with an elevated
-                # present_factor to encourage exploration of alternative
-                # paths.  This directly addresses the 4L 3/8 plateau
-                # observed in board 04.
-                if (
-                    current_overflow == 0
-                    and failed_net_ids
-                    and not timed_out
-                ):
-                    recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
-                    recovered = 0
-                    attempted = 0
-                    # Issue #3438 design note: a probe-based gate ("skip
-                    # the elevated-cost attempt when a relief probe shows
-                    # the corridor is hard-sealed") was prototyped here to
-                    # save the measured 134s-for-0/5 this recovery burns
-                    # on board 07.  It was REMOVED after A/B measurement:
-                    # the probes' mark/unmark cycles ahead of the cohort
-                    # reroute perturb the subsequent searches enough to
-                    # drop the iteration-1 cohort from 5/8 to 4/8 and the
-                    # final reach from 30/31 to 28/31.  Relief probes now
-                    # run only inside the LAST-RESORT rescue (stall
-                    # branch), after the iteration's best state is
-                    # already banked.
-                    for fn in list(failed_net_ids):
-                        # Issue #3413: per-net wall-clock check.  This
-                        # recovery previously had NO timeout discipline:
-                        # measured on board 06 it ran 380s past a 360s
-                        # budget (21 elevated-cost attempts at up to 30s
-                        # each), and the loop then "discovered" the
-                        # exhausted budget only at the next reroute.
-                        if check_timeout():
-                            timed_out = True
                             break
-                        # Issue #3448: ``net_routes.get(fn)`` (not bare
-                        # membership) so a ripped-then-failed net with an
-                        # empty-list entry still receives the elevated-cost
-                        # recovery attempt.
-                        if fn in stalled_nets or net_routes.get(fn):
-                            continue
-                        attempted += 1
-                        routes = self._route_net_negotiated(
-                            fn, recovery_factor, per_net_timeout=per_net_timeout
-                        )
-                        if routes:
-                            net_routes[fn] = routes
-                            recovered += 1
-                            for route in routes:
-                                self.grid.mark_route_usage(route)
-                                self.routes.append(route)
-                    # Issue #2514: Always log the attempt summary so the
-                    # operator can see that recovery ran -- previously the
-                    # log was silent on ``recovered == 0``, which made it
-                    # appear that the recovery path never executed.
-                    if attempted > 0:
-                        flush_print(
-                            f"  Zero-overflow recovery: routed {recovered}/{attempted} "
-                            f"previously-failed net(s) with elevated cost "
-                            f"(factor={recovery_factor:.2f})"
-                        )
-                    if recovered > 0:
-                        # Recompute overflow after recovery
-                        current_overflow = self.grid.get_total_overflow()
-                        overused = self.grid.find_overused_cells()
 
-                # If overflow improves globally, give stalled nets another
-                # chance -- their blockage may have cleared.
-                if (
-                    stalled_nets
-                    and len(overflow_history) >= 2
-                    and overflow_history[-1] < overflow_history[-2]
-                ):
-                    flush_print(
-                        f"  Re-enabling {len(stalled_nets)} stalled net(s) after overflow improvement"
-                    )
-                    stalled_nets.clear()
-                    net_ripup_stall.clear()
+                    flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
 
-                # Issue #2413: Early termination when no nets remain to rip up.
-                # All conflicting nets have been excluded by the stall detector,
-                # so further iterations cannot make progress.
-                if not nets_to_reroute:
-                    # Issue #2514: Distinguish "genuine convergence" from
-                    # "remaining unrouted nets are all structurally
-                    # unroutable" so the operator understands why the loop
-                    # exited at iteration 1 with nets still missing.
-                    remaining_unrouted = [
-                        n for n in net_order if not net_routes.get(n)
-                    ]
-                    structurally_unroutable = [
-                        n for n in remaining_unrouted if n in single_pad_nets or n in off_grid_nets
-                    ]
-                    if remaining_unrouted and len(structurally_unroutable) == len(
-                        remaining_unrouted
-                    ):
-                        flush_print(
-                            f"  No rip-up candidates: {len(remaining_unrouted)} "
-                            f"remaining unrouted net(s) are structurally "
-                            f"unroutable (single-pad or off-grid). Terminating "
-                            f"at iteration {iteration}/{max_iterations} ({elapsed_str()})"
+                    # Issue #3438: close the PREVIOUS iteration's
+                    # corridor-reservation window (if any) so this iteration
+                    # starts from exact Python/C++ grid parity -- the fix for
+                    # the historical cross-iteration phantom accretion
+                    # (Issue #3101).
+                    self._flush_corridor_reservation(net_routes)
+
+                    # Calculate adaptive parameters (Issue #633)
+                    if adaptive:
+                        # Calculate congestion ratio for adaptive present cost
+                        total_cells = self.grid.cols * self.grid.rows * self.grid.num_layers
+                        overflow_ratio = overflow / max(total_cells, 1)
+
+                        # Issue #2333: Congestion-ratio-based auto-tuning
+                        iter_pres_fac_mult = pres_fac_mult
+                        iter_history_increment = history_increment
+                        if congestion_auto_tune:
+                            iter_pres_fac_mult, iter_history_increment = (
+                                calculate_congestion_tuned_params(
+                                    overflow_ratio, pres_fac_mult, history_increment
+                                )
+                            )
+
+                        # Adaptive history increment based on convergence progress
+                        adaptive_history = calculate_history_increment(
+                            iteration, overflow_history, iter_history_increment
                         )
+                        # Adaptive present cost based on iteration and congestion
+                        present_factor = calculate_present_cost(
+                            iteration, max_iterations, overflow_ratio, initial_present_factor,
+                            exponential=exponential_cost,
+                            pres_fac_mult=iter_pres_fac_mult,
+                            pres_fac_cap=pres_fac_cap,
+                        )
+                        print(
+                            f"  Adaptive params: history={adaptive_history:.2f}, present={present_factor:.2f}"
+                        )
+                        self.grid.update_history_costs(adaptive_history)
+
+                        # Issue #2333: EMA smoothing of per-cell present cost
+                        if ema_smoothing:
+                            self.grid.update_present_cost_ema(present_factor, alpha=ema_alpha)
                     else:
-                        # Issue #2515: Surface unroutable / partial nets by
-                        # name so operators see what the loop gave up on.
-                        unrouted_names = sorted(
-                            self.net_names.get(n, f"Net_{n}")
-                            for n in net_order
-                            if not net_routes.get(n) and n in pads_by_net
+                        present_factor += present_factor_increment
+                        self.grid.update_history_costs(history_increment)
+
+                        # Issue #2333: EMA smoothing in non-adaptive mode
+                        if ema_smoothing:
+                            self.grid.update_present_cost_ema(present_factor, alpha=ema_alpha)
+
+                    # Issue #2334: Re-sort net order when perturbation is active
+                    # so the rip-up iterations explore different orderings.
+                    if self._perturbation_magnitude > 0:
+                        net_order = sorted(
+                            net_order, key=lambda n: self._get_net_priority(n)
                         )
-                        partial_at_term = self._get_partially_routed_nets(
-                            net_routes, pads_by_net
-                        )
-                        partial_names = sorted(
-                            self.net_names.get(n, f"Net_{n}") for n in partial_at_term
-                        )
-                        flush_print(
-                            f"  No nets to rip up, terminating at iteration "
-                            f"{iteration}/{max_iterations} ({elapsed_str()})"
-                        )
-                        if unrouted_names:
+
+                    nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
+
+                    # Issue #858: Also include nets that completely failed to route
+                    # (not in net_routes) - these need recovery via targeted rip-up
+                    # Issue #1605: Exclude structurally unroutable nets (PADS_OFF_GRID)
+                    # Issue #2514: Exclude single-pad nets explicitly.  The previous
+                    # ``n in pads_by_net`` clause silently dropped them but also
+                    # masked legitimate failures whose pads were not yet in the
+                    # ``pads_by_net`` cache.  We now make the structural-unroutable
+                    # filter explicit via the ``single_pad_nets`` set built up front.
+                    # Issue #3448: ``not net_routes.get(n)`` instead of
+                    # ``n not in net_routes`` -- ``rip_up_nets`` leaves an empty
+                    # list behind, so a ripped-then-failed net was invisible to
+                    # this detector and never re-entered the recovery set.
+                    failed_nets_to_recover = [
+                        n
+                        for n in net_order
+                        if not net_routes.get(n)
+                        and n not in single_pad_nets
+                        and n not in off_grid_nets
+                    ]
+                    if failed_nets_to_recover:
+                        # Add failed nets to reroute list if not already present
+                        for failed_net in failed_nets_to_recover:
+                            if failed_net not in nets_to_reroute:
+                                nets_to_reroute.append(failed_net)
+                        print(f"  Including {len(failed_nets_to_recover)} failed net(s) in recovery")
+
+                    # Issue #2475: Also include partially routed nets — nets that
+                    # appear in ``net_routes`` but failed to connect all of their
+                    # pads (e.g. PHASE_B with 3/4 pads).  These nets have routes
+                    # that may not pass through any overused cell, so the standard
+                    # detector misses them entirely.  Without re-attempting them,
+                    # they remain stuck at the connectivity gap forever.
+                    partial_nets = self._get_partially_routed_nets(net_routes, pads_by_net)
+                    if partial_nets:
+                        new_partial = [
+                            n for n in partial_nets
+                            if n not in nets_to_reroute and n not in off_grid_nets
+                        ]
+                        if new_partial:
+                            for partial_net in new_partial:
+                                nets_to_reroute.append(partial_net)
+                            partial_names = [
+                                self.net_names.get(n, f"Net_{n}") for n in new_partial
+                            ]
                             flush_print(
-                                f"    Unrouted nets: {', '.join(unrouted_names)}"
+                                f"  Including {len(new_partial)} partially routed net(s) "
+                                f"in recovery: {', '.join(partial_names)}"
                             )
-                        if partial_names:
+
+                    # Issue #3002: Post-iteration live re-validation of
+                    # committed segments against committed foreign-net vias.
+                    # The pre-commit clearance gate sees only vias already
+                    # in ``grid.routes`` at the moment a segment validates;
+                    # cross-net ordering bugs (segment commits before a
+                    # later foreign via lands in the same iteration) slip
+                    # past the gate.  This hook walks every committed
+                    # segment against every foreign-net via using the
+                    # shared :func:`segment_clears_foreign_via` predicate
+                    # (STANDARD threshold) and feeds violators back into
+                    # ``nets_to_reroute`` so the next iteration retries
+                    # them with up-to-date foreign-via context.
+                    #
+                    # Concrete failure this catches: board-04 SWDIO/BOOT0
+                    # at PCB (143.8, 119.7) on B.Cu -- SWDIO's B.Cu
+                    # segment clips BOOT0's via.
+                    # Issue #3002 (PR #3006 perf): cache_key matches the
+                    # top-of-iter snapshot since no mutations have occurred
+                    # between this call site and the iteration boundary.
+                    # Hot path: this is the third call within an iteration
+                    # that reads the same ``("post", K-1)`` state.
+                    # Issue #3077: extend the via universe with escape-phase
+                    # routes (lateral / in-pad helpers from PR #3070 etc).
+                    _extra_mid = self._collect_extra_routes_for_revalidation(net_routes)
+                    seg_via_violators = neg_router.find_nets_with_segment_via_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
+                        extra_routes=_extra_mid,
+                    )
+                    if seg_via_violators:
+                        new_violators = [
+                            n for n in seg_via_violators
+                            if n not in nets_to_reroute and n not in off_grid_nets
+                        ]
+                        if new_violators:
+                            for v_net in new_violators:
+                                nets_to_reroute.append(v_net)
+                            violator_names = [
+                                self.net_names.get(n, f"Net_{n}") for n in new_violators
+                            ]
                             flush_print(
-                                f"    Partially routed nets: {', '.join(partial_names)}"
+                                f"  Including {len(new_violators)} segment-vs-foreign-via "
+                                f"violator(s) in recovery: {', '.join(violator_names)}"
                             )
-                    break
 
-                # Issue #2388: Early-abort heuristic for power-net stalls.
-                # If every currently stalled net is a power/pour net, AND
-                # overflow has been flat for at least 2 iterations, the
-                # negotiated loop cannot make further progress (the residual
-                # congestion comes entirely from power nets the router has
-                # already given up rerouting).  Bail out with a clear
-                # diagnostic so the CLI can surface actionable suggestions
-                # (e.g. --power-nets, --auto-layers) instead of spinning
-                # until --timeout.
-                if (
-                    stalled_nets
-                    and len(overflow_history) >= 2
-                    and overflow_history[-1] == overflow_history[-2]
-                    and all(
-                        self._is_pour_net(n) or self._is_power_net_by_class(n)
-                        for n in stalled_nets
+                    # Issue #3020: Symmetric sibling of the segment-vs-via
+                    # hook above -- walks every committed VIA against
+                    # every foreign-net SEGMENT (including permanent
+                    # escape segments) and feeds VIA-OWNING nets back
+                    # into ``nets_to_reroute``.  Escape segments are
+                    # non-rippable infrastructure (see
+                    # ``_escape_pad_overrides`` policy at
+                    # ``core.py:10123-10145``), so the fix MUST be on
+                    # the via side -- A* will pick a different layer-
+                    # transition point on the via's parent net.
+                    #
+                    # Concrete failure this catches: board-04
+                    # SWDIO/BOOT0 at PCB (143.8, 119.7) on B.Cu.  SWDIO
+                    # escape segment landed in escape phase; BOOT0's
+                    # main-router via lands later on B.Cu within
+                    # via_radius + half_seg_w + clearance of SWDIO's
+                    # segment.  PR #3006 cannot see this because it
+                    # gates on SEGMENT commit; this hook gates on VIA
+                    # commit (post-iteration).
+                    via_seg_violators = neg_router.find_nets_with_via_segment_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
+                        extra_routes=_extra_mid,
                     )
-                ):
-                    stall_names = sorted(
-                        self.net_names.get(n, f"Net_{n}") for n in stalled_nets
-                    )
-                    self.power_stall_abort = True
-                    self.power_stall_nets = stall_names
-                    flush_print(
-                        f"\n  Power-net stall detected: {len(stalled_nets)} stalled "
-                        f"net(s) are all power/pour nets and overflow has plateaued "
-                        f"at {overflow_history[-1]}."
-                    )
-                    flush_print(
-                        f"  Stalled nets: {', '.join(stall_names)}"
-                    )
-                    flush_print(
-                        "  Aborting iteration loop to avoid spin-wait. "
-                        "Try --auto-layers (dedicated planes) or "
-                        "--power-nets (copper zones) to resolve this."
-                    )
-                    break
-
-                if use_targeted_ripup:
-                    # Targeted rip-up: for each conflicting net, find its specific blockers
-                    # and only rip up those instead of all conflicting nets at once
-                    flush_print(
-                        f"  Using targeted rip-up for {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
-                    )
-                    targeted_ripup_count = 0
-                    failed_nets: list[int] = []
-
-                    for i, failed_net in enumerate(nets_to_reroute):
-                        if check_timeout():
-                            print(
-                                f"  ⚠ Timeout during targeted reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                    if via_seg_violators:
+                        new_via_violators = [
+                            n for n in via_seg_violators
+                            if n not in nets_to_reroute and n not in off_grid_nets
+                        ]
+                        if new_via_violators:
+                            for v_net in new_via_violators:
+                                nets_to_reroute.append(v_net)
+                            violator_names = [
+                                self.net_names.get(n, f"Net_{n}") for n in new_via_violators
+                            ]
+                            flush_print(
+                                f"  Including {len(new_via_violators)} via-vs-foreign-segment "
+                                f"violator(s) in recovery: {', '.join(violator_names)}"
                             )
-                            timed_out = True
-                            break
 
-                        net_name = self.net_names.get(failed_net, f"Net_{failed_net}")
-                        flush_print(
-                            f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
-                        )
+                    # Issue #3433: Third quadrant -- segment-vs-foreign-
+                    # segment violators.  Cross-net trace overlaps (board-04
+                    # SWCLK/SWO committed coincident in the SWD corridor)
+                    # are invisible to the two via hooks above AND can be
+                    # missed by ``find_nets_through_overused_cells`` when
+                    # the overflow attribution lands elsewhere -- the
+                    # overlapping nets then never enter the rip-up cohort
+                    # and the loop stagnates with the overlap committed.
+                    # Feed BOTH nets of each violating pair back so the
+                    # next iteration can separate them (typically by layer).
+                    seg_seg_violators = neg_router.find_nets_with_segment_segment_violations(
+                        net_routes, trace_clearance=self.rules.trace_clearance,
+                        cache_key=("post", iteration - 1),
+                        extra_routes=_extra_mid,
+                    )
+                    if seg_seg_violators:
+                        new_seg_seg_violators = [
+                            n for n in seg_seg_violators
+                            if n not in nets_to_reroute and n not in off_grid_nets
+                        ]
+                        if new_seg_seg_violators:
+                            for v_net in new_seg_seg_violators:
+                                nets_to_reroute.append(v_net)
+                            violator_names = [
+                                self.net_names.get(n, f"Net_{n}")
+                                for n in new_seg_seg_violators
+                            ]
+                            flush_print(
+                                f"  Including {len(new_seg_seg_violators)} segment-vs-foreign-"
+                                f"segment violator(s) in recovery: {', '.join(violator_names)}"
+                            )
 
-                        # Find blocking nets for this failed net
-                        pads = pads_by_net.get(failed_net, [])
-                        if len(pads) < 2:
+                    # Issue #2295: Per-net rip-up stall filtering.
+                    # Track each net's overflow contribution across rip-up
+                    # iterations.  If a net has been ripped up N consecutive times
+                    # without its overflow improving, exclude it from future
+                    # rip-up sets.  This prevents high-pad-count decoupling nets
+                    # (e.g., C11-2 with 16 pads) from consuming ~200s per
+                    # iteration on fruitless A* searches.
+                    #
+                    # Issue #2396: Nets that completely failed to route (not in
+                    # net_routes) should not accumulate stall counts -- they
+                    # have no overflow to improve.  Only nets that ARE routed
+                    # but pass through overused cells should be stall-tracked.
+                    current_overflow = self.grid.get_total_overflow()
+                    failed_net_ids = set(failed_nets_to_recover)
+                    for net in nets_to_reroute:
+                        if net in failed_net_ids:
+                            # Issue #2396: Skip stall tracking for unrouted nets.
+                            # They failed entirely and need fresh attempts, not
+                            # stall-based exclusion.
                             continue
-
-                        # Issue #2475: If the failed net is partially routed
-                        # (some pads connected, some not), rip up its existing
-                        # routes before re-attempting.  Otherwise the new A*
-                        # search runs against a grid where the partial routes
-                        # are still marked, and ``_route_net_negotiated`` will
-                        # build a duplicate Steiner tree on top of stale routes.
-                        if failed_net in net_routes and net_routes[failed_net]:
-                            neg_router.rip_up_nets(
-                                [failed_net], net_routes, self.routes
-                            )
-
-                        # Find which nets are blocking by checking pad connections
-                        blocking_nets: set[int] = set()
-                        for j in range(len(pads) - 1):
-                            blockers = neg_router.find_blocking_nets_for_connection(
-                                pads[j], pads[j + 1]
-                            )
-                            blocking_nets.update(blockers)
-
-                        # Issue #2475: Augment blockers with same-tier siblings
-                        # that share a destination component.  When three motor
-                        # phase nets compete for the same J2 connector pin field,
-                        # the early-routed phase nets reserve grid cells in the
-                        # field but don't sit on the *direct line* between the
-                        # later phase's pads — so the wire-clearance check above
-                        # misses them entirely.  This catches that case.
-                        sibling_blockers = self._find_same_tier_destination_siblings(
-                            failed_net, list(net_routes.keys())
-                        )
-                        if sibling_blockers:
-                            new_siblings = sibling_blockers - blocking_nets
-                            if new_siblings:
-                                sibling_names = [
-                                    self.net_names.get(n, f"Net_{n}") for n in new_siblings
-                                ]
-                                flush_print(
-                                    f"      + {len(new_siblings)} same-tier destination "
-                                    f"sibling(s) added as blockers: {', '.join(sibling_names)}"
-                                )
-                            blocking_nets |= sibling_blockers
-
-                        if blocking_nets:
-                            # Use targeted rip-up to displace only blocking nets
-                            def mark_route(route: Route) -> None:
-                                self._mark_route(route)
-
-                            success = neg_router.targeted_ripup(
-                                failed_net=failed_net,
-                                blocking_nets=blocking_nets,
-                                net_routes=net_routes,
-                                routes_list=self.routes,
-                                pads_by_net=pads_by_net,
-                                present_cost_factor=present_factor,
-                                mark_route_callback=mark_route,
-                                ripup_history=ripup_history,
-                                max_ripups_per_net=max_ripups_per_net,
-                                per_net_timeout=per_net_timeout,
-                            )
-                            if success:
-                                targeted_ripup_count += 1
+                        prev = net_prev_overflow.get(net)
+                        if prev is not None:
+                            if current_overflow >= prev:
+                                # No improvement since last rip-up of this net
+                                net_ripup_stall[net] = net_ripup_stall.get(net, 0) + 1
                             else:
-                                failed_nets.append(failed_net)
-                        else:
-                            # Issue #858: No blocking nets found by direct-line check.
-                            # This can happen when blocking traces don't intersect the
-                            # direct path but still prevent routing via clearance/congestion.
-                            # Try ripping up ALL routed nets and re-routing failed net first.
-                            routed_nets = list(net_routes.keys())
-                            if routed_nets and iteration <= 2 and not full_reorder_used_this_iter and not hotset_only:  # Try in first few iterations
-                                print(
-                                    f"    No direct blockers found - trying full reorder for net {failed_net}"
-                                )
-                                # Rip up all routed nets
-                                neg_router.rip_up_nets(routed_nets, net_routes, self.routes)
+                                # Overflow improved -- reset stall counter
+                                net_ripup_stall[net] = 0
+                        net_prev_overflow[net] = current_overflow
 
-                                # Route the failed net first (it now has priority)
+                    # Filter out stalled nets
+                    newly_stalled = [
+                        n for n in nets_to_reroute
+                        if net_ripup_stall.get(n, 0) >= max_net_stall_iterations
+                        and n not in stalled_nets
+                    ]
+                    if newly_stalled:
+                        stalled_nets.update(newly_stalled)
+                        stalled_names = [
+                            self.net_names.get(n, f"Net_{n}") for n in newly_stalled
+                        ]
+                        flush_print(
+                            f"  Excluding {len(newly_stalled)} stalled net(s) from rip-up: "
+                            f"{', '.join(stalled_names)}"
+                        )
+
+                    # Issue #2515: Track the unfiltered rip-up cohort identity so
+                    # we can detect non-zero overflow stagnation -- the same set
+                    # of nets oscillating in a narrow overflow band but never
+                    # converging.  Captured *before* the stalled-net filter so
+                    # the cohort signature is stable when nets transition into
+                    # ``stalled_nets``.
+                    cohort_history.append(frozenset(nets_to_reroute))
+
+                    # Issue #2515: Non-zero overflow stagnation recovery.
+                    # When PHASE_A/B/C + SW_OUT compete for the same J2 pin field,
+                    # the rip-up loop oscillates the same 4 nets indefinitely with
+                    # overflow stuck in [2, 4, 7, 4, ...].  Eventually the per-net
+                    # stall detector marks them all stalled and the iteration
+                    # terminates with "No nets to rip up", silently leaving them
+                    # unrouted.  Detect this case and fire a recovery pass that:
+                    #
+                    #   1. Re-enables stalled nets so they are not orphaned.
+                    #   2. Rips up the entire cohort *plus* any same-tier
+                    #      destination siblings (e.g. PHASE_*  on J2) that may
+                    #      have reserved cells in the contended pin field.
+                    #   3. Re-routes them with elevated ``present_factor`` to
+                    #      bias the A* search toward unexplored corridors.
+                    #
+                    # Trigger condition: the unfiltered cohort has been
+                    # identical (or a strict subset) for the last
+                    # ``cohort_stagnation_window`` iterations, the overflow
+                    # window has not improved, and the recovery budget has not
+                    # been exhausted.
+                    cohort_stagnation_window = 3
+                    if (
+                        iteration >= cohort_stagnation_window
+                        and stagnation_recovery_count < max_stagnation_recoveries
+                        and len(cohort_history) >= cohort_stagnation_window
+                        and not timed_out
+                    ):
+                        recent_cohorts = cohort_history[-cohort_stagnation_window:]
+                        base_cohort = recent_cohorts[0]
+                        # Same set OR subsequent cohorts are a subset of base
+                        # (handles the case where some nets get marked stalled
+                        # mid-window but the active subset stabilises).
+                        cohorts_stable = (
+                            bool(base_cohort)
+                            and all(c <= base_cohort and c for c in recent_cohorts)
+                        )
+                        overflow_stable = False
+                        if len(overflow_history) >= cohort_stagnation_window:
+                            recent_ov = overflow_history[-cohort_stagnation_window:]
+                            # All non-zero AND no new global minimum AND band <= 5
+                            if (
+                                min(recent_ov) > 0
+                                and min(recent_ov) >= min(overflow_history)
+                                and (max(recent_ov) - min(recent_ov)) <= 5
+                            ):
+                                overflow_stable = True
+                        if cohorts_stable and overflow_stable:
+                            stagnation_recovery_count += 1
+                            recovery_cohort = set(base_cohort)
+                            # Augment with same-tier destination siblings so the
+                            # contended pin-field reservations are also released.
+                            sibling_extension: set[int] = set()
+                            for n in recovery_cohort:
+                                sibling_extension |= self._find_same_tier_destination_siblings(
+                                    n, list(net_routes.keys())
+                                )
+                            recovery_cohort |= sibling_extension
+                            # Re-enable previously stalled nets so they don't get
+                            # orphaned by the recovery sweep.
+                            if stalled_nets:
+                                recovery_cohort |= stalled_nets
+                                stalled_nets.clear()
+                                net_ripup_stall.clear()
+                            cohort_names = sorted(
+                                self.net_names.get(n, f"Net_{n}")
+                                for n in recovery_cohort
+                                if n in pads_by_net
+                            )
+                            flush_print(
+                                f"  Stagnation recovery #{stagnation_recovery_count}: "
+                                f"cohort stable for {cohort_stagnation_window} iter(s), "
+                                f"overflow band {overflow_history[-cohort_stagnation_window:]}, "
+                                f"rerouting {len(cohort_names)} net(s) with "
+                                f"elevated present_factor ({elapsed_str()})"
+                            )
+                            flush_print(f"    Cohort: {', '.join(cohort_names)}")
+                            # Rip up all cohort routes (only the ones currently routed)
+                            ripup_targets = [
+                                n for n in recovery_cohort if n in net_routes and net_routes[n]
+                            ]
+                            # Issue #3413: snapshot the ripped cohort so members
+                            # whose elevated-cost reroute fails are restored
+                            # verbatim.  Measured on board 06 (seed 42): the
+                            # recovery ripped 11 nets, re-landed 7, and left the
+                            # iteration with connected 19 -> 15 -- a strictly
+                            # worse state that also burned the wall budget the
+                            # later iterations needed.  Restoring failures keeps
+                            # the recovery monotone in reach: it can only swap
+                            # geometry, never lose a routed net.
+                            recovery_original_routes: dict[int, list[Route]] = {
+                                n: list(net_routes.get(n, [])) for n in ripup_targets
+                            }
+                            if ripup_targets:
+                                neg_router.rip_up_nets(ripup_targets, net_routes, self.routes)
+                            # Re-route each cohort member fresh with elevated cost
+                            recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
+                            recovered_count = 0
+                            for rn in sorted(recovery_cohort, key=lambda n: self._get_net_priority(n)):
+                                if check_timeout():
+                                    timed_out = True
+                                    break
+                                if rn not in pads_by_net:
+                                    continue
                                 routes = self._route_net_negotiated(
-                                    failed_net,
-                                    present_factor,
-                                    per_net_timeout=per_net_timeout,
+                                    rn, recovery_factor, per_net_timeout=per_net_timeout
                                 )
                                 if routes:
-                                    net_routes[failed_net] = routes
+                                    net_routes[rn] = routes
                                     for route in routes:
                                         self.grid.mark_route_usage(route)
                                         self.routes.append(route)
-                                    targeted_ripup_count += 1
-                                    # Issue #2275: Update layer fill ratios
-                                    if hasattr(self.router, "update_layer_fill_ratios"):
-                                        self.router.update_layer_fill_ratios()
+                                    recovered_count += 1
+                            # Issue #3413: no-net-loss restore for cohort members
+                            # that were ripped but did not re-land (reroute failed
+                            # or the timeout broke the loop mid-cohort).
+                            recovery_restored = 0
+                            for rn in ripup_targets:
+                                if not net_routes.get(rn) and recovery_original_routes.get(rn):
+                                    restored = recovery_original_routes[rn]
+                                    net_routes[rn] = restored
+                                    for route in restored:
+                                        self._mark_route(route)
+                                        self.grid.mark_route_usage(route)
+                                        if route not in self.routes:
+                                            self.routes.append(route)
+                                    recovery_restored += 1
+                            if recovery_restored:
+                                flush_print(
+                                    f"  Stagnation recovery restored {recovery_restored} "
+                                    f"net(s) whose reroute failed (no-net-loss)"
+                                )
+                            # Recompute overflow & cohort tracking after recovery
+                            current_overflow = self.grid.get_total_overflow()
+                            overused = self.grid.find_overused_cells()
+                            # Update the latest overflow_history entry to reflect
+                            # post-recovery state so subsequent oscillation
+                            # detection sees the recovery's effect.
+                            overflow_history[-1] = current_overflow
+                            # Reset cohort history so we don't immediately
+                            # re-trigger on the same window.
+                            cohort_history.clear()
+                            flush_print(
+                                f"  Stagnation recovery rerouted {recovered_count}/"
+                                f"{len(recovery_cohort)} net(s), overflow now: "
+                                f"{current_overflow} ({elapsed_str()})"
+                            )
+                            # Recompute nets_to_reroute for this iteration based
+                            # on post-recovery state.
+                            nets_to_reroute = neg_router.find_nets_through_overused_cells(
+                                net_routes, overused
+                            )
+                            # Re-add still-failed nets and partial nets after recovery
+                            # (Issue #3448: empty-list entries count as failed too)
+                            for fn in net_order:
+                                if (
+                                    not net_routes.get(fn)
+                                    and fn in pads_by_net
+                                    and fn not in off_grid_nets
+                                    and fn not in nets_to_reroute
+                                ):
+                                    nets_to_reroute.append(fn)
 
-                                # Always re-route the other nets (even if failed net didn't route)
-                                for other_net in routed_nets:
-                                    other_routes = self._route_net_negotiated(
-                                        other_net,
+                    if stalled_nets:
+                        nets_to_reroute = [
+                            n for n in nets_to_reroute if n not in stalled_nets
+                        ]
+
+                    # Issue #2396: When overflow is 0 but nets remain unrouted,
+                    # the rip-up loop has no overflow signal to act on.  Force
+                    # a fresh A* attempt for each unrouted net with an elevated
+                    # present_factor to encourage exploration of alternative
+                    # paths.  This directly addresses the 4L 3/8 plateau
+                    # observed in board 04.
+                    if (
+                        current_overflow == 0
+                        and failed_net_ids
+                        and not timed_out
+                    ):
+                        recovery_factor = max(present_factor * 2.0, initial_present_factor * 4.0)
+                        recovered = 0
+                        attempted = 0
+                        # Issue #3438 design note: a probe-based gate ("skip
+                        # the elevated-cost attempt when a relief probe shows
+                        # the corridor is hard-sealed") was prototyped here to
+                        # save the measured 134s-for-0/5 this recovery burns
+                        # on board 07.  It was REMOVED after A/B measurement:
+                        # the probes' mark/unmark cycles ahead of the cohort
+                        # reroute perturb the subsequent searches enough to
+                        # drop the iteration-1 cohort from 5/8 to 4/8 and the
+                        # final reach from 30/31 to 28/31.  Relief probes now
+                        # run only inside the LAST-RESORT rescue (stall
+                        # branch), after the iteration's best state is
+                        # already banked.
+                        for fn in list(failed_net_ids):
+                            # Issue #3413: per-net wall-clock check.  This
+                            # recovery previously had NO timeout discipline:
+                            # measured on board 06 it ran 380s past a 360s
+                            # budget (21 elevated-cost attempts at up to 30s
+                            # each), and the loop then "discovered" the
+                            # exhausted budget only at the next reroute.
+                            if check_timeout():
+                                timed_out = True
+                                break
+                            # Issue #3448: ``net_routes.get(fn)`` (not bare
+                            # membership) so a ripped-then-failed net with an
+                            # empty-list entry still receives the elevated-cost
+                            # recovery attempt.
+                            if fn in stalled_nets or net_routes.get(fn):
+                                continue
+                            attempted += 1
+                            routes = self._route_net_negotiated(
+                                fn, recovery_factor, per_net_timeout=per_net_timeout
+                            )
+                            if routes:
+                                net_routes[fn] = routes
+                                recovered += 1
+                                for route in routes:
+                                    self.grid.mark_route_usage(route)
+                                    self.routes.append(route)
+                        # Issue #2514: Always log the attempt summary so the
+                        # operator can see that recovery ran -- previously the
+                        # log was silent on ``recovered == 0``, which made it
+                        # appear that the recovery path never executed.
+                        if attempted > 0:
+                            flush_print(
+                                f"  Zero-overflow recovery: routed {recovered}/{attempted} "
+                                f"previously-failed net(s) with elevated cost "
+                                f"(factor={recovery_factor:.2f})"
+                            )
+                        if recovered > 0:
+                            # Recompute overflow after recovery
+                            current_overflow = self.grid.get_total_overflow()
+                            overused = self.grid.find_overused_cells()
+
+                    # If overflow improves globally, give stalled nets another
+                    # chance -- their blockage may have cleared.
+                    if (
+                        stalled_nets
+                        and len(overflow_history) >= 2
+                        and overflow_history[-1] < overflow_history[-2]
+                    ):
+                        flush_print(
+                            f"  Re-enabling {len(stalled_nets)} stalled net(s) after overflow improvement"
+                        )
+                        stalled_nets.clear()
+                        net_ripup_stall.clear()
+
+                    # Issue #2413: Early termination when no nets remain to rip up.
+                    # All conflicting nets have been excluded by the stall detector,
+                    # so further iterations cannot make progress.
+                    if not nets_to_reroute:
+                        # Issue #2514: Distinguish "genuine convergence" from
+                        # "remaining unrouted nets are all structurally
+                        # unroutable" so the operator understands why the loop
+                        # exited at iteration 1 with nets still missing.
+                        remaining_unrouted = [
+                            n for n in net_order if not net_routes.get(n)
+                        ]
+                        structurally_unroutable = [
+                            n for n in remaining_unrouted if n in single_pad_nets or n in off_grid_nets
+                        ]
+                        if remaining_unrouted and len(structurally_unroutable) == len(
+                            remaining_unrouted
+                        ):
+                            flush_print(
+                                f"  No rip-up candidates: {len(remaining_unrouted)} "
+                                f"remaining unrouted net(s) are structurally "
+                                f"unroutable (single-pad or off-grid). Terminating "
+                                f"at iteration {iteration}/{max_iterations} ({elapsed_str()})"
+                            )
+                        else:
+                            # Issue #2515: Surface unroutable / partial nets by
+                            # name so operators see what the loop gave up on.
+                            unrouted_names = sorted(
+                                self.net_names.get(n, f"Net_{n}")
+                                for n in net_order
+                                if not net_routes.get(n) and n in pads_by_net
+                            )
+                            partial_at_term = self._get_partially_routed_nets(
+                                net_routes, pads_by_net
+                            )
+                            partial_names = sorted(
+                                self.net_names.get(n, f"Net_{n}") for n in partial_at_term
+                            )
+                            flush_print(
+                                f"  No nets to rip up, terminating at iteration "
+                                f"{iteration}/{max_iterations} ({elapsed_str()})"
+                            )
+                            if unrouted_names:
+                                flush_print(
+                                    f"    Unrouted nets: {', '.join(unrouted_names)}"
+                                )
+                            if partial_names:
+                                flush_print(
+                                    f"    Partially routed nets: {', '.join(partial_names)}"
+                                )
+                        break
+
+                    # Issue #2388: Early-abort heuristic for power-net stalls.
+                    # If every currently stalled net is a power/pour net, AND
+                    # overflow has been flat for at least 2 iterations, the
+                    # negotiated loop cannot make further progress (the residual
+                    # congestion comes entirely from power nets the router has
+                    # already given up rerouting).  Bail out with a clear
+                    # diagnostic so the CLI can surface actionable suggestions
+                    # (e.g. --power-nets, --auto-layers) instead of spinning
+                    # until --timeout.
+                    if (
+                        stalled_nets
+                        and len(overflow_history) >= 2
+                        and overflow_history[-1] == overflow_history[-2]
+                        and all(
+                            self._is_pour_net(n) or self._is_power_net_by_class(n)
+                            for n in stalled_nets
+                        )
+                    ):
+                        stall_names = sorted(
+                            self.net_names.get(n, f"Net_{n}") for n in stalled_nets
+                        )
+                        self.power_stall_abort = True
+                        self.power_stall_nets = stall_names
+                        flush_print(
+                            f"\n  Power-net stall detected: {len(stalled_nets)} stalled "
+                            f"net(s) are all power/pour nets and overflow has plateaued "
+                            f"at {overflow_history[-1]}."
+                        )
+                        flush_print(
+                            f"  Stalled nets: {', '.join(stall_names)}"
+                        )
+                        flush_print(
+                            "  Aborting iteration loop to avoid spin-wait. "
+                            "Try --auto-layers (dedicated planes) or "
+                            "--power-nets (copper zones) to resolve this."
+                        )
+                        break
+
+                    if use_targeted_ripup:
+                        # Targeted rip-up: for each conflicting net, find its specific blockers
+                        # and only rip up those instead of all conflicting nets at once
+                        flush_print(
+                            f"  Using targeted rip-up for {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
+                        )
+                        targeted_ripup_count = 0
+                        failed_nets: list[int] = []
+
+                        for i, failed_net in enumerate(nets_to_reroute):
+                            if check_timeout():
+                                print(
+                                    f"  ⚠ Timeout during targeted reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                                )
+                                timed_out = True
+                                break
+
+                            net_name = self.net_names.get(failed_net, f"Net_{failed_net}")
+                            flush_print(
+                                f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
+                            )
+
+                            # Find blocking nets for this failed net
+                            pads = pads_by_net.get(failed_net, [])
+                            if len(pads) < 2:
+                                continue
+
+                            # Issue #2475: If the failed net is partially routed
+                            # (some pads connected, some not), rip up its existing
+                            # routes before re-attempting.  Otherwise the new A*
+                            # search runs against a grid where the partial routes
+                            # are still marked, and ``_route_net_negotiated`` will
+                            # build a duplicate Steiner tree on top of stale routes.
+                            if failed_net in net_routes and net_routes[failed_net]:
+                                neg_router.rip_up_nets(
+                                    [failed_net], net_routes, self.routes
+                                )
+
+                            # Find which nets are blocking by checking pad connections
+                            blocking_nets: set[int] = set()
+                            for j in range(len(pads) - 1):
+                                blockers = neg_router.find_blocking_nets_for_connection(
+                                    pads[j], pads[j + 1]
+                                )
+                                blocking_nets.update(blockers)
+
+                            # Issue #2475: Augment blockers with same-tier siblings
+                            # that share a destination component.  When three motor
+                            # phase nets compete for the same J2 connector pin field,
+                            # the early-routed phase nets reserve grid cells in the
+                            # field but don't sit on the *direct line* between the
+                            # later phase's pads — so the wire-clearance check above
+                            # misses them entirely.  This catches that case.
+                            sibling_blockers = self._find_same_tier_destination_siblings(
+                                failed_net, list(net_routes.keys())
+                            )
+                            if sibling_blockers:
+                                new_siblings = sibling_blockers - blocking_nets
+                                if new_siblings:
+                                    sibling_names = [
+                                        self.net_names.get(n, f"Net_{n}") for n in new_siblings
+                                    ]
+                                    flush_print(
+                                        f"      + {len(new_siblings)} same-tier destination "
+                                        f"sibling(s) added as blockers: {', '.join(sibling_names)}"
+                                    )
+                                blocking_nets |= sibling_blockers
+
+                            if blocking_nets:
+                                # Use targeted rip-up to displace only blocking nets
+                                def mark_route(route: Route) -> None:
+                                    self._mark_route(route)
+
+                                success = neg_router.targeted_ripup(
+                                    failed_net=failed_net,
+                                    blocking_nets=blocking_nets,
+                                    net_routes=net_routes,
+                                    routes_list=self.routes,
+                                    pads_by_net=pads_by_net,
+                                    present_cost_factor=present_factor,
+                                    mark_route_callback=mark_route,
+                                    ripup_history=ripup_history,
+                                    max_ripups_per_net=max_ripups_per_net,
+                                    per_net_timeout=per_net_timeout,
+                                )
+                                if success:
+                                    targeted_ripup_count += 1
+                                else:
+                                    failed_nets.append(failed_net)
+                            else:
+                                # Issue #858: No blocking nets found by direct-line check.
+                                # This can happen when blocking traces don't intersect the
+                                # direct path but still prevent routing via clearance/congestion.
+                                # Try ripping up ALL routed nets and re-routing failed net first.
+                                routed_nets = list(net_routes.keys())
+                                if routed_nets and iteration <= 2 and not full_reorder_used_this_iter and not hotset_only:  # Try in first few iterations
+                                    print(
+                                        f"    No direct blockers found - trying full reorder for net {failed_net}"
+                                    )
+                                    # Rip up all routed nets
+                                    neg_router.rip_up_nets(routed_nets, net_routes, self.routes)
+
+                                    # Route the failed net first (it now has priority)
+                                    routes = self._route_net_negotiated(
+                                        failed_net,
                                         present_factor,
                                         per_net_timeout=per_net_timeout,
                                     )
-                                    if other_routes:
-                                        net_routes[other_net] = other_routes
-                                        for route in other_routes:
+                                    if routes:
+                                        net_routes[failed_net] = routes
+                                        for route in routes:
+                                            self.grid.mark_route_usage(route)
+                                            self.routes.append(route)
+                                        targeted_ripup_count += 1
+                                        # Issue #2275: Update layer fill ratios
+                                        if hasattr(self.router, "update_layer_fill_ratios"):
+                                            self.router.update_layer_fill_ratios()
+
+                                    # Always re-route the other nets (even if failed net didn't route)
+                                    for other_net in routed_nets:
+                                        other_routes = self._route_net_negotiated(
+                                            other_net,
+                                            present_factor,
+                                            per_net_timeout=per_net_timeout,
+                                        )
+                                        if other_routes:
+                                            net_routes[other_net] = other_routes
+                                            for route in other_routes:
+                                                self.grid.mark_route_usage(route)
+                                                self.routes.append(route)
+                                            # Issue #2275: Update layer fill ratios
+                                            if hasattr(self.router, "update_layer_fill_ratios"):
+                                                self.router.update_layer_fill_ratios()
+                                    full_reorder_used_this_iter = True
+                                else:
+                                    # Fallback: try regular reroute
+                                    routes = self._route_net_negotiated(
+                                        failed_net,
+                                        present_factor,
+                                        per_net_timeout=per_net_timeout,
+                                    )
+                                    if routes:
+                                        net_routes[failed_net] = routes
+                                        targeted_ripup_count += 1
+                                        for route in routes:
                                             self.grid.mark_route_usage(route)
                                             self.routes.append(route)
                                         # Issue #2275: Update layer fill ratios
                                         if hasattr(self.router, "update_layer_fill_ratios"):
                                             self.router.update_layer_fill_ratios()
-                                full_reorder_used_this_iter = True
+
+                        if timed_out:
+                            break
+
+                        overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
+                        # Track overflow for both branches (Issue #633)
+                        overflow_history.append(overflow)
+
+                        # Issue #2803: capture end-of-iteration metrics so the
+                        # best-state snapshot reflects the *actual* iteration
+                        # result, not just the pre-rip-up snapshot.  Replaces
+                        # the rolling best snapshot iff the lex-tuple metric
+                        # strictly improved.  Also emits the per-iter log line.
+                        _capture_iteration_end(iteration, overflow)
+
+                        # Issue #2334: Reset perturbation when overflow improves
+                        if perturbation and perturbation_best_overflow is not None:
+                            if overflow < perturbation_best_overflow:
+                                if self._perturbation_magnitude > 0:
+                                    flush_print(
+                                        f"  Perturbation reset: overflow improved "
+                                        f"{perturbation_best_overflow} → {overflow} ({elapsed_str()})"
+                                    )
+                                perturbation_stagnation_count = 0
+                                self._reset_perturbation()
+                                perturbation_best_overflow = overflow
+                            # Update best even when perturbation is inactive
+                            elif overflow == perturbation_best_overflow:
+                                pass  # No change
+                        if perturbation_best_overflow is None or overflow < perturbation_best_overflow:
+                            perturbation_best_overflow = overflow
+
+                        flush_print(
+                            f"  Targeted rip-up resolved {targeted_ripup_count}/{len(nets_to_reroute)} nets, "
+                            f"overflow: {overflow} ({elapsed_str()})"
+                        )
+
+                        # Check for convergence in targeted mode
+                        # Issue #858: Also check that all nets were routed
+                        # Issue #3448: "all nets routed" must mean full pad
+                        # connectivity, not a ``len(net_routes)`` count --
+                        # empty-list entries (ripped then hard-failed) and
+                        # partial fragments both inflate the count and caused
+                        # premature "Convergence achieved" exits with stranded
+                        # nets and unused wall budget (board 07).
+                        if overflow == 0:
+                            stranded_targeted = _stranded_nets()
+                            if not stranded_targeted:
+                                self._reset_perturbation()
+                                print(f"  Convergence achieved at iteration {iteration}!")
+                                break
+                            stranded_names = sorted(
+                                self.net_names.get(n, f"Net_{n}")
+                                for n in stranded_targeted
+                            )
+                            flush_print(
+                                f"  Overflow clean but {len(stranded_targeted)} "
+                                f"net(s) still stranded -- continuing "
+                                f"(Issue #3448): {', '.join(stranded_names)}"
+                            )
+
+                        # Issue #2274: Neighborhood rip-up when stalled with 0
+                        # overflow but unrouted nets remain.
+                        still_unrouted_targeted = [
+                            n for n in net_order
+                            if (n not in net_routes or not net_routes.get(n))
+                            and n in pads_by_net
+                            and n not in off_grid_nets
+                        ]
+                        if overflow == 0 and still_unrouted_targeted and not timed_out and not hotset_only:
+                            # Track stall progression
+                            current_routed = len(net_routes)
+                            if current_routed <= prev_routed_count:
+                                neighborhood_stall_count += 1
                             else:
-                                # Fallback: try regular reroute
-                                routes = self._route_net_negotiated(
-                                    failed_net,
-                                    present_factor,
+                                neighborhood_stall_count = 0
+                            prev_routed_count = current_routed
+
+                            if neighborhood_stall_count >= neighborhood_stall_threshold:
+                                flush_print(
+                                    f"  Neighborhood rip-up: {len(still_unrouted_targeted)} "
+                                    f"net(s) stuck, stall #{neighborhood_stall_count} "
+                                    f"(radius escalation) ({elapsed_str()})"
+                                )
+
+                                def _mark_route_neighborhood(route: Route) -> None:
+                                    self._mark_route(route)
+
+                                improved, new_count = neg_router.neighborhood_ripup(
+                                    failed_nets=still_unrouted_targeted,
+                                    net_routes=net_routes,
+                                    routes_list=self.routes,
+                                    pads_by_net=pads_by_net,
+                                    present_cost_factor=present_factor,
+                                    mark_route_callback=_mark_route_neighborhood,
+                                    stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
                                     per_net_timeout=per_net_timeout,
+                                    max_attempts=neighborhood_max_attempts,
+                                    initial_radius_factor=neighborhood_initial_radius,
+                                    escalation_factor=neighborhood_escalation_factor,
+                                    ripup_history=ripup_history,
+                                )
+
+                                overflow = self.grid.get_total_overflow()
+                                overused = self.grid.find_overused_cells()
+                                overflow_history[-1] = overflow
+
+                                if improved:
+                                    flush_print(
+                                        f"    Neighborhood rip-up routed {new_count - current_routed} "
+                                        f"new net(s), total: {new_count}/{total_nets} ({elapsed_str()})"
+                                    )
+                                    neighborhood_stall_count = 0
+                                    prev_routed_count = new_count
+                                else:
+                                    flush_print(
+                                        f"    Neighborhood rip-up did not improve "
+                                        f"({new_count}/{total_nets} nets) ({elapsed_str()})"
+                                    )
+
+                                # Issue #3448: full-connectivity predicate, not
+                                # a ``len(net_routes)`` count (see above).
+                                if overflow == 0 and not _stranded_nets():
+                                    print(f"  Convergence achieved at iteration {iteration}!")
+                                    break
+
+                        # Adaptive oscillation detection for targeted mode (Issue #633)
+                        # Guard: skip escape strategies when overflow is already 0 (#2262)
+                        if adaptive and overflow > 0 and detect_oscillation(overflow_history):
+                            # Issue #2334: Activate perturbation on oscillation to
+                            # perturb net ordering for subsequent iterations.
+                            if perturbation:
+                                perturbation_stagnation_count += 1
+                                self._activate_perturbation(perturbation_stagnation_count)
+                                flush_print(
+                                    f"  Perturbation activated (magnitude={self._perturbation_magnitude:.2f}, "
+                                    f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
+                                )
+
+                            print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
+                            print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
+
+                            def mark_route_targeted(route: Route) -> None:
+                                self._mark_route(route)
+
+                            # Issue #2415: Compute escape budget from remaining time
+                            escape_budget = None
+                            if timeout is not None:
+                                remaining = timeout - (time.time() - start_time)
+                                escape_budget = min(60.0, remaining * 0.25)
+                                if escape_budget <= 0:
+                                    escape_budget = 0.0
+
+                            success, new_overflow, tried = neg_router.escape_local_minimum(
+                                overflow_history=overflow_history,
+                                net_routes=net_routes,
+                                routes_list=self.routes,
+                                pads_by_net=pads_by_net,
+                                net_order=net_order,
+                                present_cost_factor=present_factor,
+                                mark_route_callback=mark_route_targeted,
+                                strategy_index=escape_strategy_index,
+                                per_net_timeout=per_net_timeout,
+                                escape_budget=escape_budget,
+                            )
+                            escape_strategy_index += tried
+
+                            if success:
+                                print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
+                                overflow = new_overflow
+                                overflow_history[-1] = new_overflow
+                                overused = self.grid.find_overused_cells()
+                            else:
+                                print(f"    All {tried} escape strategies exhausted without improvement")
+
+                        # Skip common code since targeted ripup handles everything
+                        # (convergence and oscillation already checked above)
+                        continue
+
+                    else:
+                        # Full rip-up: rip up all nets through overused cells
+                        flush_print(
+                            f"  Ripping up {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
+                        )
+
+                        # Issue #3438: corridor reservation.  Keep the ripped
+                        # cohort's OLD copper phantom-blocked on the C++ grid
+                        # (foreign-hard / own-soft) for the REST OF THIS
+                        # ITERATION -- the serial cohort reroute AND the
+                        # stall fallbacks below -- so an early-rerouted member
+                        # cannot steal a not-yet-rerouted sibling's only
+                        # corridor (the bus-reversal order-chaos mode), and
+                        # the targeted fallback negotiates against the same
+                        # reserved-corridor world the cohort re-landed in.
+                        # The window is flushed at the TOP of the next
+                        # iteration (and after the loop), which is what fixes
+                        # the historical phantom ACCRETION across iterations
+                        # (Issue #3101) while preserving the intra-iteration
+                        # reservation the pre-#3438 behavior provided
+                        # accidentally.
+                        self.grid.begin_cpp_unmark_deferral()
+
+                        neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
+
+                        # Use region-based parallelism if enabled (Issue #965)
+                        if region_router is not None and len(nets_to_reroute) > 1:
+                            # Route using region-based parallelism
+                            def route_fn(net: int, pf: float) -> list[Route]:
+                                return self._route_net_negotiated(
+                                    net, pf, per_net_timeout=per_net_timeout
+                                )
+
+                            def mark_fn(route: Route) -> None:
+                                self.grid.mark_route_usage(route)
+                                self.routes.append(route)
+
+                            result = region_router.route_iteration_parallel(
+                                nets_to_route=nets_to_reroute,
+                                present_factor=present_factor,
+                                route_fn=route_fn,
+                                mark_route_fn=mark_fn,
+                            )
+
+                            # Update net_routes with results
+                            for net in result.successful_nets:
+                                # Find the routes for this net from result
+                                net_routes[net] = [r for r in result.routes if r.net == net]
+
+                            rerouted_count = len(result.successful_nets)
+                        else:
+                            # Sequential routing (original behavior)
+                            rerouted_count = 0
+                            for i, net in enumerate(nets_to_reroute):
+                                if check_timeout():
+                                    print(
+                                        f"  ⚠ Timeout during reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                                    )
+                                    timed_out = True
+                                    break
+
+                                net_name = self.net_names.get(net, f"Net_{net}")
+                                flush_print(
+                                    f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
+                                )
+
+                                routes = self._route_net_negotiated(
+                                    net, present_factor, per_net_timeout=per_net_timeout
                                 )
                                 if routes:
-                                    net_routes[failed_net] = routes
-                                    targeted_ripup_count += 1
+                                    net_routes[net] = routes
+                                    rerouted_count += 1
                                     for route in routes:
                                         self.grid.mark_route_usage(route)
                                         self.routes.append(route)
@@ -8299,19 +8558,445 @@ class Autorouter:
                                     if hasattr(self.router, "update_layer_fill_ratios"):
                                         self.router.update_layer_fill_ratios()
 
-                    if timed_out:
-                        break
+                            if timed_out:
+                                break
 
-                    overflow = self.grid.get_total_overflow()
-                    overused = self.grid.find_overused_cells()
-                    # Track overflow for both branches (Issue #633)
+                        overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
+                        flush_print(
+                            f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
+                        )
+                        flush_print(
+                            f"  Progress: {len(net_routes)}/{total_nets} nets routed total"
+                        )
+
+                        # Issue #2265: When overflow is 0 but nets remain unrouted,
+                        # the standard rip-up path only re-attempts failed nets without
+                        # clearing the routed nets that block them. Fall back to
+                        # targeted rip-up to identify and displace blockers.
+                        # Issue #2333: Skip fallbacks in hotset-only mode.
+                        # Issue #2475: Also include partially routed nets (those
+                        # in net_routes but missing pad-to-pad connectivity), since
+                        # they too cannot make further progress without rip-up.
+                        partial_failed = self._get_partially_routed_nets(net_routes, pads_by_net)
+                        # Issue #3448: ``not net_routes.get(n)`` so empty-list
+                        # entries (ripped up above, then failed re-route) also
+                        # qualify for the targeted fallback.
+                        still_failed = [
+                            n for n in net_order
+                            if (
+                                (not net_routes.get(n) or n in partial_failed)
+                                and n in pads_by_net
+                                and n not in off_grid_nets
+                            )
+                        ]
+                        # Issue #3413: update the consecutive hard-failure
+                        # counters (fully unrouted nets only -- partials still
+                        # have copper down and negotiate normally).
+                        for _hf_net in still_failed:
+                            if not net_routes.get(_hf_net):
+                                hard_fail_iterations[_hf_net] = (
+                                    hard_fail_iterations.get(_hf_net, 0) + 1
+                                )
+                        for _hf_net in list(hard_fail_iterations):
+                            if net_routes.get(_hf_net):
+                                hard_fail_iterations.pop(_hf_net)
+                        if overflow == 0 and still_failed and not timed_out and not hotset_only:
+                            flush_print(
+                                f"  Stall detected: {len(still_failed)} net(s) unrouted with 0 overflow"
+                                f" - engaging targeted rip-up fallback ({elapsed_str()})"
+                            )
+
+                            # Issue #2476: Drive a focused via-blocked rip-up
+                            # first.  The C++ pathfinder records the offending
+                            # stored-via net when its A* expansion fails the
+                            # geometric via-vs-via clearance check.  Ripping up
+                            # that specific net is much more likely to unblock
+                            # progress than the Bresenham-based blocker scan
+                            # below, which can miss conflicts that are blocked
+                            # by clearance/congestion rather than direct-line
+                            # intersection.  Any nets still failing afterwards
+                            # fall through to the existing targeted-ripup path.
+                            def _mark_route_via_blocked(route: Route) -> None:
+                                self._mark_route(route)
+
+                            via_resolved, via_attempted = neg_router.via_blocked_ripup(
+                                net_routes=net_routes,
+                                routes_list=self.routes,
+                                pads_by_net=pads_by_net,
+                                present_cost_factor=present_factor,
+                                mark_route_callback=_mark_route_via_blocked,
+                                ripup_history=ripup_history,
+                                max_ripups_per_net=max_ripups_per_net,
+                                per_net_timeout=per_net_timeout,
+                            )
+                            if via_attempted > 0:
+                                flush_print(
+                                    f"  Via-blocked rip-up resolved {via_resolved}/{via_attempted} "
+                                    f"net(s) via cpp diagnostic ({elapsed_str()})"
+                                )
+                                # Recompute the still-failed list -- some nets
+                                # may now be routed thanks to the targeted via
+                                # blocker rip-up.  (Issue #3448: empty-list
+                                # entries count as failed.)
+                                still_failed = [
+                                    n for n in net_order
+                                    if not net_routes.get(n) and n in pads_by_net
+                                    and n not in off_grid_nets
+                                ]
+
+                            # Issue #2517: Drive a destination-component sibling
+                            # rip-up next.  ``via_blocked_ripup`` only handles
+                            # via-vs-via clearance failures; the chorus-test-revA
+                            # signature (DAC_CLK 0/3, Net-(LED3-2) 0/4) is a
+                            # destination-component escape-corridor saturation
+                            # where a lower-priority sibling has consumed the
+                            # only viable channel out of a dense IC pin field.
+                            # The Bresenham-based fallback below cannot find
+                            # those siblings because the conflict is geometric
+                            # (pad escape congestion), not direct-line.  This
+                            # is the negotiated-strategy counterpart of the
+                            # PR #2511 helper that ``route_all`` already
+                            # invokes.  Per-net budget is shared with the
+                            # negotiated loop's ``ripup_history`` so we cannot
+                            # double-charge a net that the loop subsequently
+                            # rerouted.
+                            component_ripup_count = 0
+                            if still_failed and not timed_out:
+                                for failed_net in list(still_failed):
+                                    if check_timeout():
+                                        timed_out = True
+                                        break
+                                    rescued = self._attempt_blocked_component_ripup_negotiated(
+                                        failed_net=failed_net,
+                                        neg_router=neg_router,
+                                        net_routes=net_routes,
+                                        pads_by_net=pads_by_net,
+                                        ripup_history=ripup_history,
+                                        present_cost_factor=present_factor,
+                                        max_ripups_per_net=max_ripups_per_net,
+                                        per_net_timeout=per_net_timeout,
+                                    )
+                                    if rescued:
+                                        component_ripup_count += 1
+                                if component_ripup_count > 0:
+                                    flush_print(
+                                        f"  BLOCKED_BY_COMPONENT (negotiated) rip-up resolved "
+                                        f"{component_ripup_count}/{len(still_failed)} net(s) "
+                                        f"({elapsed_str()})"
+                                    )
+                                    # Recompute still_failed for the Bresenham
+                                    # fallback below.  (Issue #3448: empty-list
+                                    # entries count as failed.)
+                                    still_failed = [
+                                        n for n in net_order
+                                        if not net_routes.get(n) and n in pads_by_net
+                                        and n not in off_grid_nets
+                                    ]
+
+                            targeted_fallback_count = 0
+                            for failed_net in still_failed:
+                                if check_timeout():
+                                    timed_out = True
+                                    break
+                                pads_for_net = pads_by_net.get(failed_net, [])
+                                if len(pads_for_net) < 2:
+                                    continue
+
+                                # Identify blockers BEFORE rip-up so we don't
+                                # destroy a partial route when targeted_ripup
+                                # would not run anyway (Issue #2530).
+                                blocking_nets: set[int] = set()
+                                for j in range(len(pads_for_net) - 1):
+                                    blockers = neg_router.find_blocking_nets_for_connection(
+                                        pads_for_net[j], pads_for_net[j + 1]
+                                    )
+                                    blocking_nets.update(blockers)
+
+                                # Issue #2475: Augment with same-tier destination
+                                # siblings (e.g., other PHASE_* nets sharing J2).
+                                sibling_blockers = self._find_same_tier_destination_siblings(
+                                    failed_net, list(net_routes.keys())
+                                )
+                                blocking_nets |= sibling_blockers
+
+                                # Issue #2475/#2530: only invoke targeted_ripup
+                                # when we have blockers to displace; otherwise it
+                                # would skip and we'd permanently lose the partial
+                                # route on single-net boards (or any board where
+                                # no blockers exist).
+                                #
+                                # Issue #3470 (PR #3478 judge follow-up): the
+                                # out-of-transaction pre-rip of the failed net's
+                                # stale partial routes that used to live here is
+                                # gone.  ``targeted_ripup`` rips them INSIDE its
+                                # transaction and restores them verbatim when the
+                                # reroute does not converge, so the rollback
+                                # guarantee now covers this call site too --
+                                # previously the snapshot was taken AFTER the
+                                # external rip, losing the partial connectivity
+                                # on a failed rescue.
+                                if blocking_nets:
+
+                                    def _mark_route_fallback(route: Route) -> None:
+                                        self._mark_route(route)
+
+                                    success = neg_router.targeted_ripup(
+                                        failed_net=failed_net,
+                                        blocking_nets=blocking_nets,
+                                        net_routes=net_routes,
+                                        routes_list=self.routes,
+                                        pads_by_net=pads_by_net,
+                                        present_cost_factor=present_factor,
+                                        mark_route_callback=_mark_route_fallback,
+                                        ripup_history=ripup_history,
+                                        max_ripups_per_net=max_ripups_per_net,
+                                        per_net_timeout=per_net_timeout,
+                                    )
+                                    if success:
+                                        targeted_fallback_count += 1
+                            overflow = self.grid.get_total_overflow()
+                            overused = self.grid.find_overused_cells()
+                            flush_print(
+                                f"  Targeted fallback resolved {targeted_fallback_count}/{len(still_failed)} nets ({elapsed_str()})"
+                            )
+
+                            # Issue #3438: Relief RESCUE -- LAST resort.  A
+                            # zero-overflow hard failure that survived every
+                            # fallback above usually means the net's pin
+                            # corridor is sealed by foreign usage-0 cells the
+                            # sharing clauses treat as HARD (escape stubs,
+                            # route clearance halos, via halo rings): the
+                            # failed A* emits no overflow, so PathFinder has
+                            # no negotiation signal, and the Bresenham-based
+                            # blocker scan above misses clearance-halo seals.
+                            # The rescue iterates a relief PROBE (foreign
+                            # non-obstacle copper passable at a per-step
+                            # penalty => MIN-CONFLICT path), rips exactly the
+                            # owner nets the probe crossed, and commits only
+                            # when the failed net routes in NORMAL mode AND
+                            # every displaced victim re-lands (strict
+                            # no-net-loss transaction; otherwise verbatim
+                            # rollback).  Attempt-capped per net so hopeless
+                            # geometry cannot burn the wall budget every
+                            # iteration.
+                            still_failed = [
+                                n for n in net_order
+                                if not net_routes.get(n) and n in pads_by_net
+                                and n not in off_grid_nets
+                            ]
+                            relief_resolved = 0
+                            relief_attempted = 0
+                            for failed_net in list(still_failed):
+                                if check_timeout():
+                                    timed_out = True
+                                    break
+                                if len(pads_by_net.get(failed_net, [])) < 2:
+                                    continue
+                                if (
+                                    relief_probe_attempts.get(failed_net, 0)
+                                    >= max_relief_probes_per_net
+                                ):
+                                    continue
+                                relief_probe_attempts[failed_net] = (
+                                    relief_probe_attempts.get(failed_net, 0) + 1
+                                )
+                                relief_attempted += 1
+                                if self._relief_rescue(
+                                    failed_net,
+                                    neg_router,
+                                    net_routes,
+                                    pads_by_net,
+                                    present_factor,
+                                    per_net_timeout,
+                                    flush_print,
+                                    elapsed_str,
+                                    deadline=relief_deadline,
+                                ):
+                                    relief_resolved += 1
+                            if relief_attempted > 0:
+                                flush_print(
+                                    f"  Relief rescue resolved {relief_resolved}/"
+                                    f"{relief_attempted} net(s) ({elapsed_str()})"
+                                )
+                                overflow = self.grid.get_total_overflow()
+                                overused = self.grid.find_overused_cells()
+
+                        # Issue #3413: Overflow-silent hard-failure rescue.
+                        # The targeted-fallback chain above only opens when
+                        # overflow == 0, but a pin-access hard failure emits NO
+                        # overflow signal -- when UNRELATED congestion keeps
+                        # overflow > 0 the failed net's blockers are never in
+                        # the rip-up cohort and the net stays at 0 segments
+                        # forever (board 06 MIPI_RST: sealed U4 escape corridor
+                        # while the J1 USB3 cluster holds overflow at 3).  For
+                        # nets that have been fully unrouted for
+                        # ``hard_fail_rescue_threshold`` consecutive iterations,
+                        # run the same targeted rip-up + relief-rescue sequence
+                        # the overflow==0 chain uses.  Both helpers are
+                        # transactional (verbatim rollback on failure) and
+                        # attempt-capped per net (``ripup_history`` /
+                        # ``relief_probe_attempts``), so hopeless geometry
+                        # cannot burn the wall budget every iteration.
+                        if overflow > 0 and still_failed and not timed_out and not hotset_only:
+                            silent_failed = [
+                                n for n in still_failed
+                                if not net_routes.get(n)
+                                and hard_fail_iterations.get(n, 0) >= hard_fail_rescue_threshold
+                                and len(pads_by_net.get(n, [])) >= 2
+                            ]
+                            if silent_failed:
+                                silent_names = sorted(
+                                    self.net_names.get(n, f"Net_{n}") for n in silent_failed
+                                )
+                                flush_print(
+                                    f"  Overflow-silent hard failure: {len(silent_failed)} net(s) "
+                                    f"unrouted >= {hard_fail_rescue_threshold} iteration(s) with "
+                                    f"overflow={overflow} elsewhere - engaging targeted rescue "
+                                    f"({elapsed_str()}): {', '.join(silent_names)}"
+                                )
+                                silent_resolved = 0
+                                for failed_net in silent_failed:
+                                    if check_timeout():
+                                        timed_out = True
+                                        break
+
+                                    # 1) Targeted rip-up of direct-line blockers
+                                    # (same Bresenham scan as the overflow==0
+                                    # chain; transactional inside targeted_ripup).
+                                    pads_for_net = pads_by_net.get(failed_net, [])
+                                    blocking_nets: set[int] = set()
+                                    for j in range(len(pads_for_net) - 1):
+                                        blockers = neg_router.find_blocking_nets_for_connection(
+                                            pads_for_net[j], pads_for_net[j + 1]
+                                        )
+                                        blocking_nets.update(blockers)
+                                    if blocking_nets:
+
+                                        def _mark_route_silent(route: Route) -> None:
+                                            self._mark_route(route)
+
+                                        if neg_router.targeted_ripup(
+                                            failed_net=failed_net,
+                                            blocking_nets=blocking_nets,
+                                            net_routes=net_routes,
+                                            routes_list=self.routes,
+                                            pads_by_net=pads_by_net,
+                                            present_cost_factor=present_factor,
+                                            mark_route_callback=_mark_route_silent,
+                                            ripup_history=ripup_history,
+                                            max_ripups_per_net=max_ripups_per_net,
+                                            per_net_timeout=per_net_timeout,
+                                        ):
+                                            silent_resolved += 1
+                                            continue
+
+                                    # 2) Relief rescue (clearance-halo seals the
+                                    # Bresenham scan cannot see).
+                                    if (
+                                        relief_probe_attempts.get(failed_net, 0)
+                                        >= max_relief_probes_per_net
+                                    ):
+                                        continue
+                                    relief_probe_attempts[failed_net] = (
+                                        relief_probe_attempts.get(failed_net, 0) + 1
+                                    )
+                                    if self._relief_rescue(
+                                        failed_net,
+                                        neg_router,
+                                        net_routes,
+                                        pads_by_net,
+                                        present_factor,
+                                        per_net_timeout,
+                                        flush_print,
+                                        elapsed_str,
+                                        deadline=relief_deadline,
+                                    ):
+                                        silent_resolved += 1
+                                if silent_resolved > 0:
+                                    for n in list(hard_fail_iterations):
+                                        if net_routes.get(n):
+                                            hard_fail_iterations.pop(n)
+                                    overflow = self.grid.get_total_overflow()
+                                    overused = self.grid.find_overused_cells()
+                                flush_print(
+                                    f"  Overflow-silent rescue resolved {silent_resolved}/"
+                                    f"{len(silent_failed)} net(s) ({elapsed_str()})"
+                                )
+
+                        # Issue #2297: Neighborhood rip-up for standard path when
+                        # targeted fallback was insufficient and nets remain stalled.
+                        # Issue #2333: Skip in hotset-only mode.
+                        still_unrouted_std = [
+                            n for n in net_order
+                            if (n not in net_routes or not net_routes.get(n))
+                            and n in pads_by_net
+                            and n not in off_grid_nets
+                        ]
+                        if overflow == 0 and still_unrouted_std and not timed_out and not hotset_only:
+                            # Track stall progression
+                            current_routed = len(net_routes)
+                            if current_routed <= prev_routed_count:
+                                neighborhood_stall_count += 1
+                            else:
+                                neighborhood_stall_count = 0
+                            prev_routed_count = current_routed
+
+                            if neighborhood_stall_count >= neighborhood_stall_threshold:
+                                flush_print(
+                                    f"  Neighborhood rip-up: {len(still_unrouted_std)} "
+                                    f"net(s) stuck, stall #{neighborhood_stall_count} "
+                                    f"(radius escalation) ({elapsed_str()})"
+                                )
+
+                                def _mark_route_neighborhood_std(route: Route) -> None:
+                                    self._mark_route(route)
+
+                                improved, new_count = neg_router.neighborhood_ripup(
+                                    failed_nets=still_unrouted_std,
+                                    net_routes=net_routes,
+                                    routes_list=self.routes,
+                                    pads_by_net=pads_by_net,
+                                    present_cost_factor=present_factor,
+                                    mark_route_callback=_mark_route_neighborhood_std,
+                                    stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
+                                    per_net_timeout=per_net_timeout,
+                                    max_attempts=neighborhood_max_attempts,
+                                    initial_radius_factor=neighborhood_initial_radius,
+                                    escalation_factor=neighborhood_escalation_factor,
+                                    ripup_history=ripup_history,
+                                )
+
+                                overflow = self.grid.get_total_overflow()
+                                overused = self.grid.find_overused_cells()
+
+                                if improved:
+                                    flush_print(
+                                        f"    Neighborhood rip-up routed {new_count - current_routed} "
+                                        f"new net(s), total: {new_count}/{total_nets} ({elapsed_str()})"
+                                    )
+                                    neighborhood_stall_count = 0
+                                    prev_routed_count = new_count
+                                else:
+                                    flush_print(
+                                        f"    Neighborhood rip-up did not improve "
+                                        f"({new_count}/{total_nets} nets) ({elapsed_str()})"
+                                    )
+
+                                # Issue #3448: full-connectivity predicate, not
+                                # a ``len(net_routes)`` count (see _stranded_nets).
+                                if overflow == 0 and not _stranded_nets():
+                                    print(f"  Convergence achieved at iteration {iteration}!")
+                                    break
+
+                    # Track overflow history for adaptive mode (Issue #633)
                     overflow_history.append(overflow)
 
                     # Issue #2803: capture end-of-iteration metrics so the
                     # best-state snapshot reflects the *actual* iteration
-                    # result, not just the pre-rip-up snapshot.  Replaces
-                    # the rolling best snapshot iff the lex-tuple metric
-                    # strictly improved.  Also emits the per-iter log line.
+                    # result, not just the pre-rip-up snapshot.  Replaces the
+                    # rolling best snapshot iff the lex-tuple metric strictly
+                    # improved.  Also emits the per-iter log line.
                     _capture_iteration_end(iteration, overflow)
 
                     # Issue #2334: Reset perturbation when overflow improves
@@ -8325,111 +9010,43 @@ class Autorouter:
                             perturbation_stagnation_count = 0
                             self._reset_perturbation()
                             perturbation_best_overflow = overflow
-                        # Update best even when perturbation is inactive
-                        elif overflow == perturbation_best_overflow:
-                            pass  # No change
                     if perturbation_best_overflow is None or overflow < perturbation_best_overflow:
                         perturbation_best_overflow = overflow
 
-                    flush_print(
-                        f"  Targeted rip-up resolved {targeted_ripup_count}/{len(nets_to_reroute)} nets, "
-                        f"overflow: {overflow} ({elapsed_str()})"
-                    )
-
-                    # Check for convergence in targeted mode
                     # Issue #858: Also check that all nets were routed
-                    # Issue #3448: "all nets routed" must mean full pad
-                    # connectivity, not a ``len(net_routes)`` count --
-                    # empty-list entries (ripped then hard-failed) and
-                    # partial fragments both inflate the count and caused
-                    # premature "Convergence achieved" exits with stranded
-                    # nets and unused wall budget (board 07).
+                    # Issue #3448: "routed" must mean full pad connectivity --
+                    # ``len(net_routes)`` counts empty-list entries (ripped then
+                    # hard-failed, zero overflow) and partial fragments, which
+                    # caused premature "Convergence achieved" exits with
+                    # stranded nets and ~680s of a 1500s budget unused (board 07).
                     if overflow == 0:
-                        stranded_targeted = _stranded_nets()
-                        if not stranded_targeted:
+                        stranded_std = _stranded_nets()
+                        if not stranded_std:
                             self._reset_perturbation()
                             print(f"  Convergence achieved at iteration {iteration}!")
                             break
-                        stranded_names = sorted(
-                            self.net_names.get(n, f"Net_{n}")
-                            for n in stranded_targeted
+                        stranded_names_std = sorted(
+                            self.net_names.get(n, f"Net_{n}") for n in stranded_std
                         )
                         flush_print(
-                            f"  Overflow clean but {len(stranded_targeted)} "
-                            f"net(s) still stranded -- continuing "
-                            f"(Issue #3448): {', '.join(stranded_names)}"
+                            f"  Overflow clean but {len(stranded_std)} net(s) "
+                            f"still stranded -- continuing (Issue #3448): "
+                            f"{', '.join(stranded_names_std)}"
                         )
 
-                    # Issue #2274: Neighborhood rip-up when stalled with 0
-                    # overflow but unrouted nets remain.
-                    still_unrouted_targeted = [
-                        n for n in net_order
-                        if (n not in net_routes or not net_routes.get(n))
-                        and n in pads_by_net
-                        and n not in off_grid_nets
-                    ]
-                    if overflow == 0 and still_unrouted_targeted and not timed_out and not hotset_only:
-                        # Track stall progression
-                        current_routed = len(net_routes)
-                        if current_routed <= prev_routed_count:
-                            neighborhood_stall_count += 1
-                        else:
-                            neighborhood_stall_count = 0
-                        prev_routed_count = current_routed
+                    # Issue #2518: short-circuit out of the iteration loop if a
+                    # nested per-net loop already tripped the wall-clock budget.
+                    # ``escape_local_minimum`` below can run for tens of seconds
+                    # per strategy and would otherwise blow past the budget by
+                    # ~iteration tail before the next iteration's check_timeout()
+                    # finally fires.
+                    if timed_out:
+                        break
 
-                        if neighborhood_stall_count >= neighborhood_stall_threshold:
-                            flush_print(
-                                f"  Neighborhood rip-up: {len(still_unrouted_targeted)} "
-                                f"net(s) stuck, stall #{neighborhood_stall_count} "
-                                f"(radius escalation) ({elapsed_str()})"
-                            )
-
-                            def _mark_route_neighborhood(route: Route) -> None:
-                                self._mark_route(route)
-
-                            improved, new_count = neg_router.neighborhood_ripup(
-                                failed_nets=still_unrouted_targeted,
-                                net_routes=net_routes,
-                                routes_list=self.routes,
-                                pads_by_net=pads_by_net,
-                                present_cost_factor=present_factor,
-                                mark_route_callback=_mark_route_neighborhood,
-                                stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
-                                per_net_timeout=per_net_timeout,
-                                max_attempts=neighborhood_max_attempts,
-                                initial_radius_factor=neighborhood_initial_radius,
-                                escalation_factor=neighborhood_escalation_factor,
-                                ripup_history=ripup_history,
-                            )
-
-                            overflow = self.grid.get_total_overflow()
-                            overused = self.grid.find_overused_cells()
-                            overflow_history[-1] = overflow
-
-                            if improved:
-                                flush_print(
-                                    f"    Neighborhood rip-up routed {new_count - current_routed} "
-                                    f"new net(s), total: {new_count}/{total_nets} ({elapsed_str()})"
-                                )
-                                neighborhood_stall_count = 0
-                                prev_routed_count = new_count
-                            else:
-                                flush_print(
-                                    f"    Neighborhood rip-up did not improve "
-                                    f"({new_count}/{total_nets} nets) ({elapsed_str()})"
-                                )
-
-                            # Issue #3448: full-connectivity predicate, not
-                            # a ``len(net_routes)`` count (see above).
-                            if overflow == 0 and not _stranded_nets():
-                                print(f"  Convergence achieved at iteration {iteration}!")
-                                break
-
-                    # Adaptive oscillation detection for targeted mode (Issue #633)
+                    # Adaptive oscillation detection and escape (Issue #633)
                     # Guard: skip escape strategies when overflow is already 0 (#2262)
                     if adaptive and overflow > 0 and detect_oscillation(overflow_history):
-                        # Issue #2334: Activate perturbation on oscillation to
-                        # perturb net ordering for subsequent iterations.
+                        # Issue #2334: Activate perturbation on oscillation
                         if perturbation:
                             perturbation_stagnation_count += 1
                             self._activate_perturbation(perturbation_stagnation_count)
@@ -8441,7 +9058,7 @@ class Autorouter:
                         print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
                         print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
 
-                        def mark_route_targeted(route: Route) -> None:
+                        def mark_route(route: Route) -> None:
                             self._mark_route(route)
 
                         # Issue #2415: Compute escape budget from remaining time
@@ -8459,7 +9076,7 @@ class Autorouter:
                             pads_by_net=pads_by_net,
                             net_order=net_order,
                             present_cost_factor=present_factor,
-                            mark_route_callback=mark_route_targeted,
+                            mark_route_callback=mark_route,
                             strategy_index=escape_strategy_index,
                             per_net_timeout=per_net_timeout,
                             escape_budget=escape_budget,
@@ -8469,733 +9086,125 @@ class Autorouter:
                         if success:
                             print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
                             overflow = new_overflow
-                            overflow_history[-1] = new_overflow
+                            overflow_history[-1] = new_overflow  # Update last entry
                             overused = self.grid.find_overused_cells()
                         else:
                             print(f"    All {tried} escape strategies exhausted without improvement")
+                            # Continue to next iteration with different parameters
 
-                    # Skip common code since targeted ripup handles everything
-                    # (convergence and oscillation already checked above)
-                    continue
+            # Issue #2334: Always reset perturbation at end of routing
+            self._reset_perturbation()
 
-                else:
-                    # Full rip-up: rip up all nets through overused cells
-                    flush_print(
-                        f"  Ripping up {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
-                    )
-
-                    # Issue #3438: corridor reservation.  Keep the ripped
-                    # cohort's OLD copper phantom-blocked on the C++ grid
-                    # (foreign-hard / own-soft) for the REST OF THIS
-                    # ITERATION -- the serial cohort reroute AND the
-                    # stall fallbacks below -- so an early-rerouted member
-                    # cannot steal a not-yet-rerouted sibling's only
-                    # corridor (the bus-reversal order-chaos mode), and
-                    # the targeted fallback negotiates against the same
-                    # reserved-corridor world the cohort re-landed in.
-                    # The window is flushed at the TOP of the next
-                    # iteration (and after the loop), which is what fixes
-                    # the historical phantom ACCRETION across iterations
-                    # (Issue #3101) while preserving the intra-iteration
-                    # reservation the pre-#3438 behavior provided
-                    # accidentally.
-                    self.grid.begin_cpp_unmark_deferral()
-
-                    neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
-
-                    # Use region-based parallelism if enabled (Issue #965)
-                    if region_router is not None and len(nets_to_reroute) > 1:
-                        # Route using region-based parallelism
-                        def route_fn(net: int, pf: float) -> list[Route]:
-                            return self._route_net_negotiated(
-                                net, pf, per_net_timeout=per_net_timeout
-                            )
-
-                        def mark_fn(route: Route) -> None:
-                            self.grid.mark_route_usage(route)
-                            self.routes.append(route)
-
-                        result = region_router.route_iteration_parallel(
-                            nets_to_route=nets_to_reroute,
-                            present_factor=present_factor,
-                            route_fn=route_fn,
-                            mark_route_fn=mark_fn,
-                        )
-
-                        # Update net_routes with results
-                        for net in result.successful_nets:
-                            # Find the routes for this net from result
-                            net_routes[net] = [r for r in result.routes if r.net == net]
-
-                        rerouted_count = len(result.successful_nets)
-                    else:
-                        # Sequential routing (original behavior)
-                        rerouted_count = 0
-                        for i, net in enumerate(nets_to_reroute):
-                            if check_timeout():
-                                print(
-                                    f"  ⚠ Timeout during reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
-                                )
-                                timed_out = True
-                                break
-
-                            net_name = self.net_names.get(net, f"Net_{net}")
-                            flush_print(
-                                f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
-                            )
-
-                            routes = self._route_net_negotiated(
-                                net, present_factor, per_net_timeout=per_net_timeout
-                            )
-                            if routes:
-                                net_routes[net] = routes
-                                rerouted_count += 1
-                                for route in routes:
-                                    self.grid.mark_route_usage(route)
-                                    self.routes.append(route)
-                                # Issue #2275: Update layer fill ratios
-                                if hasattr(self.router, "update_layer_fill_ratios"):
-                                    self.router.update_layer_fill_ratios()
-
-                        if timed_out:
-                            break
-
-                    overflow = self.grid.get_total_overflow()
-                    overused = self.grid.find_overused_cells()
-                    flush_print(
-                        f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
-                    )
-                    flush_print(
-                        f"  Progress: {len(net_routes)}/{total_nets} nets routed total"
-                    )
-
-                    # Issue #2265: When overflow is 0 but nets remain unrouted,
-                    # the standard rip-up path only re-attempts failed nets without
-                    # clearing the routed nets that block them. Fall back to
-                    # targeted rip-up to identify and displace blockers.
-                    # Issue #2333: Skip fallbacks in hotset-only mode.
-                    # Issue #2475: Also include partially routed nets (those
-                    # in net_routes but missing pad-to-pad connectivity), since
-                    # they too cannot make further progress without rip-up.
-                    partial_failed = self._get_partially_routed_nets(net_routes, pads_by_net)
-                    # Issue #3448: ``not net_routes.get(n)`` so empty-list
-                    # entries (ripped up above, then failed re-route) also
-                    # qualify for the targeted fallback.
-                    still_failed = [
-                        n for n in net_order
-                        if (
-                            (not net_routes.get(n) or n in partial_failed)
-                            and n in pads_by_net
-                            and n not in off_grid_nets
-                        )
-                    ]
-                    # Issue #3413: update the consecutive hard-failure
-                    # counters (fully unrouted nets only -- partials still
-                    # have copper down and negotiate normally).
-                    for _hf_net in still_failed:
-                        if not net_routes.get(_hf_net):
-                            hard_fail_iterations[_hf_net] = (
-                                hard_fail_iterations.get(_hf_net, 0) + 1
-                            )
-                    for _hf_net in list(hard_fail_iterations):
-                        if net_routes.get(_hf_net):
-                            hard_fail_iterations.pop(_hf_net)
-                    if overflow == 0 and still_failed and not timed_out and not hotset_only:
-                        flush_print(
-                            f"  Stall detected: {len(still_failed)} net(s) unrouted with 0 overflow"
-                            f" - engaging targeted rip-up fallback ({elapsed_str()})"
-                        )
-
-                        # Issue #2476: Drive a focused via-blocked rip-up
-                        # first.  The C++ pathfinder records the offending
-                        # stored-via net when its A* expansion fails the
-                        # geometric via-vs-via clearance check.  Ripping up
-                        # that specific net is much more likely to unblock
-                        # progress than the Bresenham-based blocker scan
-                        # below, which can miss conflicts that are blocked
-                        # by clearance/congestion rather than direct-line
-                        # intersection.  Any nets still failing afterwards
-                        # fall through to the existing targeted-ripup path.
-                        def _mark_route_via_blocked(route: Route) -> None:
-                            self._mark_route(route)
-
-                        via_resolved, via_attempted = neg_router.via_blocked_ripup(
-                            net_routes=net_routes,
-                            routes_list=self.routes,
-                            pads_by_net=pads_by_net,
-                            present_cost_factor=present_factor,
-                            mark_route_callback=_mark_route_via_blocked,
-                            ripup_history=ripup_history,
-                            max_ripups_per_net=max_ripups_per_net,
-                            per_net_timeout=per_net_timeout,
-                        )
-                        if via_attempted > 0:
-                            flush_print(
-                                f"  Via-blocked rip-up resolved {via_resolved}/{via_attempted} "
-                                f"net(s) via cpp diagnostic ({elapsed_str()})"
-                            )
-                            # Recompute the still-failed list -- some nets
-                            # may now be routed thanks to the targeted via
-                            # blocker rip-up.  (Issue #3448: empty-list
-                            # entries count as failed.)
-                            still_failed = [
-                                n for n in net_order
-                                if not net_routes.get(n) and n in pads_by_net
-                                and n not in off_grid_nets
-                            ]
-
-                        # Issue #2517: Drive a destination-component sibling
-                        # rip-up next.  ``via_blocked_ripup`` only handles
-                        # via-vs-via clearance failures; the chorus-test-revA
-                        # signature (DAC_CLK 0/3, Net-(LED3-2) 0/4) is a
-                        # destination-component escape-corridor saturation
-                        # where a lower-priority sibling has consumed the
-                        # only viable channel out of a dense IC pin field.
-                        # The Bresenham-based fallback below cannot find
-                        # those siblings because the conflict is geometric
-                        # (pad escape congestion), not direct-line.  This
-                        # is the negotiated-strategy counterpart of the
-                        # PR #2511 helper that ``route_all`` already
-                        # invokes.  Per-net budget is shared with the
-                        # negotiated loop's ``ripup_history`` so we cannot
-                        # double-charge a net that the loop subsequently
-                        # rerouted.
-                        component_ripup_count = 0
-                        if still_failed and not timed_out:
-                            for failed_net in list(still_failed):
-                                if check_timeout():
-                                    timed_out = True
-                                    break
-                                rescued = self._attempt_blocked_component_ripup_negotiated(
-                                    failed_net=failed_net,
-                                    neg_router=neg_router,
-                                    net_routes=net_routes,
-                                    pads_by_net=pads_by_net,
-                                    ripup_history=ripup_history,
-                                    present_cost_factor=present_factor,
-                                    max_ripups_per_net=max_ripups_per_net,
-                                    per_net_timeout=per_net_timeout,
-                                )
-                                if rescued:
-                                    component_ripup_count += 1
-                            if component_ripup_count > 0:
-                                flush_print(
-                                    f"  BLOCKED_BY_COMPONENT (negotiated) rip-up resolved "
-                                    f"{component_ripup_count}/{len(still_failed)} net(s) "
-                                    f"({elapsed_str()})"
-                                )
-                                # Recompute still_failed for the Bresenham
-                                # fallback below.  (Issue #3448: empty-list
-                                # entries count as failed.)
-                                still_failed = [
-                                    n for n in net_order
-                                    if not net_routes.get(n) and n in pads_by_net
-                                    and n not in off_grid_nets
-                                ]
-
-                        targeted_fallback_count = 0
-                        for failed_net in still_failed:
-                            if check_timeout():
-                                timed_out = True
-                                break
-                            pads_for_net = pads_by_net.get(failed_net, [])
-                            if len(pads_for_net) < 2:
-                                continue
-
-                            # Identify blockers BEFORE rip-up so we don't
-                            # destroy a partial route when targeted_ripup
-                            # would not run anyway (Issue #2530).
-                            blocking_nets: set[int] = set()
-                            for j in range(len(pads_for_net) - 1):
-                                blockers = neg_router.find_blocking_nets_for_connection(
-                                    pads_for_net[j], pads_for_net[j + 1]
-                                )
-                                blocking_nets.update(blockers)
-
-                            # Issue #2475: Augment with same-tier destination
-                            # siblings (e.g., other PHASE_* nets sharing J2).
-                            sibling_blockers = self._find_same_tier_destination_siblings(
-                                failed_net, list(net_routes.keys())
-                            )
-                            blocking_nets |= sibling_blockers
-
-                            # Issue #2475/#2530: only invoke targeted_ripup
-                            # when we have blockers to displace; otherwise it
-                            # would skip and we'd permanently lose the partial
-                            # route on single-net boards (or any board where
-                            # no blockers exist).
-                            #
-                            # Issue #3470 (PR #3478 judge follow-up): the
-                            # out-of-transaction pre-rip of the failed net's
-                            # stale partial routes that used to live here is
-                            # gone.  ``targeted_ripup`` rips them INSIDE its
-                            # transaction and restores them verbatim when the
-                            # reroute does not converge, so the rollback
-                            # guarantee now covers this call site too --
-                            # previously the snapshot was taken AFTER the
-                            # external rip, losing the partial connectivity
-                            # on a failed rescue.
-                            if blocking_nets:
-
-                                def _mark_route_fallback(route: Route) -> None:
-                                    self._mark_route(route)
-
-                                success = neg_router.targeted_ripup(
-                                    failed_net=failed_net,
-                                    blocking_nets=blocking_nets,
-                                    net_routes=net_routes,
-                                    routes_list=self.routes,
-                                    pads_by_net=pads_by_net,
-                                    present_cost_factor=present_factor,
-                                    mark_route_callback=_mark_route_fallback,
-                                    ripup_history=ripup_history,
-                                    max_ripups_per_net=max_ripups_per_net,
-                                    per_net_timeout=per_net_timeout,
-                                )
-                                if success:
-                                    targeted_fallback_count += 1
-                        overflow = self.grid.get_total_overflow()
-                        overused = self.grid.find_overused_cells()
-                        flush_print(
-                            f"  Targeted fallback resolved {targeted_fallback_count}/{len(still_failed)} nets ({elapsed_str()})"
-                        )
-
-                        # Issue #3438: Relief RESCUE -- LAST resort.  A
-                        # zero-overflow hard failure that survived every
-                        # fallback above usually means the net's pin
-                        # corridor is sealed by foreign usage-0 cells the
-                        # sharing clauses treat as HARD (escape stubs,
-                        # route clearance halos, via halo rings): the
-                        # failed A* emits no overflow, so PathFinder has
-                        # no negotiation signal, and the Bresenham-based
-                        # blocker scan above misses clearance-halo seals.
-                        # The rescue iterates a relief PROBE (foreign
-                        # non-obstacle copper passable at a per-step
-                        # penalty => MIN-CONFLICT path), rips exactly the
-                        # owner nets the probe crossed, and commits only
-                        # when the failed net routes in NORMAL mode AND
-                        # every displaced victim re-lands (strict
-                        # no-net-loss transaction; otherwise verbatim
-                        # rollback).  Attempt-capped per net so hopeless
-                        # geometry cannot burn the wall budget every
-                        # iteration.
-                        still_failed = [
-                            n for n in net_order
-                            if not net_routes.get(n) and n in pads_by_net
-                            and n not in off_grid_nets
-                        ]
-                        relief_resolved = 0
-                        relief_attempted = 0
-                        for failed_net in list(still_failed):
-                            if check_timeout():
-                                timed_out = True
-                                break
-                            if len(pads_by_net.get(failed_net, [])) < 2:
-                                continue
-                            if (
-                                relief_probe_attempts.get(failed_net, 0)
-                                >= max_relief_probes_per_net
-                            ):
-                                continue
-                            relief_probe_attempts[failed_net] = (
-                                relief_probe_attempts.get(failed_net, 0) + 1
-                            )
-                            relief_attempted += 1
-                            if self._relief_rescue(
-                                failed_net,
-                                neg_router,
-                                net_routes,
-                                pads_by_net,
-                                present_factor,
-                                per_net_timeout,
-                                flush_print,
-                                elapsed_str,
-                                deadline=relief_deadline,
-                            ):
-                                relief_resolved += 1
-                        if relief_attempted > 0:
-                            flush_print(
-                                f"  Relief rescue resolved {relief_resolved}/"
-                                f"{relief_attempted} net(s) ({elapsed_str()})"
-                            )
-                            overflow = self.grid.get_total_overflow()
-                            overused = self.grid.find_overused_cells()
-
-                    # Issue #3413: Overflow-silent hard-failure rescue.
-                    # The targeted-fallback chain above only opens when
-                    # overflow == 0, but a pin-access hard failure emits NO
-                    # overflow signal -- when UNRELATED congestion keeps
-                    # overflow > 0 the failed net's blockers are never in
-                    # the rip-up cohort and the net stays at 0 segments
-                    # forever (board 06 MIPI_RST: sealed U4 escape corridor
-                    # while the J1 USB3 cluster holds overflow at 3).  For
-                    # nets that have been fully unrouted for
-                    # ``hard_fail_rescue_threshold`` consecutive iterations,
-                    # run the same targeted rip-up + relief-rescue sequence
-                    # the overflow==0 chain uses.  Both helpers are
-                    # transactional (verbatim rollback on failure) and
-                    # attempt-capped per net (``ripup_history`` /
-                    # ``relief_probe_attempts``), so hopeless geometry
-                    # cannot burn the wall budget every iteration.
-                    if overflow > 0 and still_failed and not timed_out and not hotset_only:
-                        silent_failed = [
-                            n for n in still_failed
-                            if not net_routes.get(n)
-                            and hard_fail_iterations.get(n, 0) >= hard_fail_rescue_threshold
-                            and len(pads_by_net.get(n, [])) >= 2
-                        ]
-                        if silent_failed:
-                            silent_names = sorted(
-                                self.net_names.get(n, f"Net_{n}") for n in silent_failed
-                            )
-                            flush_print(
-                                f"  Overflow-silent hard failure: {len(silent_failed)} net(s) "
-                                f"unrouted >= {hard_fail_rescue_threshold} iteration(s) with "
-                                f"overflow={overflow} elsewhere - engaging targeted rescue "
-                                f"({elapsed_str()}): {', '.join(silent_names)}"
-                            )
-                            silent_resolved = 0
-                            for failed_net in silent_failed:
-                                if check_timeout():
-                                    timed_out = True
-                                    break
-
-                                # 1) Targeted rip-up of direct-line blockers
-                                # (same Bresenham scan as the overflow==0
-                                # chain; transactional inside targeted_ripup).
-                                pads_for_net = pads_by_net.get(failed_net, [])
-                                blocking_nets: set[int] = set()
-                                for j in range(len(pads_for_net) - 1):
-                                    blockers = neg_router.find_blocking_nets_for_connection(
-                                        pads_for_net[j], pads_for_net[j + 1]
-                                    )
-                                    blocking_nets.update(blockers)
-                                if blocking_nets:
-
-                                    def _mark_route_silent(route: Route) -> None:
-                                        self._mark_route(route)
-
-                                    if neg_router.targeted_ripup(
-                                        failed_net=failed_net,
-                                        blocking_nets=blocking_nets,
-                                        net_routes=net_routes,
-                                        routes_list=self.routes,
-                                        pads_by_net=pads_by_net,
-                                        present_cost_factor=present_factor,
-                                        mark_route_callback=_mark_route_silent,
-                                        ripup_history=ripup_history,
-                                        max_ripups_per_net=max_ripups_per_net,
-                                        per_net_timeout=per_net_timeout,
-                                    ):
-                                        silent_resolved += 1
-                                        continue
-
-                                # 2) Relief rescue (clearance-halo seals the
-                                # Bresenham scan cannot see).
-                                if (
-                                    relief_probe_attempts.get(failed_net, 0)
-                                    >= max_relief_probes_per_net
-                                ):
-                                    continue
-                                relief_probe_attempts[failed_net] = (
-                                    relief_probe_attempts.get(failed_net, 0) + 1
-                                )
-                                if self._relief_rescue(
-                                    failed_net,
-                                    neg_router,
-                                    net_routes,
-                                    pads_by_net,
-                                    present_factor,
-                                    per_net_timeout,
-                                    flush_print,
-                                    elapsed_str,
-                                    deadline=relief_deadline,
-                                ):
-                                    silent_resolved += 1
-                            if silent_resolved > 0:
-                                for n in list(hard_fail_iterations):
-                                    if net_routes.get(n):
-                                        hard_fail_iterations.pop(n)
-                                overflow = self.grid.get_total_overflow()
-                                overused = self.grid.find_overused_cells()
-                            flush_print(
-                                f"  Overflow-silent rescue resolved {silent_resolved}/"
-                                f"{len(silent_failed)} net(s) ({elapsed_str()})"
-                            )
-
-                    # Issue #2297: Neighborhood rip-up for standard path when
-                    # targeted fallback was insufficient and nets remain stalled.
-                    # Issue #2333: Skip in hotset-only mode.
-                    still_unrouted_std = [
-                        n for n in net_order
-                        if (n not in net_routes or not net_routes.get(n))
-                        and n in pads_by_net
-                        and n not in off_grid_nets
-                    ]
-                    if overflow == 0 and still_unrouted_std and not timed_out and not hotset_only:
-                        # Track stall progression
-                        current_routed = len(net_routes)
-                        if current_routed <= prev_routed_count:
-                            neighborhood_stall_count += 1
-                        else:
-                            neighborhood_stall_count = 0
-                        prev_routed_count = current_routed
-
-                        if neighborhood_stall_count >= neighborhood_stall_threshold:
-                            flush_print(
-                                f"  Neighborhood rip-up: {len(still_unrouted_std)} "
-                                f"net(s) stuck, stall #{neighborhood_stall_count} "
-                                f"(radius escalation) ({elapsed_str()})"
-                            )
-
-                            def _mark_route_neighborhood_std(route: Route) -> None:
-                                self._mark_route(route)
-
-                            improved, new_count = neg_router.neighborhood_ripup(
-                                failed_nets=still_unrouted_std,
-                                net_routes=net_routes,
-                                routes_list=self.routes,
-                                pads_by_net=pads_by_net,
-                                present_cost_factor=present_factor,
-                                mark_route_callback=_mark_route_neighborhood_std,
-                                stall_count=neighborhood_stall_count - neighborhood_stall_threshold,
-                                per_net_timeout=per_net_timeout,
-                                max_attempts=neighborhood_max_attempts,
-                                initial_radius_factor=neighborhood_initial_radius,
-                                escalation_factor=neighborhood_escalation_factor,
-                                ripup_history=ripup_history,
-                            )
-
-                            overflow = self.grid.get_total_overflow()
-                            overused = self.grid.find_overused_cells()
-
-                            if improved:
-                                flush_print(
-                                    f"    Neighborhood rip-up routed {new_count - current_routed} "
-                                    f"new net(s), total: {new_count}/{total_nets} ({elapsed_str()})"
-                                )
-                                neighborhood_stall_count = 0
-                                prev_routed_count = new_count
-                            else:
-                                flush_print(
-                                    f"    Neighborhood rip-up did not improve "
-                                    f"({new_count}/{total_nets} nets) ({elapsed_str()})"
-                                )
-
-                            # Issue #3448: full-connectivity predicate, not
-                            # a ``len(net_routes)`` count (see _stranded_nets).
-                            if overflow == 0 and not _stranded_nets():
-                                print(f"  Convergence achieved at iteration {iteration}!")
-                                break
-
-                # Track overflow history for adaptive mode (Issue #633)
-                overflow_history.append(overflow)
-
-                # Issue #2803: capture end-of-iteration metrics so the
-                # best-state snapshot reflects the *actual* iteration
-                # result, not just the pre-rip-up snapshot.  Replaces the
-                # rolling best snapshot iff the lex-tuple metric strictly
-                # improved.  Also emits the per-iter log line.
-                _capture_iteration_end(iteration, overflow)
-
-                # Issue #2334: Reset perturbation when overflow improves
-                if perturbation and perturbation_best_overflow is not None:
-                    if overflow < perturbation_best_overflow:
-                        if self._perturbation_magnitude > 0:
-                            flush_print(
-                                f"  Perturbation reset: overflow improved "
-                                f"{perturbation_best_overflow} → {overflow} ({elapsed_str()})"
-                            )
-                        perturbation_stagnation_count = 0
-                        self._reset_perturbation()
-                        perturbation_best_overflow = overflow
-                if perturbation_best_overflow is None or overflow < perturbation_best_overflow:
-                    perturbation_best_overflow = overflow
-
-                # Issue #858: Also check that all nets were routed
-                # Issue #3448: "routed" must mean full pad connectivity --
-                # ``len(net_routes)`` counts empty-list entries (ripped then
-                # hard-failed, zero overflow) and partial fragments, which
-                # caused premature "Convergence achieved" exits with
-                # stranded nets and ~680s of a 1500s budget unused (board 07).
-                if overflow == 0:
-                    stranded_std = _stranded_nets()
-                    if not stranded_std:
-                        self._reset_perturbation()
-                        print(f"  Convergence achieved at iteration {iteration}!")
-                        break
-                    stranded_names_std = sorted(
-                        self.net_names.get(n, f"Net_{n}") for n in stranded_std
-                    )
-                    flush_print(
-                        f"  Overflow clean but {len(stranded_std)} net(s) "
-                        f"still stranded -- continuing (Issue #3448): "
-                        f"{', '.join(stranded_names_std)}"
-                    )
-
-                # Issue #2518: short-circuit out of the iteration loop if a
-                # nested per-net loop already tripped the wall-clock budget.
-                # ``escape_local_minimum`` below can run for tens of seconds
-                # per strategy and would otherwise blow past the budget by
-                # ~iteration tail before the next iteration's check_timeout()
-                # finally fires.
-                if timed_out:
-                    break
-
-                # Adaptive oscillation detection and escape (Issue #633)
-                # Guard: skip escape strategies when overflow is already 0 (#2262)
-                if adaptive and overflow > 0 and detect_oscillation(overflow_history):
-                    # Issue #2334: Activate perturbation on oscillation
-                    if perturbation:
-                        perturbation_stagnation_count += 1
-                        self._activate_perturbation(perturbation_stagnation_count)
-                        flush_print(
-                            f"  Perturbation activated (magnitude={self._perturbation_magnitude:.2f}, "
-                            f"stagnation={perturbation_stagnation_count}) ({elapsed_str()})"
-                        )
-
-                    print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
-                    print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
-
-                    def mark_route(route: Route) -> None:
-                        self._mark_route(route)
-
-                    # Issue #2415: Compute escape budget from remaining time
-                    escape_budget = None
-                    if timeout is not None:
-                        remaining = timeout - (time.time() - start_time)
-                        escape_budget = min(60.0, remaining * 0.25)
-                        if escape_budget <= 0:
-                            escape_budget = 0.0
-
-                    success, new_overflow, tried = neg_router.escape_local_minimum(
-                        overflow_history=overflow_history,
-                        net_routes=net_routes,
-                        routes_list=self.routes,
-                        pads_by_net=pads_by_net,
-                        net_order=net_order,
-                        present_cost_factor=present_factor,
-                        mark_route_callback=mark_route,
-                        strategy_index=escape_strategy_index,
-                        per_net_timeout=per_net_timeout,
-                        escape_budget=escape_budget,
-                    )
-                    escape_strategy_index += tried
-
-                    if success:
-                        print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
-                        overflow = new_overflow
-                        overflow_history[-1] = new_overflow  # Update last entry
-                        overused = self.grid.find_overused_cells()
-                    else:
-                        print(f"    All {tried} escape strategies exhausted without improvement")
-                        # Continue to next iteration with different parameters
-
-        # Issue #2334: Always reset perturbation at end of routing
-        self._reset_perturbation()
-
-        # Issue #2540 + #2803: Restore best-of-iterations state if a later
-        # iteration was either aborted mid-rip-up (the original #2540 case,
-        # ``self.routes`` left with FEWER routes than a prior iteration
-        # produced) or completed but produced a strictly worse PCB by the
-        # lex tuple ``(routed_count desc, overflow asc)`` (the #2803 case,
-        # e.g. overflow climbed from 16 to 36 on the same routed count).
-        #
-        # Without this restore, the saved-partial result drops to whatever
-        # the final iteration produced — which can be strictly worse than a
-        # prior iteration on either dimension.
-        current_routed = sum(1 for r in net_routes.values() if r)
-        # Issue #3002 (PR #3006 follow-up): include clearance-violation
-        # count in the final lex-tuple comparison.  A best snapshot with
-        # zero clearance violations must NOT be overwritten by a final
-        # state with marginally lower overflow but live DRC violations.
-        # Issue #3002 (PR #3006 perf): the final restore comparator
-        # runs once after the iteration loop exits.  Hits the cache if
-        # the last _capture_iteration_end stored a result for the same
-        # state -- we identify "same state" via a content fingerprint
-        # (route count + via count) since the last completed iteration
-        # index isn't readily available here.
-        final_route_count = sum(len(r) for r in net_routes.values())
-        final_via_count = sum(
-            len(route.vias)
-            for routes in net_routes.values()
-            for route in routes
-        )
-        # Issue #3020: combine both directions of the clearance
-        # matrix in the final lex-tuple comparator so a best snapshot
-        # with fewer total violations (in either direction) survives
-        # the post-loop restore.
-        # Issue #3077: extend the via/segment universe with
-        # escape-phase routes for the post-loop best-vs-final compare.
-        _extra_final = self._collect_extra_routes_for_revalidation(net_routes)
-        final_seg_via = neg_router.find_nets_with_segment_via_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
-            cache_key=("final", final_route_count, final_via_count),
-            extra_routes=_extra_final,
-        )
-        final_via_seg = neg_router.find_nets_with_via_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
-            cache_key=("final", final_route_count, final_via_count),
-            extra_routes=_extra_final,
-        )
-        # Issue #3433: seg-seg violators in the final comparator so a
-        # best snapshot that resolved trace overlaps by layer
-        # separation is never overwritten by an overlapping final
-        # state with equal routed count.
-        final_seg_seg = neg_router.find_nets_with_segment_segment_violations(
-            net_routes, trace_clearance=self.rules.trace_clearance,
-            cache_key=("final", final_route_count, final_via_count),
-            extra_routes=_extra_final,
-        )
-        final_violations = (
-            len(final_seg_via) + len(final_via_seg) + len(final_seg_seg)
-        )
-        # Issue #3117: include ``nets_fully_connected`` in the final
-        # lex-tuple comparator so the post-loop restore preserves a
-        # best snapshot whose pad-to-pad paths are more thoroughly
-        # closed -- even when the live final state has marginally
-        # higher ``routed_count``.
-        final_connected = _compute_nets_fully_connected()
-        final_metrics = IterationMetrics(
-            iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
-            routed_count=current_routed,
-            overflow=overflow,
-            clearance_violations=final_violations,
-            nets_fully_connected=final_connected,
-        )
-        if best_metrics.is_better_than(final_metrics):
-            flush_print(
-                f"  Restoring iteration {best_iteration} state "
-                f"(connected={best_metrics.nets_fully_connected}, "
-                f"routed={best_metrics.routed_count}, "
-                f"clearance_viol={best_metrics.clearance_violations}, "
-                f"overflow={best_metrics.overflow}) instead of final "
-                f"(connected={final_metrics.nets_fully_connected}, "
-                f"routed={final_metrics.routed_count}, "
-                f"clearance_viol={final_metrics.clearance_violations}, "
-                f"overflow={final_metrics.overflow})"
+            # Issue #2540 + #2803: Restore best-of-iterations state if a later
+            # iteration was either aborted mid-rip-up (the original #2540 case,
+            # ``self.routes`` left with FEWER routes than a prior iteration
+            # produced) or completed but produced a strictly worse PCB by the
+            # lex tuple ``(routed_count desc, overflow asc)`` (the #2803 case,
+            # e.g. overflow climbed from 16 to 36 on the same routed count).
+            #
+            # Without this restore, the saved-partial result drops to whatever
+            # the final iteration produced — which can be strictly worse than a
+            # prior iteration on either dimension.
+            current_routed = sum(1 for r in net_routes.values() if r)
+            # Issue #3002 (PR #3006 follow-up): include clearance-violation
+            # count in the final lex-tuple comparison.  A best snapshot with
+            # zero clearance violations must NOT be overwritten by a final
+            # state with marginally lower overflow but live DRC violations.
+            # Issue #3002 (PR #3006 perf): the final restore comparator
+            # runs once after the iteration loop exits.  Hits the cache if
+            # the last _capture_iteration_end stored a result for the same
+            # state -- we identify "same state" via a content fingerprint
+            # (route count + via count) since the last completed iteration
+            # index isn't readily available here.
+            final_route_count = sum(len(r) for r in net_routes.values())
+            final_via_count = sum(
+                len(route.vias)
+                for routes in net_routes.values()
+                for route in routes
             )
-            # Unmark all current routes from the grid
-            for route in list(self.routes):
-                self.grid.unmark_route_usage(route)
-            # Replace with best-state routes
-            self.routes.clear()
-            self.routes.extend(best_routes)
-            # Re-mark best routes on the grid
-            for route in self.routes:
-                self.grid.mark_route_usage(route)
-            # Update net_routes to best state
-            net_routes.clear()
-            net_routes.update(best_net_routes)
-            # Update overflow to reflect the restored state so the final
-            # summary print at the end of route_all_negotiated shows the
-            # restored value, not the worse pre-restore value.
-            overflow = best_metrics.overflow
+            # Issue #3020: combine both directions of the clearance
+            # matrix in the final lex-tuple comparator so a best snapshot
+            # with fewer total violations (in either direction) survives
+            # the post-loop restore.
+            # Issue #3077: extend the via/segment universe with
+            # escape-phase routes for the post-loop best-vs-final compare.
+            _extra_final = self._collect_extra_routes_for_revalidation(net_routes)
+            final_seg_via = neg_router.find_nets_with_segment_via_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("final", final_route_count, final_via_count),
+                extra_routes=_extra_final,
+            )
+            final_via_seg = neg_router.find_nets_with_via_segment_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("final", final_route_count, final_via_count),
+                extra_routes=_extra_final,
+            )
+            # Issue #3433: seg-seg violators in the final comparator so a
+            # best snapshot that resolved trace overlaps by layer
+            # separation is never overwritten by an overlapping final
+            # state with equal routed count.
+            final_seg_seg = neg_router.find_nets_with_segment_segment_violations(
+                net_routes, trace_clearance=self.rules.trace_clearance,
+                cache_key=("final", final_route_count, final_via_count),
+                extra_routes=_extra_final,
+            )
+            final_violations = (
+                len(final_seg_via) + len(final_via_seg) + len(final_seg_seg)
+            )
+            # Issue #3117: include ``nets_fully_connected`` in the final
+            # lex-tuple comparator so the post-loop restore preserves a
+            # best snapshot whose pad-to-pad paths are more thoroughly
+            # closed -- even when the live final state has marginally
+            # higher ``routed_count``.
+            final_connected = _compute_nets_fully_connected()
+            final_metrics = IterationMetrics(
+                iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
+                routed_count=current_routed,
+                overflow=overflow,
+                clearance_violations=final_violations,
+                nets_fully_connected=final_connected,
+            )
+            if best_metrics.is_better_than(final_metrics):
+                flush_print(
+                    f"  Restoring iteration {best_iteration} state "
+                    f"(connected={best_metrics.nets_fully_connected}, "
+                    f"routed={best_metrics.routed_count}, "
+                    f"clearance_viol={best_metrics.clearance_violations}, "
+                    f"overflow={best_metrics.overflow}) instead of final "
+                    f"(connected={final_metrics.nets_fully_connected}, "
+                    f"routed={final_metrics.routed_count}, "
+                    f"clearance_viol={final_metrics.clearance_violations}, "
+                    f"overflow={final_metrics.overflow})"
+                )
+                # Unmark all current routes from the grid
+                for route in list(self.routes):
+                    self.grid.unmark_route_usage(route)
+                # Replace with best-state routes
+                self.routes.clear()
+                self.routes.extend(best_routes)
+                # Re-mark best routes on the grid
+                for route in self.routes:
+                    self.grid.mark_route_usage(route)
+                # Update net_routes to best state
+                net_routes.clear()
+                net_routes.update(best_net_routes)
+                # Update overflow to reflect the restored state so the final
+                # summary print at the end of route_all_negotiated shows the
+                # restored value, not the worse pre-restore value.
+                overflow = best_metrics.overflow
 
-        # Issue #3438: close any corridor-reservation window left open by
-        # the final iteration so post-loop passes (match-group tuning,
-        # DRC-nudge re-routes) see a parity-consistent C++ grid.
-        self._flush_corridor_reservation(net_routes)
+        finally:
+            # Issue #3438 / #3489: close any corridor-reservation /
+            # cpp-unmark deferral window left open by the final
+            # iteration so post-loop passes (match-group tuning,
+            # DRC-nudge re-routes) see a parity-consistent C++ grid.
+            # The try/finally makes this flush unconditional: an
+            # unexpected exception escaping the rip-up/reroute loop or
+            # the post-loop best-state restore no longer leaves the
+            # grid with _cpp_unmark_deferred=True, which would silently
+            # queue every subsequent unmark_route on a long-lived grid
+            # (follow-up to #3488).  No-op when no window is open.
+            self._flush_corridor_reservation(net_routes)
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         total_elapsed = time.time() - start_time
