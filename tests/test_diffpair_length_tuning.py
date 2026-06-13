@@ -37,6 +37,7 @@ from kicad_tools.router.diffpair import (
 from kicad_tools.router.diffpair_detection import DetectedPair, DetectionSource
 from kicad_tools.router.diffpair_length_tuning import (
     MAX_INSERTS_PER_PAIR,
+    SERPENTINE_TARGET_HEADROOM_FRACTION,
     DiffPairTuneResult,
     tune_diff_pair_skew,
 )
@@ -599,3 +600,109 @@ class TestModuleInvariants:
         assert r.attempts == 0
         assert r.inserts_applied == 0
         assert r.serpentine_results == []
+
+    def test_serpentine_target_headroom_fraction_is_point_nine(self):
+        # Issue #3543 AC: "Serpentine targets <= 0.9 * max_length_delta".
+        assert SERPENTINE_TARGET_HEADROOM_FRACTION == 0.9
+
+
+# =============================================================================
+# 11. Exact-tolerance target headroom (issue #3543)
+# =============================================================================
+
+
+class TestTargetHeadroom:
+    """The trombone under-targets so a quantization overshoot stays in-bounds.
+
+    Issue #3543: closing 100% of the gap aimed the serpentine at the
+    partner's exact length; quantized loop sizing then overshot, landing
+    the measured skew at 0.501 mm against a 0.500 mm budget.  The tuner now
+    deliberately leaves ``0.9 * tolerance`` of residual delta so the
+    artifact cannot cross tolerance.
+    """
+
+    def _length(self, route: Route) -> float:
+        from kicad_tools.router.length import LengthTracker
+
+        return LengthTracker.calculate_route_length(route)
+
+    def test_tuned_skew_stays_under_tolerance(self):
+        # PCIE_RX-style geometry: a pair that is just out of tolerance.
+        # P is shorter (20.0 mm); N is the partner/target (20.55 mm) so the
+        # entry skew is 0.55 mm > 0.5 mm tolerance and the tuner engages.
+        pair = _make_pair(p_id=1, n_id=2)
+        p = Route(
+            net=1,
+            net_name="USB_D+",
+            segments=[Segment(0.0, 0.0, 20.0, 0.0, 0.2, Layer.F_CU, net=1, net_name="USB_D+")],
+        )
+        n = Route(
+            net=2,
+            net_name="USB_D-",
+            segments=[Segment(0.0, 2.0, 20.55, 2.0, 0.2, Layer.F_CU, net=2, net_name="USB_D-")],
+        )
+        routes = {1: p, 2: n}
+        target_length = self._length(n)
+
+        p_out, n_out, result = tune_diff_pair_skew(
+            pair,
+            routes,
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0),
+        )
+
+        # The longer half is never mutated.
+        assert n_out is n
+        # The tuner must have actually engaged (skew was > tolerance).
+        assert result.inserts_applied >= 1
+        # The *measured* artifact skew must be within tolerance -- the
+        # overshoot that produced 0.501 mm pre-fix is now banked as headroom.
+        measured_skew = abs(target_length - self._length(p_out))
+        assert measured_skew <= 0.5 + 1e-9, (
+            f"Tuned artifact skew {measured_skew:.4f} mm exceeds 0.5 mm tolerance"
+        )
+        assert result.skew_after_mm <= 0.5 + 1e-9
+
+    def test_under_targets_below_partner_length(self):
+        # The serpentine target passed to add_serpentine must be the partner
+        # length MINUS the headroom (not the full partner length), so the
+        # shorter route is grown to *less than* the partner -- leaving the
+        # residual delta as headroom rather than risking an overshoot past it.
+        pair = _make_pair(p_id=1, n_id=2)
+        p = Route(
+            net=1,
+            net_name="USB_D+",
+            segments=[Segment(0.0, 0.0, 20.0, 0.0, 0.2, Layer.F_CU, net=1, net_name="USB_D+")],
+        )
+        n = Route(
+            net=2,
+            net_name="USB_D-",
+            segments=[Segment(0.0, 2.0, 24.0, 2.0, 0.2, Layer.F_CU, net=2, net_name="USB_D-")],
+        )
+        routes = {1: p, 2: n}
+        target_length = self._length(n)
+
+        captured_targets: list[float] = []
+        orig_add = SerpentineGenerator.add_serpentine
+
+        def spy(self, route, target_length_arg, grid=None):
+            captured_targets.append(target_length_arg)
+            return orig_add(self, route, target_length_arg, grid)
+
+        with patch.object(SerpentineGenerator, "add_serpentine", spy):
+            tune_diff_pair_skew(
+                pair,
+                routes,
+                tolerance_mm=0.5,
+                intra_pair_clearance_mm=0.1,
+                config=SerpentineConfig(amplitude=0.5, min_spacing=0.2, gap_factor=2.0),
+            )
+
+        assert captured_targets, "add_serpentine was never called"
+        expected_headroom = SERPENTINE_TARGET_HEADROOM_FRACTION * 0.5  # 0.45 mm
+        for tgt in captured_targets:
+            # Aim is partner length minus the banked headroom, never the full
+            # partner length (which is what overshot pre-fix).
+            assert tgt == pytest.approx(target_length - expected_headroom, abs=1e-9)
+            assert tgt < target_length

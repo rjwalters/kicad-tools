@@ -132,6 +132,17 @@ class DiffPairTuneResult:
 # targets (very large skew on a congested board).
 MAX_INSERTS_PER_PAIR: int = 3
 
+# Fraction of the skew tolerance to deliberately leave un-closed when
+# sizing the trombone (issue #3543).  Closing 100% of the gap aims the
+# serpentine at the partner's exact length; because loop length is
+# quantized (45deg doglegs, integer loop counts) the artifact routinely
+# *overshoots* by a fraction of a loop, landing the measured skew just
+# *over* tolerance (the observed 0.501 mm against a 0.500 mm budget).
+# Under-targeting by 0.9x tolerance banks ~0.45 mm of headroom (at the
+# 0.5 mm default) so a quantization overshoot stays comfortably in-bounds,
+# while the residual ~0.45 mm skew is itself still within tolerance.
+SERPENTINE_TARGET_HEADROOM_FRACTION: float = 0.9
+
 
 def tune_diff_pair_skew(
     pair: DetectedPair,
@@ -256,6 +267,18 @@ def tune_diff_pair_skew(
         shorter_id, shorter_route, longer_id, longer_route = n_id, n_route, p_id, p_route
         longer_is_p = True
     target_length = max(l_p, l_n)
+    # Under-target by a fraction of the tolerance so quantized loop sizing
+    # does not overshoot the partner length and push the measured skew just
+    # *over* tolerance (issue #3543).  ``serpentine_target`` is what the
+    # trombone generator aims for; ``target_length`` remains the partner's
+    # true length and is used for skew measurement / early-stop below.  The
+    # headroom is clamped so it never reaches/inverts the gap on a pair
+    # whose skew is smaller than the headroom itself.
+    target_headroom = min(
+        SERPENTINE_TARGET_HEADROOM_FRACTION * tolerance_mm,
+        skew,
+    )
+    serpentine_target = target_length - target_headroom
     original_longer_segments = longer_route.segments  # for rollback assertion
 
     # Snapshot the original shorter route -- we may need to roll back.
@@ -307,7 +330,7 @@ def tune_diff_pair_skew(
         attempt_generator = SerpentineGenerator(attempt_config)
 
         candidate_route, serp_result = attempt_generator.add_serpentine(
-            current_shorter, target_length
+            current_shorter, serpentine_target
         )
         result.serpentine_results.append(serp_result)
 
@@ -601,6 +624,7 @@ def _empty_route(net_id: int, net_name: str) -> Route:
 # Re-export for ``from kicad_tools.router.diffpair_length_tuning import *``.
 __all__ = [
     "MAX_INSERTS_PER_PAIR",
+    "SERPENTINE_TARGET_HEADROOM_FRACTION",
     "DiffPairTuneResult",
     "tune_diff_pair_skew",
 ]
