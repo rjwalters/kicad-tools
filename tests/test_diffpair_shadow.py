@@ -381,3 +381,240 @@ def test_shadow_construction_flag_plumbed_from_config():
         diffpair_config=DifferentialPairConfig(enabled=True)
     )
     assert dpr.enable_shadow_construction is False
+
+
+# ---------------------------------------------------------------------------
+# 8. Issue #3547: flag-off inertness of the #3508 coupled search upgrades
+#
+# PR #3546 shipped the #3508 coupled machinery as a gated opt-in
+# (``enable_shadow_construction``, default False) with the contract that
+# a flag-off run keeps recipes on their pre-#3508 budget-exit behaviour.
+# Two pieces were found always-on (not gated by the flag):
+#
+#   1. the near-miss rescue (``_rescue_near_miss_coupled``), which commits
+#      a coupled body + single-ended tails for a search that deferred, and
+#   2. the CoupledPathfinder weighted-A* search upgrade
+#      (``heuristic_weight=COUPLED_HEURISTIC_WEIGHT`` > 1), which changes
+#      WHICH joint states the always-running coupled pre-phase explores --
+#      so a search that DEFERRED on the pre-#3508 baseline can CONVERGE
+#      (and commit) with the flag off, re-exposing the gated hazards
+#      (#3542 corridor competition, #3544 pre-phase seg-seg violations).
+#
+# Both are now gated behind ``enable_shadow_construction``.  These tests
+# drive ``route_differential_pair_coupled`` against a stubbed pathfinder
+# so the flag-off/flag-on behaviour of each path is asserted directly:
+#   - the search upgrade by capturing the ``heuristic_weight`` the
+#     CoupledPathfinder is constructed with, and
+#   - the rescue by spying on ``_rescue_near_miss_coupled``.
+# ---------------------------------------------------------------------------
+
+
+def _two_pad_coupled_router_and_pair():
+    """A 2-pad diff pair + its router, ready for the coupled pre-phase.
+
+    Returns ``(router, pair)`` where ``router._diffpair`` is the
+    :class:`DiffPairRouter` under test and ``pair`` is a
+    :class:`DifferentialPair` whose pads are registered on the router.
+    """
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.diffpair import (
+        DifferentialPair,
+        DifferentialPairType,
+        DifferentialSignal,
+    )
+
+    rules = DesignRules()
+    router = Autorouter(width=30.0, height=10.0, rules=rules)
+    p_y, n_y = 4.8, 5.2
+    router.add_component(
+        "U1",
+        [
+            {"number": "1", "x": 5.0, "y": p_y, "width": 0.4, "height": 0.4,
+             "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 5.0, "y": n_y, "width": 0.4, "height": 0.4,
+             "net": 2, "net_name": "USB_D-"},
+        ],
+    )
+    router.add_component(
+        "J1",
+        [
+            {"number": "1", "x": 25.0, "y": p_y, "width": 0.4, "height": 0.4,
+             "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 25.0, "y": n_y, "width": 0.4, "height": 0.4,
+             "net": 2, "net_name": "USB_D-"},
+        ],
+    )
+    pair = DifferentialPair(
+        name="USB_D",
+        positive=DifferentialSignal(
+            net_name="USB_D+", net_id=1, base_name="USB_D",
+            polarity="P", notation="plus_minus",
+        ),
+        negative=DifferentialSignal(
+            net_name="USB_D-", net_id=2, base_name="USB_D",
+            polarity="N", notation="plus_minus",
+        ),
+        pair_type=DifferentialPairType.USB2,
+    )
+    return router, pair
+
+
+class _StubPathfinder:
+    """Stand-in for ``CoupledPathfinder`` with a scripted outcome.
+
+    ``route_coupled`` returns ``_result`` (a committable (P, N) tuple to
+    simulate a CONVERGED search, or ``None`` to simulate a DEFERRED one).
+    The progress diagnostics are populated so the near-miss rescue branch
+    is *eligible* to fire whenever the search deferred -- the only thing
+    that should gate it is ``enable_shadow_construction``.
+    """
+
+    def __init__(self, result, rescue_eligible: bool = True):
+        self._result = result
+        self.last_timeout_exceeded = False
+        self.last_iterations = 1
+        self.last_best_progress = 0.0  # <= NEAR_MISS_RESCUE_CELLS
+        self.last_best_state = object()
+        # rescue eligibility requires a non-None last_best_node; tests that
+        # are not exercising the rescue set this to None so the (real,
+        # un-stubbed) rescue branch is never entered.
+        self.last_best_node = object() if rescue_eligible else None
+        self.last_rejections = {}
+
+    def route_coupled(self, *_a, **_k):
+        return self._result
+
+
+def _patch_pathfinder_capture_weight(monkeypatch, result, rescue_eligible=True):
+    """Patch the module ``CoupledPathfinder``; capture ``heuristic_weight``.
+
+    Returns a ``captured`` dict whose ``"heuristic_weight"`` key records the
+    value the pre-phase constructed the pathfinder with.
+    """
+    import kicad_tools.router.diffpair_routing as dpr_mod
+
+    captured: dict[str, float] = {}
+
+    def _factory(*_a, **kwargs):
+        captured["heuristic_weight"] = kwargs.get("heuristic_weight")
+        return _StubPathfinder(result, rescue_eligible=rescue_eligible)
+
+    monkeypatch.setattr(dpr_mod, "CoupledPathfinder", _factory)
+    return captured
+
+
+def test_flag_off_uses_classic_astar_search(monkeypatch):
+    """Flag OFF -> CoupledPathfinder built with classic A* (weight 1.0).
+
+    The #3508 weighted-A* upgrade (``COUPLED_HEURISTIC_WEIGHT`` > 1) is
+    what changes which joint states the search explores.  With
+    ``enable_shadow_construction=False`` the pre-phase must construct the
+    pathfinder with ``heuristic_weight == 1.0`` (the pre-#3508 search), so
+    a search that deferred on the baseline still defers.
+    """
+    from kicad_tools.router.diffpair_routing import COUPLED_HEURISTIC_WEIGHT
+
+    assert COUPLED_HEURISTIC_WEIGHT > 1.0, (
+        "fixture assumes the weighted-A* upgrade is > 1.0"
+    )
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = False
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+    captured = _patch_pathfinder_capture_weight(
+        monkeypatch, None, rescue_eligible=False
+    )
+
+    dpr.route_differential_pair_coupled(pair, coupled_only=True)
+
+    assert captured.get("heuristic_weight") == 1.0, (
+        "flag-off run must use classic optimal A* (heuristic_weight=1.0), "
+        f"got {captured.get('heuristic_weight')}"
+    )
+
+
+def test_flag_on_uses_weighted_astar_search(monkeypatch):
+    """Flag ON -> CoupledPathfinder built with the weighted-A* upgrade.
+
+    Control for the search-upgrade gate: with
+    ``enable_shadow_construction=True`` the pre-phase constructs the
+    pathfinder with the #3508 ``COUPLED_HEURISTIC_WEIGHT``.
+    """
+    from kicad_tools.router.diffpair_routing import COUPLED_HEURISTIC_WEIGHT
+
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = True
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+    captured = _patch_pathfinder_capture_weight(
+        monkeypatch, None, rescue_eligible=False
+    )
+
+    dpr.route_differential_pair_coupled(pair, coupled_only=True)
+
+    assert captured.get("heuristic_weight") == COUPLED_HEURISTIC_WEIGHT, (
+        "flag-on run must use the weighted-A* upgrade "
+        f"({COUPLED_HEURISTIC_WEIGHT}), got {captured.get('heuristic_weight')}"
+    )
+
+
+def test_flag_off_does_not_invoke_near_miss_rescue(monkeypatch):
+    """Flag OFF + search DEFERS near the goal -> rescue is NOT invoked.
+
+    The stub pathfinder returns ``None`` with ``last_best_progress=0`` and
+    a non-None ``last_best_node``, i.e. the exact precondition that makes
+    the near-miss rescue eligible.  With the flag off the rescue must not
+    even be called (spy asserts zero invocations).
+    """
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = False
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+    _patch_pathfinder_capture_weight(monkeypatch, None)
+
+    calls = {"n": 0}
+
+    def _spy(self, *a, **k):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(
+        type(dpr), "_rescue_near_miss_coupled", _spy, raising=True
+    )
+
+    dpr.route_differential_pair_coupled(pair, coupled_only=True)
+
+    assert calls["n"] == 0, (
+        "near-miss rescue must NOT be invoked when "
+        "enable_shadow_construction is False"
+    )
+
+
+def test_flag_on_invokes_near_miss_rescue(monkeypatch):
+    """Flag ON + search DEFERS near the goal -> rescue IS invoked.
+
+    Control for the rescue gate: same deferred-near-goal precondition, but
+    with ``enable_shadow_construction=True`` the rescue is called.
+    """
+    router, pair = _two_pad_coupled_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = True
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: None)
+    _patch_pathfinder_capture_weight(monkeypatch, None)
+
+    calls = {"n": 0}
+
+    def _spy(self, *a, **k):
+        calls["n"] += 1
+        return None  # rescue declines; we only assert it was consulted
+
+    monkeypatch.setattr(
+        type(dpr), "_rescue_near_miss_coupled", _spy, raising=True
+    )
+
+    dpr.route_differential_pair_coupled(pair, coupled_only=True)
+
+    assert calls["n"] == 1, (
+        "near-miss rescue must be invoked when "
+        "enable_shadow_construction is True"
+    )

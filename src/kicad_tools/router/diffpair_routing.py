@@ -54,6 +54,44 @@ COUPLED_HEURISTIC_WEIGHT: float = float(
     os.environ.get("KCT_COUPLED_HEURISTIC_WEIGHT", "1.5")
 )
 
+# Issue #3547: default per-pair ITERATION budget for the coupled search
+# when the shadow constructor is OFF (the default) and the caller plumbed
+# no explicit budget.  The weighted-A* upgrade (#3508) is gated behind
+# ``enable_shadow_construction``; with the flag off the search falls back
+# to classic optimal A* (``heuristic_weight=1.0``), which floods the
+# cost_turn-deep f-plateaus and explores far more joint states than the
+# weighted search before reaching the ``cols * rows * 4`` memory backstop.
+# On a deferring fixture (e.g. the DQS-like polarity-swap) classic A*
+# grinds the full backstop -- ~75k iterations, ~2x the weighted search's
+# wall-clock -- pushing existing flag-off tests to the CI 60s timeout.
+# The contract for the flag-off path is "may only DEFER" (it never
+# attempts coupled convergence -- that is #3508/#3542), so an unbounded
+# grind is itself a smell: cap the classic-A* search at a budget that
+# lets genuinely fast-converging pairs succeed while a deferring pair
+# bails promptly (sets ``last_timeout_exceeded`` -> independent
+# fallback), restoring the pre-#3508 budget-exit behaviour.  Env-
+# overridable for experimentation (KCT_COUPLED_FLAGOFF_MAX_ITERS).  Only
+# applied when no explicit ``per_pair_max_iterations`` was plumbed --
+# callers that set a budget (the re-route gate, board configs) keep it.
+#
+# Issue #3547 (doctor follow-up): the first cap (16000 total, 8000/phase)
+# was BELOW the classic-A* convergence floor for at least one flag-off
+# pair the search CAN solve -- the pitch-mismatch USB fixture
+# (test_diffpair_npad.py::test_pitch_mismatch_diff_pair_routes,
+# ``coupled_only=True`` so NO independent fallback) reached
+# ``best_progress=2`` (two grid cells from the joint goal) then bailed at
+# the 8000-iter corridor cap, returning ``[]``.  That changed the OUTCOME
+# (a pair that used to route coupled produced no routes) rather than
+# merely DEFERRING -- a flag-off contract violation.  Empirically the npad
+# fixture converges between 9000 and 12000 iters/phase; the DQS-like
+# deferring fixture grinds the full ``cols*rows*4`` (~75k) and lands ~5s
+# on the CI no-coverage path regardless.  40000 total (20000/phase) sits
+# in that wide window: ~1.7x above npad's convergence floor (npad passes
+# in ~1.3s) while DQS still bails comfortably under the 60s CI timeout.
+COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(
+    os.environ.get("KCT_COUPLED_FLAGOFF_MAX_ITERS", "40000")
+)
+
 # Issue #3508: max joint remaining Manhattan distance (grid cells, max
 # over the two heads) at which a budget-exited coupled search qualifies
 # for the near-miss rescue (commit the coupled body, finish each side
@@ -4005,6 +4043,46 @@ class DiffPairRouter:
         # (~90k iterations for ONE 5-point shell on board 06) and no
         # CI-affordable iteration budget converges.  See the
         # ``heuristic_weight`` rationale in ``CoupledPathfinder``.
+        #
+        # Issue #3547: the weighted-A* search upgrade is gated behind
+        # ``enable_shadow_construction``.  Weighting the heuristic changes
+        # WHICH joint states the always-running coupled pre-phase explores
+        # (goal-ward gradient dominates shell-flooding), so a search that
+        # DEFERRED on the pre-#3508 baseline can CONVERGE with the flag
+        # off -- committing a route where main deferred re-exposes the
+        # gated hazards (#3542 corridor competition, #3544 pre-phase
+        # seg-seg violations).  With the shadow constructor disabled
+        # (default) fall back to classic optimal A* (``heuristic_weight=
+        # 1.0``), the pre-#3508 search behaviour, so a flag-off run keeps
+        # recipes on their pre-#3508 budget-exit path.
+        coupled_heuristic_weight = (
+            COUPLED_HEURISTIC_WEIGHT if self.enable_shadow_construction else 1.0
+        )
+
+        # Issue #3547: bound the flag-off classic-A* search so it DEFERS
+        # promptly instead of grinding the ``cols * rows * 4`` memory
+        # backstop.  With the shadow constructor OFF (default) the search
+        # uses ``heuristic_weight=1.0`` (classic optimal A*), which on a
+        # deferring fixture explores ~2x the joint states the weighted
+        # search (#3508) did, pushing existing flag-off tests to the CI
+        # 60s timeout (Judge note on #3547).  The flag-off contract is
+        # "may only DEFER", so when the caller plumbed no explicit
+        # iteration budget we supply ``COUPLED_FLAGOFF_MAX_ITERATIONS``:
+        # fast-converging pairs (boards 03/06's open search) finish well
+        # within it, while a deferring pair bails (sets
+        # ``last_timeout_exceeded`` -> independent fallback) instead of
+        # running the full optimal search to ~60s.  Flag-ON is UNCHANGED:
+        # the shadow path keeps whatever budget the caller plumbed (the
+        # re-route gate's per-pair budget), so this default never narrows
+        # an opt-in run.  An explicit ``per_pair_max_iterations`` (board
+        # configs, the re-route gate) always takes precedence.
+        if (
+            not self.enable_shadow_construction
+            and (per_pair_max_iterations is None or per_pair_max_iterations <= 0)
+            and COUPLED_FLAGOFF_MAX_ITERATIONS > 0
+        ):
+            per_pair_max_iterations = COUPLED_FLAGOFF_MAX_ITERATIONS
+
         pathfinder = CoupledPathfinder(
             self.autorouter.grid,
             self.autorouter.rules,
@@ -4012,7 +4090,7 @@ class DiffPairRouter:
             net_class_map=self.autorouter.net_class_map,
             allow_swap_via=False,  # Issue #3508: see rationale above
             min_spacing_cells=min_spacing_cells,
-            heuristic_weight=COUPLED_HEURISTIC_WEIGHT,
+            heuristic_weight=coupled_heuristic_weight,
         )
 
         routes: list[Route] = []
@@ -4287,7 +4365,20 @@ class DiffPairRouter:
             # routinely.  The resulting tail (<= ~2 mm of a 30-50 mm
             # route) keeps the coupled-length fraction far above every
             # ``coupled_continuity_threshold`` in use (0.7-0.9).
-            if result is None and pathfinder.last_best_node is not None:
+            # Issue #3547: the near-miss rescue commits a coupled body +
+            # single-ended tails for a search that DEFERRED on the
+            # pre-#3508 baseline.  Committing where main deferred
+            # re-exposes the exact hazards the gate exists to suppress
+            # (#3542 corridor competition stranding singles, #3544
+            # pre-phase copper seg-seg violations).  Gate the rescue on
+            # ``enable_shadow_construction`` so a flag-off run never
+            # invokes it -- the pre-phase may only defer, matching the
+            # pre-#3508 budget-exit behaviour.
+            if (
+                self.enable_shadow_construction
+                and result is None
+                and pathfinder.last_best_node is not None
+            ):
                 if pathfinder.last_best_progress <= NEAR_MISS_RESCUE_CELLS:
                     rescue = self._rescue_near_miss_coupled(pair, spec, pathfinder)
                     if rescue is not None:
@@ -4319,7 +4410,21 @@ class DiffPairRouter:
                 # up these nets normally.  This mirrors the AC of
                 # #3089: "with at least one pair surfacing a clean
                 # 'skipped: budget exceeded' diagnostic and continuing".
-                if pathfinder.last_timeout_exceeded:
+                # Issue #3547: the "skip the independent fallback" exit
+                # below exists to protect a caller-supplied WALL-CLOCK
+                # budget (``per_pair_timeout``): the per-net A* on a
+                # congested BGA-escape pair is the slowest single-net
+                # case and would blow the whole-run budget.  But when the
+                # only budget in force is the flag-off iteration default
+                # (``COUPLED_FLAGOFF_MAX_ITERATIONS``, no
+                # ``per_pair_timeout``), there is no whole-run wall-clock
+                # contract to protect, and the pre-#3508 behaviour on a
+                # deferring fixture was to fall through to the independent
+                # fallback (the DQS-like polarity-swap test asserts this).
+                # So only take the skip-fallback exit when a wall-clock
+                # budget was actually plumbed; otherwise let the search
+                # DEFER to the independent fallback below.
+                if pathfinder.last_timeout_exceeded and per_pair_timeout is not None:
                     print(
                         "    WARNING: Coupled routing budget exceeded "
                         f"({per_pair_timeout:.0f}s); skipping diff-pair "
