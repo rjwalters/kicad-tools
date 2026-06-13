@@ -950,6 +950,79 @@ class TestValidateRoutes:
         assert violations[0].net == 1
         assert violations[0].obstacle_net == 2
 
+    def test_thin_rect_pad_no_false_positive_along_short_axis(self):
+        """Issue #3592: a trace clearing a long, thin pad along its short
+        axis must not be a false positive from the circular pad model.
+
+        Reproduces the board-04 OSC_OUT-vs-GND near-miss: the STM32
+        LQFP-48 GND land is 1.475 x 0.3 mm.  A trace running 1.0 mm from
+        the pad centre on the short (Y) axis clears the rectangle by
+        ``1.0 - 0.15 = 0.85 mm`` centerline, ``0.85 - 0.1 = 0.75 mm``
+        edge-to-edge -- well above the 0.2 mm requirement.  The old
+        ``max(width, height) / 2`` circular model treated the pad as a
+        0.7375 mm-radius disc and reported ``1.0 - 0.7375 - 0.1 =
+        0.1625 mm``, a phantom violation.  After the rectangular fix the
+        clearance is honoured and NO violation is emitted.
+        """
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+        router.add_component(
+            "U2",
+            [
+                {"number": "6", "x": 10, "y": 10, "width": 1.475, "height": 0.3, "net": 1},
+                {"number": "8", "x": 10, "y": 11, "width": 1.475, "height": 0.3, "net": 2},
+            ],
+        )
+        # OSC_OUT (net 1) escape running parallel to the pad long axis,
+        # 1.0 mm from the GND pad (net 2) centre on the short axis.
+        segment = Segment(x1=9.0, y1=10.0, x2=11.0, y2=10.0, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="OSC_OUT", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        pad_violations = [v for v in violations if v.obstacle_type == "pad"]
+        assert pad_violations == [], (
+            "Trace clearing a 1.475 x 0.3 mm pad by 0.75 mm edge-to-edge "
+            "must not produce a pad-clearance violation; the circular pad "
+            "model regressed (issue #3592)."
+        )
+
+    def test_thin_rect_pad_through_metal_still_flagged(self):
+        """The rectangular pad model must still flag a trace that runs
+        THROUGH the pad metal (issue #3592 must not silence real
+        overlaps)."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+        router.add_component(
+            "U2",
+            [
+                {"number": "6", "x": 5, "y": 10, "width": 1.475, "height": 0.3, "net": 1},
+                {"number": "8", "x": 10, "y": 10, "width": 1.475, "height": 0.3, "net": 2},
+            ],
+        )
+        # Trace on net 1 cuts straight through the GND pad (net 2) centre.
+        segment = Segment(x1=9.0, y1=10.0, x2=11.0, y2=10.0, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="OSC_OUT", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        pad_violations = [v for v in violations if v.obstacle_type == "pad"]
+        assert len(pad_violations) >= 1
+        assert pad_violations[0].distance < 0, (
+            "A trace through pad metal must report negative clearance "
+            "(copper inside the pad rectangle)."
+        )
+
     def test_no_violation_for_same_net_proximity(self):
         """Test no violation when route is near pad on same net."""
         rules = DesignRules(trace_clearance=0.2, grid_resolution=0.1)
@@ -1216,8 +1289,15 @@ class TestValidateRoutes:
             ],
         )
 
-        # Route a segment to pad 1 that passes near pad 2
-        segment = Segment(x1=5, y1=10, x2=10, y2=10, layer=Layer.F_CU, width=0.2)
+        # Route a segment to pad 1 that runs INTO pad 2's rectangle.
+        # Issue #3592: pad 2 is a 0.4 x 1.2 mm rect centred at (10.65, 10)
+        # so its left edge is at x = 10.45.  The segment runs along y = 10
+        # to x = 10.5, crossing the rect's left edge -> a genuine
+        # clearance violation that exercises the component_inherent
+        # classification.  (Before the rectangular-pad fix the segment
+        # only had to reach x = 10 because the circular model inflated
+        # the pad to a 0.6 mm radius disc.)
+        segment = Segment(x1=5, y1=10, x2=10.5, y2=10, layer=Layer.F_CU, width=0.2)
         route = Route(net=1, net_name="SPI_SCK", segments=[segment], vias=[])
         router.routes.append(route)
 
@@ -1248,8 +1328,11 @@ class TestValidateRoutes:
             [{"number": "1", "x": 10.65, "y": 10, "width": 0.4, "height": 1.2, "net": 2}],
         )
 
-        # Route to U1 pad that passes near R1 pad
-        segment = Segment(x1=5, y1=10, x2=10, y2=10, layer=Layer.F_CU, width=0.2)
+        # Route to U1 pad that runs INTO R1's pad rectangle (issue #3592:
+        # the R1 pad is a 0.4 x 1.2 mm rect at (10.65, 10) with its left
+        # edge at x = 10.45; extend the segment to x = 10.5 so it crosses
+        # that edge and produces a genuine cross-component violation).
+        segment = Segment(x1=5, y1=10, x2=10.5, y2=10, layer=Layer.F_CU, width=0.2)
         route = Route(net=1, net_name="VCC", segments=[segment], vias=[])
         router.routes.append(route)
 

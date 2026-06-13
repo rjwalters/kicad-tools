@@ -115,9 +115,19 @@ class TestValidateRoutesSkippedPourPad:
         assert v.net == 1
         assert v.obstacle_net == 0
         assert v.obstacle_net_name == "GND"  # Named obstacle, not "Net 0"
-        # Trace at y=1.0, pad at y=1.3, pad radius=0.5, trace half-width=0.1
-        # Center distance = 0.3, edge-to-edge = 0.3 - 0.5 - 0.1 = -0.3
-        assert v.distance == pytest.approx(-0.3, abs=1e-3)
+        # Issue #3592: validate_routes now models the pad as its true
+        # 1.0 x 1.0 mm axis-aligned rectangle (centre (5.0, 1.3), so it
+        # spans y in [0.8, 1.8] and x in [4.5, 5.5]).  The trace runs
+        # along y = 1.0 from x = 1 to x = 8, crossing the pad's left and
+        # right edges, so the centerline touches the rectangle boundary
+        # (signed distance 0); the reported clearance is the negative
+        # half trace width, 0 - 0.1 = -0.1.  (The previous -0.3 came from
+        # the circular pad model that treated the square pad as a 0.5 mm
+        # radius disc — see ``test_router_io.py`` rect-pad regressions.)
+        # The sign is what matters: a negative distance flags the trace
+        # as overlapping pad copper, which is what this test pins.
+        assert v.distance < 0
+        assert v.distance == pytest.approx(-0.1, abs=1e-3)
         assert v.location == (5.0, 1.3)
 
     def test_does_not_emit_for_truly_unconnected_pad(self):

@@ -2071,14 +2071,26 @@ def validate_routes(
                 if not pad.through_hole and pad.layer != segment.layer:
                     continue
 
-                # Calculate minimum distance from segment to pad center
-                dist = _point_to_segment_distance(
-                    pad.x, pad.y, segment.x1, segment.y1, segment.x2, segment.y2
-                )
-
-                # Account for pad size (use larger dimension)
-                pad_radius = max(pad.width, pad.height) / 2
-                effective_dist = dist - pad_radius - seg_half_width
+                # Calculate minimum distance from the segment to the
+                # pad's true axis-aligned rectangle.  Issue #3592: the
+                # previous model treated every pad as a circle of radius
+                # ``max(width, height) / 2``, which over-estimated the
+                # extent of long, thin SMD pads (e.g. an LQFP land at
+                # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
+                # produced false-positive ``[pad]`` clearance violations
+                # for traces that legally clear the rectangular copper.
+                # Pad ``width``/``height`` are already rotated into PCB
+                # space at load time, so the bounding box is correct.
+                effective_dist = _segment_to_aabb_distance(
+                    segment.x1,
+                    segment.y1,
+                    segment.x2,
+                    segment.y2,
+                    pad.x,
+                    pad.y,
+                    pad.width / 2,
+                    pad.height / 2,
+                ) - seg_half_width
 
                 # For skipped-pour-net pads, look up the clearance under the
                 # named net (GND, +3V3, ...) rather than net 0, so the
@@ -2255,9 +2267,13 @@ def validate_routes(
                 if pad.net == 0 and not pad.net_name:
                     continue
 
-                pad_radius = max(pad.width, pad.height) / 2
-                dist = math.sqrt((via.x - pad.x) ** 2 + (via.y - pad.y) ** 2)
-                effective_dist = dist - via_radius - pad_radius
+                # Issue #3592: model the pad as its true axis-aligned
+                # rectangle rather than a bounding circle so anisotropic
+                # SMD lands do not produce false-positive via-clearance
+                # violations along their short axis.
+                effective_dist = _point_to_aabb_distance(
+                    via.x, via.y, pad.x, pad.y, pad.width / 2, pad.height / 2
+                ) - via_radius
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is
@@ -2572,6 +2588,108 @@ def _segment_to_segment_distance(
 ) -> float:
     """Calculate minimum distance between two line segments."""
     return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
+
+
+def _point_to_aabb_distance(
+    px: float, py: float, cx: float, cy: float, half_w: float, half_h: float
+) -> float:
+    """Minimum distance from a point to an axis-aligned rectangle.
+
+    The rectangle is centred at ``(cx, cy)`` with half-extents
+    ``half_w`` (X) and ``half_h`` (Y).  Returns 0.0 when the point is
+    inside the rectangle.
+
+    Issue #3592: the segment-to-pad clearance check previously modelled
+    every pad as a CIRCLE of radius ``max(width, height) / 2``.  For a
+    long, thin SMD pad (e.g. an LQFP land at 1.475 x 0.3 mm) that
+    over-estimates the pad extent along the short axis by ~0.6 mm,
+    producing false-positive clearance violations when a trace passes
+    the pad's narrow side at a distance that is legal against the real
+    rectangular copper.  Modelling the pad as its true axis-aligned
+    bounding box (pad dimensions are already rotated into PCB space at
+    load time, see ``load_pcb_for_routing``) removes that bias.
+    """
+    dx = max(abs(px - cx) - half_w, 0.0)
+    dy = max(abs(py - cy) - half_h, 0.0)
+    return math.hypot(dx, dy)
+
+
+def _segment_to_aabb_distance(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    cx: float,
+    cy: float,
+    half_w: float,
+    half_h: float,
+) -> float:
+    """Signed centerline distance from a segment to an axis-aligned rect.
+
+    Sign convention (matches ``validate.rules.clearance.
+    _rect_segment_centerline_distance``):
+
+    - **Positive** -- segment is entirely outside the rectangle.
+    - **Zero**     -- segment touches/crosses the rectangle boundary.
+    - **Negative** -- the segment centerline lies inside the rectangle;
+      the magnitude is the deepest penetration (smallest distance to an
+      escaping edge), so the post-route DRC summary can still flag
+      "trace runs through pad metal" with a meaningful depth.
+
+    Used by the segment-to-pad clearance check so that anisotropic pads
+    are modelled by their true rectangular footprint rather than a
+    bounding circle (issue #3592).
+    """
+    left, right = cx - half_w, cx + half_w
+    bottom, top = cy - half_h, cy + half_h
+
+    def _inside(px: float, py: float) -> bool:
+        return left <= px <= right and bottom <= py <= top
+
+    p1_in = _inside(x1, y1)
+    p2_in = _inside(x2, y2)
+
+    if p1_in and p2_in:
+        # Whole centerline inside the rect -- report the deepest
+        # (most negative) signed penetration along the segment.
+        def _signed_depth(px: float, py: float) -> float:
+            gap_x = max(px - right, left - px)
+            gap_y = max(py - top, bottom - py)
+            return max(gap_x, gap_y)
+
+        deepest = min(_signed_depth(x1, y1), _signed_depth(x2, y2))
+        steps = 32
+        dx, dy = x2 - x1, y2 - y1
+        for i in range(1, steps):
+            t = i / steps
+            d = _signed_depth(x1 + t * dx, y1 + t * dy)
+            if d < deepest:
+                deepest = d
+        return deepest
+
+    if p1_in != p2_in:
+        # One endpoint inside, one outside -- the centerline crosses an
+        # edge, so it touches the boundary.
+        return 0.0
+
+    # Both endpoints outside: the segment either clears the rectangle or
+    # crosses straight through it.  Decompose the rectangle into its four
+    # edges and take the minimum segment-to-edge distance; a crossing
+    # produces distance 0 because the segment intersects an edge.
+    corners = [
+        (left, top),
+        (right, top),
+        (right, bottom),
+        (left, bottom),
+    ]
+    best = math.inf
+    for i in range(4):
+        ax, ay = corners[i]
+        bx, by = corners[(i + 1) % 4]
+        d = _geom_seg_to_seg_dist(x1, y1, x2, y2, ax, ay, bx, by)
+        if d < best:
+            best = d
+    return best
 
 
 def detect_layer_stack(pcb_text: str) -> LayerStack:
