@@ -58,9 +58,20 @@ The legal-capacity recovery (>= 8/9 WITH zero pad-clearance
 violations) is tracked in issue #3588; when it lands, restore
 ``REQUIRED_NETS_ROUTED = 8``.  This test now ALSO asserts the routed
 result contains zero pad-OVERLAP violations (negative clearance) and
-at most one trace-vs-pad near-miss
+zero trace-vs-pad clearance violations
 (``test_no_pad_overlap_violations``), so a future "fix" cannot
 reclaim 8/9 by re-shipping illegal copper.
+
+Issue #3592 (2026-06-13) — the single tolerated OSC_OUT-vs-GND
+trace-vs-pad near-miss (reported at 0.163mm) was a FALSE POSITIVE in
+``router/io.py::validate_routes``: it modelled every pad as a circle
+of radius ``max(width, height) / 2``, so the STM32 LQFP-48 GND land
+U2.8 (1.475 x 0.3mm) was treated as a 0.7375mm-radius disc instead of
+its true 0.15mm half-height along the axis the OSC_OUT escape passes.
+The validator now measures distance to the pad's true axis-aligned
+rectangle (pad dimensions are already rotated into PCB space at load
+time), the phantom violation is gone, and ``MAX_PAD_CLEARANCE_VIOLATIONS``
+is tightened 1 -> 0.
 """
 
 from __future__ import annotations
@@ -191,15 +202,25 @@ def _parse_pad_clearance_violations(stdout: str) -> tuple[int, list[tuple[str, f
     return pad_count, details
 
 
-# Issue #3582: the current 7/9 result carries exactly ONE trace-vs-pad
-# near-miss — OSC_OUT vs GND at 0.163mm (required 0.200mm), a positive-
-# distance shortfall in the long-congested crystal area, NOT pad
-# overlap.  Pin the count so a regression cannot silently add more pad
-# violations (the illegal pre-#3565 8/9 carried 4, two of them at
-# -0.337mm), and keep it small enough that the formatter's 20-line
-# detail cap can never hide a negative-distance overlap from the
-# distance assertion in ``test_no_pad_overlap_violations``.
-MAX_PAD_CLEARANCE_VIOLATIONS = 1
+# Issue #3582: the 7/9 result previously carried exactly ONE trace-vs-pad
+# near-miss — OSC_OUT vs GND reported at 0.163mm (required 0.200mm) — and
+# this bound tolerated it at 1.
+#
+# Issue #3592 (2026-06-13): that near-miss was a FALSE POSITIVE.  The
+# segment-to-pad clearance check in ``router/io.py::validate_routes``
+# modelled every pad as a circle of radius ``max(width, height) / 2``.
+# The offending GND pad (STM32 LQFP-48 land U2.8, 1.475 x 0.3 mm) was
+# therefore treated as a 0.7375 mm-radius disc, ~0.6 mm larger than its
+# true 0.15 mm half-height along the axis the OSC_OUT escape passes.
+# The real rectangular clearance is ~0.75 mm — well above the 0.200 mm
+# requirement.  ``validate_routes`` now measures distance to the pad's
+# true axis-aligned rectangle, so the phantom violation no longer
+# appears and the recipe reports ZERO ``[pad]`` clearance violations.
+# Pinned to 0 so any future regression that re-introduces a real
+# trace-vs-pad encroachment (or reverts the rectangular pad model)
+# fails immediately.  Note the 4 OSC_IN-vs-OSC_OUT crystal coupling
+# near-misses are SEGMENT-segment, a different class not counted here.
+MAX_PAD_CLEARANCE_VIOLATIONS = 0
 
 
 @pytest.mark.slow
@@ -349,8 +370,10 @@ class TestBoard04OscOutRouting:
            overlapping foreign pad metal) — the #3545 illegal-copper
            signature.
         2. Total pad-violation count <= ``MAX_PAD_CLEARANCE_VIOLATIONS``
-           (currently 1: the known OSC_OUT-vs-GND 0.163mm near-miss).
-           This pins against growth AND guarantees every pad violation
+           (now 0 — issue #3592 fixed the circular-pad false positive
+           that previously reported the OSC_OUT-vs-GND near-miss at
+           0.163mm; the real rectangular clearance is ~0.75mm).  This
+           pins against growth AND guarantees every pad violation
            appears in the capped detail listing, so check 1 cannot be
            evaded by volume.
         """
