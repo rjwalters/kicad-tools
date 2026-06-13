@@ -1539,7 +1539,7 @@ class CppPathfinder:
                 )
 
             for attempt in range(max_resume_attempts + 1):
-                route = self._convert_result_to_route(result, start, net_class)
+                route = self._convert_result_to_route(result, start, end, net_class)
 
                 # Issue #3438: relief PROBES deliberately cross foreign
                 # copper/halos -- post-route clearance validation would
@@ -1732,10 +1732,33 @@ class CppPathfinder:
         """
         return self._last_failure_info
 
+    def _get_component_pitches(self) -> dict[str, float]:
+        """Lazily compute and cache per-component pin pitches.
+
+        Shared by the same-component carve-out gate (Issue #3545) and the
+        Issue #1018 neck-down post-processing in
+        :meth:`_convert_result_to_route`.  Returns an empty dict (without
+        caching) when no Python source grid is attached, so a later
+        attachment can still populate the cache.
+        """
+        pitches = self._component_pitches_cache
+        if pitches is not None:
+            return pitches
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is None:
+            return {}
+        try:
+            pitches = py_grid.compute_component_pitches()
+        except Exception:
+            pitches = {}
+        self._component_pitches_cache = pitches
+        return pitches
+
     def _convert_result_to_route(
         self,
         result: "router_cpp.RouteResult",
         start: "Pad",
+        end: "Pad",
         net_class: "NetClassRouting | None",
     ) -> "Route":
         """Convert a C++ RouteResult to a Python Route object.
@@ -1743,6 +1766,7 @@ class CppPathfinder:
         Args:
             result: C++ route result with segments and vias.
             start: Source pad (provides net and net_name).
+            end: Destination pad (needed for Issue #1018 neck-down taper).
             net_class: Optional net class for trace width override.
 
         Returns:
@@ -1754,12 +1778,59 @@ class CppPathfinder:
 
         route = Route(net=start.net, net_name=start.net_name)
 
-        # Issue #1543: Apply net-class-aware trace width to segments.
-        # Issue #3130: As of #3130 the C++ pathfinder also accepts per-net
-        # emit widths and writes them into ``cpp_seg.width``, so this Python
-        # override is now a defensive fallback (e.g. when the call path
-        # passes a zero ``emit_trace_width``).
-        trace_width = net_class.trace_width if net_class else None
+        # Issue #3456 follow-up: echo the requested float64 trace width
+        # verbatim instead of reading back ``cpp_seg.width``.  The C++
+        # Segment stores float32, so a requested 0.2 mm would round-trip
+        # as 0.20000000298023224.  The width the C++ search emitted is
+        # always known on the Python side: the per-net-class width when a
+        # class is mapped (forwarded as ``emit_trace_width``, Issue #3130),
+        # else the global ``rules.trace_width`` (the C++ ``rules_`` default
+        # was populated from this same Python value).  This mirrors the
+        # Python backend's ``_get_trace_width_for_net`` (Issue #1543).
+        base_trace_width = float(net_class.trace_width if net_class else self._rules.trace_width)
+
+        # Issue #1018 parity: the C++ pathfinder has no neck-down support.
+        # Apply the same width taper as the Python backend
+        # (``PathFinder._convert_path_to_route``) as post-processing on the
+        # C++-returned segments.  Semantics match exactly: per-segment
+        # width is the minimum over both pads of
+        # ``rules.get_neck_down_width(min endpoint distance, pitch,
+        # base_width=net-class width)``, gated per pad by
+        # ``rules.should_apply_neck_down``.
+        pitches = self._get_component_pitches()
+        start_pitch = pitches.get(start.ref) if start.ref else None
+        end_pitch = pitches.get(end.ref) if end.ref else None
+        start_needs_neckdown = self._rules.should_apply_neck_down(start.ref, start_pitch)
+        end_needs_neckdown = self._rules.should_apply_neck_down(end.ref, end_pitch)
+
+        def _segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
+            """Trace width for one segment, with Issue #1018 neck-down taper."""
+            if not start_needs_neckdown and not end_needs_neckdown:
+                return base_trace_width
+            min_width = base_trace_width
+            if start_needs_neckdown:
+                min_dist_start = min(
+                    math.hypot(x1 - start.x, y1 - start.y),
+                    math.hypot(x2 - start.x, y2 - start.y),
+                )
+                min_width = min(
+                    min_width,
+                    self._rules.get_neck_down_width(
+                        min_dist_start, start_pitch, base_width=base_trace_width
+                    ),
+                )
+            if end_needs_neckdown:
+                min_dist_end = min(
+                    math.hypot(x1 - end.x, y1 - end.y),
+                    math.hypot(x2 - end.x, y2 - end.y),
+                )
+                min_width = min(
+                    min_width,
+                    self._rules.get_neck_down_width(
+                        min_dist_end, end_pitch, base_width=base_trace_width
+                    ),
+                )
+            return min_width
 
         for cpp_seg in result.segments:
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
@@ -1776,6 +1847,16 @@ class CppPathfinder:
                 float(cpp_seg.x2),
                 float(cpp_seg.y2),
             )
+            # Issue #1018: compute the (possibly necked-down) width once per
+            # C++ segment, BEFORE the dogleg split -- matching the Python
+            # backend, where ``_emit_segment`` computes the width on the
+            # merged segment endpoints and applies it to both dogleg legs.
+            seg_width = _segment_width(
+                float(cpp_seg.x1),
+                float(cpp_seg.y1),
+                float(cpp_seg.x2),
+                float(cpp_seg.y2),
+            )
             for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
                 if sx == ex and sy == ey:
                     continue
@@ -1784,7 +1865,7 @@ class CppPathfinder:
                     y1=sy,
                     x2=ex,
                     y2=ey,
-                    width=trace_width if trace_width is not None else cpp_seg.width,
+                    width=seg_width,
                     layer=Layer(layer_enum_value),
                     net=cpp_seg.net,
                     net_name=start.net_name,
@@ -1794,12 +1875,16 @@ class CppPathfinder:
         # Issue #3130: Mirror the segment-width override for via diameter.
         # Previously C++ emitted ``rules_.via_diameter`` / ``rules_.via_drill``
         # regardless of net class; this caused POWER-class nets (which declare
-        # ``via_size=0.8mm``) to emit vias at the global default.  With #3130
-        # the C++ side also honors ``emit_via_diameter``, so this is also
-        # a defensive fallback when called with ``emit_via_diameter == 0``.
-        # ``via_drill`` is not yet a per-net attribute on ``NetClassRouting``;
-        # fall back to ``cpp_via.drill`` for now.
-        via_diameter = net_class.via_size if net_class else None
+        # ``via_size=0.8mm``) to emit vias at the global default.
+        # Issue #3456 follow-up: like segment widths, echo the requested
+        # float64 values verbatim instead of the C++ float32 round-trip.
+        # Both are always known on the Python side: the per-net-class
+        # ``via_size`` (forwarded as ``emit_via_diameter``) or the global
+        # ``rules.via_diameter``; ``via_drill`` is not yet a per-net
+        # attribute, so the C++ always emits ``rules_.via_drill`` (populated
+        # from ``rules.via_drill``).
+        via_diameter = float(net_class.via_size if net_class else self._rules.via_diameter)
+        via_drill = float(self._rules.via_drill)
 
         for cpp_via in result.vias:
             layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
@@ -1807,8 +1892,8 @@ class CppPathfinder:
             via = Via(
                 x=cpp_via.x,
                 y=cpp_via.y,
-                drill=cpp_via.drill,
-                diameter=via_diameter if via_diameter is not None else cpp_via.diameter,
+                drill=via_drill,
+                diameter=via_diameter,
                 layers=(Layer(layer_from_value), Layer(layer_to_value)),
                 net=cpp_via.net,
                 net_name=start.net_name,
@@ -1846,14 +1931,7 @@ class CppPathfinder:
         relaxed_refs = getattr(py_grid, "_relaxed_clearance_refs", None)
         if relaxed_refs and ref in relaxed_refs:
             return True
-        pitches = self._component_pitches_cache
-        if pitches is None:
-            try:
-                pitches = py_grid.compute_component_pitches()
-            except Exception:
-                pitches = {}
-            self._component_pitches_cache = pitches
-        pitch = pitches.get(ref)
+        pitch = self._get_component_pitches().get(ref)
         required = self._rules.get_clearance_for_component(ref, pitch)
         if required < self._rules.trace_clearance:
             return True
