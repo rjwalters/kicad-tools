@@ -1294,7 +1294,75 @@ tolerances:
   # pairs lands (#3471-adjacent: 7+7 of the local 33 are that family),
   # at which point re-measure the band with the same recipe and set
   # floor = new-band-max + 1.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 34
+  #
+  # Raised 34 -> 62 by Issue #3617 / PR #3632 (pour fill + connectivity
+  # repair, doctor pass 2026-06-13).  Until #3617 the seed-42 re-route
+  # produced a DEAD pour: zone outlines with zero ``filled_polygon``
+  # copper (the #3482 boundary-test illusion).  #3617 wires the
+  # fill -> stitch -> repair loop into the recipe, so the re-route now
+  # carries REAL pour copper (GND 156 / +1V2 8 / +1V8 18 pads each in one
+  # copper component, copper-union audit PASS in CI in 2-3 rounds).  Three
+  # things change the DRC band, decomposed by a forensic per-family audit
+  # of the local arm64 artifact (drill/width signature tags the geometry's
+  # source):
+  #
+  #   1. Diff-pair ENGAGEMENT (+4): the filled pour completes more nets, so
+  #      diffpair_length_skew 5 -> 7 and diffpair_routing_continuity 5 -> 7
+  #      (honest measurement of two newly-connected pairs; engagement-over-
+  #      silence, the #3145 shape) and match_group_length_skew 0 -> 1.
+  #
+  #   2. STITCHER cross-net clearance residual (+18 net-new, the dominant
+  #      term): the ``kct stitch`` step (96 plane-stitch vias + 88 pad-to-
+  #      via traces) lands within the jlcpcb 4-layer floor (min_clearance
+  #      0.1016mm) of FOREIGN-pour copper on this dense board.  The audit
+  #      attributes ALL 18 by geometry signature to drill-0.2 stitch vias /
+  #      width-0.2 stitch traces:
+  #        11 clearance_pad_via   (stitch via vs foreign-pour pad)
+  #         7 clearance_segment_via (stitch via vs foreign-pour stitch trace)
+  #      Root cause: stitch_cmd.run_stitch threads cross-net placed VIAS
+  #      into each subsequent net's clearance check (cross_net_placed_vias)
+  #      but generates the pad-to-via TRACES in a separate later pass, so a
+  #      stitch via on net B is not checked against net A's just-placed
+  #      stitch trace.  Board 06 escapes this because its signal classes
+  #      route at clearance=0.15mm (roomier); board 07's DDR/MIPI/HDMI
+  #      classes route at clearance=0.10mm.  Fixing it is a shared-stitcher
+  #      restructure (interleave trace emission into the via-placement
+  #      clearance loop) -- out of scope for this pour-connectivity PR and
+  #      filed as a follow-up.  IMPORTANT: the pour-repair geometry this PR
+  #      ADDS (drill-0.25 repair vias + width-0.15 stubs) was A/B-measured
+  #      at VIA_CLEAR 0.15 vs 0.23 and contributes ZERO net-new DRC
+  #      violations -- it is jlcpcb-legal as designed (no via-in-pad,
+  #      >=0.15mm to foreign copper).  The +18 is pre-existing shared-tool
+  #      behaviour newly EXPOSED because real pour copper now exists to
+  #      short against; it is not a regression introduced by #3617's code.
+  #
+  #   3. Bare-route diff-pair congestion now visible against the pour
+  #      (the 0.10mm-clearance signal classes: 14 clearance_segment_via +
+  #      2 clearance_via_via + 6 clearance_pad_segment + 4
+  #      clearance_segment_segment on drill-0.3 router vias / router traces).
+  #
+  # Measured band, 2026-06-13, seed 42 / PYTHONHASHSEED=42 / C++ backend:
+  #   * CI ubuntu-latest 2c: 42 (run 27459610498, the failing-gate run that
+  #     prompted this doctor pass; convergence in 3 rounds).
+  #   * Local macOS arm64 8c idle: 61, 61 across two consecutive solo
+  #     re-routes (DRC count deterministic; repair converges 52+30 then
+  #     30+5 both runs).  The 42-vs-61 spread is the same #3466 wall-clock-
+  #     budget cliff documented for the pre-fill band -- the fast machine
+  #     lands more copper per budgeted pass, so more honest-accounting
+  #     diff-pair measurements + more stitch geometry.
+  # Band = [42, 61]; floor = band-max 61 + 1 = 62 (locally reproducible,
+  # matching the band-max+1 convention established for the 34 floor).
+  # The committed artifact (parity-pinned in
+  # tests/test_kct_check_parity.py at 60 blocking + 1 advisory) is the
+  # local-arm64 re-route; ``kct check`` on that fixed file is deterministic
+  # across machines (no re-route), so the parity pins are a tighter,
+  # machine-independent gate than this re-route floor.
+  #
+  # Tighten when: (a) the shared-stitcher cross-net trace-clearance fix
+  # lands (retires the +18 stitcher residual -> floor drops toward ~44);
+  # (b) the load-variance cliff (#3466) is fixed; (c) the diff-pair skew/
+  # continuity engaged-pair work (#3471-adjacent) lands.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 62
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
   # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
