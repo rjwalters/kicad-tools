@@ -249,6 +249,13 @@ class StitchResult:
     # enabled in ``run_stitch``.  The corresponding pads are recorded in
     # ``pads_skipped`` with a ``via_in_pad`` reason.
     via_in_pad_filtered: int = 0
+    # Issue #3633: pads that found NO cross-net-clearing placement but were
+    # rescued by the connectivity fallback -- the via was placed against the
+    # pre-existing copper only (ignoring just-placed sibling stitch geometry),
+    # accepting a marginal cross-net graze rather than stranding a pour pad.
+    # Each entry is (pad, reason).  Connectivity wins over a sub-clearance
+    # band intrusion that DRC already grandfathers.
+    connectivity_fallback: list[tuple[PadInfo, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -2546,6 +2553,65 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
         sexp.append(seg)
 
 
+def trace_to_track_segments(trace: TraceSegment) -> list[TrackSegment]:
+    """Decompose a pad-to-via :class:`TraceSegment` into its constituent
+    :class:`TrackSegment` legs.
+
+    This mirrors the geometry emitted by :func:`add_trace_to_pcb` (straight,
+    dog-leg, and extended-escape forms) so the same copper that will be
+    written to the PCB can be fed back into the clearance checks of
+    *subsequent* stitch placements.  Each returned segment carries the
+    originating pad's net number so callers can filter by net (cross-net
+    co-check) when assembling obstacle lists.
+
+    See issue #3633: ``run_stitch`` placed cross-net stitch vias into the
+    clearance loop but emitted the pad-to-via traces in a separate later
+    pass, so a stitch via on net B was never checked against net A's
+    just-placed stitch trace.  Decomposing the trace here lets the placement
+    loop co-check trace-vs-via and trace-vs-trace within the same pass.
+    """
+    net = trace.pad.net_number
+    width = trace.width
+    layer = trace.layer
+
+    # Build the ordered path of points the trace passes through.
+    if trace.is_extended_escape:
+        points: list[tuple[float, float]] = [(trace.pad.x, trace.pad.y)]
+        points.extend(trace.waypoints or [])
+        points.append((trace.via_x, trace.via_y))
+    elif trace.is_dogleg:
+        # ``is_dogleg`` is True iff both intermediate coords are set (see
+        # ``TraceSegment.is_dogleg``), so these locals are never None on this
+        # branch.  Bind + assert so mypy narrows ``float | None`` to ``float``.
+        ix = trace.intermediate_x
+        iy = trace.intermediate_y
+        assert ix is not None and iy is not None  # guaranteed by is_dogleg
+        points = [
+            (trace.pad.x, trace.pad.y),
+            (ix, iy),
+            (trace.via_x, trace.via_y),
+        ]
+    else:
+        points = [(trace.pad.x, trace.pad.y), (trace.via_x, trace.via_y)]
+
+    segments: list[TrackSegment] = []
+    for i in range(len(points) - 1):
+        sx, sy = points[i]
+        ex, ey = points[i + 1]
+        segments.append(
+            TrackSegment(
+                start_x=sx,
+                start_y=sy,
+                end_x=ex,
+                end_y=ey,
+                width=width,
+                layer=layer,
+                net_number=net,
+            )
+        )
+    return segments
+
+
 def find_all_filled_polygons(
     sexp: SExp, exclude_nets: set[int] | None = None
 ) -> list[FilledPolygon]:
@@ -3818,19 +3884,59 @@ def run_stitch(
     # diagonal grazing the GND pad).
     obstacle_net_map = get_net_map(sexp)
 
-    # Process each pad
-    for pad in pads:
-        # Check if already connected
-        if is_pad_connected(
-            pad,
-            existing_vias,
-            track_points,
-            same_net_filled_polygons=same_net_filled_polys,
-            same_net_zone_polygons=same_net_zone_polys,
-        ):
-            result.already_connected += 1
-            continue
+    # Issue #3633: cross-net co-check of just-placed stitch geometry.
+    #
+    # ``other_net_tracks`` / ``other_net_vias`` above are pre-filtered to
+    # exclude *all* stitch nets, so pre-existing routed copper on a sibling
+    # stitch net does not block placement.  But the stitch step also EMITS
+    # new copper (a via plus a pad-to-via trace) for every pad it processes.
+    # Previously the placed via was appended to ``existing_vias`` (checked
+    # only for same-net via-to-via spacing) and the trace was buffered in
+    # ``result.traces_added`` for a separate later write pass -- so a stitch
+    # via/trace on net B was never checked against net A's just-placed stitch
+    # trace.  On dense boards routing near the manufacturer clearance floor
+    # (board 07: DDR/MIPI/HDMI at 0.10mm vs the jlcpcb 4-layer 0.1016mm
+    # floor) this let foreign-net stitch geometry land inside the clearance
+    # band, producing cross-net clearance DRC violations only visible once
+    # real pour copper existed.
+    #
+    # We track each placed via and the constituent legs of each placed trace,
+    # tagged with their net number, and feed the OTHER-net subset of that
+    # geometry into the obstacle lists for every subsequent placement.  The
+    # placement helpers treat their ``other_net_*`` arguments as flat
+    # obstacle lists (no internal net filtering), so we filter by net here
+    # when assembling the per-pad augmented lists.
+    placed_stitch_tracks: list[TrackSegment] = []
+    placed_stitch_vias: list[tuple[float, float, float, int]] = []
 
+    def _record_placed(placement: ViaPlacement, trace: TraceSegment) -> None:
+        """Record a placed via + trace so later placements co-check against it."""
+        placed_stitch_vias.append(
+            (placement.via_x, placement.via_y, placement.size, placement.pad.net_number)
+        )
+        placed_stitch_tracks.extend(trace_to_track_segments(trace))
+
+    # Issue #3633: run the full placement-strategy cascade for one pad against
+    # the supplied obstacle lists.  Returns ``(via_pos, dogleg_pos,
+    # extended_pos, is_micro)`` on success, or ``None`` when every strategy
+    # (straight / dog-leg / extended-escape, with the micro-via retry when
+    # enabled) is exhausted.  The caller invokes this twice: first with the
+    # cross-net-augmented obstacle lists, then -- only for a pour pad that
+    # would otherwise be stranded -- with the pre-existing copper alone, so a
+    # load-bearing via is placed anyway rather than dropping the pad.
+    def _attempt_placement(
+        pad: PadInfo,
+        eff_other_net_tracks: list[TrackSegment],
+        eff_other_net_vias: list[tuple[float, float, float, int]],
+    ) -> (
+        tuple[
+            tuple[float, float] | None,
+            tuple[float, float, float, float] | None,
+            tuple[float, float, list[tuple[float, float]]] | None,
+            bool,
+        ]
+        | None
+    ):
         # Calculate via position with clearance checking against all copper,
         # including the connecting trace path from pad to via
         via_pos = calculate_via_position(
@@ -3839,8 +3945,8 @@ def run_stitch(
             via_size=via_size,
             existing_vias=existing_vias,
             clearance=clearance,
-            other_net_tracks=other_net_tracks,
-            other_net_vias=other_net_vias,
+            other_net_tracks=eff_other_net_tracks,
+            other_net_vias=eff_other_net_vias,
             other_net_pads=other_net_pads,
             trace_width=trace_width,
             other_net_filled_polygons=other_net_filled_polys,
@@ -3861,8 +3967,8 @@ def run_stitch(
                 via_size=via_size,
                 existing_vias=existing_vias,
                 clearance=clearance,
-                other_net_tracks=other_net_tracks,
-                other_net_vias=other_net_vias,
+                other_net_tracks=eff_other_net_tracks,
+                other_net_vias=eff_other_net_vias,
                 other_net_pads=other_net_pads,
                 trace_width=trace_width,
                 other_net_filled_polygons=other_net_filled_polys,
@@ -3879,8 +3985,8 @@ def run_stitch(
                     existing_vias=existing_vias,
                     clearance=clearance,
                     escape_distance=escape_distance,
-                    other_net_tracks=other_net_tracks,
-                    other_net_vias=other_net_vias,
+                    other_net_tracks=eff_other_net_tracks,
+                    other_net_vias=eff_other_net_vias,
                     other_net_pads=other_net_pads,
                     trace_width=trace_width,
                 )
@@ -3895,8 +4001,8 @@ def run_stitch(
                             via_size=micro_via_size,
                             existing_vias=existing_vias,
                             clearance=clearance,
-                            other_net_tracks=other_net_tracks,
-                            other_net_vias=other_net_vias,
+                            other_net_tracks=eff_other_net_tracks,
+                            other_net_vias=eff_other_net_vias,
                             other_net_pads=other_net_pads,
                             trace_width=trace_width,
                             other_net_filled_polygons=other_net_filled_polys,
@@ -3910,99 +4016,135 @@ def run_stitch(
                                 via_size=micro_via_size,
                                 existing_vias=existing_vias,
                                 clearance=clearance,
-                                other_net_tracks=other_net_tracks,
-                                other_net_vias=other_net_vias,
+                                other_net_tracks=eff_other_net_tracks,
+                                other_net_vias=eff_other_net_vias,
                                 other_net_pads=other_net_pads,
                                 trace_width=trace_width,
                                 other_net_filled_polygons=other_net_filled_polys,
                             )
                             if micro_dogleg is not None:
                                 # Use micro dogleg
-                                via_pos = None
-                                dogleg_pos = micro_dogleg
-                                extended_pos = None
-                                is_micro = True
-                            else:
-                                # Also try extended escape with micro-via
-                                micro_extended = calculate_extended_escape_position(
-                                    pad,
-                                    offset=offset,
-                                    via_size=micro_via_size,
-                                    existing_vias=existing_vias,
-                                    clearance=clearance,
-                                    escape_distance=escape_distance,
-                                    other_net_tracks=other_net_tracks,
-                                    other_net_vias=other_net_vias,
-                                    other_net_pads=other_net_pads,
-                                    trace_width=trace_width,
-                                )
-                                if micro_extended is not None:
-                                    via_pos = None
-                                    dogleg_pos = None
-                                    extended_pos = micro_extended
-                                    is_micro = True
-                                else:
-                                    is_micro = False
-                        else:
-                            # Micro straight-line succeeded
-                            via_pos = micro_pos
-                            dogleg_pos = None
-                            extended_pos = None
-                            is_micro = True
+                                return (None, micro_dogleg, None, True)
+                            # Also try extended escape with micro-via
+                            micro_extended = calculate_extended_escape_position(
+                                pad,
+                                offset=offset,
+                                via_size=micro_via_size,
+                                existing_vias=existing_vias,
+                                clearance=clearance,
+                                escape_distance=escape_distance,
+                                other_net_tracks=eff_other_net_tracks,
+                                other_net_vias=eff_other_net_vias,
+                                other_net_pads=other_net_pads,
+                                trace_width=trace_width,
+                            )
+                            if micro_extended is not None:
+                                return (None, None, micro_extended, True)
+                            # Micro-via also failed.
+                            return None
+                        # Micro straight-line succeeded
+                        return (micro_pos, None, None, True)
+                    # No micro-via retry available.
+                    return None
+                return (via_pos, dogleg_pos, extended_pos, False)
+            return (via_pos, dogleg_pos, extended_pos, False)
+        return (via_pos, dogleg_pos, extended_pos, False)
 
-                        if not is_micro:
-                            # Micro-via also failed -- record diagnostic
-                            detail = identify_nearest_obstacle(
-                                pad,
-                                micro_via_size,
-                                clearance,
-                                existing_vias,
-                                other_net_tracks,
-                                other_net_vias,
-                                other_net_pads,
-                                other_net_filled_polys,
-                                net_map=obstacle_net_map,
-                            )
-                            result.skip_details.append((pad, detail))
-                            result.pads_skipped.append(
-                                (
-                                    pad,
-                                    "no valid via location (clearance conflict, all "
-                                    f"strategies up to {escape_distance}mm with "
-                                    f"micro-via {micro_via_size}mm also failed; "
-                                    f"nearest obstacle: {detail.reason})",
-                                )
-                            )
-                            continue
-                    else:
-                        # No micro-via retry -- record diagnostic
-                        detail = identify_nearest_obstacle(
-                            pad,
-                            via_size,
-                            clearance,
-                            existing_vias,
-                            other_net_tracks,
-                            other_net_vias,
-                            other_net_pads,
-                            other_net_filled_polys,
-                            net_map=obstacle_net_map,
-                        )
-                        result.skip_details.append((pad, detail))
-                        result.pads_skipped.append(
-                            (
-                                pad,
-                                "no valid via location (clearance conflict, dog-leg and "
-                                f"extended escape up to {escape_distance}mm also failed; "
-                                f"nearest obstacle: {detail.reason})",
-                            )
-                        )
-                        continue
-                else:
-                    is_micro = False
-            else:
-                is_micro = False
+    # Process each pad
+    for pad in pads:
+        # Assemble per-pad obstacle lists augmented with cross-net stitch
+        # geometry placed earlier in this same pass (issue #3633).  Only
+        # foreign-net geometry is included so a net's own earlier stitch
+        # trace/via never falsely blocks its later placements.
+        cross_net_stitch_tracks = [
+            seg for seg in placed_stitch_tracks if seg.net_number != pad.net_number
+        ]
+        cross_net_stitch_vias = [
+            v for v in placed_stitch_vias if v[3] != pad.net_number
+        ]
+        eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
+        eff_other_net_vias = other_net_vias + cross_net_stitch_vias
+
+        # Check if already connected
+        if is_pad_connected(
+            pad,
+            existing_vias,
+            track_points,
+            same_net_filled_polygons=same_net_filled_polys,
+            same_net_zone_polygons=same_net_zone_polys,
+        ):
+            result.already_connected += 1
+            continue
+
+        # Attempt placement against the cross-net-augmented obstacle lists
+        # (issue #3633): just-placed foreign-net stitch geometry participates
+        # so a stitch via on net B clears net A's just-placed stitch trace.
+        placement_result = _attempt_placement(
+            pad, eff_other_net_tracks, eff_other_net_vias
+        )
+
+        if placement_result is None:
+            # Every cross-net-clearing strategy is exhausted for this pad.
+            #
+            # Issue #3633 (pour-connectivity regression): the tightened
+            # foreign-net rejection can strand a POUR pad whose ONLY reachable
+            # via position grazes a just-placed sibling stitch -- e.g. board
+            # 07's ``+1V8: U3.12`` and ``GND: U2.47`` lost their only bridge
+            # to the main pour island, splitting the net into disjoint copper
+            # components.  A stranded pour pad is a worse defect than a
+            # sub-clearance graze that DRC already grandfathers, so
+            # connectivity must win: retry placement against the PRE-EXISTING
+            # copper alone (dropping the cross-net stitch geometry from the
+            # obstacle pool).  This restores the load-bearing via that existed
+            # before the co-check tightened, accepting the marginal cross-net
+            # band intrusion rather than leaving the pad disconnected.
+            fallback_result = _attempt_placement(
+                pad, other_net_tracks, other_net_vias
+            )
+            if fallback_result is None:
+                # Genuinely no placement even against pre-existing copper --
+                # this is a real obstruction, not a self-inflicted cross-net
+                # rejection.  Record the skip diagnostic as before.
+                detail = identify_nearest_obstacle(
+                    pad,
+                    micro_via_size if micro_via else via_size,
+                    clearance,
+                    existing_vias,
+                    other_net_tracks,
+                    other_net_vias,
+                    other_net_pads,
+                    other_net_filled_polys,
+                    net_map=obstacle_net_map,
+                )
+                result.skip_details.append((pad, detail))
+                strategy_note = (
+                    f"all strategies up to {escape_distance}mm with micro-via "
+                    f"{micro_via_size}mm also failed"
+                    if micro_via
+                    else f"dog-leg and extended escape up to {escape_distance}mm "
+                    "also failed"
+                )
+                result.pads_skipped.append(
+                    (
+                        pad,
+                        f"no valid via location (clearance conflict, {strategy_note}; "
+                        f"nearest obstacle: {detail.reason})",
+                    )
+                )
+                continue
+            # Fallback succeeded: place the least-violating via anyway and log
+            # it so the marginal cross-net graze is auditable.
+            via_pos, dogleg_pos, extended_pos, is_micro = fallback_result
+            result.connectivity_fallback.append(
+                (
+                    pad,
+                    "cross-net co-check left no clearing placement; placed via "
+                    "against pre-existing copper to preserve pour connectivity "
+                    "(connectivity > marginal cross-net clearance graze)",
+                )
+            )
         else:
-            is_micro = False
+            via_pos, dogleg_pos, extended_pos, is_micro = placement_result
 
         # Determine actual via dimensions (micro or standard)
         actual_via_size = micro_via_size if is_micro else via_size
@@ -4057,6 +4199,9 @@ def run_stitch(
 
             # Add to existing vias list
             existing_vias.append((via_x, via_y, pad.net_number))
+            # Issue #3633: feed this stitch via + trace into the cross-net
+            # obstacle pool so later-placed foreign-net stitches clear it.
+            _record_placed(placement, trace)
         elif dogleg_pos is not None:
             # Dog-leg placement: (via_x, via_y, intermediate_x, intermediate_y)
             via_x, via_y, intermediate_x, intermediate_y = dogleg_pos
@@ -4089,6 +4234,9 @@ def run_stitch(
 
             # Add to existing vias list
             existing_vias.append((via_x, via_y, pad.net_number))
+            # Issue #3633: feed this stitch via + trace into the cross-net
+            # obstacle pool so later-placed foreign-net stitches clear it.
+            _record_placed(placement, trace)
         else:
             # Straight-line placement
             placement = ViaPlacement(
@@ -4117,6 +4265,9 @@ def run_stitch(
 
             # Add to existing vias list
             existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
+            # Issue #3633: feed this stitch via + trace into the cross-net
+            # obstacle pool so later-placed foreign-net stitches clear it.
+            _record_placed(placement, trace)
 
     # Issue #3271: pad-aware post-filter for manufacturers that forbid
     # via-in-pad (e.g. JLCPCB standard tier).
@@ -4414,6 +4565,17 @@ def output_result(
             "that would have produced via_in_pad violations "
             "(--avoid-pad-overlap; pads rely on the plane pour for connectivity)"
         )
+    if result.connectivity_fallback:
+        # Issue #3633: pour pads rescued by the connectivity fallback -- the
+        # cross-net co-check found no clearing placement, so we placed the
+        # via against pre-existing copper anyway to avoid stranding the pad.
+        print(
+            f"  ~ {len(result.connectivity_fallback)} pour pad(s) used the "
+            "connectivity fallback (placed despite a marginal cross-net "
+            "clearance graze to avoid stranding the pad)"
+        )
+        for pad, _reason in result.connectivity_fallback[:5]:
+            print(f"      - {pad.net_name}: {pad.reference}.{pad.pad_number}")
     if result.pads_skipped:
         print(f"  ! Skipped {len(result.pads_skipped)} pads (manual placement needed)")
 
