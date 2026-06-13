@@ -31,6 +31,8 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.router.partial_rescue import RescueConfig
+from kicad_tools.router.partial_rescue import rescue_partial_nets as shared_rescue_partial_nets
 from kicad_tools.schematic.blocks import (
     CurrentSenseShunt,
     DebugHeader,
@@ -2943,112 +2945,37 @@ _RESCUE_EXCLUDED_NETS = frozenset(
     ["+24V", "+5V", "+3V3", "GND", "PHASE_A", "PHASE_B", "PHASE_C", "VIN"]
 )
 
-# Per-rescue-stage budgets.  Each stage routes exactly ONE net against
-# the committed copper of every other net, so the per-stage wall budget
-# is small.  60 s per-net matches the main recipe; 300 s wall bounds the
-# #3485 budget-leak overshoot inside escape/rip-up phases.
-_RESCUE_STAGE_TIMEOUT_S = 300
-_RESCUE_PER_NET_TIMEOUT_S = 60
-
-
-def _all_net_names(pcb_path: Path) -> list[str]:
-    """Parse all named nets from the PCB's ``(net N \"NAME\")`` declarations."""
-    import re
-
-    text = pcb_path.read_text()
-    names = {m.group(2) for m in re.finditer(r'\(net (\d+) "([^"]+)"\)', text)}
-    return sorted(n for n in names if n)
-
-
-def _partially_connected_signal_nets(pcb_path: Path) -> list[str]:
-    """Return signal nets whose pads are not all trace-connected.
-
-    Runs ``kct check`` (connectivity is an advisory rule, so this never
-    interferes with the blocking-DRC gate) and parses the
-    "Net 'X' is partially routed" messages, excluding the pour/skip nets.
-    """
-    import json
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "kicad_tools.cli",
-            "check",
-            str(pcb_path),
-            "--mfr",
-            "jlcpcb-tier1",
-            "--format",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    try:
-        data = json.loads(result.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    partial: list[str] = []
-    for v in data.get("violations", data.get("errors", [])):
-        if v.get("rule", v.get("type")) != "connectivity":
-            continue
-        msg = v.get("message", "")
-        if "'" not in msg or "partially routed" not in msg:
-            continue
-        net = msg.split("'")[1]
-        if net not in _RESCUE_EXCLUDED_NETS:
-            partial.append(net)
-    return sorted(set(partial))
-
-
-def _strip_net_copper(pcb_path: Path, net_names: list[str]) -> int:
-    """Remove all top-level ``(segment ...)``/``(via ...)`` copper for *net_names*.
-
-    Zones, pads, and footprints are untouched.  Returns the number of
-    copper blocks removed.  Used by the rescue loop so a stranded
-    partial route does not poison the rescue A* (and so a FAILED rescue
-    leaves no stub copper behind -- the #3470 overlap-stub lesson).
-    """
-    import re
-
-    text = pcb_path.read_text()
-    net_ids = {
-        m.group(1)
-        for m in re.finditer(r'\(net (\d+) "([^"]+)"\)', text)
-        if m.group(2) in set(net_names)
-    }
-    if not net_ids:
-        return 0
-
-    spans: list[tuple[int, int]] = []
-    for m in re.finditer(r"^\t\((?:segment|via)\b", text, re.MULTILINE):
-        start = m.start()
-        depth = 0
-        i = start
-        while i < len(text):
-            if text[i] == "(":
-                depth += 1
-            elif text[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        end = i + 1
-        if end < len(text) and text[end] == "\n":
-            end += 1
-        block = text[start:end]
-        net_match = re.search(r"\(net (\d+)\)", block)
-        if net_match and net_match.group(1) in net_ids:
-            spans.append((start, end))
-
-    for start, end in sorted(spans, reverse=True):
-        text = text[:start] + text[end:]
-    pcb_path.write_text(text)
-    return len(spans)
+# Board-specific knobs for the shared per-net rescue loop
+# (:func:`kicad_tools.router.partial_rescue.rescue_partial_nets`).  These
+# reproduce the previous recipe-local loop byte-for-byte:
+#
+#   * seed 7 + ``--micro-via-in-pad-fallback`` (Issue #3425/#3118): the
+#     0.3 mm in-pad rescue vias the router needs to escape the DRV8301
+#     (U3, 0.5 mm-pitch),
+#   * 60 s per-net matches the main recipe; 300 s stage wall bounds the
+#     #3485 budget-leak overshoot inside escape/rip-up phases,
+#   * 4-layer, cpp backend, jlcpcb-tier1 -- same as the main pass.
+_RESCUE_CONFIG = RescueConfig(
+    manufacturer="jlcpcb-tier1",
+    backend="cpp",
+    seed=7,
+    stage_timeout_s=300,
+    per_net_timeout_s=60,
+    starting_layers=4,
+    max_layers=4,
+    excluded_nets=_RESCUE_EXCLUDED_NETS,
+    micro_via_in_pad_fallback=True,
+)
 
 
 def rescue_partial_nets(routed_path: Path) -> dict[str, bool]:
     """Rescue partially-routed signal nets one at a time (Issue #3471).
+
+    Thin wrapper over the shared
+    :func:`kicad_tools.router.partial_rescue.rescue_partial_nets` (issue
+    #3503), invoked with this board's knobs (:data:`_RESCUE_CONFIG`).
+    The per-net loop logic previously duplicated here is now maintained
+    in one place; see the shared module's docstring for the mechanism.
 
     Mechanism (measured on this board, 2026-06-10):
 
@@ -3059,114 +2986,15 @@ def rescue_partial_nets(routed_path: Path) -> dict[str, bool]:
     escape band.  Re-routing each residual net ALONE -- with every other
     net's copper preserved as immutable obstacles -- sidesteps the
     negotiation entirely and lands a subset of the cluster that the
-    global pass cannot extract:
-
-      * ``--preserve-existing`` keeps all other nets' copper (#3155),
-      * ``--skip-nets`` everything except the rescue target,
-      * ALL partial nets' stranded copper is stripped upfront so the
-        rescue A* starts from a clean slate (a stale partial stub of a
-        later rescue target is an immutable obstacle for the current
-        one),
-      * a FAILED rescue strips the target's copper again -- a rescue
-        never leaves stranded stubs (the #3470 overlap-stub lesson) and
-        never makes the board worse (reach counts fully-connected nets
-        only).
-
-    Each stage is a fresh ``kct route`` invocation with the same
-    manufacturer/layer/backend flags as the main recipe.  Measured
-    effect at the 2026-06-10 recipe (post Steiner-virtual-pad fixes,
-    seed 7): main pass lands 29/35 + 0 blocking; the rescue loop lifts
-    PWM_CL (and, run-dependently, additional ISENSE nets) without
-    introducing blocking violations.
+    global pass cannot extract.  Measured effect at the 2026-06-10 recipe
+    (post Steiner-virtual-pad fixes, seed 7): main pass lands 29/35 + 0
+    blocking; the rescue loop lifts PWM_CL (and, run-dependently,
+    additional ISENSE nets) without introducing blocking violations.
 
     Returns a dict mapping rescued net name -> True (fully connected
     after rescue) / False (rescue failed; net left with no copper).
     """
-    print("\n" + "=" * 60)
-    print("Rescuing partially-routed nets (Issue #3471)...")
-    print("=" * 60)
-
-    partial = _partially_connected_signal_nets(routed_path)
-    if not partial:
-        print("\n   No partially-routed signal nets -- nothing to rescue.")
-        return {}
-
-    print(f"\n   Partial nets: {', '.join(partial)}")
-    all_nets = _all_net_names(routed_path)
-    results: dict[str, bool] = {}
-
-    # Strip ALL partial nets' stranded copper upfront: a stale partial
-    # stub of net B is a preserved (immutable) obstacle during net A's
-    # rescue and measurably blocks rescues that succeed on the stripped
-    # board.  Stripping is loss-free for the reach metric -- partially
-    # connected nets count as unrouted either way -- and removes the
-    # stranded-stub DRC liability (#3470).
-    stripped_total = _strip_net_copper(routed_path, partial)
-    print(f"   Stripped {stripped_total} stale copper block(s) for {len(partial)} net(s)")
-
-    for net in partial:
-        skip = [n for n in all_nets if n != net]
-        tmp_out = routed_path.with_name(routed_path.stem + "_rescue.kicad_pcb")
-        cmd = [
-            sys.executable,
-            "-m",
-            "kicad_tools.cli",
-            "route",
-            str(routed_path),
-            "--output",
-            str(tmp_out),
-            "--preserve-existing",
-            "--auto-layers",
-            "--starting-layers",
-            "4",
-            "--max-layers",
-            "4",
-            "--manufacturer",
-            "jlcpcb-tier1",
-            "--micro-via-in-pad-fallback",
-            "--backend",
-            "cpp",
-            "--seed",
-            "7",
-            "--timeout",
-            str(_RESCUE_STAGE_TIMEOUT_S),
-            "--per-net-timeout",
-            str(_RESCUE_PER_NET_TIMEOUT_S),
-            "--skip-nets",
-            ",".join(skip),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if not tmp_out.exists():
-            print(f"   Rescue {net}: FAILED (no output produced)")
-            results[net] = False
-            continue
-
-        # Promote the rescue output; on failure strip the net's copper so
-        # no stranded stubs remain.
-        tmp_out.replace(routed_path)
-        if result.returncode == 0:
-            print(f"   Rescue {net}: SUCCESS (fully connected)")
-            results[net] = True
-        else:
-            removed = _strip_net_copper(routed_path, [net])
-            print(
-                f"   Rescue {net}: failed (exit {result.returncode}); "
-                f"stripped {removed} stub block(s)"
-            )
-            results[net] = False
-
-        # Clean up per-stage side files (``kct route`` writes a .kicad_prl
-        # next to its output, and a *_partial.kicad_pcb on partial exits).
-        for stray in (
-            tmp_out.with_suffix(".kicad_prl"),
-            tmp_out.with_name(tmp_out.stem + "_partial.kicad_pcb"),
-        ):
-            stray.unlink(missing_ok=True)
-
-    rescued = sum(1 for ok in results.values() if ok)
-    print(f"\n   Rescue summary: {rescued}/{len(results)} net(s) rescued")
-    return results
+    return shared_rescue_partial_nets(routed_path, _RESCUE_CONFIG)
 
 
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:

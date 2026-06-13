@@ -24,4 +24,16 @@ new git worktrees (`.loom/worktrees/issue-N/`) need this step explicitly.
 The C++ backend gives a 10-100x speedup for the A* loop, so a missing
 extension is the most likely cause of multi-minute-per-net routing.
 
+### Rebuilding after editing C++ sources
+
+`kct build-native` now detects staleness automatically: it compares the
+newest mtime of `src/kicad_tools/router/cpp/**` (`.cpp`/`.hpp` and
+`CMakeLists.txt`) against the installed `.so` and **rebuilds when the
+source is newer**, even without a `BUILD_VERSION` bump. When the `.so` is
+already up to date it prints `SKIPPED rebuild` instead of the old
+misleading `installed successfully!`.
+
+`--force` always recompiles regardless of mtimes — reach for it if you
+suspect the auto-detection missed something (e.g. a touched build flag).
+
 See `README.md` "Fresh worktree checklist" for the full setup sequence.

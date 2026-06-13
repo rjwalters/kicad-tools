@@ -53,13 +53,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      # continue-on-error is tracked by issue #3512 (1472 mypy errors in
-      # 264 files on main as of 2026-06-11). Removing it requires a
-      # baseline/burn-down that is out of scope for #3436 (which un-masked
-      # the Test job).
-      - name: Run mypy
-        run: uv run mypy src/
-        continue-on-error: true
+      # Issue #3512: the `Run mypy` step used to carry continue-on-error: true,
+      # so the Type Check job was green regardless of mypy's exit code and
+      # type rot accumulated invisibly (1512 errors in 269 files on main as of
+      # 2026-06-13). Fixing all of them in one PR is infeasible, so this gate
+      # mirrors the routed-pcb-drc-check allowlist pattern: a committed
+      # baseline (.github/mypy-baseline.txt) records the known errors, and the
+      # wrapper script fails the job ONLY on NEW errors beyond the baseline.
+      # This catches regressions immediately while the existing debt is burned
+      # down. As the baseline shrinks toward 0, this step should eventually be
+      # replaced by a bare `uv run mypy src/`. Do NOT re-add continue-on-error
+      # or pad the baseline to silence a new error -- fix the type error.
+      - name: Run mypy (baseline-gated)
+        run: uv run python scripts/ci/check_mypy_baseline.py
 
   test:
     name: Test
@@ -691,19 +697,36 @@ jobs:
     # the merge button.
     name: Match-Group Routing Regression
     runs-on: ubuntu-latest
-    # Issue #2660 acceptance criterion #5 (mirrored for #2726): wall-clock
-    # <= 5 min on ubuntu-latest.  The 10-minute limit was the original
-    # safety net for slow runners; if the typical run creeps above 5
-    # minutes, move to a nightly schedule per the epic's runtime guidance.
-    #
-    # Board 07 routing currently consumes ~9-10 min in CI; PR #3005
-    # scope-split (dropping --differential-pairs from the recipe pending
-    # the upstream CoupledPathfinder fix) widened this to ~10-12 min
-    # because more nets fall through to longer pathfinder paths when the
-    # diff-pair pre-pass is skipped.  Reduce back to 10 once #3012 lands
-    # and --differential-pairs is re-enabled in
-    # boards/07-matchgroup-test/generate_design.py.
-    timeout-minutes: 15
+    # Issue #3617 (sibling of board 06's #3509): run inside the official
+    # KiCad 10 container (same image as the test + kicad-cli-smoke +
+    # diffpair-routing-regression jobs).  The board 07 recipe's pour
+    # pipeline (zone fill -> stitch -> pour-connectivity repair -> re-fill
+    # -> copper-union audit) shells out to ``kct zones fill``, which is
+    # backed by kicad-cli.  On the bare ubuntu-latest runner kicad-cli does
+    # not exist, so every fill invocation fails and the pour zones stay
+    # zero-fill -- the same "dead pour" trap board 06 closed in PR #3615.
+    # The container provides kicad-cli 10 so the fills actually run,
+    # matching the local artifact-refresh environment.  The gate now
+    # asserts the pour audit verdict (see scripts/ci/check_matchgroup_coverage.py
+    # + the board recipe's REQUIRE_POUR_CONNECTIVITY contract), so a future
+    # fill regression fails the job instead of rotting in the log.
+    container:
+      image: kicad/kicad:10.0
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the test job).
+        shell: bash
+    # Board 07 routing consumes ~10-12 min in CI; the prior bare-runner
+    # green wall was ~12-13 min (run 27433067590).  Issue #3617 re-measure:
+    # moving into the kicad/kicad:10.0 container adds ~1-2 min (image pull +
+    # apt prerequisites) and the recipe now performs real zone fills +
+    # pour-repair rounds, so the prior 15-min ceiling leaves no headroom.
+    # Bumped 15 -> 20 to match the container + fill re-measure (same value
+    # PR #3625 sets for issue #3620's container move of this job).
+    timeout-minutes: 20
     # Issue #3146 closure: the matrix-scoped soft-fail
     # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
     # that PR #3145 installed pending matchgroup-routing
@@ -742,28 +765,45 @@ jobs:
         # length_match_reference=pace-car semantics) can be added
         # cheaply once they exist.
     steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.  The
+        # ``kicad-cli --version`` probe makes a missing/broken kicad-cli
+        # fail THIS step with an attributable error instead of surfacing
+        # later as zero-fill pour zones (Issue #3617).
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install uv
+        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # coupling inside the container (mirrors the test + smoke +
+        # diffpair-routing-regression jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        # Pin the interpreter via uv (parity with the sibling jobs that use
+        # actions/setup-python with python-version: "3.12"); the container
+        # image's own Python version is irrelevant.
+        run: uv sync --extra dev --python 3.12
 
       - name: Build C++ router backend
         # Issue #3146: ``uv sync`` does NOT build the native extension
         # (see repo CLAUDE.md "Routing performance: build the C++ backend
         # first").  Without this step board 07 routing falls back to pure
-        # Python which is 10-100x slower; with a 2-core ubuntu-latest
-        # runner and 600s outer / 30s per-net budgets, the slowdown was
-        # the dominant source of the cross-platform DRC variance reported
-        # in PR #3145 (27 local vs 48 CI).  Mirrors the equivalent step in
-        # the diffpair-routing-regression job above.
+        # Python which is 10-100x slower; with a 2-core runner and 600s
+        # outer / 30s per-net budgets, the slowdown was the dominant source
+        # of the cross-platform DRC variance reported in PR #3145 (27 local
+        # vs 48 CI).  Mirrors the equivalent step in the
+        # diffpair-routing-regression job above.
         run: uv run kct build-native
 
       - name: Re-route board + check match-group coverage
@@ -774,8 +814,12 @@ jobs:
         # across runner environments.  The board 07 ``generate_design.py``
         # also re-pins it on its own ``kct route`` subprocess for the
         # local-CLI case, but pinning here covers the CI path end-to-end.
+        # PYTHONUNBUFFERED makes a timeout attributable to a specific
+        # pipeline step instead of going silent in a block-buffered pipe
+        # (the diffpair job's #3413 lesson).
         env:
           PYTHONHASHSEED: "42"
+          PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_matchgroup_coverage.py \

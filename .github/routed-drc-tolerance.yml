@@ -500,6 +500,45 @@ tolerances:
   # vs GND B.Cu shorts) was cleared by Issue #3551: ``kct zones fill``
   # regenerated the pours against the final trace set (refill-only, no
   # copper re-route), restoring the strict 0-error gate.
+  #
+  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone``
+  # / ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
+  # *fill* copper -- the via/pad sibling of #3527's segment-vs-fill rule)
+  # surfaced 14 pre-existing ``clearance_pad_zone`` findings on this
+  # committed artifact: foreign-net pads (GND / JOY_X / JOY_Y / JOY_BTN /
+  # XTAL1 / XTAL2 / VCC) overlapping the opposite-net pours (the VCC F.Cu
+  # fill and GND B.Cu fill) by 0.003-0.008mm at the dense MCU/connector
+  # cluster.  No gate previously compared pad copper to zone fill, so
+  # board 03's effective gate was 0; this re-adds an entry at 14 to lock
+  # the new gate in.  These are the same legitimate stale-pour-carve class
+  # as boards 04-07 (the fill was not re-carved after the final pad
+  # geometry settled), NOT false positives -- the rule correctly skips
+  # same-net fills.  The per-board fill regeneration (refill the VCC/GND
+  # pours against the final pads) is artifact cleanup, sibling of
+  # #3549-#3553.  ``MAX_COMMITTED_DRC_ERRORS`` in
+  # tests/router/test_board03_routing_baseline.py is pinned to the same 14.
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 14
+
+  # Board 02 (charlieplex-led).  Measured at the default ``--mfr jlcpcb``
+  # tier-0 profile (no manufacturers: override).  Issue #3556 grandfather
+  # (June 13 2026): the new ``clearance_via_zone`` / ``clearance_pad_zone``
+  # DRC rule (vias and pads vs foreign-net zone *fill* copper -- the
+  # via/pad sibling of #3527's segment-vs-fill rule) surfaced 4
+  # pre-existing ``clearance_pad_zone`` findings on this committed
+  # artifact: 3x GND pads overlapping the VCC F.Cu fill + 1x VCC pad
+  # overlapping the GND B.Cu fill, all at the U1 DIP-8 cluster
+  # (~29.59, 42-50mm), sub-0.01mm overlap depth.  No gate previously
+  # compared pad copper to zone fill, so board 02's effective gate was 0;
+  # this adds an entry at 4 to lock the new gate in.  These are the same
+  # legitimate stale-pour-carve class as boards 04-07, NOT false positives
+  # (the rule correctly skips same-net fills).  The fresh re-route
+  # reproduces the identical 4 findings at the identical coordinates, so
+  # the board-02 manufacturable-baseline test
+  # (tests/router/test_board02_manufacturable_baseline.py:
+  # ``MAX_DRC_ERRORS = 4``) grandfathers the same family.  Burn-down:
+  # refill the VCC/GND pours against the final pad geometry (sibling of
+  # #3549-#3553) and drop both this entry and the test ceiling to 0.
+  boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb: 4
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
@@ -899,7 +938,16 @@ tolerances:
   # In1.Cu fill was regenerated via ``kct zones fill`` after the
   # USB_CC1 corridor move; ``--only segment_zone`` now reports 0 and the
   # floor tightens 22 -> 20 (back to the pre-#3527 count).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
+  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone`` /
+  # ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
+  # *fill* copper -- the via/pad sibling of #3527's segment-vs-fill rule)
+  # surfaced 1 pre-existing finding on this committed artifact: a GND pad
+  # 0.093 mm from the +3V3 fill (< 0.102 mm jlcpcb minimum), the exact
+  # stale-pour-carve class that motivated #3556 but for pad copper rather
+  # than a track. The fill was not regenerated after the pad's net/position
+  # settled. Floor rises 20 -> 21 to lock the new gate in; the underlying
+  # pad-vs-fill cleanup is per-board artifact work (sibling of #3549-#3553).
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 21
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -1294,10 +1342,145 @@ tolerances:
   # pairs lands (#3471-adjacent: 7+7 of the local 33 are that family),
   # at which point re-measure the band with the same recipe and set
   # floor = new-band-max + 1.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 34
+  #
+  # Raised 34 -> 62 by Issue #3617 / PR #3632 (pour fill + connectivity
+  # repair, doctor pass 2026-06-13).  Until #3617 the seed-42 re-route
+  # produced a DEAD pour: zone outlines with zero ``filled_polygon``
+  # copper (the #3482 boundary-test illusion).  #3617 wires the
+  # fill -> stitch -> repair loop into the recipe, so the re-route now
+  # carries REAL pour copper (GND 156 / +1V2 8 / +1V8 18 pads each in one
+  # copper component, copper-union audit PASS in CI in 2-3 rounds).  Three
+  # things change the DRC band, decomposed by a forensic per-family audit
+  # of the local arm64 artifact (drill/width signature tags the geometry's
+  # source):
+  #
+  #   1. Diff-pair ENGAGEMENT (+4): the filled pour completes more nets, so
+  #      diffpair_length_skew 5 -> 7 and diffpair_routing_continuity 5 -> 7
+  #      (honest measurement of two newly-connected pairs; engagement-over-
+  #      silence, the #3145 shape) and match_group_length_skew 0 -> 1.
+  #
+  #   2. STITCHER cross-net clearance residual (+18 net-new, the dominant
+  #      term): the ``kct stitch`` step (96 plane-stitch vias + 88 pad-to-
+  #      via traces) lands within the jlcpcb 4-layer floor (min_clearance
+  #      0.1016mm) of FOREIGN-pour copper on this dense board.  The audit
+  #      attributes ALL 18 by geometry signature to drill-0.2 stitch vias /
+  #      width-0.2 stitch traces:
+  #        11 clearance_pad_via   (stitch via vs foreign-pour pad)
+  #         7 clearance_segment_via (stitch via vs foreign-pour stitch trace)
+  #      Root cause: stitch_cmd.run_stitch threads cross-net placed VIAS
+  #      into each subsequent net's clearance check (cross_net_placed_vias)
+  #      but generates the pad-to-via TRACES in a separate later pass, so a
+  #      stitch via on net B is not checked against net A's just-placed
+  #      stitch trace.  Board 06 escapes this because its signal classes
+  #      route at clearance=0.15mm (roomier); board 07's DDR/MIPI/HDMI
+  #      classes route at clearance=0.10mm.  Fixing it is a shared-stitcher
+  #      restructure (interleave trace emission into the via-placement
+  #      clearance loop) -- out of scope for this pour-connectivity PR and
+  #      filed as a follow-up.  IMPORTANT: the pour-repair geometry this PR
+  #      ADDS (drill-0.25 repair vias + width-0.15 stubs) was A/B-measured
+  #      at VIA_CLEAR 0.15 vs 0.23 and contributes ZERO net-new DRC
+  #      violations -- it is jlcpcb-legal as designed (no via-in-pad,
+  #      >=0.15mm to foreign copper).  The +18 is pre-existing shared-tool
+  #      behaviour newly EXPOSED because real pour copper now exists to
+  #      short against; it is not a regression introduced by #3617's code.
+  #
+  #   3. Bare-route diff-pair congestion now visible against the pour
+  #      (the 0.10mm-clearance signal classes: 14 clearance_segment_via +
+  #      2 clearance_via_via + 6 clearance_pad_segment + 4
+  #      clearance_segment_segment on drill-0.3 router vias / router traces).
+  #
+  #   4. 45-degree quantization of the pour-repair stubs/bridges (#3617
+  #      doctor pass 2, refs #3532).  The repair emitter now builds each
+  #      off-axis stub/bridge as a two-leg 45-aligned dogleg (so the
+  #      committed artifact passes tests/test_fleet_45_census.py) instead of
+  #      a single skewed chord.  Each leg is validated against the live
+  #      obstacle index with the same _path_ok contract, but the dogleg's
+  #      bounded perpendicular bulge occupies slightly more lateral area than
+  #      the chord it replaces, and a later net's repair segment placed in
+  #      the SAME pass is not retro-checked against an earlier net's dogleg
+  #      (the identical cross-net single-pass interleave limitation as the
+  #      stitcher in (2), tracked by #3633).  On board 07's 0.10mm-clearance
+  #      DDR/MIPI/HDMI classes this surfaces as a handful of sub-0.10mm
+  #      grazes: +4 clearance_pad_segment (6->10) and +3
+  #      clearance_segment_segment (4->7) and +2 clearance_segment_via
+  #      (21->23) versus the pre-quantization straight-chord artifact -- a
+  #      +9-total / +8-blocking band shift.  No NEW family appears; the
+  #      diff-pair/match-group gated families (15) and the connectivity
+  #      advisory (1) are unchanged.  This is the cost of the
+  #      manufacturability-convention 45-only copper on an already-congested
+  #      board; the underlying grazes retire with the #3633 interleave fix.
+  #
+  # Measured band, 2026-06-13, seed 42 / PYTHONHASHSEED=42 / C++ backend:
+  #   * Pre-quantization straight-chord artifact (doctor pass 1): CI
+  #     ubuntu-latest 2c = 42 (run 27459610498); local macOS arm64 8c = 61.
+  #   * Post-quantization dogleg artifact (doctor pass 2, this commit):
+  #     local macOS arm64 8c idle = 70 total / 69 blocking + 1 advisory
+  #     connectivity, deterministic across re-routes (repair converges
+  #     54+26 then 34+9, quantizes 37 segments, post-quantize pour audit
+  #     PASS on all 3 plane nets).  The 42-vs-local spread is the same
+  #     #3466 wall-clock-budget cliff documented for the pre-fill band; CI
+  #     re-routes land fewer repair segments per budgeted pass, so the CI
+  #     count tracks well below the local band.
+  # Band = [CI ~50, local 69]; floor = local-max 69 + 1 = 70 (locally
+  # reproducible, matching the band-max+1 convention established for the 34
+  # and 62 floors).  The committed artifact (parity-pinned in
+  # tests/test_kct_check_parity.py at 69 blocking + 1 advisory) is the
+  # local-arm64 re-route; ``kct check`` on that fixed file is deterministic
+  # across machines (no re-route), so the parity pins are a tighter,
+  # machine-independent gate than this re-route floor.
+  #
+  # Tighten when: (a) the shared-stitcher / pour-repair cross-net trace-
+  # clearance fix lands (#3633 -- retires the stitcher residual AND the
+  # quantization-dogleg grazes -> floor drops toward ~44); (b) the
+  # load-variance cliff (#3466) is fixed; (c) the diff-pair skew/
+  # continuity engaged-pair work (#3471-adjacent) lands.
+  #
+  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone`` /
+  # ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
+  # *fill* copper) surfaced 51 pre-existing findings on this committed
+  # artifact (47 pad-vs-fill + 4 via-vs-fill), all foreign-net pairs
+  # (GND/+1V8/+1V2/A0..A7 vs the power pours) at sub-0.102 mm gaps or
+  # outright overlap -- the stale-pour-carve class that motivated #3556.
+  # No gate previously compared via/pad copper to zone fill, so these
+  # were invisible. Floor rises 69 -> 120 (= 69 prior blocking + 51 new)
+  # to lock the gate in; the per-board fill regeneration is artifact
+  # cleanup tracked alongside the #3633 stitcher/pour-repair work.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 120
 
-  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
-  # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
+  # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
+  # this board's tolerances entry -- the committed artifact reached a
+  # strict 0-blocking-error state at jlcpcb-tier1 (the manufacturers:
+  # override below keeps it on tier-1).
+  #
+  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone`` /
+  # ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
+  # *fill* copper -- the via/pad sibling of #3527's segment-vs-fill rule)
+  # surfaced 30 pre-existing ``clearance_pad_zone`` findings on the
+  # committed artifact: foreign-net pairs (PHASE_A/B/C vs GND, +24V vs GND,
+  # SWDIO/SWO vs +3V3, ...) at sub-clearance gaps to (or overlap with) the
+  # power/ground pours.  These were invisible because no gate compared pad
+  # copper to zone fill (the exact stale-pour-carve class that motivated
+  # #3556).  Floor re-added at 30 to lock the new gate in; refilling the
+  # zones after the final pad placement is artifact cleanup (sibling of
+  # #3549-#3553).  ``BOARD_05_EXPECTED_TOLERANCE`` in
+  # tests/test_board_05_drc_allowlist.py is pinned to the same 30.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 30
+
+  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Issue #3556 grandfather
+  # (June 13 2026): the new ``clearance_via_zone`` / ``clearance_pad_zone``
+  # DRC rule (vias and pads vs foreign-net zone *fill* copper -- the
+  # via/pad sibling of #3527's segment-vs-fill rule) surfaced 13
+  # pre-existing ``clearance_pad_zone`` findings on the committed artifact:
+  # SWDIO/SWCLK/SWO/NRST/OSC_IN/GND escape-side pads sub-clearance to the
+  # +3.3V pour.  No gate previously compared pad copper to zone fill, so
+  # board 04's effective floor was 0; this re-adds an entry at 13 to lock
+  # the new gate in.  The per-board fill regeneration (refill the +3.3V/GND
+  # pours against the final escape geometry) is artifact cleanup, sibling
+  # of #3549-#3553.  tests/test_board_04_mfr_gate.py reads this floor.
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 13
+
+  # Board 04 history (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12
+  # by Issue #2908.  The narrowing introduced in #2871 / #2874
   # only kept plane-net pads in the validator when ``pad.net == 0``
   # (the SKIPPED-pour convention); board 04 routes ``+3.3V`` / ``GND``
   # as real nets (so the GND zone can stitch up after routing), so the

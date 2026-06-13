@@ -45,7 +45,13 @@ class TestArgparseFlagPlumbing:
         """--mfr-tier-ladder accepts a comma-separated value."""
         parser = self._get_route_parser()
         args = parser.parse_args(
-            ["route", "test.kicad_pcb", "--auto-mfr-tier", "--mfr-tier-ladder", "jlcpcb,jlcpcb-tier1"]
+            [
+                "route",
+                "test.kicad_pcb",
+                "--auto-mfr-tier",
+                "--mfr-tier-ladder",
+                "jlcpcb,jlcpcb-tier1",
+            ]
         )
         assert args.mfr_tier_ladder == "jlcpcb,jlcpcb-tier1"
 
@@ -508,9 +514,7 @@ class TestLadderExhaustionDiagnostic:
         # Named line precedes the generic Options list.
         assert out.index("Diagnosis") < out.index("Options:")
 
-    def test_exhaustion_with_multiple_affected_components_reports_count(
-        self, capsys
-    ):
+    def test_exhaustion_with_multiple_affected_components_reports_count(self, capsys):
         """When more than one component shares the unfixable constraint,
         the diagnostic mentions the extra-affected count so the user knows
         the scope of the problem."""
@@ -550,9 +554,7 @@ class TestLadderExhaustionDiagnostic:
         # 2 other components affected.
         assert "2 other component" in out
 
-    def test_exhaustion_without_missed_rescues_suppresses_named_line(
-        self, capsys
-    ):
+    def test_exhaustion_without_missed_rescues_suppresses_named_line(self, capsys):
         """When the EscapeRouter has no missed-rescue signal we don't have
         a confident named constraint to surface; the Diagnosis section is
         suppressed but the generic Options list still prints."""
@@ -594,9 +596,7 @@ class TestLadderExhaustionDiagnostic:
             _name_dominant_unfixable_constraint,
         )
 
-        assert _name_dominant_unfixable_constraint(
-            last_router=None, manufacturer="jlcpcb"
-        ) is None
+        assert _name_dominant_unfixable_constraint(last_router=None, manufacturer="jlcpcb") is None
 
     def test_named_constraint_helper_handles_missing_escape_router(self):
         """The diagnostic helper degrades gracefully when the Autorouter
@@ -609,9 +609,11 @@ class TestLadderExhaustionDiagnostic:
         # We need to explicitly stub _escape_router to None.
         broken_router = MagicMock()
         broken_router._escape_router = None
-        assert _name_dominant_unfixable_constraint(
-            last_router=broken_router, manufacturer="jlcpcb"
-        ) is None
+        assert (
+            _name_dominant_unfixable_constraint(last_router=broken_router, manufacturer="jlcpcb")
+            is None
+        )
+
 
 class TestTriggerTableWiring:
     """Issue #2883: trigger table is wired into the outer escalation loop.
@@ -698,6 +700,13 @@ class TestTriggerTableWiring:
         via-in-pad capability gain (which would otherwise escalate
         defensively), the trigger table marks BLOCKED_PATH as
         non-manufacturer-fixable and vetoes the walk-forward.
+
+        Issue #3463: the veto only applies when there is *no* instrumented
+        ``missed_via_in_pad_rescues`` signal.  A non-zero missed-rescue
+        counter is direct evidence that via-in-pad would help and takes
+        precedence over the dominant-cause tally (see
+        ``test_missed_via_in_pad_overrides_blocked_path_veto`` below).  So
+        this pure-veto case sets the missed-rescue counter to 0.
         """
         from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
         from kicad_tools.router.failure_analysis import FailureCause
@@ -709,10 +718,10 @@ class TestTriggerTableWiring:
             seen_tiers.append(args.manufacturer)
             mock_router = MagicMock()
             mock_router._escape_router = MagicMock()
-            # Even with non-zero missed_via_in_pad_rescues (so the
-            # legacy heuristic would escalate), the trigger table must
-            # override and suppress.
-            mock_router._escape_router.missed_via_in_pad_rescues = 5
+            # No missed-rescue signal: the only evidence is the
+            # BLOCKED_PATH tally, which the trigger table marks
+            # non-manufacturer-fixable -> veto.
+            mock_router._escape_router.missed_via_in_pad_rescues = 0
             mock_router.routing_failures = [
                 self._make_failure(FailureCause.BLOCKED_PATH),
                 self._make_failure(FailureCause.BLOCKED_PATH),
@@ -737,8 +746,20 @@ class TestTriggerTableWiring:
         # Only the starting tier ran; trigger table vetoed escalation.
         assert seen_tiers == ["jlcpcb"]
 
-    def test_congestion_dominant_cause_suppresses_escalation(self):
-        """CONGESTION (a layer-budget issue) should not trigger escalation."""
+    def test_missed_via_in_pad_overrides_blocked_path_veto(self):
+        """Issue #3463: a non-zero ``missed_via_in_pad_rescues`` counter
+        overrides a BLOCKED_PATH dominant-cause veto.
+
+        This is the board-04 regression shape: a single keepout-blocked
+        net makes BLOCKED_PATH the *most-common* per-net failure cause, so
+        ``_classify_dominant_failure_cause`` returns BLOCKED_PATH and the
+        #2883 trigger table would veto escalation.  But the EscapeRouter
+        separately recorded a non-zero ``missed_via_in_pad_rescues`` for
+        the fine-pitch LQFP-48 inner pins -- direct, instrumented evidence
+        that the next (via-in-pad-capable) tier is exactly the fix.  The
+        ladder must walk forward to ``jlcpcb-tier1`` rather than aborting
+        on the coincidental BLOCKED_PATH tally.
+        """
         from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
         from kicad_tools.router.failure_analysis import FailureCause
 
@@ -749,7 +770,59 @@ class TestTriggerTableWiring:
             seen_tiers.append(args.manufacturer)
             mock_router = MagicMock()
             mock_router._escape_router = MagicMock()
-            mock_router._escape_router.missed_via_in_pad_rescues = 1
+            # Non-zero missed-rescue signal: via-in-pad would directly
+            # rescue the fine-pitch pins, even though the dominant tally
+            # is BLOCKED_PATH (an unrelated keepout-blocked net).
+            mock_router._escape_router.missed_via_in_pad_rescues = 3
+            mock_router._escape_router.missed_via_in_pad_components = {"U2"}
+            mock_router.routing_failures = [
+                self._make_failure(FailureCause.BLOCKED_PATH),
+                self._make_failure(FailureCause.BLOCKED_PATH),
+                self._make_failure(FailureCause.PIN_ACCESS),
+            ]
+            args._last_router = mock_router
+            if args.manufacturer == "jlcpcb-tier1":
+                return 0  # success on the via-in-pad-capable tier
+            return 2
+
+        with patch(
+            "kicad_tools.cli.route_cmd.route_with_layer_escalation",
+            side_effect=fake_inner,
+        ):
+            from pathlib import Path
+
+            rc = route_with_mfr_tier_escalation(
+                pcb_path=Path("test.kicad_pcb"),
+                output_path=Path("out.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        # Escalation engaged despite the BLOCKED_PATH dominant tally:
+        # the missed-rescue signal took precedence.
+        assert seen_tiers == ["jlcpcb", "jlcpcb-tier1"]
+        assert rc == 0
+
+    def test_congestion_dominant_cause_suppresses_escalation(self):
+        """CONGESTION (a layer-budget issue) should not trigger escalation.
+
+        Issue #3463: the trigger-table veto only applies absent an
+        instrumented ``missed_via_in_pad_rescues`` signal, so this
+        pure-veto case sets the missed-rescue counter to 0 (CONGESTION is
+        a layer-budget problem handled by --auto-layers, not a via-in-pad
+        deficiency).
+        """
+        from kicad_tools.cli.route_cmd import route_with_mfr_tier_escalation
+        from kicad_tools.router.failure_analysis import FailureCause
+
+        args = self._make_args()
+        seen_tiers: list[str] = []
+
+        def fake_inner(*, pcb_path, output_path, args, quiet):
+            seen_tiers.append(args.manufacturer)
+            mock_router = MagicMock()
+            mock_router._escape_router = MagicMock()
+            mock_router._escape_router.missed_via_in_pad_rescues = 0
             mock_router.routing_failures = [
                 self._make_failure(FailureCause.CONGESTION),
                 self._make_failure(FailureCause.CONGESTION),

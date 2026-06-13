@@ -84,7 +84,14 @@ namespace router {
 // ``mark_blocked`` also began recording ``original_net`` for ALL static
 // cells (previously pad-metal only) so the restore has the owner net.
 //
-// Version 12 (Issue #3456): standard-mode own-net-obstacle parity with
+// Bump to 12 (Issue #3490): the same-component validator carve-out in
+// ``validate_route`` now silences NEGATIVE pad clearance for net=0
+// (unconnected / NC) same-component pads, restoring routability to a
+// signal pad whose metal overlaps an adjacent net=0 pad (the #1764
+// reachability guarantee). Foreign signal pads keep the strict >= 0
+// guard (#2933).
+//
+// Version 13 (Issue #3456): standard-mode own-net-obstacle parity with
 // the Python pathfinder (Issue #864 semantics: same-net cells are
 // passable regardless of the obstacle flag).  Fixed in BOTH
 // ``is_trace_blocked`` (fast + slow paths) and ``is_diagonal_blocked``;
@@ -102,7 +109,7 @@ namespace router {
 // own-net-obstacle reject pinned by
 // tests/test_cpp_pathfinder_own_net_obstacle.py (verified NOT needed
 // for the board-03 fallbacks).
-constexpr int ROUTER_CPP_BUILD_VERSION = 12;
+constexpr int ROUTER_CPP_BUILD_VERSION = 13;
 
 // Grid cell state
 struct GridCell {

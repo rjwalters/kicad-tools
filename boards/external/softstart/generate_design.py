@@ -405,7 +405,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x=X_AC_INPUT,
         y=100,
         ref="J1",
-        value="AC_INPUT",
+        value="TB",
         footprint="TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
     )
     print(f"   J1: AC input terminal block")
@@ -438,7 +438,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x=X_AC_INPUT + 60,
         y=100,
         ref="J2",
-        value="AC_OUTPUT",
+        value="TB",
         footprint="TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
     )
     print(f"   J2: AC output terminal block")
@@ -492,6 +492,9 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ratio=100.0,
         ref_start=1,
     )
+    # The VoltageDividerSense block computes nominal values (R1=990.0k); the
+    # routed PCB uses the nearest E-series part (1M).  R2 (10k) already matches.
+    vsense.r1.value = "1M"
     print("   R1/R2: Voltage divider (ratio 100:1, rev B spec)")
 
     # Wire voltage divider
@@ -624,11 +627,13 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         "Diode_Bridge:RB157",
         x=X_CHARGE,
         y=170,
+        # Value matches the routed PCB BOM part (DB107, DIP-4 bridge); the
+        # RB157 library symbol shares the same DIP-4 footprint.
         ref="D1",
-        value="RB157",
+        value="DB107",
         footprint="Diode_THT:Diode_Bridge_DIP-4_W7.62mm_P5.08mm",
     )
-    print(f"   D1: RB157 bridge rectifier for charging")
+    print(f"   D1: DB107 bridge rectifier for charging")
 
     # Charging resistor (limit current to ~0.5-1A)
     r_charge = sch.add_symbol(
@@ -675,7 +680,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x=X_CHARGE + 30,
         y=120,
         ref="J3",
-        value="SCAP_POS",
+        value="TB",
         footprint="TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
     )
     # Negative bank connector
@@ -684,7 +689,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         x=X_CHARGE + 30,
         y=160,
         ref="J4",
-        value="SCAP_NEG",
+        value="TB",
         footprint="TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
     )
     print(f"   J3, J4: Supercap bank connectors (positive, negative)")
@@ -871,6 +876,8 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         # Bleeder pin 2 to source net (via label)
         sch.add_wire(rb_pin2, (rb_pin2[0] + 3, rb_pin2[1]))
         # TVS: Device:D_TVS, value "SMBJ18A".
+        # Footprint must match the routed PCB (generate_sma_tvs uses the
+        # DO-214AC / SMA land pattern for the SMBJ-series clamp).
         d_tvs = sch.add_symbol(
             "Device:D_TVS",
             x=tvs_x,
@@ -878,7 +885,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
             ref=ref_tvs,
             value="SMBJ18A",
             rotation=0,
-            footprint="Diode_SMD:D_SMB",
+            footprint="Diode_SMD:D_SMA",
         )
         d_tvs_pin1 = d_tvs.pin_position("1")  # K (anode side per Device:D_TVS)
         d_tvs_pin2 = d_tvs.pin_position("2")  # cathode side
@@ -960,7 +967,8 @@ def create_softstart_schematic(output_dir: Path) -> Path:
             ref=ref_d,
             value="SMBJ18A",
             rotation=0,
-            footprint="Diode_SMD:D_SMB",
+            # Match the routed PCB's SMA (DO-214AC) land for the SMBJ clamp.
+            footprint="Diode_SMD:D_SMA",
         )
         rp1 = r.pin_position("1")
         rp2 = r.pin_position("2")
@@ -1083,7 +1091,8 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         y=110,
         ref_q="Q5",
         ref_r="R20",
-        resistor_value="100R",
+        # 100Ω 5W axial; value carries the power rating to match the PCB BOM.
+        resistor_value="100R 5W",
         monitor_label="PRECHARGE_POS",
     )
     # Bank → precharge resistor input
@@ -1107,7 +1116,8 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         y=180,
         ref_q="Q6",
         ref_r="R21",
-        resistor_value="100R",
+        # 100Ω 5W axial; value carries the power rating to match the PCB BOM.
+        resistor_value="100R 5W",
         monitor_label="PRECHARGE_NEG",
     )
     pn_main = precharge_neg.port("MAIN_DRIVE")
@@ -1194,7 +1204,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         y=155,
         ref="C1",
         value="100nF",
-        auto_footprint=True,
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     sch.wire_decoupling_cap(c_ina, RAIL_3V3, RAIL_GND)
     print("   C1: 100nF decoupling for INA180")
@@ -1312,7 +1322,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Decoupling cap C34 for LM393 supply
     c_lm393 = sch.add_symbol(
         "Device:C", x=X_OC + 15, y=85, ref="C34", value="100nF",
-        auto_footprint=True,
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     sch.wire_decoupling_cap(c_lm393, RAIL_3V3, RAIL_GND)
     print("   U7: LM393 hardware overcurrent comparator (trip ~3.0V threshold)")
@@ -1328,6 +1338,10 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ratio=30.0,
         ref_start=25,    # R25, R26
     )
+    # Override the computed nominal values (R25=290.0k, R26=10k) with the
+    # E-series parts on the routed PCB (270k / 9.1k → ~30:1 ratio).
+    bank_pos_div.r1.value = "270k"
+    bank_pos_div.r2.value = "9.1k"
     bpd_vin = bank_pos_div.port("VIN")
     bpd_vout = bank_pos_div.port("VOUT")
     bpd_gnd = bank_pos_div.port("GND")
@@ -1346,6 +1360,10 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         ratio=30.0,
         ref_start=27,    # R27, R28
     )
+    # Override the computed nominal values (R27=290.0k, R28=10k) with the
+    # E-series parts on the routed PCB (270k / 9.1k → ~30:1 ratio).
+    bank_neg_div.r1.value = "270k"
+    bank_neg_div.r2.value = "9.1k"
     bnd_vin = bank_neg_div.port("VIN")
     bnd_vout = bank_neg_div.port("VOUT")
     bnd_gnd = bank_neg_div.port("GND")
@@ -1406,7 +1424,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # at x≈612 and any U7 LM393 west-side activity at x≈505-540).
     c_buf = sch.add_symbol(
         "Device:C", x=X_BUSBUF - 15, y=155, ref="C30", value="100nF",
-        auto_footprint=True,
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     sch.wire_decoupling_cap(c_buf, RAIL_3V3, RAIL_GND)
     print("   U8: MCP6001 bus-envelope buffer (unity gain)")
@@ -1415,7 +1433,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # Output V_BUS_DVDT → MCU PA1.
     c_dvdt = sch.add_symbol(
         "Device:C", x=X_BUSBUF - 5, y=200, ref="C31", value="100nF",
-        rotation=90, auto_footprint=True,
+        rotation=90, footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     r_dvdt = sch.add_symbol(
         "Device:R", x=X_BUSBUF + 10, y=220, ref="R29", value="10k",
@@ -1470,8 +1488,8 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     sch.add_junction(mcu_vss[0], RAIL_GND)
 
     # Bypass capacitors
-    c2 = sch.add_symbol("Device:C", x=X_MCU - 30, y=160, ref="C2", value="100nF", auto_footprint=True)
-    c3 = sch.add_symbol("Device:C", x=X_MCU - 20, y=160, ref="C3", value="100nF", auto_footprint=True)
+    c2 = sch.add_symbol("Device:C", x=X_MCU - 30, y=160, ref="C2", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
+    c3 = sch.add_symbol("Device:C", x=X_MCU - 20, y=160, ref="C3", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
     c4 = sch.add_symbol("Device:C", x=X_MCU - 10, y=160, ref="C4", value="4.7uF", auto_footprint=True)
     for cap in [c2, c3, c4]:
         sch.wire_decoupling_cap(cap, RAIL_3V3, RAIL_GND)
@@ -1529,6 +1547,9 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         pins=6,
         ref="J5",
     )
+    # Align the J5 value with the routed PCB BOM ("SWD"); the DebugHeader
+    # block defaults to "SWD-6" but the PCB pin-header generator emits "SWD".
+    debug.header.value = "SWD"
     debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
     # Label the SWDIO/SWCLK/NRST debug pins so they tie to the MCU via net
     # labels (DebugHeader only wires VCC/GND to the rails itself).
@@ -1713,7 +1734,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
 
     # Output caps
     c7 = sch.add_symbol("Device:C", x=X_LDO + 15, y=115, ref="C7", value="10uF", auto_footprint=True)
-    c8 = sch.add_symbol("Device:C", x=X_LDO + 25, y=115, ref="C8", value="100nF", auto_footprint=True)
+    c8 = sch.add_symbol("Device:C", x=X_LDO + 25, y=115, ref="C8", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
     sch.wire_decoupling_cap(c7, RAIL_3V3, RAIL_GND)
     sch.wire_decoupling_cap(c8, RAIL_3V3, RAIL_GND)
 
@@ -1756,7 +1777,7 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # crossing issue with RAIL_12V (which doesn't exist as a rail anymore).
     c33 = sch.add_symbol(
         "Device:C", x=X_LDO + 55, y=140, ref="C33", value="100nF",
-        rotation=0, auto_footprint=True,
+        rotation=0, footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     c33_p1 = c33.pin_position("1")
     c33_p2 = c33.pin_position("2")
@@ -1782,6 +1803,9 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         # (LEDIndicator derives "R2" by default from ref_prefix digit "2").
         resistor_ref="R12",
     )
+    # Align the D2 value with the routed PCB BOM ("LED"); the LEDIndicator
+    # block uses the "STATUS" label as the symbol value by default.
+    led.led.value = "LED"
     # MCU controls the LED via low-side switching: anode -> +3.3V, cathode
     # through R12 to MCU.PA8 (STATUS_LED).  Wire VCC (anode) to the +3.3V
     # rail; tap the resistor's GND-side as STATUS_LED instead of grounding it.

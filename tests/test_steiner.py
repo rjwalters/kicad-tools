@@ -648,7 +648,7 @@ class TestMSTRouterSteinerRelocation:
         seen_pads: list[Pad] = []
 
         class _StubRouter:
-            def route(self, source_pad, target_pad):
+            def route(self, source_pad, target_pad, per_net_timeout=None, **kwargs):
                 seen_pads.extend([source_pad, target_pad])
                 return None  # failure is fine; we only inspect endpoints
 
@@ -678,7 +678,7 @@ class TestMSTRouterSteinerRelocation:
         seen_pads: list[Pad] = []
 
         class _StubRouter:
-            def route(self, source_pad, target_pad):
+            def route(self, source_pad, target_pad, per_net_timeout=None, **kwargs):
                 seen_pads.extend([source_pad, target_pad])
                 return None
 

@@ -268,14 +268,10 @@ class TestZonePriorityOverlapResolution:
         # Every F.Cu zone must have positive area.
         for z in f_cu_zones:
             area = _polygon_area(z.polygon)
-            assert area > 0.0, (
-                f"zone {z.net_name} on F.Cu has zero area (fix regressed)"
-            )
+            assert area > 0.0, f"zone {z.net_name} on F.Cu has zero area (fix regressed)"
 
         # The two zones must not overlap (the fix's core invariant).
-        overlap = _polygons_overlap_area(
-            f_cu_zones[0].polygon, f_cu_zones[1].polygon
-        )
+        overlap = _polygons_overlap_area(f_cu_zones[0].polygon, f_cu_zones[1].polygon)
         assert overlap < 1e-6, (
             f"zones {f_cu_zones[0].net_name} and {f_cu_zones[1].net_name} "
             f"still overlap by {overlap:.3f} mm² (fix not applied)"
@@ -306,9 +302,7 @@ class TestZonePriorityOverlapResolution:
         # from the issue body.
         zone_areas = {z.net_name: _polygon_area(z.polygon) for z in f_cu_zones}
         for net_name, area in zone_areas.items():
-            assert area > 0.0, (
-                f"zone {net_name} has zero area; issue #3043 regressed"
-            )
+            assert area > 0.0, f"zone {net_name} has zero area; issue #3043 regressed"
 
         # And all three must be pairwise disjoint (no overlap at all).
         polys = {z.net_name: z.polygon for z in f_cu_zones}
@@ -321,9 +315,7 @@ class TestZonePriorityOverlapResolution:
                     f"outline allocator did not partition correctly"
                 )
 
-    def test_compute_pour_outlines_returns_carved_polygon_for_lowest_priority(
-        self, tmp_path: Path
-    ):
+    def test_compute_pour_outlines_returns_carved_polygon_for_lowest_priority(self, tmp_path: Path):
         """Direct unit test: lower-priority zone gets a carved-out outline.
 
         With 3 power nets on F.Cu (priorities 1/2/3), the highest-priority
@@ -339,13 +331,16 @@ class TestZonePriorityOverlapResolution:
 
         pcb_path = _make_3net_nested_pcb(tmp_path)
         gen = ZoneGenerator.from_pcb(pcb_path)
-        assignments = _assign_layers_for_pour_nets(4, [
-            ("GND", NetClass.GROUND),
-            ("VBUS", NetClass.POWER),
-            ("+3V3", NetClass.POWER),
-            ("+1V8", NetClass.POWER),
-            ("+1V2", NetClass.POWER),
-        ])
+        assignments = _assign_layers_for_pour_nets(
+            4,
+            [
+                ("GND", NetClass.GROUND),
+                ("VBUS", NetClass.POWER),
+                ("+3V3", NetClass.POWER),
+                ("+1V8", NetClass.POWER),
+                ("+1V2", NetClass.POWER),
+            ],
+        )
         outlines = _compute_pour_outlines(gen.pcb, assignments, gen.board_outline)
 
         # GND and VBUS are sole on their inner layers.
@@ -401,8 +396,7 @@ class TestZonePriorityOverlapResolution:
 
         captured = capsys.readouterr()
         assert "WARNING" not in captured.err, (
-            f"spurious overlap warning(s) on disjoint carved polygons:\n"
-            f"{captured.err}"
+            f"spurious overlap warning(s) on disjoint carved polygons:\n{captured.err}"
         )
 
 
@@ -631,9 +625,7 @@ class TestZonePartitionErrorAndPadSafeFallback:
        nets.
     """
 
-    def test_three_power_nets_nested_in_xy_get_carved_to_pad_safe(
-        self, tmp_path: Path
-    ):
+    def test_three_power_nets_nested_in_xy_get_carved_to_pad_safe(self, tmp_path: Path):
         """The chorus-test-revA failure shape: +3.3V fully covered by +5V/+3.3VA bboxes.
 
         With +5V and +3.3VA both having higher priority than +3.3V, the
@@ -665,8 +657,7 @@ class TestZonePartitionErrorAndPadSafeFallback:
         pcb = PCB.load(str(pcb_path))
         f_cu_zones = [z for z in pcb.zones if z.layer == "F.Cu"]
         assert len(f_cu_zones) == 3, (
-            f"expected 3 power zones on F.Cu, got "
-            f"{[z.net_name for z in f_cu_zones]}"
+            f"expected 3 power zones on F.Cu, got {[z.net_name for z in f_cu_zones]}"
         )
 
         # CORE ASSERTION (issue #3240 acceptance criterion 1, Option A):
@@ -675,9 +666,7 @@ class TestZonePartitionErrorAndPadSafeFallback:
         # winners), so KiCad's fill resolver would award it zero copper.
         zone_areas = {z.net_name: _polygon_area(z.polygon) for z in f_cu_zones}
         for net_name, area in zone_areas.items():
-            assert area > 0.0, (
-                f"zone {net_name} has zero area; issue #3240 regressed"
-            )
+            assert area > 0.0, f"zone {net_name} has zero area; issue #3240 regressed"
 
         # Disjointness: no two power zones may overlap (otherwise the
         # priority resolver would still silently win one and zero the other).
@@ -699,9 +688,7 @@ class TestZonePartitionErrorAndPadSafeFallback:
         assignments = _assign_layers_for_pour_nets(4, pour_nets)
         outlines = _compute_pour_outlines(gen.pcb, assignments, gen.board_outline)
         # Find the lowest-priority F.Cu net by inspecting assignments.
-        f_cu_assignments = [
-            (n, p) for n, layer, p in assignments if layer == "F.Cu"
-        ]
+        f_cu_assignments = [(n, p) for n, layer, p in assignments if layer == "F.Cu"]
         if f_cu_assignments:
             lowest = min(f_cu_assignments, key=lambda np: np[1])[0]
             assert outlines.get(lowest) is not None, (
@@ -730,8 +717,7 @@ class TestZonePartitionErrorAndPadSafeFallback:
 
         captured = capsys.readouterr()
         assert "zero copper" not in captured.err.lower(), (
-            f"#3240 fix did not eliminate the zero-copper warning:\n"
-            f"{captured.err}"
+            f"#3240 fix did not eliminate the zero-copper warning:\n{captured.err}"
         )
 
     def test_zone_partition_error_on_coincident_pad_layout(self, tmp_path: Path):
@@ -761,12 +747,9 @@ class TestZonePartitionErrorAndPadSafeFallback:
         assert err.failing_net in {"+5V", "+3.3VA", "+3.3V"}, (
             f"failing net should be one of the power nets, got {err.failing_net}"
         )
-        assert err.layer == "F.Cu", (
-            f"layer should be F.Cu (the contested layer), got {err.layer}"
-        )
+        assert err.layer == "F.Cu", f"layer should be F.Cu (the contested layer), got {err.layer}"
         assert len(err.covering_nets) >= 1, (
-            f"covering_nets should list at least one higher-priority net, "
-            f"got {err.covering_nets}"
+            f"covering_nets should list at least one higher-priority net, got {err.covering_nets}"
         )
         # The error message must be actionable.
         msg = str(err)
@@ -806,8 +789,7 @@ class TestZonePartitionErrorAndPadSafeFallback:
 
         result = _subtract_polygon(minuend, subtrahend)
         assert result is not None, (
-            "_subtract_polygon must return a carved polygon when "
-            "diff is non-empty"
+            "_subtract_polygon must return a carved polygon when diff is non-empty"
         )
         # The result must have positive area strictly smaller than the
         # original 100 mm² minuend.
@@ -815,11 +797,217 @@ class TestZonePartitionErrorAndPadSafeFallback:
 
         result_area = Polygon(result).area
         assert 0 < result_area < 100.0, (
-            f"carved polygon should be smaller than the full 10x10 "
-            f"(100 mm²); got {result_area}"
+            f"carved polygon should be smaller than the full 10x10 (100 mm²); got {result_area}"
         )
         # The carved region must be disjoint from the subtrahend.
         overlap = Polygon(result).intersection(Polygon(subtrahend)).area
-        assert overlap < 1e-6, (
-            f"carved polygon still overlaps the subtrahend by {overlap}"
+        assert overlap < 1e-6, f"carved polygon still overlaps the subtrahend by {overlap}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #3443: the over-claiming winner must keep its extreme-edge copper
+# ---------------------------------------------------------------------------
+
+
+def _make_winner_with_interior_sibling_pcb(tmp_path: Path) -> Path:
+    """Build a 2-layer PCB modelling board 05's +24V / +5V failure shape.
+
+    ``HV`` (the highest-priority pour, like board 05's ``+24V``) has pads
+    spanning a wide region (10..50 in x, 10..50 in y), including exclusive
+    pads at its extremes (10,10) and (50,50) -- the analogue of the
+    HS-MOSFET drain tabs that must receive thermal-stitch copper.
+
+    Two lower-priority siblings reproduce the board-05 mechanism:
+
+    * ``LVI`` (like board 05's ``+5V``) sits interior to HV's raw bbox in
+      y but reaches toward HV's right edge in x (pads 30..48 in x, 25..35
+      in y).  Being enclosed, it triggers the over-claim downgrade -- the
+      condition that the #3240 fix collapsed HV to its pad-safe bbox for.
+    * ``LVE`` (like board 05's ``+3V3``) crosses HV's right edge (pads
+      45..55 in x, 25..40 in y), abutting ``LVI``.
+
+    The *union* of the two siblings' pad-safe bboxes spans from interior
+    out across HV's right edge, exactly as board 05's +5V + +3V3 cluster
+    does.  ``raw - union(LVI, LVE pad-safe)`` is therefore a single
+    hole-free concave polygon that keeps HV's full raw margin at its
+    exclusive corner extremes (the #3443 fix).  Before #3443 the #3240
+    carve collapsed HV's entire outline to its 0.3 mm pad-safe bbox,
+    pulling its extremes inward and starving any thermal halo at the
+    (10,10)/(50,50) corners.
+    """
+    pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "HV")
+  (net 3 "LVI")
+  (net 4 "LVE")
+  (gr_rect
+    (start 0 0)
+    (end 100 100)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+"""
+
+    rows = []
+
+    def fp(ref: str, x: float, y: float, net_num: int, net_name: str) -> str:
+        return f"""  (footprint "Test:{ref}"
+    (layer "F.Cu")
+    (at {x} {y})
+    (uuid "fp-{ref}-uuid")
+    (property "Reference" "{ref}"
+      (at 0 -2 0) (layer "F.SilkS") (uuid "{ref}-ref-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (property "Value" "T"
+      (at 0 2 0) (layer "F.Fab") (uuid "{ref}-val-uuid")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net {net_num} "{net_name}"))
+  )"""
+
+    # HV (winner) pads: wide span 10..50 x 10..50, with exclusive extreme
+    # pads at the corners (the thermal-tab analogue).
+    rows.append(fp("U1", 10, 10, 2, "HV"))
+    rows.append(fp("U2", 50, 10, 2, "HV"))
+    rows.append(fp("U3", 10, 50, 2, "HV"))
+    rows.append(fp("U4", 50, 50, 2, "HV"))
+    rows.append(fp("U5", 30, 30, 2, "HV"))
+    # LVI (interior sibling) pads inside HV's raw bbox, reaching toward
+    # the right edge: x 30..48, y 25..35 -> pad-safe 29.7..48.3.  Enclosed
+    # by HV raw 8.5..51.5, so it triggers the over-claim downgrade.
+    rows.append(fp("U6", 30, 25, 3, "LVI"))
+    rows.append(fp("U7", 48, 25, 3, "LVI"))
+    rows.append(fp("U8", 30, 35, 3, "LVI"))
+    rows.append(fp("U9", 48, 35, 3, "LVI"))
+    # LVE (edge-crossing sibling) pads crossing HV's right edge: x 45..55
+    # (pad-safe 44.7..55.3 reaches past HV's 51.5 right edge), y 25..40.
+    # Abuts LVI so their union spans interior-to-edge and opens the
+    # staircase, making HV's carve hole-free.
+    rows.append(fp("U10", 45, 25, 4, "LVE"))
+    rows.append(fp("U11", 55, 25, 4, "LVE"))
+    rows.append(fp("U12", 45, 40, 4, "LVE"))
+    rows.append(fp("U13", 55, 40, 4, "LVE"))
+    # GND sole on the other layer.
+    rows.append(fp("U14", 80, 80, 1, "GND"))
+
+    pcb_text += "\n".join(rows)
+    pcb_text += "\n)\n"
+
+    p = tmp_path / "winner_interior_sibling.kicad_pcb"
+    p.write_text(pcb_text)
+    return p
+
+
+class TestWinnerExtremeCopperIssue3443:
+    """Regression tests for issue #3443.
+
+    The #3240 carve fallback collapsed an over-claiming high-priority
+    pour's *entire* outline to its tight pad-safe bbox.  On board 05 that
+    pulled the +24V pour off its HS-MOSFET drain tabs (which sit at the
+    pour's bbox extremes), so the thermal-stitch halo around Q1/Q3/Q5 had
+    no copper to land on and the per-MOSFET via count fell below the
+    issue #2901 minimum of 4.
+
+    The fix carves only the contested region out of the winner's raw
+    bbox, preserving the full raw margin at the winner's exclusive
+    extremes whenever the carve is hole-free.
+    """
+
+    def test_winner_keeps_raw_margin_at_exclusive_extremes(self, tmp_path: Path):
+        """The over-claiming winner retains its raw-margin extremes."""
+        from kicad_tools.zones import ZoneGenerator
+        from kicad_tools.zones.generator import (
+            DEFAULT_POUR_BBOX_MARGIN_MM,
+            PAD_SAFE_MARGIN_MM,
+            _net_pad_positions_absolute,
         )
+
+        pcb_path = _make_winner_with_interior_sibling_pcb(tmp_path)
+        # Order = priority: HV first (highest), then the two siblings.
+        pour_nets = [
+            ("GND", NetClass.GROUND),
+            ("HV", NetClass.POWER),  # highest-priority winner
+            ("LVE", NetClass.POWER),  # edge-crossing sibling
+            ("LVI", NetClass.POWER),  # strictly-interior sibling
+        ]
+        gen = ZoneGenerator.from_pcb(pcb_path)
+        assignments = _assign_layers_for_pour_nets(2, pour_nets)
+        outlines = _compute_pour_outlines(gen.pcb, assignments, gen.board_outline)
+
+        hv = outlines["HV"]
+        assert hv is not None
+
+        hv_pads = _net_pad_positions_absolute(gen.pcb, "HV")
+        pad_xmin = min(x for x, _ in hv_pads)
+        pad_xmax = max(x for x, _ in hv_pads)
+        pad_ymin = min(y for _, y in hv_pads)
+        pad_ymax = max(y for _, y in hv_pads)
+        hv_xmin = min(x for x, _ in hv)
+        hv_xmax = max(x for x, _ in hv)
+        hv_ymin = min(y for _, y in hv)
+        hv_ymax = max(y for _, y in hv)
+
+        # The four exclusive HV corners are at the pad extremes.  At least
+        # one extreme edge of the outline must extend a full raw margin
+        # beyond the pads -- proving the carve preserved the extreme-edge
+        # copper rather than collapsing to the 0.3 mm pad-safe bbox.
+        reaches = [
+            pad_xmin - hv_xmin,
+            hv_xmax - pad_xmax,
+            pad_ymin - hv_ymin,
+            hv_ymax - pad_ymax,
+        ]
+        assert max(reaches) >= DEFAULT_POUR_BBOX_MARGIN_MM - 1e-6, (
+            f"winner outline never reaches the raw "
+            f"{DEFAULT_POUR_BBOX_MARGIN_MM}mm margin at any extreme; "
+            f"edge reaches were {reaches} -- #3443 fix regressed "
+            f"(outline collapsed toward pad-safe)"
+        )
+        assert max(reaches) > PAD_SAFE_MARGIN_MM + 1e-6, (
+            "winner outline reaches no farther than the pad-safe margin; "
+            "the #3240 collapse regressed (#3443)"
+        )
+
+    def test_winner_and_sibling_stay_disjoint(self, tmp_path: Path):
+        """The carve preserves the #3043 disjointness invariant."""
+        from kicad_tools.zones import ZoneGenerator
+
+        pcb_path = _make_winner_with_interior_sibling_pcb(tmp_path)
+        pour_nets = [
+            ("GND", NetClass.GROUND),
+            ("HV", NetClass.POWER),
+            ("LVE", NetClass.POWER),
+            ("LVI", NetClass.POWER),
+        ]
+        gen = ZoneGenerator.from_pcb(pcb_path)
+        assignments = _assign_layers_for_pour_nets(2, pour_nets)
+        outlines = _compute_pour_outlines(gen.pcb, assignments, gen.board_outline)
+
+        hv = outlines["HV"]
+        assert hv is not None
+
+        # The winner must stay disjoint from BOTH lower siblings (no copper
+        # awarded twice by the fill resolver) and each sibling must keep
+        # positive copper covering its own pads (the #3240 guarantee).
+        for sibling in ("LVE", "LVI"):
+            sib = outlines[sibling]
+            assert sib is not None, f"{sibling} outline is None"
+            overlap = _polygons_overlap_area(hv, sib)
+            assert overlap < 1e-6, (
+                f"HV and {sibling} outlines overlap by {overlap:.3f} mm²; "
+                f"the #3443 carve must keep the winner disjoint from siblings"
+            )
+            assert _polygon_area(sib) > 0.0, f"{sibling} sibling lost all copper (#3240)"

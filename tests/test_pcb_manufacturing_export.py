@@ -73,6 +73,50 @@ class TestExportPlacement:
             assert result == output
             assert output.exists()
 
+    def test_export_placement_jlcpcb_excludes_tht(self, test_project_pcb, tmp_path):
+        """export_placement(format="jlcpcb") must honor JLCPCB's exclude_tht default.
+
+        Regression test for issue #3627: export_placement() used to synthesize a
+        bare PnPExportConfig() and pass it to export_pnp(), defeating the JLCPCB
+        formatter's exclude_tht=True default.  The CPL would then ship THT rows,
+        diverging from export_pnp(..., config=None).  Passing config=None lets the
+        formatter resolve the effective config (single source of truth, #3616/#3618).
+        """
+        # Inject a through-hole footprint into the SMD-only fixture so the
+        # JLCPCB exclude_tht default has something to act on.
+        tht_footprint = (
+            '\t(footprint "Connector_PinHeader_2.54mm:PinHeader_1x04"\n'
+            '\t\t(layer "F.Cu")\n'
+            '\t\t(uuid "fp-j1-uuid")\n'
+            "\t\t(at 160 50)\n"
+            "\t\t(attr through_hole)\n"
+            '\t\t(property "Reference" "J1" (at 0 -1.5) (layer "F.SilkS") (uuid "ref-j1"))\n'
+            '\t\t(property "Value" "Conn_01x04" (at 0 1.5) (layer "F.Fab") (uuid "val-j1"))\n'
+            '\t\t(pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) '
+            '(layers "*.Cu" "*.Mask") (net 2 "GND"))\n'
+            "\t)\n"
+        )
+        original = Path(test_project_pcb).read_text()
+        # Insert the THT footprint before the final closing paren of the board.
+        patched = original.rstrip()
+        assert patched.endswith(")")
+        patched = patched[:-1] + tht_footprint + ")\n"
+
+        pcb_path = tmp_path / "with_tht.kicad_pcb"
+        pcb_path.write_text(patched)
+
+        pcb = PCB.load(pcb_path)
+
+        output = tmp_path / "cpl_jlcpcb.csv"
+        pcb.export_placement(output, format="jlcpcb")
+        content = output.read_text()
+
+        # THT part excluded from the CPL by JLCPCB's exclude_tht default...
+        assert "J1" not in content
+        # ...while SMD parts remain.
+        assert "R1" in content
+        assert "C1" in content
+
     def test_export_placement_top_only(self, test_project_pcb):
         """Should export only top-side components."""
         pcb = PCB.load(test_project_pcb)

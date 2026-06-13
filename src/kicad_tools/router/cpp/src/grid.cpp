@@ -509,7 +509,20 @@ ValidationResult Grid3D::validate_route(
             // trace clears the neighbour pad's metal (clearance >= 0).
             // Negative clearance means the trace overlaps pad copper -- a
             // true defect that no carve-out should silence.
-            if (same_component_signal_carveout && clearance >= 0.0f) {
+            //
+            // Issue #3490: EXCEPTION -- a same-component pad on net 0
+            // (an unconnected / NC pad) carries no electrical net, so a
+            // trace endpoint that geometrically overlaps its metal is not
+            // a real short.  When such a pad sits within metal-overlap
+            // distance of the signal pad being routed (an LED whose
+            // net=0 pin is 0.2mm from its signal pin -- the #1764
+            // scenario), reaching the signal pad's center is impossible
+            // without entering the net=0 pad's rectangle.  The footprint
+            // guarantees the geometry, so silence the violation for
+            // negative clearance too -- but ONLY for net=0 pads.  Foreign
+            // SIGNAL pads (net != 0) keep the strict >= 0 guard so the
+            // trace-through-pad-copper pathology (#2933) stays caught.
+            if (same_component_signal_carveout && (clearance >= 0.0f || pad.net == 0)) {
                 continue;
             }
 
