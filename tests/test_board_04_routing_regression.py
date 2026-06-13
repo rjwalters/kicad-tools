@@ -121,8 +121,27 @@ UNROUTED_PCB = BOARD_DIR / "output" / "stm32_devboard.kicad_pcb"
 # acceptance criteria restore >= 8/9 WITH zero pad-clearance
 # violations; bump this back to 8 when #3588 lands.
 #
+# Issue #3588 update (2026-06-13): floor restored 7 -> 8.  The 7/9
+# regression was NOT a true 2L capacity limit — the negotiated loop's
+# best-state comparator (``IterationMetrics`` in ``router/core.py``)
+# used raw ``nets_fully_connected`` as its primary key, so it preferred
+# an iteration that closed 9/9 pad-to-pad paths while TWO of those nets
+# (SWDIO, NRST) sat in hard copper overlaps that the post-loop
+# demote-to-partial safety net (``_demote_seg_seg_overlap_nets``) then
+# stripped — collapsing the saved board to 7/9.  A clean 8/9-connected
+# iteration with ZERO clearance violations existed in the same run
+# (board-04 iter-2: connected=8, clearance_viol=0, overflow=1) but lost
+# the comparison on raw connectivity (8 < 9).  #3588 makes the primary
+# key SURVIVABLE connectivity (``effective_connected =
+# nets_fully_connected - demotable_connected``), so the clean iter-2
+# (effective 8) now beats the demotion-doomed iter-3 (effective 7) and
+# the router commits the 8/9 result with no pad-overlap copper.  The
+# ``test_no_pad_overlap_violations`` assertion below still guards the
+# zero-overlap requirement, so this floor cannot be reclaimed with
+# illegal copper.
+#
 # Board 04 has 9 routable nets after schematic / PCB sync.
-REQUIRED_NETS_ROUTED = 7
+REQUIRED_NETS_ROUTED = 8
 REQUIRED_NETS_TOTAL = 9
 
 

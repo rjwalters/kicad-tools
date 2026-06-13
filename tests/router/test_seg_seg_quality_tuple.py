@@ -328,6 +328,82 @@ class TestIterationMetricsSegSegOrdering:
         assert clean_early.is_better_than(overlapping_late)
 
 
+class TestIterationMetricsDemotableConnected:
+    """Issue #3588: the comparator's primary key is SURVIVABLE
+    connectivity (``effective_connected = nets_fully_connected -
+    demotable_connected``), not raw ``nets_fully_connected``.
+
+    Board-04's 2L SWDIO/NRST regression made the blind spot concrete:
+    iter-3 closed 9/9 pad-to-pad paths but TWO of those nets
+    (SWDIO, NRST) sat in hard copper overlaps the post-loop
+    ``_demote_seg_seg_overlap_nets`` safety net strips, collapsing the
+    saved board to 7/9.  iter-2 closed only 8/9 paths but carried ZERO
+    overlaps, so it survives demotion at a clean 8/9.  The old #3117
+    primary key (raw ``nets_fully_connected``) preferred iter-3 (9 > 8)
+    and shipped the worse result.
+    """
+
+    def test_clean_lower_connected_beats_higher_but_demotable(self):
+        """The exact board-04 trade: clean 8-connected must beat
+        9-connected-with-2-demotable (effective 7)."""
+        dirty_high = IterationMetrics(
+            iteration=3,
+            routed_count=9,
+            overflow=3,
+            clearance_violations=7,
+            nets_fully_connected=9,
+            demotable_connected=2,  # SWDIO + NRST will be stripped.
+        )
+        clean_low = IterationMetrics(
+            iteration=2,
+            routed_count=9,
+            overflow=1,
+            clearance_violations=0,
+            nets_fully_connected=8,
+            demotable_connected=0,
+        )
+        assert clean_low.effective_connected == 8
+        assert dirty_high.effective_connected == 7
+        assert clean_low.is_better_than(dirty_high)
+        assert not dirty_high.is_better_than(clean_low)
+
+    def test_equal_effective_prefers_more_raw_connected(self):
+        """When survivable connectivity ties, the state that closed more
+        pad-to-pad paths overall still wins (secondary key)."""
+        more_raw = IterationMetrics(
+            iteration=1,
+            routed_count=9,
+            overflow=0,
+            clearance_violations=1,
+            nets_fully_connected=9,
+            demotable_connected=1,  # effective 8
+        )
+        fewer_raw = IterationMetrics(
+            iteration=1,
+            routed_count=8,
+            overflow=0,
+            clearance_violations=0,
+            nets_fully_connected=8,
+            demotable_connected=0,  # effective 8
+        )
+        assert more_raw.effective_connected == fewer_raw.effective_connected == 8
+        assert more_raw.is_better_than(fewer_raw)
+
+    def test_default_demotable_preserves_3117_ordering(self):
+        """With ``demotable_connected`` defaulted (0), ``effective_connected``
+        collapses to ``nets_fully_connected`` and the historical #3117
+        ordering is unchanged: higher raw connectivity wins."""
+        nine = IterationMetrics(
+            iteration=1, routed_count=9, overflow=0, nets_fully_connected=9
+        )
+        eight = IterationMetrics(
+            iteration=2, routed_count=9, overflow=0, nets_fully_connected=8
+        )
+        assert nine.effective_connected == 9
+        assert eight.effective_connected == 8
+        assert nine.is_better_than(eight)
+
+
 # ---------------------------------------------------------------------------
 # Demotion: greedy cover + Autorouter safety net
 # ---------------------------------------------------------------------------

@@ -57,13 +57,14 @@ _SRC_ROOT = _REPO_ROOT / "src" / "kicad_tools"
 
 # Format: {relative_path: {line_number: reason}}
 _ALLOWLIST: dict[str, dict[int, str]] = {
-    # Router core: default-constructed router (line ~352 is the
-    # ``rules_dict``-spread default in _route_with_seed; line ~763 is
+    # Router core: default-constructed router (line ~398 is the
+    # ``rules_dict``-spread default in _route_with_seed; line ~809 is
     # the constructor default).  Reaching either means the caller did
-    # not pass rules.  (Line numbers refreshed for issue #3436 burn-down.)
+    # not pass rules.  (Line numbers refreshed for issue #3588 — the
+    # IterationMetrics docstring/field/property shifted both sites down.)
     "router/core.py": {
-        352: "worker-process rules_dict-spread default (both calls on this line)",
-        763: "Autorouter.__init__ rules-arg default fallback",
+        398: "worker-process rules_dict-spread default (both calls on this line)",
+        809: "Autorouter.__init__ rules-arg default fallback",
     },
     # AdaptiveRouter default fallback — same pattern as Autorouter.
     "router/adaptive.py": {

@@ -191,7 +191,27 @@ class IterationMetrics:
 
     Lex order (used by :meth:`is_better_than`):
 
-    1. ``nets_fully_connected`` descending — Issue #3117: the canonical
+    1. ``effective_connected`` descending — Issue #3588: the
+       ``nets_fully_connected`` count MINUS ``demotable_connected``
+       (fully-connected nets whose copper physically overlaps a foreign
+       net and so will be STRIPPED by the post-loop demote-to-partial
+       safety net, ``Autorouter._demote_seg_seg_overlap_nets``).  This is
+       the connectivity that will actually SURVIVE to the saved board.
+       Without this discount the comparator's old #3117 primary key
+       (raw ``nets_fully_connected``) preferred a state that closes more
+       pad-to-pad paths even when those extra paths are
+       unmanufacturable copper overlaps the demotion pass then rips out
+       — board-04's 2L SWDIO/NRST regression (issue #3588): iter-3 scored
+       ``connected=9`` with two hard-overlap nets vs iter-2's clean
+       ``connected=8``; the comparator picked iter-3, the correction
+       pass could not re-land SWDIO/NRST, and the demotion stripped both
+       back to a final 7/9 — strictly worse than iter-2's survivable
+       8/9.  Discounting the demotion-doomed nets makes iter-2
+       (effective 8) beat iter-3 (effective 7).  Defaults to
+       ``nets_fully_connected`` (``demotable_connected=0``) so callers
+       that don't compute the overlap count keep the historical #3117
+       ordering exactly.
+    2. ``nets_fully_connected`` descending — Issue #3117: the canonical
        "did the router actually wire up the design" signal.  More nets
        whose pads are all electrically joined is unconditionally
        better than a state where the per-net A* dropped fragments but
@@ -200,7 +220,11 @@ class IterationMetrics:
        route fragment and so cannot distinguish a 4-pad net at 2/4
        connected from the same net at 4/4 connected (the softstart
        failure mode for board #3085: iter-0 logged 9/10 ``routed_count``
-       but only 4/10 ``nets_fully_connected``).
+       but only 4/10 ``nets_fully_connected``).  Retained as a SECONDARY
+       key below ``effective_connected`` (#3588) so that when two states
+       have equal survivable connectivity, the one that closed more
+       pad-to-pad paths overall is still preferred — a tie-break that
+       only matters when both carry the same demotable-overlap count.
     2. ``routed_count`` descending — kept as the tertiary "incremental
        progress" signal: with equal fully-connected counts, a state
        that has more nets with at least some fragment is preferred so
@@ -243,6 +267,14 @@ class IterationMetrics:
             value -- on a default-zeroed tuple the older
             ``routed_count``-then-overflow ordering still applies, so
             existing comparator tests continue to pass.
+        demotable_connected: Count of fully-connected nets whose copper
+            physically overlaps a foreign net (the
+            ``copper_overlap_only`` seg-seg class) and so will be
+            STRIPPED by the post-loop demote-to-partial safety net
+            (Issue #3588; higher is worse).  Subtracted from
+            ``nets_fully_connected`` to form the ``effective_connected``
+            primary sort key.  Defaults to 0 so call sites that don't
+            compute it preserve the historical #3117 ordering exactly.
     """
 
     iteration: int
@@ -250,15 +282,29 @@ class IterationMetrics:
     overflow: int
     clearance_violations: int = 0
     nets_fully_connected: int = 0
+    demotable_connected: int = 0
 
     @property
-    def sort_key(self) -> tuple[int, int, int, int, int]:
+    def effective_connected(self) -> int:
+        """Connectivity that will SURVIVE the post-loop demotion (#3588).
+
+        ``nets_fully_connected`` minus the fully-connected nets whose
+        copper physically overlaps a foreign net (those are stripped by
+        :meth:`Autorouter._demote_seg_seg_overlap_nets`).  Clamped at 0
+        for safety; ``demotable_connected`` should never exceed
+        ``nets_fully_connected`` by construction.
+        """
+        return max(0, self.nets_fully_connected - self.demotable_connected)
+
+    @property
+    def sort_key(self) -> tuple[int, int, int, int, int, int]:
         """Tuple suitable for ``min()`` / sort key.
 
         Negated where descending is desired so the *smallest* tuple is the
         *best* iteration.
         """
         return (
+            -self.effective_connected,
             -self.nets_fully_connected,
             -self.routed_count,
             self.clearance_violations,
@@ -7188,9 +7234,9 @@ class Autorouter:
         # already requires.
         from .observability import validate_net_connectivity as _validate_conn
 
-        def _compute_nets_fully_connected() -> int:
-            """Return the count of nets in ``net_routes`` whose pads
-            are all in one connected component.
+        def _connected_net_ids() -> set[int]:
+            """Return the set of net ids in ``net_routes`` whose pads are
+            all in one connected component.
 
             Reads the live closure ``net_routes`` / ``pads_by_net`` so
             the caller does not need to re-thread the dicts.  Mirrors the
@@ -7205,12 +7251,47 @@ class Autorouter:
                 if pads and len(pads) >= 2:
                     net_pads[net_id] = pads
             if not net_pads:
-                return 0
+                return set()
             all_routes: list[Route] = []
             for routes_list_local in net_routes.values():
                 all_routes.extend(routes_list_local)
             conn = _validate_conn(all_routes, net_pads)
-            return sum(1 for info in conn.values() if info.get("connected"))
+            return {n for n, info in conn.items() if info.get("connected")}
+
+        def _compute_nets_fully_connected() -> int:
+            """Return the count of nets in ``net_routes`` whose pads
+            are all in one connected component (see :func:`_connected_net_ids`).
+            """
+            return len(_connected_net_ids())
+
+        def _compute_demotable_connected(iter_index: int) -> int:
+            """Count fully-connected nets the demotion pass will STRIP (#3588).
+
+            A net whose copper physically overlaps a foreign net (the
+            ``copper_overlap_only`` seg-seg class) is removed by the
+            post-loop :meth:`_demote_seg_seg_overlap_nets` safety net,
+            so its connectivity does NOT survive to the saved board.
+            Returns the number of CURRENTLY-connected nets that appear in
+            at least one hard-overlap pair — this is the amount by which
+            ``nets_fully_connected`` overstates the survivable
+            connectivity used in the best-state comparator.
+
+            Reuses the iteration-tagged seg-seg cache (same ``cache_key``
+            the comparator's seg-seg violation walk uses) so the extra
+            ``copper_overlap_only`` pass is near-free.
+            """
+            connected = _connected_net_ids()
+            if not connected:
+                return 0
+            _extra = self._collect_extra_routes_for_revalidation(net_routes)
+            overlap_pairs = neg_router.find_segment_segment_violation_pairs(
+                net_routes,
+                trace_clearance=self.rules.trace_clearance,
+                extra_routes=_extra,
+                copper_overlap_only=True,
+            )
+            overlapping_nets = {n for pair in overlap_pairs for n in pair}
+            return len(connected & overlapping_nets)
 
         def _stranded_nets() -> list[int]:
             """Routable nets that must block a convergence declaration.
@@ -7257,12 +7338,14 @@ class Autorouter:
             ]
 
         initial_connected = _compute_nets_fully_connected()
+        initial_demotable = _compute_demotable_connected(0)
         best_metrics = IterationMetrics(
             iteration=0,
             routed_count=best_routed_count,
             overflow=overflow,
             clearance_violations=initial_violations,
             nets_fully_connected=initial_connected,
+            demotable_connected=initial_demotable,
         )
 
         # Issue #2803: Lightweight trajectory log (three ints per iteration,
@@ -7334,12 +7417,18 @@ class Autorouter:
             # ``_get_partially_routed_nets`` walk that the rip-up loop
             # already requires.
             connected_now = _compute_nets_fully_connected()
+            # Issue #3588: discount fully-connected nets the post-loop
+            # demotion will strip (hard copper overlaps) so the comparator
+            # ranks SURVIVABLE connectivity, not transient pre-demotion
+            # connectivity.
+            demotable_now = _compute_demotable_connected(iter_index)
             metrics = IterationMetrics(
                 iteration=iter_index,
                 routed_count=routed_now,
                 overflow=overflow_val,
                 clearance_violations=violations_now,
                 nets_fully_connected=connected_now,
+                demotable_connected=demotable_now,
             )
             iteration_trajectory.append(metrics)
 
@@ -7464,12 +7553,15 @@ class Autorouter:
                     # more fully-connected nets than what
                     # ``_capture_iteration_end`` last recorded.
                     current_connected = _compute_nets_fully_connected()
+                    # Issue #3588: discount demotion-doomed connected nets.
+                    current_demotable = _compute_demotable_connected(iteration - 1)
                     current_metrics = IterationMetrics(
                         iteration=iteration - 1,  # captured state is end of prior iter
                         routed_count=current_routed,
                         overflow=overflow,
                         clearance_violations=current_violations,
                         nets_fully_connected=current_connected,
+                        demotable_connected=current_demotable,
                     )
                     if current_metrics.is_better_than(best_metrics):
                         best_metrics = current_metrics
@@ -9218,12 +9310,22 @@ class Autorouter:
             # closed -- even when the live final state has marginally
             # higher ``routed_count``.
             final_connected = _compute_nets_fully_connected()
+            # Issue #3588: discount fully-connected nets the demotion pass
+            # will strip so the final restore compares survivable
+            # connectivity.  A final state with more connected-but-
+            # overlapping nets must not overwrite a best snapshot whose
+            # connectivity actually survives demotion.
+            final_iter_idx = (
+                iteration_trajectory[-1].iteration if iteration_trajectory else 0
+            )
+            final_demotable = _compute_demotable_connected(final_iter_idx)
             final_metrics = IterationMetrics(
-                iteration=iteration_trajectory[-1].iteration if iteration_trajectory else 0,
+                iteration=final_iter_idx,
                 routed_count=current_routed,
                 overflow=overflow,
                 clearance_violations=final_violations,
                 nets_fully_connected=final_connected,
+                demotable_connected=final_demotable,
             )
             if best_metrics.is_better_than(final_metrics):
                 flush_print(
