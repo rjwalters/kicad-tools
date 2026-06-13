@@ -91,14 +91,27 @@ def test_typecheck_job_invokes_baseline_wrapper(workflow: dict) -> None:
     )
 
 
-def test_lint_job_continue_on_error_untouched(workflow: dict) -> None:
-    """Scope guard: #3512 must NOT touch the Lint & Format job's
-    continue-on-error (that is sibling issue #3464)."""
+def test_lint_job_continue_on_error_removed(workflow: dict) -> None:
+    """Gate guard: issue #3464 REMOVED continue-on-error from the Lint &
+    Format job so ruff format/check failures now fail CI.
+
+    The two lint steps -- ``Check formatting`` (``ruff format --check``)
+    and ``Lint`` (``ruff check .``) -- must NOT carry
+    ``continue-on-error: true``; if either is re-added, the gate goes
+    advisory again and ~860 lint / ~510 format regressions become
+    invisible (the exact failure mode #3464 fixed)."""
     steps = workflow["jobs"]["lint"]["steps"]
     advisory = [s for s in steps if s.get("continue-on-error") is True]
-    assert len(advisory) == 2, (
-        "expected the two lint steps (format check + ruff) to retain "
-        "continue-on-error: true (issue #3464's domain, out of scope for #3512)"
+    assert advisory == [], (
+        "the Lint & Format steps must gate (issue #3464 removed "
+        "continue-on-error), but these still carry continue-on-error: true: "
+        + ", ".join(repr(s.get("name")) for s in advisory)
+    )
+    # Sanity: the two ruff steps that do the gating are present and run ruff.
+    run_blobs = " ".join(str(s.get("run", "")) for s in steps)
+    assert "ruff format" in run_blobs and "ruff check" in run_blobs, (
+        "expected the Lint & Format job to invoke `ruff format --check` and "
+        "`ruff check .` as the gating steps"
     )
 
 
