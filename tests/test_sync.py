@@ -14,7 +14,26 @@ from kicad_tools.sync.reconciler import (
     SyncAnalysis,
     SyncChange,
     SyncMatch,
+    _is_mounting_hole,
 )
+
+
+class TestIsMountingHole:
+    """Tests for the mounting-hole detector used to filter benign PCB-only drift."""
+
+    def test_mounting_hole_by_reference(self):
+        for ref in ("MH1", "MH4", "H1", "MK2", "MP3", "MTG1", "mh1"):
+            assert _is_mounting_hole(ref), ref
+
+    def test_mounting_hole_by_footprint_name(self):
+        assert _is_mounting_hole("X1", "MountingHole:MountingHole_3.2mm_M3")
+        assert _is_mounting_hole("FOO", "Mounting_Hole_M3")
+
+    def test_real_components_not_mounting_holes(self):
+        # Refs that merely start with the same letters but carry no mounting
+        # semantics must not be filtered (M is not a mounting-hole prefix).
+        for ref in ("R1", "C30", "D_TVS1", "U5", "J3", "MH"):
+            assert not _is_mounting_hole(ref, "Capacitor_SMD:C_0805_2012Metric"), ref
 
 
 class TestSyncMatch:
