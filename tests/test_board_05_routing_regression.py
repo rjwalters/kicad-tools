@@ -17,6 +17,23 @@ change that re-introduces the regression is caught loudly.
 The test is marked ``@pytest.mark.slow`` (4-minute wall clock) so PR-time
 CI excludes it; the nightly slow-tests workflow at
 ``.github/workflows/slow-tests.yml`` (``-m slow``) picks it up.
+
+NON-PRODUCTION RECIPE (read before editing the flags below).  This test
+deliberately runs ``--backend python --no-auto-layers --layers 2`` -- it
+is a *throughput* regression guard (net-completion %, the #2681 per-net
+A* slowdown dimension), pinned on the python backend so it reproduces on
+CI runners where the C++ extension is not built.  It is NOT board 05's
+production recipe: ``boards/05-bldc-motor-controller/design.py`` routes
+with ``--backend cpp --auto-layers --starting-layers 4 --max-layers 4
+--manufacturer jlcpcb-tier1`` (Issue #3425).
+
+The hard cross-net trace-overlap crossings on this python/2L path
+(Issue #3444: ``clearance_segment_segment`` actual -0.200mm etc.) were
+NOT fixed in the python backend -- the production recipe moved off this
+path entirely.  Do not treat this throughput floor as a manufacturability
+or DRC-cleanliness gate for board 05; that is
+``tests/test_board_05_drc_hotspot_regression.py`` against the committed
+cpp/tier1/4L snapshot.
 """
 
 from __future__ import annotations

@@ -24,11 +24,26 @@ Why a separate test:
   ships with **0 ``clearance_pad_segment`` violations**: the 0.3 mm
   micro-via in-pad rescues fit the DRV8301's 0.3 mm-wide pads without
   clipping neighbours, eliminating the historical U3/U10 escape
-  hot-spots.  The single residual blocking violation is 1
-  ``clearance_segment_segment`` (ISENSE_A- / ISENSE_B- partial-route
-  stub overlap on In1.Cu at (18.75, 53.75)) -- gated by the allowlist
-  (= 1) in ``.github/routed-drc-tolerance.yml`` and tracked in the
-  #3425 follow-on issues.
+  hot-spots.
+* Issue #3444 (2026-06-13) closed: the hard cross-net trace-overlap
+  crossings it reported (``clearance_segment_segment`` actual -0.200mm,
+  ``clearance_segment_via`` -0.274mm, in-pad ``clearance_pad_segment``)
+  were artifacts of the OLD ``--backend python --layers 2`` fresh
+  re-route path, which forced ``.github/routed-drc-tolerance.yml`` to be
+  churned 6 -> 20.  That path is DEAD in board 05's production recipe:
+  ``design.py`` now pins ``--backend cpp --auto-layers --starting-layers 4
+  --max-layers 4 --manufacturer jlcpcb-tier1 --micro-via-in-pad-fallback``
+  (#3425, PR #3472), and the python in-pad stub generator was made
+  conflict-aware (#3470, PR #3478).  Measured on the committed cpp/tier1/4L
+  snapshot at ``--mfr jlcpcb-tier1``: all three #3444 trace-overlap
+  families are 0.  No python-2L fix is needed; the python 2L path was
+  retired in production, not repaired.
+* The board-05 ``.github/routed-drc-tolerance.yml`` entry is NOT removed:
+  it is re-pinned at 30, but those 30 are ALL the unrelated
+  ``clearance_pad_zone`` family added by Issue #3556 (2026-06-13: pads
+  vs stale foreign-net pour-fill copper, a stale-zone-fill artifact
+  tracked with #3549-#3553).  None of the 30 are the trace/segment
+  overlap families this test pins absent.
 
 The test does NOT pin the exact set of violating pins (that would be
 too brittle).  It asserts:
@@ -124,8 +139,24 @@ MAX_SHORTFALL_UM = 130
 # the BLOCKED_BY_COMPONENT rip-up transactional (negotiated.py
 # ``targeted_ripup`` snapshot/rollback), so partial outputs no longer
 # strand overlap copper.  The refreshed committed snapshot measures 0
-# blocking violations at jlcpcb-tier1; the board-05 allowlist entry in
-# .github/routed-drc-tolerance.yml was removed (strict 0 gate).
+# blocking violations of these families at jlcpcb-tier1.
+#
+# Issue #3444 (2026-06-13) closed against this set: the hard cross-net
+# trace-overlap crossings (-0.200mm ``clearance_segment_segment``,
+# -0.274mm ``clearance_segment_via``, in-pad ``clearance_pad_segment``)
+# it reported were a property of the OLD ``--backend python --layers 2``
+# fresh re-route recipe (the path that forced the tolerance churn
+# 6 -> 20).  That recipe is no longer board 05's production path -- it
+# moved to cpp/tier1/4L (#3425) -- so #3444 needed no new python-backend
+# overlap fix; the families are already absent here.  This frozenset is
+# the standing regression guard that keeps them absent.
+#
+# NOTE on the tolerance file: the board-05 entry was NOT permanently
+# removed.  Issue #3556 (2026-06-13) re-added it at 30 for an UNRELATED
+# new rule family (``clearance_pad_zone`` / ``clearance_via_zone``: pads
+# and vias vs stale foreign-net pour-fill copper).  None of those 30 are
+# in this frozenset, so the #3556 grandfather does not loosen the #3444
+# trace-overlap guard.
 ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset(
     {
         "clearance_pad_via",
@@ -306,6 +337,14 @@ class TestBoard05DRCHotspotRegression:
         clipping U3's neighbouring 0.5 mm-pitch pads.  Pinning their
         absence makes that regression loud even while the aggregate
         allowlist would otherwise tolerate a count drift.
+
+        This is also the standing regression guard for Issue #3444 (the
+        ``clearance_segment_segment`` / ``clearance_segment_via`` hard
+        cross-net trace-overlap crossings reported on the OLD python-2L
+        fresh re-route recipe).  Those families are absent here because
+        the production recipe moved to cpp/tier1/4L (#3425) and the
+        python in-pad stub generator was made conflict-aware (#3470);
+        no python-backend overlap fix was required.
 
         Refresh policy: when a recipe/router change legitimately alters
         the committed snapshot's rule mix, re-route AND re-derive
