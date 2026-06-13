@@ -110,6 +110,94 @@ logger = logging.getLogger(__name__)
 _AUTO_FIX_RESERVE_FRACTION = 0.20
 _AUTO_FIX_RESERVE_FLOOR_SEC = 60.0
 
+# =============================================================================
+# Issue #3538: Deterministic (iteration-budgeted) routing
+# =============================================================================
+#
+# The board-07 Match-Group routing-regression CI gate re-routes from source and
+# its DRC count must be reproducible across machines so the allowlist floor in
+# .github/routed-drc-tolerance.yml can be an exact value instead of a
+# machine-variance band.  The only routing stage that lands a load-dependent
+# amount of copper is the per-net A* search: on a slow/loaded runner the per-net
+# wall-clock budget (``--per-net-timeout``) cuts a search short, so the SAME
+# code at the SAME ``--seed`` reaches fewer nets and reports a different DRC
+# profile (the "#3466 wall-clock-budget cliff").
+#
+# ``--deterministic-budget`` (see the parser declaration) removes that coupling:
+# it disables the per-net wall-clock cutoff and instead pins the C++ A*
+# *iteration backstop* (``--max-search-iterations``, Issue #2610 / #2819) to a
+# fixed node-expansion count.  Each per-net search then either finds a path or
+# aborts after the SAME number of node expansions on every environment, making
+# the routed artifact (and its DRC count) machine-independent.  The outer
+# ``--timeout`` is retained only as a safety backstop; if it fires under
+# deterministic-budget mode the run is no longer reproducible, so the
+# normalization warns.
+#
+# The fixed backstop must be large enough that a search which WOULD succeed on
+# an unbounded run still succeeds (so reach is not lost), while bounded enough
+# that a genuinely unroutable net aborts in finite work.  ~12M node expansions
+# is ~12x the historical ``cols * rows * 4`` heuristic for the board-07 grid
+# (~1M for a 500x500 lattice) -- generous headroom for the dense DDR/MIPI/HDMI
+# escapes without being unbounded.  Override with an explicit
+# ``--max-search-iterations N`` alongside the flag when a board needs more.
+DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS = 12_000_000
+
+
+def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
+    """Apply Issue #3538 iteration-budget normalization to ``args`` in place.
+
+    When ``--deterministic-budget`` is set this:
+
+      1. Disables the per-net wall-clock A* cutoff
+         (``args.per_net_timeout = 0.0``) so a slow machine does not cut a
+         search short and land less copper than a fast one.
+      2. Pins the C++ A* iteration backstop
+         (``args.max_search_iterations``) to
+         :data:`DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS` UNLESS the user
+         passed an explicit positive ``--max-search-iterations`` (which is
+         then honoured verbatim).  A positive backstop is what makes each
+         per-net search terminate after a fixed node-expansion count instead
+         of running unbounded when the wall-clock cutoff is removed.
+      3. Warns when the outer ``--timeout`` is set, because a firing outer
+         deadline re-introduces wall-clock dependence and breaks the
+         reproducibility guarantee (the deadline is kept as a safety
+         backstop, not the binding constraint).
+
+    No-op when ``--deterministic-budget`` is not set, so legacy behaviour is
+    preserved bit-for-bit.
+    """
+    if not getattr(args, "deterministic_budget", False):
+        return
+
+    # (1) Disable the per-net wall-clock cutoff.
+    args.per_net_timeout = 0.0
+
+    # (2) Pin the iteration backstop unless the user gave an explicit positive
+    # value.  ``--max-search-iterations`` defaults to 0 ("use cols*rows*4
+    # heuristic"); under deterministic-budget that heuristic is acceptable but
+    # we prefer an explicit, machine-independent fixed cap so the abort point
+    # does not vary with the auto-derived grid dimensions.
+    if not getattr(args, "max_search_iterations", 0):
+        args.max_search_iterations = DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS
+
+    # (3) Warn if the outer wall-clock deadline could bind.
+    timeout = getattr(args, "timeout", None)
+    if not quiet:
+        print(
+            "[deterministic-budget] Iteration-budgeted routing enabled "
+            "(Issue #3538): per-net wall-clock cutoff DISABLED, C++ A* "
+            f"iteration backstop pinned to {args.max_search_iterations:,} "
+            "node expansions.  Routed output is reproducible across machines."
+        )
+        if timeout and timeout > 0:
+            print(
+                "[deterministic-budget] WARNING: --timeout "
+                f"{timeout:g}s is set.  It is retained only as a SAFETY "
+                "backstop; if the outer deadline fires the run is no longer "
+                "machine-independent.  Size it generously (or omit it) so the "
+                "iteration budget -- not wall-clock -- bounds the work."
+            )
+
 
 def _auto_fix_budget(args) -> float:
     """Return the auto-fix reserve in seconds (issue #3238).
@@ -6755,6 +6843,28 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--deterministic-budget",
+        action="store_true",
+        help=(
+            "Bound routing work by an ITERATION budget instead of wall-clock "
+            "time so the routed output (and its DRC count) is reproducible "
+            "across machines regardless of runner speed or load (Issue #3538). "
+            "The per-net A* search is the only wall-clock-coupled stage that "
+            "lands different amounts of copper on a slow vs fast machine; this "
+            "flag disables the per-net wall-clock cutoff (--per-net-timeout 0) "
+            "and pins the C++ A* iteration backstop (--max-search-iterations) "
+            "to a fixed positive value, so each search either finds a path or "
+            "aborts after the SAME node-expansion count on every environment. "
+            "--timeout (the outer wall-clock budget) is kept only as a safety "
+            "backstop; if it fires it is logged as a determinism-breaking "
+            "warning. Combine with --seed for byte-stable re-routes. The fixed "
+            "iteration backstop value can be overridden by passing an explicit "
+            "--max-search-iterations N alongside this flag (N is then used "
+            "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
+            "default."
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -7681,6 +7791,13 @@ def main(argv: list[str] | None = None) -> int:
         random.seed(args.seed)
         if not getattr(args, "quiet", False):
             print(f"[seed] Seeded global random with --seed {args.seed}")
+
+    # Issue #3538: normalize --deterministic-budget BEFORE any wall-clock
+    # deadline is stamped or any inner router routine reads per_net_timeout /
+    # max_search_iterations off ``args``.  This disables the per-net wall-clock
+    # cutoff and pins the C++ A* iteration backstop so the routed output is
+    # reproducible across machines.  No-op when the flag is unset.
+    _normalize_deterministic_budget(args, quiet=getattr(args, "quiet", False))
 
     # Resolve two-phase iteration count.
     # Priority: --two-phase-iterations (explicit) > --iterations (explicit) > 20 (default)
