@@ -191,7 +191,7 @@ class TestPredictiveAnalyzer:
     def test_analyze_move_performance(self, analyzer) -> None:
         """Test that analysis completes within performance target (<10ms)."""
         # Run analysis
-        warnings = analyzer.analyze_move("R1", (150.0, 150.0))
+        analyzer.analyze_move("R1", (150.0, 150.0))
 
         # Check analysis time (stored in analyzer)
         assert hasattr(analyzer, "_last_analysis_time_ms")

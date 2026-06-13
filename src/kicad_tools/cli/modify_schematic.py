@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import re
 import shutil
 import sys
@@ -89,10 +90,8 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
     lib_symbols_end = 0
     lib_sym_match = re.search(r"\(lib_symbols\b", text)
     if lib_sym_match:
-        try:
+        with contextlib.suppress(ValueError):
             lib_symbols_end = _find_matching_close_paren(text, lib_sym_match.start()) + 1
-        except ValueError:
-            pass
 
     # Find each top-level (symbol ...) block after lib_symbols using paren balancing
     symbol_start_pattern = re.compile(r"\n(\s+)\(symbol\n")

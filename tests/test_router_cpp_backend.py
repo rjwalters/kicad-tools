@@ -820,7 +820,7 @@ class TestResumableRouting:
         reject_gx, reject_gy = grid._impl.world_to_grid(last_seg.x2, last_seg.y2)
 
         # Resume with the goal cell rejected
-        result2 = pf.resume(reject_gx, reject_gy, 0)
+        pf.resume(reject_gx, reject_gy, 0)
 
         # The resume should find an alternative path (different goal cell
         # in the end pad metal area) or exhaust the search

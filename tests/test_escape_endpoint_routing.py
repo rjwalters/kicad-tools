@@ -120,7 +120,7 @@ class TestEscapePadOverrides:
         if not dense:
             pytest.skip("Package not detected as dense -- test data may need adjustment")
 
-        escape_routes = router.generate_escape_routes(dense)
+        router.generate_escape_routes(dense)
 
         # Verify that overrides were built
         assert len(router._escape_pad_overrides) > 0, (
@@ -158,9 +158,9 @@ class TestRSMTUsesEscapeEndpoints:
         from kicad_tools.router.algorithms.steiner import build_rsmt
 
         # Original pad positions
-        pad1 = _make_pad(0.0, 0.0, net=1, ref="U1", pin="1")
-        pad2 = _make_pad(10.0, 0.0, net=1, ref="U1", pin="2")
-        pad3 = _make_pad(5.0, 10.0, net=1, ref="U1", pin="3")
+        _make_pad(0.0, 0.0, net=1, ref="U1", pin="1")
+        _make_pad(10.0, 0.0, net=1, ref="U1", pin="2")
+        _make_pad(5.0, 10.0, net=1, ref="U1", pin="3")
 
         # Virtual pads at escape endpoints (shifted)
         vpad1 = _make_pad(1.0, 1.0, net=1, ref="U1", pin="1")

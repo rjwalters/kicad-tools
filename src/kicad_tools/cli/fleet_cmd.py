@@ -37,6 +37,7 @@ decision 2026-05-21):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import re
@@ -794,10 +795,8 @@ def _extract_pcb_pad_net_numbers(pcb_text: str) -> set[int]:
         # Match (net N "name") inside the pad body
         m = _PCB_NET_NUMBERED_RE.search(body)
         if m:
-            try:
+            with contextlib.suppress(ValueError):
                 pad_net_numbers.add(int(m.group(1)))
-            except ValueError:
-                pass
         i = body_end
     return pad_net_numbers
 

@@ -162,11 +162,11 @@ def compute_pairwise_repulsion_gpu(
 
         # Get chunk of source edges (edges receiving forces)
         src_starts = starts[chunk_start:chunk_end]  # (chunk, 2)
-        src_ends = ends[chunk_start:chunk_end]
+        ends[chunk_start:chunk_end]
         src_vecs = edge_vecs[chunk_start:chunk_end]
         src_lens = edge_lens[chunk_start:chunk_end]
         src_comp = comp_idx[chunk_start:chunk_end]
-        chunk_size = chunk_end - chunk_start
+        chunk_end - chunk_start
 
         # Generate sample points along source edges
         # t values: (num_samples,)

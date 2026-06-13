@@ -1407,7 +1407,7 @@ class TestCorridorCostsInterBlockRouting:
             return original_set(corridor, net, penalty)
 
         with patch.object(router.grid, "set_corridor_preference", side_effect=tracking_set):
-            routes = router.route_all_block_aware()
+            router.route_all_block_aware()
 
         # No inter-block nets means no corridor assignments
         assert len(calls) == 0, (

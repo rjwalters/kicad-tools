@@ -723,7 +723,7 @@ class TestLatestReportOnly:
             preflight=PreflightConfig(skip_all=True),
         )
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
-        result = pkg.export(out_dir)
+        pkg.export(out_dir)
 
         # Version directories should remain
         assert (out_dir / "v1").exists()
@@ -789,7 +789,7 @@ class TestLatestReportOnly:
             preflight=PreflightConfig(skip_all=True),
         )
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
-        result = pkg.export(out_dir)
+        pkg.export(out_dir)
 
         # report.md should be promoted to root with v1 content
         assert (out_dir / "report.md").exists()
@@ -967,7 +967,7 @@ class TestLatestReportOnly:
             preflight=PreflightConfig(skip_all=True),
         )
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
-        result = pkg.export(out_dir)
+        pkg.export(out_dir)
 
         # vN/ directories preserved
         assert (out_dir / "v1").exists()
@@ -1006,7 +1006,7 @@ class TestLatestReportOnly:
             preflight=PreflightConfig(skip_all=True),
         )
         pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
-        result = pkg.export(out_dir)
+        pkg.export(out_dir)
 
         # Parse manifest
         import json

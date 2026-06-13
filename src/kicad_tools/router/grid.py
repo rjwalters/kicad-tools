@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
@@ -3477,10 +3477,8 @@ class RoutingGrid:
         # Determine which layer indices the via spans
         via_layer_indices: set[int] = set()
         for layer in via.layers:
-            try:
+            with suppress(KeyError, ValueError):
                 via_layer_indices.add(self.layer_to_index(layer.value))
-            except (KeyError, ValueError):
-                pass
 
         # Check against segments from existing routes
         for route in self.routes:

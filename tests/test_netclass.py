@@ -166,7 +166,7 @@ class TestAddNetclass:
     def test_add_netclass_pattern(self):
         """Test adding a netclass pattern."""
         data = {}
-        pattern = add_netclass_pattern(data, "Power", "VCC*")
+        add_netclass_pattern(data, "Power", "VCC*")
 
         patterns = get_netclass_patterns(data)
         assert len(patterns) == 1

@@ -12,6 +12,7 @@ Adaptive parameter tuning (Issue #633) improves convergence by:
 
 from __future__ import annotations
 
+import contextlib
 import random
 import time
 from typing import TYPE_CHECKING, Callable
@@ -2404,7 +2405,8 @@ class NegotiatedRouter:
                 resolved_name = net_names.get(net_id, f"Net_{net_id}")
             else:
                 resolved_name = f"Net_{net_id}"
-            try:
+            # Never let a buggy progress callback abort the rip-up.
+            with contextlib.suppress(Exception):
                 progress_callback(
                     "ripup_phase",
                     {
@@ -2416,9 +2418,6 @@ class NegotiatedRouter:
                         "elapsed": time.time() - start_time,
                     },
                 )
-            except Exception:
-                # Never let a buggy progress callback abort the rip-up.
-                pass
 
         # Re-route the failed net first (it now has priority with cleared
         # path).  Issue #3470: track per-edge failures via the failure

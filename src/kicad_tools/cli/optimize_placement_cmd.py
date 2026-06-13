@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -133,10 +134,8 @@ def _write_placements_to_pcb_atomic(
         Path(tmp_path).replace(out)
     except BaseException:
         # Clean up the temp file on failure
-        try:
+        with contextlib.suppress(OSError):
             Path(tmp_path).unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 

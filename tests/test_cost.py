@@ -347,7 +347,7 @@ class TestManufacturingCostEstimator:
             quantity=10,
         )
         # Should identify layer count and finish as cost drivers
-        drivers_text = " ".join(estimate.cost_drivers)
+        " ".join(estimate.cost_drivers)
         # At least one cost driver should be identified
         assert len(estimate.cost_drivers) > 0
 

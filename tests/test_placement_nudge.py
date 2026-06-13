@@ -265,7 +265,7 @@ class TestNudgePadClearance:
 
         if result.fixes_applied > 0:
             # Read the output and check that R2 moved further right (or R1 further left)
-            content = output_path.read_text()
+            output_path.read_text()
             # The fix should maintain directional relationship
             assert output_path.exists()
 

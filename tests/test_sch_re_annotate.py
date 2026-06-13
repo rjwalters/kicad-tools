@@ -2053,7 +2053,7 @@ class TestIncludePower:
     def test_unannotated_only_without_include_power_skips_power(self, tmp_path):
         """--unannotated-only without --include-power skips #PWR? symbols."""
         sch = _write_sch(tmp_path, POWER_UNANNOTATED_SCHEMATIC)
-        original = sch.read_text()
+        sch.read_text()
         ret = run_re_annotate(
             schematic_path=sch,
             dry_run=False,

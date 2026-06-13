@@ -383,7 +383,7 @@ def run_insert_inline(args) -> int:
     else:
         effective_end = wire_end
 
-    effective_len = _wire_length(effective_start, effective_end)
+    _wire_length(effective_start, effective_end)
 
     # Component placement at midpoint
     mid_x = _snap((effective_start[0] + effective_end[0]) / 2)

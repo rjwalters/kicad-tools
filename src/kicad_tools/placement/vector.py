@@ -463,14 +463,13 @@ def bounds(
 def _rotate_offset(dx: float, dy: float, rot_deg: float) -> tuple[float, float]:
     """Rotate an offset vector by *rot_deg* degrees counter-clockwise."""
     rot_idx = int(round(rot_deg / 90.0)) % 4
-    if rot_idx == 0:
-        return dx, dy
-    elif rot_idx == 1:
-        return -dy, dx
-    elif rot_idx == 2:
-        return -dx, -dy
-    else:
-        return dy, -dx
+    rotations = {
+        0: (dx, dy),
+        1: (-dy, dx),
+        2: (-dx, -dy),
+        3: (dy, -dx),
+    }
+    return rotations[rot_idx]
 
 
 def _block_member_refs(block_groups: Sequence[BlockGroupDef]) -> frozenset[str]:
@@ -611,7 +610,7 @@ def decode_with_blocks(
     Raises:
         ValueError: If vector length does not match expected dimensionality.
     """
-    blocked_refs = _block_member_refs(block_groups)
+    _block_member_refs(block_groups)
     free_indices, ref_to_idx = _split_free_and_block(components, block_groups)
     n_free = len(free_indices)
     n_blocks = len(block_groups)
@@ -702,7 +701,7 @@ def bounds_with_blocks(
     Returns:
         :class:`PlacementBounds` for the reduced-dimensionality vector.
     """
-    blocked_refs = _block_member_refs(block_groups)
+    _block_member_refs(block_groups)
     free_indices, ref_to_idx = _split_free_and_block(components, block_groups)
     n_free = len(free_indices)
     n_blocks = len(block_groups)

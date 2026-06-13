@@ -19,7 +19,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 from ..primitives import Route, Segment
-from ..quantize import dogleg_points, is_45_aligned, snap_direction_8
+from ..quantize import dogleg_points, snap_direction_8
 from .geometry import segment_length
 
 if TYPE_CHECKING:

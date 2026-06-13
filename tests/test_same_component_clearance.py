@@ -127,7 +127,7 @@ class TestSameComponentClearanceRelaxation:
         """Cells within trace_width/2 of pad metal must remain blocked."""
         grid = crystal_grid
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
-        reduced = grid.rules.trace_width / 2  # 0.1mm
+        grid.rules.trace_width / 2  # 0.1mm
 
         # Check that cells immediately adjacent to pad metal (within 0.1mm)
         # are still blocked.  Pad1 metal right edge is at x=4.5.
@@ -224,7 +224,7 @@ class TestSameComponentClearanceRelaxation:
         # Count blocked cells at midpoint before second pad
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         mid_gx, mid_gy = grid.world_to_grid(5.0, 5.0)
-        blocked_before = bool(grid._blocked[layer_idx, mid_gy, mid_gx])
+        bool(grid._blocked[layer_idx, mid_gy, mid_gx])
 
         grid.add_pad(pad2)
 
@@ -273,7 +273,7 @@ class TestSameComponentClearanceRelaxation:
         grid.add_pad(pad2)
 
         # Should not crash and should not relax (net=0 pad is skipped)
-        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        grid.layer_to_index(Layer.F_CU.value)
         mid_gx, mid_gy = grid.world_to_grid(5.0, 5.0)
         # No assertion on blocked state -- just verify no exception
 

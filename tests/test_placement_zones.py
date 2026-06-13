@@ -265,7 +265,7 @@ class TestPlacementOptimizerZoneMethods:
             "supercaps",
             pattern=r"C1[0-6][0-9]",
         )
-        control_assigned = self.optimizer.assign_to_zone(
+        self.optimizer.assign_to_zone(
             "control",
             references=["C100", "C101"],  # Some overlap for control logic
         )

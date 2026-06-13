@@ -32,6 +32,7 @@ gate the lateral rescue success/failure.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 import pytest
@@ -710,12 +711,10 @@ class TestQfpDispatcherWiring:
         # Run the QFP dispatcher; with strict mode + forced in-pad
         # deferral, any clearance violation should funnel through the
         # lateral helper.
-        try:
+        # Minimal fixtures may trip downstream assertions; the
+        # spy is what matters here.
+        with contextlib.suppress(Exception):
             router._escape_qfp_alternating(package)
-        except Exception:  # noqa: BLE001
-            # Minimal fixtures may trip downstream assertions; the
-            # spy is what matters here.
-            pass
 
         assert calls, (
             "Strict-mode dispatcher must invoke _try_lateral_via_escape "
@@ -762,10 +761,8 @@ class TestQfpDispatcherWiring:
         for pad in package.pads:
             router.grid.add_pad(pad)
 
-        try:
+        with contextlib.suppress(Exception):
             router._escape_qfp_alternating(package)
-        except Exception:  # noqa: BLE001
-            pass
 
         assert calls, (
             "Issue #3080: non-strict mode MUST invoke the lateral helper "

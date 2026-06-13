@@ -756,7 +756,7 @@ class TestInstancesBlock:
         )
         assert result == 0
 
-        content = sch_path.read_text()
+        sch_path.read_text()
         # Power symbols should not have instances blocks
         # The symbol section should not contain (instances ...)
         # (The only (instances ...) would be in sheet_instances which is different)

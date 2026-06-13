@@ -530,7 +530,7 @@ class TestIntegrationWorkflow:
 
         if success:
             # Final DRC should pass
-            drc_result = pcb.run_drc()
+            pcb.run_drc()
             # Note: DRC may still find issues if placement is tight
             # but at least we avoided direct collision
             assert final_pos is not None

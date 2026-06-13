@@ -503,7 +503,7 @@ def run_add_pull_resistor(args) -> int:
         if clear_x is not None:
             rerouted = True
             # Shift the resistor and power symbol to the new column
-            x_shift = clear_x - res_x
+            clear_x - res_x
             res_x = clear_x
             res_position = (res_x, res_y)
 

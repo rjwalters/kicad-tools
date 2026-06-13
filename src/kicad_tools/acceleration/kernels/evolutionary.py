@@ -67,7 +67,7 @@ def evaluate_population_gpu(
     Returns:
         Fitness values with shape (pop_size,). Higher is better.
     """
-    pop_size = positions.shape[0]
+    positions.shape[0]
 
     # Transfer data to GPU
     pos_gpu = backend.array(positions)
@@ -122,7 +122,6 @@ def _compute_wire_lengths_batch(
     Returns:
         Wire lengths (pop_size,)
     """
-    xp = backend.xp
     pop_size = positions.shape[0]
     n_springs = springs.shape[0]
 
@@ -182,7 +181,6 @@ def _compute_overlaps_batch(
     Returns:
         Overlap counts (pop_size,)
     """
-    xp = backend.xp
     pop_size = positions.shape[0]
     n_comp = positions.shape[1]
 
@@ -206,7 +204,7 @@ def _compute_overlaps_batch(
 
     idx_i = backend.array(idx_i, dtype=backend.int32)
     idx_j = backend.array(idx_j, dtype=backend.int32)
-    n_pairs = len(idx_i) if hasattr(idx_i, "__len__") else idx_i.shape[0]
+    len(idx_i) if hasattr(idx_i, "__len__") else idx_i.shape[0]
 
     # Get positions for all pairs
     # positions[:, idx_i, :] gives (pop_size, n_pairs, 2)
@@ -254,7 +252,6 @@ def _compute_boundary_violations_batch(
     Returns:
         Violation counts (pop_size,)
     """
-    xp = backend.xp
     pop_size = positions.shape[0]
     n_comp = positions.shape[1]
     n_verts = board_vertices.shape[0]
@@ -326,7 +323,6 @@ def _compute_routability_batch(
     Returns:
         Routability scores (pop_size,) in range [0, 100]
     """
-    xp = backend.xp
     pop_size = positions.shape[0]
     n_comp = positions.shape[1]
 
@@ -378,7 +374,6 @@ def _compute_pin_alignment_batch(
     Returns:
         Alignment scores (pop_size,) in range [0, 100]
     """
-    xp = backend.xp
     pop_size = positions.shape[0]
     n_springs = springs.shape[0]
 
@@ -445,7 +440,7 @@ def prepare_evaluation_data(
     """
     n_components = len(components)
     n_springs = len(springs)
-    n_verts = len(board_vertices)
+    len(board_vertices)
 
     # Build component sizes array
     component_sizes = np.zeros((n_components, 2), dtype=np.float32)

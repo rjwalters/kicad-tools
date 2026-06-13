@@ -1798,7 +1798,7 @@ class TestInwardViaStrategy:
         escape_logger = logging.getLogger("kicad_tools.router.escape")
         escape_logger.addHandler(handler)
         try:
-            escapes = router.generate_escapes(info)
+            router.generate_escapes(info)
             handler.flush()
             warnings = [
                 r
@@ -2012,7 +2012,7 @@ class TestConnectorEscapeRouting:
         )
 
         # Adjacent vias in the inner row should be staggered along the row axis
-        min_stagger = router.via_spacing / 2
+        router.via_spacing / 2
         for i in range(len(via_escapes) - 1):
             vp1 = via_escapes[i].via_pos
             vp2 = via_escapes[i + 1].via_pos
@@ -2624,7 +2624,7 @@ class TestSegmentToPadClearance:
         escape_logger = logging.getLogger("kicad_tools.router.escape")
         escape_logger.addHandler(handler)
         try:
-            escapes = router.generate_escapes(info)
+            router.generate_escapes(info)
             handler.flush()
             warnings = [
                 r
@@ -2745,7 +2745,7 @@ class TestSegmentToPadClearance:
                 row_pads,
             )
             handler.flush()
-            pad_warnings = [
+            [
                 r
                 for r in handler.buffer
                 if r.levelno >= logging.WARNING and "segment-to-pad" in r.getMessage().lower()
@@ -2814,7 +2814,7 @@ class TestSegmentToPadClearance:
 
         rules = DesignRules()
         grid = RoutingGrid(10, 10, rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, rules)
+        EscapeRouter(grid, rules)
 
         # Pad centered at (0, 1.0) with height=0.42mm
         pad = Pad(

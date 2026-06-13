@@ -193,7 +193,7 @@ class TestSESMerge:
 
         output = tmp_path / "merged.kicad_pcb"
         importer = SESToKiCadImporter(str(ses_file))
-        result = importer.merge_into(str(VOLTAGE_DIVIDER_PCB), str(output))
+        importer.merge_into(str(VOLTAGE_DIVIDER_PCB), str(output))
 
         assert output.exists()
         content = output.read_text()

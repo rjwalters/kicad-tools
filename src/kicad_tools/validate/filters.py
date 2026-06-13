@@ -31,14 +31,14 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass, field
-from typing import Any, Union
+from typing import Any
 
 from kicad_tools.drc.violation import DRCViolation as DRCReportViolation
 from kicad_tools.erc.violation import ERCViolation
 from kicad_tools.validate.violations import DRCViolation as ValidateViolation
 
 # Union type for all supported violation types
-AnyViolation = Union[DRCReportViolation, ERCViolation, ValidateViolation]
+AnyViolation = DRCReportViolation | ERCViolation | ValidateViolation
 
 # Valid actions for filter rules
 VALID_ACTIONS = frozenset({"ignore", "warning", "error"})

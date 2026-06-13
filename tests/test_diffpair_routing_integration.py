@@ -364,7 +364,7 @@ def test_diffpair_prepass_then_negotiated_routes_connector_sibling():
     )
 
     # Now run the negotiated loop.  USB_CC1 must connect.
-    routes = router.route_all_negotiated(max_iterations=10, timeout=60.0)
+    router.route_all_negotiated(max_iterations=10, timeout=60.0)
 
     # Look for at least one segment per net.
     nets_with_routes = {r.net for r in router.routes}

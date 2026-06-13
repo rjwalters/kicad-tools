@@ -322,7 +322,7 @@ class Reconciler:
         from kicad_tools.validate.consistency import SchematicPCBChecker
 
         checker = SchematicPCBChecker(self._schematic_path, self._pcb_path)
-        result = checker.check()
+        checker.check()
 
         analysis = SyncAnalysis()
 

@@ -94,7 +94,7 @@ class TestBuildNetlistHierarchical:
     def test_global_labels_merged_across_sheets(self):
         """Global label DATA_BUS appears in root, sub_a, and sub_b -- should merge."""
         netlist = build_netlist_from_schematic(FIXTURES / "root.kicad_sch")
-        net_names = {n.name for n in netlist.nets}
+        {n.name for n in netlist.nets}
         # DATA_BUS is a global label present on root, sub_a, and sub_b
         # It won't have pin connections (no symbols connected by wire to it)
         # but should still appear as a net if the extract_netlist picks it up

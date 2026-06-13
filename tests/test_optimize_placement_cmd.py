@@ -862,7 +862,7 @@ class TestBoardOriginCoordinates:
         # R1 at board-relative (10, 10) should be written as
         # sheet-absolute (10 + 116, 10 + 76.75) = (126, 86.75)
         at_pattern = re.compile(r"\(at\s+([\d.]+)\s+([\d.]+)")
-        at_matches = at_pattern.findall(content)
+        at_pattern.findall(content)
 
         # Collect footprint (at ...) values — should be sheet-absolute
         # The file has two footprints; collect their (at ...) from the output.

@@ -4,6 +4,7 @@ Verifies that the --auto-layers flag correctly escalates layer count
 when routing fails to achieve the minimum completion threshold.
 """
 
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1017,7 +1018,7 @@ class TestEarlyTermination:
             with patch("kicad_tools.router.is_cpp_available", return_value=False):
                 with patch("kicad_tools.router.show_routing_summary"):
                     with patch("kicad_tools.cli.route_cmd.run_post_route_drc", return_value=False):
-                        result = route_with_layer_escalation(pcb, out, args, quiet=True)
+                        route_with_layer_escalation(pcb, out, args, quiet=True)
 
         assert call_count == 1, f"Expected 1 attempt (success on first try), got {call_count}"
 
@@ -1838,7 +1839,8 @@ class TestPristineStatePerAttempt:
             # --no-auto-layers should NOT call route_with_layer_escalation.
             # It will fail on PCB loading since we don't mock that, but the
             # key assertion is that escalation was never invoked.
-            try:
+            # Expected -- PCB file doesn't exist.
+            with contextlib.suppress(SystemExit, FileNotFoundError, Exception):
                 route_main(
                     [
                         "test.kicad_pcb",
@@ -1846,8 +1848,6 @@ class TestPristineStatePerAttempt:
                         "--quiet",
                     ]
                 )
-            except (SystemExit, FileNotFoundError, Exception):
-                pass  # Expected -- PCB file doesn't exist
 
             assert mock_escalation.call_count == 0, (
                 "route_with_layer_escalation should not be called with --no-auto-layers"
