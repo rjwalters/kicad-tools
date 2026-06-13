@@ -30,6 +30,7 @@ class BuildResult:
     error_message: str | None = None
     steps_completed: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    skipped: bool = False
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON output."""
@@ -40,6 +41,7 @@ class BuildResult:
             "error_message": self.error_message,
             "steps_completed": self.steps_completed,
             "warnings": self.warnings,
+            "skipped": self.skipped,
         }
 
 
@@ -92,6 +94,64 @@ def _get_cpp_source_dir() -> Path | None:
     if cpp_dir.exists():
         return cpp_dir
     return None
+
+
+def _find_installed_so(router_dir: Path) -> Path | None:
+    """Return the installed router_cpp extension (.so/.pyd), if any."""
+    for pattern in ("router_cpp.*.so", "router_cpp.*.pyd"):
+        for so_file in router_dir.glob(pattern):
+            return so_file
+    return None
+
+
+def _newest_cpp_source_mtime(cpp_dir: Path) -> float | None:
+    """Return the newest mtime among C++ source/header files under ``cpp_dir``.
+
+    Scans recursively for ``*.cpp`` and ``*.hpp`` (plus the common ``*.cc``,
+    ``*.h``, ``*.hxx`` variants and ``CMakeLists.txt``) so that any edit to the
+    build inputs is detected.  Returns ``None`` when no source files are found.
+    """
+    newest: float | None = None
+    patterns = ("*.cpp", "*.cc", "*.cxx", "*.hpp", "*.hxx", "*.h", "CMakeLists.txt")
+    for pattern in patterns:
+        for source in cpp_dir.rglob(pattern):
+            try:
+                mtime = source.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or mtime > newest:
+                newest = mtime
+    return newest
+
+
+def _is_so_stale(router_dir: Path) -> bool:
+    """Decide whether the installed .so is older than its C++ sources.
+
+    Returns ``True`` (rebuild needed) when the newest C++ source mtime is
+    strictly greater than the installed extension's mtime.  Returns ``False``
+    when the .so is up to date, when there is no .so to compare against, or
+    when the source tree cannot be located (e.g. a pip-installed wheel without
+    bundled sources) -- in those cases we defer to the existing
+    version-matching guard rather than forcing a rebuild we cannot perform.
+    """
+    so_file = _find_installed_so(router_dir)
+    if so_file is None:
+        return False
+
+    cpp_dir = _get_cpp_source_dir()
+    if cpp_dir is None:
+        return False
+
+    newest_source = _newest_cpp_source_mtime(cpp_dir)
+    if newest_source is None:
+        return False
+
+    try:
+        so_mtime = so_file.stat().st_mtime
+    except OSError:
+        return False
+
+    return newest_source > so_mtime
 
 
 def _get_project_root() -> Path | None:
@@ -190,20 +250,35 @@ def build_native(
     result = BuildResult(success=False)
     router_dir = _get_package_root() / "router"
 
-    # Check if already installed (unless force)
+    # Check if already installed (unless force).
+    #
+    # Issue #3621: a matching-version .so short-circuits the build, but the
+    # version guard offers no protection during development when the C++
+    # source changes WITHOUT a version bump -- the most common iteration loop.
+    # Compare the newest source mtime against the installed extension and fall
+    # through to a real rebuild when the source is newer.  Only short-circuit
+    # (and clearly report SKIPPED) when the .so is genuinely up to date.
     if not force:
         try:
             from kicad_tools.router.cpp_backend import is_cpp_available
 
             if is_cpp_available():
-                result.success = True
-                result.backend_installed = True
-                result.steps_completed.append("C++ backend already installed")
-                # Find the .so file
-                for so_file in router_dir.glob("router_cpp.*.so"):
-                    result.so_path = so_file
-                    break
-                return result
+                if _is_so_stale(router_dir):
+                    if verbose:
+                        print("C++ source is newer than the installed extension -- rebuilding.")
+                    result.steps_completed.append(
+                        "C++ source newer than installed .so -- rebuilding"
+                    )
+                else:
+                    result.success = True
+                    result.backend_installed = True
+                    result.skipped = True
+                    result.steps_completed.append(
+                        "C++ backend already installed (up to date) -- skipped rebuild"
+                    )
+                    # Find the .so file
+                    result.so_path = _find_installed_so(router_dir)
+                    return result
         except ImportError:
             pass
 
@@ -394,7 +469,16 @@ def format_result_text(result: BuildResult) -> str:
     lines = []
 
     if result.success:
-        if result.backend_installed:
+        if result.skipped:
+            lines.append(
+                "C++ backend already installed -- SKIPPED rebuild (use --force to recompile)"
+            )
+            lines.append("")
+            if result.so_path:
+                lines.append(f"  Extension: {result.so_path.name}")
+            lines.append("")
+            lines.append("Run `kct route --backend cpp` to use the C++ backend.")
+        elif result.backend_installed:
             lines.append("C++ backend installed successfully!")
             lines.append("")
             if result.so_path:
