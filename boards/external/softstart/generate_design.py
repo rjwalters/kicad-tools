@@ -229,13 +229,33 @@ REINFORCEMENT_POUR_NETS: list[str] = [n for n in POWER_TRACE_WIDTHS_MM if n != "
 # the fence either).  Routed first, its short local path claims the
 # corridor before SRC_NEG's 54-segment bundle exists.
 #
-# Keep this set MINIMAL and LOCAL.  Front-loading VGATE (8 pads across
-# both driver clusters) was also tried and regressed hard: the early
-# VGATE commit consumed the U1-south corridor, pushing NRST /
-# STATUS_LED into an unbounded BLOCKED_BY_COMPONENT rip-up grind (run
-# killed after 70+ min with no convergence).  VGATE's residual island
-# is closed by the step-10b B.Cu bridge pour instead.
-ROUTE_FIRST_NETS = ["BUS_LINE", "VRECT", "V_BANK_POS_SENSE", "UCC_LO_NEG"]
+# NRST (8 pads, ~31 mm span across the central vertical corridor: the
+# Q7/Q8 2N7002 failsafe gates, U1.6 PF2/NRST on the LQFP south-west
+# face, SW1/J5/R10/C5) is here as the #3479 fix.  NRST is auto-classed
+# DEBUG (priority 5) by the ``(NRST|RESET|RST)`` pattern in
+# ``router/net_class.py``, so by default it routes 24th of 26 signal
+# nets — into a corridor already saturated by the sense/gate nets.
+# Measured at default ordering it strands at the production recipe
+# (1/8 pads pre-#3438 relief rescue; 6/8 after — the last two pads,
+# Q7.2 and U1.6, are sealed by foreign copper the recovery pass cannot
+# negotiate around).  Front-loaded at priority 1 it routes 8/8.
+#
+# The displacement is asymmetric in our favour: front-loading NRST
+# pushes SRC_NEG / VGATE to partial, but BOTH are in
+# ``REINFORCEMENT_POUR_NETS`` (pad-bbox pours that bulk + bridge their
+# skeletons), whereas NRST is a thin signal net with NO pour fallback —
+# a stranded NRST pad is an open reset line.  Trading an unrecoverable
+# signal failure for two pour-recoverable power failures is the right
+# call (issue #3479 ask #2: route the high-fanout signal net early so
+# the pour-backed nets absorb the corridor displacement).
+#
+# NOTE on the historical warning below: front-loading *VGATE* regressed
+# hard (early VGATE commit STARVED NRST into an unbounded
+# BLOCKED_BY_COMPONENT grind, killed after 70+ min).  Front-loading
+# *NRST itself* is the inverse — it eliminates exactly that starvation,
+# and the run converges in normal time (~4-6 min main+recovery).  Keep
+# this set MINIMAL and LOCAL; do not add VGATE.
+ROUTE_FIRST_NETS = ["BUS_LINE", "VRECT", "V_BANK_POS_SENSE", "UCC_LO_NEG", "NRST"]
 
 # Deterministic route seed (PYTHONHASHSEED=0 is set by ``route_pcb``).
 # The end-of-run rip-up cohort is seed-sensitive: with the
