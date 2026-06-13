@@ -4505,6 +4505,7 @@ def route_with_mfr_tier_escalation(
     Returns:
         Exit code (0 = success, 1 = failure, 2 = partial)
     """
+    from kicad_tools.cli.mfr_tier_budget import per_tier_routing_budget
     from kicad_tools.cli.progress import flush_print
     from kicad_tools.router.failure_analysis import (
         MFR_TIER_ESCALATION_TRIGGERS,
@@ -4634,17 +4635,38 @@ def route_with_mfr_tier_escalation(
 
             should_escalate = False
             reason = ""
-            if trigger_table_vetoes:
+            # Issue #3463: the canonical ``missed_via_in_pad_rescues``
+            # signal takes precedence over the dominant-cause trigger-table
+            # veto.  A non-zero missed-rescue counter is *direct,
+            # instrumented* evidence that one or more fine-pitch pins would
+            # be rescued by an in-pad via on the next tier -- strictly
+            # stronger than a statistical tally of per-net failure causes.
+            #
+            # On board-04 the dominant cause across the (few) failing nets
+            # is classified as BLOCKED_PATH (a single keepout-blocked net),
+            # which the trigger table marks not-manufacturer-fixable.  But
+            # the EscapeRouter separately recorded a non-zero
+            # ``missed_via_in_pad_rescues`` for the LQFP-48 inner pins --
+            # exactly what ``jlcpcb-tier1`` fixes.  Letting the BLOCKED_PATH
+            # tally veto escalation here aborts the ladder before the
+            # capable tier ever runs (the #3463 regression).  So we check
+            # the missed-rescue signal *first*: when it fires and the next
+            # tier gains via-in-pad capability, escalate regardless of the
+            # dominant-cause tally.  The trigger-table veto still applies
+            # when there is *no* instrumented missed-rescue signal (the
+            # legacy placement-class suppression for #2883).
+            if gains_capability and triggered_by_missed_in_pad:
+                should_escalate = True
+                reason = "missed via-in-pad rescues detected on previous tier"
+            elif trigger_table_vetoes:
                 # Trigger table says this failure category is not
-                # manufacturer-fixable.  Suppress escalation even if
+                # manufacturer-fixable and there is no missed-rescue
+                # signal to override it.  Suppress escalation even if
                 # capability / scalar gain exists.
                 reason = (
                     f"dominant failure cause ({dominant_cause.value}) is not "
                     "manufacturer-fixable (trigger table veto)"
                 )
-            elif gains_capability and triggered_by_missed_in_pad:
-                should_escalate = True
-                reason = "missed via-in-pad rescues detected on previous tier"
             elif gains_capability:
                 # No instrumented missed-rescue signal, but capability gain
                 # exists -- escalate defensively (the user asked for it).
@@ -4697,20 +4719,26 @@ def route_with_mfr_tier_escalation(
             # Dispatch to the layer-escalation path.  When args.auto_layers
             # is False we fall through to single-layer routing.  When True,
             # full 2D escalation (layers x mfr-tier) occurs.
-            if getattr(args, "auto_layers", True):
-                inner_rc = route_with_layer_escalation(
-                    pcb_path=pcb_path,
-                    output_path=output_path,
-                    args=args,
-                    quiet=quiet,
-                )
-            else:
-                # Single-layer routing path -- recurse via main() with
-                # auto_layers/auto_mfr_tier turned off would be cleaner, but
-                # to keep this PR focused we just call the layer-escalation
-                # path with --max-layers=args.layers honored via the inner
-                # filter.  When the user explicitly disabled auto-layers,
-                # they should explicitly invoke the appropriate path.
+            #
+            # Issue #3463: wrap the inner call in a per-tier routing-budget
+            # window so the base tier's layer-escalation loop cannot consume
+            # the entire routing deadline.  Without this, the inner
+            # ``_per_attempt_budgeted_timeout`` sees the full remaining
+            # budget at base-tier time, the base tier expands to fill it,
+            # and ``_deadline_expired(args)`` is True at the top of the next
+            # tier iteration -- so the ladder aborts before ever attempting
+            # ``jlcpcb-tier1`` (the via-in-pad-capable tier).  The context
+            # manager narrows ``args._routing_deadline`` to a fair per-tier
+            # slice and restores the original deadline on exit (so auto-fix
+            # still sees its reserved budget).
+            with per_tier_routing_budget(
+                args,
+                tier_index=tier_idx,
+                tier_count=len(tiers_to_try),
+            ):
+                # Both branches dispatch identically today; when the user
+                # explicitly disabled --auto-layers the layer-escalation
+                # path honours --max-layers via its inner filter.
                 inner_rc = route_with_layer_escalation(
                     pcb_path=pcb_path,
                     output_path=output_path,

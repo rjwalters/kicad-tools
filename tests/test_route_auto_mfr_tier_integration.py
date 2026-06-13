@@ -220,14 +220,6 @@ class TestAutoMfrTierIntegration:
     # AC #1: Tier-1 escalation produces measurable progress over jlcpcb.
     # ------------------------------------------------------------------
 
-    @pytest.mark.xfail(
-        reason=(
-            "Issue #3463: --auto-mfr-tier aborts on the jlcpcb escape "
-            "infeasibility (U2 via-in-pad) instead of escalating to "
-            "jlcpcb-tier1; remove this xfail when #3463 is fixed."
-        ),
-        strict=False,
-    )
     def test_tier1_routes_more_nets_than_jlcpcb(
         self,
         auto_mfr_tier_result: subprocess.CompletedProcess[str],
@@ -294,14 +286,6 @@ class TestAutoMfrTierIntegration:
     # AC #2: CLI advances to jlcpcb-tier1
     # ------------------------------------------------------------------
 
-    @pytest.mark.xfail(
-        reason=(
-            "Issue #3463: --auto-mfr-tier aborts on the jlcpcb escape "
-            "infeasibility (U2 via-in-pad) instead of escalating to "
-            "jlcpcb-tier1; remove this xfail when #3463 is fixed."
-        ),
-        strict=False,
-    )
     def test_escalation_advances_to_tier1(
         self,
         auto_mfr_tier_result: subprocess.CompletedProcess[str],
@@ -331,14 +315,6 @@ class TestAutoMfrTierIntegration:
     # AC #3: Escalation trigger reason is the canonical missed-rescue signal.
     # ------------------------------------------------------------------
 
-    @pytest.mark.xfail(
-        reason=(
-            "Issue #3463: --auto-mfr-tier aborts on the jlcpcb escape "
-            "infeasibility (U2 via-in-pad) instead of escalating to "
-            "jlcpcb-tier1; remove this xfail when #3463 is fixed."
-        ),
-        strict=False,
-    )
     def test_escalation_triggered_by_missed_via_in_pad(
         self, auto_mfr_tier_result: subprocess.CompletedProcess[str]
     ) -> None:
