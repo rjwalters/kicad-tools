@@ -440,18 +440,28 @@ class TestRunStitch:
         assert result.already_connected >= 1
 
     def test_run_stitch_multiple_nets(self, stitch_test_pcb: Path):
-        """Should handle multiple nets and co-check cross-net stitch geometry.
+        """Should handle multiple nets and co-check cross-net stitch geometry
+        WITHOUT stranding pour pads.
 
         Issue #3633: the four GND pads stitch first (one via each, placed at
         x+0.31 alongside each pad row).  Each 0402 cap's +3.3V pad sits only
-        0.20mm from the GND via just placed on the same package, so a +3.3V
-        stitch via/trace would land inside the manufacturer clearance band of
-        that foreign-net GND via.  Before #3633 the GND traces were emitted in
-        a separate later pass, so the +3.3V placements were checked only
-        against pre-existing copper and all 7 vias were (incorrectly) placed
-        within clearance of each other.  With the in-pass cross-net co-check
-        the 3 conflicting +3.3V vias are correctly dropped, leaving the 4 GND
-        vias whose geometry is jlcpcb-legal.
+        0.20mm from the GND via just placed on the same package, so the
+        cross-net co-check finds NO clearing via position for those three
+        +3.3V pads -- every candidate grazes the adjacent foreign-net GND
+        stitch via.
+
+        Pre-#3633 these +3.3V vias were placed against pre-existing copper
+        only, so all 7 landed within clearance of each other.  An earlier
+        revision of the co-check fix over-corrected and *dropped* the three
+        conflicting +3.3V pads -- but that STRANDS them (their only bridge to
+        the pour island is the dropped via), which is a worse defect than a
+        marginal cross-net graze that DRC already grandfathers.
+
+        The connectivity fallback restores the load-bearing via: when no
+        cross-net-clearing placement exists for a pour pad, the via is placed
+        anyway (against pre-existing copper) and recorded in
+        ``connectivity_fallback``.  So all 7 pads keep a via -- the three
+        +3.3V pads via the fallback path -- and NOTHING is stranded.
         """
         result = run_stitch(
             pcb_path=stitch_test_pcb,
@@ -459,12 +469,17 @@ class TestRunStitch:
             dry_run=True,
         )
 
-        # 4 GND vias placed; the 3 +3.3V vias are dropped because each would
-        # violate cross-net clearance against the adjacent GND stitch via.
-        assert len(result.vias_added) == 4
-        assert {v.pad.net_name for v in result.vias_added} == {"GND"}
-        assert len(result.pads_skipped) == 3
-        assert all(pad.net_name == "+3.3V" for pad, _ in result.pads_skipped)
+        # All 7 pads get a via -- connectivity is preserved for both nets.
+        assert len(result.vias_added) == 7
+        assert {v.pad.net_name for v in result.vias_added} == {"GND", "+3.3V"}
+        # No pour pad is stranded.
+        assert len(result.pads_skipped) == 0
+        # The 3 +3.3V pads had no clearing placement, so they were rescued by
+        # the connectivity fallback rather than dropped.
+        assert len(result.connectivity_fallback) == 3
+        assert all(
+            pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback
+        )
 
     def test_run_stitch_custom_via_size(self, stitch_test_pcb: Path):
         """Should use custom via size."""
@@ -5657,6 +5672,71 @@ STITCH_CROSS_NET_TRACE_PCB = """(kicad_pcb
   )
 )
 """
+
+
+class TestPourConnectivityFallback:
+    """Issue #3633: a pour-net pad whose only via candidate grazes a foreign
+    stitch via (no clearing placement exists) must still receive a via via the
+    connectivity fallback rather than being stranded.
+
+    This guards the board-07 regression (``+1V8: U3.12`` / ``GND: U2.47``
+    splitting into disjoint pour-copper components) at the unit level, so the
+    connectivity guarantee is covered without the multi-minute CI route.
+
+    The ``stitch_test_pcb`` fixture is the board-07 pattern at unit scale:
+    each 0402 carries a GND pad at -0.51 and a +3.3V pad at +0.51 (1.02 mm
+    apart).  GND stitches first; its via lands toward the +3.3V side, so the
+    +3.3V pad's only escape grazes the just-placed foreign GND stitch via and
+    has NO cross-net-clearing placement.
+    """
+
+    def test_stranded_pour_pad_rescued_by_fallback(
+        self, stitch_test_pcb: Path
+    ) -> None:
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND", "+3.3V"],
+            dry_run=True,
+        )
+
+        # The three +3.3V pads have no cross-net-clearing placement (each
+        # grazes the adjacent GND stitch via).  Pre-fix they were stranded;
+        # the fallback must rescue every one of them.
+        #
+        # No pour pad is stranded.
+        assert not any(
+            pad.net_name == "+3.3V" for pad, _ in result.pads_skipped
+        ), "no +3.3V pour pad may be stranded"
+        assert len(result.pads_skipped) == 0
+
+        # Each rescued +3.3V pad still receives a via via the fallback path
+        # and is recorded in connectivity_fallback for auditability.
+        plus_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
+        assert len(plus_vias) == 3, "every stranded pour pad must get a via"
+        assert len(result.connectivity_fallback) == 3
+        assert all(
+            pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback
+        )
+
+    def test_non_stranded_pad_still_uses_clearing_placement(
+        self, tmp_path: Path
+    ) -> None:
+        """When a clearing placement DOES exist, the fallback must NOT fire --
+        the cross-net DRC reduction is preserved (no over-broad rescue)."""
+        pcb = tmp_path / "cross_net_trace.kicad_pcb"
+        pcb.write_text(STITCH_CROSS_NET_TRACE_PCB)
+
+        result = run_stitch(
+            pcb_path=pcb,
+            net_names=["NETA", "NETB"],
+            clearance=0.2,
+            trace_width=0.2,
+            dry_run=True,
+        )
+
+        # NETB has open space to escape, so it finds a clearing position and
+        # the fallback never triggers.
+        assert len(result.connectivity_fallback) == 0
 
 
 class TestTraceToTrackSegments:
