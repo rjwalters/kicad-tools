@@ -1336,6 +1336,22 @@ class EscapeRouter:
         # pattern; consumed by diagnostics / future tier-escalation.
         self.adjacent_in_pad_via_conflicts_refused: int = 0
 
+        # Issue #3430: Counter for the auto-lateral-via FALLBACK that the
+        # dispatcher takes after #3429 refuses an in-pad rescue because a
+        # sibling fine-pitch pin's via barrel blocks it.  #3429 is the
+        # DETECTION half (``_try_in_pad_escape`` returns None on a sub-pitch
+        # via-via conflict); this is the RECOVERY half -- the dispatcher
+        # falls through to ``_try_lateral_via_escape``, which pushes the
+        # via OFF the pad along the outward escape direction so the second
+        # pin still escapes instead of being silently dropped at
+        # ``apply_escape_routes`` commit time.  Bumped once per pin whose
+        # in-pad rescue was refused AND whose lateral fallback succeeded.
+        # When this counter is non-zero a fine-pitch package that would
+        # otherwise have lost a pin to the commit-time drop was rescued by
+        # the offset escape.  Mirrors the instrumentation pattern above;
+        # reset between attempts by ``Autorouter.reset_attempt_state``.
+        self.forced_lateral_via_fallbacks: int = 0
+
         # Issue #3257: per-pad escape-layer overrides for SSOP/TSSOP
         # fine-pitch dual-row dispatcher.  Maps ``(ref, pin)`` to the
         # forced escape layer (``Layer.F_CU`` -> stay on surface,
@@ -3083,8 +3099,35 @@ class EscapeRouter:
                                 effective_clearance=effective_clearance,
                                 escape_width=escape_width,
                                 package=package,
+                                # Issue #3430: forward the escapes placed so
+                                # far this pass so the off-pad via candidate
+                                # is validated against sibling escape vias
+                                # (in-pad OR lateral), not just footprint
+                                # pads.  Without this the lateral fallback
+                                # could relocate the very commit-time drop
+                                # #3429's detection was meant to prevent.
+                                existing_escapes=escapes,
                             )
                             if lateral_route is not None:
+                                # Issue #3430: observe the auto-lateral-via
+                                # FALLBACK.  ``adjacent_in_pad_via_conflicts_refused``
+                                # (#3429) counts the refused in-pad rescue;
+                                # this counts the successful offset escape
+                                # that rescued the same pin.  When the in-pad
+                                # via was refused for a barrel conflict, this
+                                # is the recovery that keeps board 04 at 9/9.
+                                self.forced_lateral_via_fallbacks += 1
+                                logger.info(
+                                    "AUTO-LATERAL-VIA fallback for %s pin %s "
+                                    "(net %s): in-pad rescue refused (sibling "
+                                    "via barrel conflict / strict clearance); "
+                                    "escaped via off-pad lateral via instead "
+                                    "of deferring the pin to the main router "
+                                    "(Issue #3430, follow-on to #3429).",
+                                    package.ref,
+                                    pad.pin,
+                                    pad.net_name,
+                                )
                                 escapes.append(lateral_route)
                                 continue
 
@@ -6636,6 +6679,69 @@ class EscapeRouter:
                 return er
         return None
 
+    def _lateral_via_sibling_conflict(
+        self,
+        x: float,
+        y: float,
+        via_diameter: float,
+        clearance: float,
+        same_net: int,
+        existing_escapes: list[EscapeRoute] | None,
+    ) -> bool:
+        """Barrel-spacing check for a LATERAL via against sibling escapes.
+
+        Issue #3430 (auto-lateral-via fallback): the recovery half of the
+        adjacent-pin conflict story.  When #3429's detection refuses an
+        in-pad rescue, the dispatcher falls through to
+        :meth:`_try_lateral_via_escape`, which pushes the via OFF the pad
+        along the outward escape direction.  Those off-pad candidates are
+        validated by :meth:`_can_place_via` only against footprint PADS --
+        the vias of sibling escapes generated earlier in the SAME pass are
+        invisible there (the routing grid is not populated until commit
+        time).  This predicate closes that gap.
+
+        It differs from :meth:`_adjacent_in_pad_via_conflict` (which guards
+        the FIRST, in-pad via and therefore only considers sibling *in-pad*
+        vias) in ONE respect: a lateral via must clear EVERY foreign-net
+        sibling via -- whether that sibling escaped in-pad or also took a
+        lateral offset.  Two off-pad vias can collide just as readily as an
+        in-pad / off-pad pair, so the ``in_pad`` flag is not consulted
+        here.  The center-spacing requirement is identical::
+
+            via_r_self + via_r_sibling + clearance
+
+        Args:
+            x: Proposed lateral via center X (mm).
+            y: Proposed lateral via center Y (mm).
+            via_diameter: Proposed via pad diameter (mm).
+            clearance: Required minimum via-to-via clearance (mm).
+            same_net: Net id of the via being placed; same-net sibling vias
+                are skipped (same-net copper may share spacing).
+            existing_escapes: Escape routes accumulated so far in this
+                dispatch pass.  ``None`` disables the check (legacy /
+                unit-fixture callers), preserving byte-for-byte behaviour.
+
+        Returns:
+            ``True`` when a foreign-net sibling via lies closer than the
+            required center spacing, else ``False``.
+        """
+        if not existing_escapes:
+            return False
+
+        via_radius = via_diameter / 2
+        for er in existing_escapes:
+            via = er.via
+            if via is None:
+                continue
+            if via.net == same_net:
+                continue
+            sibling_radius = via.diameter / 2
+            required = via_radius + sibling_radius + clearance
+            dist = math.hypot(via.x - x, via.y - y)
+            if dist < required - 1e-9:
+                return True
+        return False
+
     def _try_in_pad_escape(
         self,
         pad: Pad,
@@ -6967,6 +7073,12 @@ class EscapeRouter:
         )
         if conflicting is not None:
             self.adjacent_in_pad_via_conflicts_refused += 1
+            # ``_adjacent_in_pad_via_conflict`` only returns an EscapeRoute
+            # whose ``.via`` is non-None (it skips ``via is None`` siblings),
+            # so narrowing here is sound -- the local lets mypy prove the
+            # attribute access below type-checks (Via | None -> Via).
+            sibling_via = conflicting.via
+            assert sibling_via is not None
             logger.info(
                 "In-pad rescue REFUSED for pad %s (ref=%s pin=%s) at "
                 "(%.3f, %.3f): via barrel (OD %.3fmm) conflicts with the "
@@ -6983,8 +7095,8 @@ class EscapeRouter:
                 via_diameter,
                 conflicting.pad.pin,
                 conflicting.pad.net_name,
-                conflicting.via.x,
-                conflicting.via.y,
+                sibling_via.x,
+                sibling_via.y,
             )
             return None
 
@@ -7158,6 +7270,7 @@ class EscapeRouter:
         package: PackageInfo | None = None,
         max_offset_mm: float | None = None,
         step_mm: float = 0.05,
+        existing_escapes: list[EscapeRoute] | None = None,
     ) -> EscapeRoute | None:
         """Probe off-pad via candidates along the pin's escape direction.
 
@@ -7225,6 +7338,17 @@ class EscapeRouter:
                 would be unnecessarily large.
             step_mm: Step granularity in mm.  Default 0.05 mm matches
                 the grid resolution and the existing in-pad nudge step.
+            existing_escapes: Escape routes accumulated so far in this
+                dispatch pass (Issue #3430).  Each off-pad via candidate is
+                validated against the in-pad / lateral vias of these sibling
+                escapes via the same ``via_r + via_r + clearance`` barrel-
+                spacing predicate the in-pad rescue uses
+                (:meth:`_adjacent_in_pad_via_conflict`).  Without this the
+                lateral fallback is blind to sibling escapes generated in
+                the same pass -- it would merely move the silent commit-time
+                drop from the refused in-pad via to its lateral replacement.
+                ``None`` (legacy callers / unit fixtures) disables the
+                sibling check, preserving byte-for-byte behaviour.
 
         Returns:
             An ``EscapeRoute`` with the laterally-offset via and the
@@ -7321,6 +7445,32 @@ class EscapeRouter:
                 clearance=effective_clearance,
                 via_diameter=via_diameter,
             ):
+                # Issue #3430: ``_can_place_via`` validates only against
+                # footprint pads (and populated grid cells), NOT against
+                # the vias of sibling escapes generated earlier in THIS
+                # pass -- those live only in ``existing_escapes`` until
+                # commit time.  Without this guard the lateral fallback
+                # would merely relocate the silent commit-time drop from
+                # the refused in-pad via to its off-pad replacement: the
+                # offset via could still land inside a sibling via's
+                # barrel-spacing halo.  We check ANY foreign-net sibling
+                # via (in-pad OR a lateral via placed for an earlier pin
+                # this pass), using the same ``via_r + via_r + clearance``
+                # predicate the in-pad rescue uses (#3429), so a candidate
+                # "accepted" here would also survive
+                # ``apply_escape_routes``.  No-op when ``existing_escapes``
+                # is None (legacy callers / unit fixtures), preserving
+                # byte-for-byte behaviour.
+                if self._lateral_via_sibling_conflict(
+                    x=cand_x,
+                    y=cand_y,
+                    via_diameter=via_diameter,
+                    clearance=effective_clearance,
+                    same_net=pad.net,
+                    existing_escapes=existing_escapes,
+                ):
+                    continue
+
                 # Found a via location that satisfies foreign-pad
                 # clearance.  Before committing, validate that the
                 # surface stub from the pad center to this via location
