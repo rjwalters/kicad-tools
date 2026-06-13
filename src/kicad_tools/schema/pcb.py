@@ -4925,7 +4925,6 @@ class PCB:
             >>> # JLCPCB format
             >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
         """
-        from ..export import PnPExportConfig
         from ..export import export_pnp as _export_pnp
 
         footprints = list(self.footprints)
@@ -4940,8 +4939,11 @@ class PCB:
         if format.lower() in ("jlcpcb", "pcbway"):
             mfr = format.lower()
 
-        config = PnPExportConfig()
-        pnp_csv = _export_pnp(footprints, mfr, config)
+        # Pass config=None so the formatter resolves the effective config —
+        # the single source of truth (issues #3616/#3618).  Synthesizing a
+        # bare PnPExportConfig() here would defeat manufacturer defaults such
+        # as JLCPCB's exclude_tht=True, shipping THT rows in the CPL.
+        pnp_csv = _export_pnp(footprints, mfr, config=None)
 
         # Write to file
         output_path = Path(output)
