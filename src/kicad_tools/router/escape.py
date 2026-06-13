@@ -1363,8 +1363,8 @@ class EscapeRouter:
         # post-escape layer (e.g. softstart U1 east column where pin 17
         # SWDIO odd-via to B.Cu and pin 15 STATUS_LED odd-via to B.Cu
         # produce overlapping B.Cu routes near the U1 east-side cluster
-        # -- the documented 4-violation residual the
-        # ``test_softstart_manufacturable_baseline`` test pinned).
+        # -- the kind of fine-pitch escape regression now guarded by the
+        # rev B harness ``test_softstart_revb_fine_pitch_escape``).
         #
         # Env-var encoding (preferred for both CLI and Python callers):
         #
