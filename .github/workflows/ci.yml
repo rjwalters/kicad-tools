@@ -53,13 +53,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      # continue-on-error is tracked by issue #3512 (1472 mypy errors in
-      # 264 files on main as of 2026-06-11). Removing it requires a
-      # baseline/burn-down that is out of scope for #3436 (which un-masked
-      # the Test job).
-      - name: Run mypy
-        run: uv run mypy src/
-        continue-on-error: true
+      # Issue #3512: the `Run mypy` step used to carry continue-on-error: true,
+      # so the Type Check job was green regardless of mypy's exit code and
+      # type rot accumulated invisibly (1512 errors in 269 files on main as of
+      # 2026-06-13). Fixing all of them in one PR is infeasible, so this gate
+      # mirrors the routed-pcb-drc-check allowlist pattern: a committed
+      # baseline (.github/mypy-baseline.txt) records the known errors, and the
+      # wrapper script fails the job ONLY on NEW errors beyond the baseline.
+      # This catches regressions immediately while the existing debt is burned
+      # down. As the baseline shrinks toward 0, this step should eventually be
+      # replaced by a bare `uv run mypy src/`. Do NOT re-add continue-on-error
+      # or pad the baseline to silence a new error -- fix the type error.
+      - name: Run mypy (baseline-gated)
+        run: uv run python scripts/ci/check_mypy_baseline.py
 
   test:
     name: Test

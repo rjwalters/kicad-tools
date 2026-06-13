@@ -1,0 +1,1530 @@
+# Mypy baseline -- committed debt ledger for the CI Type Check gate (issue #3512).
+#
+# Each non-comment line is a NORMALIZED mypy error signature:
+#     <path>\t<error-code>\t<message-with-numbers-masked>
+# Line numbers are intentionally absent so the gate survives refactors that
+# shift code around.  scripts/ci/check_mypy_baseline.py compares the current
+# mypy run against this multiset and fails CI only on NEW errors.
+#
+# BURN-DOWN INTENT: this is debt, not a target.  When you fix type errors,
+# regenerate this file in the same PR:
+#     uv run python scripts/ci/check_mypy_baseline.py --update
+# so the floor ratchets down and the fixed errors cannot silently return.
+# The end state is an empty baseline and removal of the wrapper.
+#
+# DO NOT hand-edit. DO NOT add entries to silence a NEW error -- fix the type
+# error or, if it is a false positive, add a targeted ``# type: ignore[code]``
+# with a comment, which removes it from the report entirely.
+
+src/kicad_tools/acceleration/backend.py	import-not-found	Cannot find implementation or library stub for module named "cupyx"
+src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/acceleration/kernels/routing.py	assignment	Incompatible types in assignment (expression has type "int", variable has type "ndarray[tuple[Any, ...], dtype[signedinteger[_32Bit]]]")
+src/kicad_tools/acceleration/kernels/routing.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/acceleration/kernels/routing.py	var-annotated	Need type annotation for "conflicts"
+src/kicad_tools/analysis/congestion.py	var-annotated	Need type annotation for "result" (hint: "result: list[<type>] = ...")
+src/kicad_tools/analysis/signal_integrity.py	arg-type	Argument N to "add" of "set" has incompatible type "tuple[int, ...]"; expected "tuple[int, int]"
+src/kicad_tools/assembly/validation.py	assignment	Incompatible types in assignment (expression has type "LCSCClient", variable has type "None")
+src/kicad_tools/assembly/validation.py	no-any-return	Returning Any from function declared to return "AssemblyValidationResult"
+src/kicad_tools/audit/auditor.py	assignment	Incompatible types in assignment (expression has type "ManufacturerProfile", variable has type "None")
+src/kicad_tools/audit/auditor.py	assignment	Incompatible types in assignment (expression has type "None", variable has type "Path")
+src/kicad_tools/calibration.py	assignment	Incompatible types in assignment (expression has type "list[float]", variable has type "ndarray[tuple[int], dtype[float64]]")
+src/kicad_tools/calibration.py	assignment	Incompatible types in assignment (expression has type "str", target has type "float")
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "array"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "array"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "array"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "cuda"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "cuda"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "cuda"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "ones"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "random"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "random"
+src/kicad_tools/calibration.py	attr-defined	any? has no attribute "zeros"
+src/kicad_tools/calibration.py	no-any-return	Returning Any from function declared to return any?
+src/kicad_tools/calibration.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/calibration.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/calibration.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/calibration.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/cli/bom_cmd.py	assignment	Incompatible types in assignment (expression has type "list[dict[Any, Any]]", variable has type "list[BOMItem]")
+src/kicad_tools/cli/bom_cmd.py	attr-defined	"object" has no attribute "append"
+src/kicad_tools/cli/bom_cmd.py	operator	Unsupported operand types for + ("object" and "int")
+src/kicad_tools/cli/build_cmd.py	assignment	Incompatible types in assignment (expression has type "Path | None", variable has type "Path")
+src/kicad_tools/cli/build_cmd.py	union-attr	Item "None" of "ProjectArtifacts | Any | None" has no attribute "schematic"
+src/kicad_tools/cli/build_cmd.py	union-attr	Item "None" of "ProjectSpec | None" has no attribute "project"
+src/kicad_tools/cli/build_native_cmd.py	import-not-found	Cannot find implementation or library stub for module named "nanobind"
+src/kicad_tools/cli/clean_cmd.py	assignment	Incompatible types in assignment (expression has type "ProtectedFile", variable has type "CleanableFile")
+src/kicad_tools/cli/commands/benchmark.py	var-annotated	Need type annotation for "by_case" (hint: "by_case: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/commands/benchmark.py	var-annotated	Need type annotation for "by_case" (hint: "by_case: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/commands/impedance.py	index	Value of type "tuple[str, str] | None" is not indexable
+src/kicad_tools/cli/commands/impedance.py	operator	Cannot call function of unknown type
+src/kicad_tools/cli/commands/ipc.py	import-not-found	Cannot find implementation or library stub for module named "kicad_tools.pcb.parser"
+src/kicad_tools/cli/commands/parts.py	attr-defined	"Collection[str]" has no attribute "append"
+src/kicad_tools/cli/commands/pcb.py	attr-defined	"object" has no attribute "append"
+src/kicad_tools/cli/commands/pcb.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/commands/pcb.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/commands/pcb.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/commands/pcb.py	index	Invalid index type "str" for "str"; expected type "SupportsIndex | slice[Any, Any, Any]"
+src/kicad_tools/cli/commands/pcb.py	index	Invalid index type "str" for "str"; expected type "SupportsIndex | slice[Any, Any, Any]"
+src/kicad_tools/cli/commands/pcb.py	index	Invalid index type "str" for "str"; expected type "SupportsIndex | slice[Any, Any, Any]"
+src/kicad_tools/cli/commands/pcb.py	index	Value of type "dict[str, int] | str | Any | bool | list[Any] | None" is not indexable
+src/kicad_tools/cli/commands/pcb.py	index	Value of type "dict[str, int] | str | Any | bool | list[Any] | None" is not indexable
+src/kicad_tools/cli/commands/pcb.py	index	Value of type "dict[str, int] | str | Any | bool | list[Any] | None" is not indexable
+src/kicad_tools/cli/commands/spec.py	arg-type	Argument "completed" to "add_task" of "Progress" has incompatible type "float"; expected "int"
+src/kicad_tools/cli/constraints_cmd.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/cli/datasheet_cmd.py	arg-type	Argument "pins" to "generate" of "SymbolGenerator" has incompatible type "PinTable | list[dict[str, Any]]"; expected "PinTable | list[ExtractedPin]"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "confidence"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "package"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "package"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "package"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "package"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "pins"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "pins"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "to_csv"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "to_json"
+src/kicad_tools/cli/datasheet_cmd.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "to_markdown"
+src/kicad_tools/cli/drc_cmd.py	arg-type	Argument N to "apply" of "FilterEngine" has incompatible type "list[kicad_tools.drc.violation.DRCViolation]"; expected "list[kicad_tools.drc.violation.DRCViolation | ERCViolation | kicad_tools.validate.violations.DRCViolation]"
+src/kicad_tools/cli/drc_cmd.py	arg-type	Argument N to "load" of "DRCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/drc_summary.py	arg-type	Argument N to "compare_with_manufacturer" has incompatible type "str | None"; expected "str"
+src/kicad_tools/cli/drc_summary.py	arg-type	Argument N to "load" of "DRCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/erc_cmd.py	arg-type	Argument N to "apply" of "FilterEngine" has incompatible type "list[ERCViolation]"; expected "list[kicad_tools.drc.violation.DRCViolation | ERCViolation | kicad_tools.validate.violations.DRCViolation]"
+src/kicad_tools/cli/erc_cmd.py	arg-type	Argument N to "load" of "ERCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/export_netlist.py	arg-type	Argument "source" to "SheetInfo" has incompatible type "SExp | None"; expected "str"
+src/kicad_tools/cli/export_netlist.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "SExp | None")
+src/kicad_tools/cli/export_netlist.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "SExp | None")
+src/kicad_tools/cli/fix_drc_cmd.py	arg-type	Argument N to "load" of "DRCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/fix_erc_cmd.py	arg-type	Argument N to "load" of "ERCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/fix_silkscreen_cmd.py	assignment	Incompatible types in assignment (expression has type "TextHeightFix", variable has type "SilkscreenFix")
+src/kicad_tools/cli/fix_silkscreen_cmd.py	attr-defined	"SilkscreenFix" has no attribute "new_height"
+src/kicad_tools/cli/fix_silkscreen_cmd.py	attr-defined	"SilkscreenFix" has no attribute "old_height"
+src/kicad_tools/cli/fix_vias_cmd.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/cli/fix_vias_cmd.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/cli/fix_vias_cmd.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/cli/fix_vias_cmd.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/cli/fix_vias_cmd.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/cli/fix_vias_cmd.py	assignment	Incompatible types in assignment (expression has type "ViaClearanceWarning", variable has type "SameLayerViaWarning")
+src/kicad_tools/cli/fix_vias_cmd.py	assignment	Incompatible types in assignment (expression has type "ViaFix", variable has type "SameLayerViaFix")
+src/kicad_tools/cli/fix_vias_cmd.py	assignment	Incompatible types in assignment (expression has type "ViaFix", variable has type "SameLayerViaFix")
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "new_diameter"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "new_diameter"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "new_drill"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "new_drill"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "old_diameter"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "old_diameter"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "old_drill"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaFix" has no attribute "old_drill"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaWarning" has no attribute "clearance_mm"
+src/kicad_tools/cli/fix_vias_cmd.py	attr-defined	"SameLayerViaWarning" has no attribute "nearby_item"
+src/kicad_tools/cli/fix_vias_cmd.py	return-value	Incompatible return value type (got "list[tuple[SExp, float | int, float | int, float | int, float | int, int, str | int | float | None, str, str, str]]", expected "list[tuple[SExp, float, float, float, float, int, str, str, str, str]]")
+src/kicad_tools/cli/fleet_cmd.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/cli/footprint_generate.py	arg-type	Argument N to "join" of "str" has incompatible type "object"; expected "Iterable[str]"
+src/kicad_tools/cli/footprint_generate.py	arg-type	Argument N to "join" of "str" has incompatible type "object"; expected "Iterable[str]"
+src/kicad_tools/cli/footprint_generate.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/cli/mfr_tier_budget.py	no-any-return	Returning Any from function declared to return "float | None"
+src/kicad_tools/cli/mfr_tier_budget.py	no-any-return	Returning Any from function declared to return "float | None"
+src/kicad_tools/cli/mfr_tier_budget.py	no-any-return	Returning Any from function declared to return "float | None"
+src/kicad_tools/cli/modify_schematic.py	arg-type	Argument N to "join" of "str" has incompatible type "list[dict[Any, Any]]"; expected "Iterable[str]"
+src/kicad_tools/cli/modify_schematic.py	arg-type	Argument N to "join" of "str" has incompatible type "list[dict[Any, Any]]"; expected "Iterable[str]"
+src/kicad_tools/cli/modify_schematic.py	operator	Unsupported operand types for + ("str" and "dict[Any, Any]")
+src/kicad_tools/cli/modify_schematic.py	type-var	Value of type variable "AnyStr" of "escape" cannot be "dict[Any, Any]"
+src/kicad_tools/cli/net_status_cmd.py	misc	List comprehension has incompatible type List[dict[Any, Any]]; expected List[str]
+src/kicad_tools/cli/optimize_placement_cmd.py	arg-type	Argument "mode" to "PlacementCostConfig" has incompatible type "object"; expected "CostMode"
+src/kicad_tools/cli/optimize_placement_cmd.py	arg-type	Argument N to "PlacementCostConfig" has incompatible type "**dict[str, object]"; expected "CostMode"
+src/kicad_tools/cli/optimize_placement_cmd.py	arg-type	Argument N to "PlacementCostConfig" has incompatible type "**dict[str, object]"; expected "float"
+src/kicad_tools/cli/optimize_placement_cmd.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "OverlapDetail")
+src/kicad_tools/cli/optimize_placement_cmd.py	attr-defined	"PlacementStrategy" has no attribute "_population_size"
+src/kicad_tools/cli/optimize_placement_cmd.py	attr-defined	"PlacementStrategy" has no attribute "_population_size"
+src/kicad_tools/cli/optimize_placement_cmd.py	union-attr	Item "None" of "SlideOffResult | None" has no attribute "overlap_details"
+src/kicad_tools/cli/parts_cmd.py	attr-defined	"Collection[str]" has no attribute "append"
+src/kicad_tools/cli/pcb_modify.py	return-value	Incompatible return value type (got "None", expected "SExp")
+src/kicad_tools/cli/pcb_query.py	arg-type	Argument N to "len" has incompatible type "list[Any] | float | Literal[N]"; expected "Sized"
+src/kicad_tools/cli/pcb_query.py	arg-type	Argument N to "round" has incompatible type "list[Any] | float | Literal[N]"; expected "_SupportsRound2[float]"
+src/kicad_tools/cli/pcb_query.py	assignment	Incompatible types in assignment (expression has type "list[Footprint]", variable has type "FootprintList")
+src/kicad_tools/cli/pcb_query.py	assignment	Incompatible types in assignment (expression has type "list[Footprint]", variable has type "FootprintList")
+src/kicad_tools/cli/pcb_query.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "set[Any]")
+src/kicad_tools/cli/pcb_query.py	index	Value of type "list[Any] | float | Literal[N]" is not indexable
+src/kicad_tools/cli/pcb_query.py	misc	Generator has incompatible item type "list[Any] | float | Literal[N]"; expected "bool"
+src/kicad_tools/cli/pcb_query.py	operator	Unsupported left operand type for + ("set[Any]")
+src/kicad_tools/cli/pcb_query.py	union-attr	Item "None" of "Net | None" has no attribute "name"
+src/kicad_tools/cli/pcb_query.py	var-annotated	Need type annotation for "by_layer" (hint: "by_layer: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/pcb_query.py	var-annotated	Need type annotation for "by_size" (hint: "by_size: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/pcb_query.py	var-annotated	Need type annotation for "net_counts" (hint: "net_counts: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/pipeline_cmd.py	arg-type	Argument N to "load" of "ERCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/pipeline_cmd.py	assignment	Incompatible types in assignment (expression has type "Path | None", variable has type "Path")
+src/kicad_tools/cli/repair_clearance_cmd.py	arg-type	Argument N to "load" of "DRCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/report_cmd.py	assignment	Incompatible types in assignment (expression has type "Path | None", variable has type "Path")
+src/kicad_tools/cli/report_cmd.py	no-any-return	Returning Any from function declared to return "dict[Any, Any] | None"
+src/kicad_tools/cli/route_cmd.py	arg-type	Argument "router" to "AdaptiveGridRouter" has incompatible type "Autorouter"; expected "Router | None"
+src/kicad_tools/cli/route_cmd.py	arg-type	Argument N to "detect_analog_nets" has incompatible type "_AnalogDetectAdapter"; expected "PCB"
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Autorouter", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Autorouter", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Autorouter", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Path", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Path", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Path", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Path", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Path", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Path", target has type "bool | None")
+src/kicad_tools/cli/route_cmd.py	assignment	Incompatible types in assignment (expression has type "Stats", variable has type "dict[Any, Any]")
+src/kicad_tools/cli/route_cmd.py	attr-defined	"bool" has no attribute "get_statistics"
+src/kicad_tools/cli/route_cmd.py	attr-defined	"bool" has no attribute "read_text"
+src/kicad_tools/cli/route_cmd.py	attr-defined	"bool" has no attribute "routes"
+src/kicad_tools/cli/route_cmd.py	attr-defined	"bool" has no attribute "stem"
+src/kicad_tools/cli/route_cmd.py	attr-defined	"bool" has no attribute "to_sexp"
+src/kicad_tools/cli/route_cmd.py	attr-defined	"bool" has no attribute "with_stem"
+src/kicad_tools/cli/route_cmd.py	attr-defined	"bool" has no attribute "write_text"
+src/kicad_tools/cli/route_cmd.py	attr-defined	"dict[Any, Any]" has no attribute "strip_dirs"
+src/kicad_tools/cli/route_cmd.py	attr-defined	any? has no attribute "__iter__" (not iterable)
+src/kicad_tools/cli/route_cmd.py	attr-defined	any? has no attribute "__iter__" (not iterable)
+src/kicad_tools/cli/route_cmd.py	misc	"None" object is not iterable
+src/kicad_tools/cli/route_cmd.py	misc	Cannot assign to a type
+src/kicad_tools/cli/route_cmd.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/route_cmd.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/route_cmd.py	no-any-return	Returning Any from function declared to return "float | None"
+src/kicad_tools/cli/route_cmd.py	no-any-return	Returning Any from function declared to return "float | None"
+src/kicad_tools/cli/route_cmd.py	operator	Unsupported operand types for >= ("int" and "None")
+src/kicad_tools/cli/route_cmd.py	operator	Unsupported operand types for >= ("int" and "None")
+src/kicad_tools/cli/runner.py	assignment	Incompatible types in assignment (expression has type "Path", variable has type "str | None")
+src/kicad_tools/cli/runner.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/runner.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/runner.py	no-any-return	Returning Any from function declared to return "str | None"
+src/kicad_tools/cli/runner.py	return-value	Incompatible return value type (got "Literal[''] | None", expected "Path | None")
+src/kicad_tools/cli/runner.py	union-attr	Item "None" of "Literal[''] | None" has no attribute "exists"
+src/kicad_tools/cli/runner.py	union-attr	Item "str" of "Literal[''] | None" has no attribute "exists"
+src/kicad_tools/cli/sch_add_bypass_cap.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/sch_add_component.py	assignment	Incompatible types in assignment (expression has type "tuple[float, float] | None", variable has type "tuple[float, float]")
+src/kicad_tools/cli/sch_add_component.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/sch_add_component.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/sch_add_component.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/sch_add_label.py	arg-type	Argument N to "add_global_label" of "Schematic" has incompatible type "Any | None"; expected "str"
+src/kicad_tools/cli/sch_add_label.py	arg-type	Argument N to "add_hierarchical_label" of "Schematic" has incompatible type "Any | None"; expected "str"
+src/kicad_tools/cli/sch_add_label.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_add_label.py	assignment	Incompatible types in assignment (expression has type "HierarchicalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_add_label.py	attr-defined	"Label" has no attribute "shape"
+src/kicad_tools/cli/sch_add_label.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/sch_add_no_connect.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_add_no_connect.py	assignment	Incompatible types in assignment (expression has type "HierarchicalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_add_wire.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/cli/sch_cleanup_wires.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_cleanup_wires.py	assignment	Incompatible types in assignment (expression has type "HierarchicalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_connectivity.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_connectivity.py	assignment	Incompatible types in assignment (expression has type "HierarchicalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_find_unconnected.py	arg-type	Argument N to "Path" has incompatible type "Path | None"; expected "str | PathLike[str]"
+src/kicad_tools/cli/sch_find_unconnected.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_find_unconnected.py	assignment	Incompatible types in assignment (expression has type "HierarchicalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_find_unconnected.py	assignment	Incompatible types in assignment (expression has type "list[MissingFromNetlist]", variable has type "list[UnconnectedPin]")
+src/kicad_tools/cli/sch_hierarchy.py	assignment	Incompatible default for argument "max_depth" (default has type "None", argument has type "int")
+src/kicad_tools/cli/sch_hierarchy.py	assignment	Incompatible default for argument "max_depth" (default has type "None", argument has type "int")
+src/kicad_tools/cli/sch_hierarchy.py	assignment	Incompatible types in assignment (expression has type "HierarchyNode | None", variable has type "HierarchyNode")
+src/kicad_tools/cli/sch_hierarchy.py	assignment	Incompatible types in assignment (expression has type "dict[str, object]", target has type "int")
+src/kicad_tools/cli/sch_hierarchy.py	assignment	Incompatible types in assignment (expression has type "int", target has type "Sequence[Collection[str]]")
+src/kicad_tools/cli/sch_hierarchy.py	index	Value of type "int" is not indexable
+src/kicad_tools/cli/sch_hierarchy.py	var-annotated	Need type annotation for "path_parts" (hint: "path_parts: list[<type>] = ...")
+src/kicad_tools/cli/sch_list_labels.py	var-annotated	Need type annotation for "type_counts" (hint: "type_counts: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/sch_preflight.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_preflight.py	assignment	Incompatible types in assignment (expression has type "Path | None", variable has type "Path")
+src/kicad_tools/cli/sch_repair_instances.py	misc	"None" object is not iterable
+src/kicad_tools/cli/sch_set_footprint.py	no-any-return	Returning Any from function declared to return "dict[str, str]"
+src/kicad_tools/cli/sch_set_footprint.py	no-redef	Name "mapping" already defined on line N
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "dict[Never, Never]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "dict[str, int]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "dict[str, object]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "dict[str, object]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "dict[str, object]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "dict[str, str]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "int", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "list[Never]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	assignment	Incompatible types in assignment (expression has type "list[str]", target has type "str")
+src/kicad_tools/cli/sch_summary.py	index	Unsupported target for indexed assignment ("str")
+src/kicad_tools/cli/sch_summary.py	index	Unsupported target for indexed assignment ("str")
+src/kicad_tools/cli/sch_summary.py	misc	List comprehension has incompatible type List[str]; expected List[dict[str, object]]
+src/kicad_tools/cli/sch_summary.py	var-annotated	Need type annotation for "ref_counts"
+src/kicad_tools/cli/sch_sync_hierarchy.py	arg-type	Argument "name" to "SyncAction" has incompatible type "str | None"; expected "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	arg-type	Argument "name" to "SyncAction" has incompatible type "str | None"; expected "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	arg-type	Argument "name" to "SyncAction" has incompatible type "str | None"; expected "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	assignment	Incompatible types in assignment (expression has type "dict[str, list[Never]]", target has type "list[Any]")
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	call-overload	No overload variant of "__getitem__" of "list" matches argument type "str"
+src/kicad_tools/cli/sch_sync_hierarchy.py	misc	Generator has incompatible item type "int"; expected "bool"
+src/kicad_tools/cli/sch_sync_hierarchy.py	misc	Generator has incompatible item type "int"; expected "bool"
+src/kicad_tools/cli/sch_validate.py	arg-type	Argument N to "find_orphan_labels" has incompatible type "list[tuple[str, Schematic]]"; expected "list[tuple[str, object]]"
+src/kicad_tools/cli/sch_validate.py	arg-type	Argument N to "find_wire_stubs" has incompatible type "list[tuple[str, Schematic]]"; expected "list[tuple[str, object]]"
+src/kicad_tools/cli/sch_validate.py	assignment	Incompatible default for argument "lib_paths" (default has type "None", argument has type "list[str]")
+src/kicad_tools/cli/sch_validate.py	assignment	Incompatible types in assignment (expression has type "set[str]", variable has type "frozenset[str]")
+src/kicad_tools/cli/sch_validate.py	var-annotated	Need type annotation for "by_category" (hint: "by_category: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/sch_validate.py	var-annotated	Need type annotation for "label_map" (hint: "label_map: dict[<type>, <type>] = ...")
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "end_x" to "segment_node" has incompatible type "float | None"; expected "float"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "end_y" to "segment_node" has incompatible type "float | None"; expected "float"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "layer" to "PadInfo" has incompatible type "str | None"; expected "str"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "layer" to "PadInfo" has incompatible type "str | None"; expected "str"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "other_net_filled_polygons" to "point_clear_of_copper" has incompatible type "list[FilledPolygon] | None"; expected "list[FilledPolygonLike] | None"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "other_net_pads" to "point_clear_of_copper" has incompatible type "list[tuple[float, float, float, int]]"; expected "list[tuple[float, float, float, int] | tuple[float, float, float, float, int]] | None"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "other_net_tracks" to "point_clear_of_copper" has incompatible type "list[TrackSegment]"; expected "list[TrackSegmentLike] | None"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "start_x" to "segment_node" has incompatible type "float | None"; expected "float"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument "start_y" to "segment_node" has incompatible type "float | None"; expected "float"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument N to "extend" of "list" has incompatible type "list[tuple[float, float]] | None"; expected "Iterable[tuple[float, float]]"
+src/kicad_tools/cli/stitch_cmd.py	arg-type	Argument N to "load" of "DRCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/cli/stitch_cmd.py	assignment	Incompatible types in assignment (expression has type "str | None", variable has type "str")
+src/kicad_tools/cli/stitch_cmd.py	index	Value of type "tuple[float, float] | None" is not indexable
+src/kicad_tools/cli/stitch_cmd.py	index	Value of type "tuple[float, float] | None" is not indexable
+src/kicad_tools/cli/stitch_cmd.py	index	Value of type "tuple[float, float] | None" is not indexable
+src/kicad_tools/cli/stitch_cmd.py	index	Value of type "tuple[float, float] | None" is not indexable
+src/kicad_tools/cli/stitch_cmd.py	index	Value of type "tuple[float, float] | None" is not indexable
+src/kicad_tools/config.py	import-not-found	Cannot find implementation or library stub for module named "tomli"
+src/kicad_tools/config.py	no-any-return	Returning Any from function declared to return "dict[str, Any] | None"
+src/kicad_tools/config.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/config.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/constraints/conflict.py	type-arg	Missing type parameters for generic type "dict"
+src/kicad_tools/constraints/conflict.py	type-arg	Missing type parameters for generic type "dict"
+src/kicad_tools/constraints/manifest.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/constraints/manifest.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/constraints/manifest.py	no-untyped-def	Function is missing a return type annotation
+src/kicad_tools/core/project_file.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/core/project_file.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/core/project_file.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/core/project_file.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/core/project_file.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/core/project_file.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
+src/kicad_tools/core/project_file.py	no-any-return	Returning Any from function declared to return "list[dict[str, str]]"
+src/kicad_tools/core/severity.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/core/severity.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/cost/alternatives.py	union-attr	Item "None" of "Match[str] | None" has no attribute "group"
+src/kicad_tools/cost/alternatives.py	union-attr	Item "None" of "Match[str] | None" has no attribute "group"
+src/kicad_tools/cost/alternatives.py	var-annotated	Need type annotation for "differences" (hint: "differences: list[<type>] = ...")
+src/kicad_tools/cost/alternatives.py	var-annotated	Need type annotation for "differences" (hint: "differences: list[<type>] = ...")
+src/kicad_tools/cost/alternatives.py	var-annotated	Need type annotation for "warnings" (hint: "warnings: list[<type>] = ...")
+src/kicad_tools/cost/availability.py	assignment	Incompatible types in assignment (expression has type "LCSCClient", variable has type "None")
+src/kicad_tools/cost/estimator.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/cost/estimator.py	no-any-return	Returning Any from function declared to return "dict[Any, Any]"
+src/kicad_tools/cost/estimator.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/cost/estimator.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/cost/suggest.py	assignment	Incompatible types in assignment (expression has type "LCSCClient", variable has type "None")
+src/kicad_tools/datasheet/cache.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/datasheet/parser.py	assignment	Incompatible types in assignment (expression has type "Iterable[int]", variable has type "range")
+src/kicad_tools/datasheet/parser.py	assignment	Incompatible types in assignment (expression has type "Iterable[int]", variable has type "range")
+src/kicad_tools/datasheet/parser.py	import-not-found	Cannot find implementation or library stub for module named "fitz"
+src/kicad_tools/datasheet/parser.py	import-not-found	Cannot find implementation or library stub for module named "markitdown"
+src/kicad_tools/datasheet/parser.py	import-not-found	Cannot find implementation or library stub for module named "pdfplumber"
+src/kicad_tools/datasheet/parser.py	import-untyped	Library stubs not installed for "pandas"
+src/kicad_tools/datasheet/parser.py	no-any-return	Returning Any from function declared to return "str | None"
+src/kicad_tools/datasheet/parser.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/datasheet/parser.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/datasheet/parser.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "pins"
+src/kicad_tools/datasheet/sources/base.py	attr-defined	"None" has no attribute "headers"
+src/kicad_tools/datasheet/sources/base.py	import-untyped	Library stubs not installed for "requests"
+src/kicad_tools/datasheet/sources/octopart.py	import-untyped	Library stubs not installed for "requests"
+src/kicad_tools/datasheet/tables.py	import-untyped	Library stubs not installed for "pandas"
+src/kicad_tools/design/strategies.py	attr-defined	"Footprint" has no attribute "footprint_name"
+src/kicad_tools/design/strategies.py	var-annotated	Need type annotation for "input_caps" (hint: "input_caps: list[<type>] = ...")
+src/kicad_tools/design/strategies.py	var-annotated	Need type annotation for "load_caps" (hint: "load_caps: list[<type>] = ...")
+src/kicad_tools/dev.py	import-not-found	Cannot find implementation or library stub for module named "tomllib"
+src/kicad_tools/dev.py	no-any-return	Returning Any from function declared to return "str | None"
+src/kicad_tools/dev.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/drc/checker.py	assignment	Incompatible types in assignment (expression has type "dict[Never, Never]", target has type "int")
+src/kicad_tools/drc/checker.py	index	Unsupported target for indexed assignment ("int")
+src/kicad_tools/drc/checker.py	index	Value of type "int" is not indexable
+src/kicad_tools/drc/checker.py	operator	Unsupported right operand type for in ("int")
+src/kicad_tools/drc/cpp_backend.py	attr-defined	Module "kicad_tools.drc" has no attribute "drc_cpp"
+src/kicad_tools/drc/cpp_backend.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/drc/fixer.py	arg-type	Argument "layer" to "TraceInfo" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/drc/fixer.py	arg-type	Argument "uuid" to "TraceInfo" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/drc/fixer.py	arg-type	Argument "uuid" to "ViaInfo" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/drc/fixer.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/fixer.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/fixer.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/fixer.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/fixer.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/fixer.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/fixer.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/drc/fixer.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/drc/incremental.py	arg-type	Argument N to "add" of "set" has incompatible type "tuple[str, ...]"; expected "tuple[str, str]"
+src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/local_rerouter.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument "uuid" to "NudgeResult" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument "uuid" to "NudgeResult" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "_record_nudge" of "ClearanceRepairer" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "_would_oscillate" of "ClearanceRepairer" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | Any | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | Any | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | Any | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | Any | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/repair_clearance.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/repair_clearance.py	misc	"None" object is not iterable
+src/kicad_tools/drc/repair_clearance.py	misc	"None" object is not iterable
+src/kicad_tools/drc/repair_clearance.py	misc	"None" object is not iterable
+src/kicad_tools/drc/repair_clearance.py	return-value	Incompatible return value type (got "list[tuple[SExp, str, float, float, str | int | float | None, str]]", expected "list[tuple[SExp, str, float, float, str, str]]")
+src/kicad_tools/drc/repair_drill_clearance.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/drc/repair_drill_clearance.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/repair_drill_clearance.py	arg-type	Argument N to "resolve_net_atom" has incompatible type "str | int | float | None"; expected "str | None"
+src/kicad_tools/drc/report.py	arg-type	Argument N to "apply" of "FilterEngine" has incompatible type "list[kicad_tools.drc.violation.DRCViolation]"; expected "list[kicad_tools.drc.violation.DRCViolation | ERCViolation | kicad_tools.validate.violations.DRCViolation]"
+src/kicad_tools/drc/report.py	assignment	Incompatible types in assignment (expression has type "list[str]", variable has type "list[FixSuggestion]")
+src/kicad_tools/drc/report.py	assignment	Incompatible types in assignment (expression has type "list[str]", variable has type "list[FixSuggestion]")
+src/kicad_tools/drc/report.py	assignment	Incompatible types in assignment (expression has type "list[str]", variable has type "list[FixSuggestion]")
+src/kicad_tools/drc/report.py	name-defined	Name "ViolationFilter" is not defined
+src/kicad_tools/erc/report.py	arg-type	Argument N to "apply" of "FilterEngine" has incompatible type "list[ERCViolation]"; expected "list[kicad_tools.drc.violation.DRCViolation | ERCViolation | kicad_tools.validate.violations.DRCViolation]"
+src/kicad_tools/erc/report.py	name-defined	Name "ViolationFilter" is not defined
+src/kicad_tools/explain/__init__.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/explain/__init__.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/explain/__init__.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/explain/__init__.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/explain/checks/acid_trap.py	no-any-return	Returning Any from function declared to return "tuple[float, float] | None"
+src/kicad_tools/explain/checks/crystal.py	union-attr	Item "None" of "Net | None" has no attribute "name"
+src/kicad_tools/explain/checks/power.py	arg-type	Argument N to "add" of "set" has incompatible type "tuple[str, ...]"; expected "str"
+src/kicad_tools/explain/checks/power.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
+src/kicad_tools/explain/checks/thermal.py	var-annotated	Need type annotation for "thermal_pads" (hint: "thermal_pads: list[<type>] = ...")
+src/kicad_tools/explain/formatters.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/explain/formatters.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/explain/formatters.py	operator	Cannot call function of unknown type
+src/kicad_tools/explain/formatters.py	operator	Cannot call function of unknown type
+src/kicad_tools/explain/rationale.py	arg-type	Argument "action" to "create" of "Decision" has incompatible type "str"; expected "Literal['place', 'route', 'move', 'reroute', 'delete']"
+src/kicad_tools/explain/rationale.py	arg-type	Argument "decided_by" to "create" of "Decision" has incompatible type "str"; expected "Literal['agent', 'human', 'optimizer', 'autorouter']"
+src/kicad_tools/explain/rationale.py	arg-type	Argument "metrics" to "Alternative" has incompatible type "str | dict[str, float]"; expected "dict[str, float]"
+src/kicad_tools/explain/rationale.py	attr-defined	"PCB" has no attribute "_decision_store"
+src/kicad_tools/explain/rationale.py	attr-defined	"PCB" has no attribute "_decision_store"
+src/kicad_tools/explain/rationale.py	attr-defined	"PCB" has no attribute "_decision_store"
+src/kicad_tools/explain/rationale.py	no-any-return	Returning Any from function declared to return "DecisionStore"
+src/kicad_tools/explain/registry.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/export/assembly.py	arg-type	Argument N to "extract_bom" has incompatible type "Path"; expected "str"
+src/kicad_tools/export/assembly.py	arg-type	Argument N to "extract_bom" has incompatible type "Path"; expected "str"
+src/kicad_tools/export/assembly.py	assignment	Incompatible types in assignment (expression has type "None", variable has type "Path")
+src/kicad_tools/export/assembly.py	assignment	Incompatible types in assignment (expression has type "Path | None", variable has type "Path")
+src/kicad_tools/export/bom_enrich.py	assignment	Incompatible types in assignment (expression has type "PackageMismatch | None", variable has type "ValueMismatch | None")
+src/kicad_tools/export/bom_enrich.py	assignment	Incompatible types in assignment (expression has type "ValueMismatch | PackageMismatch | None", variable has type "ValueMismatch | None")
+src/kicad_tools/export/bom_formats.py	misc	Key expression in dictionary comprehension has incompatible type "str"; expected type "tuple[Any, ...]"
+src/kicad_tools/export/dsn.py	arg-type	Argument "drill" to "ViaInfo" has incompatible type "float | None"; expected "float"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/dsn.py	union-attr	Item "None" of "SExp | None" has no attribute "children"
+src/kicad_tools/export/gerber.py	arg-type	Argument N to "get_drill_origin_value" has incompatible type "Path | None"; expected "Path"
+src/kicad_tools/export/manufacturing.py	index	Unsupported target for indexed assignment ("ManufacturingResult")
+src/kicad_tools/export/manufacturing.py	index	Unsupported target for indexed assignment ("ManufacturingResult")
+src/kicad_tools/export/manufacturing.py	index	Unsupported target for indexed assignment ("ManufacturingResult")
+src/kicad_tools/export/manufacturing.py	misc	List comprehension has incompatible type List[dict[Any, Any]]; expected List[str]
+src/kicad_tools/export/manufacturing.py	no-redef	Name "result" already defined on line N
+src/kicad_tools/export/manufacturing.py	return-value	Incompatible return value type (got "ManufacturingResult | None", expected "dict[Any, Any] | None")
+src/kicad_tools/export/pnp.py	attr-defined	"object" has no attribute "split"
+src/kicad_tools/export/preflight.py	assignment	Incompatible types in assignment (expression has type "BOM", variable has type "None")
+src/kicad_tools/export/preflight.py	assignment	Incompatible types in assignment (expression has type "BOM", variable has type "None")
+src/kicad_tools/export/preflight.py	assignment	Incompatible types in assignment (expression has type "BOM", variable has type "None")
+src/kicad_tools/export/preflight.py	assignment	Incompatible types in assignment (expression has type "BOM", variable has type "None")
+src/kicad_tools/export/preflight.py	assignment	Incompatible types in assignment (expression has type "PCB", variable has type "None")
+src/kicad_tools/export/preflight.py	attr-defined	"None" has no attribute "footprint_count"
+src/kicad_tools/export/preflight.py	attr-defined	"None" has no attribute "items"
+src/kicad_tools/export/preflight.py	attr-defined	"None" has no attribute "items"
+src/kicad_tools/footprints/library_path.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/intent/interfaces/i2c.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/intent/interfaces/power.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/intent/interfaces/spi.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/intent/interfaces/usb.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/ipc/board.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
+src/kicad_tools/ipc/board.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
+src/kicad_tools/ipc/board.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
+src/kicad_tools/ipc/client.py	import-not-found	Cannot find implementation or library stub for module named "pynng"
+src/kicad_tools/ipc/client.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
+src/kicad_tools/ipc/client.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/ipc/transactions.py	no-any-return	Returning Any from function declared to return "list[str]"
+src/kicad_tools/library/footprint.py	arg-type	Argument "pad_type" to "Pad" has incompatible type "str"; expected "Literal['smd', 'thru_hole', 'np_thru_hole', 'connect']"
+src/kicad_tools/library/footprint.py	arg-type	Argument "shape" to "Pad" has incompatible type "str"; expected "Literal['circle', 'rect', 'oval', 'roundrect', 'trapezoid', 'custom']"
+src/kicad_tools/library/footprint.py	arg-type	Argument "text_type" to "GraphicText" has incompatible type "str"; expected "Literal['reference', 'value', 'user']"
+src/kicad_tools/library/generators/bga.py	arg-type	Argument "cols" to "create_bga" has incompatible type "float"; expected "int"
+src/kicad_tools/library/generators/bga.py	arg-type	Argument "rows" to "create_bga" has incompatible type "float"; expected "int"
+src/kicad_tools/library/generators/chip.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/chip.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/chip.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/chip.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/chip.py	list-item	List item N has incompatible type "object"; expected "str"
+src/kicad_tools/library/generators/chip.py	operator	Unsupported left operand type for + ("object")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand type for unary - ("object")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for * ("object" and "float")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for / ("object" and "int")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for / ("object" and "int")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for / ("object" and "int")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for / ("object" and "int")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for / ("object" and "int")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for / ("object" and "int")
+src/kicad_tools/library/generators/chip.py	operator	Unsupported operand types for > ("float" and "object")
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "body_length" to "create_dfn" has incompatible type "object"; expected "float | None"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "body_width" to "create_dfn" has incompatible type "object"; expected "float | None"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "exposed_pad" to "create_dfn" has incompatible type "object"; expected "tuple[float, float] | float | bool | None"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "height" to "add_pad" of "Footprint" has incompatible type "float | None"; expected "float"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "pad_height" to "create_dfn" has incompatible type "object"; expected "float | None"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "pad_width" to "create_dfn" has incompatible type "object"; expected "float | None"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "pins" to "create_dfn" has incompatible type "object"; expected "int"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "pitch" to "create_dfn" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "wettable_flanks" to "create_dfn" has incompatible type "object"; expected "bool"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument "width" to "add_pad" of "Footprint" has incompatible type "float | None"; expected "float"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "float | None"; expected "float"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "float | None"; expected "float"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "float | None"; expected "float"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "float | None"; expected "float"
+src/kicad_tools/library/generators/dfn.py	arg-type	Argument N to "get" of "dict" has incompatible type "tuple[int, float, float] | None"; expected "Sequence[str | int | float]"
+src/kicad_tools/library/generators/dfn.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "float | None")
+src/kicad_tools/library/generators/dfn.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "float | None")
+src/kicad_tools/library/generators/dfn.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "float | None")
+src/kicad_tools/library/generators/dfn.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "float | None")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for * ("None" and "float")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for * ("None" and "float")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for * ("None" and "float")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for * ("None" and "float")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/dfn.py	type-var	Value of type variable "SupportsRichComparisonT" of "min" cannot be "float | None"
+src/kicad_tools/library/generators/qfn.py	arg-type	Argument N to "get" of "dict" has incompatible type "tuple[int, float] | None"; expected "tuple[int, float]"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object | None"; expected "float"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object | None"; expected "float"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object | None"; expected "float"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "add_pad" of "Footprint" has incompatible type "object"; expected "float"
+src/kicad_tools/library/generators/sot.py	arg-type	Argument N to "enumerate" has incompatible type "object"; expected "Iterable[Never]"
+src/kicad_tools/library/generators/sot.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "float | None")
+src/kicad_tools/library/generators/sot.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "float | None")
+src/kicad_tools/library/generators/sot.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "float | None")
+src/kicad_tools/library/generators/sot.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "int | None")
+src/kicad_tools/library/generators/sot.py	has-type	Cannot determine type of "x"
+src/kicad_tools/library/generators/sot.py	has-type	Cannot determine type of "x"
+src/kicad_tools/library/generators/sot.py	has-type	Cannot determine type of "x"
+src/kicad_tools/library/generators/sot.py	has-type	Cannot determine type of "y"
+src/kicad_tools/library/generators/sot.py	has-type	Cannot determine type of "y"
+src/kicad_tools/library/generators/sot.py	has-type	Cannot determine type of "y"
+src/kicad_tools/library/generators/sot.py	misc	"Never" object is not iterable
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand type for unary - ("float | None")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand type for unary - ("float | None")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand type for unary - ("float | None")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand type for unary - ("float | None")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand type for unary - ("float | None")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for + ("None" and "float")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for + ("object" and "float")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/library/generators/sot.py	operator	Unsupported operand types for / ("None" and "int")
+src/kicad_tools/manufacturers/base.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/manufacturers/base.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/manufacturers/base.py	no-any-return	Returning Any from function declared to return "dict[str, float]"
+src/kicad_tools/mcp/server.py	call-arg	Unexpected keyword argument "host" for "run" of "FastMCP"
+src/kicad_tools/mcp/server.py	call-arg	Unexpected keyword argument "port" for "run" of "FastMCP"
+src/kicad_tools/mcp/server.py	no-any-return	Returning Any from function declared to return "dict[Any, Any]"
+src/kicad_tools/mcp/server.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/mcp/tools/analysis.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
+src/kicad_tools/mcp/tools/analysis.py	no-any-return	Returning Any from function declared to return "float | None"
+src/kicad_tools/mcp/tools/explain.py	no-any-return	Returning Any from function declared to return "list[str]"
+src/kicad_tools/mcp/tools/explain.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/mcp/tools/explain.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/mcp/tools/explain.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/mcp/tools/explain.py	union-attr	Item "None" of "Any | None" has no attribute "get"
+src/kicad_tools/mcp/tools/explain.py	union-attr	Item "None" of "Any | None" has no attribute "get"
+src/kicad_tools/mcp/tools/export.py	no-any-return	Returning Any from function declared to return "dict[Any, Any]"
+src/kicad_tools/mcp/tools/placement.py	union-attr	Item "None" of "Net | None" has no attribute "name"
+src/kicad_tools/mcp/tools/registry.py	attr-defined	Module "kicad_tools.mcp.tools.placement" has no attribute "placement_suggestions"
+src/kicad_tools/mcp/tools/registry.py	no-any-return	Returning Any from function declared to return "dict[str, Any]"
+src/kicad_tools/mcp/tools/routing.py	arg-type	Argument N to "merge_routes_into_pcb" has incompatible type "PCB"; expected "str"
+src/kicad_tools/mcp/tools/routing.py	arg-type	Argument N to "merge_routes_into_pcb" has incompatible type "list[Route]"; expected "str"
+src/kicad_tools/mcp/tools/routing.py	call-arg	Unexpected keyword argument "net_map" for "merge_routes_into_pcb"
+src/kicad_tools/mcp/tools/routing.py	call-arg	Unexpected keyword argument "trace_width" for "merge_routes_into_pcb"
+src/kicad_tools/mcp/tools/routing.py	call-arg	Unexpected keyword argument "via_diameter" for "merge_routes_into_pcb"
+src/kicad_tools/mcp/tools/routing.py	call-arg	Unexpected keyword argument "via_drill" for "merge_routes_into_pcb"
+src/kicad_tools/mcp/tools/routing.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/mcp/tools/screenshot.py	import-untyped	Skipping analyzing "cairosvg": module is installed, but missing library stubs or py.typed marker
+src/kicad_tools/operations/net_ops.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/operations/net_ops.py	assignment	Incompatible types in assignment (expression has type "GlobalLabel", variable has type "Label")
+src/kicad_tools/operations/net_ops.py	assignment	Incompatible types in assignment (expression has type "HierarchicalLabel", variable has type "Label")
+src/kicad_tools/operations/net_ops.py	assignment	Incompatible types in assignment (expression has type "HierarchicalLabel", variable has type "Label")
+src/kicad_tools/operations/netlist.py	no-any-return	Returning Any from function declared to return "str | None"
+src/kicad_tools/operations/netlist.py	no-any-return	Returning Any from function declared to return "tuple[Any, ...]"
+src/kicad_tools/operations/pinmap.py	arg-type	Argument "number" to "Pin" has incompatible type "str | None"; expected "str"
+src/kicad_tools/operations/symbol_ops.py	arg-type	Argument "preserved_properties" to "SymbolReplacement" has incompatible type "list[str | None]"; expected "list[str]"
+src/kicad_tools/operations/symbol_ops.py	arg-type	Argument N to "add" of "SExp" has incompatible type "str | None"; expected "SExp | str | int | float"
+src/kicad_tools/operations/symbol_ops.py	arg-type	Argument N to "add_property" has incompatible type "str | None"; expected "str"
+src/kicad_tools/operations/symbol_ops.py	assignment	Incompatible types in assignment (expression has type "LibraryPin", variable has type "SExp")
+src/kicad_tools/operations/symbol_ops.py	attr-defined	"SExp" has no attribute "number"
+src/kicad_tools/operations/symbol_ops.py	attr-defined	"SExp" has no attribute "number"
+src/kicad_tools/operations/symbol_ops.py	attr-defined	"SExp" has no attribute "number"
+src/kicad_tools/optim/alignment.py	misc	Generator has incompatible item type "float | Any"; expected "bool"
+src/kicad_tools/optim/alignment.py	misc	Generator has incompatible item type "float | Any"; expected "bool"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "height"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "height"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "height"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "height"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "height"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "height"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "update_pin_positions"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "update_pin_positions"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "update_pin_positions"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "vx"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "vx"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "vx"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "vy"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "vy"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "vy"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "width"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "width"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "width"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "width"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "width"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "width"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "x"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/alignment.py	union-attr	Item "None" of "Component | None" has no attribute "y"
+src/kicad_tools/optim/constraint_loader.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/optim/cpp_backend.py	attr-defined	Module "kicad_tools.placement" has no attribute "placement_cpp"
+src/kicad_tools/optim/cpp_backend.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/optim/evolutionary.py	arg-type	Argument N to "evaluate_population_gpu" has incompatible type "ndarray[tuple[Any, ...], dtype[Any]] | None"; expected "ndarray[tuple[Any, ...], dtype[floating[_32Bit]]]"
+src/kicad_tools/optim/evolutionary.py	arg-type	Argument N to "evaluate_population_gpu" has incompatible type "ndarray[tuple[Any, ...], dtype[Any]] | None"; expected "ndarray[tuple[Any, ...], dtype[floating[_32Bit]]]"
+src/kicad_tools/optim/evolutionary.py	arg-type	Argument N to "evaluate_population_gpu" has incompatible type "ndarray[tuple[Any, ...], dtype[Any]] | None"; expected "ndarray[tuple[Any, ...], dtype[floating[_32Bit]]]"
+src/kicad_tools/optim/evolutionary.py	arg-type	Argument N to "evaluate_population_gpu" has incompatible type "ndarray[tuple[Any, ...], dtype[Any]] | None"; expected "ndarray[tuple[Any, ...], dtype[signedinteger[_32Bit]]]"
+src/kicad_tools/optim/evolutionary.py	assignment	Incompatible types in assignment (expression has type "ThreadPoolExecutor", variable has type "ProcessPoolExecutor")
+src/kicad_tools/optim/evolutionary.py	attr-defined	Module "kicad_tools.placement" has no attribute "placement_cpp"
+src/kicad_tools/optim/evolutionary.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/optim/evolutionary.py	no-any-return	Returning Any from function declared to return "list[float]"
+src/kicad_tools/optim/evolutionary.py	union-attr	Item "None" of "RoutingEvaluator | None" has no attribute "evaluate_routability"
+src/kicad_tools/optim/evolutionary.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/optim/fom.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/optim/fom_features.py	assignment	Incompatible types in assignment (expression has type "FootprintFeature", variable has type "Footprint")
+src/kicad_tools/optim/fom_features.py	attr-defined	"Footprint" has no attribute "pad_features"
+src/kicad_tools/optim/keepout.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/optim/keepout.py	var-annotated	Need type annotation for "zones" (hint: "zones: list[<type>] = ...")
+src/kicad_tools/optim/place_route.py	misc	"None" not callable
+src/kicad_tools/optim/placement.py	arg-type	Argument "action" to "create" of "Decision" has incompatible type "str"; expected "Literal['place', 'route', 'move', 'reroute', 'delete']"
+src/kicad_tools/optim/placement.py	assignment	Incompatible types in assignment (expression has type "Component | None", variable has type "Component")
+src/kicad_tools/optim/placement.py	assignment	Incompatible types in assignment (expression has type "set[str]", variable has type "list[str] | None")
+src/kicad_tools/optim/placement.py	attr-defined	"FunctionalCluster" has no attribute "component_refs"
+src/kicad_tools/optim/placement.py	attr-defined	"FunctionalCluster" has no attribute "component_refs"
+src/kicad_tools/optim/placement.py	attr-defined	"FunctionalCluster" has no attribute "name"
+src/kicad_tools/optim/placement.py	attr-defined	"FunctionalCluster" has no attribute "name"
+src/kicad_tools/optim/placement.py	attr-defined	"str" has no attribute "value"
+src/kicad_tools/optim/placement.py	attr-defined	"type[ThermalClass]" has no attribute "HIGH_POWER"
+src/kicad_tools/optim/placement.py	misc	callable? not callable
+src/kicad_tools/optim/placement.py	operator	Unsupported right operand type for in ("list[str] | None")
+src/kicad_tools/optim/placement.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/optim/placement.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/optim/placement.py	var-annotated	Need type annotation for "forces" (hint: "forces: dict[<type>, <type>] = ...")
+src/kicad_tools/optim/placement.py	var-annotated	Need type annotation for "forces" (hint: "forces: dict[<type>, <type>] = ...")
+src/kicad_tools/optim/placement.py	var-annotated	Need type annotation for "forces" (hint: "forces: dict[<type>, <type>] = ...")
+src/kicad_tools/optim/placement.py	var-annotated	Need type annotation for "forces" (hint: "forces: dict[<type>, <type>] = ...")
+src/kicad_tools/optim/signal_integrity.py	union-attr	Item "None" of "CrosstalkAnalyzer | None" has no attribute "analyze"
+src/kicad_tools/optim/signal_integrity.py	union-attr	Item "None" of "Stackup | None" has no attribute "is_outer_layer"
+src/kicad_tools/optim/signal_integrity.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "microstrip"
+src/kicad_tools/optim/signal_integrity.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "stripline"
+src/kicad_tools/optim/signal_integrity.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "width_for_impedance"
+src/kicad_tools/optim/suggestions.py	arg-type	Argument N to "from_pcb" of "PlacementOptimizer" has incompatible type "PCB | None"; expected "PCB"
+src/kicad_tools/optim/suggestions.py	arg-type	Argument N to "from_pcb" of "PlacementOptimizer" has incompatible type "PCB | None"; expected "PCB"
+src/kicad_tools/optim/suggestions.py	arg-type	Argument N to "from_pcb" of "PlacementOptimizer" has incompatible type "PCB | None"; expected "PCB"
+src/kicad_tools/optim/workflow.py	arg-type	Argument N to "add_keepout_zones" has incompatible type "EvolutionaryPlacementOptimizer"; expected "PlacementOptimizer"
+src/kicad_tools/optim/workflow.py	arg-type	Argument N to "add_keepout_zones" has incompatible type "EvolutionaryPlacementOptimizer"; expected "PlacementOptimizer"
+src/kicad_tools/optim/workflow.py	assignment	Incompatible types in assignment (expression has type "list[ConstraintViolation]", variable has type "list[str]")
+src/kicad_tools/optim/workflow.py	attr-defined	"EvolutionaryPlacementOptimizer" has no attribute "compute_energy"
+src/kicad_tools/optim/workflow.py	attr-defined	"EvolutionaryPlacementOptimizer" has no attribute "total_wire_length"; maybe "_total_wire_length"?
+src/kicad_tools/panel/cuts.py	arg-type	Argument "y" to "MousebiteHole" has incompatible type "float | None"; expected "float"
+src/kicad_tools/panel/cuts.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/panel/panel.py	arg-type	Argument N to "tooling_hole_to_sexp" has incompatible type "MousebiteHole"; expected "ToolingHole"
+src/kicad_tools/panel/panel.py	assignment	Incompatible types in assignment (expression has type "list[ToolingHole]", variable has type "list[MousebiteHole]")
+src/kicad_tools/panel/panel.py	call-overload	No overload variant of "get" of "dict" matches argument types "tuple[int, int]", "int"
+src/kicad_tools/panel/panel.py	index	Invalid index type "tuple[int, int]" for "dict[int, int]"; expected type "int"
+src/kicad_tools/panel/panel.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/parts/importer.py	assignment	Incompatible types in assignment (expression has type "DatasheetManager", variable has type "None")
+src/kicad_tools/parts/importer.py	no-any-return	Returning Any from function declared to return "Datasheet | DatasheetResult"
+src/kicad_tools/parts/importer.py	no-any-return	Returning Any from function declared to return "Datasheet | DatasheetResult"
+src/kicad_tools/parts/importer.py	no-any-return	Returning Any from function declared to return "Datasheet"
+src/kicad_tools/parts/importer.py	return-value	Incompatible return value type (got "PinTable | list[dict[str, Any]]", expected "PinTable")
+src/kicad_tools/parts/importer.py	union-attr	Item "list[dict[str, Any]]" of "PinTable | list[dict[str, Any]]" has no attribute "pins"
+src/kicad_tools/parts/lcsc.py	attr-defined	"BOMItem" has no attribute "quantity"
+src/kicad_tools/parts/lcsc.py	attr-defined	"None" has no attribute "headers"
+src/kicad_tools/parts/lcsc.py	import-untyped	Library stubs not installed for "requests"
+src/kicad_tools/parts/lcsc.py	no-any-return	Returning Any from function declared to return "dict[Any, Any] | None"
+src/kicad_tools/parts/models.py	name-defined	Name "ComposedPart" is not defined
+src/kicad_tools/patterns/analog.py	var-annotated	Need type annotation for "errors" (hint: "errors: list[<type>] = ...")
+src/kicad_tools/patterns/checks.py	arg-type	Argument N to "_parse_value" of "ValueMatchCheck" has incompatible type "ValueRangeCheck"; expected "ValueMatchCheck"
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "ComponentRequirements | None", variable has type "ComponentRequirements")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "dict[str, bool]", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "dict[str, float | None]", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "dict[str, float | None]", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "dict[str, float | None]", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "float", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "float", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "float", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "list[str]", target has type "str")
+src/kicad_tools/patterns/components.py	assignment	Incompatible types in assignment (expression has type "list[str]", target has type "str")
+src/kicad_tools/patterns/components.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/patterns/dsl.py	misc	Accessing "__init__" on an instance is unsound, since instance.__init__ could be from an incompatible subclass
+src/kicad_tools/patterns/dsl.py	no-any-return	Returning Any from function declared to return "dict[str, Placement]"
+src/kicad_tools/patterns/loader.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/patterns/registry.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/patterns/registry.py	valid-type	Function "kicad_tools.patterns.registry.PatternRegistry.list" is not valid as a type
+src/kicad_tools/patterns/registry.py	valid-type	Function "kicad_tools.patterns.registry.PatternRegistry.list" is not valid as a type
+src/kicad_tools/patterns/validation.py	var-annotated	Need type annotation for "violations" (hint: "violations: list[<type>] = ...")
+src/kicad_tools/patterns/validation.py	var-annotated	Need type annotation for "violations" (hint: "violations: list[<type>] = ...")
+src/kicad_tools/pcb/board_geometry.py	import-untyped	Library stubs not installed for "shapely"
+src/kicad_tools/pcb/board_geometry.py	import-untyped	Library stubs not installed for "shapely.geometry"
+src/kicad_tools/pcb/board_geometry.py	import-untyped	Library stubs not installed for "shapely.ops"
+src/kicad_tools/pcb/board_geometry.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/pcb/board_geometry.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/pcb/board_geometry.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/pcb/board_geometry.py	no-any-return	Returning Any from function declared to return "tuple[float, float, float, float]"
+src/kicad_tools/pcb/board_geometry.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/pcb/editor.py	arg-type	Argument N to "_points_close" of "PCBEditor" has incompatible type "SExp | None"; expected "tuple[float, float]"
+src/kicad_tools/pcb/editor.py	arg-type	Argument N to "_points_close" of "PCBEditor" has incompatible type "SExp | None"; expected "tuple[float, float]"
+src/kicad_tools/pcb/editor.py	arg-type	Argument N to "append" of "list" has incompatible type "SExp | None"; expected "tuple[float, float]"
+src/kicad_tools/pcb/editor.py	arg-type	Argument N to "append" of "list" has incompatible type "SExp | None"; expected "tuple[float, float]"
+src/kicad_tools/pcb/editor.py	assignment	Incompatible types in assignment (expression has type "tuple[float, float]", variable has type "SExp | None")
+src/kicad_tools/pcb/editor.py	attr-defined	"object" has no attribute "append"
+src/kicad_tools/pcb/editor.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/pcb/editor.py	var-annotated	Need type annotation for "issues" (hint: "issues: list[<type>] = ...")
+src/kicad_tools/pcb/editor.py	var-annotated	Need type annotation for "zones" (hint: "zones: list[<type>] = ...")
+src/kicad_tools/pcb/footprints.py	arg-type	Argument N to "len" has incompatible type "object"; expected "Sized"
+src/kicad_tools/pcb/footprints.py	assignment	Incompatible types in assignment (expression has type "dict[str, tuple[float, int]]", target has type "dict[str, tuple[float, float]]")
+src/kicad_tools/pcb/footprints.py	assignment	Incompatible types in assignment (expression has type "object", target has type "dict[str, tuple[float, float]]")
+src/kicad_tools/pcb/footprints.py	return-value	Incompatible return value type (got "object", expected "dict[str, tuple[Any, ...]]")
+src/kicad_tools/pcb/placement.py	import-not-found	Cannot find implementation or library stub for module named "kicad_footprint_reader"
+src/kicad_tools/pcb/placement.py	no-any-return	Returning Any from function declared to return "dict[str, tuple[float, float]]"
+src/kicad_tools/performance.py	import-not-found	Cannot find implementation or library stub for module named "tomli"
+src/kicad_tools/performance.py	import-untyped	Library stubs not installed for "psutil"
+src/kicad_tools/performance.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/performance.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/physics/timing.py	arg-type	Argument "net_name" to "TimingBudget" has incompatible type "float"; expected "str"
+src/kicad_tools/placement/bo_strategy.py	union-attr	Item "None" of "Any | None" has no attribute "complete_trial"
+src/kicad_tools/placement/cmaes_strategy.py	import-untyped	Skipping analyzing "cmaes": module is installed, but missing library stubs or py.typed marker
+src/kicad_tools/placement/cpp_backend.py	attr-defined	Module "kicad_tools.placement" has no attribute "placement_cpp"
+src/kicad_tools/placement/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/placement/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/placement/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/placement/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/placement/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/placement/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/placement/cpp_backend.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/placement/drc.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/placement/multi_fidelity.py	arg-type	Argument N to "route_all" of "GlobalRouter" has incompatible type "list[Never]"; expected "dict[tuple[str, str], Pad]"
+src/kicad_tools/placement/multi_fidelity.py	arg-type	Argument N to "route_all" of "GlobalRouter" has incompatible type "list[int]"; expected "dict[int, list[tuple[str, str]]]"
+src/kicad_tools/placement/multi_fidelity.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/placement/multi_fidelity.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/placement/multi_fidelity.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/placement/multi_fidelity.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/placement/place_unplaced.py	no-redef	Name "xs" already defined on line N
+src/kicad_tools/placement/place_unplaced.py	no-redef	Name "ys" already defined on line N
+src/kicad_tools/placement/priors.py	no-redef	Name "sinks_idx" already defined on line N
+src/kicad_tools/placement/priors.py	no-redef	Name "sources_idx" already defined on line N
+src/kicad_tools/placement/vector.py	assignment	Incompatible types in assignment (expression has type "ComponentDef | None", variable has type "ComponentDef")
+src/kicad_tools/progress.py	assignment	Incompatible types in assignment (expression has type "Token[Callable[[float, str, bool], bool] | None]", variable has type "None")
+src/kicad_tools/progress.py	assignment	Incompatible types in assignment (expression has type "float", variable has type "int")
+src/kicad_tools/project.py	return-value	Incompatible return value type (got "Path", expected "list[Path]")
+src/kicad_tools/query/base.py	no-any-return	Returning Any from function declared to return "T | None"
+src/kicad_tools/reasoning/agent.py	assignment	Incompatible types in assignment (expression has type "PlacementDiagnosis", variable has type "RoutingDiagnosis")
+src/kicad_tools/reasoning/diagnosis.py	arg-type	Argument N to "CrosstalkAnalyzer" has incompatible type "Stackup | None"; expected "Stackup"
+src/kicad_tools/reasoning/diagnosis.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/reasoning/diagnosis.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "width_for_impedance"
+src/kicad_tools/reasoning/diagnosis.py	var-annotated	Need type annotation for "alternatives" (hint: "alternatives: list[<type>] = ...")
+src/kicad_tools/reasoning/interpreter.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/reasoning/interpreter.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/reasoning/interpreter.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/reasoning/interpreter.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/reasoning/state.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/reasoning/state.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/reasoning/state.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/reasoning/state.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/reasoning/state.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/reasoning/state.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/reasoning/state.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/reasoning/state.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, float] | None" is not indexable
+src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, float] | None" is not indexable
+src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, float] | None" is not indexable
+src/kicad_tools/recovery/applicator.py	index	Value of type "Any | tuple[float, float] | None" is not indexable
+src/kicad_tools/recovery/strategy.py	assignment	Incompatible types in assignment (expression has type "def contains_point(self, _x: float, _y: float) -> bool", variable has type "def contains_point(self, x: float, y: float) -> bool")
+src/kicad_tools/recovery/strategy.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/recovery/strategy.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/report/interactive.py	import-not-found	Cannot find implementation or library stub for module named "kicad_tools.drc.runner"
+src/kicad_tools/report/renderers.py	import-untyped	Library stubs not installed for "markdown"
+src/kicad_tools/report/renderers.py	import-untyped	Skipping analyzing "weasyprint": module is installed, but missing library stubs or py.typed marker
+src/kicad_tools/report/renderers.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/report/renderers.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/router/__init__.py	assignment	Incompatible import of "RoutingResult" (imported name has type "type[kicad_tools.router.strategies.RoutingResult]", local name has type "type[kicad_tools.router.adaptive.RoutingResult]")
+src/kicad_tools/router/adaptive_grid.py	union-attr	Item "None" of "Router | None" has no attribute "find_path"
+src/kicad_tools/router/adaptive_grid.py	union-attr	Item "Router" of "Router | None" has no attribute "find_path"
+src/kicad_tools/router/algorithms/evolutionary.py	no-any-return	Returning Any from function declared to return "list[Route]"
+src/kicad_tools/router/algorithms/evolutionary.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/router/algorithms/evolutionary.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/hierarchical.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "dict[Any, Any] | None"; expected "dict[str, NetClassRouting]"
+src/kicad_tools/router/algorithms/hierarchical.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/hierarchical.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/hierarchical.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/hierarchical.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/hierarchical.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/hierarchical.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/hierarchical.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/hierarchical.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/monte_carlo.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/monte_carlo.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/monte_carlo.py	no-any-return	Returning Any from function declared to return "list[Route]"
+src/kicad_tools/router/algorithms/monte_carlo.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/monte_carlo.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/mst.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/mst.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/mst.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/mst.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/mst.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/mst.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/mst.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/mst.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/mst.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/mst.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	arg-type	Argument N to "find_blocking_nets_relaxed" of "Router" has incompatible type "ndarray[tuple[Any, ...], dtype[Any]] | None"; expected "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/router/algorithms/negotiated.py	arg-type	Argument N to "find_blocking_nets_relaxed" of "Router" has incompatible type "ndarray[tuple[Any, ...], dtype[Any]] | None"; expected "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/router/algorithms/negotiated.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/negotiated.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/negotiated.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/negotiated.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/two_phase.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "dict[Any, Any] | None"; expected "dict[str, NetClassRouting]"
+src/kicad_tools/router/algorithms/two_phase.py	arg-type	Argument N to "float" has incompatible type "float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/router/algorithms/two_phase.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/two_phase.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/two_phase.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/two_phase.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/two_phase.py	misc	callable? not callable
+src/kicad_tools/router/algorithms/two_phase.py	no-any-return	Returning Any from function declared to return "list[Route]"
+src/kicad_tools/router/algorithms/two_phase.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/two_phase.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/two_phase.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/algorithms/two_phase.py	valid-type	Function "builtins.callable" is not valid as a type
+src/kicad_tools/router/auto_pour.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/router/auto_pour.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/router/bus.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/cache.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/router/core.py	arg-type	Argument "route_net_fn" to "try_rip_reroute" of "ViaConflictManager" has incompatible type "Callable[[int], list[Route]]"; expected "None"
+src/kicad_tools/router/core.py	arg-type	Argument "route_net_fn" to "try_trace_rip_reroute" of "ViaConflictManager" has incompatible type "Callable[[int], list[Route]]"; expected "None"
+src/kicad_tools/router/core.py	arg-type	Argument "router" to "AdaptiveGridRouter" has incompatible type "CppPathfinder | Router"; expected "Router | None"
+src/kicad_tools/router/core.py	arg-type	Argument "router" to "HierarchicalRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument "router" to "TwoPhaseRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "MSTRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "MSTRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "NegotiatedRouter" has incompatible type "CppPathfinder | Router"; expected "Router"
+src/kicad_tools/router/core.py	arg-type	Argument N to "add" of "set" has incompatible type "tuple[float, float]"; expected "tuple[int, tuple[float, float, float, float]]"
+src/kicad_tools/router/core.py	arg-type	Argument N to "float" has incompatible type "float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/router/core.py	arg-type	Argument N to "setdefault" of "MutableMapping" has incompatible type "MatchGroup"; expected "str"
+src/kicad_tools/router/core.py	arg-type	Argument N to "try_trace_rip_reroute" of "ViaConflictManager" has incompatible type "ViaConflict"; expected "TraceConflict"
+src/kicad_tools/router/core.py	arg-type	Argument N to "width_for_impedance" of "TransmissionLine" has incompatible type "int | str"; expected "str"
+src/kicad_tools/router/core.py	assignment	Incompatible types in assignment (expression has type "None", variable has type "int")
+src/kicad_tools/router/core.py	assignment	Incompatible types in assignment (expression has type "Route | None", variable has type "Route")
+src/kicad_tools/router/core.py	assignment	Incompatible types in assignment (expression has type "TraceConflict", variable has type "ViaConflict")
+src/kicad_tools/router/core.py	assignment	Incompatible types in assignment (expression has type "str | None", variable has type "MatchGroup")
+src/kicad_tools/router/core.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "MatchGroup")
+src/kicad_tools/router/core.py	assignment	Incompatible types in assignment (expression has type "tuple[int, tuple[Any, Any, Any, Any]]", variable has type "tuple[float, float]")
+src/kicad_tools/router/core.py	attr-defined	"NetClassRouting" has no attribute "min_trace_width"; maybe "trace_width"?
+src/kicad_tools/router/core.py	attr-defined	"Segment" has no attribute "end_x"
+src/kicad_tools/router/core.py	attr-defined	"Segment" has no attribute "end_y"
+src/kicad_tools/router/core.py	attr-defined	"Segment" has no attribute "start_x"; maybe "start"?
+src/kicad_tools/router/core.py	attr-defined	"Segment" has no attribute "start_y"; maybe "start"?
+src/kicad_tools/router/core.py	attr-defined	"ViaConflict" has no attribute "segment"
+src/kicad_tools/router/core.py	attr-defined	"ViaConflict" has no attribute "segment_route"
+src/kicad_tools/router/core.py	index	Invalid index type "MatchGroup" for "dict[str, int]"; expected type "str"
+src/kicad_tools/router/core.py	index	Invalid index type "MatchGroup" for "dict[str, int]"; expected type "str"
+src/kicad_tools/router/core.py	misc	Generator has incompatible item type "int"; expected "bool"
+src/kicad_tools/router/core.py	name-defined	Name "Segment" is not defined
+src/kicad_tools/router/core.py	name-defined	Name "Segment" is not defined
+src/kicad_tools/router/core.py	name-defined	Name "Via" is not defined
+src/kicad_tools/router/core.py	name-defined	Name "Via" is not defined
+src/kicad_tools/router/core.py	no-redef	Name "blocking_nets" already defined on line N
+src/kicad_tools/router/core.py	no-redef	Name "blocking_nets" already defined on line N
+src/kicad_tools/router/core.py	union-attr	Item "CppPathfinder" of "CppPathfinder | Router" has no attribute "grid"
+src/kicad_tools/router/core.py	union-attr	Item "None" of "EscapeRouter | None" has no attribute "diff_pair_map"
+src/kicad_tools/router/core.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "width_for_impedance"
+src/kicad_tools/router/core.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "width_for_impedance"
+src/kicad_tools/router/core.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/core.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/core.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/cpp_backend.py	attr-defined	Module "kicad_tools.router" has no attribute "router_cpp"
+src/kicad_tools/router/cpp_backend.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/router/cpp_backend.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/router/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/router/cpp_backend.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/router/cpp_backend.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/router/cpp_backend.py	no-any-return	Returning Any from function declared to return "tuple[float, float]"
+src/kicad_tools/router/cpp_backend.py	no-any-return	Returning Any from function declared to return "tuple[int, int]"
+src/kicad_tools/router/cpp_backend.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/router/cpp_backend.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/router/diffpair.py	no-any-return	Returning Any from function declared to return "NetClassRouting | None"
+src/kicad_tools/router/diffpair.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/diffpair_detection.py	arg-type	Argument N to "_is_polarity_counterpart" has incompatible type "str | None"; expected "str"
+src/kicad_tools/router/diffpair_detection.py	arg-type	Argument N to "_is_polarity_counterpart" has incompatible type "str | None"; expected "str"
+src/kicad_tools/router/diffpair_length.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/router/diffpair_routing.py	arg-type	Argument N to "float" has incompatible type "float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/router/diffpair_routing.py	arg-type	Argument N to "float" has incompatible type "float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/router/diffpair_routing.py	assignment	Incompatible types in assignment (expression has type "DifferentialPair | None", variable has type "DifferentialPair")
+src/kicad_tools/router/diffpair_routing.py	no-redef	Attribute "last_best_node" already defined on line N
+src/kicad_tools/router/diffpair_routing.py	no-redef	Attribute "last_best_progress" already defined on line N
+src/kicad_tools/router/diffpair_routing.py	no-redef	Attribute "last_best_state" already defined on line N
+src/kicad_tools/router/diffpair_routing.py	operator	"object" not callable
+src/kicad_tools/router/diffpair_routing.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/diffpair_routing.py	var-annotated	Need type annotation for "stub_failed"
+src/kicad_tools/router/escape.py	arg-type	Argument "other_net_pads" to "point_clear_of_copper" has incompatible type "list[tuple[float, float, float, float, int]]"; expected "list[tuple[float, float, float, int] | tuple[float, float, float, float, int]] | None"
+src/kicad_tools/router/escape.py	arg-type	Argument "other_net_tracks" to "point_clear_of_copper" has incompatible type "list[_SegmentAdapter]"; expected "list[TrackSegmentLike] | None"
+src/kicad_tools/router/escape.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/router/failure_analysis.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/router/failure_analysis.py	no-any-return	Returning Any from function declared to return "str | None"
+src/kicad_tools/router/fine_pitch.py	var-annotated	Need type annotation for "recommendations" (hint: "recommendations: list[<type>] = ...")
+src/kicad_tools/router/fine_pitch_escape.py	arg-type	Argument N to "get_mfr_limits" has incompatible type "str | None"; expected "str"
+src/kicad_tools/router/global_router.py	assignment	Incompatible types in assignment (expression has type "tuple[int, int]", variable has type "tuple[str, str]")
+src/kicad_tools/router/grid.py	arg-type	Argument N to "_dilate_blocked" of "RoutingGrid" has incompatible type "int | None"; expected "int"
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"ArrayBackend" has no attribute "asarray"; maybe "array"?
+src/kicad_tools/router/grid.py	attr-defined	"object" has no attribute "mark_segment"
+src/kicad_tools/router/grid.py	attr-defined	"object" has no attribute "mark_via"
+src/kicad_tools/router/grid.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/router/grid.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/router/grid.py	no-any-return	Returning Any from function declared to return "int"
+src/kicad_tools/router/grid.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/router/grid.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/router/grid.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/router/grid.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
+src/kicad_tools/router/grid.py	operator	Unsupported operand types for < ("float" and "None")
+src/kicad_tools/router/grid.py	operator	Unsupported operand types for < ("float" and "None")
+src/kicad_tools/router/grid.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/router/grid.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/grid.py	valid-type	Function "builtins.any" is not valid as a type
+src/kicad_tools/router/io.py	arg-type	Argument "key" to "max" has incompatible type overloaded function; expected "Callable[[tuple[float, float]], SupportsDunderLT[Any] | SupportsDunderGT[Any]]"
+src/kicad_tools/router/io.py	arg-type	Argument N to "list" has incompatible type "list[Pad] | list[PadPosition]"; expected "Iterable[Pad]"
+src/kicad_tools/router/io.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/router/io.py	no-redef	Name "route_component_refs" already defined on line N
+src/kicad_tools/router/length_tuning.py	assignment	Incompatible types in assignment (expression has type "Route | None", variable has type "Route")
+src/kicad_tools/router/length_tuning.py	assignment	Incompatible types in assignment (expression has type "int | str", variable has type "int")
+src/kicad_tools/router/match_group_length.py	assignment	Incompatible types in assignment (expression has type "Route | None", variable has type "Route")
+src/kicad_tools/router/orchestrator.py	arg-type	Argument "grid" to "SubGridRouter" has incompatible type "Any | None"; expected "RoutingGrid"
+src/kicad_tools/router/orchestrator.py	attr-defined	Module "kicad_tools.router.primitives" has no attribute "PCB"
+src/kicad_tools/router/orchestrator.py	import-not-found	Cannot find implementation or library stub for module named "kicad_tools.design_intent"
+src/kicad_tools/router/orchestrator.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/router/output.py	arg-type	Argument N to "append" of "list" has incompatible type "dict[str, str]"; expected "dict[str, object]"
+src/kicad_tools/router/output.py	index	Value of type "tuple[float, float] | None" is not indexable
+src/kicad_tools/router/output.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/router/parallel.py	arg-type	Argument N to "resolve_parallel_conflicts" has incompatible type "Callable[[int], tuple[int, int, float, int, float, float]]"; expected "Callable[[int], tuple[int, int, float]] | None"
+src/kicad_tools/router/parallel.py	assignment	Incompatible types in assignment (expression has type "Callable[[int], tuple[int, int]]", variable has type "Callable[[int], tuple[int, int, float]] | None")
+src/kicad_tools/router/parallel.py	misc	"None" not callable
+src/kicad_tools/router/parallel.py	misc	"None" not callable
+src/kicad_tools/router/parallel.py	return-value	Incompatible return value type (got "tuple[int, int]", expected "tuple[int, int, float]")
+src/kicad_tools/router/parallel.py	union-attr	Item "None" of "Pad | None" has no attribute "x"
+src/kicad_tools/router/parallel.py	union-attr	Item "None" of "Pad | None" has no attribute "x"
+src/kicad_tools/router/parallel.py	union-attr	Item "None" of "Pad | None" has no attribute "x"
+src/kicad_tools/router/parallel.py	union-attr	Item "None" of "Pad | None" has no attribute "y"
+src/kicad_tools/router/parallel.py	union-attr	Item "None" of "Pad | None" has no attribute "y"
+src/kicad_tools/router/parallel.py	union-attr	Item "None" of "Pad | None" has no attribute "y"
+src/kicad_tools/router/path.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/router/pathfinder.py	arg-type	Argument "key" to "max" has incompatible type overloaded function; expected "Callable[[tuple[int, int]], SupportsDunderLT[Any] | SupportsDunderGT[Any]]"
+src/kicad_tools/router/pathfinder.py	arg-type	Argument "other_net_pads" to "point_clear_of_copper" has incompatible type "list[tuple[float, float, float, float, int]]"; expected "list[tuple[float, float, float, int] | tuple[float, float, float, float, int]] | None"
+src/kicad_tools/router/pathfinder.py	arg-type	Argument "other_net_tracks" to "point_clear_of_copper" has incompatible type "list[_SegmentAdapter]"; expected "list[TrackSegmentLike] | None"
+src/kicad_tools/router/pathfinder.py	operator	Unsupported left operand type for * ("None")
+src/kicad_tools/router/pathfinder.py	operator	Unsupported operand types for * ("None" and "int")
+src/kicad_tools/router/pathfinder.py	operator	Unsupported operand types for * ("int" and "None")
+src/kicad_tools/router/placement_feedback.py	arg-type	Argument N to "generate_strategies" of "StrategyGenerator" has incompatible type "kicad_tools.router.failure_analysis.FailureAnalysis"; expected "kicad_tools.recovery.types.FailureAnalysis"
+src/kicad_tools/router/subgrid.py	no-any-return	Returning Any from function declared to return "CopperLayer | None"
+src/kicad_tools/router/subgrid.py	no-any-return	Returning Any from function declared to return "int | None"
+src/kicad_tools/router/tuning.py	union-attr	Item "None" of "Pad | None" has no attribute "x"
+src/kicad_tools/router/tuning.py	union-attr	Item "None" of "Pad | None" has no attribute "x"
+src/kicad_tools/router/tuning.py	union-attr	Item "None" of "Pad | None" has no attribute "y"
+src/kicad_tools/router/tuning.py	union-attr	Item "None" of "Pad | None" has no attribute "y"
+src/kicad_tools/router/via_clearance.py	attr-defined	"_SegmentLike" has no attribute "layer"
+src/kicad_tools/router/via_clearance.py	attr-defined	"_ViaLike" has no attribute "layers"
+src/kicad_tools/router/via_clearance.py	attr-defined	"_ViaLike" has no attribute "layers"
+src/kicad_tools/router/via_conflict.py	assignment	Incompatible types in assignment (expression has type "<typing special form>", variable has type "type[None]")
+src/kicad_tools/schema/instances.py	attr-defined	"object" has no attribute "parent"
+src/kicad_tools/schema/instances.py	attr-defined	"object" has no attribute "uuid"
+src/kicad_tools/schema/instances.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/schema/instances.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/schema/library.py	assignment	Incompatible types in assignment (expression has type "str | None", variable has type "str")
+src/kicad_tools/schema/pcb.py	arg-type	Argument N to "add" of "SExp" has incompatible type "object"; expected "SExp | str | int | float"
+src/kicad_tools/schema/pcb.py	arg-type	Argument N to "extract_bom" has incompatible type "Path"; expected "str"
+src/kicad_tools/schema/pcb.py	arg-type	Argument N to "int" has incompatible type "str | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/schema/pcb.py	arg-type	Argument N to "set_value" of "SExp" has incompatible type "object"; expected "str | int | float"
+src/kicad_tools/schema/pcb.py	arg-type	Argument N to "set_value" of "SExp" has incompatible type "object"; expected "str | int | float"
+src/kicad_tools/schema/pcb.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
+src/kicad_tools/schema/pcb.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
+src/kicad_tools/schema/pcb.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
+src/kicad_tools/schema/pcb.py	assignment	Incompatible types in assignment (expression has type "Net | None", variable has type "Net")
+src/kicad_tools/schema/pcb.py	has-type	Cannot determine type of "x"
+src/kicad_tools/schema/pcb.py	has-type	Cannot determine type of "y"
+src/kicad_tools/schema/pcb.py	index	Invalid index type "str | None" for "dict[str, str]"; expected type "str"
+src/kicad_tools/schema/pcb.py	index	Invalid index type "str | None" for "dict[str, str]"; expected type "str"
+src/kicad_tools/schema/pcb.py	misc	"object" object is not iterable
+src/kicad_tools/schema/pcb.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/schema/schematic.py	arg-type	Argument N to "load" of "ERCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/schema/schematic.py	return-value	Incompatible return value type (got "list[SymbolInstance]", expected "SymbolList")
+src/kicad_tools/schema/wire.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schema/wire.py	no-any-return	Returning Any from function declared to return "float"
+src/kicad_tools/schematic/blocks/_stub_helpers.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/analog.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/analog.py	no-any-return	Returning Any from function declared to return "tuple[float, float]"
+src/kicad_tools/schematic/blocks/base.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/base.py	no-untyped-def	Function is missing a type annotation for one or more arguments
+src/kicad_tools/schematic/blocks/base.py	no-untyped-def	Function is missing a type annotation for one or more arguments
+src/kicad_tools/schematic/blocks/indicators.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/indicators.py	misc	List comprehension has incompatible type List[tuple[int, ...]]; expected List[tuple[int, int]]
+src/kicad_tools/schematic/blocks/interface/analog_input.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/interface/can.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "str | None")
+src/kicad_tools/schematic/blocks/interface/can.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/interface/can.py	index	Value of type "object" is not indexable
+src/kicad_tools/schematic/blocks/interface/can.py	index	Value of type "object" is not indexable
+src/kicad_tools/schematic/blocks/interface/can.py	index	Value of type "object" is not indexable
+src/kicad_tools/schematic/blocks/interface/can.py	index	Value of type "object" is not indexable
+src/kicad_tools/schematic/blocks/interface/can.py	index	Value of type "object" is not indexable
+src/kicad_tools/schematic/blocks/interface/can.py	index	Value of type "object" is not indexable
+src/kicad_tools/schematic/blocks/interface/can.py	index	Value of type "object" is not indexable
+src/kicad_tools/schematic/blocks/interface/can.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/schematic/blocks/interface/can.py	return-value	Incompatible return value type (got "object", expected "float")
+src/kicad_tools/schematic/blocks/interface/debug.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/interface/i2c.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/interface/usb.py	assignment	Incompatible types in assignment (expression has type "object", variable has type "str | None")
+src/kicad_tools/schematic/blocks/interface/usb.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/schematic/blocks/interface/usb.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/interface/usb.py	return-value	Incompatible return value type (got "object", expected "bool")
+src/kicad_tools/schematic/blocks/interface/usb.py	return-value	Incompatible return value type (got "object", expected "bool")
+src/kicad_tools/schematic/blocks/mcu.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/mcu.py	index	Invalid index type "object" for "dict[str, tuple[float, float]]"; expected type "str"
+src/kicad_tools/schematic/blocks/mcu.py	return-value	Incompatible return value type (got "object", expected "str")
+src/kicad_tools/schematic/blocks/motor.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/power/inputs.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/power/passives.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/power/precharge.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/power/regulators.py	assignment	Incompatible default for argument "extend_vout_rail_to" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/blocks/power/regulators.py	assignment	Incompatible default for argument "output_caps" (default has type "None", argument has type "list[str]")
+src/kicad_tools/schematic/blocks/power/regulators.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/protection.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/blocks/timing.py	import-not-found	Cannot find implementation or library stub for module named "kicad_sch_helper"
+src/kicad_tools/schematic/exceptions.py	assignment	Incompatible default for argument "available_symbols" (default has type "None", argument has type "list[str]")
+src/kicad_tools/schematic/exceptions.py	assignment	Incompatible default for argument "suggestions" (default has type "None", argument has type "list[str]")
+src/kicad_tools/schematic/exceptions.py	assignment	Incompatible default for argument "suggestions" (default has type "None", argument has type "list[str]")
+src/kicad_tools/schematic/helpers.py	var-annotated	Need type annotation for "groups"
+src/kicad_tools/schematic/library.py	assignment	Incompatible default for argument "lib_paths" (default has type "None", argument has type "list[Path]")
+src/kicad_tools/schematic/library.py	assignment	Incompatible default for argument "lib_paths" (default has type "None", argument has type "list[Path]")
+src/kicad_tools/schematic/library.py	assignment	Incompatible default for argument "lib_paths" (default has type "None", argument has type "list[Path]")
+src/kicad_tools/schematic/logging.py	assignment	Incompatible default for argument "format" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/elements_mixin.py	assignment	Incompatible default for argument "properties" (default has type "None", argument has type "dict[str, str]")
+src/kicad_tools/schematic/models/elements_mixin.py	assignment	Incompatible default for argument "value" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_embedded_lib_symbols"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_pwr_counter"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_pwr_counter"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_pwr_counter"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_pwr_counter"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_symbol_defs"; maybe "_load_symbol_def"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_symbol_defs"; maybe "_load_symbol_def"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_symbol_defs"; maybe "_load_symbol_def"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_symbol_defs"; maybe "_load_symbol_def"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_symbol_defs"; maybe "_load_symbol_def"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_symbol_defs"; maybe "_load_symbol_def"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_synthesized_pwr_defs"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "_synthesized_pwr_defs"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "global_labels"; maybe "add_global_label"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "hier_labels"; maybe "add_hier_label"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "junctions"; maybe "add_junction"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "no_connects"; maybe "add_no_connect"?
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "snap_mode"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "snap_mode"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "snap_mode"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "suggest_position"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "text_notes"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	attr-defined	"SchematicElementsMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/elements_mixin.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schematic/models/elements_mixin.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schematic/models/io_mixin.py	arg-type	Argument N to "load" of "ERCReport" has incompatible type "Path | None"; expected "Path | str"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "_embedded_lib_symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "_embedded_lib_symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "_pwr_counter"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "_symbol_defs"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "_symbol_defs"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "_symbol_defs"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "comment1"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "comment2"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "company"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "date"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "global_labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "global_labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "global_labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "no_connects"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "no_connects"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "no_connects"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "page"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "page"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "project_name"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "project_name"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "project_name"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "revision"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "sheet_path"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "sheet_path"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "sheet_path"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "sheet_uuid"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "text_notes"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "text_notes"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "text_notes"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "title"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/io_mixin.py	attr-defined	"SchematicIOMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "comment1" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "comment2" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "company" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "date" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "paper" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "revision" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "sheet_uuid" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "snap_mode" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	call-arg	Unexpected keyword argument "title" for "SchematicIOMixin"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	has-type	Cannot determine type of "paper"
+src/kicad_tools/schematic/models/io_mixin.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/schematic/models/io_mixin.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/schematic/models/io_mixin.py	no-any-return	Returning Any from function declared to return "str"
+src/kicad_tools/schematic/models/io_mixin.py	return-value	Incompatible return value type (got "SchematicIOMixin", expected "Schematic")
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "_symbol_defs"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "_symbol_defs"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "_symbol_defs"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/layout_mixin.py	attr-defined	"SchematicLayoutMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/modification_mixin.py	assignment	Incompatible default for argument "tolerance" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/models/modification_mixin.py	assignment	Incompatible default for argument "tolerance" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/models/modification_mixin.py	assignment	Incompatible default for argument "tolerance" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "_point_near"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "find_hier_label"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "find_hier_label"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "find_label"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "find_label"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "find_symbol"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "find_wires"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/modification_mixin.py	attr-defined	"SchematicModificationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "global_labels"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/netlist_mixin.py	attr-defined	"SchematicNetlistMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/netlist_mixin.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schematic/models/netlist_mixin.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schematic/models/netlist_mixin.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schematic/models/netlist_mixin.py	no-any-return	Returning Any from function declared to return "str | None"
+src/kicad_tools/schematic/models/pin.py	arg-type	Argument "pin_type" to "Pin" has incompatible type "str | int | float | None"; expected "str"
+src/kicad_tools/schematic/models/pin.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/schematic/models/pin.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/schematic/models/pin.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/schematic/models/pin.py	arg-type	Argument N to "float" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+src/kicad_tools/schematic/models/query_mixin.py	assignment	Incompatible default for argument "connected_to_label" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/query_mixin.py	assignment	Incompatible default for argument "endpoint" (default has type "None", argument has type "tuple[float, float]")
+src/kicad_tools/schematic/models/query_mixin.py	assignment	Incompatible default for argument "near" (default has type "None", argument has type "tuple[float, float]")
+src/kicad_tools/schematic/models/query_mixin.py	assignment	Incompatible default for argument "pattern" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/query_mixin.py	assignment	Incompatible default for argument "pattern" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/query_mixin.py	assignment	Incompatible default for argument "pattern" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/query_mixin.py	assignment	Incompatible default for argument "tolerance" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "hier_labels"; maybe "find_hier_labels" or "find_hier_label"?
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "hier_labels"; maybe "find_hier_labels" or "find_hier_label"?
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "hier_labels"; maybe "find_hier_labels" or "find_hier_label"?
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/query_mixin.py	attr-defined	"SchematicQueryMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/query_mixin.py	no-any-return	Returning Any from function declared to return "HierarchicalLabel | None"
+src/kicad_tools/schematic/models/query_mixin.py	no-any-return	Returning Any from function declared to return "Label | None"
+src/kicad_tools/schematic/models/query_mixin.py	no-any-return	Returning Any from function declared to return "SymbolInstance | None"
+src/kicad_tools/schematic/models/schematic.py	assignment	Incompatible default for argument "parent_uuid" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/schematic.py	assignment	Incompatible default for argument "sheet_uuid" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/schematic.py	assignment	Incompatible types in assignment (expression has type "Path | None", base class "SchematicIOMixin" defined the type as "Path")
+src/kicad_tools/schematic/models/symbol.py	arg-type	Argument N to "int" has incompatible type "str | int | float | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+src/kicad_tools/schematic/models/symbol.py	arg-type	Argument N to "list" of "SExp" has incompatible type "str | None"; expected "str"
+src/kicad_tools/schematic/models/symbol.py	assignment	Incompatible default for argument "lib_paths" (default has type "None", argument has type "list[Path]")
+src/kicad_tools/schematic/models/symbol.py	assignment	Incompatible default for argument "lib_paths" (default has type "None", argument has type "list[Path]")
+src/kicad_tools/schematic/models/symbol.py	assignment	Incompatible default for argument "lib_symbols" (default has type "None", argument has type "dict[str, SExp]")
+src/kicad_tools/schematic/models/symbol.py	assignment	Incompatible default for argument "symbol_defs" (default has type "None", argument has type "dict[str, SymbolDef]")
+src/kicad_tools/schematic/models/symbol.py	assignment	Incompatible types in assignment (expression has type "None", variable has type "Callable[[], SymbolRegistry]")
+src/kicad_tools/schematic/models/symbol.py	return-value	Incompatible return value type (got "None", expected "SExp")
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "_point_on_wire_segment_interior"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "_point_on_wire_segment_interior"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "global_labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "global_labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "grid"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "hier_labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "junctions"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "labels"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "no_connects"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "power_symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "symbols"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	attr-defined	"SchematicValidationMixin" has no attribute "wires"
+src/kicad_tools/schematic/models/validation_mixin.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schematic/models/validation_mixin.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/schematic/models/validation_mixin.py	operator	Unsupported left operand type for + ("object")
+src/kicad_tools/schematic/models/validation_mixin.py	var-annotated	Need type annotation for "all_output_locations" (hint: "all_output_locations: list[<type>] = ...")
+src/kicad_tools/schematic/models/validation_mixin.py	var-annotated	Need type annotation for "endpoint_counts" (hint: "endpoint_counts: dict[<type>, <type>] = ...")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "bus_x" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "bus_y" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "end_power" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "extend_to_x" (default has type "None", argument has type "float")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "name" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "net_label" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "net_label" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "net_label" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "output_label" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "shape" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	assignment	Incompatible default for argument "start_power" (default has type "None", argument has type "str")
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "_continuous_rails"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "_continuous_rails"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "_snap_coord"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_hier_label"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_junction"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_label"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_label"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_label"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_label"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_power"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_power"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_power"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_power"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_symbol"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_symbol"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	attr-defined	"SchematicWiringMixin" has no attribute "add_wire"
+src/kicad_tools/schematic/models/wiring_mixin.py	no-any-return	Returning Any from function declared to return "HierarchicalLabel"
+src/kicad_tools/schematic/models/wiring_mixin.py	no-any-return	Returning Any from function declared to return "PowerSymbol"
+src/kicad_tools/schematic/models/wiring_mixin.py	no-any-return	Returning Any from function declared to return "PowerSymbol"
+src/kicad_tools/schematic/models/wiring_mixin.py	no-any-return	Returning Any from function declared to return "Wire"
+src/kicad_tools/schematic/registry.py	assignment	Incompatible types in assignment (expression has type "SymbolDef", variable has type "str")
+src/kicad_tools/schematic/registry.py	assignment	Incompatible types in assignment (expression has type "SymbolDef", variable has type "str")
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "description"
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "footprint"
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "keywords"
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "lib_id"
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "lib_id"
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "pins"
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "pins"
+src/kicad_tools/schematic/registry.py	attr-defined	"str" has no attribute "pins"
+src/kicad_tools/schematic/registry.py	var-annotated	Need type annotation for "by_type" (hint: "by_type: dict[<type>, <type>] = ...")
+src/kicad_tools/schematic/symbol_generator.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/schematic/symbol_generator.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/schematic/symbol_generator.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/schematic/symbol_generator.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/schematic/symbol_generator.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/schematic/symbol_generator.py	attr-defined	"object" has no attribute "__iter__"; maybe "__dir__" or "__str__"? (not iterable)
+src/kicad_tools/schematic/symbol_generator.py	operator	Unsupported operand types for + ("object" and "int")
+src/kicad_tools/schematic/symbol_generator.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/schematic/symbol_generator.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/schematic/symbol_generator.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/schematic/symbol_generator.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/schematic/symbol_generator.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/schematic/symbol_generator.py	operator	Unsupported right operand type for in ("object")
+src/kicad_tools/schematic/symbol_generator.py	var-annotated	Need type annotation for "by_side" (hint: "by_side: dict[<type>, <type>] = ...")
+src/kicad_tools/schematic/symbol_generator.py	var-annotated	Need type annotation for "by_type" (hint: "by_type: dict[<type>, <type>] = ...")
+src/kicad_tools/schematic/symbol_generator.py	var-annotated	Need type annotation for "pins_by_side"
+src/kicad_tools/sexp/builders.py	assignment	Incompatible default for argument "justify" (default has type "None", argument has type "str")
+src/kicad_tools/sexp/parser.py	arg-type	Argument N to "append" of "list" has incompatible type "SExp"; expected "str | int | float | None"
+src/kicad_tools/sexp/parser.py	index	Value of type "SExp | None" is not indexable
+src/kicad_tools/sexp/parser.py	index	Value of type "SExp | None" is not indexable
+src/kicad_tools/sexp/parser.py	misc	List comprehension has incompatible type List[str | int | float | None]; expected List[str | int | float]
+src/kicad_tools/sexp/parser.py	no-any-return	Returning Any from function declared to return "SExp | None"
+src/kicad_tools/sexp/parser.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/spec/parser.py	import-untyped	Library stubs not installed for "yaml"
+src/kicad_tools/sync/reconciler.py	arg-type	Argument "actions" to "SyncMatch" has incompatible type "list[dict[str, str]]"; expected "tuple[dict[str, Any], ...]"
+src/kicad_tools/sync/reconciler.py	arg-type	Argument N to "SchematicPCBChecker" has incompatible type "Path | None"; expected "str | Path | PCB"
+src/kicad_tools/sync/reconciler.py	arg-type	Argument N to "SchematicPCBChecker" has incompatible type "Path | None"; expected "str | Path | Schematic"
+src/kicad_tools/sync/reconciler.py	arg-type	Argument N to "add" of "set" has incompatible type "Any | int"; expected "str"
+src/kicad_tools/sync/reconciler.py	assignment	Incompatible types in assignment (expression has type "tuple[dict[str, str]]", variable has type "list[dict[str, str]]")
+src/kicad_tools/sync/reconciler.py	var-annotated	Need type annotation for "actions_to_apply" (hint: "actions_to_apply: list[<type>] = ...")
+src/kicad_tools/validate/checker.py	arg-type	Argument N to "apply" of "FilterEngine" has incompatible type "list[kicad_tools.validate.violations.DRCViolation]"; expected "list[kicad_tools.drc.violation.DRCViolation | ERCViolation | kicad_tools.validate.violations.DRCViolation]"
+src/kicad_tools/validate/connectivity.py	arg-type	Argument N to "add" of "set" has incompatible type "Pad"; expected "str"
+src/kicad_tools/validate/connectivity.py	arg-type	Argument N to "add" of "set" has incompatible type "Pad"; expected "str"
+src/kicad_tools/validate/connectivity.py	arg-type	Argument N to "add" of "set" has incompatible type "Pad"; expected "str"
+src/kicad_tools/validate/connectivity.py	arg-type	Argument N to "add" of "set" has incompatible type "Pad"; expected "str"
+src/kicad_tools/validate/connectivity.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "Pad")
+src/kicad_tools/validate/connectivity.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "Pad")
+src/kicad_tools/validate/connectivity.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "Pad")
+src/kicad_tools/validate/connectivity.py	assignment	Incompatible types in assignment (expression has type "str", variable has type "Pad")
+src/kicad_tools/validate/connectivity.py	index	Invalid index type "Pad" for "dict[str, set[str]]"; expected type "str"
+src/kicad_tools/validate/connectivity.py	index	Invalid index type "Pad" for "dict[str, set[str]]"; expected type "str"
+src/kicad_tools/validate/connectivity.py	index	Invalid index type "Pad" for "dict[str, set[str]]"; expected type "str"
+src/kicad_tools/validate/connectivity.py	index	Invalid index type "Pad" for "dict[str, set[str]]"; expected type "str"
+src/kicad_tools/validate/consistency.py	arg-type	Argument N to "append" of "list" has incompatible type "tuple[str, str, Any, bool]"; expected "tuple[str, str]"
+src/kicad_tools/validate/consistency.py	arg-type	Argument N to "append" of "list" has incompatible type "tuple[str, str, bool]"; expected "tuple[str, str]"
+src/kicad_tools/validate/consistency.py	misc	Need more than N values to unpack (N expected)
+src/kicad_tools/validate/consistency.py	misc	Need more than N values to unpack (N expected)
+src/kicad_tools/validate/diffpair_engagement.py	assignment	Incompatible types in assignment (expression has type "NetClassRouting | None", variable has type "NetClassRouting")
+src/kicad_tools/validate/diffpair_skew.py	assignment	Incompatible types in assignment (expression has type "NetClassRouting | None", variable has type "NetClassRouting")
+src/kicad_tools/validate/filters.py	assignment	Incompatible types in assignment (expression has type "ERCViolation", variable has type "DRCViolation")
+src/kicad_tools/validate/filters.py	import-not-found	Cannot find implementation or library stub for module named "tomli"
+src/kicad_tools/validate/filters.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/validate/match_group_skew.py	assignment	Incompatible types in assignment (expression has type "NetClassRouting | None", variable has type "NetClassRouting")
+src/kicad_tools/validate/models.py	no-untyped-def	Function is missing a type annotation
+src/kicad_tools/validate/models.py	type-arg	Missing type parameters for generic type "dict"
+src/kicad_tools/validate/models.py	type-arg	Missing type parameters for generic type "dict"
+src/kicad_tools/validate/models.py	type-arg	Missing type parameters for generic type "dict"
+src/kicad_tools/validate/models.py	type-arg	Missing type parameters for generic type "dict"
+src/kicad_tools/validate/rules/clearance.py	import-untyped	Library stubs not installed for "shapely"
+src/kicad_tools/validate/rules/clearance.py	import-untyped	Library stubs not installed for "shapely.geometry"
+src/kicad_tools/validate/rules/clearance.py	import-untyped	Library stubs not installed for "shapely.ops"
+src/kicad_tools/validate/rules/clearance.py	unused-ignore	Unused "type: ignore" comment
+src/kicad_tools/validate/rules/diffpair_length_skew.py	arg-type	Argument N to "add" of "set" has incompatible type "tuple[str, str]"; expected "tuple[int, int]"
+src/kicad_tools/validate/rules/diffpair_length_skew.py	assignment	Incompatible types in assignment (expression has type "int", variable has type "str")
+src/kicad_tools/validate/rules/diffpair_length_skew.py	assignment	Incompatible types in assignment (expression has type "int", variable has type "str")
+src/kicad_tools/validate/rules/diffpair_length_skew.py	index	Invalid index type "tuple[str, str]" for "dict[tuple[int, int], float]"; expected type "tuple[int, int]"
+src/kicad_tools/validate/rules/impedance.py	arg-type	Argument "target_z0" to "ImpedanceCheckResult" has incompatible type "float | None"; expected "float"
+src/kicad_tools/validate/rules/impedance.py	operator	Unsupported operand types for - ("float" and "None")
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "CoupledLines | None" has no attribute "edge_coupled_microstrip"
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "CoupledLines | None" has no attribute "edge_coupled_stripline"
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "Stackup | None" has no attribute "is_outer_layer"
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "Stackup | None" has no attribute "is_outer_layer"
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "Stackup | None" has no attribute "is_outer_layer"
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "microstrip"
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "stripline"
+src/kicad_tools/validate/rules/impedance.py	union-attr	Item "None" of "TransmissionLine | None" has no attribute "width_for_impedance"
+src/kicad_tools/validate/rules/silkscreen.py	assignment	Incompatible types in assignment (expression has type "FootprintGraphic", variable has type "BoardGraphic")
+src/kicad_tools/validate/rules/silkscreen.py	assignment	Incompatible types in assignment (expression has type "FootprintGraphic", variable has type "BoardGraphic")
+src/kicad_tools/validate/sch_orphan_label.py	attr-defined	"object" has no attribute "end"
+src/kicad_tools/validate/sch_orphan_label.py	attr-defined	"object" has no attribute "get_all_pin_positions"
+src/kicad_tools/validate/sch_orphan_label.py	attr-defined	"object" has no attribute "global_labels"
+src/kicad_tools/validate/sch_orphan_label.py	attr-defined	"object" has no attribute "no_connects"
+src/kicad_tools/validate/sch_orphan_label.py	attr-defined	"object" has no attribute "start"
+src/kicad_tools/validate/sch_orphan_label.py	attr-defined	"object" has no attribute "start"
+src/kicad_tools/validate/sch_orphan_label.py	attr-defined	"object" has no attribute "wires"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "get_all_pin_positions"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "global_labels"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "hierarchical_labels"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "junctions"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "labels"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "no_connects"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "wires"
+src/kicad_tools/validate/sch_wire_stub.py	attr-defined	"object" has no attribute "wires"
+src/kicad_tools/zones/generator.py	arg-type	Argument N to "_subtract_polygon" has incompatible type "list[tuple[float, float]] | None"; expected "list[tuple[float, float]]"
+src/kicad_tools/zones/generator.py	import-untyped	Library stubs not installed for "shapely.geometry"
+src/kicad_tools/zones/generator.py	import-untyped	Library stubs not installed for "shapely.ops"
+src/kicad_tools/zones/generator.py	no-any-return	Returning Any from function declared to return "bool"
+src/kicad_tools/zones/generator.py	no-any-return	Returning Any from function declared to return "float"
