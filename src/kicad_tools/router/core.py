@@ -1881,6 +1881,7 @@ class Autorouter:
         use_mst: bool = True,
         target_impedance: float | None = None,
         _subgrid_retry: bool = False,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all connections for a net.
 
@@ -1892,6 +1893,13 @@ class Autorouter:
                 appropriate trace widths per layer to achieve this impedance.
             _subgrid_retry: Internal flag to prevent recursive retry loops.
                 Do not set this parameter directly.
+            per_net_timeout: Issue #3485: optional cumulative per-net
+                wall-clock budget (seconds), forwarded to the MST/RSMT
+                edge loop so every per-edge A* search honours the
+                ``--per-net-timeout`` deadline.  ``None`` preserves the
+                pre-#3485 unbudgeted behaviour.  Without this a single
+                pathological multi-terminal Steiner net could grind for
+                tens of minutes inside the negotiated rip-up reroute loop.
 
         Returns:
             List of Route objects for this net
@@ -2170,9 +2178,13 @@ class Autorouter:
             new_routes = mst_router.route_net(
                 pad_objs, mark_route, record_failure,
                 use_steiner=not has_off_grid,
+                per_net_timeout=per_net_timeout,
             )
         else:
-            new_routes = mst_router.route_net_star(pad_objs, mark_route, record_failure)
+            new_routes = mst_router.route_net_star(
+                pad_objs, mark_route, record_failure,
+                per_net_timeout=per_net_timeout,
+            )
 
         routes.extend(new_routes)
 
@@ -5302,7 +5314,9 @@ class Autorouter:
             # branch missed this case because partial routing made the
             # else-branch unreachable.
             pre_failure_count = sum(1 for f in self.routing_failures if f.net == net)
-            routes = self.route_net(net)
+            # Issue #3485: forward the per-net wall-clock budget so the
+            # MST/RSMT edge loop bounds each per-edge A* search.
+            routes = self.route_net(net, per_net_timeout=per_net_timeout)
             all_routes.extend(routes)
             new_failure_count = sum(1 for f in self.routing_failures if f.net == net)
             recorded_new_failure = new_failure_count > pre_failure_count
@@ -5740,6 +5754,7 @@ class Autorouter:
     def route_all_interleaved(
         self,
         progress_callback: ProgressCallback | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route all nets using interleaved ordering for N-port nets.
 
@@ -5758,6 +5773,11 @@ class Autorouter:
 
         Args:
             progress_callback: Optional callback for progress updates
+            per_net_timeout: Issue #3485: optional cumulative per-net
+                wall-clock budget (seconds), forwarded to the MST/RSMT
+                edge loops so each per-edge A* search honours the
+                ``--per-net-timeout`` deadline.  ``None`` (default)
+                preserves the pre-#3485 unbudgeted behaviour.
 
         Returns:
             List of Route objects for all nets
@@ -5801,7 +5821,7 @@ class Autorouter:
 
             if pad_count == 2 or net not in mst_cache:
                 # 2-port net or N-port without MST: route normally
-                routes = self.route_net(net)
+                routes = self.route_net(net, per_net_timeout=per_net_timeout)
                 all_routes.extend(routes)
                 if routes:
                     flush_print(
@@ -5812,7 +5832,9 @@ class Autorouter:
             else:
                 # N-port net: route using cached MST edges in order
                 mst_edges = mst_cache[net]
-                routes = self._route_net_with_mst_edges(net, mst_edges)
+                routes = self._route_net_with_mst_edges(
+                    net, mst_edges, per_net_timeout=per_net_timeout
+                )
                 all_routes.extend(routes)
                 nport_routed_edges[net] = len(mst_edges)
                 if routes:
@@ -5838,7 +5860,12 @@ class Autorouter:
 
         return all_routes
 
-    def _route_net_with_mst_edges(self, net: int, mst_edges: list[MSTEdgeInfo]) -> list[Route]:
+    def _route_net_with_mst_edges(
+        self,
+        net: int,
+        mst_edges: list[MSTEdgeInfo],
+        per_net_timeout: float | None = None,
+    ) -> list[Route]:
         """Route an N-port net using pre-computed MST edges.
 
         Routes the MST edges in order (shortest first), using the cached
@@ -5847,6 +5874,13 @@ class Autorouter:
         Args:
             net: Net ID to route
             mst_edges: Pre-computed MST edges sorted by distance
+            per_net_timeout: Issue #3485: optional cumulative per-net
+                wall-clock budget (seconds).  A single ``time.monotonic()``
+                deadline brackets the whole net; each edge's A* search
+                receives the remaining budget, and edges that arrive after
+                the budget is exhausted are recorded as failures and
+                skipped.  ``None`` preserves the pre-#3485 unbudgeted
+                behaviour.
 
         Returns:
             List of Route objects for this net
@@ -5898,12 +5932,36 @@ class Autorouter:
         # The mst_edges contain indices into the original pad list
         # We need to map them to pads_for_routing if intra-IC reduced the list
         if len(pads_for_routing) == len(pads):
-            # No intra-IC reduction, use edges directly
+            # No intra-IC reduction, use edges directly.
+            #
+            # Issue #3485: cumulative per-net deadline -- the same
+            # whole-net bracketing MSTRouter.route_net applies.  Each edge
+            # gets the remaining budget; once exhausted, the remaining
+            # edges are recorded as failures and skipped so a pathological
+            # multi-terminal Steiner net (softstart's VGATE) can no longer
+            # grind past ``--per-net-timeout`` here.
+            net_deadline = (
+                time.monotonic() + per_net_timeout
+                if per_net_timeout is not None
+                else None
+            )
             for edge in mst_edges:
                 if edge.source_idx < len(pad_objs) and edge.target_idx < len(pad_objs):
                     source_pad = pad_objs[edge.source_idx]
                     target_pad = pad_objs[edge.target_idx]
-                    route = self.router.route(source_pad, target_pad)
+
+                    if net_deadline is not None:
+                        remaining = net_deadline - time.monotonic()
+                        if remaining <= 0:
+                            self._record_routing_failure(net, source_pad, target_pad)
+                            continue
+                        edge_timeout: float | None = remaining
+                    else:
+                        edge_timeout = None
+
+                    route = self.router.route(
+                        source_pad, target_pad, per_net_timeout=edge_timeout
+                    )
 
                     if route:
                         self._mark_route(route)
@@ -5922,7 +5980,10 @@ class Autorouter:
             def record_failure(source_pad: Pad, target_pad: Pad):
                 self._record_routing_failure(net, source_pad, target_pad)
 
-            mst_routes = mst_router.route_net(pad_objs, mark_route, record_failure)
+            mst_routes = mst_router.route_net(
+                pad_objs, mark_route, record_failure,
+                per_net_timeout=per_net_timeout,
+            )
             routes.extend(mst_routes)
 
         return routes
@@ -10960,7 +11021,9 @@ class Autorouter:
                     per_net_timeout=per_net_timeout,
                 )
             else:
-                routes = self.route_net(net)
+                # Issue #3485: forward the per-net budget to the MST/RSMT
+                # edge loop so intra-block nets honour --per-net-timeout too.
+                routes = self.route_net(net, per_net_timeout=per_net_timeout)
             all_routes.extend(routes)
             if routes:
                 flush_print(

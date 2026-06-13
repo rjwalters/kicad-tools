@@ -6,7 +6,8 @@ by connecting pads in order of shortest Manhattan distance.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ..grid import RoutingGrid
@@ -83,9 +84,10 @@ class MSTRouter:
     def route_net(
         self,
         pad_objs: list[Pad],
-        mark_route_callback: callable,
-        failure_callback: callable | None = None,
+        mark_route_callback: Callable[[Route], None],
+        failure_callback: Callable[[Pad, Pad], None] | None = None,
         use_steiner: bool = True,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route a net using MST or RSMT ordering.
 
@@ -96,6 +98,22 @@ class MSTRouter:
                 Called with (source_pad, target_pad) when routing fails.
             use_steiner: If True, use RSMT decomposition (Steiner tree)
                 instead of plain MST for multi-pin nets. Default True.
+            per_net_timeout: Issue #3485: optional cumulative wall-clock
+                budget (seconds) for the WHOLE net.  A single
+                ``time.monotonic()`` deadline is computed before the
+                edge loop; each edge's ``self.router.route()`` receives
+                the REMAINING budget (so the sum of all edge A* searches
+                is bounded by ``per_net_timeout``), and edges that arrive
+                after the budget is exhausted are short-circuited (their
+                ``failure_callback`` still fires so the rip-up layer sees
+                them as failures).  Mirrors
+                ``NegotiatedRouter.route_net_negotiated``'s #2769
+                bracketing.  ``None`` preserves the pre-#3485 unbudgeted
+                behaviour.  Without this, a single pathological
+                multi-terminal Steiner net (e.g. softstart's VGATE, 8
+                pads) could grind for 20-30 min despite an explicit
+                ``--per-net-timeout``, because the per-edge A* calls
+                here never received the deadline.
 
         Returns:
             List of successfully created routes
@@ -148,10 +166,38 @@ class MSTRouter:
                     + abs(pad_objs[e[0]].y - pad_objs[e[1]].y)
                 )
 
+            # Issue #3485: cumulative per-net deadline.  ``per_net_timeout``
+            # brackets the WHOLE net, not each edge -- so compute one
+            # deadline before the loop and hand each edge the remaining
+            # budget.  This guarantees the sum of all edge A* searches is
+            # bounded by ``per_net_timeout`` and a single grindy edge can
+            # no longer consume ``per_net_timeout * len(edges)`` seconds.
+            net_deadline = (
+                time.monotonic() + per_net_timeout
+                if per_net_timeout is not None
+                else None
+            )
+
             for i, j in edges:
                 source_pad = pad_objs[i]
                 target_pad = pad_objs[j]
-                route = self.router.route(source_pad, target_pad)
+
+                if net_deadline is not None:
+                    remaining = net_deadline - time.monotonic()
+                    if remaining <= 0:
+                        # Cumulative budget exhausted before this edge could
+                        # be attempted.  Record the failure so the rip-up /
+                        # retry layer still sees the edge, then skip it.
+                        if failure_callback:
+                            failure_callback(source_pad, target_pad)
+                        continue
+                    edge_timeout: float | None = remaining
+                else:
+                    edge_timeout = None
+
+                route = self.router.route(
+                    source_pad, target_pad, per_net_timeout=edge_timeout
+                )
 
                 if route:
                     mark_route_callback(route)
@@ -159,8 +205,10 @@ class MSTRouter:
                 elif failure_callback:
                     failure_callback(source_pad, target_pad)
         else:
-            # Simple 2-pin net
-            route = self.router.route(pad_objs[0], pad_objs[1])
+            # Simple 2-pin net: the whole budget bounds the single A* search.
+            route = self.router.route(
+                pad_objs[0], pad_objs[1], per_net_timeout=per_net_timeout
+            )
             if route:
                 mark_route_callback(route)
                 routes.append(route)
@@ -172,8 +220,9 @@ class MSTRouter:
     def route_net_star(
         self,
         pad_objs: list[Pad],
-        mark_route_callback: callable,
-        failure_callback: callable | None = None,
+        mark_route_callback: Callable[[Route], None],
+        failure_callback: Callable[[Pad, Pad], None] | None = None,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route a net using star topology from the first pad.
 
@@ -182,6 +231,10 @@ class MSTRouter:
             mark_route_callback: Callback to mark a route on the grid
             failure_callback: Optional callback to record routing failures.
                 Called with (source_pad, target_pad) when routing fails.
+            per_net_timeout: Issue #3485: optional cumulative wall-clock
+                budget (seconds) for the WHOLE net.  See
+                :meth:`route_net` for the bracketing contract.  ``None``
+                preserves the pre-#3485 unbudgeted behaviour.
 
         Returns:
             List of successfully created routes
@@ -192,9 +245,29 @@ class MSTRouter:
         routes: list[Route] = []
         first_pad = pad_objs[0]
 
+        # Issue #3485: cumulative per-net deadline (see route_net above).
+        net_deadline = (
+            time.monotonic() + per_net_timeout
+            if per_net_timeout is not None
+            else None
+        )
+
         for i in range(1, len(pad_objs)):
             target_pad = pad_objs[i]
-            route = self.router.route(first_pad, target_pad)
+
+            if net_deadline is not None:
+                remaining = net_deadline - time.monotonic()
+                if remaining <= 0:
+                    if failure_callback:
+                        failure_callback(first_pad, target_pad)
+                    continue
+                edge_timeout: float | None = remaining
+            else:
+                edge_timeout = None
+
+            route = self.router.route(
+                first_pad, target_pad, per_net_timeout=edge_timeout
+            )
 
             if route:
                 mark_route_callback(route)
