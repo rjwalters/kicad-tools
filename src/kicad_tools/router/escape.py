@@ -1319,6 +1319,23 @@ class EscapeRouter:
         # for the named-constraint diagnostic line.
         self.missed_via_in_pad_components: set[str] = set()
 
+        # Issue #3429: Counter for adjacent-pin via-in-pad CONFLICTS that
+        # the dispatcher refused before committing a second in-pad via.
+        # Two adjacent fine-pitch QFP pins can each be flagged for an
+        # in-pad rescue, but at sub-pitch spacing their two via barrels +
+        # annular rings cannot both fit (center spacing < via_r_A +
+        # via_r_B + clearance).  ``_try_in_pad_escape`` validates the
+        # candidate via against PADS only -- sibling escapes' vias from
+        # the same pass are invisible there -- so without this guard the
+        # losing escape was silently dropped at the ``apply_escape_routes``
+        # commit-time cross-validation with no retry.  When the guard
+        # fires, the second in-pad rescue is refused (returns None) so the
+        # dispatcher falls through to the lateral / surface escape path
+        # instead of emitting a pair that the commit step later drops.
+        # Mirrors the ``missed_via_in_pad_rescues`` instrumentation
+        # pattern; consumed by diagnostics / future tier-escalation.
+        self.adjacent_in_pad_via_conflicts_refused: int = 0
+
         # Issue #3257: per-pad escape-layer overrides for SSOP/TSSOP
         # fine-pitch dual-row dispatcher.  Maps ``(ref, pin)`` to the
         # forced escape layer (``Layer.F_CU`` -> stay on surface,
@@ -2980,6 +2997,15 @@ class EscapeRouter:
                             # avoid copper conflicts with the escapes
                             # generated earlier in this pass.
                             existing_escapes=escapes,
+                            # Issue #3429: enforce via-barrel spacing
+                            # against sibling in-pad vias for the LEGACY
+                            # violation / pin_boxed rescues (which have a
+                            # lateral / surface fallback when refused).
+                            # The #3428 pocket-escape rescue is exempt --
+                            # its divergent target-aware stubs are designed
+                            # to let two adjacent in-pad vias coexist, and
+                            # it has no lateral fallback.
+                            enforce_adjacent_via_spacing=(pocket_target is None),
                         )
                         if in_pad_route is not None:
                             if pocket_target is not None:
@@ -6539,6 +6565,77 @@ class EscapeRouter:
                 return True
         return False
 
+    def _adjacent_in_pad_via_conflict(
+        self,
+        x: float,
+        y: float,
+        via_diameter: float,
+        clearance: float,
+        same_net: int,
+        existing_escapes: list[EscapeRoute] | None,
+    ) -> EscapeRoute | None:
+        """Detect a via-via spacing conflict with a sibling in-pad via.
+
+        Issue #3429 (adjacent-pin via-in-pad conflict detection): the
+        per-pad in-pad rescue (:meth:`_try_in_pad_escape`) validates a
+        candidate via only against the footprint's PADS
+        (:meth:`_via_clears_other_pads`) -- sibling escapes' vias placed
+        earlier in the SAME dispatch pass are invisible to that check
+        because the routing grid is not yet populated.  At fine pitch
+        (e.g. LQFP-48 0.5 mm) two adjacent foreign-net pins can each be
+        flagged for an in-pad rescue, but their two via barrels + annular
+        rings physically cannot coexist: the required center-to-center
+        spacing is::
+
+            via_r_A + via_r_B + clearance
+
+        which on jlcpcb-tier1 (0.6 mm OD, 0.127 mm clearance) is
+        0.3 + 0.3 + 0.127 = 0.727 mm -- already wider than the 0.5 mm
+        pitch.  Before this guard the conflict surfaced only at the
+        :meth:`apply_escape_routes` commit-time cross-validation, where
+        the losing escape was dropped with no retry (a silent gap).
+
+        This helper performs the cheap pairwise check BEFORE the second
+        via is committed so the dispatcher can refuse it and fall through
+        to the lateral / surface escape path.  Distinct from #3470's
+        :meth:`_in_pad_stub_conflicts`, which guards the inner-layer STUB
+        copper; this guards the VIA-BARREL spacing, which the stub-flip
+        retry cannot fix (flipping the stub does not move the via).
+
+        Args:
+            x: Proposed via center X (mm).
+            y: Proposed via center Y (mm).
+            via_diameter: Proposed via pad diameter (mm).
+            clearance: Required minimum via-to-via clearance (mm).
+            same_net: Net id of the via being placed; sibling vias on the
+                same net are skipped (same-net copper may share spacing).
+            existing_escapes: Escape routes accumulated so far in this
+                dispatch pass.  ``None`` (legacy call sites) disables the
+                check entirely, preserving byte-for-byte behaviour.
+
+        Returns:
+            The conflicting sibling :class:`EscapeRoute` when a foreign-net
+            in-pad via lies closer than the required center spacing, else
+            ``None``.
+        """
+        if not existing_escapes:
+            return None
+
+        via_radius = via_diameter / 2
+        for er in existing_escapes:
+            via = er.via
+            if via is None or not getattr(via, "in_pad", False):
+                continue
+            # Same-net vias do not need foreign-clearance spacing.
+            if via.net == same_net:
+                continue
+            sibling_radius = via.diameter / 2
+            required = via_radius + sibling_radius + clearance
+            dist = math.hypot(via.x - x, via.y - y)
+            if dist < required - 1e-9:
+                return er
+        return None
+
     def _try_in_pad_escape(
         self,
         pad: Pad,
@@ -6549,6 +6646,7 @@ class EscapeRouter:
         skip_on_clearance_violation: bool = False,
         target_direction: EscapeDirection | None = None,
         existing_escapes: list[EscapeRoute] | None = None,
+        enforce_adjacent_via_spacing: bool = False,
     ) -> EscapeRoute | None:
         """Attempt an in-pad via escape for a fine-pitch SSOP/TSSOP pad.
 
@@ -6646,6 +6744,20 @@ class EscapeRouter:
                 mutually block their nets' escape endpoints (board-05
                 U3 pin31/pin33 ISENSE_B-/ISENSE_A-).  ``None`` (default)
                 preserves legacy behaviour byte-for-byte.
+            enforce_adjacent_via_spacing: When True (Issue #3429), refuse
+                the rescue (return ``None``) if the candidate via barrel
+                would land closer than ``via_r + sibling_via_r +
+                clearance`` to a FOREIGN-net in-pad via already present in
+                ``existing_escapes``.  This is the via-VS-via spacing
+                guard the #3470 stub-flip cannot fix (flipping the stub
+                does not move the barrel).  It is gated to the LEGACY
+                violation / pin_boxed rescue paths, where the dispatcher
+                has a lateral / surface fallback to take when the rescue
+                is refused; it is intentionally left ``False`` for the
+                #3428 pocket-escape path, whose divergent target-aware
+                stubs are designed to let two adjacent in-pad vias
+                coexist.  ``False`` (default) preserves legacy behaviour
+                byte-for-byte for every existing call site.
 
         Returns:
             An ``EscapeRoute`` with the in-pad via and inner-layer segment,
@@ -6829,6 +6941,52 @@ class EscapeRouter:
                         via_y,
                         pad.ref,
                     )
+
+        # Issue #3429: adjacent-pin via-in-pad conflict detection.  The
+        # pad-clearance check above only validates the candidate via
+        # against the footprint's PADS; a sibling fine-pitch pin that
+        # already claimed an in-pad via in THIS pass is invisible there
+        # (the routing grid is not populated until commit time).  At
+        # sub-pitch spacing the two via barrels cannot coexist -- refuse
+        # the second rescue here so the dispatcher falls through to the
+        # lateral / surface escape path, instead of emitting a pair that
+        # ``apply_escape_routes`` later silently drops one of.  The check
+        # is a no-op when ``existing_escapes`` is None (legacy callers),
+        # preserving byte-for-byte behaviour.
+        conflicting = (
+            self._adjacent_in_pad_via_conflict(
+                x=via_x,
+                y=via_y,
+                via_diameter=via_diameter,
+                clearance=effective_clearance,
+                same_net=pad.net,
+                existing_escapes=existing_escapes,
+            )
+            if enforce_adjacent_via_spacing
+            else None
+        )
+        if conflicting is not None:
+            self.adjacent_in_pad_via_conflicts_refused += 1
+            logger.info(
+                "In-pad rescue REFUSED for pad %s (ref=%s pin=%s) at "
+                "(%.3f, %.3f): via barrel (OD %.3fmm) conflicts with the "
+                "in-pad via already claimed by sibling pin %s (net %s) at "
+                "(%.3f, %.3f) -- center spacing below via_r+via_r+clearance "
+                "at this pitch.  Returning None so the dispatcher takes the "
+                "lateral / surface escape path rather than committing a pair "
+                "that apply_escape_routes would later drop (Issue #3429).",
+                pad.net_name,
+                pad.ref,
+                pad.pin,
+                via_x,
+                via_y,
+                via_diameter,
+                conflicting.pad.pin,
+                conflicting.pad.net_name,
+                conflicting.via.x,
+                conflicting.via.y,
+            )
+            return None
 
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)
