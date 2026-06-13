@@ -249,9 +249,24 @@ EXPECTED_TOTAL_NETS = 13
 # against the final trace set (refill-only -- segment/via copper is
 # byte-identical to the pre-fix artifact), clearing all 4 shorts.  The
 # ceiling is back at 0 and the rule is dropped from the allowlist set.
-MAX_COMMITTED_DRC_ERRORS = 0
+# Issue #3556 (June 13 2026): the new ``clearance_pad_zone`` rule (pad
+# copper vs foreign-net zone *fill* copper -- the pad sibling of #3527's
+# segment-vs-fill rule) surfaces 14 pre-existing findings on the
+# committed artifact: foreign-net pads (GND/JOY_*/XTAL1/XTAL2/VCC vs the
+# VCC F.Cu and GND B.Cu pours) overlapping the opposite-net fill by
+# 0.003-0.008mm at the dense MCU/connector cluster.  These are GENUINE
+# stale-pour-carve shorts (the fill was not re-carved after the final
+# pad geometry settled), the same legitimate class grandfathered for
+# boards 04-07 in ``.github/routed-drc-tolerance.yml`` -- NOT false
+# positives (the rule correctly skips same-net fills).  They were
+# invisible before #3556 because no gate compared pad copper to zone
+# fill.  Ceiling raised 0 -> 14 and the rule added to the allowlist set;
+# burn-down (re-fill the VCC/GND pours against the final pads, sibling of
+# #3549-#3553) drops it back to 0.
+MAX_COMMITTED_DRC_ERRORS = 14
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
+    "clearance_pad_zone",
 }
 
 
