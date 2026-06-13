@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import pytest
 
+from kicad_tools.router.core import Autorouter
 from kicad_tools.router.cpp_backend import (
     CppGrid,
     CppPathfinder,
@@ -199,4 +200,69 @@ class TestIsViaBlockedOwnNetObstacle:
         ), (
             "Issue #3622: foreign-net cells must still reject the via in "
             "standard mode (same-net relaxation only)."
+        )
+
+
+@requires_cpp
+class TestSingleLayerOwnNetObstacleNoVias:
+    """Issue #3622 follow-up: the standard-mode own-net-obstacle via admit
+    must NOT introduce vias on a single-layer (``allowed_layers``) route.
+
+    The #864 parity relaxation made own-net ``is_obstacle`` cells passable
+    for vias in standard mode.  That removed an incidental suppression that
+    had been keeping vias off single-layer boards: the C++ pathfinder's
+    via-expansion loop iterates every grid layer, and only the strict
+    obstacle reject (now relaxed) had been blocking the layer change when a
+    candidate via's clearance disc touched the routing net's own pad copper.
+
+    The fix restricts the C++ ``routable_layers_`` set to the
+    ``allowed_layers`` permitted indices (see
+    ``CppPathfinder._apply_allowed_layers_to_routable``), so a single-layer
+    route has no second layer to land a via on.  These tests pin that the
+    own-net admit and the single-layer invariant coexist.
+    """
+
+    def test_single_layer_route_emits_no_vias_with_own_net_obstacle(self) -> None:
+        """A same-net two-pad route constrained to F.Cu must emit zero vias
+        even though the destination pad copper is an own-net ``is_obstacle``
+        that the #864 relaxation now admits for via landing.
+        """
+        rules = DesignRules(allowed_layers=["F.Cu"])
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        pads = [
+            {"number": "1", "x": 10.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 40.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        routes = router.route_net(1)
+
+        assert routes, "Single-layer same-net route should still connect"
+        for route in routes:
+            assert len(route.vias) == 0, (
+                "Issue #3622: own-net-obstacle via admit must not introduce "
+                "vias on a single-layer (allowed_layers=['F.Cu']) route"
+            )
+
+    def test_routable_layers_restricted_to_single_allowed_layer(self) -> None:
+        """White-box check: the C++ pathfinder's routable-layer set is
+        restricted to the single allowed copper index, leaving the via loop
+        with no alternate layer to expand onto.
+        """
+        rules = DesignRules(allowed_layers=["F.Cu"], grid_resolution=0.1)
+        grid = RoutingGrid(
+            width=5.0,
+            height=5.0,
+            rules=rules,
+            layer_stack=LayerStack.four_layer_all_signal(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+
+        f_cu_idx = grid.layer_to_index(0)  # F.Cu is enum value 0
+        assert pathfinder._routable_layers == [f_cu_idx], (
+            "Issue #3622: allowed_layers=['F.Cu'] must restrict the C++ "
+            "routable-layer set to the single F.Cu index so the via loop "
+            "has no second routable layer to land on"
         )

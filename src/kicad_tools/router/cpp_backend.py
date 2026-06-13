@@ -833,6 +833,29 @@ class CppPathfinder:
         self._rules = rules
         self._diagonal_routing = diagonal_routing
 
+        # Issue #3622 follow-up: restrict the C++ via-expansion to the layers
+        # actually permitted by ``allowed_layers`` (Issue #715 single-layer
+        # constraint).  The pathfinder defaults ``routable_layers_`` to every
+        # grid layer, so without this the via loop in ``pathfinder.cpp`` will
+        # attempt a layer change even when only one copper layer is routable.
+        #
+        # Pre-#3622 this leaked no vias because the strict standard-mode
+        # ``is_via_blocked`` rejected via candidates whose clearance disc
+        # touched the routing net's OWN ``is_obstacle`` pad copper.  The #864
+        # parity relaxation (own-net obstacle cells now passable for vias)
+        # removed that incidental suppression, so a single-layer route began
+        # emitting vias that land back on the only routable layer.  Filtering
+        # the routable-layer set here enforces the real single-layer invariant
+        # ("a via requires >= 2 routable layers") without touching the parity
+        # predicate -- with a one-element routable set the via loop's
+        # ``new_layer == current.layer`` skip leaves no via target at all.
+        #
+        # ``_routable_layers`` mirrors the C++ ``routable_layers_`` vector,
+        # defaulting to the grid's routable indices (the pathfinder ctor's
+        # own default) until/unless the allowed-layers filter narrows it.
+        self._routable_layers: list[int] = list(grid.get_routable_indices())
+        self._apply_allowed_layers_to_routable()
+
         # Lazy Python fallback router (constructed on first fallback)
         self._py_router: Router | None = None
         # Fallback statistics
@@ -1095,6 +1118,38 @@ class CppPathfinder:
     def set_routable_layers(self, layers: list[int]) -> None:
         """Set which layers are routable (skip plane layers)."""
         self._impl.set_routable_layers(layers)
+        # Mirror the value pushed to the C++ ``routable_layers_`` vector so
+        # Python callers (and tests) can introspect the active set without a
+        # dedicated C++ getter binding.
+        self._routable_layers: list[int] = list(layers)
+
+    def _apply_allowed_layers_to_routable(self) -> None:
+        """Restrict the C++ via-expansion to ``allowed_layers`` (Issue #715).
+
+        When ``DesignRules.allowed_layers`` constrains routing to a subset of
+        copper layers (e.g. a single-layer ``["F.Cu"]`` board), the C++
+        pathfinder must not consider a layer change to a disallowed layer.
+        The pathfinder defaults its routable-layer set to every grid layer, so
+        we intersect that default with the ``allowed_layers``-permitted indices
+        and push the result down to the C++ ``routable_layers_`` vector.
+
+        With a single allowed layer the resulting set has one element, and the
+        via loop's ``new_layer == current.layer`` skip leaves no via target --
+        which is exactly the single-layer invariant ("a via requires >= 2
+        routable layers"). This keeps the Issue #3622 / #864 own-net-obstacle
+        via relaxation intact while preventing it from leaking vias onto
+        single-layer routes.
+        """
+        if self._rules.allowed_layers is None:
+            return  # No restriction; keep the pathfinder default (all layers).
+
+        base = self._grid.get_routable_indices()
+        permitted = [idx for idx in base if self._is_layer_allowed(idx)]
+        # Defensive: never push an empty set (would make every route fail);
+        # leave the default in place and let the start/end-layer filter in
+        # ``_route_impl`` reject impossible routes instead.
+        if permitted and permitted != list(base):
+            self.set_routable_layers(permitted)
 
     def _is_layer_allowed(self, layer_idx: int) -> bool:
         """Check if routing on this layer is allowed by allowed_layers constraint.
