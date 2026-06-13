@@ -7,7 +7,7 @@ by connecting pads in order of shortest Manhattan distance.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ..grid import RoutingGrid
@@ -84,8 +84,8 @@ class MSTRouter:
     def route_net(
         self,
         pad_objs: list[Pad],
-        mark_route_callback: callable,
-        failure_callback: callable | None = None,
+        mark_route_callback: Callable[[Route], None],
+        failure_callback: Callable[[Pad, Pad], None] | None = None,
         use_steiner: bool = True,
         per_net_timeout: float | None = None,
     ) -> list[Route]:
@@ -220,8 +220,8 @@ class MSTRouter:
     def route_net_star(
         self,
         pad_objs: list[Pad],
-        mark_route_callback: callable,
-        failure_callback: callable | None = None,
+        mark_route_callback: Callable[[Route], None],
+        failure_callback: Callable[[Pad, Pad], None] | None = None,
         per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route a net using star topology from the first pad.

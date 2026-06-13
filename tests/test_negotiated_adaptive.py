@@ -1903,7 +1903,7 @@ class TestRouteAllBlockedComponentRipup:
 
         rescue_calls: list[int] = []
 
-        def fake_route_net(net):
+        def fake_route_net(net, per_net_timeout=None, **kwargs):
             # Simulate partial routing: one MST edge succeeded (returns
             # one route) but the other edge failed (record_failure is
             # called and a RoutingFailure for net 1 is appended).
@@ -1994,7 +1994,7 @@ class TestRouteAllBlockedComponentRipup:
         good_route = Route(net=1, net_name="NET_1", segments=[], vias=[])
         rescue_calls: list[int] = []
 
-        def fake_route_net(net):
+        def fake_route_net(net, per_net_timeout=None, **kwargs):
             return [good_route]
 
         def fake_rescue(failed_net):  # pragma: no cover - must not fire
