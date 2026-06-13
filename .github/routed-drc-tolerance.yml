@@ -899,7 +899,16 @@ tolerances:
   # In1.Cu fill was regenerated via ``kct zones fill`` after the
   # USB_CC1 corridor move; ``--only segment_zone`` now reports 0 and the
   # floor tightens 22 -> 20 (back to the pre-#3527 count).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
+  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone`` /
+  # ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
+  # *fill* copper -- the via/pad sibling of #3527's segment-vs-fill rule)
+  # surfaced 1 pre-existing finding on this committed artifact: a GND pad
+  # 0.093 mm from the +3V3 fill (< 0.102 mm jlcpcb minimum), the exact
+  # stale-pour-carve class that motivated #3556 but for pad copper rather
+  # than a track. The fill was not regenerated after the pad's net/position
+  # settled. Floor rises 20 -> 21 to lock the new gate in; the underlying
+  # pad-vs-fill cleanup is per-board artifact work (sibling of #3549-#3553).
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 21
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -1386,10 +1395,53 @@ tolerances:
   # quantization-dogleg grazes -> floor drops toward ~44); (b) the
   # load-variance cliff (#3466) is fixed; (c) the diff-pair skew/
   # continuity engaged-pair work (#3471-adjacent) lands.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 70
+  #
+  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone`` /
+  # ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
+  # *fill* copper) surfaced 51 pre-existing findings on this committed
+  # artifact (47 pad-vs-fill + 4 via-vs-fill), all foreign-net pairs
+  # (GND/+1V8/+1V2/A0..A7 vs the power pours) at sub-0.102 mm gaps or
+  # outright overlap -- the stale-pour-carve class that motivated #3556.
+  # No gate previously compared via/pad copper to zone fill, so these
+  # were invisible. Floor rises 69 -> 120 (= 69 prior blocking + 51 new)
+  # to lock the gate in; the per-board fill regeneration is artifact
+  # cleanup tracked alongside the #3633 stitcher/pour-repair work.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 120
 
-  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12 by
-  # Issue #2908 (this PR).  The narrowing introduced in #2871 / #2874
+  # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
+  # this board's tolerances entry -- the committed artifact reached a
+  # strict 0-blocking-error state at jlcpcb-tier1 (the manufacturers:
+  # override below keeps it on tier-1).
+  #
+  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone`` /
+  # ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
+  # *fill* copper -- the via/pad sibling of #3527's segment-vs-fill rule)
+  # surfaced 30 pre-existing ``clearance_pad_zone`` findings on the
+  # committed artifact: foreign-net pairs (PHASE_A/B/C vs GND, +24V vs GND,
+  # SWDIO/SWO vs +3V3, ...) at sub-clearance gaps to (or overlap with) the
+  # power/ground pours.  These were invisible because no gate compared pad
+  # copper to zone fill (the exact stale-pour-carve class that motivated
+  # #3556).  Floor re-added at 30 to lock the new gate in; refilling the
+  # zones after the final pad placement is artifact cleanup (sibling of
+  # #3549-#3553).  ``BOARD_05_EXPECTED_TOLERANCE`` in
+  # tests/test_board_05_drc_allowlist.py is pinned to the same 30.
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 30
+
+  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Issue #3556 grandfather
+  # (June 13 2026): the new ``clearance_via_zone`` / ``clearance_pad_zone``
+  # DRC rule (vias and pads vs foreign-net zone *fill* copper -- the
+  # via/pad sibling of #3527's segment-vs-fill rule) surfaced 13
+  # pre-existing ``clearance_pad_zone`` findings on the committed artifact:
+  # SWDIO/SWCLK/SWO/NRST/OSC_IN/GND escape-side pads sub-clearance to the
+  # +3.3V pour.  No gate previously compared pad copper to zone fill, so
+  # board 04's effective floor was 0; this re-adds an entry at 13 to lock
+  # the new gate in.  The per-board fill regeneration (refill the +3.3V/GND
+  # pours against the final escape geometry) is artifact cleanup, sibling
+  # of #3549-#3553.  tests/test_board_04_mfr_gate.py reads this floor.
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 13
+
+  # Board 04 history (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12
+  # by Issue #2908.  The narrowing introduced in #2871 / #2874
   # only kept plane-net pads in the validator when ``pad.net == 0``
   # (the SKIPPED-pour convention); board 04 routes ``+3.3V`` / ``GND``
   # as real nets (so the GND zone can stitch up after routing), so the

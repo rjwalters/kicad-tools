@@ -826,6 +826,66 @@ def _repair_fill_polygon(poly):  # type: ignore[no-untyped-def]
     return MultiPolygon(polys)
 
 
+def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
+    """Group every zone's filled polygons by copper layer, resolving nets.
+
+    Shared by :class:`SegmentZoneClearanceRule` and
+    :class:`ViaZoneClearanceRule` so segment-vs-fill and via/pad-vs-fill
+    clearance both consult the *same* committed ``filled_polygon`` copper
+    (this repo's source of truth -- issues #3482/#3523/#3527).
+
+    Zones whose net cannot be resolved to a nonzero net number are
+    skipped (keepout/rule areas have no fills anyway; a zone with no net
+    has no foreign-net relationship to enforce).  Invalid fill rings are
+    repaired with :func:`_repair_fill_polygon` (``make_valid``) so every
+    copper lobe survives -- ``buffer(0)`` silently drops bowtie lobes and
+    a real short under a dropped lobe would be masked (Issue #3560).
+
+    Args:
+        pcb: The PCB whose zones to collect.
+
+    Returns:
+        Mapping of copper-layer name -> list of :class:`_ZoneFill`, each
+        carrying the resolved net number/name and a shapely (Multi)Polygon.
+    """
+    from shapely.geometry import Polygon
+
+    name_to_number = {net.name: net.number for net in pcb.nets.values() if net.name}
+    number_to_name = {net.number: net.name for net in pcb.nets.values()}
+
+    fills_by_layer: dict[str, list[_ZoneFill]] = {}
+    for zone in pcb.zones:
+        net_number = zone.net_number
+        if net_number == 0 and zone.net_name:
+            # KiCad 9 name-only ``(net "X")`` format -- resolve by name.
+            net_number = name_to_number.get(zone.net_name, 0)
+        if net_number == 0:
+            continue
+        net_name = zone.net_name or number_to_name.get(net_number, "")
+        for i, points in enumerate(zone.filled_polygons):
+            if len(points) < 3:
+                continue
+            poly = Polygon(points)
+            if not poly.is_valid:
+                # make_valid keeps every copper lobe (buffer(0)
+                # drops bowtie lobes -- see _repair_fill_polygon).
+                poly = _repair_fill_polygon(poly)
+            if poly.is_empty:
+                continue
+            layer = zone.filled_polygon_layer(i)
+            if not layer:
+                continue
+            fills_by_layer.setdefault(layer, []).append(
+                _ZoneFill(
+                    net_number=net_number,
+                    net_name=net_name,
+                    layer=layer,
+                    polygon=poly,
+                )
+            )
+    return fills_by_layer
+
+
 class SegmentZoneClearanceRule(DRCRule):
     """Check track segments against foreign-net zone fill copper.
 
@@ -919,46 +979,12 @@ class SegmentZoneClearanceRule(DRCRule):
     def _collect_fills(self, pcb: PCB) -> dict[str, list[_ZoneFill]]:
         """Group zone fill polygons by copper layer, resolving zone nets.
 
-        Zones whose net cannot be resolved to a nonzero net number are
-        skipped (keepout/rule areas have no fills anyway; a zone with
-        no net has no foreign-net relationship to enforce).
+        Thin wrapper over the module-level :func:`_collect_zone_fills`
+        helper, shared with :class:`ViaZoneClearanceRule` so both rules
+        consume the same fill geometry (same net-resolution and
+        invalid-ring repair semantics).
         """
-        from shapely.geometry import Polygon
-
-        name_to_number = {net.name: net.number for net in pcb.nets.values() if net.name}
-        number_to_name = {net.number: net.name for net in pcb.nets.values()}
-
-        fills_by_layer: dict[str, list[_ZoneFill]] = {}
-        for zone in pcb.zones:
-            net_number = zone.net_number
-            if net_number == 0 and zone.net_name:
-                # KiCad 9 name-only ``(net "X")`` format -- resolve by name.
-                net_number = name_to_number.get(zone.net_name, 0)
-            if net_number == 0:
-                continue
-            net_name = zone.net_name or number_to_name.get(net_number, "")
-            for i, points in enumerate(zone.filled_polygons):
-                if len(points) < 3:
-                    continue
-                poly = Polygon(points)
-                if not poly.is_valid:
-                    # make_valid keeps every copper lobe (buffer(0)
-                    # drops bowtie lobes -- see _repair_fill_polygon).
-                    poly = _repair_fill_polygon(poly)
-                if poly.is_empty:
-                    continue
-                layer = zone.filled_polygon_layer(i)
-                if not layer:
-                    continue
-                fills_by_layer.setdefault(layer, []).append(
-                    _ZoneFill(
-                        net_number=net_number,
-                        net_name=net_name,
-                        layer=layer,
-                        polygon=poly,
-                    )
-                )
-        return fills_by_layer
+        return _collect_zone_fills(pcb)
 
     def _check_pair(
         self,
@@ -1039,3 +1065,257 @@ class SegmentZoneClearanceRule(DRCRule):
             items=(seg_ref, zone_ref),
             nets=(seg_net, fill.net_name),
         )
+
+
+class ViaZoneClearanceRule(DRCRule):
+    """Check vias and pads against foreign-net zone fill copper.
+
+    The sibling of :class:`SegmentZoneClearanceRule`.  That rule closed
+    the segment-vs-fill gap (Issue #3527), but vias and pads were still
+    never compared to the committed ``filled_polygon`` copper of another
+    net's zone -- so a via dropped sub-clearance to (or straight through)
+    a stale foreign pour shipped uncaught: KiCad's own DRC flags the
+    overlap, but every project gate stayed green because the strict CI
+    gate runs ``kct check`` and ``kct check`` had no via/pad-vs-fill term.
+    This is the exact failure class that motivated Issue #3556 (a surgical
+    trace move on board 06 left copper 0.0347 mm from an un-refilled GND
+    pour) -- but for the round copper of a via barrel rather than a track.
+
+    A through-via barrel is physical copper on **every** layer it spans,
+    so each via is checked against the fills on all spanned copper layers
+    (via :func:`kicad_tools.core.layers.via_spans_layer`), matching the
+    all-layer treatment :class:`ClearanceRule` already applies to
+    segment-vs-via pairs (Issue #3487).  Pads are checked on each copper
+    layer they declare.
+
+    Two violation flavours, both severity ``error`` (blocking):
+
+    - **Short**: the via/pad copper overlaps the fill polygon
+      (edge-to-edge clearance < 0).  ``actual_value`` is the negative
+      overlap depth.
+    - **Clearance**: the copper gap is positive but below the
+      manufacturer's ``min_clearance_mm``.
+
+    Same-net pairs are skipped (a via stitching its own pour is legal).
+    Net-0 vias/pads/zones are skipped, matching the sibling rule.
+
+    The rule_id is ``clearance_via_zone`` for vias and ``clearance_pad_zone``
+    for pads, so the existing strict CI gate (which counts every blocking
+    ``clearance_*`` violation ``kct check`` reports) picks them up with no
+    allowlist surgery.
+    """
+
+    rule_id = "clearance_via_zone"
+    name = "Via/Pad to Zone Fill Clearance"
+    description = "Validates vias and pads against foreign-net zone fill copper"
+
+    def check(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+    ) -> DRCResults:
+        """Check all vias and pads against foreign-net zone fills.
+
+        Args:
+            pcb: The PCB to check
+            design_rules: Design rules from the manufacturer profile
+
+        Returns:
+            DRCResults containing via/pad-vs-zone-fill shorts and
+            clearance violations.
+        """
+        results = DRCResults()
+        results.rules_checked = 1
+
+        fills_by_layer = _collect_zone_fills(pcb)
+        if not fills_by_layer:
+            return results
+
+        import shapely
+        from shapely import STRtree
+        from shapely.geometry import Point
+
+        min_clearance = design_rules.min_clearance_mm
+
+        for layer, fills in fills_by_layer.items():
+            tree = STRtree([f.polygon for f in fills])
+
+            # --- Vias: a barrel is copper on every layer it spans. ---
+            for via in pcb.vias:
+                if via.net_number == 0:
+                    continue
+                if not _via_spans_layer(via.layers, layer):
+                    continue
+                radius = via.size / 2.0
+                if radius <= 0:
+                    continue
+                shape = Point(via.position).buffer(radius)
+                ref = f"Via-{via.uuid[:8]}" if via.uuid else "Via"
+                self._query_and_check(
+                    tree,
+                    fills,
+                    shape,
+                    radius,
+                    via.net_number,
+                    via.net_name,
+                    ref,
+                    min_clearance,
+                    layer,
+                    results,
+                    shapely,
+                )
+
+            # --- Pads: checked on each copper layer they declare. ---
+            for fp in pcb.footprints:
+                for pad in fp.pads:
+                    if pad.net_number == 0:
+                        continue
+                    if not _pad_on_layer(pad, layer):
+                        continue
+                    abs_x, abs_y = _transform_pad_position(pad, fp)
+                    width, height = _transform_pad_dimensions(pad, fp)
+                    if width <= 0 or height <= 0:
+                        continue
+                    shape = shapely.box(
+                        abs_x - width / 2.0,
+                        abs_y - height / 2.0,
+                        abs_x + width / 2.0,
+                        abs_y + height / 2.0,
+                    )
+                    ref = f"{fp.reference}-{pad.number}"
+                    self._query_and_check(
+                        tree,
+                        fills,
+                        shape,
+                        0.0,  # the box already models the full pad copper
+                        pad.net_number,
+                        pad.net_name,
+                        ref,
+                        min_clearance,
+                        layer,
+                        results,
+                        shapely,
+                        rule_id="clearance_pad_zone",
+                        kind="pad",
+                    )
+
+        return results
+
+    def _query_and_check(
+        self,
+        tree: object,
+        fills: list[_ZoneFill],
+        shape: object,
+        inflate: float,
+        net_number: int,
+        net_name: str,
+        ref: str,
+        min_clearance: float,
+        layer: str,
+        results: DRCResults,
+        shapely_mod: object,
+        rule_id: str = "clearance_via_zone",
+        kind: str = "via",
+    ) -> None:
+        """Query the fill STRtree for one via/pad shape and emit violations."""
+        minx, miny, maxx, maxy = shape.bounds  # type: ignore[attr-defined]
+        margin = inflate + min_clearance
+        query_box = shapely_mod.box(  # type: ignore[attr-defined]
+            minx - margin, miny - margin, maxx + margin, maxy + margin
+        )
+        for idx in tree.query(query_box):  # type: ignore[attr-defined]
+            fill = fills[int(idx)]
+            if fill.net_number == net_number:
+                continue
+            violation = self._check_shape(
+                shape, net_number, net_name, ref, fill, min_clearance, layer, rule_id, kind
+            )
+            if violation is not None:
+                results.add(violation)
+
+    def _check_shape(
+        self,
+        shape: object,
+        net_number: int,
+        net_name: str,
+        ref: str,
+        fill: _ZoneFill,
+        min_clearance: float,
+        layer: str,
+        rule_id: str,
+        kind: str,
+    ) -> DRCViolation | None:
+        """Check one via/pad copper shape against one foreign fill polygon."""
+        poly = fill.polygon
+        net_label = net_name if net_number != 0 else ""
+        zone_ref = f"ZoneFill-{fill.net_name}" if fill.net_name else "ZoneFill"
+
+        # The shape already models the full copper footprint (via barrel
+        # disc / pad box), so a positive shape-to-polygon distance IS the
+        # edge-to-edge clearance -- no half-width subtraction needed.
+        dist = shape.distance(poly)  # type: ignore[attr-defined]
+
+        if dist > 0:
+            clearance = dist
+            if clearance + DRC_TOLERANCE >= min_clearance:
+                return None
+            from shapely.ops import nearest_points
+
+            p_shape, p_poly = nearest_points(shape, poly)
+            loc_x = (p_shape.x + p_poly.x) / 2.0
+            loc_y = (p_shape.y + p_poly.y) / 2.0
+            message = (
+                f"{kind.title()} to zone fill clearance {clearance:.3f}mm < "
+                f"minimum {min_clearance:.3f}mm (net '{net_label}' vs zone net "
+                f"'{fill.net_name}')"
+            )
+            return DRCViolation(
+                rule_id=rule_id,
+                severity="error",
+                message=message,
+                location=(round(loc_x, 3), round(loc_y, 3)),
+                layer=layer,
+                actual_value=round(clearance, 4),
+                required_value=min_clearance,
+                items=(ref, zone_ref),
+                nets=(net_label, fill.net_name),
+            )
+
+        # dist == 0: the copper overlaps (or grazes) the fill -- hard short.
+        intersection = shape.intersection(poly)  # type: ignore[attr-defined]
+        if intersection.is_empty:
+            from shapely.ops import nearest_points
+
+            rep = nearest_points(shape, poly)[0]
+            depth = 0.0
+        else:
+            rep = intersection.representative_point()
+            depth = poly.boundary.distance(rep)  # type: ignore[attr-defined]
+        clearance = -depth
+        return DRCViolation(
+            rule_id=rule_id,
+            severity="error",
+            message=(
+                f"Short: {kind} on net '{net_label}' overlaps zone fill of net "
+                f"'{fill.net_name}' on {layer} (overlap depth {depth:.3f}mm)"
+            ),
+            location=(round(rep.x, 3), round(rep.y, 3)),
+            layer=layer,
+            actual_value=round(clearance, 4),
+            required_value=min_clearance,
+            items=(ref, zone_ref),
+            nets=(net_label, fill.net_name),
+        )
+
+
+def _pad_on_layer(pad: Pad, layer: str) -> bool:
+    """Return True if a pad's copper exists on ``layer``.
+
+    Pads declare layers like ``["F.Cu", "F.Mask"]`` (SMD) or
+    ``["*.Cu", "*.Mask"]`` (through-hole).  The ``*.Cu`` wildcard means
+    every copper layer, so a through-hole pad is copper on ``layer``.
+    """
+    pad_layers = pad.layers
+    if "*.Cu" in pad_layers:
+        return True
+    return layer in pad_layers

@@ -87,7 +87,18 @@ def routed_pcb_path() -> Path:
 # as board 06 / PR #3548) cleared all 10 findings with zero trace, via,
 # or zone-outline changes.  The allowlist entry was removed, restoring
 # the #3470 strict-0 gate (``None`` = entry absent = 0 blocking errors).
-BOARD_05_EXPECTED_TOLERANCE: int | None = None
+#
+# Issue #3556 (2026-06-13) re-added a tolerance of 30: the new
+# ``clearance_via_zone`` / ``clearance_pad_zone`` rule (the via/pad
+# sibling of #3527, vias/pads vs foreign-net zone *fill* copper) surfaced
+# 30 pre-existing ``clearance_pad_zone`` defects in the committed artifact
+# (foreign-net pad-vs-pour gaps: PHASE_A/B/C vs GND, +24V vs GND, SWDIO/
+# SWO vs +3V3, ...).  Like the #3527 findings these were always in the
+# copper -- the gate simply could not see pad-vs-fill spacing before the
+# rule existed; #3553-style zone refill against the final placement clears
+# them.  This fixture pins the entry to EXACTLY 30: any other value fails
+# loudly and requires an explicit update here with reviewer sign-off.
+BOARD_05_EXPECTED_TOLERANCE: int | None = 30
 
 
 @pytest.fixture(scope="module")
@@ -285,9 +296,10 @@ class TestBoard05DRCAllowlistGuard:
         would silently pass even with serious routing damage.  This test
         catches the "allowlist itself regressed" case.
 
-        The 200 upper bound is generous (the highest historic value
-        across all boards in the file is 70 for board 07) but tight
-        enough to flag a typo like 530 vs 53.
+        The 200 upper bound is generous (the highest value across all
+        boards in the file is 120 for board 07 after Issue #3556 added the
+        via/pad-vs-zone-fill rule) but tight enough to flag a typo like
+        530 vs 53.
         """
         assert 0 <= board_05_allowlist_value <= 200, (
             f"Board 05 allowlist value {board_05_allowlist_value} is "

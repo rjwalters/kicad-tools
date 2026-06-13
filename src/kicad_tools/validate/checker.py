@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import DesignRules, get_profile
 
-from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule
+from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
 from .rules.connectivity import ConnectivityRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
@@ -114,6 +114,7 @@ class DRCChecker:
         "check_clearances",
         "check_connectivity",
         "check_segment_zone_clearances",
+        "check_via_zone_clearances",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
@@ -239,6 +240,26 @@ class DRCChecker:
             (severity error, blocking).
         """
         rule = SegmentZoneClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_via_zone_clearances(self) -> DRCResults:
+        """Check vias and pads against foreign-net zone fill copper.
+
+        The sibling of :meth:`check_segment_zone_clearances`.  Validates
+        each via barrel (on every layer it spans) and each pad against
+        the committed ``filled_polygon`` geometry of zones on a
+        *different* net and the same layer, flagging both copper overlap
+        (a hard short) and sub-clearance gaps.  Closes the Issue #3556
+        residual gap: a via dropped sub-clearance to (or through) a stale
+        foreign pour was invisible to ``kct check`` because
+        ``clearance_segment_zone`` only inspected track segments, and the
+        other clearance rules never consult zone fills.
+
+        Returns:
+            DRCResults containing ``clearance_via_zone`` and
+            ``clearance_pad_zone`` violations (severity error, blocking).
+        """
+        rule = ViaZoneClearanceRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_connectivity(self) -> DRCResults:

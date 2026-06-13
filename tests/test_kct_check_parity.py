@@ -409,9 +409,16 @@ class TestCiGateCountsGatedFamilies:
             pytest.skip("board 07 routed PCB not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # 70 total - 1 advisory connectivity = 69 blocking (filled +
-        # 45-quantized artifact).
-        assert blocking == 69, (
-            f"expected 69 blocking errors with net_class_map awareness, got {blocking}"
+        # Re-baselined 2026-06-13 (Issue #3556): the new
+        # ``clearance_via_zone`` / ``clearance_pad_zone`` rule (vias and
+        # pads vs foreign-net zone *fill* copper) surfaces 51 pre-existing
+        # findings on this committed artifact (47 pad-vs-fill + 4
+        # via-vs-fill, all foreign-net sub-0.102mm gaps / overlaps that no
+        # gate previously caught). 69 prior blocking + 51 = 120 blocking;
+        # the advisory connectivity count is unchanged at 1. The tolerance
+        # floor in .github/routed-drc-tolerance.yml rises 70 -> 120 to match.
+        assert blocking == 120, (
+            f"expected 120 blocking errors with net_class_map awareness "
+            f"+ via/pad-vs-zone-fill checks, got {blocking}"
         )
         assert advisory.get("connectivity", 0) == 1
