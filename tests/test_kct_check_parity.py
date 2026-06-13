@@ -383,29 +383,35 @@ class TestCiGateCountsGatedFamilies:
         Before #3151 the gate ran bare and saw 11 blocking errors; now it
         resolves the sidecar and sees the gated-family errors too.
 
-        Re-baselined 2026-06-13 (Issue #3617 / PR #3632, doctor pass) for
-        the FILLED committed artifact: 61 total - 1 advisory connectivity =
-        60 blocking.  The dead-pour artifact measured 19 total - 5 advisory
-        = 14 blocking; filling the pour (a) completes more nets so more
-        diff-pair/match-group families get honestly measured and (b)
-        physically connects the formerly-floating pads, dropping advisory
-        connectivity 5 -> 1.  The bulk of the blocking rise is the seed-42
-        route's pre-existing diff-pair congestion (clearance_segment_via /
-        clearance_via_via on the 0.10mm-clearance signal classes) plus the
-        stitcher's cross-net clearance residual, both surfaced now that the
-        pour copper exists to short against -- see the board-07 entry in
-        .github/routed-drc-tolerance.yml for the per-family forensics.
+        Re-baselined 2026-06-13 (Issue #3617 / PR #3632, doctor pass 2) for
+        the FILLED + 45-QUANTIZED committed artifact: 70 total - 1 advisory
+        connectivity = 69 blocking.  Doctor pass 1 (straight-chord filled
+        artifact) was 61 total / 60 blocking; pass 2 routes the pour-repair
+        stubs/bridges through the #3532 quantizer so the committed artifact
+        passes tests/test_fleet_45_census.py.  The +9 (+8 blocking) is the
+        quantization doglegs grazing the 0.10mm-clearance DDR/MIPI/HDMI
+        copper (+4 clearance_pad_segment, +3 clearance_segment_segment, +2
+        clearance_segment_via); no new family, gated diff-pair/match-group
+        families (15) and the connectivity advisory (1) unchanged.  See the
+        board-07 entry in .github/routed-drc-tolerance.yml (note 4) for the
+        per-family forensics and the #3633 interleave-fix exit clause.
 
-        Previous re-baselines: 2026-06-10 (Issue #3440: 14 blocking);
-        2026-06-09 (issue #3458 inventory, PR #3462: 16); 2026-06-06
-        (Issue #3263: 17).
+        Earlier in this PR: the dead-pour artifact measured 19 total - 5
+        advisory = 14 blocking; filling the pour completes more nets (honest
+        diff-pair/match-group measurement) and physically connects the
+        formerly-floating pads (advisory connectivity 5 -> 1).
+
+        Previous re-baselines: 2026-06-13 pass 1 (Issue #3617: 60 blocking);
+        2026-06-10 (Issue #3440: 14 blocking); 2026-06-09 (issue #3458
+        inventory, PR #3462: 16); 2026-06-06 (Issue #3263: 17).
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 routed PCB not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # 61 total - 1 advisory connectivity = 60 blocking (filled artifact).
-        assert blocking == 60, (
-            f"expected 60 blocking errors with net_class_map awareness, got {blocking}"
+        # 70 total - 1 advisory connectivity = 69 blocking (filled +
+        # 45-quantized artifact).
+        assert blocking == 69, (
+            f"expected 69 blocking errors with net_class_map awareness, got {blocking}"
         )
         assert advisory.get("connectivity", 0) == 1

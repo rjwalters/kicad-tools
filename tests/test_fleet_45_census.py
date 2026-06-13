@@ -20,16 +20,19 @@ and teardrop geometry would be exempt, but the fleet uses straight
 
 Documented residuals (tracked by issue #3535):
 
-* two corridor chords on boards 06/07 where BOTH dogleg variants
-  (diag-first and axis-first) introduce a clearance violation against
-  neighbouring copper -- the skewed chord is the only path that fits;
-  pinned by uuid in ``DOCUMENTED_OFF_ANGLE``;
-* board 07's ``DDR_DATA_BYTE_0`` length-tuning meanders (55 segments):
-  the group is tuned to exactly-equal member lengths by SLOPED meander
-  segments, and doglegging them changes lengths unevenly (DQ6
-  +1.149 mm), tripping ``match_group_length_skew``.  Exempted per net
-  in ``EXEMPT_TUNED_NETS`` until the tuning emitter generates
-  45-degree trombones (issue #3535).
+* a corridor chord on board 06 where BOTH dogleg variants (diag-first
+  and axis-first) introduce a clearance violation against neighbouring
+  copper -- the skewed chord is the only path that fits; pinned by uuid
+  in ``DOCUMENTED_OFF_ANGLE``.  (Board 07 carried such a chord before
+  issue #3617's filled re-route; it is gone now and the pour-repair
+  emitter quantizes its own stubs/bridges, so board 07 needs no
+  ``DOCUMENTED_OFF_ANGLE`` entry.)
+* board 07's ``DDR_DATA_BYTE_0`` length-tuning meanders: the group is
+  tuned to exactly-equal member lengths by SLOPED meander segments, and
+  doglegging them changes lengths unevenly (DQ6 +1.149 mm), tripping
+  ``match_group_length_skew``.  Exempted per net in
+  ``EXEMPT_TUNED_NETS`` until the tuning emitter generates 45-degree
+  trombones (issue #3535).
 
 Any NEW off-angle segment outside these pinned sets still fails.
 """
@@ -57,12 +60,12 @@ DOCUMENTED_OFF_ANGLE: dict[str, dict[str, str]] = {
         # (clearance_segment_via at PCB-local (14.1-15.7, 9.4-10.3)).
         "e9af299d-7f67-4eec-bda7-0577aee1e86b": "diffpair corridor chord",
     },
-    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": {
-        # (156.5, 155.0) -> (156.379, 155.5795), 11.8 deg, net 21
-        # (TMDS_D0 pair area): both bulges violate intra-pair clearance
-        # or clip the adjacent via at PCB-local (56.8, 55.0).
-        "351d1137-d518-4b72-b0ac-cfda7f055b10": "TMDS_D0 pair corridor chord",
-    },
+    # Issue #3617: board 07's prior corridor-chord exemption
+    # (351d1137-..., TMDS_D0) is gone -- the regenerated filled artifact
+    # routes that area 45-aligned, and the pour-repair emitter now runs
+    # through the #3532 quantizer, so no board-07 segment needs an
+    # in-place dogleg exemption.  (Empty entries are omitted so the
+    # ratchet check below cannot resurrect a stale uuid.)
 }
 
 #: Per-artifact nets whose off-angle segments are length-tuning meanders
@@ -109,12 +112,9 @@ def _committed_routed_artifacts() -> list[Path]:
         # Local developer runs keep the git path so stray untracked
         # artifacts cannot widen (or accidentally gate) the census.
         names = [
-            str(p.relative_to(REPO_ROOT))
-            for p in REPO_ROOT.glob("boards/**/*_routed.kicad_pcb")
+            str(p.relative_to(REPO_ROOT)) for p in REPO_ROOT.glob("boards/**/*_routed.kicad_pcb")
         ]
-    return sorted(
-        REPO_ROOT / line for line in names if line.endswith("_routed.kicad_pcb")
-    )
+    return sorted(REPO_ROOT / line for line in names if line.endswith("_routed.kicad_pcb"))
 
 
 def _artifact_id(path: Path) -> str:
@@ -127,8 +127,7 @@ ARTIFACTS = _committed_routed_artifacts()
 def test_fleet_has_routed_artifacts() -> None:
     """Sanity: the census below must actually cover the fleet."""
     assert len(ARTIFACTS) >= 8, (
-        f"expected at least 8 committed routed artifacts, found "
-        f"{[str(p) for p in ARTIFACTS]}"
+        f"expected at least 8 committed routed artifacts, found {[str(p) for p in ARTIFACTS]}"
     )
 
 
@@ -140,11 +139,7 @@ def test_committed_artifact_is_45_aligned(artifact: Path) -> None:
     allowed = DOCUMENTED_OFF_ANGLE.get(_artifact_id(artifact), {})
     tuned_names = EXEMPT_TUNED_NETS.get(_artifact_id(artifact), frozenset())
     tuned_ids = _net_ids_by_name(artifact, tuned_names) if tuned_names else set()
-    unexpected = [
-        b
-        for b in bad
-        if (b["uuid"] or "") not in allowed and b["net"] not in tuned_ids
-    ]
+    unexpected = [b for b in bad if (b["uuid"] or "") not in allowed and b["net"] not in tuned_ids]
     sample = [
         f"{b['start']} -> {b['end']} [{b['layer']} net {b['net']} "
         f"uuid {b['uuid']}] off by {b['off_deg']:.2f} deg"

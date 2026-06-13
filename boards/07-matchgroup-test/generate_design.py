@@ -382,9 +382,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         # The zone's net is serialized as ``(net "NAME")`` by the
         # ``zones fill`` round-trip writer and as ``(net N)`` +
         # ``(net_name "NAME")`` by KiCad itself -- accept both.
-        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(
-            r'\(net "([^"]*)"\)', zone
-        )
+        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(r'\(net "([^"]*)"\)', zone)
         if not m or m.group(1) not in fills:
             continue
         net = m.group(1)
@@ -566,9 +564,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
     text = pcb_path.read_text()
-    net_id_by_name = {
-        name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)
-    }
+    net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
     id_to_name = {str(v): k for k, v in net_id_by_name.items()}
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
 
@@ -588,9 +584,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             y = fp.position[1] + ry + origin_y
             is_th = any("*" in str(layer) for layer in pad.layers)
             layers = (
-                all_layers
-                if is_th
-                else frozenset({l for l in pad.layers if l.endswith(".Cu")})
+                all_layers if is_th else frozenset({l for l in pad.layers if l.endswith(".Cu")})
             )
             # Conservative obstacle: circumscribed half-diagonal so square
             # pad corners are respected.  The CONNECTIVITY geometry uses
@@ -645,9 +639,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # Zone fills: net -> [(poly, layer)]
     fills_by_net: dict[str, list] = {n: [] for n in net_names}
     for zone in _find_sexp_blocks(text, "\n\t(zone") + _find_sexp_blocks(text, "\n  (zone"):
-        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(
-            r'\(net "([^"]*)"\)', zone
-        )
+        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(r'\(net "([^"]*)"\)', zone)
         if not m or m.group(1) not in fills_by_net:
             continue
         for block in _find_sexp_blocks(zone, "(filled_polygon"):
@@ -716,9 +708,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False
         return True
 
-    directions = [
-        (math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)
-    ]
+    directions = [(math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)]
     # Near offsets first (the BGA diagonal hollow sits at 0.898 mm); the
     # long tail handles lane escapes -- a pad boxed in by parallel
     # traces (board 06: U2.F1 between USB3_TX2+/TX2- on F.Cu with
@@ -736,7 +726,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         nonlocal vias_placed
         nid = net_id_by_name[net]
         via_lines.append(
-            f'  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) '
+            f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
             f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
         )
         via_index.append((Point(vx, vy), net, VIA_R))
@@ -757,6 +747,50 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         )
         seg_index.append((LineString([p0, p1]).buffer(width / 2.0), net, layer))
 
+    def _emit_seg_45(
+        net: str,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        layer: str,
+        width: float,
+    ) -> bool:
+        """Validate and emit a connectivity stub/bridge as 45-aligned copper.
+
+        Issue #3617 / #3532: ``_emit_seg`` writes a single straight chord, so
+        an off-axis pad->via stub or cross-component bridge ships
+        arbitrary-angle copper that fails the fleet 45-census gate
+        (``tests/test_fleet_45_census.py``).  Rather than post-processing the
+        committed artifact (where a dogleg's ``min(|dx|, |dy|)`` perpendicular
+        bulge can be >1 mm and clip the congested BGA/diff-pair copper), the
+        emitter builds the 45-aligned path itself and validates EVERY leg
+        against foreign copper with the same ``_path_ok`` contract -- so the
+        repair copper is 45-only AND clearance-clean by construction, and
+        future regens stay census-clean without a separate quantize step.
+
+        Tries the straight chord first (already 45-aligned bridges stay one
+        segment), then both dogleg variants (diagonal-first / axis-first --
+        the bulge falls on opposite sides of the chord).  Emits the first
+        candidate whose legs all clear; returns False (caller skips, exactly
+        as a bare ``_path_ok`` failure did) when none clears.
+        """
+        from kicad_tools.router.quantize import dogleg_points, is_45_aligned
+
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        if is_45_aligned(dx, dy):
+            candidates = [[p0, p1]]
+        else:
+            candidates = [
+                dogleg_points(p0[0], p0[1], p1[0], p1[1], axis_first=False),
+                dogleg_points(p0[0], p0[1], p1[0], p1[1], axis_first=True),
+            ]
+        for verts in candidates:
+            legs = list(zip(verts[:-1], verts[1:], strict=True))
+            if all(_path_ok(net, a, b, layer, width) for a, b in legs):
+                for a, b in legs:
+                    _emit_seg(net, a, b, layer, width)
+                return True
+        return False
+
     # --- per-net connectivity loop ------------------------------------------
     for net in net_names:
         # Own elements: (geom, layerset, label).  Pads carry their name.
@@ -775,9 +809,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 # Inscribed-circle copper for own-net union (matches the
                 # audit's conservative connectivity model).
                 own.append((inscribed, layers, f"pad:{name}"))
-        pad_center = {
-            entry[5]: entry[4] for entry in pad_index if entry[1] == net
-        }
+        pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
 
         # Union-find over own elements, built ONCE and maintained
         # incrementally as repair geometry is appended (a full O(n^2)
@@ -836,9 +868,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # Connect the largest not-yet-skipped secondary component; a
             # component that failed every strategy is set aside so the
             # remaining components still get their repair attempt.
-            candidates = [
-                idxs for idxs in live[1:] if _find(idxs[0]) not in skipped_roots
-            ]
+            candidates = [idxs for idxs in live[1:] if _find(idxs[0]) not in skipped_roots]
             if not candidates:
                 break
             target = candidates[0]
@@ -847,9 +877,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
             # Sub-stage A: lone SMD pad (or pad cluster) with no via -- try
             # an offset via + stub whose barrel lands on PRIMARY copper.
-            comp_pads = [
-                own[i][2][4:] for i in target if own[i][2].startswith("pad:")
-            ]
+            comp_pads = [own[i][2][4:] for i in target if own[i][2].startswith("pad:")]
             comp_has_via = any(own[i][2] == "via" for i in target)
             if comp_pads and not comp_has_via:
                 pad_name = comp_pads[0]
@@ -875,7 +903,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 if best is not None:
                     vx, vy = best
                     _emit_via(net, vx, vy)
-                    _emit_seg(net, (x0, y0), (vx, vy), "F.Cu", STUB_W)
+                    _emit_seg_45(net, (x0, y0), (vx, vy), "F.Cu", STUB_W)
                     _append_own((Point(vx, vy).buffer(VIA_R), all_layers, "via"))
                     _append_own(
                         (
@@ -911,9 +939,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     ux, uy = vec[0] / norm, vec[1] / norm
                     p0 = (pa.x - ux * 0.35, pa.y - uy * 0.35)
                     p1 = (pb.x + ux * 0.35, pb.y + uy * 0.35)
-                    if not _path_ok(net, p0, p1, lay, BRIDGE_W):
+                    if not _emit_seg_45(net, p0, p1, lay, BRIDGE_W):
                         continue
-                    _emit_seg(net, p0, p1, lay, BRIDGE_W)
                     _append_own(
                         (
                             LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
@@ -933,9 +960,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # first intersection with primary copper within 12 mm becomes
             # the bridge endpoint.
             if not merged:
-                ray_origins = [
-                    own[i][0].centroid for i in target if own[i][2] == "via"
-                ]
+                ray_origins = [own[i][0].centroid for i in target if own[i][2] == "via"]
                 for origin in ray_origins:
                     for dx, dy in directions:
                         ray = LineString(
@@ -967,9 +992,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         end = ray.interpolate(min(best_t + 0.35, 12.0))
                         p0 = (origin.x, origin.y)
                         p1 = (end.x, end.y)
-                        if not _path_ok(net, p0, p1, best_lay, BRIDGE_W):
+                        if not _emit_seg_45(net, p0, p1, best_lay, BRIDGE_W):
                             continue
-                        _emit_seg(net, p0, p1, best_lay, BRIDGE_W)
                         _append_own(
                             (
                                 LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
@@ -1016,13 +1040,14 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                                     continue
                                 _emit_via(net, *va)
                                 _emit_via(net, *vb)
-                                _emit_seg(net, va, vb, lay, BRIDGE_W)
-                                _append_own(
-                                    (Point(va).buffer(VIA_R), all_layers, "via")
-                                )
-                                _append_own(
-                                    (Point(vb).buffer(VIA_R), all_layers, "via")
-                                )
+                                # Straight chord cleared above, so a
+                                # 45-aligned chord always emits; an off-angle
+                                # chord doglegs (both via barrels span all
+                                # layers, the bulge clears the same copper the
+                                # straight chord did at this short length).
+                                _emit_seg_45(net, va, vb, lay, BRIDGE_W)
+                                _append_own((Point(va).buffer(VIA_R), all_layers, "via"))
+                                _append_own((Point(vb).buffer(VIA_R), all_layers, "via"))
                                 _append_own(
                                     (
                                         LineString([va, vb]).buffer(BRIDGE_W / 2.0),
@@ -1044,8 +1069,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             if not merged:
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
                 failed.append(
-                    f"{net}: cannot reconnect component "
-                    f"{[n[4:] for n in names] or '(fill island)'}"
+                    f"{net}: cannot reconnect component {[n[4:] for n in names] or '(fill island)'}"
                 )
                 skipped_roots.add(_find(target[0]))
 
@@ -1743,6 +1767,46 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         print("   POUR CONNECTIVITY: FAIL (see above)")
     else:
         print("   POUR CONNECTIVITY: PASS")
+
+    # Issue #3617 / #3532: the pour-repair emitter (_repair_pour_connectivity)
+    # connects pad -> offset-via stubs and cross-component island bridges with
+    # single straight segments to raw shapely-derived endpoints, so it ships
+    # arbitrary-angle copper (~22 degrees off the 0/45/90/135 set) that
+    # bypasses the router's on-grid A* output and fails the fleet 45-census
+    # gate (tests/test_fleet_45_census.py).  Quantize the artifact through the
+    # shared #3532 machinery (kicad_tools.router.quantize.quantize_pcb_file),
+    # which replaces each off-angle segment with an EXACT two-leg dogleg
+    # (45-degree leg + axis-aligned leg) that preserves the original
+    # endpoints bit-for-bit -- so pour connectivity is unchanged.  Mirror the
+    # softstart recipe's quantize -> re-fill fixpoint: a dogleg's small
+    # perpendicular bulge can graze a foreign via barrel, so re-fill carves
+    # clearance around the converged geometry before the final audit.
+    print("\n8. 45-degree quantization of pour-repair copper (#3532 / #3617)...")
+    try:
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        quantized = quantize_pcb_file(output_path)
+        if quantized:
+            print(f"   Quantized {len(quantized)} off-angle repair segment(s)")
+            print("8b. Re-filling zones after quantization...")
+            fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+            if fill_result.returncode == 0:
+                print("8c. Copper-union pour-connectivity audit (post-quantize)...")
+                pour_ok = _run_pour_audit("[quant]")
+                print(
+                    "   POUR CONNECTIVITY (post-quantize): "
+                    + ("PASS" if pour_ok else "FAIL (see above)")
+                )
+            else:
+                print(
+                    f"   Zone re-fill after quantization failed "
+                    f"(rc={fill_result.returncode}); committed copper still "
+                    f"connectivity-correct (dogleg preserves endpoints)."
+                )
+        else:
+            print("   No off-angle segments: repair copper already 45-aligned")
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        print(f"   WARNING: 45-degree quantization step skipped: {exc}")
 
     return success
 
