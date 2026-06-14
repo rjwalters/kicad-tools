@@ -98,6 +98,16 @@ if TYPE_CHECKING:
 # DDR5) MUST set ``NetClassRouting.skew_tolerance_mm`` explicitly.
 DEFAULT_SKEW_TOLERANCE_MM = 0.5
 
+# Float-comparison slack for the skew-vs-tolerance test.  A pair routed to
+# *exactly* the tolerance (e.g. skew 0.500 mm against a 0.500 mm budget)
+# can measure as 0.5000000001 mm after summing many segment lengths in
+# floating point, which would spuriously fire ``skew_mm > tolerance_mm``.
+# We treat any skew within this epsilon of the tolerance as in-bounds
+# (issue #3543: "exact-tolerance rounding 0.501 vs 0.500").  1 micron is
+# far below fab resolution (typical min trace/space ~0.1 mm) so this never
+# masks a real, manufacturable over-skew.
+SKEW_TOLERANCE_EPSILON_MM = 1e-6
+
 
 def _normalize_name_pair(a: str, b: str) -> tuple[str, str]:
     """Return the lexicographically-sorted (low, high) name tuple."""
@@ -266,7 +276,7 @@ class DiffPairLengthSkewRule(DRCRule):
             )
 
             tolerance_mm = self._threshold_map.get(key, self._default_tolerance_mm)
-            if skew_mm > tolerance_mm:
+            if skew_mm > tolerance_mm + SKEW_TOLERANCE_EPSILON_MM:
                 results.add(
                     self._make_violation(
                         name_a=name_a,
