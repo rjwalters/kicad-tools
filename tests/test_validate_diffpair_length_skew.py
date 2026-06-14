@@ -167,6 +167,43 @@ class TestDiffPairLengthSkewRule:
         results = rule.check(pcb, _design_rules())
         assert len(results.violations) == 0
 
+    def test_float_noise_at_tolerance_does_not_fire(self):
+        """skew measured as tolerance + float epsilon -> no violation (issue #3543).
+
+        A pair routed to *exactly* the tolerance can sum to a value a few
+        ULPs over (e.g. 0.5 + 1e-12) after accumulating many segment
+        lengths.  Without the epsilon slack the bare ``>`` comparison would
+        spuriously fire on a manufacturable, at-tolerance pair.
+        """
+        pcb = _make_pair_pcb()
+        # 0.5 + tiny float noise, well inside SKEW_TOLERANCE_EPSILON_MM (1e-6).
+        noisy = 0.5 + 1e-12
+        assert noisy > 0.5  # genuinely greater as a raw float
+        rule = DiffPairLengthSkewRule(
+            skew_data={("USB_D+", "USB_D-"): noisy},
+            engaged_pairs={(4, 5)},
+        )
+        results = rule.check(pcb, _design_rules())
+        assert len(results.violations) == 0
+        # The pair was still *checked* (engaged + measured); just no fire.
+        assert results.rules_checked == 1
+
+    def test_overshoot_beyond_epsilon_still_fires(self):
+        """skew = 0.501 (1 micron over) is a real over-skew -> still fires.
+
+        The epsilon slack is only 1e-6 mm; a 0.001 mm (1 micron) overshoot
+        is three orders of magnitude larger and must NOT be masked.  This
+        guards against the epsilon being widened into a real-tolerance hole.
+        """
+        pcb = _make_pair_pcb()
+        rule = DiffPairLengthSkewRule(
+            skew_data={("USB_D+", "USB_D-"): 0.501},
+            engaged_pairs={(4, 5)},
+        )
+        results = rule.check(pcb, _design_rules())
+        assert len(results.violations) == 1
+        assert results.violations[0].actual_value == pytest.approx(0.501, abs=1e-9)
+
     def test_above_default_tolerance_fires(self):
         """Asymmetric pair: skew=2.0 > default 0.5 -> fires with correct values."""
         pcb = _make_pair_pcb()
