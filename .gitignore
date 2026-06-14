@@ -35,3 +35,19 @@
 .loom/state.json
 .loom/*.log
 .loom/*.sock
+
+# Build artifacts
+# Compiled native extension (rebuilt locally via `uv run kct build-native`)
+*.so
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+*.egg-info/
+
+# Test byproducts
+# KiCad regenerates project-local state (.kicad_prl) when tests open the fixture
+tests/fixtures/projects/*.kicad_prl
