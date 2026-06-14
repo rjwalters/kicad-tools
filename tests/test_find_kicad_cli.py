@@ -23,7 +23,6 @@ class TestFindKicadCliUserApplications:
         user_app_path = str(Path.home() / "Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
 
         # Patch Path.exists so only the user-local path "exists"
-        original_exists = Path.exists
 
         def fake_exists(self):
             if str(self) == user_app_path:
@@ -43,7 +42,6 @@ class TestFindKicadCliUserApplications:
         won't be expanded and the file will never be found."""
         # Capture all paths that find_kicad_cli checks by patching Path.exists
         checked_paths: list[str] = []
-        original_exists = Path.exists
 
         def tracking_exists(self):
             checked_paths.append(str(self))

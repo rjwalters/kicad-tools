@@ -1904,7 +1904,7 @@ class TestAutorouterAdvanced:
         """Test resetting router for new trial."""
         # Route first
         router_with_nets.route_all()
-        original_routes = len(router_with_nets.routes)
+        len(router_with_nets.routes)
 
         # Reset
         router_with_nets._reset_for_new_trial()

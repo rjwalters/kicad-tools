@@ -160,7 +160,7 @@ class TestPCBEditorBoardOutline:
         pcb_file.write_text(MINIMAL_PCB)
         editor = PCBEditor(str(pcb_file))
 
-        nodes = editor.add_board_outline(150.0, 100.0, origin_x=100.0, origin_y=100.0)
+        editor.add_board_outline(150.0, 100.0, origin_x=100.0, origin_y=100.0)
         editor.save()
 
         # Re-read and verify the outline matches spec dimensions

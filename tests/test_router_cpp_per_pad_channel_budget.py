@@ -476,7 +476,6 @@ class TestSoftstartRealisticCluster:
         # (0.5mm east of the package edge -- matches softstart's escape
         # stub length).
         pad_y_list = [4.0, 4.65, 5.3, 5.95]
-        pkg_edge_x = 6.0
         escape_x = 6.5
 
         # Targets: each net wants to reach a peer pad's row but on the

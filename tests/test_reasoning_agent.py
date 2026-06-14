@@ -407,7 +407,7 @@ class TestPCBReasoningAgentInit:
         mock_state = create_mock_pcb_state()
         mock_from_pcb.return_value = mock_state
 
-        agent = PCBReasoningAgent(pcb_path="/test/board.kicad_pcb")
+        PCBReasoningAgent(pcb_path="/test/board.kicad_pcb")
 
         mock_from_pcb.assert_called_once()
 
@@ -1027,7 +1027,7 @@ class TestPCBReasoningAgentFromPCB:
         mock_state = create_mock_pcb_state()
         mock_from_pcb.return_value = mock_state
 
-        agent = PCBReasoningAgent.from_pcb("/test/board.kicad_pcb")
+        PCBReasoningAgent.from_pcb("/test/board.kicad_pcb")
 
         mock_from_pcb.assert_called_once()
         mock_drc_load.assert_not_called()
@@ -1044,7 +1044,7 @@ class TestPCBReasoningAgentFromPCB:
         mock_drc = MagicMock()
         mock_drc_load.return_value = mock_drc
 
-        agent = PCBReasoningAgent.from_pcb(
+        PCBReasoningAgent.from_pcb(
             "/test/board.kicad_pcb",
             drc_path="/test/board.rpt",
         )

@@ -188,7 +188,7 @@ class TestNetStatusCLI:
 
     def test_basic_text_output(self, connected_pcb: Path, capsys):
         """Test basic text output format."""
-        result = main([str(connected_pcb)])
+        main([str(connected_pcb)])
 
         captured = capsys.readouterr()
         assert "Net Status:" in captured.out
@@ -197,7 +197,7 @@ class TestNetStatusCLI:
 
     def test_json_output(self, connected_pcb: Path, capsys):
         """Test JSON output format."""
-        result = main([str(connected_pcb), "--format", "json"])
+        main([str(connected_pcb), "--format", "json"])
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -232,7 +232,7 @@ class TestNetStatusCLI:
 
     def test_incomplete_filter(self, incomplete_pcb: Path, capsys):
         """Test --incomplete filter shows only incomplete nets."""
-        result = main([str(incomplete_pcb), "--incomplete"])
+        main([str(incomplete_pcb), "--incomplete"])
 
         captured = capsys.readouterr()
         # Should show incomplete/unrouted nets
@@ -295,7 +295,7 @@ class TestNetStatusCLI:
 
     def test_by_class_option(self, incomplete_pcb: Path, capsys):
         """Test --by-class grouping option."""
-        result = main([str(incomplete_pcb), "--by-class"])
+        main([str(incomplete_pcb), "--by-class"])
 
         captured = capsys.readouterr()
         # Should show net class grouping
@@ -307,7 +307,7 @@ class TestNetStatusCLI:
 
     def test_verbose_option(self, incomplete_pcb: Path, capsys):
         """Test --verbose option shows more details."""
-        result = main([str(incomplete_pcb), "--verbose"])
+        main([str(incomplete_pcb), "--verbose"])
 
         captured = capsys.readouterr()
         # Verbose should show coordinates
@@ -316,7 +316,7 @@ class TestNetStatusCLI:
 
     def test_json_by_class(self, incomplete_pcb: Path, capsys):
         """Test JSON output with --by-class option."""
-        result = main([str(incomplete_pcb), "--format", "json", "--by-class"])
+        main([str(incomplete_pcb), "--format", "json", "--by-class"])
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -326,7 +326,7 @@ class TestNetStatusCLI:
 
     def test_json_nets_list(self, incomplete_pcb: Path, capsys):
         """Test JSON output contains nets list."""
-        result = main([str(incomplete_pcb), "--format", "json"])
+        main([str(incomplete_pcb), "--format", "json"])
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)

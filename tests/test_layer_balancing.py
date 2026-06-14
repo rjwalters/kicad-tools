@@ -59,7 +59,7 @@ class TestLayerFillRatios:
     def test_blocked_cells_excluded(self, grid_4layer):
         """Blocked cells should be excluded from the denominator."""
         rows, cols = grid_4layer.rows, grid_4layer.cols
-        total_cells = rows * cols
+        rows * cols
 
         # Block half the cells on layer 1
         for y in range(rows):

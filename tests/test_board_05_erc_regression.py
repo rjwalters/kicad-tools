@@ -43,6 +43,7 @@ adjustment (rare — bump the constant with a referenced commit/issue).
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 
@@ -100,10 +101,8 @@ def _run_erc_count_errors(sch_path: Path) -> tuple[int, list[dict]]:
 
     with open(result.output_path) as f:
         data = json.load(f)
-    try:
+    with contextlib.suppress(Exception):
         result.output_path.unlink(missing_ok=True)
-    except Exception:
-        pass
 
     errors: list[dict] = []
     for sheet in data.get("sheets", []):

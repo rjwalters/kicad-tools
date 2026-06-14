@@ -82,7 +82,7 @@ class TestSyncCLIAnalyzeMode:
         )
         MockReconciler.return_value = self._mock_reconciler(analysis)
 
-        result = sync_main(["--analyze", "--format", "json", "project.kicad_pro"])
+        sync_main(["--analyze", "--format", "json", "project.kicad_pro"])
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert "matches" in data

@@ -364,7 +364,7 @@ class TestSExpSerialization:
 
     def test_needs_quoting_nan_inf(self):
         """Strings like 'nan' and 'inf' are valid floats but should not be unquoted."""
-        sexp = SExp("test")
+        SExp("test")
         # 'nan' and 'inf' parse as float but are not valid KiCad numeric literals.
         # However, _needs_quoting uses float() which accepts them.  Since KiCad
         # would never emit these, and they are not identifiers, leaving them

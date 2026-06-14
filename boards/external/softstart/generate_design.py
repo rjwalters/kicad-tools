@@ -307,7 +307,6 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # =========================================================================
     RAIL_3V3 = 30  # 3.3V logic supply
     RAIL_VRECT = 50  # Rectified DC (~12V from bridge rectifier)
-    RAIL_12V = 70  # 12V VGATE rail (LM7812 output) for UCC27211 supply
     RAIL_GND = 280  # Ground
 
     # Schematic section X positions
@@ -938,8 +937,8 @@ def create_softstart_schematic(output_dir: Path) -> Path:
     # nets explicitly so they bind to the driver outputs.
     qa_gate = pair_pos.port("GATE_A")
     qb_gate = pair_pos.port("GATE_B")
-    qa_pos_source = pair_pos.port("SOURCE")
-    qb_pos_source = pair_pos.port("SOURCE")
+    pair_pos.port("SOURCE")
+    pair_pos.port("SOURCE")
     # Gate labels for the back-to-back pair pins so they bond to driver outputs
     sch.add_wire(qa_gate, (qa_gate[0] - 5, qa_gate[1]))
     sch.add_label("UCC_HO_POS", qa_gate[0] - 5, qa_gate[1])

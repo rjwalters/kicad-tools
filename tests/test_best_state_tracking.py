@@ -522,7 +522,7 @@ class TestEarlyStopOverflowRegression:
             "kicad_tools.router.algorithms.NegotiatedRouter",
             FakeNegotiatedRouter,
         ):
-            routes = two_phase._detailed_negotiated(
+            two_phase._detailed_negotiated(
                 net_order=[1],
                 corridor_penalty=5.0,
                 max_iterations=10,

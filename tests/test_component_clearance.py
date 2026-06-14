@@ -556,7 +556,7 @@ class TestAutorouterComponentClearance:
         router.add_component("U1", pads)
 
         # Should detect fine-pitch and use tighter clearance
-        routes = router.route_all([1])
+        router.route_all([1])
 
         # Check that component pitches are computed
         pitches = router.grid.compute_component_pitches()

@@ -502,7 +502,7 @@ class ArrayBackend:
         if self._backend_type == BackendType.METAL:
             # MLX doesn't have fill_diagonal, use indexing
             n = min(arr.shape[0], arr.shape[1])
-            indices = self._xp.arange(n)
+            self._xp.arange(n)
             # MLX arrays are immutable, need to create new array
             result = self._xp.array(arr)
             # Use scatter for diagonal assignment

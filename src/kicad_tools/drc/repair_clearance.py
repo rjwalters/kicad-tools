@@ -980,7 +980,6 @@ class ClearanceRepairer:
 
         # Get actual clearance values for reporting
         actual_clearance = violation.actual_value_mm or 0.0
-        required_clearance = violation.required_value_mm or 0.0
 
         nudge_result = NudgeResult(
             object_type=obj_type,

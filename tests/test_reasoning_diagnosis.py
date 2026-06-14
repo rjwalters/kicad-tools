@@ -692,7 +692,7 @@ class TestDiagnosisEngine:
 
         # Target near the edge of U1's bounds (40-60, 40-60)
         # so some +5mm offsets will find clear positions
-        diag = engine.diagnose_placement(
+        engine.diagnose_placement(
             result=result,
             ref="C1",
             target=(65.0, 65.0),  # Just at the edge of U1

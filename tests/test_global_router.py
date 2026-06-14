@@ -1403,7 +1403,6 @@ class TestNegotiatedGlobalRouting:
         """History cost increases on overflowed edges after update."""
         edge = RegionEdge(source=0, target=1, capacity=2, utilization=3)
         assert edge.overflow == 1
-        cost_before = edge.congestion_cost
 
         graph = RegionGraph(
             board_width=10.0,
@@ -1837,7 +1836,7 @@ class TestEscapeRouteRipupEligibility:
 
         # Directly test _detailed_negotiated with initial_routes
         # Use a very short timeout to prevent it from running too long
-        routes = tp_router._detailed_negotiated(
+        tp_router._detailed_negotiated(
             net_order=[1],
             initial_routes=[escape_route],
             timeout=0.001,

@@ -187,7 +187,7 @@ def _extract_symbols_with_instance_info(text: str, project_name: str) -> list[di
     )
 
     for start_match in start_pattern.finditer(text):
-        indent = start_match.group(1)
+        start_match.group(1)
         lib_id = start_match.group(2)
         block_start = start_match.start()
 
@@ -257,8 +257,8 @@ def _extract_symbols_with_instance_info(text: str, project_name: str) -> list[di
             # Check if this uuid is inside a (pin ...) block
             preceding = block[: uuid_m.start()]
             # Count unmatched (pin openings
-            pin_opens = len(re.findall(r"\(pin\b", preceding))
-            pin_closes = preceding.count(")")  # rough estimate
+            len(re.findall(r"\(pin\b", preceding))
+            preceding.count(")")  # rough estimate
             # Better approach: check if (pin appears after the last )
             # before our uuid position
             last_paren_close = preceding.rfind(")")

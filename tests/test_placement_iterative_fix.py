@@ -319,7 +319,7 @@ class TestIterativeFixDenseCluster:
         result = fixer.iterative_fix(dense_pcb, output_path=output)
 
         # If there are stalled passes, at least one should have escalation > 1.0
-        stalled_passes = [pr for pr in result.pass_results if pr.escalation_factor > 1.0]
+        [pr for pr in result.pass_results if pr.escalation_factor > 1.0]
         # We may or may not have stalled passes depending on geometry,
         # but the total_passes should be > 1 for a dense cluster
         assert result.total_passes >= 1
@@ -400,7 +400,7 @@ class TestIterativeFixCLI:
         from kicad_tools.cli.placement_cmd import main
 
         output = tmp_path / "cli_fixed.kicad_pcb"
-        result = main(
+        main(
             [
                 "fix",
                 str(simple_overlap_pcb),

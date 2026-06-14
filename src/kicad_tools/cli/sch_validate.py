@@ -113,7 +113,7 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
             output_file = f.name
 
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [
                     kicad_cli,
                     "sch",

@@ -64,7 +64,7 @@ from .cache import (
     transform_routes,
 )
 from .congestion_estimator import CongestionEstimator, NetBBox, TileGrid
-from .core import AdaptiveAutorouter, Autorouter, RoutingFailure, RoutingResult
+from .core import AdaptiveAutorouter, Autorouter, RoutingFailure
 from .cpp_backend import (
     CppGrid,
     CppPathfinder,
@@ -305,7 +305,6 @@ __all__ = [
     "Autorouter",
     "AdaptiveAutorouter",
     "RoutingFailure",
-    "RoutingResult",
     # C++ backend
     "is_cpp_available",
     "ensure_cpp_backend_available",
@@ -567,8 +566,16 @@ __all__ = [
     "CacheKey",
     "CachedRoutingResult",
     "CachedNetRoute",
+    "CachedSubProblem",
+    "SubProblemSignature",
     "compute_pad_positions_hash",
     "get_default_cache_path",
+    "normalize_routes_to_origin",
+    "transform_routes",
+    # Congestion estimation
+    "CongestionEstimator",
+    "NetBBox",
+    "TileGrid",
     # Preflight checks (Issue #2497)
     "OffGridReport",
     "PreflightOffGridPad",

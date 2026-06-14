@@ -217,7 +217,7 @@ class TestDSNRoundTrip:
         exporter = KiCadToDSNExporter(str(VOLTAGE_DIVIDER_PCB))
 
         # Count nets in DSN (exclude net 0 which is the unconnected net)
-        dsn_nets = re.findall(r'\(net "?[^")\s]+', dsn_content)
+        re.findall(r'\(net "?[^")\s]+', dsn_content)
         # Count non-empty net names from source
         source_nets = {n for n, v in exporter.nets.items() if v and n != 0}
 

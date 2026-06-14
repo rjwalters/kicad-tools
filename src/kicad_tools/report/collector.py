@@ -544,9 +544,7 @@ class ReportDataCollector:
         # Classify nets by type for richer reporting.
         # Zone-connected: plane nets that the trace-level analyzer may mark
         # incomplete but are actually connected via copper zones.
-        zone_connected_nets = sorted(
-            n.net_name for n in result.nets if n.is_plane_net and n.status != "complete"
-        )
+        sorted(n.net_name for n in result.nets if n.is_plane_net and n.status != "complete")
         # Also include plane nets that *are* complete (they are still zone-connected).
         all_zone_nets = sorted(n.net_name for n in result.nets if n.is_plane_net)
 

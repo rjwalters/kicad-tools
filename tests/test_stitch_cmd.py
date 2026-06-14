@@ -2811,7 +2811,7 @@ class TestDoglegRouting:
         assert len(result.vias_added) > 0, "Should place at least some vias"
 
         # Check if any dog-leg traces were used
-        dogleg_traces = [t for t in result.traces_added if t.is_dogleg]
+        [t for t in result.traces_added if t.is_dogleg]
         # We expect some dog-leg routing due to the dense pin arrangement
         # Note: The exact count depends on the algorithm finding clearance
 
@@ -2834,21 +2834,11 @@ class TestDoglegRouting:
                 assert trace.intermediate_x is not None
                 assert trace.intermediate_y is not None
 
-                # Verify the path is actually L-shaped (not colinear)
-                # The intermediate point should not be on the direct line from pad to via
-                pad_to_via_dx = trace.via_x - trace.pad.x
-                pad_to_via_dy = trace.via_y - trace.pad.y
-                pad_to_int_dx = trace.intermediate_x - trace.pad.x
-                pad_to_int_dy = trace.intermediate_y - trace.pad.y
-
-                # If the path were straight, these ratios would be equal
-                # For an L-shape, they should differ
-                if abs(pad_to_via_dx) > 0.01 and abs(pad_to_int_dx) > 0.01:
-                    ratio_dx = pad_to_int_dy / (pad_to_int_dx + 0.001)
-                    ratio_via = pad_to_via_dy / (pad_to_via_dx + 0.001)
-                    # L-shape: ratios should differ significantly (not colinear)
-                    is_colinear = abs(ratio_dx - ratio_via) < 0.1
-                    # Note: An L-shape doesn't need to fail this check; it's informational
+                # The intermediate point should not be on the direct line from
+                # pad to via. Comparing the pad->via vs pad->intermediate slope
+                # ratios would confirm the L-shape, but that check is purely
+                # informational here (an L-shape need not fail any assertion),
+                # so we only assert the intermediate point exists, above.
 
     def test_dogleg_no_clearance_violations(self, fine_pitch_pcb: Path):
         """All placed vias (straight or dog-leg) should respect clearance."""
@@ -2894,7 +2884,7 @@ class TestDoglegRouting:
         # GND pads in the SSOP-20: pins 3, 8, 13, 18 (4 pads total)
         total_gnd_pads = 4
         placed_count = len(result.vias_added)
-        skipped_count = len(result.pads_skipped)
+        len(result.pads_skipped)
 
         # With dog-leg routing, we should achieve at least 50% success rate
         # on fine-pitch packages (better than 0% without dog-leg)
@@ -3794,8 +3784,8 @@ class TestExtendedEscapeRouting:
         # Each waypoint should be a tuple of (x, y)
         for wp in waypoints:
             assert len(wp) == 2
-            assert isinstance(wp[0], float) or isinstance(wp[0], int)
-            assert isinstance(wp[1], float) or isinstance(wp[1], int)
+            assert isinstance(wp[0], (float, int))
+            assert isinstance(wp[1], (float, int))
 
     def test_extended_escape_respects_clearance(self):
         """Extended escape via and trace path should respect clearance."""

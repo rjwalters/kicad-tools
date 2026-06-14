@@ -407,7 +407,7 @@ class TestCLIDefaults:
         from kicad_tools.cli import check_cmd
         from kicad_tools.cli.check_cmd import main as _main  # noqa: F401
 
-        parser = argparse.ArgumentParser()
+        argparse.ArgumentParser()
         # Just verify the symbols exist in the module
         assert hasattr(check_cmd, "run_selected_checks")
         # Sanity check: run_selected_checks accepts the two new kwargs.

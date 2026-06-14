@@ -249,20 +249,12 @@ ignore = [
     "B023",   # function doesn't bind loop variable - requires refactoring
     "UP035",  # deprecated typing imports - requires Python 3.9+ for generics
     # ---------------------------------------------------------------------
-    # Residual backlog baselined when the CI Lint & Format gate was turned
-    # on (#3464). These rules carry behavioral risk (unsafe --fix can delete
-    # side-effecting calls) or need per-site judgement, so they were parked
-    # rather than bulk-fixed. Burn-down tracked by #3663 -- remove each entry
-    # as its sites are individually reviewed and fixed.
-    "F841",   # unused-variable - unsafe fix can drop side-effecting calls
-    "SIM105", # suppressible-exception (try/except/pass)
-    "F401",   # unused-import - residual __init__.py re-export positions
-    "F601",   # multi-value-repeated-key-literal
-    "SIM115", # open-file-with-context-handler
-    "F811",   # redefined-while-unused (router/__init__.py RoutingResult)
-    "SIM101", # duplicate-isinstance-call
-    "SIM116", # if-else-block-instead-of-dict-lookup
-    "UP007",  # non-pep604-annotation-union
+    # The residual backlog baselined when the CI Lint & Format gate was
+    # turned on (#3464) has been fully burned down by #3663: F841, SIM105,
+    # F401, F601, SIM115, F811, SIM101, SIM116, and UP007 are all enforced
+    # again. Two latent defects were fixed in the process -- duplicate dict
+    # keys in erc/violation.py (F601) and a shadowed duplicate test class in
+    # test_pcb_sync_netlist.py (F811).
 ]
 
 [tool.ruff.format]

@@ -119,12 +119,6 @@ ERC_TYPE_DESCRIPTIONS = {
     "unspecified": "Unspecified error",
     "wire_dangling": "Wire not connected at both ends",
     "unconnected_wire_endpoint": "Unconnected wire endpoint",
-    # Library/footprint checks (non-electrical)
-    "lib_symbol_mismatch": "Library symbol does not match schematic symbol",
-    "footprint_link_issues": "Footprint link issues",
-    "single_global_label": "Only one global label for a net",
-    "isolated_pin_label": "Pin connected only by label (no wire)",
-    "pin_to_pin": "Pin-to-pin connection issue",
     # Unknown
     "unknown": "Unknown violation type",
 }

@@ -7,6 +7,7 @@ ERC JSON and populates both ``ValidationIssue.items`` and an enriched
 
 from __future__ import annotations
 
+import contextlib
 import json
 from unittest.mock import MagicMock, patch
 
@@ -49,12 +50,12 @@ def _run_erc_with_violations(violations: list[dict]) -> list[ValidationIssue]:
     erc_json = _make_erc_json(violations)
 
     # Write ERC JSON to a real temp file so run_erc can read it back.
-    tmp = _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
-    tmp.write(erc_json)
-    tmp.close()
+    with _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
+        tmp.write(erc_json)
+    tmp_name = tmp.name
 
     class _FakeTmp:
-        name = tmp.name
+        name = tmp_name
 
         def __enter__(self):
             return self
@@ -74,8 +75,8 @@ def _run_erc_with_violations(violations: list[dict]) -> list[ValidationIssue]:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         issues = run_erc("test.kicad_sch")
 
-    if os.path.exists(tmp.name):
-        os.unlink(tmp.name)
+    if os.path.exists(tmp_name):
+        os.unlink(tmp_name)
     return issues
 
 
@@ -307,10 +308,8 @@ class TestJSONOutput:
         with patch("kicad_tools.cli.sch_validate.validate_schematic", return_value=result):
             with patch("kicad_tools.cli.sch_validate.Path") as mock_path:
                 mock_path.return_value.exists.return_value = True
-                try:
+                with contextlib.suppress(SystemExit):
                     main(["test.kicad_sch", "--format", "json"])
-                except SystemExit:
-                    pass
 
         output = capsys.readouterr().out
         data = json.loads(output)

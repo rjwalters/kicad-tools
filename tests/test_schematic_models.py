@@ -1073,7 +1073,7 @@ class TestSchematicConstruction:
     def test_add_rail(self):
         """Add power rail wire."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        wire = sch.add_rail(y=100, x_start=10, x_end=50, net_label="VCC", snap=False)
+        sch.add_rail(y=100, x_start=10, x_end=50, net_label="VCC", snap=False)
         assert len(sch.wires) == 1
         assert len(sch.labels) == 1
         assert sch.labels[0].text == "VCC"
@@ -1081,7 +1081,7 @@ class TestSchematicConstruction:
     def test_add_rail_with_end_power_symbols(self):
         """add_rail() places power symbols at endpoints when requested."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        wire = sch.add_rail(
+        sch.add_rail(
             y=100,
             x_start=10,
             x_end=50,
@@ -1104,7 +1104,7 @@ class TestSchematicConstruction:
     def test_add_rail_with_gnd_power_symbol(self):
         """add_rail() places GND power symbols below the rail."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        wire = sch.add_rail(
+        sch.add_rail(
             y=280,
             x_start=25,
             x_end=600,
@@ -2154,7 +2154,7 @@ class TestSchematicValidationAdvanced:
         issues = sch._check_wire_connectivity()
         # One end of vertical wire connects to horizontal at (50, 100) - should detect missing junction
         # Other end at (50, 50) is floating
-        t_junctions = [i for i in issues if i["type"] == "missing_junction"]
+        [i for i in issues if i["type"] == "missing_junction"]
         # Note: May or may not detect depending on implementation
 
     def test_check_unconnected_pins_power_connected(self):

@@ -357,8 +357,6 @@ class TestNeighborhoodRipup:
 
         neg.find_blocking_nets_relaxed = MagicMock(return_value={100: 1})
 
-        call_count = [0]
-
         def mock_rip_up(nets, net_routes, routes_list):
             for n in nets:
                 net_routes[n] = []

@@ -560,11 +560,11 @@ class BatchPathfinder:
             net_ids[i] = req.net_id
 
         # Move to GPU
-        source_gx_gpu = self.backend.array(source_gx)
-        source_gy_gpu = self.backend.array(source_gy)
-        target_gx_gpu = self.backend.array(target_gx)
-        target_gy_gpu = self.backend.array(target_gy)
-        net_ids_gpu = self.backend.array(net_ids)
+        self.backend.array(source_gx)
+        self.backend.array(source_gy)
+        self.backend.array(target_gx)
+        self.backend.array(target_gy)
+        self.backend.array(net_ids)
 
         # Run parallel A* with shared frontier expansion
         # For now, fall back to sequential with GPU-accelerated cost computation
@@ -1040,8 +1040,8 @@ def compute_batch_costs_gpu(
     off_gpu = backend.array(neighbor_offsets)
 
     # Compute neighbor positions
-    pos_expanded = backend.reshape(pos_gpu, (n_positions, 1, 3))
-    off_expanded = backend.reshape(off_gpu, (1, n_neighbors, 3))
+    backend.reshape(pos_gpu, (n_positions, 1, 3))
+    backend.reshape(off_gpu, (1, n_neighbors, 3))
 
     # This would need custom kernel for proper broadcasting
     # For now, return placeholder
@@ -1073,8 +1073,8 @@ def batch_heuristic_gpu(
     Returns:
         (N,) array of minimum heuristic values to any goal
     """
-    n = current_positions.shape[0]
-    m = goal_positions.shape[0]
+    current_positions.shape[0]
+    goal_positions.shape[0]
 
     # Move to GPU
     curr_gpu = backend.array(current_positions)

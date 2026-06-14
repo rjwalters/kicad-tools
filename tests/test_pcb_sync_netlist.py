@@ -1704,7 +1704,7 @@ class TestNetTieSync:
         assert not result.orphaned
 
 
-class TestGetBoardEdgePosition:
+class TestGetBoardEdgePositionCoordinates:
     """Tests for _get_board_edge_position coordinate handling."""
 
     def test_nonzero_origin_no_double_subtraction(self):
@@ -2380,9 +2380,7 @@ class TestNetAssignmentErrorSurfacing:
 
         # Mock export_netlist to raise
 
-        original_import = (
-            __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
-        )
+        (__builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__)
 
         def mock_export_netlist(path):
             raise RuntimeError("kicad-cli not found")

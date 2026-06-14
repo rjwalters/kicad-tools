@@ -27,6 +27,8 @@ from kicad_tools.cli.progress import flush_print
 
 logger = logging.getLogger(__name__)
 
+import contextlib
+
 from . import via_conflict as _via_conflict_module
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .adaptive_grid import AdaptiveGridRouter
@@ -3798,10 +3800,8 @@ class Autorouter:
         if hasattr(self.router, "_net_class_map"):
             self.router._net_class_map = self.net_class_map
         if hasattr(self.router, "net_class_map"):
-            try:
+            with contextlib.suppress(AttributeError):
                 self.router.net_class_map = self.net_class_map
-            except AttributeError:
-                pass
 
     # ------------------------------------------------------------------
     # Post-route skew bookkeeping
@@ -6526,7 +6526,7 @@ class Autorouter:
         self._prepare_routing()
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
-        escape_routes = self._run_subgrid_prepass()
+        self._run_subgrid_prepass()
 
         flush_print("\n=== Negotiated Congestion Routing ===")
         flush_print(f"  Max iterations: {max_iterations}")
@@ -11582,8 +11582,8 @@ class Autorouter:
         removed_oob_segs: dict[int, list[Segment]] = {}  # noqa: F821  # Segment imported func-locally
         removed_oob_vias: dict[int, list[Via]] = {}  # noqa: F821  # Via imported func-locally
         for idx, route in enumerate(self.routes):
-            orig_seg_count = len(route.segments)
-            orig_via_count = len(route.vias)
+            len(route.segments)
+            len(route.vias)
 
             # Keep segment if at least one endpoint is inside bounds
             # (bridges the board edge -- preserve to avoid breaking
@@ -11675,13 +11675,11 @@ class Autorouter:
         # restored vias.  Rebuild from the post-cleanup ``self.routes``
         # so the optimizer's ``VectorCollisionChecker.path_is_clear``
         # queries see the same set of vias the validator does.
-        try:
+        # Grids constructed by older test fixtures may not provide
+        # ``rebuild_via_index``; suppress AttributeError so cleanup remains
+        # backwards compatible (treats the missing method as a no-op).
+        with contextlib.suppress(AttributeError):
             self.grid.rebuild_via_index()
-        except AttributeError:
-            # Grids constructed by older test fixtures may not provide
-            # ``rebuild_via_index``; treat as a no-op so cleanup remains
-            # backwards compatible.
-            pass
 
         # Store stats for retrieval by output module
         self._cleanup_stats = stats

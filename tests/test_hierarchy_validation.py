@@ -87,7 +87,7 @@ class TestFindSimilarName:
     def test_threshold(self):
         """Threshold should be respected."""
         # With default 0.8 threshold, "VCC" and "VDD" might not match
-        result = _find_similar_name("VCC", ["VDD"])
+        _find_similar_name("VCC", ["VDD"])
         # This depends on the similarity ratio
 
 

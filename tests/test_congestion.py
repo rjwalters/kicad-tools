@@ -376,7 +376,7 @@ class TestCongestionCLI:
         from kicad_tools.cli.analyze_cmd import main
 
         # Run with critical filter - should filter out lower severity
-        result = main(
+        main(
             [
                 "congestion",
                 str(congested_pcb),
@@ -421,7 +421,7 @@ class TestCongestionCLI:
         result = main(["congestion", str(simple_pcb), "--quiet"])
         assert result == 0
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # In quiet mode with no issues, output should be minimal
         # (no header, no "No congestion issues found" message)
 

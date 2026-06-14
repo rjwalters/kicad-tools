@@ -321,12 +321,12 @@ class TestRunERCWireDanglingIntegration:
         """Run ``run_erc`` with mocked subprocess and custom sheet data."""
         erc_json = _make_erc_json(sheets)
 
-        tmp = _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
-        tmp.write(erc_json)
-        tmp.close()
+        with _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
+            tmp.write(erc_json)
+        tmp_name = tmp.name
 
         class _FakeTmp:
-            name = tmp.name
+            name = tmp_name
 
             def __enter__(self):
                 return self
@@ -361,8 +361,8 @@ class TestRunERCWireDanglingIntegration:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             issues = run_erc("test.kicad_sch")
 
-        if os.path.exists(tmp.name):
-            os.unlink(tmp.name)
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
         return issues
 
     def test_wire_dangling_location_from_sheet_path(self):
@@ -380,12 +380,12 @@ class TestRunERCWireDanglingIntegration:
         """Verify that reattribute_wire_dangling_violations is called."""
         erc_json = _make_erc_json([_make_sheet("/", [_wire_dangling(100.0, 50.0)])])
 
-        tmp = _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
-        tmp.write(erc_json)
-        tmp.close()
+        with _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
+            tmp.write(erc_json)
+        tmp_name = tmp.name
 
         class _FakeTmp:
-            name = tmp.name
+            name = tmp_name
 
             def __enter__(self):
                 return self
@@ -421,8 +421,8 @@ class TestRunERCWireDanglingIntegration:
         args = mock_reattr.call_args[0]
         assert args[1] == "test.kicad_sch"
 
-        if os.path.exists(tmp.name):
-            os.unlink(tmp.name)
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
     def test_multiple_sheets_wire_dangling_preserved(self):
         """Multiple sheets with wire_dangling keep their own sheet paths."""
@@ -1119,12 +1119,12 @@ class TestRunERCPhantomFilterIntegration:
         """Verify that filter_phantom_wire_violations is invoked during run_erc."""
         erc_json = _make_erc_json([_make_sheet("/", [_wire_dangling(100.0, 50.0)])])
 
-        tmp = _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
-        tmp.write(erc_json)
-        tmp.close()
+        with _tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
+            tmp.write(erc_json)
+        tmp_name = tmp.name
 
         class _FakeTmp:
-            name = tmp.name
+            name = tmp_name
 
             def __enter__(self):
                 return self
@@ -1163,5 +1163,5 @@ class TestRunERCPhantomFilterIntegration:
         args = mock_phantom.call_args[0]
         assert args[1] == "test.kicad_sch"
 
-        if os.path.exists(tmp.name):
-            os.unlink(tmp.name)
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)

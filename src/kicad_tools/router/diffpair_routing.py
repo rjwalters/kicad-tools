@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
 
+import contextlib
+
 from .diffpair import (
     DifferentialPair,
     DifferentialPairConfig,
@@ -4579,10 +4581,8 @@ class DiffPairRouter:
                 # will see the pair as unrouted and the negotiated
                 # strategy picks it up on the main pass.
                 for prev_route in routes:
-                    try:
+                    with contextlib.suppress(Exception):
                         self.autorouter.grid.unmark_route(prev_route)
-                    except Exception:
-                        pass
                     if prev_route in self.autorouter.routes:
                         self.autorouter.routes.remove(prev_route)
                 if coupled_only:
@@ -4725,10 +4725,8 @@ class DiffPairRouter:
                 # net is claimed because we return without the pair's
                 # routes.
                 for committed in routes:
-                    try:
+                    with contextlib.suppress(Exception):
                         self.autorouter.grid.unmark_route(committed)
-                    except Exception:
-                        pass
                     if committed in self.autorouter.routes:
                         self.autorouter.routes.remove(committed)
                 if coupled_only:
@@ -5337,7 +5335,7 @@ class DiffPairRouter:
 
             # Snapshot the violation count BEFORE the retry so we can
             # detect new violations introduced by this attempt.
-            pre_retry_count = len(self._intra_clearance_violations)
+            len(self._intra_clearance_violations)
 
             for attempt in range(1, max_retries_per_pair + 1):
                 # Clear violations from prior retry on this pair so the

@@ -441,7 +441,7 @@ class TestRenderReportPdf:
             with patch(
                 "kicad_tools.export.manufacturing.ManufacturingPackage._render_report_pdf",
                 wraps=None,
-            ) as mock_render:
+            ):
                 # Let _generate_report run normally to produce the .md,
                 # then manually call the rendering logic with mocks.
                 pkg._generate_report(out_dir, result)

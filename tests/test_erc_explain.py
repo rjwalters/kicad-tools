@@ -260,7 +260,7 @@ class TestERCExplainCommand:
 
     def test_main_with_json_format(self, sample_erc_report: Path, capsys):
         """Test JSON output format."""
-        result = main([str(sample_erc_report), "--format", "json"])
+        main([str(sample_erc_report), "--format", "json"])
 
         captured = capsys.readouterr()
         # Should be valid JSON
@@ -272,7 +272,7 @@ class TestERCExplainCommand:
 
     def test_main_errors_only(self, sample_erc_report: Path, capsys):
         """Test --errors-only filter."""
-        result = main([str(sample_erc_report), "--errors-only", "--format", "json"])
+        main([str(sample_erc_report), "--errors-only", "--format", "json"])
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -283,7 +283,7 @@ class TestERCExplainCommand:
 
     def test_main_filter_by_type(self, sample_erc_report: Path, capsys):
         """Test --type filter."""
-        result = main([str(sample_erc_report), "--type", "label", "--format", "json"])
+        main([str(sample_erc_report), "--type", "label", "--format", "json"])
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)

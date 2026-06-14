@@ -343,10 +343,8 @@ class TestPlacementOptimizerGPUIntegration:
         assert iterations >= 1, "Should run at least one iteration"
 
         # Verify components moved (positions changed)
-        positions_changed = False
         for comp in optimizer.components:
             if comp.vx != 0 or comp.vy != 0:
-                positions_changed = True
                 break
 
         # Note: Energy may not decrease in all cases due to GPU implementation differences

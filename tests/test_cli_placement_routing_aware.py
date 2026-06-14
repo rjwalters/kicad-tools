@@ -212,7 +212,7 @@ class TestRoutingAwareExecution:
 
         from kicad_tools.cli.placement_cmd import main
 
-        result = main(
+        main(
             [
                 "optimize",
                 str(minimal_pcb),

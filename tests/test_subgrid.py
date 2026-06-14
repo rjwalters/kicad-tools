@@ -1545,7 +1545,7 @@ class TestFineGridClearanceZoneUnblocking:
         was_blocked = center_cell.blocked
 
         # Run escape routing
-        result = subgrid.route_with_subgrid([pad, other_pad])
+        subgrid.route_with_subgrid([pad, other_pad])
 
         # After escape routing, the other pad's copper must still be blocked
         center_cell_after = grid.grid[layer_idx][ogy][ogx]
@@ -2668,7 +2668,7 @@ class TestSubGridEscapeFailureLogging:
         analysis = subgrid.analyze_pads(pads)
 
         with caplog.at_level(logging.WARNING, logger="kicad_tools.router.subgrid"):
-            result = subgrid.generate_escape_segments(analysis)
+            subgrid.generate_escape_segments(analysis)
 
         warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert not warning_msgs, f"Expected no WARNING on success but got: {warning_msgs}"

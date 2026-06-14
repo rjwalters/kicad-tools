@@ -1153,7 +1153,7 @@ class TestLCSCClientAdditional:
             cache = PartsCache(db_path=tmp_path / "cache.db")
             client = LCSCClient(cache=cache)
 
-            results = client.search("test")
+            client.search("test")
 
             # Part from search should be cached
             assert cache.contains("C123")

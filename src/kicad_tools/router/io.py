@@ -283,7 +283,7 @@ def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
         # Parse min_via_annular_width if present
         via_ann_match = re.search(r"\(min_via_annular_width\s+([\d.]+)\)", setup_text)
         if via_ann_match:
-            ann_width = float(via_ann_match.group(1))
+            float(via_ann_match.group(1))
             # Via diameter = drill + 2 * annular width
             # We'll use this to calculate minimum via diameter
             pass
@@ -296,7 +296,7 @@ def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
 
     # Find all net_class blocks using bracket matching
     for nc_match in re.finditer(r'\(net_class\s+"([^"]+)"', pcb_text):
-        class_name = nc_match.group(1)
+        nc_match.group(1)
         start_pos = nc_match.start()
 
         # Find the matching closing paren for this net_class block
@@ -1380,10 +1380,8 @@ def compute_multi_resolution_plan(
     # Convert to appropriate format
     if isinstance(pads, dict):
         pad_list: list = list(pads.values())
-        pad_dict = pads
     else:
         pad_list = list(pads)
-        pad_dict = None
 
     if not pad_list:
         return None
@@ -3534,10 +3532,8 @@ def load_pcb_for_routing(
             from kicad_tools.schema.pcb import PCB as SchemaPCB
 
             _schema_pcb = SchemaPCB.load(pcb_path)
-            try:
+            with contextlib.suppress(ValueError, Exception):
                 router._board_geometry = BoardGeometry.from_pcb(_schema_pcb)
-            except (ValueError, Exception):
-                pass
     except ImportError:
         pass
 

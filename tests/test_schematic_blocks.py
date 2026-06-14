@@ -2837,7 +2837,7 @@ class TestResetButtonMocked:
         # Find the jog wires (the pair for cap bottom)
         # The jog_x should be 110 - 2.54 = 107.46
         jog_x = 110 - 2.54
-        jog_wire_starts = [c[0][0] for c in rail_calls]  # p1 of each call
+        [c[0][0] for c in rail_calls]  # p1 of each call
         # One wire should go horizontal from (115, ...) to (jog_x, ...)
         has_horizontal_jog = any(
             c[0][0][0] != c[0][1][0] and abs(c[0][1][0] - jog_x) < 0.01 for c in rail_calls

@@ -597,7 +597,7 @@ class TestConnectivityAwareRestoration:
                 ],
             ),
         ]
-        stats = router.cleanup_artifacts()
+        router.cleanup_artifacts()
         # Segment 3 (99,79)-(95,75) has both endpoints OOB.
         # Removing it fragments the net into two components
         # (the first two segments connect to each other, but
@@ -698,7 +698,7 @@ class TestConnectivityAwareRestoration:
                 ],
             ),
         ]
-        stats = router.cleanup_artifacts()
+        router.cleanup_artifacts()
         # Net 3's bridge restored
         assert len(router.routes[0].segments) == 3
         # Net 7's orphan removed

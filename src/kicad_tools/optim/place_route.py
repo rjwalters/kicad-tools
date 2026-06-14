@@ -19,6 +19,7 @@ Example:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -511,10 +512,8 @@ class PlaceRouteOptimizer:
             if self.verbose:
                 print(f"  Warning: checkpoint save failed: {e}")
             # Clean up temp file if it exists
-            try:
+            with contextlib.suppress(OSError, UnboundLocalError):
                 Path(tmp_path).unlink(missing_ok=True)
-            except (OSError, UnboundLocalError):
-                pass
 
     def _run_placement_phase(self) -> list[Conflict]:
         """Run placement conflict detection.
