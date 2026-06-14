@@ -7,13 +7,13 @@ This directory contains role definitions for Loom terminal configurations.
 **The single source of truth for all Loom role definitions is `.claude/commands/loom/*.md`.**
 
 This directory contains:
-- **Symlinks** (`*.md`) pointing to `../.claude/commands/loom/*.md` for Tauri App compatibility
+- **Symlinks** (`*.md`) pointing to `../.claude/commands/loom/*.md` for backward compatibility
 - **Metadata files** (`*.json`) with default settings for each role
 
 ### Why Symlinks?
 
 - **Claude Code CLI** uses `.claude/commands/loom/` for slash commands (e.g., `/loom/builder`, `/loom/loom`)
-- **Tauri App** reads role files from `.loom/roles/` for terminal configuration
+- **Daemon and tooling** that historically read role files from `.loom/roles/` continue to work without code changes
 - Symlinks ensure both access the same content - single source of truth
 
 ### Editing Roles
@@ -21,7 +21,6 @@ This directory contains:
 To edit a role definition:
 1. Edit the file in `.claude/commands/loom/<role>.md`
 2. The symlink in `roles/<role>.md` automatically reflects changes
-3. Both CLI and Tauri App get the updated content
 
 ## Available Roles
 
@@ -69,7 +68,7 @@ To create a custom role:
 
 1. Create `.claude/commands/loom/my-role.md` with the full role definition
 2. Optionally create `roles/my-role.json` with metadata
-3. Use it via `/loom/my-role` in CLI or select in Tauri App terminal settings
+3. Use it via `/loom/my-role` in Claude Code or reference it from daemon terminal configuration
 
 ### Role File Structure
 

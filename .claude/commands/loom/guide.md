@@ -916,7 +916,7 @@ update_work_log() {
 ```markdown
 ### 2026-01-31
 
-- **PR #1803**: Fix Rust clippy errors across loom-daemon and src-tauri
+- **PR #1803**: Fix Rust clippy errors across loom-daemon and loom-api
 - **PR #1780**: Fix biome lint errors across quickstarts and src/lib
 - **Issue #1770** (closed): Stale heartbeat messages from previous phase
 ```
@@ -973,7 +973,7 @@ Only update README.md when merged PRs touch architectural files.
 ```bash
 check_readme_staleness() {
   # Check recently merged PRs for architectural file changes
-  local arch_patterns="Cargo.toml|package.json|src/lib/|src-tauri/|install.sh|scripts/install"
+  local arch_patterns="Cargo.toml|package.json|loom-daemon/|loom-api/|install.sh|scripts/install"
 
   # Get last 10 merged PRs and check their changed files
   local recent_prs=$(gh pr list --state merged --limit 10 --json number,files \

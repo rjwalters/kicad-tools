@@ -339,7 +339,7 @@ Report what was created:
 
 ### To speed things up:
 - Manually approve Phase 1 issues: `gh issue edit <number> --remove-label "loom:architect" --add-label "loom:issue"`
-- Or use `/shepherd <issue-number> --merge` to fast-track individual issues
+- Or use `/loom:sweep <issue-number>` to fast-track individual issues
 ```
 
 ## Guidelines

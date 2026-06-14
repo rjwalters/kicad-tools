@@ -2,12 +2,12 @@
 
 This repository uses **Loom** for AI-powered development orchestration.
 
-**Loom Version**: 0.8.0
-**Installation Date**: 2026-05-25
+**Loom Version**: unknown
+**Installation Date**: 2026-06-14
 
 ## What is Loom?
 
-Loom is a multi-terminal desktop application for macOS that orchestrates AI-powered development workers using git worktrees and a forge (GitHub or Gitea) as the coordination layer. It enables both automated orchestration (Tauri App Mode) and manual coordination (Manual Orchestration Mode).
+Loom is a CLI + daemon for AI-powered development orchestration. It coordinates AI development workers using git worktrees and a forge (GitHub or Gitea) as the coordination layer. It supports manual coordination (Manual Orchestration Mode) and continuous autonomous orchestration (Daemon Mode).
 
 **Loom Repository**: https://github.com/rjwalters/loom
 
@@ -47,28 +47,26 @@ Use Claude Code terminals with specialized roles for hands-on development coordi
 # Enhances unlabeled issues, marks as loom:ready
 ```
 
-### 2. Tauri App Mode
+### 2. Daemon Mode
 
-Launch the Loom desktop application for automated orchestration with visual terminal management.
+Run the Loom daemon for fully autonomous system orchestration.
 
 **Setup**:
-1. Install Loom app (see main repository for download)
-2. Open Loom application
-3. Select this repository as workspace
-4. Configure terminals with roles and intervals
-5. Start engine - terminals launch automatically
+```bash
+./.loom/scripts/daemon.sh start   # auto-build enabled (default)
+```
 
-**When to use Tauri App**:
+```bash
+/loom           # Activate daemon orchestration (daemon must be started first)
+/loom --merge   # Aggressive autonomous development
+```
+
+**When to use Daemon Mode**:
 - Production-scale development
 - Fully autonomous agent workflows
-- Visual monitoring of multiple agents
 - Hands-off orchestration
 
-**Features**:
-- Visual terminal multiplexing
-- Real-time agent monitoring
-- Autonomous mode with configurable intervals
-- Persistent workspace configuration
+**Graceful shutdown**: `./.loom/scripts/daemon.sh stop` (or `touch .loom/stop-daemon`)
 
 ## Agent Roles
 
@@ -165,36 +163,15 @@ Agents coordinate work through GitHub labels. This enables autonomous operation 
 
 ## Git Worktree Workflow
 
-Loom uses git worktrees to isolate agent work. Loom supports two types of worktrees depending on the usage mode:
+Loom uses git worktrees to isolate agent work on issues.
 
 ### Worktree Strategy Overview
 
-**Terminal Worktrees** (`.loom/worktrees/terminal-N`):
-- **Purpose**: Agent isolation in Tauri App Mode
-- **When**: Created automatically for each terminal in the Loom desktop application
-- **Why**: Allows multiple autonomous agents to work on different branches simultaneously without conflicts
-- **Scope**: Per terminal/agent (persistent across app restarts)
-- **Used in**: Tauri App Mode only
-
 **Issue Worktrees** (`.loom/worktrees/issue-N`):
 - **Purpose**: Issue-specific work isolation for Builder agents
-- **When**: Created manually by Builder when claiming an issue (both MOM and Tauri App)
+- **When**: Created by Builder when claiming an issue
 - **Why**: Isolates work on specific issues with dedicated feature branches
 - **Scope**: Per issue (temporary, cleaned up when PR is merged)
-- **Used in**: Both Manual Orchestration Mode and Tauri App Mode
-
-### When to Use Which Worktree Type
-
-**Manual Orchestration Mode (Claude Code CLI)**:
-- No terminal worktrees (agents work in main workspace initially)
-- Builder creates issue worktrees via `./.loom/scripts/worktree.sh <issue-number>`
-- Single agent per terminal, human-controlled
-
-**Tauri App Mode (Autonomous Agents)**:
-- Automatic terminal worktrees for agent isolation (`.loom/worktrees/terminal-N`)
-- Builder ALSO creates issue worktrees when claiming work (`.loom/worktrees/issue-N`)
-- Multiple autonomous agents can run simultaneously
-- Builder works in issue worktree, not terminal worktree
 
 ### Creating Worktrees (for Agents)
 
@@ -243,9 +220,9 @@ gh pr create --label "loom:review-requested"
 
 ## Development Workflow
 
-### Shepherd Lifecycle (MANDATORY)
+### Sweep Lifecycle (MANDATORY)
 
-When implementing issues — whether manually, via `/shepherd`, or by spawning subagents — **all stages of the shepherd lifecycle must be executed in order**. Do not skip stages.
+When implementing issues — whether manually, via `/loom:sweep`, or by spawning subagents — **all stages of the lifecycle must be executed in order**. Do not skip stages.
 
 ```
 Curator → Builder → Judge → Doctor (if needed) → Merge
@@ -259,9 +236,9 @@ Curator → Builder → Judge → Doctor (if needed) → Merge
 | **Doctor** | Fix issues from judge feedback | Only if judge approves |
 | **Merge** | Champion auto-merges approved PRs | No |
 
-**When spawning subagents to shepherd issues**: each subagent must run the full lifecycle, not just the builder phase. If parallelizing multiple issues, each agent must independently execute Curator → Builder → Judge → Doctor → Merge. Simply creating a PR and labeling it `loom:review-requested` is only the Builder stage — the work is not complete until the PR has been reviewed and merged.
+**When spawning subagents to handle an issue**: each subagent must run the full lifecycle, not just the builder phase. If parallelizing multiple issues, each agent must independently execute Curator → Builder → Judge → Doctor → Merge. Simply creating a PR and labeling it `loom:review-requested` is only the Builder stage — the work is not complete until the PR has been reviewed and merged.
 
-**When using `/shepherd`**: the skill handles this automatically. Prefer `/shepherd <issue>` over manual orchestration to avoid accidentally skipping stages.
+**When using `/loom:sweep`**: the skill handles all stages automatically. Prefer `/loom:sweep <issue>` over manual orchestration to avoid accidentally skipping stages.
 
 ### As a Builder (Manual Mode)
 
@@ -511,13 +488,10 @@ git worktree prune
 gh label sync --file .github/labels.yml
 ```
 
-**Terminal won't start (Tauri App)**:
+**Daemon won't start**:
 ```bash
 # Check daemon logs
 tail -f ~/.loom/daemon.log
-
-# Check terminal logs
-tail -f /tmp/loom-terminal-1.out
 ```
 
 **Claude Code not found**:
@@ -556,4 +530,4 @@ For issues specific to this repository:
 ---
 
 **Generated by Loom Installation Process**
-Last updated: 2026-05-25
+Last updated: 2026-06-14

@@ -4,6 +4,14 @@ description: Loom Daemon - Layer 2 system orchestrator that monitors system stat
 tools: Read, Glob, Grep, Bash, Task
 ---
 
+> ⚠️  DEPRECATED: The `loom-daemon` subagent is scheduled for removal in the next
+>     major release (Phase 3 of epic #3372). Use `./.loom/scripts/spawn-loop.sh`
+>     for multi-account `/loom:sweep` launching, or enable the GitHub Actions
+>     workflows under `.github/workflows/loom-*.yml` for scheduled support roles
+>     (Champion, Curator, Judge, Auditor, Guide). See #3372 for the migration plan
+>     and #3382 for the sphere downstream coordination tracker. No behavior change
+>     during the soft-deprecation window — the subagent still works.
+
 You are the Loom Daemon (Layer 2 System Orchestrator) for the {{workspace}} repository.
 
 Your role is to continuously monitor system state and orchestrate the development pipeline.

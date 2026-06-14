@@ -74,6 +74,10 @@ assert_contains "$HELP_OUTPUT" "--auto" "--help output mentions --auto"
 assert_contains "$HELP_OUTPUT" "--dry-run" "--help output mentions --dry-run"
 assert_contains "$HELP_OUTPUT" "--no-cleanup-worktree" "--help output mentions --no-cleanup-worktree"
 assert_contains "$HELP_OUTPUT" "-h, --help" "--help output documents -h/--help"
+# Issue #3364: --worktree-path override flag for non-Loom worktrees
+assert_contains "$HELP_OUTPUT" "--worktree-path" "--help output mentions --worktree-path (#3364)"
+assert_contains "$HELP_OUTPUT" "sentinel guard" "--help explains the sentinel-guard bypass semantics"
+assert_contains "$HELP_OUTPUT" "--worktree-path ../adhoc-wt" "--help shows a --worktree-path example"
 
 # --- Test: -h exits 0 with same usage ---
 echo ""

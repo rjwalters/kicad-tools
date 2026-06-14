@@ -9,10 +9,13 @@
 # Usage:
 #   agent-metrics.sh [--role ROLE] [--period PERIOD] [--format FORMAT]
 #   agent-metrics.sh summary
-#   agent-metrics.sh effectiveness [--role ROLE]
-#   agent-metrics.sh costs [--issue NUMBER]
+#   agent-metrics.sh effectiveness [--role ROLE] [--by-model]
+#   agent-metrics.sh costs [--issue NUMBER] [--by-model]
 #   agent-metrics.sh velocity
 #   agent-metrics.sh --help
+#
+# --by-model (#3482, Phase 3a) adds a per-model dimension to the
+# effectiveness/costs output; NULL/absent model values render as 'default'.
 
 set -euo pipefail
 

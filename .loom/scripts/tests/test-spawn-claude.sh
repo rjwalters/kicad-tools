@@ -196,6 +196,96 @@ set -e
 assert_eq "78" "$exit_code" "missing tokens exits 78 (EX_CONFIG)"
 
 # ============================================================
+# Section 3: model selection (issue #3477, Phase 1)
+#
+# Precedence chain at the spawn layer, all four observable cases:
+#   1. explicit --model arg beats LOOM_MODEL env
+#   2. --model=value form also beats LOOM_MODEL env
+#   3. LOOM_MODEL alone produces --model in the exec'd args
+#   4. no env + no arg produces NO --model at all (session default
+#      preserved — the zero-behavior-change acceptance criterion)
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh model selection (#3477)..."
+
+# Case 3: LOOM_MODEL env produces --model in args
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_MODEL="claude-sonnet-4-6" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "stub-claude args=-p ping --model claude-sonnet-4-6" "$output" \
+    "LOOM_MODEL env injects --model into claude args"
+assert_contains "spawn-claude: model=claude-sonnet-4-6 (from LOOM_MODEL)" "$output" \
+    "structured model log line emitted for LOOM_MODEL case (#3482)"
+
+# Case 1: explicit --model arg wins over LOOM_MODEL env
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_MODEL="claude-sonnet-4-6" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" --model claude-opus-4-8 2>&1 || true)
+assert_contains "stub-claude args=-p ping --model claude-opus-4-8" "$output" \
+    "explicit --model arg wins over LOOM_MODEL env"
+assert_contains "spawn-claude: model=claude-opus-4-8 (from --model arg)" "$output" \
+    "structured model log line emitted for explicit --model arg case (#3482)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" != *"claude-sonnet-4-6"* ]] || [[ "$output" == *"wins over LOOM_MODEL"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: LOOM_MODEL value is not injected when explicit --model present"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: LOOM_MODEL value is not injected when explicit --model present"
+    echo "    In: '$output'"
+fi
+
+# Case 2: --model=value form also suppresses LOOM_MODEL injection
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_MODEL="claude-sonnet-4-6" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" --model=claude-opus-4-8 2>&1 || true)
+assert_contains "stub-claude args=-p ping --model=claude-opus-4-8" "$output" \
+    "--model=value form wins over LOOM_MODEL env"
+assert_contains "spawn-claude: model=claude-opus-4-8 (from --model arg)" "$output" \
+    "structured model log line emitted for --model=value form (#3482)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" != *"--model claude-sonnet-4-6"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: --model=value suppresses LOOM_MODEL injection"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: --model=value suppresses LOOM_MODEL injection"
+    echo "    In: '$output'"
+fi
+
+# Case 4 (zero-behavior-change criterion): no env + no arg => no --model
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" == *"stub-claude args=-p ping"* && "$output" != *"--model"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: no LOOM_MODEL + no --model arg emits NO --model (session default preserved)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: no LOOM_MODEL + no --model arg emits NO --model (session default preserved)"
+    echo "    In: '$output'"
+fi
+assert_contains "spawn-claude: model=default" "$output" \
+    "structured model=default log line emitted when nothing configured (#3482)"
+
+# Empty LOOM_MODEL is treated as unset — no --model emitted
+output=$(LOOM_WORKSPACE="$TEST_WS" PATH="$STUB_DIR:$PATH" \
+    LOOM_MODEL="" \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$output" == *"stub-claude args=-p ping"* && "$output" != *"--model"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: empty LOOM_MODEL emits NO --model"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: empty LOOM_MODEL emits NO --model"
+    echo "    In: '$output'"
+fi
+assert_contains "spawn-claude: model=default" "$output" \
+    "structured model=default log line emitted for empty LOOM_MODEL (#3482)"
+
+# ============================================================
 # Summary
 # ============================================================
 

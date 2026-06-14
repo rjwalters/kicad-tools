@@ -634,6 +634,137 @@ forge_get_pr_reviews() {
   fi
 }
 
+# Get branch-protection required status check contexts for a branch.
+#
+# Usage: forge_get_required_status_check_contexts NWO BRANCH [GH_CMD]
+# Outputs: One context name per line on stdout. Empty output means the branch
+#   has no required status checks configured (every failing check is
+#   informational from a branch-protection standpoint).
+# Exit code: 0 on success (including empty result), nonzero on lookup failure.
+#
+# This is used by merge-pr.sh's UNSTABLE-fallback (sibling of #3371's CLEAN
+# fallback) to decide whether an auto-merge "Pull request is in unstable status"
+# error can be safely bypassed. If every failing check on the PR is outside this
+# set, the immediate-merge path is taken; otherwise the existing UNSTABLE
+# refusal is preserved. See issue #3486.
+#
+# GitHub: GraphQL query against
+#   `repository(owner, name).ref(qualifiedName: "refs/heads/<branch>")
+#    .branchProtectionRule.requiredStatusCheckContexts`.
+#   Branches with no protection rule, or whose rule has no required contexts,
+#   yield empty output (exit 0). This is the desired behavior — "no required
+#   checks" means every failing check is informational, which is the case the
+#   UNSTABLE-fallback wants to unblock.
+#
+# Gitea: GET /api/v1/repos/{owner}/{repo}/branch_protections/{name}. Gitea's
+#   branch-protection rule carries both `enable_status_check` (boolean toggle)
+#   and `status_check_contexts` (array of context patterns). The contexts are
+#   only enforced when `enable_status_check` is true — when it's false, the
+#   contexts list is informational and we emit empty output (every failing
+#   check is then treated as informational, same as the GitHub "no rule" path).
+#
+#   Distinguishing 404 (no protection rule, emit empty → fallback fires) from
+#   5xx / network error (emit empty + nonzero exit → caller fails closed) is
+#   important: the issue explicitly requires fail-closed semantics on lookup
+#   failure. `gitea_api` collapses both 4xx and 5xx into exit 1, so this
+#   function uses a direct curl invocation that captures the HTTP code and
+#   branches on it explicitly.
+#
+#   Unknown forge types fall through to a fail-closed nonzero exit, leaving
+#   the caller's existing UNSTABLE refusal intact.
+forge_get_required_status_check_contexts() {
+  local nwo="$1"
+  local branch="$2"
+  local gh_cmd="${3:-gh}"
+
+  if [[ "$FORGE_TYPE" == "gitea" ]]; then
+    forge_split_nwo "$nwo"
+
+    # Sanity-check Gitea config before issuing the request. Missing URL or
+    # token is treated as fail-closed (nonzero exit, empty stdout) so the
+    # caller preserves the UNSTABLE refusal.
+    if [[ -z "$_GITEA_BASE_URL" ]] || [[ -z "$_GITEA_TOKEN" ]]; then
+      return 1
+    fi
+    if ! _gitea_validate_basic_auth; then
+      return 1
+    fi
+
+    local url="${_GITEA_BASE_URL}/api/v1/repos/${FORGE_OWNER}/${FORGE_REPO}/branch_protections/${branch}"
+    local response
+    if [[ -n "$_GITEA_USERNAME" ]]; then
+      response=$(curl -s -w "\n%{http_code}" \
+        -X GET \
+        -u "${_GITEA_USERNAME}:${_GITEA_TOKEN}" \
+        -H "Accept: application/json" \
+        "$url" 2>/dev/null) || return 1
+    else
+      response=$(curl -s -w "\n%{http_code}" \
+        -X GET \
+        -H "Authorization: token $_GITEA_TOKEN" \
+        -H "Accept: application/json" \
+        "$url" 2>/dev/null) || return 1
+    fi
+
+    local http_code body
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+
+    # 404: no branch protection rule exists. Mirror GitHub's "no rule means no
+    # required" behavior — emit empty, exit 0 so the fallback fires.
+    if [[ "$http_code" == "404" ]]; then
+      return 0
+    fi
+
+    # 5xx / network failure / auth error / anything else non-2xx: fail closed.
+    # Empty stdout, nonzero exit; the caller will preserve the UNSTABLE refusal.
+    if [[ "$http_code" -lt 200 ]] || [[ "$http_code" -ge 300 ]]; then
+      return 1
+    fi
+
+    # 2xx: parse `enable_status_check` and `status_check_contexts`. When the
+    # toggle is off, contexts are not enforced — emit empty. Otherwise emit
+    # each context on its own line. A missing/null array also yields empty.
+    echo "$body" | jq -r '
+      if (.enable_status_check // false) then
+        (.status_check_contexts // []) | .[]
+      else
+        empty
+      end
+    ' 2>/dev/null || return 1
+    return 0
+  fi
+
+  if [[ "$FORGE_TYPE" != "github" ]]; then
+    # Unknown forge — fail closed so the caller preserves the UNSTABLE refusal.
+    return 1
+  fi
+
+  forge_split_nwo "$nwo"
+
+  local query='query($owner: String!, $name: String!, $ref: String!) {
+    repository(owner: $owner, name: $name) {
+      ref(qualifiedName: $ref) {
+        branchProtectionRule {
+          requiredStatusCheckContexts
+        }
+      }
+    }
+  }'
+
+  # `gh api graphql --jq` with a missing path field yields `null`; pipe through
+  # jq to flatten the optional contexts array into a newline-separated list.
+  # Each step is allowed to yield empty output without failing the helper —
+  # absent protection rule or empty contexts list both mean "no required checks".
+  "$gh_cmd" api graphql \
+    -f "query=$query" \
+    -F "owner=$FORGE_OWNER" \
+    -F "name=$FORGE_REPO" \
+    -F "ref=refs/heads/$branch" \
+    --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' \
+    2>/dev/null || return 0
+}
+
 # Get repo NWO (name with owner).
 # Usage: forge_get_repo_nwo [GH_CMD]
 # Returns "owner/repo" on stdout.

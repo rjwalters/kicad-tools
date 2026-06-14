@@ -52,6 +52,202 @@ print_warning() {
 }
 
 # --------------------------------------------------------------------------
+# Concurrency lock (issue #3380)
+# --------------------------------------------------------------------------
+#
+# `git worktree add` is not safe to run concurrently against the same repo —
+# parallel invocations contend on the per-worktree administrative dir
+# (`.git/worktrees/issue-N/`) and on git's repo-global locks. The observed
+# failure mode in busy shepherd sessions is multi-minute hangs (10-20 min)
+# while a peer process holds an `index.lock` it will never release.
+#
+# We use the same POSIX-atomic `mkdir`-based primitive as spawn-loop.sh
+# (`.loom/scripts/spawn-loop.sh:236-260`) — `flock` is not available on stock
+# macOS, so `mkdir` is the only portable atomic file-system operation we can
+# rely on.
+#
+# Lock scope is **repo-global** (`.loom/locks/worktree-add/`). The original
+# per-issue design was tried first but failed under concurrent invocations
+# with different issue numbers: `git worktree add` mutates the repo-global
+# `.git/config.lock` (writing the new branch's upstream configuration), and
+# concurrent processes race with the diagnostic:
+#
+#   error: could not lock config file .git/config: File exists
+#   error: unable to write upstream branch configuration
+#
+# A repo-global lock serializes the entire `git worktree add` call so this
+# race cannot happen. The cost — two builders on different issues no longer
+# parallelize through the helper — is acceptable because (a) `git worktree
+# add` itself is short relative to the rest of an issue's lifecycle, and
+# (b) parallel hangs that hold an `index.lock` for 10-20 minutes are the
+# very problem this PR fixes.
+#
+# The lock path uses the same name (`worktree-<id>/`) the per-issue version
+# used so its layout matches `.loom/locks/issue-<N>/` (spawn-loop). The "id"
+# here is the constant string "add"; per-issue accounting still lives in the
+# `owner.json` body for debugging visibility.
+#
+# Tunables (env vars, documented in show_help):
+#   LOOM_WORKTREE_LOCK_TIMEOUT       — seconds to wait (default 600 = 10min,
+#                                      sized to cover worst-case cold-clone
+#                                      submodule init on heavy repos)
+#   LOOM_WORKTREE_LOCK_POLL_INTERVAL — seconds between poll attempts (default 2)
+
+LOOM_WORKTREE_LOCK_TIMEOUT="${LOOM_WORKTREE_LOCK_TIMEOUT:-600}"
+LOOM_WORKTREE_LOCK_POLL_INTERVAL="${LOOM_WORKTREE_LOCK_POLL_INTERVAL:-2}"
+
+# Resolve the locks directory to the canonical git common dir so worktrees
+# and the main workspace all share the same lock namespace. Falls back to the
+# current dir for the rare case where we're not yet inside a repo (tests).
+_worktree_locks_dir() {
+    local common
+    common=$(git rev-parse --git-common-dir 2>/dev/null || true)
+    if [[ -n "$common" ]]; then
+        # git-common-dir may be returned as a relative path; resolve it.
+        local abs_common
+        abs_common=$(cd "$common" 2>/dev/null && pwd) || abs_common="$common"
+        echo "$(dirname "$abs_common")/.loom/locks"
+    else
+        echo ".loom/locks"
+    fi
+}
+
+_worktree_lock_path() {
+    # The argument is the issue number — accepted for owner-metadata logging
+    # only. The lock itself is repo-global; see the design note above.
+    echo "$(_worktree_locks_dir)/worktree-add"
+}
+
+# Returns 0 if lock acquired, non-zero otherwise. Sets WORKTREE_LOCK_HOLDER_PID
+# on timeout failure so the caller can include it in error output.
+WORKTREE_LOCK_HOLDER_PID=""
+
+acquire_worktree_lock() {
+    local issue="$1"
+    local lock
+    lock="$(_worktree_lock_path "$issue")"
+    local locks_dir
+    locks_dir="$(_worktree_locks_dir)"
+
+    mkdir -p "$locks_dir" 2>/dev/null || true
+
+    local deadline=$(( $(date +%s) + LOOM_WORKTREE_LOCK_TIMEOUT ))
+    local stale_retry_done=0
+
+    while true; do
+        if mkdir "$lock" 2>/dev/null; then
+            # Lock acquired; record owner metadata for debugging.
+            cat > "$lock/owner.json" <<EOF
+{
+  "issue": $issue,
+  "owner_pid": $$,
+  "script": "worktree.sh",
+  "acquired_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+            return 0
+        fi
+
+        # Lock exists. Check whether the owner is still alive; if not, clear
+        # it once and retry (mirrors spawn-loop's stale-lock recovery).
+        local owner_pid=""
+        if [[ -f "$lock/owner.json" ]]; then
+            owner_pid=$(awk -F'[ ,]+' '/owner_pid/ {gsub(/[^0-9]/,"",$3); print $3; exit}' "$lock/owner.json" 2>/dev/null)
+        fi
+
+        if [[ -n "$owner_pid" ]] && [[ "$stale_retry_done" -eq 0 ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_warning "Stale worktree lock from dead PID $owner_pid — cleaning up"
+            fi
+            rm -rf "$lock" 2>/dev/null || true
+            stale_retry_done=1
+            continue
+        fi
+
+        if [[ $(date +%s) -ge $deadline ]]; then
+            WORKTREE_LOCK_HOLDER_PID="$owner_pid"
+            return 1
+        fi
+
+        sleep "$LOOM_WORKTREE_LOCK_POLL_INTERVAL"
+    done
+}
+
+release_worktree_lock() {
+    local issue="$1"
+    [[ -z "$issue" ]] && return 0
+    local lock
+    lock="$(_worktree_lock_path "$issue")"
+    [[ -d "$lock" ]] || return 0
+    rm -rf "$lock" 2>/dev/null || true
+}
+
+# cleanup_partial_worktree_state <issue>
+#
+# Removes the residue of a crashed `git worktree add`:
+#   - `.git/worktrees/issue-<N>/{index,HEAD,gitdir}.lock` — file-level locks
+#     that git would normally hold for the duration of an add operation and
+#     release on success/failure. A SIGKILL'd or stuck process leaves them
+#     behind, where they block every subsequent operation against the same
+#     administrative dir.
+#   - `.loom/worktrees/issue-<N>/` — a half-created worktree dir that was
+#     never registered with git (verified via `git worktree list --porcelain`).
+#
+# **Sentinel contract** (#3334): a dir that IS registered with git is NEVER
+# removed by this helper, regardless of `.loom-managed` presence. The sentinel
+# governs cleanup-on-merge; this helper governs cleanup-on-crash-recovery, and
+# the dividing line is "registered with git or not". An unregistered dir is by
+# definition a shell from a killed add — the sentinel is written *after* a
+# successful add (worktree.sh:761), so a half-created dir never has one.
+cleanup_partial_worktree_state() {
+    local issue="$1"
+    local git_common
+    git_common=$(git rev-parse --git-common-dir 2>/dev/null) || return 0
+
+    local admin_dir="$git_common/worktrees/issue-$issue"
+    local cleaned=0
+
+    # 1. Per-worktree file locks.
+    local lf
+    for lf in index.lock HEAD.lock gitdir.lock; do
+        if [[ -f "$admin_dir/$lf" ]]; then
+            rm -f "$admin_dir/$lf" 2>/dev/null && cleaned=1
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_warning "Cleaned stale $lf at $admin_dir/$lf"
+            fi
+        fi
+    done
+
+    # 2. Orphan worktree dir (exists but git doesn't know about it).
+    local wt_path=".loom/worktrees/issue-$issue"
+    if [[ -d "$wt_path" ]]; then
+        # `git worktree list --porcelain` emits absolute paths on the
+        # `worktree ` line; compare against the resolved absolute path.
+        local abs_wt
+        abs_wt=$(cd "$wt_path" 2>/dev/null && pwd) || abs_wt=""
+        local registered=0
+        if [[ -n "$abs_wt" ]]; then
+            if git worktree list --porcelain 2>/dev/null \
+                | awk '/^worktree / {print $2}' \
+                | grep -Fxq "$abs_wt"; then
+                registered=1
+            fi
+        fi
+        if [[ $registered -eq 0 ]]; then
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_warning "Removing orphan worktree dir (not registered with git): $wt_path"
+            fi
+            rm -rf "$wt_path" 2>/dev/null && cleaned=1
+        fi
+    fi
+
+    # 3. Prune now that the orphan administrative dir is locally consistent.
+    if [[ $cleaned -eq 1 ]]; then
+        git worktree prune 2>/dev/null || true
+    fi
+}
+
+# --------------------------------------------------------------------------
 # Sparse-checkout helpers
 # --------------------------------------------------------------------------
 #
@@ -240,6 +436,18 @@ Safety Features:
   ✓ Symlinks .mcp.json from main (MCP config visible in worktrees)
   ✓ Runs project-specific hooks after creation
   ✓ Stashes/restores local changes during pull
+  ✓ Repo-global lock serializes concurrent invocations (issue #3380)
+  ✓ Recovers from stale .git/worktrees/issue-N/index.lock files
+  ✓ Recovers from half-created .loom/worktrees/issue-N/ dirs
+
+Environment Variables:
+  LOOM_WORKTREE_ALWAYS_INCLUDE      Extra sparse-mode safety paths (space-sep)
+  LOOM_SUBMODULE_TIMEOUT            Per-submodule init timeout (default 300s)
+  LOOM_WORKTREE_LOCK_TIMEOUT        Lock acquisition timeout in seconds
+                                    (default 600 — sized to cover worst-case
+                                    cold-clone submodule init)
+  LOOM_WORKTREE_LOCK_POLL_INTERVAL  Lock poll interval in seconds (default 2)
+  LOOM_PRESERVE_WORKTREE            Disable cleanup-on-merge for all worktrees
 
 Project-Specific Hooks:
   Create .loom/hooks/post-worktree.sh to run custom setup after worktree creation.
@@ -435,6 +643,39 @@ if check_if_in_worktree; then
         echo ""
     fi
 fi
+
+# ─── Concurrency lock (issue #3380) ─────────────────────────────────────────
+# Serialize concurrent invocations against the same issue. The lock dir
+# lives under the canonical git common dir so worktrees and the main
+# workspace agree on the lock namespace.
+#
+# Pre-cleanup runs *before* the lock so a crashed prior run's debris (which
+# would otherwise prevent us from making progress under the lock) is cleared
+# regardless of whether we ultimately acquire the lock.
+cleanup_partial_worktree_state "$ISSUE_NUMBER" || true
+
+if ! acquire_worktree_lock "$ISSUE_NUMBER"; then
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo '{"success": false, "error": "worktree-lock-timeout", "issueNumber": '"$ISSUE_NUMBER"', "holderPid": "'"${WORKTREE_LOCK_HOLDER_PID:-}"'", "timeoutSeconds": '"$LOOM_WORKTREE_LOCK_TIMEOUT"'}'
+    else
+        print_error "Timed out waiting for worktree lock after ${LOOM_WORKTREE_LOCK_TIMEOUT}s"
+        if [[ -n "${WORKTREE_LOCK_HOLDER_PID:-}" ]]; then
+            echo "  Lock holder PID: $WORKTREE_LOCK_HOLDER_PID"
+        fi
+        echo "  Lock dir: $(_worktree_lock_path "$ISSUE_NUMBER")"
+        echo ""
+        echo "  If the holder is dead, remove the lock dir manually:"
+        echo "    rm -rf '$(_worktree_lock_path "$ISSUE_NUMBER")'"
+    fi
+    exit 1
+fi
+
+# Release the lock on any exit path (success, failure, signal).
+trap 'release_worktree_lock "$ISSUE_NUMBER"' EXIT INT TERM
+
+# Re-run cleanup under the lock so a crashed concurrent peer (one that died
+# between our pre-cleanup and our lock acquisition) is still handled.
+cleanup_partial_worktree_state "$ISSUE_NUMBER" || true
 
 # Prune orphaned worktree references before any worktree operations
 # This cleans up stale references when worktree directories were deleted externally (e.g., rm -rf)
@@ -753,6 +994,19 @@ _try_worktree_add() {
 if _try_worktree_add; then
     # Get absolute path to worktree
     ABS_WORKTREE_PATH=$(cd "$WORKTREE_PATH" && pwd)
+
+    # Write a sentinel marker identifying this worktree as Loom-managed.
+    # Cleanup tooling (merge-pr.sh, agent-destroy.sh, loom-clean) refuses to
+    # remove worktrees lacking this marker, so user-provisioned worktrees at
+    # arbitrary paths are never touched by Loom. See issue #3334.
+    cat > "$ABS_WORKTREE_PATH/.loom-managed" <<EOF
+# Loom-managed worktree marker
+# Created by .loom/scripts/worktree.sh
+# Issue: $ISSUE_NUMBER
+# Branch: $BRANCH_NAME
+# Removing this file makes Loom treat the worktree as user-owned and refuse
+# to clean it up automatically.
+EOF
 
     # Sparse-mode: configure cone and materialize tracked files.
     # This must run before submodule init / symlinking so the working tree

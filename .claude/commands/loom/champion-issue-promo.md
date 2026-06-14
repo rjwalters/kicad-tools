@@ -332,6 +332,7 @@ This proposal has been auto-promoted in force mode. The daemon is configured for
 
 Even in force mode, do NOT auto-promote if:
 - Issue has `loom:blocked` label
+- Issue has `loom:operator-only` label (requires human action outside automation — credentials, infra rotations, manual deploys, hardware access; sweep/shepherd will skip these in pre-flight, so promoting to `loom:issue` would only stall the queue)
 - Issue title contains "DISCUSSION" or "RFC" (requires human input)
 - Issue mentions breaking changes without migration plan
 - Issue references external dependencies that need coordination

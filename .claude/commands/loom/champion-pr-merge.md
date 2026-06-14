@@ -87,12 +87,10 @@ fi
 - [ ] **Force mode**: Critical file check is waived (trust Judge review)
 
 **Critical file patterns** (do NOT auto-merge if PR modifies any of these - normal mode only):
-- `src-tauri/tauri.conf.json` - app configuration
 - `Cargo.toml` - root dependency changes
 - `loom-daemon/Cargo.toml` - daemon dependency changes
-- `src-tauri/Cargo.toml` - tauri dependency changes
+- `loom-api/Cargo.toml` - api dependency changes
 - `package.json` - npm dependency changes
-- `pnpm-lock.yaml` - lock file changes
 - `.github/workflows/*` - CI/CD pipeline changes
 - `*.sql` - database schema changes
 - `*migration*` - database migration files
@@ -110,12 +108,10 @@ else
 
   # Define critical patterns (extend as needed)
   CRITICAL_PATTERNS=(
-    "src-tauri/tauri.conf.json"
     "Cargo.toml"
     "loom-daemon/Cargo.toml"
-    "src-tauri/Cargo.toml"
+    "loom-api/Cargo.toml"
     "package.json"
-    "pnpm-lock.yaml"
     ".github/workflows/"
     ".sql"
     "migration"

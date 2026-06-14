@@ -57,7 +57,7 @@
   color: "9333EA"  # purple (violet-600)
 
 - name: loom:curated
-  description: Enhanced by Curator, awaiting human approval
+  description: "Curator-enriched. Additive marker; coexists with loom:issue (highest-quality state for Builders)"
   color: "10B981"  # emerald-500
 
 # Status Labels
@@ -68,6 +68,15 @@
 - name: loom:urgent
   description: Critical/blocking issue requiring immediate attention
   color: "DC2626"  # red-600
+
+# Epic Labels
+- name: loom:epic
+  description: Multi-phase epic proposal (decomposes into implementation issues)
+  color: "7C3AED"  # violet-600 - distinguishes from regular proposals
+
+- name: loom:epic-phase
+  description: Issue is part of an epic phase (references parent epic)
+  color: "8B5CF6"  # violet-500 - lighter variant for child issues
 
 # Tier Labels (Goal Alignment)
 - name: tier:goal-advancing

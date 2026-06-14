@@ -157,8 +157,7 @@ if [[ "$INJECT_ROLE" == "true" ]]; then
             /champion*) ROLE="champion" ;;
             /guide*)   ROLE="guide" ;;
             /auditor*) ROLE="auditor" ;;
-            /shepherd*) ROLE="shepherd" ;;
-            /loom*)    ROLE="loom" ;;
+            /loom:sweep*) ROLE="sweep" ;;
         esac
     fi
 

@@ -2,12 +2,12 @@
 # validate-toolchain.sh - Validate loom-tools commands are available
 #
 # Validates that essential loom-tools commands are installed and accessible
-# before the daemon enters its main loop. Provides tiered validation with
-# critical vs optional commands.
+# before the spawn loop (Tier 2) enters its main loop. Provides tiered
+# validation with critical vs optional commands.
 #
 # Exit codes:
 #   0 - All critical commands available (optional warnings may exist)
-#   1 - Critical commands missing (daemon cannot start)
+#   1 - Critical commands missing (spawn loop cannot start)
 #   2 - Invalid arguments
 #
 # Usage:
@@ -18,22 +18,19 @@
 
 set -euo pipefail
 
-# Critical commands - daemon cannot function without these
+# Critical commands - spawn loop cannot function without these
 CRITICAL_COMMANDS=(
-    "loom-daemon-cleanup"
-    "loom-recover-orphans"
-    "loom-snapshot"
+    "loom-cleanup"
+    "loom-orphan-recovery"
 )
 
-# Optional commands - daemon can continue with degraded functionality
+# Optional commands - degraded functionality without these
 OPTIONAL_COMMANDS=(
     "loom-stuck-detection"
     "loom-status"
     "loom-health-monitor"
     "loom-agent-wait"
     "loom-agent-spawn"
-    "loom-validate-state"
-    "loom-milestone"
 )
 
 # Colors for output
@@ -59,18 +56,15 @@ OPTIONS:
     --help      Show this help message
 
 CRITICAL COMMANDS (required):
-    loom-daemon-cleanup   - Cleanup stale artifacts at daemon startup
-    loom-recover-orphans  - Recover orphaned shepherds after crash
-    loom-snapshot         - Generate pipeline snapshot for iteration
+    loom-cleanup          - Log archival and lock-dir cleanup
+    loom-orphan-recovery  - Recover orphaned tasks after spawn-loop crash
 
 OPTIONAL COMMANDS (degraded without):
-    loom-stuck-detection  - Detect stuck agents
-    loom-status           - Show daemon status
+    loom-stuck-detection  - Detect stuck sweep children
+    loom-status           - Show spawn-loop / pipeline status
     loom-health-monitor   - Health monitoring
     loom-agent-wait       - Wait for agent completion
     loom-agent-spawn      - Spawn agent sessions
-    loom-validate-state   - Validate daemon state
-    loom-milestone        - Report progress milestones
 
 INSTALLATION:
     If commands are missing, install loom-tools:
@@ -82,7 +76,7 @@ INSTALLATION:
     uv pip install -e ./loom-tools
 
     # Verify installation:
-    which loom-daemon-cleanup
+    which loom-cleanup
 
 EXIT CODES:
     0 - All critical commands available
@@ -114,16 +108,13 @@ command_exists() {
     # Map command names to module paths
     local module_name
     case "$cmd" in
-        loom-daemon-cleanup) module_name="loom_tools.daemon_cleanup" ;;
-        loom-recover-orphans) module_name="loom_tools.orphan_recovery" ;;
-        loom-snapshot) module_name="loom_tools.snapshot" ;;
+        loom-cleanup) module_name="loom_tools.cleanup" ;;
+        loom-orphan-recovery) module_name="loom_tools.orphan_recovery" ;;
         loom-stuck-detection) module_name="loom_tools.stuck_detection" ;;
         loom-status) module_name="loom_tools.status" ;;
         loom-health-monitor) module_name="loom_tools.health_monitor" ;;
         loom-agent-wait) module_name="loom_tools.agent_wait" ;;
         loom-agent-spawn) module_name="loom_tools.agent_spawn" ;;
-        loom-validate-state) module_name="loom_tools.validate_state" ;;
-        loom-milestone) module_name="loom_tools.milestones" ;;
         *) return 1 ;;
     esac
 
@@ -315,13 +306,13 @@ output_text() {
         degraded)
             echo -e "${YELLOW}Status: DEGRADED${NC} - Optional commands missing"
             echo ""
-            echo "The daemon will continue with degraded functionality."
+            echo "The spawn loop will continue with degraded functionality."
             echo "Some features (stuck detection, health monitoring) may not work."
             ;;
         critical)
             echo -e "${RED}Status: CRITICAL${NC} - Essential commands missing"
             echo ""
-            echo "The daemon cannot start without these commands."
+            echo "The spawn loop cannot start without these commands."
             echo ""
             echo "To install loom-tools, run:"
             echo "  pip install -e ./loom-tools"

@@ -1,6 +1,6 @@
 # Loom Daemon
 
-You are the Layer 2 Loom Daemon orchestrator in the {{workspace}} repository. This skill operates as a **signal-writer and observer** — you coordinate the daemon process through JSON signals and state observation. You NEVER spawn daemon or shepherd processes directly via Bash.
+You are the Layer 2 Loom Daemon orchestrator in the {{workspace}} repository. The `loom-daemon` is a Rust binary that exposes an MCP-level dispatch + monitoring + pub/sub surface; you coordinate it via MCP tools, not by spawning shell processes directly.
 
 ## Arguments
 
@@ -16,99 +16,87 @@ IF arguments start with "help":
     -> EXIT after displaying help
 
 ELSE IF arguments contain "status":
-    -> Read .loom/daemon-state.json and display current state
+    -> Call mcp__loom__list_sweeps and display registry state
     -> EXIT after displaying status
 
 ELSE IF arguments contain "health":
-    -> Read .loom/daemon-state.json and display health summary
+    -> Call mcp__loom__list_sweeps + observe event-bus health via
+       mcp__loom__tail_event_bus (short tail) and display summary
     -> EXIT after displaying health
 
 ELSE IF arguments contain "stop":
-    -> Write stop signal to .loom/signals/
+    -> Iterate mcp__loom__list_sweeps and call mcp__loom__cancel_sweep
+       on each. Inform the operator the daemon process itself remains
+       running (cancellation drains in-flight sweeps; the daemon is a
+       long-lived process they control via their service manager).
     -> EXIT
 
 ELSE:
-    -> Proceed to Daemon Detection below
+    -> Proceed to Host Sleep Readiness, then Daemon Detection below
 ```
+
+## Host Sleep Readiness (#3350)
+
+`/loom` is intended for **long-running, often overnight** autonomous orchestration. If the host enters sleep / suspend mid-run, in-flight subagent sockets to `api.anthropic.com` are torn down and that work is lost (see #3350 for the incident that motivated this check).
+
+Before doing anything else (other than the help / status / stop early exits handled in Mode Selection above), run the host-sleep readiness check and surface its output to the user:
+
+```bash
+./.loom/scripts/check-host-sleep.sh
+```
+
+This is advisory-only. The script always exits `0` and **must not block** orchestration — proceed regardless of what it prints. It prints a platform-aware warning when the host is configured in a way that allows it to sleep:
+
+- **macOS:** user-idle sleep assertions (e.g. Amphetamine, `caffeinate -dimsu`) do **not** reliably defeat Maintenance Sleep. The reliable defenses are `sudo pmset -c sleep 0` or flipping the sleep manager's "allow system sleep when display is off" toggle to OFF.
+- **systemd Linux:** wrap the session in `systemd-inhibit --what=idle:sleep --who=loom --why=loom -- <cmd>`, which IS reliable.
+
+If the user is starting an overnight run, they should heed the warning before walking away.
 
 ## Daemon Detection
 
-Before observing, check whether the daemon is running:
+Before observing or dispatching, verify the daemon is reachable. Use `mcp__loom__list_sweeps` as the probe — it returns a (possibly empty) registry on a healthy daemon, and fails fast if the IPC socket is missing or the process is dead.
 
-```bash
-cat .loom/daemon-loop.pid 2>/dev/null
+```
+Call: mcp__loom__list_sweeps
 ```
 
-If the PID file exists, verify the process is alive:
-
-```bash
-PID=$(cat .loom/daemon-loop.pid 2>/dev/null)
-kill -0 "$PID" 2>/dev/null && echo "RUNNING" || echo "STALE"
-```
-
-### If Daemon is NOT Running
+### If the call fails (daemon unreachable)
 
 Display this message and EXIT:
 
 ```
-The Loom daemon is not running.
+The Loom daemon is not running (mcp__loom__list_sweeps returned no
+response).
 
-Start it from a terminal OUTSIDE Claude Code:
+The daemon is a long-lived Rust process. Start it from a terminal
+OUTSIDE Claude Code via your service manager of choice (systemd, launchd,
+foreman, or just `loom-daemon` in a background shell).
 
-  ./.loom/scripts/daemon.sh start                      # Auto-build mode (default)
-  ./.loom/scripts/daemon.sh start --no-auto-build      # Support-only (no auto-spawn)
-  ./.loom/scripts/daemon.sh start --timeout-min 120    # Auto-stop after 2 hours
+While the daemon is down, in-process orchestration still works:
 
-Then run /loom again to begin observing and orchestrating.
+  /loom:sweep <issue>       # Single-issue lifecycle, in-session
+                            # (subagent dispatch, single OAuth token)
 
-Why run outside Claude Code?
-  Shepherds start as daemon children (not Claude Code descendants),
-  avoiding the nested Claude Code spawning restriction.
+Stage -1 of /loom:sweep auto-detects the daemon — when the daemon comes
+back up AND a multi-account token pool is configured (.loom/tokens/),
+new /loom:sweep invocations will delegate dispatch to the daemon
+automatically.
 ```
 
-### If Daemon IS Running
+### If the call succeeds (daemon reachable)
 
-Read `.loom/daemon-state.json` and check `orchestration_active`.
+Proceed to the Observer / Dispatch Loop below.
 
-**If `orchestration_active` is `false` (standby mode)**:
+## Observer / Dispatch Loop
 
-The daemon is waiting for an explicit signal to begin autonomous work. Send a `start_orchestration` signal:
-
-```
-Mode mapping:
-  /loom           → mode: "default"
-  /loom --merge   → mode: "force"
-  /loom --force   → mode: "force"
-```
-
-Write the signal file using the Write tool (not Bash):
-
-```
-.loom/signals/cmd-{YYYYMMDD-HHMMSS}-{random4hex}.json
-```
-
-Payload:
-```json
-{"action": "start_orchestration", "mode": "<default|force>"}
-```
-
-Inform the user: `→ Activating orchestration (mode=<mode>)...`
-
-Then wait ~3 seconds and verify `orchestration_active` is now `true` in the state file before proceeding to the Observer Loop.
-
-**If `orchestration_active` is `true`**:
-
-Proceed directly to the Observer Loop below.
-
-## Observer Loop
-
-When the daemon is running, you are an intelligent observer and signal-writer.
+When the daemon is running, you coordinate work via MCP tools.
 
 **Each iteration:**
 
-1. **Read current state** using the Read tool:
-   - `.loom/daemon-state.json` — shepherd status, pipeline counts, warnings
-   - `.loom/daemon.log` — recent daemon activity
+1. **Read current state** by calling the daemon's MCP tools:
+   - `mcp__loom__list_sweeps` — currently-dispatched sweeps with PIDs and started_at
+   - `mcp__loom__get_sweep_status <sweep_id>` — per-sweep phase, blockers, last activity
+   - `mcp__loom__tail_event_bus` (short tail) — recent lifecycle events for context
 
 2. **Assess pipeline** using read-only gh commands:
    ```bash
@@ -117,93 +105,91 @@ When the daemon is running, you are an intelligent observer and signal-writer.
    gh pr list --label="loom:review-requested" --json number,title --limit=20
    ```
 
-3. **Signal the daemon** by writing JSON command files to `.loom/signals/`:
-   ```bash
-   SIGNAL=".loom/signals/cmd-$(date +%Y%m%d-%H%M%S)-$(openssl rand -hex 4).json"
-   echo '{"action": "spawn_shepherd", "issue": 42, "mode": "default"}' > "$SIGNAL"
-   # The daemon picks this up within 2 seconds.
+3. **Dispatch new sweeps** via MCP:
+   ```
+   For each ready loom:issue not already in the daemon registry:
+     mcp__loom__dispatch_sweep --issue <N>
+   ```
+   The daemon picks an OAuth token from the pool (`spawn-claude.sh` rotation), fork+execs `claude -p "/loom:sweep N"`, and registers the child PID in the in-memory `SweepRegistry`. Token rotation only happens at this process-spawn boundary.
+
+4. **Monitor lifecycle events** (optional, for live debugging or stuck-sweep detection):
+   ```
+   mcp__loom__subscribe_to_events --topic "sweep.issue.*"
+   ```
+   The frozen v0.10.0 topic taxonomy is:
+   - `sweep.issue.{N}.phase`     — phase transitions (curator → builder → judge → doctor → merge)
+   - `sweep.issue.{N}.blocker`   — a sweep added a `loom:blocked` or `loom:operator-only` label
+   - `sweep.issue.{N}.exited`    — clean exit (with `exit_code` and `duration_sec`)
+   - `sweep.issue.{N}.crashed`   — non-zero exit / OOM (with `exit_code` and `duration_sec`)
+   - `sweep.global.dispatch`     — daemon accepted a new `dispatch_sweep` request
+   - `sweep.global.completed`    — sweep completed (terminal state, post-reaper)
+
+5. **Cancel stuck sweeps** as needed:
+   ```
+   mcp__loom__cancel_sweep --sweep_id <id>
+   ```
+   This sends SIGTERM, waits the configured grace window, then SIGKILL. The `.loom/sweep-checkpoint/issue-<N>.json` checkpoint survives the cancellation; the next `dispatch_sweep` for that issue resumes from the last completed phase.
+
+6. **Tail per-sweep logs** if you need to inspect output:
+   ```
+   mcp__loom__tail_sweep_log --issue <N> --lines 200
+   ```
+   Or use the bare-event-bus view:
+   ```
+   mcp__loom__tail_event_bus --lines 50
    ```
 
-4. **Wait and observe**: Use the Read tool or MCP tools to monitor state.
-
-5. **Repeat** at appropriate intervals.
-
-### Signal Protocol
-
-Write JSON files named `cmd-{YYYYMMDD-HHMMSS}-{random}.json` to `.loom/signals/`:
-
-| Action | Payload | Description |
-|--------|---------|-------------|
-| `start_orchestration` | `{"action": "start_orchestration", "mode": "default\|force"}` | Activate autonomous orchestration loop |
-| `spawn_shepherd` | `{"action": "spawn_shepherd", "issue": N, "mode": "default\|force"}` | Start shepherd for issue N |
-| `stop` | `{"action": "stop"}` | Graceful daemon shutdown |
-| `set_max_shepherds` | `{"action": "set_max_shepherds", "count": N}` | Adjust shepherd pool size |
-| `pause_shepherd` | `{"action": "pause_shepherd", "shepherd_id": "shepherd-1"}` | Pause a shepherd slot |
-| `resume_shepherd` | `{"action": "resume_shepherd", "shepherd_id": "shepherd-1"}` | Resume a paused shepherd slot |
-
-**Force/merge mode**: Use `"mode": "force"` in `spawn_shepherd` to enable auto-promote + auto-merge behavior.
+7. **Sleep ~30 seconds**, then repeat.
 
 ### Orchestration Logic
 
 **Normal autonomous operation:**
-1. Count `loom:issue` issues available for work
-2. Check active shepherds in `daemon-state.json`
-3. If issues are available and shepherd slots are idle: signal `spawn_shepherd`
-4. If pipeline is empty (no issues, no proposals): assess whether Architect/Hermit should run
-5. Monitor for blocked issues, stuck shepherds, or unmerged approved PRs
-6. Sleep 30 seconds (checks signals and ready-issue assignment every 2 seconds), then repeat
+1. Count `loom:issue` items in the forge
+2. Check active sweeps via `mcp__loom__list_sweeps`
+3. If issues are available and the daemon is not at capacity (operator-defined; the daemon itself does not enforce a hard limit), dispatch new sweeps
+4. If pipeline is empty (no issues, no proposals), prompt the operator to consider triggering Architect/Hermit manually — work-generation cadence is tracked under #3381 and is **not** dispatched by the daemon
+5. Monitor `sweep.issue.*.blocker` events for sweeps that added a blocker label; surface these to the operator
+6. Monitor `sweep.issue.*.crashed` events for non-zero exits; consider re-dispatch (the checkpoint preserves progress)
 
 **Force/merge mode** (`/loom --merge` or `/loom --force`):
-- Same as normal, but pass `"mode": "force"` in all `spawn_shepherd` signals
-- This instructs shepherds to auto-promote curated issues and auto-merge approved PRs
+- Same as normal, but pass `--force` to `mcp__loom__dispatch_sweep` so the dispatched sweep auto-merges approved PRs (Mode B semantics — see `/loom:sweep` skill)
 
-### Observing with MCP Tools
+### Multi-account scaling
 
-Use MCP tools to monitor live state:
+The daemon is the **only** path that gives autonomous orchestration multi-account OAuth token rotation:
+- Each `mcp__loom__dispatch_sweep` call fork+execs a fresh `claude -p "/loom:sweep N"` child
+- `spawn-claude.sh` selects a token from `.loom/tokens/.ranking` (or the allowlist, or random fallback) and exports `CLAUDE_CODE_OAUTH_TOKEN` before exec
+- Multiple sweeps can run concurrently under different tokens, spreading load across accounts
 
-```
-mcp__loom__get_heartbeat          # Check if Loom app is active
-mcp__loom__list_terminals         # List running terminal sessions
-mcp__loom__get_ui_state           # Full engine + terminal status
-```
-
-Use the Read tool for file-based state:
-```
-Read: .loom/daemon-state.json     # Shepherd assignments, pipeline state, warnings
-Read: .loom/daemon.log            # Daemon process log
-Glob: .loom/signals/*.json        # Count pending signals in queue
-```
+In-session subagent dispatch (`/loom:sweep` with Stage -1 falling through to subagent path) inherits the parent's single OAuth token — fine for short batches, fatal for multi-day runs. The daemon path exists precisely to break that limit.
 
 ## Commands Quick Reference
 
 | Command | Description |
 |---------|-------------|
-| `/loom` | Check daemon, start observing/orchestrating |
-| `/loom --merge` | Same, but signal shepherds with force mode |
+| `/loom` | Check daemon, start observing/dispatching |
+| `/loom --merge` | Same, but dispatched sweeps use `--force` (auto-merge) |
 | `/loom --force` | Alias for --merge |
-| `/loom status` | Read and display daemon-state.json |
-| `/loom health` | Display daemon health summary |
-| `/loom stop` | Signal daemon to stop gracefully |
+| `/loom status` | Call `mcp__loom__list_sweeps` and display |
+| `/loom health` | Display daemon health summary (registry + recent events) |
+| `/loom stop` | Cancel all in-flight sweeps via `mcp__loom__cancel_sweep`; daemon process itself stays alive |
 | `/loom help` | Show comprehensive help guide |
 | `/loom help <topic>` | Show help for a specific topic |
 
-## Stopping the Daemon
+## Cancelling sweeps and stopping the daemon
 
-**Via IPC signal** (preferred, daemon processes within 2 seconds):
-```bash
-echo '{"action": "stop"}' > ".loom/signals/cmd-$(date +%Y%m%d-%H%M%S)-stop.json"
+**Cancel individual sweeps** (preferred):
+```
+mcp__loom__cancel_sweep --sweep_id <id>
 ```
 
-**Via stop file** (classic approach):
-```bash
-touch .loom/stop-daemon
+**Cancel all in-flight sweeps**:
+```
+For each sweep returned by mcp__loom__list_sweeps:
+  mcp__loom__cancel_sweep --sweep_id <sweep_id>
 ```
 
-**Via stop script** (from a shell outside Claude Code):
-```bash
-./.loom/scripts/daemon.sh stop            # Graceful (waits for exit)
-./.loom/scripts/daemon.sh stop --force   # Immediate SIGTERM
-```
+**Stop the daemon process itself** is out of scope for this skill — the daemon is a long-lived service that the operator manages outside Claude Code (via their init system, foreman, or shell-level process management).
 
 ---
 
@@ -221,8 +207,8 @@ List these when showing the full help or when the sub-topic is unrecognized:
 /loom help roles        - All available agent roles
 /loom help commands     - Slash command reference
 /loom help workflow     - Label-based workflow overview
-/loom help daemon       - Daemon mode and configuration
-/loom help shepherd     - Single-issue orchestration
+/loom help daemon       - Daemon mode and MCP-tool reference
+/loom help sweep        - Single-issue orchestration
 /loom help worktrees    - Git worktree workflow
 /loom help labels       - Label state machine reference
 /loom help troubleshoot - Common issues and fixes
@@ -249,24 +235,25 @@ Loom orchestrates AI-powered development using GitHub issues, labels, and git wo
 /curator
 ```
 
-**Try it now - Autonomous Mode (daemon manages everything):**
-
-```bash
-# Step 1: Start the daemon from a terminal OUTSIDE Claude Code
-./.loom/scripts/daemon.sh start
-
-# Step 2: In Claude Code, observe and orchestrate
-/loom --merge
-
-# Check daemon health anytime
-/loom health
-```
-
-**Try it now - Single Issue (shepherd handles the full lifecycle):**
+**Try it now - Single Issue (sweep handles the full lifecycle):**
 
 ```bash
 # Orchestrate one issue from curation through merge
-/shepherd 123 --merge
+/loom:sweep 123 --merge
+```
+
+**Try it now - Daemon Mode (multi-account autonomous dispatch):**
+
+```
+# Step 1: Ensure loom-daemon is running (outside Claude Code, via your
+# service manager). Verify via:
+#   mcp__loom__list_sweeps
+#
+# Step 2: In Claude Code, observe and dispatch:
+#   /loom --merge
+#
+# /loom uses MCP tools to enumerate the registry, dispatch new sweeps,
+# subscribe to lifecycle events, and cancel stuck work.
 ```
 
 **Key concepts:**
@@ -274,6 +261,7 @@ Loom orchestrates AI-powered development using GitHub issues, labels, and git wo
 - Each role manages specific label transitions
 - Agents coordinate through labels, not direct communication
 - Work happens in git worktrees (`.loom/worktrees/issue-N`)
+- Multi-account token rotation only works at process-spawn boundaries — that is the architectural reason daemon mode exists alongside in-session subagent dispatch
 
 ---
 
@@ -287,13 +275,13 @@ Loom has three layers of roles:
 
 | Command | Role | What it does |
 |---------|------|-------------|
-| `/loom` | Daemon | Observes daemon state, writes signals to coordinate shepherds and work generation. |
+| `/loom` | Daemon | Observes the `loom-daemon` registry via MCP tools, dispatches sweeps via `mcp__loom__dispatch_sweep`, and monitors lifecycle events via the pub/sub bus. |
 
 **Layer 1 - Issue Orchestration:**
 
 | Command | Role | What it does |
 |---------|------|-------------|
-| `/shepherd <N>` | Shepherd | Orchestrates a single issue through its full lifecycle: Curator -> Builder -> Judge -> Doctor -> Merge. |
+| `/loom:sweep <N>` | Sweep | Orchestrates a single issue through its full lifecycle: Curator -> Builder -> Judge -> Doctor -> Merge. Stage -1 auto-detects a running daemon + multi-account pool and delegates dispatch when both are available. |
 
 **Layer 0 - Task Execution (Worker Roles):**
 
@@ -317,34 +305,35 @@ Loom has three layers of roles:
 
 **Slash Command Reference**
 
-**Daemon commands:**
+**Daemon-observer commands:**
 ```
-/loom                          Check daemon, start observing/orchestrating
-/loom --merge                  Observe in merge mode (signals use force mode)
-/loom status                   Read and display daemon-state.json
+/loom                          Check daemon, start observing/dispatching
+/loom --merge                  Observe + dispatch in merge mode (force flag)
+/loom status                   List current sweep registry
 /loom health                   Show daemon health summary
-/loom stop                     Signal daemon to stop gracefully
+/loom stop                     Cancel all in-flight sweeps
 /loom help                     Show this help guide
 /loom help <topic>             Show help for a specific topic
 ```
 
-**Starting the daemon (run OUTSIDE Claude Code):**
+**Daemon MCP tools (callable from any Claude Code session):**
 ```
-./.loom/scripts/daemon.sh start                   Start daemon (auto-build, default)
-./.loom/scripts/daemon.sh start --no-auto-build   Support-only (no auto-spawn)
-./.loom/scripts/daemon.sh start -t 180            Run for 3 hours then stop
-./.loom/scripts/daemon.sh status                  Check if daemon is running
-./.loom/scripts/daemon.sh stop                    Stop gracefully (waits for exit)
-./.loom/scripts/daemon.sh stop --force            Stop immediately (SIGTERM)
-./.loom/scripts/daemon.sh restart                 Stop + start
-./.loom/scripts/daemon.sh restart --no-auto-build  Restart in support-only mode
+mcp__loom__dispatch_sweep      Dispatch a sweep for an issue
+mcp__loom__list_sweeps         Enumerate the in-memory sweep registry
+mcp__loom__get_sweep_status    Inspect a single sweep's state
+mcp__loom__cancel_sweep        SIGTERM -> grace -> SIGKILL
+mcp__loom__tail_sweep_log      Tail .loom/logs/sweep-issue-<N>.log
+mcp__loom__publish_event       Publish a sweep-lifecycle event
+mcp__loom__subscribe_to_events Topic-filtered event stream
+mcp__loom__tail_event_bus      Untopiced event tail
 ```
 
-**Shepherd commands:**
+**Sweep commands:**
 ```
-/shepherd 123                  Orchestrate issue #123 (stop after PR approval)
-/shepherd 123 --merge          Full automation including auto-merge
-/shepherd 123 --to curated     Stop after curation phase
+/loom:sweep 123                Orchestrate issue #123 (stop after PR approval)
+/loom:sweep 123 --merge        Full automation including auto-merge
+/loom:sweep --prs 456 789      Mode C — PR-set back half (judge / doctor / merge)
+/loom:sweep 123 --no-daemon    Force in-session subagent dispatch
 ```
 
 **Worker commands (with optional issue/PR number):**
@@ -412,74 +401,86 @@ Agents coordinate exclusively through GitHub labels. Here is how an issue flows 
 
 **Daemon Mode**
 
-The daemon is the Layer 2 orchestrator that runs continuously as a standalone background process. It spawns shepherds as direct subprocesses, so shepherds are children of the daemon — not descendants of any Claude Code session.
+The Layer-2 daemon is the Rust binary `loom-daemon`. It exposes a Unix-socket IPC surface and a paired `mcp-loom` MCP server which maps each IPC request 1:1 to an MCP tool. The daemon is the coordination point for multi-account dispatch, monitoring, and lifecycle eventing.
 
 **Architecture:**
 ```
-init/launchd → loom-daemon → loom-shepherd.sh → claude /builder
+init/launchd → loom-daemon  ──MCP──→  Claude Code session (this skill)
+                  │
+                  ├── SweepRegistry (in-memory BTreeMap of dispatched sweeps)
+                  ├── EventBus (tokio broadcast channel, 6 frozen topics)
+                  └── ReaperTask (30-second tick, sweeps dead PIDs,
+                                   emits sweep.issue.*.exited / .crashed)
+                  │
+                  ▼
+        fork+exec /loom:sweep N via spawn-claude.sh (token rotation)
 ```
 
-This avoids nested Claude Code spawning restrictions.
+The daemon does **not** poll the forge, **does not** maintain a `shepherd-N` pool, and **does not** drive cron-scheduled support roles. Those responsibilities live in the operator's `mcp__loom__dispatch_sweep` calls (this skill, or the `/loom:sweep` skill via Stage -1 delegation) and the GitHub Actions cron workflows under `.github/workflows/loom-*.yml`.
 
-**Starting the daemon (from a shell outside Claude Code):**
-```bash
-./.loom/scripts/daemon.sh start                    # Start daemon
-./.loom/scripts/daemon.sh start -t 120             # Start daemon, stop after 2 hours
+**Starting the daemon**:
+```
+Run `loom-daemon` from a terminal outside Claude Code, via your service
+manager of choice (systemd unit, launchd plist, foreman, or just a
+background shell). The daemon binds a Unix socket and serves IPC over it
+until stopped.
 ```
 
-**Observing from Claude Code (`/loom`):**
+**Observing and dispatching from Claude Code (`/loom`)**:
 ```
-/loom                  Check daemon, observe state, write signals
-/loom --merge          Same, but signal shepherds with force mode
-/loom status           Read daemon-state.json and display
-```
-
-**Signal queue** (`.loom/signals/`):
-- `/loom` writes JSON command files here
-- The daemon polls and processes them within 2 seconds
-- Commands: `spawn_shepherd`, `stop`, `set_max_shepherds`, `pause_shepherd`, `resume_shepherd`
-
-**What the daemon does each iteration:**
-1. Polls `.loom/signals/` for IPC commands from `/loom`
-2. Captures system snapshot (issues, PRs, labels)
-3. Checks for completed shepherds
-4. Spawns new shepherds for ready `loom:issue` issues
-5. Triggers Architect/Hermit when backlog is low
-6. Sleeps until next iteration (default: 30 seconds, checks signals and assigns ready issues every 2 seconds)
-
-**Stopping the daemon:**
-```bash
-./.loom/scripts/daemon.sh stop                   # Graceful (waits for exit)
-./.loom/scripts/daemon.sh stop --force           # Immediate SIGTERM
-touch .loom/stop-daemon                          # Via file signal (equivalent)
+/loom                  Check daemon (probe via mcp__loom__list_sweeps),
+                       then observe registry + event bus and dispatch
+                       new sweeps for ready loom:issue items
+/loom --merge          Same, but dispatched sweeps run in --force mode
+                       (auto-merge approved PRs)
+/loom status           mcp__loom__list_sweeps + format the result
 ```
 
-**Configuration (environment variables):**
+**MCP tool reference**:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LOOM_POLL_INTERVAL` | 30 | Seconds between full iterations |
-| `LOOM_MAX_SHEPHERDS` | 10 | Max concurrent shepherds |
-| `LOOM_ISSUE_THRESHOLD` | 3 | Trigger work generation below this count |
-| `LOOM_ARCHITECT_COOLDOWN` | 1800 | Seconds between architect triggers |
-| `LOOM_HERMIT_COOLDOWN` | 1800 | Seconds between hermit triggers |
-| `LOOM_ISSUE_STRATEGY` | fifo | Issue selection: fifo, lifo, or priority |
+| Tool | Purpose |
+|------|---------|
+| `mcp__loom__dispatch_sweep` | Dispatch a sweep for an issue (returns sweep ID) |
+| `mcp__loom__list_sweeps` | Enumerate registry entries |
+| `mcp__loom__get_sweep_status` | Inspect a single sweep's state |
+| `mcp__loom__cancel_sweep` | SIGTERM -> grace -> SIGKILL |
+| `mcp__loom__tail_sweep_log` | Tail per-issue log file |
+| `mcp__loom__publish_event` | Publish a lifecycle event |
+| `mcp__loom__subscribe_to_events` | Topic-filtered event stream |
+| `mcp__loom__tail_event_bus` | Untopiced bus tail |
 
-**Merge mode** auto-promotes proposals and auto-merges PRs after Judge approval. It does NOT skip code review - the Judge always runs.
+**Event taxonomy** (frozen for v0.10.0 — new topics require a follow-up issue):
+
+| Topic | Publisher | Payload |
+|-------|-----------|---------|
+| `sweep.issue.{N}.phase` | Sweep child via `publish_event` | `{phase, pr_number?}` |
+| `sweep.issue.{N}.blocker` | Sweep child | `{reason, label_added}` |
+| `sweep.issue.{N}.exited` | Daemon reaper or `cancel_sweep` | `{exit_code, duration_sec}` |
+| `sweep.issue.{N}.crashed` | Daemon reaper | `{exit_code, duration_sec}` |
+| `sweep.global.dispatch` | Daemon | `{sweep_id, issue}` |
+| `sweep.global.completed` | Daemon reaper | `{sweep_id, issue, terminal_state}` |
+
+**Stopping the daemon** is out of scope for this skill — manage the daemon process via your service manager.
+
+**Merge mode** auto-merges PRs after Judge approval. It does NOT skip code review — the Judge phase still runs inside the dispatched sweep.
+
+**Full reference**: see `.loom/docs/daemon-reference.md` for the wire protocol, IPC request/response variants, registry internals, and reaper semantics.
 
 ---
 
-### Sub-topic: shepherd
+### Sub-topic: sweep
 
-**Shepherd - Single-Issue Orchestration**
+**Sweep - Single-Issue Orchestration**
 
-The shepherd (`/shepherd <issue>`) orchestrates one issue through its complete lifecycle.
+The sweep skill (`/loom:sweep <issue>`) orchestrates one issue through its complete lifecycle.
 
 **Usage:**
-```bash
-/shepherd 123            # Stop after PR is approved
-/shepherd 123 --merge    # Full automation including auto-merge
-/shepherd 123 --to curated  # Stop after curation
+```text
+/loom:sweep 123                    # Run the full lifecycle for issue 123
+/loom:sweep 123 --merge            # Full automation including auto-merge
+/loom:sweep --prs 456 789          # Mode C — PR-set back half
+/loom:sweep 123 --no-daemon        # Force in-session subagent dispatch
+                                    # (skip Stage -1 daemon delegation)
 ```
 
 **Lifecycle phases:**
@@ -491,7 +492,17 @@ The shepherd (`/shepherd <issue>`) orchestrates one issue through its complete l
 5. Merge phase     - Auto-merge the approved PR (with --merge)
 ```
 
-The shepherd tracks progress via milestones in `.loom/progress/` and writes checkpoints for crash recovery.
+**Stage -1: Backend detection** (Phase D of #3449):
+
+Before running phase 1, the sweep skill probes:
+1. Is `loom-daemon` reachable? (Ping over IPC, 500ms timeout)
+2. Does a multi-account token pool exist? (`.loom/tokens/` has ≥ 2 `ACCOUNT_KEY_*` entries)
+
+**Strict AND** — if either probe fails, fall through to in-process subagent dispatch (the existing Mode A/B/C lifecycle, no behaviour change for solo-token operators). If both succeed AND the mode is not C AND `--no-daemon` is not set, the skill calls `mcp__loom__dispatch_sweep` and exits.
+
+Mode C (`--prs`) always uses subagent dispatch; the daemon does not handle PR-set dispatch in v0.10.0.
+
+The skill tracks progress via checkpoints in `.loom/sweep-checkpoint/issue-<N>.json` for crash recovery.
 
 ---
 
@@ -509,7 +520,6 @@ cd .loom/worktrees/issue-42           # Branch: feature/issue-42
 
 **Worktree locations:**
 - `.loom/worktrees/issue-N` - Per-issue work (Builder creates these)
-- `.loom/worktrees/terminal-N` - Per-terminal isolation (Tauri App only)
 
 **Rules:**
 - Always use `./.loom/scripts/worktree.sh` (never `git worktree` directly)
@@ -538,6 +548,7 @@ loom-clean --deep       # Also remove build artifacts
 | `loom:issue` | Approved and ready for work | Champion/Human |
 | `loom:building` | Builder is implementing | Builder |
 | `loom:blocked` | Work is blocked | Builder |
+| `loom:operator-only` | Requires human action; sweep skip | Human |
 | `loom:urgent` | Critical priority | Guide/Human |
 
 **Workflow labels (PR lifecycle):**
@@ -568,9 +579,9 @@ loom-clean --deep       # Also remove build artifacts
 ./.loom/scripts/stale-building-check.sh --recover
 ```
 
-**Orphaned shepherds after daemon crash:**
+**Orphaned sweeps after daemon crash:**
 ```bash
-./.loom/scripts/recover-orphaned-shepherds.sh --recover
+loom-orphan-recovery --recover
 ```
 
 **Labels out of sync:**
@@ -583,21 +594,25 @@ gh label sync --file .github/labels.yml
 loom-clean --force
 ```
 
-**Daemon won't start (stale PID):**
-```bash
-rm -f .loom/daemon-loop.pid
-./.loom/scripts/daemon.sh start
+**Daemon unreachable:**
+Verify the binary is running outside Claude Code (via your service manager).
+The MCP probe `mcp__loom__list_sweeps` will fail immediately if the IPC
+socket is missing.
+
+**Cancel a stuck sweep:**
+```
+mcp__loom__cancel_sweep --sweep_id <id>
 ```
 
-**Stop daemon gracefully:**
-```bash
-./.loom/scripts/daemon.sh stop
+**Inspect a sweep's log:**
+```
+mcp__loom__tail_sweep_log --issue <N> --lines 200
 ```
 
-**Check daemon status:**
-```bash
-/loom status
-./.loom/scripts/daemon.sh status
+**Subscribe to events for live debugging:**
+```
+mcp__loom__subscribe_to_events --topic "sweep.issue.<N>.*"
+mcp__loom__tail_event_bus
 ```
 
 **Merge PRs from worktrees (never use `gh pr merge`):**
@@ -606,6 +621,6 @@ rm -f .loom/daemon-loop.pid
 ```
 
 **Reference documentation:**
-- Daemon details: `/loom-reference`
-- Shepherd lifecycle: `/shepherd-lifecycle`
+- Daemon details: `.loom/docs/daemon-reference.md`
+- Sweep lifecycle: `defaults/.claude/commands/loom/sweep.md`
 - Full troubleshooting: `.loom/docs/troubleshooting.md`

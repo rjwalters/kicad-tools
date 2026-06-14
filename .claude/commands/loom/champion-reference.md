@@ -372,12 +372,10 @@ echo "PASS: Size check ($TOTAL lines)"
 if [ "$FORCE_MODE" != "true" ]; then
   FILES=$(gh pr view "$PR_NUMBER" --json files --jq -r '.files[].path')
   CRITICAL_PATTERNS=(
-    "src-tauri/tauri.conf.json"
     "Cargo.toml"
     "loom-daemon/Cargo.toml"
-    "src-tauri/Cargo.toml"
+    "loom-api/Cargo.toml"
     "package.json"
-    "pnpm-lock.yaml"
     ".github/workflows/"
     ".sql"
     "migration"

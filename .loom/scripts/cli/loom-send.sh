@@ -7,10 +7,10 @@
 #   loom send --help                     Show help
 #
 # Examples:
-#   loom send shepherd-1 "/shepherd 123"
-#   loom send shepherd-1 "/shepherd 123 --merge"
-#   loom send terminal-2 "/builder 456"
-#   loom send champion "/champion"
+#   loom send shepherd-1 "/loom:shepherd 123"
+#   loom send shepherd-1 "/loom:shepherd 123 --merge"
+#   loom send terminal-2 "/loom:builder 456"
+#   loom send champion "/loom:champion"
 #
 # Notes:
 #   - Commands are sent with a trailing newline (Enter key)
@@ -83,10 +83,10 @@ ${YELLOW}OPTIONS:${NC}
     --json            Output result as JSON
 
 ${YELLOW}EXAMPLES:${NC}
-    loom send shepherd-1 "/shepherd 123"
-    loom send shepherd-1 "/shepherd 123 --merge"
-    loom send terminal-2 "/builder 456"
-    loom send champion "/champion"
+    loom send shepherd-1 "/loom:shepherd 123"
+    loom send shepherd-1 "/loom:shepherd 123 --merge"
+    loom send terminal-2 "/loom:builder 456"
+    loom send champion "/loom:champion"
 
 ${YELLOW}SESSION NAMING:${NC}
     Loom uses tmux sessions with the naming pattern:

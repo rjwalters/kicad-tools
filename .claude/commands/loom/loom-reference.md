@@ -455,8 +455,8 @@ The daemon integrates with cleanup scripts to manage task artifacts and worktree
 # Safe worktree cleanup (only MERGED PRs)
 loom-clean --safe --worktrees-only [--dry-run] [--grace-period N]
 
-# Event-driven daemon cleanup
-./.loom/scripts/daemon-cleanup.sh <event> [options]
+# Log archival via Python (delegates to archive-logs.sh)
+./.loom/scripts/cleanup.sh logs [--dry-run] [--prune-only] [--retention-days N]
 ```
 
 ### Cleanup Configuration
@@ -597,7 +597,7 @@ In MOM, the daemon spawns subagents using the Task tool. No pre-configured termi
 | Doctor | 1 | PR conflict resolution |
 | Auditor | 1 | Main branch validation |
 
-### Required Terminal Configuration for Tauri App Mode
+### Required Terminal Configuration for Daemon Mode
 
 | Terminal ID | Role | Purpose |
 |-------------|------|---------|

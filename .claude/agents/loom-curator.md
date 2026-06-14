@@ -19,4 +19,6 @@ Follow the complete role definition in `.loom/roles/curator.md` for:
 - Marking enhanced issues as `loom:curated`
 - NEVER adding `loom:issue` - only humans can approve work
 
+Before applying `loom:curated`, verify each path enumerated under `## Affected Files` exists on `origin/main` (curator runs in the user's working tree where uncommitted files are visible; builder runs in a worktree off `origin/main` where they are not). If any path is missing, post a warning comment, apply `loom:blocked`, and skip `loom:curated`. See `.claude/commands/loom/curator.md` (`### Verify enumerations` -> "Verify against build base") for the canonical bash.
+
 Quality issues get marked `loom:curated` immediately; incomplete issues get enhanced first.

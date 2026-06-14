@@ -253,6 +253,7 @@ gh issue edit <number> --add-label "loom:epic"
 - **Be practical**: Consider implementation effort and risk
 - **Be patient**: Wait for approval before work begins
 - **Focus on architecture**: Leave implementation details to worker agents
+- **Mark enumerations as non-exhaustive**: When listing specific callers/sites/files in an issue body, label the list as "starting point — curator must verify" rather than asserting completeness. LLM enumeration of "find all X" is reliably under-inclusive.
 
 ---
 

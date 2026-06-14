@@ -27,6 +27,13 @@
 #   LOOM_AUTH_CACHE_TTL    - Auth cache TTL in seconds (default: 120)
 #   LOOM_AUTH_CACHE_STALE_LOCK_THRESHOLD - Stale lock cleanup threshold in seconds (default: 90)
 #   LOOM_AUTH_CACHE_LOCK_WAIT - Max time to wait for lock holder in seconds (default: 60)
+#   LOOM_MODEL             - Model to pass as `claude --model <value>` (issue
+#                            #3477). An explicit `--model` in the wrapper args
+#                            always wins. The flag is appended once before the
+#                            retry loop, so every retry attempt reuses the SAME
+#                            model (re-consulting policy on retry is strategy B
+#                            of #3477 and intentionally out of scope). When
+#                            neither is set, NO --model flag is emitted.
 
 set -euo pipefail
 
@@ -1290,10 +1297,12 @@ run_with_retry() {
         # Run claude with all arguments passed to wrapper
         # Three execution modes for Claude CLI:
         #
-        # 1. Slash command prompt detected (e.g., "/judge 2434"):
+        # 1. Slash command prompt detected (e.g., "/loom:judge 2434"):
         #    Use --print mode for reliable one-shot execution.  Interactive mode
         #    (script -q) can be blocked by onboarding/promotional dialogs that
         #    require user interaction before the prompt is processed. (Issue #2438)
+        #    Note: Claude Code 2.1+ uses `/loom:<role>` for subdirectory commands;
+        #    detection below works for any slash-prefixed argument (see #3345).
         #
         # 2. No prompt, TTY available (autonomous agents):
         #    Use macOS `script` to preserve TTY so Claude CLI sees isatty(stdout) = true.
@@ -1317,7 +1326,7 @@ run_with_retry() {
         if [[ -n "${TMPDIR:-}" ]]; then
             export TMPDIR
         fi
-        # Detect slash command prompt in arguments (e.g., "/judge 2434").
+        # Detect slash command prompt in arguments (e.g., "/loom:judge 2434").
         # On-demand workers spawned by the shepherd receive a slash command
         # as a positional prompt argument.  This flag is used for log-capture
         # heuristics (fallback append when pipe-pane misses output).
@@ -1325,7 +1334,9 @@ run_with_retry() {
         # --print treats "/role" as a skill-definition print (exits with 0s
         # duration, no actual work).  Interactive mode (script -q) is safe
         # because CLAUDE_CONFIG_DIR isolation ensures onboarding is complete.
-        # Regression from #2537, fixed in #2608.
+        # Regression from #2537, fixed in #2608.  Detection matches any
+        # slash-prefixed argument so both bare and namespaced forms work
+        # (see #3345 for the Claude Code 2.1+ namespacing requirement).
         _has_slash_cmd=false
         for _arg in "$@"; do
             case "$_arg" in
@@ -1578,6 +1589,30 @@ main() {
         log_info "Stop signal already present - exiting without starting"
         _write_exit_sidecar 0
         exit 0
+    fi
+
+    # Model selection (issue #3477, Phase 1).
+    # Precedence: explicit `--model` in args > LOOM_MODEL env > nothing
+    # (session/CLI default — no --model flag emitted at all). The flag is
+    # appended ONCE here, before run_with_retry, so all retry attempts
+    # invoke `claude "$@"` with the same model (retries never re-consult
+    # model policy — that is strategy B of #3477, out of scope).
+    local _has_model_arg=false
+    for arg in "$@"; do
+        case "$arg" in
+            --model|--model=*)
+                _has_model_arg=true
+                break
+                ;;
+        esac
+    done
+    if [[ -n "${LOOM_MODEL:-}" ]]; then
+        if [[ "${_has_model_arg}" == "false" ]]; then
+            set -- "$@" --model "${LOOM_MODEL}"
+            log_info "Model: ${LOOM_MODEL} (from LOOM_MODEL)"
+        else
+            log_info "Explicit --model in args wins over LOOM_MODEL='${LOOM_MODEL}'"
+        fi
     fi
 
     # Run Claude with retry logic

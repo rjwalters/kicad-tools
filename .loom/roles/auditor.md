@@ -110,15 +110,15 @@ fi
 # For Node.js apps:
 node dist/index.js 2>&1 | head -100
 
-# For Tauri apps (Loom specifically):
+# For daemon-based apps (Loom specifically):
 # Start in background, check if process runs
-pnpm tauri dev &
-TAURI_PID=$!
-sleep 15  # Wait for startup
-if ! kill -0 $TAURI_PID 2>/dev/null; then
-    echo "Tauri failed to start - creating bug issue"
+./target/release/loom-daemon &
+DAEMON_PID=$!
+sleep 5  # Wait for startup
+if ! kill -0 $DAEMON_PID 2>/dev/null; then
+    echo "loom-daemon failed to start - creating bug issue"
 fi
-kill $TAURI_PID 2>/dev/null
+kill $DAEMON_PID 2>/dev/null
 
 # 5. If any step fails, create bug issue with loom:auditor label
 ```

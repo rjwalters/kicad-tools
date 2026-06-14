@@ -1,7 +1,3 @@
-<!-- BEGIN LOOM ORCHESTRATION -->
-This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration. See `.loom/CLAUDE.md` for the full guide (roles, labels, worktrees, configuration).
-<!-- END LOOM ORCHESTRATION -->
-
 ## Routing performance: build the C++ backend first
 
 Before benchmarking routing latency or filing "router is slow" issues,
@@ -37,3 +33,7 @@ misleading `installed successfully!`.
 suspect the auto-detection missed something (e.g. a touched build flag).
 
 See `README.md` "Fresh worktree checklist" for the full setup sequence.
+
+<!-- BEGIN LOOM ORCHESTRATION -->
+This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration. See `.loom/CLAUDE.md` for the full guide (roles, labels, worktrees, configuration).
+<!-- END LOOM ORCHESTRATION -->

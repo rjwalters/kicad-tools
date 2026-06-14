@@ -190,7 +190,7 @@ EXAMPLES:
     ./.loom/bin/loom status                 Show current state
     ./.loom/bin/loom status --json          Machine-readable status
     ./.loom/bin/loom attach shepherd-1      Connect to agent terminal
-    ./.loom/bin/loom send shepherd-1 "/shepherd 123"  Send command to agent
+    ./.loom/bin/loom send shepherd-1 "/loom:shepherd 123"  Send command to agent
     ./.loom/bin/loom stop                   Graceful shutdown
     ./.loom/bin/loom stop --force           Force kill all sessions
     ./.loom/bin/loom stop shepherd-1        Stop single agent

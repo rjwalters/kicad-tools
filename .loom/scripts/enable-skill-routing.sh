@@ -78,21 +78,24 @@ if [[ -n "$DEFAULT_CONFIG" ]]; then
     echo "Skill routing enabled (copied default routes from Loom source)"
 else
     # Inline minimal default if Loom source not available
+    # Agent paths use the namespaced `/loom:<role>` form required by Claude Code 2.1+
+    # (subdirectory commands at `.claude/commands/loom/<role>.md` resolve via
+    # `namespace:command` syntax — see issue #3345).
     cat > "$CONFIG_FILE" <<'ROUTES'
 {
   "version": 1,
   "description": "Skill routing table for Loom agent suggestions.",
   "routes": [
-    { "pattern": "shepherd|orchestrate|lifecycle|end.to.end", "agent": "/shepherd", "description": "Full issue lifecycle orchestration" },
-    { "pattern": "architect|design|proposal|system design|rfc", "agent": "/architect", "description": "System design and architecture" },
-    { "pattern": "review|\\bPR\\b|pull request|code review", "agent": "/judge", "description": "Code review" },
-    { "pattern": "fix|bug|broken|changes.requested|merge.conflict", "agent": "/doctor", "description": "Bug fixes and PR feedback" },
-    { "pattern": "simplify|refactor|clean.?up|dead.?code|complexity", "agent": "/hermit", "description": "Simplification opportunities" },
-    { "pattern": "build|implement|feature|develop|code", "agent": "/builder", "description": "Implement features and fixes" },
-    { "pattern": "curate|triage|issue|enhance|enrich", "agent": "/curator", "description": "Issue enrichment" },
-    { "pattern": "prioriti[zs]e|backlog|roadmap", "agent": "/guide", "description": "Backlog triage" },
-    { "pattern": "audit|validate|check.?build", "agent": "/auditor", "description": "Build validation" },
-    { "pattern": "loom|daemon|auto.?build", "agent": "/loom", "description": "System daemon orchestration" }
+    { "pattern": "shepherd|orchestrate|lifecycle|end.to.end", "agent": "/loom:shepherd", "description": "Full issue lifecycle orchestration" },
+    { "pattern": "architect|design|proposal|system design|rfc", "agent": "/loom:architect", "description": "System design and architecture" },
+    { "pattern": "review|\\bPR\\b|pull request|code review", "agent": "/loom:judge", "description": "Code review" },
+    { "pattern": "fix|bug|broken|changes.requested|merge.conflict", "agent": "/loom:doctor", "description": "Bug fixes and PR feedback" },
+    { "pattern": "simplify|refactor|clean.?up|dead.?code|complexity", "agent": "/loom:hermit", "description": "Simplification opportunities" },
+    { "pattern": "build|implement|feature|develop|code", "agent": "/loom:builder", "description": "Implement features and fixes" },
+    { "pattern": "curate|triage|issue|enhance|enrich", "agent": "/loom:curator", "description": "Issue enrichment" },
+    { "pattern": "prioriti[zs]e|backlog|roadmap", "agent": "/loom:guide", "description": "Backlog triage" },
+    { "pattern": "audit|validate|check.?build", "agent": "/loom:auditor", "description": "Build validation" },
+    { "pattern": "loom|daemon|auto.?build", "agent": "/loom:loom", "description": "System daemon orchestration" }
   ]
 }
 ROUTES

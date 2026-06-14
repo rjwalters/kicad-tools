@@ -17,6 +17,43 @@ You help PRs move toward merge by:
 
 **Important**: After fixing issues, you signal completion by transitioning `loom:changes-requested` → `loom:review-requested`. This completes the feedback cycle and hands the PR back to the Reviewer.
 
+## CRITICAL: PR Branch Isolation (Always Use a Worktree)
+
+**Never run `gh pr checkout <N>` in the orchestrator's main worktree.** Doing so switches the orchestrator's `HEAD` to the PR branch and can leave behind untracked files from the PR when you switch back — see issue #3358 for a concrete incident.
+
+Pick the right worktree path before any `gh pr checkout` mutation:
+
+- **Loom-issue PRs** — branch matches the strict pattern `^feature/issue-([0-9]+)$`:
+  ```bash
+  ./.loom/scripts/worktree.sh <ISSUE_NUMBER>
+  cd .loom/worktrees/issue-<ISSUE_NUMBER>
+  gh pr checkout <PR_NUMBER>   # safe: already inside the issue worktree
+  ```
+
+- **External-fork or ad-hoc PRs** — any other branch shape (e.g., `fix/foo-bar`, `release-1`, `jperla:fix/claude-code-2.1-compat`):
+  ```bash
+  ./.loom/scripts/pr-worktree.sh <PR_NUMBER>
+  cd .loom/worktrees/pr-<PR_NUMBER>
+  # pr-worktree.sh already ran `gh pr checkout` inside the worktree
+  ```
+
+The branch-name heuristic to choose between them:
+
+```bash
+PR_BRANCH=$(gh pr view <PR_NUMBER> --json headRefName --jq '.headRefName')
+if [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]]; then
+  ISSUE_NUM="${BASH_REMATCH[1]}"
+  ./.loom/scripts/worktree.sh "$ISSUE_NUM"
+  cd ".loom/worktrees/issue-$ISSUE_NUM"
+  gh pr checkout <PR_NUMBER>
+else
+  ./.loom/scripts/pr-worktree.sh <PR_NUMBER>
+  cd ".loom/worktrees/pr-<PR_NUMBER>"
+fi
+```
+
+Both worktree paths get a `.loom-managed` sentinel and are auto-cleaned by `merge-pr.sh` on merge.
+
 ## CRITICAL: Scope Discipline
 
 **Only modify files that contain the failing test or the code under test. Do not refactor or improve code outside the scope of the failure you are fixing.**
@@ -253,7 +290,18 @@ if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
 
   if [ -n "$UNLABELED_PR" ]; then
     echo "Checking health of unlabeled PR #$UNLABELED_PR"
-    gh pr checkout $UNLABELED_PR
+
+    # Route through the right worktree (see "PR Branch Isolation" above)
+    PR_BRANCH=$(gh pr view "$UNLABELED_PR" --json headRefName --jq '.headRefName')
+    if [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]]; then
+      ISSUE_NUM="${BASH_REMATCH[1]}"
+      ./.loom/scripts/worktree.sh "$ISSUE_NUM" >/dev/null
+      cd ".loom/worktrees/issue-$ISSUE_NUM"
+      gh pr checkout "$UNLABELED_PR"
+    else
+      ./.loom/scripts/pr-worktree.sh "$UNLABELED_PR" >/dev/null
+      cd ".loom/worktrees/pr-$UNLABELED_PR"
+    fi
 
     # Check for merge conflicts
     if git merge-tree origin/main | grep -q "^+<<<<<<<"; then
@@ -325,8 +373,17 @@ When the user explicitly instructs you to work on a specific PR by number:
 gh pr edit 588 --add-label "loom:treating"
 gh pr comment 588 --body "Addressing issues on this PR per user request"
 
-# Check out and fix
-gh pr checkout 588
+# Check out and fix — always inside a dedicated worktree (see "PR Branch Isolation")
+PR_BRANCH=$(gh pr view 588 --json headRefName --jq '.headRefName')
+if [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]]; then
+  ISSUE_NUM="${BASH_REMATCH[1]}"
+  ./.loom/scripts/worktree.sh "$ISSUE_NUM"
+  cd ".loom/worktrees/issue-$ISSUE_NUM"
+  gh pr checkout 588
+else
+  ./.loom/scripts/pr-worktree.sh 588
+  cd ".loom/worktrees/pr-588"
+fi
 # ... address feedback, resolve conflicts ...
 
 # Complete normally
@@ -355,7 +412,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
    ```
 3. **Check PR details**: `gh pr view <number>` - look for "Changes requested" reviews or conflicts
 4. **Read feedback**: Understand what the reviewer is asking for
-5. **Check out PR branch**: `gh pr checkout <number>`
+5. **Check out PR branch in a dedicated worktree** (see "PR Branch Isolation" above): use `./.loom/scripts/worktree.sh <ISSUE_NUM>` for `feature/issue-<N>` branches or `./.loom/scripts/pr-worktree.sh <PR_NUMBER>` for external/ad-hoc branches, then `cd` into the worktree before running `gh pr checkout`.
 6. **CRITICAL: Assess ALL CI failures FIRST** (see "CI Assessment" section below):
    - Run `gh pr checks <number>` to identify ALL failing checks
    - Fetch logs for each failing check
@@ -635,8 +692,17 @@ gh pr edit 42 --add-label "loom:treating"
 # View PR details and review status
 gh pr view 42
 
-# Check out the PR branch
-gh pr checkout 42
+# Check out the PR branch in a dedicated worktree (see "PR Branch Isolation")
+PR_BRANCH=$(gh pr view 42 --json headRefName --jq '.headRefName')
+if [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]]; then
+  ISSUE_NUM="${BASH_REMATCH[1]}"
+  ./.loom/scripts/worktree.sh "$ISSUE_NUM"
+  cd ".loom/worktrees/issue-$ISSUE_NUM"
+  gh pr checkout 42
+else
+  ./.loom/scripts/pr-worktree.sh 42
+  cd ".loom/worktrees/pr-42"
+fi
 
 # See what reviewer said
 gh pr view 42 --comments
@@ -780,7 +846,7 @@ If review requests major architectural changes:
 
 ## Notes
 
-- **Work in PR branches**: You don't need worktrees - check out the PR branch directly with `gh pr checkout <number>`
+- **Always work in a dedicated worktree** (see "PR Branch Isolation" above): use the issue worktree for `feature/issue-<N>` branches or `pr-worktree.sh` for external/ad-hoc branches. Never run `gh pr checkout` in the orchestrator's main worktree.
 - **Find work by label**: Look for `loom:changes-requested` (amber badges) to find PRs needing fixes
 - **Signal completion**: After fixing, transition `loom:changes-requested` → `loom:review-requested` to hand back to Reviewer
 - **Be proactive**: Check all open PRs regularly - conflicts can appear even on unlabeled PRs

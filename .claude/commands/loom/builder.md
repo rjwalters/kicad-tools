@@ -55,9 +55,21 @@ This role definition is split across multiple files for maintainability:
 | Document | Content |
 |----------|---------|
 | **builder.md** (this file) | Core workflow, labels, finding work, guidelines |
-| **builder-worktree.md** | Git worktree workflows, Tauri App mode, parallel claiming |
+| **builder-worktree.md** | Git worktree workflows, parallel claiming |
 | **builder-complexity.md** | Complexity assessment, issue decomposition, scope management |
 | **builder-pr.md** | PR creation, **acceptance criteria verification**, test output, quality requirements |
+
+## Post-Builder Quality Gate (optional, configured per-repo)
+
+If this repository configures a `buildGate` block in `.loom/config.json`, the shepherd orchestrator runs three deterministic checks **after you exit but before any PR is opened**:
+
+1. At least one commit ahead of `origin/main`.
+2. At least one changed file matches the configured `realChangeGlobs` (or default scratch exclusions).
+3. The configured build command exits 0 in the worktree.
+
+If any check fails the orchestrator releases the claim (`loom:building` -> `loom:issue`) and **no PR is opened**. The next builder retries from scratch.
+
+This is enforced by the orchestrator independent of your prompt — you cannot disable it from inside the agent session. In practice this means: commit real source changes, make sure the build passes before you exit, and don't rely on logfiles or scratch files being treated as "the implementation." See `.loom/docs/build-gate.md` for the full schema.
 
 ## Argument Handling
 
@@ -237,7 +249,6 @@ For detailed worktree workflows, see **builder-worktree.md**.
 **Quick reference:**
 - Use `./.loom/scripts/worktree.sh <issue-number>` to create worktrees
 - Work in `.loom/worktrees/issue-N` directories
-- Return with `pnpm worktree:return` in Tauri App mode
 
 ## CRITICAL: Never Work on Main Branch
 
@@ -548,6 +559,20 @@ cargo fmt            # Format code
 ```
 
 `cargo check` is fast (seconds) and catches the most common errors. Don't rely solely on `pnpm check:ci` at PR time — by then, a failed build wastes the entire implementation cycle.
+
+### Build-time performance
+
+If your change adds or modifies code called from the project's build pipeline (`pnpm build`, `cargo build`, equivalent), **time it before pushing**. A green local build is not the same as a green deploy: downstream deploy scripts often wrap the build in a `timeout` command, and code that scales with the consumer project's dataset (N items) can silently bust that budget.
+
+**Concrete precedent**: in `rjwalters/lean-genius`, `scripts/deploy/sync-and-deploy.sh` (line 570) wraps the build in `timeout --kill-after=30 20m pnpm build` — a hard 20-minute cap. A PR that spawned one `git log` subprocess per gallery listing (~2435 listings) added several minutes to `pnpm build` and pushed total build time past the cap, killing the deploy mid-`vite` transform. Local `pnpm build` passed (no cap); the regression was invisible until deploy.
+
+Before opening a PR that touches build-time code:
+- Measure actual build time against actual N (not the count quoted in the issue).
+- **Sanity-check magnitude claims in the issue body against repo state.** If the issue says "~300 items" and the repo has 2000+, an N-subprocess design will not fit. Re-derive N from `find`, `git ls-files`, or whatever the build actually iterates over.
+- Leave headroom for growth — if you're at 80% of the cap today, the next contributor's data import will tip you over.
+- If the design is fundamentally N-bound, **profile, batch, or cache** before pushing (e.g., one `git log` invocation for all paths instead of N invocations).
+
+If no downstream cap is documented, ask in the PR description rather than assuming there is none.
 
 ## Guidelines
 
