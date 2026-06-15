@@ -2380,6 +2380,148 @@ class TestBoardOriginCoordinateConversion:
         assert 0 <= c1_final.position[1] <= 56, f"C1.y={c1_final.position[1]} outside board bounds"
 
 
+class TestPCBPageFit:
+    """Tests for PCB.page_fit() — tight User page + centered board."""
+
+    def test_page_fit_rewrites_paper_to_user(self):
+        """page_fit replaces (paper "A4") with (paper "User" W H)."""
+        # 200 x 120 board on default A4, centered at (48.5, 45).
+        pcb = PCB.create(width=200, height=120)
+        assert pcb._sexp.find("paper").get_string(0) == "A4"
+
+        new_w, new_h = pcb.page_fit(margin=5.0)
+
+        paper = pcb._sexp.find("paper")
+        assert paper is not None
+        assert paper.get_string(0) == "User"
+        # W = 200 + 2*5, H = 120 + 2*5
+        assert paper.get_float(1) == pytest.approx(210.0)
+        assert paper.get_float(2) == pytest.approx(130.0)
+        assert new_w == pytest.approx(210.0)
+        assert new_h == pytest.approx(130.0)
+
+    def test_page_fit_centers_board_with_uniform_margin(self):
+        """After page_fit the board outline sits at (margin, margin)."""
+        pcb = PCB.create(width=200, height=120)
+        margin = 7.5
+        new_w, new_h = pcb.page_fit(margin=margin)
+
+        gr_rect = pcb._sexp.find("gr_rect")
+        start = gr_rect.find("start")
+        end = gr_rect.find("end")
+
+        # Board outline min corner moved to (margin, margin).
+        assert start.get_float(0) == pytest.approx(margin)
+        assert start.get_float(1) == pytest.approx(margin)
+        # Max corner = margin + board size.
+        assert end.get_float(0) == pytest.approx(margin + 200)
+        assert end.get_float(1) == pytest.approx(margin + 120)
+
+        # Board center == page center.
+        board_cx = (start.get_float(0) + end.get_float(0)) / 2
+        board_cy = (start.get_float(1) + end.get_float(1)) / 2
+        assert board_cx == pytest.approx(new_w / 2)
+        assert board_cy == pytest.approx(new_h / 2)
+
+    def test_page_fit_translates_footprint_position(self, tmp_path: Path):
+        """A footprint's absolute position shifts by (margin - bbox_min)."""
+        # Non-centered board: outline at (0,0)..(50,40); a footprint at
+        # absolute (10, 20). page_fit(margin=5) shifts everything by +5.
+        pcb_text = """(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(footprint "Test:FP"
+\t\t(layer "F.Cu")
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(at 10 20)
+\t\t(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+\t)
+\t(gr_rect
+\t\t(start 0 0)
+\t\t(end 50 40)
+\t\t(layer "Edge.Cuts")
+\t\t(width 0.15)
+\t)
+\t(segment (start 5 5) (end 45 35) (width 0.25) (layer "F.Cu") (net 0))
+)
+"""
+        pcb_file = tmp_path / "fp.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        pcb = PCB.load(pcb_file)
+        pcb.page_fit(margin=5.0)
+
+        # Footprint absolute (at ...) is bbox_min(0,0) -> (5,5), so +5 each.
+        fp_node = pcb._sexp.find("footprint")
+        at_node = fp_node.find_child("at")
+        assert at_node.get_float(0) == pytest.approx(15.0)
+        assert at_node.get_float(1) == pytest.approx(25.0)
+
+        # Pad inner (at 0 0) must NOT be translated (footprint-relative).
+        pad_at = fp_node.find_child("pad").find_child("at")
+        assert pad_at.get_float(0) == pytest.approx(0.0)
+        assert pad_at.get_float(1) == pytest.approx(0.0)
+
+        # Segment endpoints shift by +5 too.
+        seg = pcb._sexp.find("segment")
+        assert seg.find("start").get_float(0) == pytest.approx(10.0)
+        assert seg.find("start").get_float(1) == pytest.approx(10.0)
+        assert seg.find("end").get_float(0) == pytest.approx(50.0)
+        assert seg.find("end").get_float(1) == pytest.approx(40.0)
+
+    def test_page_fit_preserves_relative_geometry(self):
+        """Relative spacing between items is unchanged (DRC-preserving)."""
+        pcb = PCB.create(width=80, height=60)
+        gr_rect = pcb._sexp.find("gr_rect")
+        before = (
+            gr_rect.find("end").get_float(0) - gr_rect.find("start").get_float(0),
+            gr_rect.find("end").get_float(1) - gr_rect.find("start").get_float(1),
+        )
+        pcb.page_fit(margin=10.0)
+        gr_rect = pcb._sexp.find("gr_rect")
+        after = (
+            gr_rect.find("end").get_float(0) - gr_rect.find("start").get_float(0),
+            gr_rect.find("end").get_float(1) - gr_rect.find("start").get_float(1),
+        )
+        assert after[0] == pytest.approx(before[0])
+        assert after[1] == pytest.approx(before[1])
+
+    def test_page_fit_roundtrip_idempotent_page_size(self, tmp_path: Path):
+        """Running page_fit twice yields the same page size (idempotent)."""
+        pcb = PCB.create(width=120, height=90)
+        w1, h1 = pcb.page_fit(margin=5.0)
+        pcb_file = tmp_path / "rt.kicad_pcb"
+        pcb.save(pcb_file)
+
+        reloaded = PCB.load(pcb_file)
+        w2, h2 = reloaded.page_fit(margin=5.0)
+        assert w2 == pytest.approx(w1)
+        assert h2 == pytest.approx(h1)
+
+    def test_page_fit_no_edge_cuts_raises(self, tmp_path: Path):
+        """page_fit raises ValueError when there is no Edge.Cuts outline."""
+        pcb_text = """(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t)
+)
+"""
+        pcb_file = tmp_path / "noedge.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+        pcb = PCB.load(pcb_file)
+        with pytest.raises(ValueError):
+            pcb.page_fit(margin=5.0)
+
+
 class TestPropertySetterProtection:
     """Tests for property setters that prevent silent data loss.
 

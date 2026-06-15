@@ -50,6 +50,7 @@ class BuildStep(str, Enum):
     SILKSCREEN = "silkscreen"
     ROUTE = "route"
     STITCH = "stitch"
+    PAGE_FIT = "page-fit"
     PREFLIGHT_ROUTING = "preflight-routing"
     VERIFY = "verify"
     EXPORT = "export"
@@ -1724,6 +1725,75 @@ def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
     )
 
 
+def _run_step_page_fit(ctx: BuildContext, console: Console) -> BuildResult:
+    """Resize the drawing sheet to fit the board and center it.
+
+    Runs after STITCH (the final layout-modifying step) so the committed
+    board has a tight ``(paper "User" W H)`` page with the board centered.
+    The interactive viewer (KiCanvas) fits its camera to the whole sheet,
+    so a tight page makes the board fill and center the frame instead of
+    appearing tiny in an A4 page.
+
+    This is a pure geometric translate: every item shifts together, so
+    routing/DRC validity is preserved and no re-route is needed.  Operates
+    on the routed PCB when present, falling back to the unrouted PCB so
+    ``kct build --step page-fit`` works in isolation.  Idempotent: a second
+    run yields the same page size.
+    """
+    pcb_to_fit = ctx.routed_pcb_file
+    if (not pcb_to_fit or not pcb_to_fit.exists()) and ctx.pcb_file:
+        expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+        if expected_routed.exists():
+            pcb_to_fit = expected_routed
+
+    if not pcb_to_fit or not pcb_to_fit.exists():
+        pcb_to_fit = ctx.pcb_file
+
+    if not pcb_to_fit or not pcb_to_fit.exists():
+        return BuildResult(
+            step="page-fit",
+            success=True,
+            message="page-fit: no PCB file found — skipped",
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="page-fit",
+            success=True,
+            message="[dry-run] Would resize drawing sheet to fit + center board",
+            output_file=pcb_to_fit,
+        )
+
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(pcb_to_fit)
+        new_w, new_h = pcb.page_fit(margin=5.0)
+        pcb.save(pcb_to_fit)
+    except ValueError as exc:
+        # No Edge.Cuts outline to fit — non-fatal, leave the page as-is.
+        return BuildResult(
+            step="page-fit",
+            success=True,
+            message=f"page-fit: skipped ({exc})",
+            output_file=pcb_to_fit,
+        )
+    except Exception as exc:
+        return BuildResult(
+            step="page-fit",
+            success=False,
+            message=f"page-fit failed: {exc}",
+            output_file=pcb_to_fit,
+        )
+
+    return BuildResult(
+        step="page-fit",
+        success=True,
+        message=f'Page fit: (paper "User" {new_w} {new_h}) — board centered',
+        output_file=pcb_to_fit,
+    )
+
+
 def _run_step_erc(ctx: BuildContext, console: Console) -> BuildResult:
     """Run ERC (Electrical Rules Check) on the schematic.
 
@@ -2395,6 +2465,7 @@ _PCB_WRITE_STEPS: set[BuildStep] = {
     BuildStep.SILKSCREEN,
     BuildStep.ROUTE,
     BuildStep.STITCH,
+    BuildStep.PAGE_FIT,
 }
 
 
@@ -2530,6 +2601,7 @@ Examples:
             "silkscreen",
             "route",
             "stitch",
+            "page-fit",
             "preflight-routing",
             "verify",
             "export",
@@ -2707,6 +2779,7 @@ def main(argv: list[str] | None = None) -> int:
             BuildStep.SILKSCREEN,
             BuildStep.ROUTE,
             BuildStep.STITCH,
+            BuildStep.PAGE_FIT,
             BuildStep.PREFLIGHT_ROUTING,
             BuildStep.VERIFY,
             BuildStep.EXPORT,
@@ -2761,6 +2834,11 @@ def main(argv: list[str] | None = None) -> int:
 
             elif step == BuildStep.STITCH:
                 result = _run_step_stitch(ctx, console)
+                if result.output_file:
+                    ctx.routed_pcb_file = result.output_file
+
+            elif step == BuildStep.PAGE_FIT:
+                result = _run_step_page_fit(ctx, console)
                 if result.output_file:
                     ctx.routed_pcb_file = result.output_file
 

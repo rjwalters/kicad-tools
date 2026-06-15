@@ -2064,6 +2064,200 @@ class PCB:
 
         return (0.0, 0.0)
 
+    def _edge_cuts_bbox_sexp(self) -> tuple[float, float, float, float] | None:
+        """Compute the Edge.Cuts bounding box in sheet-absolute coordinates.
+
+        Walks ``self._sexp`` directly (the source of truth that ``save()``
+        serialises) rather than the in-memory, board-relative collections,
+        so the returned box is in the same coordinate space as the values
+        :meth:`page_fit` rewrites.
+
+        Returns:
+            ``(min_x, min_y, max_x, max_y)`` of all graphics on the
+            ``Edge.Cuts`` layer, or ``None`` if no Edge.Cuts geometry is
+            found.
+        """
+        xs: list[float] = []
+        ys: list[float] = []
+
+        def _on_edge_cuts(node: SExp) -> bool:
+            layer_node = node.find_child("layer")
+            return bool(layer_node and layer_node.get_string(0) == "Edge.Cuts")
+
+        for child in self._sexp.iter_children():
+            if child.tag not in (
+                "gr_rect",
+                "gr_line",
+                "gr_arc",
+                "gr_circle",
+                "gr_poly",
+                "gr_curve",
+            ):
+                continue
+            if not _on_edge_cuts(child):
+                continue
+            for coord_tag in ("start", "end", "mid", "center"):
+                for n in child.find_children(coord_tag):
+                    x, y = n.get_float(0), n.get_float(1)
+                    if x is not None and y is not None:
+                        xs.append(x)
+                        ys.append(y)
+            # gr_poly / gr_curve carry a (pts (xy ...)) child.
+            for pts in child.find_all("pts"):
+                for xy in pts.find_children("xy"):
+                    x, y = xy.get_float(0), xy.get_float(1)
+                    if x is not None and y is not None:
+                        xs.append(x)
+                        ys.append(y)
+
+        if not xs or not ys:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    @staticmethod
+    def _translate_coord_node(node: SExp, dx: float, dy: float) -> None:
+        """Translate the first two atoms (X, Y) of a coordinate node in place.
+
+        Used for ``(at X Y ...)``, ``(start X Y)``, ``(end X Y)``,
+        ``(mid X Y)``, ``(center X Y)`` and ``(xy X Y)`` nodes.  Any trailing
+        atoms (e.g. a rotation angle on ``(at X Y ANGLE)``) are left
+        untouched.
+        """
+        x, y = node.get_float(0), node.get_float(1)
+        if x is None or y is None:
+            return
+        node.set_value(0, round(x + dx, 6))
+        node.set_value(1, round(y + dy, 6))
+
+    def _translate_item_sexp(self, node: SExp, dx: float, dy: float) -> None:
+        """Recursively translate all coordinate nodes within an item.
+
+        Applies to every ``at`` / ``start`` / ``end`` / ``mid`` / ``center`` /
+        ``xy`` descendant of ``node``.  This is correct for board-level items
+        (``segment``, ``via``, ``zone`` incl. ``filled_polygon`` vertices,
+        ``gr_*`` graphics, ``gr_text`` / ``text`` / ``dimension``) whose
+        coordinates are all sheet-absolute.
+
+        NOTE: this MUST NOT be called on a ``footprint`` node, whose internal
+        pad/text ``at`` nodes are footprint-relative.  Use
+        :meth:`_translate_footprint_sexp` for footprints.
+        """
+        coord_tags = {"at", "start", "end", "mid", "center", "xy"}
+        if node.tag in coord_tags:
+            self._translate_coord_node(node, dx, dy)
+        for child in node.iter_children():
+            self._translate_item_sexp(child, dx, dy)
+
+    def _translate_footprint_sexp(self, node: SExp, dx: float, dy: float) -> None:
+        """Translate a footprint by shifting only its top-level ``(at ...)``.
+
+        A footprint's position is its direct-child ``(at X Y [ANGLE])`` node;
+        all pad and graphic ``at`` nodes nested inside are relative to that
+        anchor and must be left untouched.
+        """
+        at_node = node.find_child("at")
+        if at_node is not None:
+            self._translate_coord_node(at_node, dx, dy)
+
+    def page_fit(self, margin: float = 5.0) -> tuple[float, float]:
+        """Resize the drawing sheet to fit the board with a uniform margin.
+
+        Computes the Edge.Cuts bounding box, sets ``(paper "User" W H)`` where
+        ``W = bbox_width + 2*margin`` and ``H = bbox_height + 2*margin``, then
+        translates ALL board items so the board sits at ``(margin, margin)`` in
+        the new sheet space -- i.e. centered with a uniform margin all around.
+
+        The board's interactive viewer (KiCanvas) fits its camera to the whole
+        drawing sheet, so a tight ``User`` page makes the board fill and center
+        the frame instead of appearing tiny in an A4 page.
+
+        This is a pure geometric transform: every item shifts together, so
+        relative spacing -- and therefore routing and DRC validity -- is
+        preserved.  No re-routing is required.
+
+        The transform operates directly on ``self._sexp`` (the authoritative
+        tree that :meth:`save` serialises), then re-runs
+        :meth:`_detect_board_origin` so the in-memory board-relative view stays
+        consistent.
+
+        Args:
+            margin: Margin around the board in mm (default 5.0).
+
+        Returns:
+            ``(new_width, new_height)`` of the paper in mm.
+
+        Raises:
+            ValueError: If no Edge.Cuts geometry is found to fit the page to.
+        """
+        bbox = self._edge_cuts_bbox_sexp()
+        if bbox is None:
+            raise ValueError("page_fit() requires an Edge.Cuts board outline; none found.")
+        min_x, min_y, max_x, max_y = bbox
+        bbox_w = max_x - min_x
+        bbox_h = max_y - min_y
+
+        dx = margin - min_x
+        dy = margin - min_y
+
+        # Translate every positioned top-level item in the tree.
+        for child in self._sexp.iter_children():
+            tag = child.tag
+            if tag == "footprint":
+                self._translate_footprint_sexp(child, dx, dy)
+            elif tag in (
+                "segment",
+                "via",
+                "arc",
+                "zone",
+                "gr_line",
+                "gr_arc",
+                "gr_rect",
+                "gr_circle",
+                "gr_poly",
+                "gr_curve",
+                "gr_text",
+                "text",
+                "dimension",
+                "target",
+            ):
+                self._translate_item_sexp(child, dx, dy)
+
+        # Rewrite the (paper ...) node to a tight User page.
+        new_w = round(bbox_w + 2 * margin, 6)
+        new_h = round(bbox_h + 2 * margin, 6)
+        paper_node = self._sexp.find_child("paper")
+        if paper_node is not None:
+            self._sexp.remove(paper_node)
+        new_paper = SExp.list("paper", SExp.quoted_atom("User"), new_w, new_h)
+        # Keep paper near the front of the document, where KiCad writes it.
+        version_node = self._sexp.find_child("version")
+        if version_node is not None:
+            self._sexp.insert_after("version", new_paper)
+        else:
+            self._sexp.insert(0, new_paper)
+
+        # Re-derive the in-memory board-relative coordinate view from the
+        # mutated tree so analyzers/optimizers stay consistent.  Reset the
+        # collections first since _parse() appends rather than replaces.
+        self._layers = {}
+        self._nets = {}
+        self._footprints = []
+        self._segments = []
+        self._vias = []
+        self._zones = []
+        self._graphic_lines = []
+        self._graphic_arcs = []
+        self._texts = []
+        self._graphics = []
+        self._setup = None
+        self._title_block = {}
+        self._parse()
+        self._board_origin = (0.0, 0.0)
+        self._detect_board_origin()
+        self._link_footprint_sexp_nodes()
+
+        return (new_w, new_h)
+
     @property
     def layers(self) -> dict[int, Layer]:
         """Layer definitions."""
