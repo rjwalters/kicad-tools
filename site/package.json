@@ -5,7 +5,10 @@
   "type": "module",
   "description": "Astro static site for the kicad-tools.org demo gallery (Epic #3674, Phase 2).",
   "scripts": {
+    "copy-renders": "node scripts/copy-renders.mjs",
+    "predev": "npm run copy-renders",
     "dev": "astro dev",
+    "prebuild": "npm run copy-renders",
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",

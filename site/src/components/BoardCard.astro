@@ -1,0 +1,247 @@
+---
+/**
+ * BoardCard — one gallery card per discovered board (issue #3680).
+ *
+ * Renders a thumbnail (with a 3D-front → PCB-front → static-placeholder
+ * fallback chain), the board name + description, a status chip, and a set of
+ * metric badges. Every optional field follows the data contract's
+ * omit-when-absent rule: a badge is rendered only when its backing field is
+ * defined (`field !== undefined`), never as "null" or "—".
+ *
+ * The whole card links to `/<slug>` — the per-board detail route built in
+ * issue #3681. Until that page exists the link 404s, which is expected.
+ */
+import type { Board } from "../data/types.ts";
+
+interface Props {
+  board: Board;
+}
+
+const { board } = Astro.props;
+
+/**
+ * Resolve the thumbnail URL via the fallback chain. `board.renders` values are
+ * paths relative to `board.json` (e.g. `renders/pcb-front.png`); the prebuild
+ * `copy-renders` step stages them at `site/public/boards/<slug>/renders/<file>`
+ * so they are served from `/boards/<slug>/renders/<file>`.
+ */
+function thumbnailFor(b: Board): { src: string; isPlaceholder: boolean } {
+  const renders = b.renders;
+  const rel = renders?.["3d_front"] ?? renders?.["pcb_front"];
+  if (rel) {
+    // Strip any leading "./" or "/" and re-root under the staged public path.
+    const file = rel.replace(/^\.?\//, "");
+    return { src: `/boards/${b.slug}/${file}`, isPlaceholder: false };
+  }
+  return { src: "/placeholder-board.svg", isPlaceholder: true };
+}
+
+const thumb = thumbnailFor(board);
+const displayName = board.name ?? board.slug;
+const href = `/${board.slug}`;
+
+const STATUS_LABEL: Record<Board["status"], string> = {
+  ok: "Ready",
+  partial: "Partial",
+  no_artifacts: "No artifacts",
+};
+const statusLabel = STATUS_LABEL[board.status];
+---
+
+<a class="card" href={href} data-status={board.status}>
+  <div class="thumb">
+    <img
+      src={thumb.src}
+      alt={thumb.isPlaceholder
+        ? `No render available for ${displayName}`
+        : `Render of ${displayName}`}
+      loading="lazy"
+      decoding="async"
+      class:list={["thumb-img", { "is-placeholder": thumb.isPlaceholder }]}
+    />
+    <span class:list={["chip", `chip-${board.status}`]}>{statusLabel}</span>
+  </div>
+
+  <div class="body">
+    <h2 class="name">{displayName}</h2>
+    {board.description && <p class="desc">{board.description}</p>}
+
+    <ul class="badges">
+      {
+        board.nets_routed_pct !== undefined && (
+          <li class="badge">
+            <span class="badge-label">Nets</span>
+            <span class="badge-value">{board.nets_routed_pct.toFixed(1)}%</span>
+          </li>
+        )
+      }
+      {
+        board.drc_violations !== undefined && (
+          <li class:list={["badge", { "badge-warn": board.drc_violations > 0 }]}>
+            <span class="badge-label">DRC</span>
+            <span class="badge-value">
+              {board.drc_violations} violation{board.drc_violations === 1 ? "" : "s"}
+            </span>
+          </li>
+        )
+      }
+      {
+        board.layer_count !== undefined && (
+          <li class="badge">
+            <span class="badge-label">Layers</span>
+            <span class="badge-value">{board.layer_count}L</span>
+          </li>
+        )
+      }
+      {
+        board.part_count !== undefined && (
+          <li class="badge">
+            <span class="badge-label">Parts</span>
+            <span class="badge-value">{board.part_count}</span>
+          </li>
+        )
+      }
+      {
+        board.cost?.per_board_usd !== undefined && (
+          <li class="badge">
+            <span class="badge-label">Cost</span>
+            <span class="badge-value">${board.cost.per_board_usd.toFixed(2)} ea</span>
+          </li>
+        )
+      }
+    </ul>
+  </div>
+</a>
+
+<style>
+  .card {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border, #25303a);
+    border-radius: 12px;
+    background: var(--card-bg, #11171d);
+    color: inherit;
+    text-decoration: none;
+    transition:
+      transform 0.15s ease,
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+
+  .card:hover,
+  .card:focus-visible {
+    transform: translateY(-3px);
+    border-color: var(--accent, #3fae7a);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    outline: none;
+  }
+
+  .thumb {
+    position: relative;
+    aspect-ratio: 4 / 3;
+    background: #0d1b14;
+    overflow: hidden;
+  }
+
+  .thumb-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+
+  .thumb-img.is-placeholder {
+    object-fit: cover;
+  }
+
+  .chip {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    backdrop-filter: blur(4px);
+  }
+
+  .chip-ok {
+    background: rgba(63, 174, 122, 0.9);
+    color: #04150d;
+  }
+
+  .chip-partial {
+    background: rgba(224, 168, 0, 0.9);
+    color: #1a1300;
+  }
+
+  .chip-no_artifacts {
+    background: rgba(120, 134, 148, 0.85);
+    color: #0c1116;
+  }
+
+  .body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.9rem 1rem 1.1rem;
+  }
+
+  .name {
+    margin: 0;
+    font-size: 1.05rem;
+    line-height: 1.25;
+    word-break: break-word;
+  }
+
+  .desc {
+    margin: 0;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    color: var(--muted, #9aa7b2);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .badges {
+    list-style: none;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 6px;
+    background: var(--badge-bg, #1b2530);
+    border: 1px solid var(--border, #25303a);
+    font-size: 0.74rem;
+  }
+
+  .badge-warn {
+    border-color: rgba(224, 168, 0, 0.6);
+    background: rgba(224, 168, 0, 0.12);
+  }
+
+  .badge-label {
+    color: var(--muted, #9aa7b2);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.64rem;
+  }
+
+  .badge-value {
+    font-weight: 600;
+    color: var(--text, #e6edf3);
+  }
+</style>
