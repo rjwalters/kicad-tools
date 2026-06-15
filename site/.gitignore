@@ -1,0 +1,11 @@
+# Astro build output + dependencies (never committed)
+dist/
+node_modules/
+
+# Astro generated types / cache
+.astro/
+
+# Logs and local env
+*.log
+.env
+.env.*

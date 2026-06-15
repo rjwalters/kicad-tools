@@ -1,0 +1,23 @@
+{
+  "name": "kicad-tools-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Astro static site for the kicad-tools.org demo gallery (Epic #3674, Phase 2).",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "astro": "^6.4.6"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.9",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.8"
+  }
+}
