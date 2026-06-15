@@ -5,15 +5,15 @@ Generates per-board visual artifacts for downstream consumers (e.g. the
 kicad-tools.org demo gallery, Epic #3674):
 
 - 2D layer plots (front + back: copper + silkscreen + edge cuts) via
-  ``kicad-cli pcb export png``.
+  ``kicad-cli pcb export svg`` (KiCad 10 removed the raster ``png`` export).
 - 3D ray-traced renders (front + back) via ``kicad-cli pcb render``.
 
 Outputs are written to a fixed, documented path under each board's output
 directory so the site build and CI can consume them without board-specific
 logic:
 
-    boards/<id>/output/renders/pcb-front.png   # 2D front layer plot
-    boards/<id>/output/renders/pcb-back.png    # 2D back layer plot
+    boards/<id>/output/renders/pcb-front.svg   # 2D front layer plot
+    boards/<id>/output/renders/pcb-back.svg    # 2D back layer plot
     boards/<id>/output/renders/3d-front.png    # 3D ray-traced front
     boards/<id>/output/renders/3d-back.png     # 3D ray-traced back
 
@@ -21,7 +21,7 @@ The routed PCB (``*_routed.kicad_pcb``) is preferred; the command falls back
 to the unrouted ``*.kicad_pcb`` when no routed artifact exists.
 
 This command only writes image files — it makes no assumptions about hosting
-or any website. Generated PNGs are git-ignored build artifacts.
+or any website. Generated renders are git-ignored build artifacts.
 
 ``kicad-cli pcb render`` requires KiCad 8.0.4 or newer and a display (use a
 virtual framebuffer such as ``xvfb-run`` on headless CI).
@@ -44,7 +44,7 @@ from kicad_tools.cli.export_cmd import _find_pcb_for_export
 from kicad_tools.cli.runner import (
     find_kicad_cli,
     get_kicad_version,
-    run_pcb_export_png,
+    run_pcb_export_svg,
     run_pcb_render,
 )
 
@@ -58,8 +58,8 @@ BACK_LAYERS = ["B.Cu", "B.Silkscreen", "Edge.Cuts"]
 
 # Output file names (fixed contract for downstream consumers).
 RENDER_OUTPUTS = {
-    "pcb-front": "pcb-front.png",
-    "pcb-back": "pcb-back.png",
+    "pcb-front": "pcb-front.svg",
+    "pcb-back": "pcb-back.svg",
     "3d-front": "3d-front.png",
     "3d-back": "3d-back.png",
 }
@@ -167,7 +167,7 @@ def _render_board(
     ]
     for key, layers in plots:
         out = renders_dir / RENDER_OUTPUTS[key]
-        res = run_pcb_export_png(pcb_path, out, layers, kicad_cli=kicad_cli)
+        res = run_pcb_export_svg(pcb_path, out, layers, kicad_cli=kicad_cli)
         if res.success:
             written[key] = str(out)
         else:

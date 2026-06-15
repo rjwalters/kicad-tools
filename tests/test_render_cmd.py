@@ -36,9 +36,9 @@ def _make_board(root: Path, name: str, pcb_name: str | None = None) -> Path:
 def fake_kicad(monkeypatch):
     """Make kicad-cli appear available and stub render helpers to write files.
 
-    Each export/render helper creates the requested output PNG (non-empty) and
-    returns a successful KiCadCLIResult, so the command exercises its full path
-    without a live KiCad.
+    The 2D export helper creates the requested SVG and the 3D render helper the
+    requested PNG (both non-empty), returning a successful KiCadCLIResult, so the
+    command exercises its full path without a live KiCad.
     """
     from kicad_tools.cli.runner import KiCadCLIResult
 
@@ -47,11 +47,11 @@ def fake_kicad(monkeypatch):
     monkeypatch.setattr(render_cmd, "find_kicad_cli", lambda: fake_cli)
     monkeypatch.setattr(render_cmd, "get_kicad_version", lambda *a, **k: "8.0.6")
 
-    calls: dict[str, list] = {"png": [], "render": []}
+    calls: dict[str, list] = {"svg": [], "render": []}
 
-    def fake_png(pcb_path, output_path, layers, **kwargs):
-        Path(output_path).write_bytes(b"PNG")
-        calls["png"].append((Path(pcb_path), Path(output_path), list(layers)))
+    def fake_svg(pcb_path, output_path, layers, **kwargs):
+        Path(output_path).write_bytes(b"<svg></svg>")
+        calls["svg"].append((Path(pcb_path), Path(output_path), list(layers)))
         return KiCadCLIResult(success=True, output_path=Path(output_path))
 
     def fake_render(pcb_path, output_path, side="front", **kwargs):
@@ -59,7 +59,7 @@ def fake_kicad(monkeypatch):
         calls["render"].append((Path(pcb_path), Path(output_path), side))
         return KiCadCLIResult(success=True, output_path=Path(output_path))
 
-    monkeypatch.setattr(render_cmd, "run_pcb_export_png", fake_png)
+    monkeypatch.setattr(render_cmd, "run_pcb_export_svg", fake_svg)
     monkeypatch.setattr(render_cmd, "run_pcb_render", fake_render)
 
     return calls
@@ -149,8 +149,8 @@ class TestOutputPathContract:
 
     def test_filenames_are_exactly_the_contract(self):
         assert RENDER_OUTPUTS == {
-            "pcb-front": "pcb-front.png",
-            "pcb-back": "pcb-back.png",
+            "pcb-front": "pcb-front.svg",
+            "pcb-back": "pcb-back.svg",
             "3d-front": "3d-front.png",
             "3d-back": "3d-back.png",
         }
@@ -170,14 +170,14 @@ class TestPcbSelection:
         assert rc == 0
 
         # Every helper should have been called with the routed PCB.
-        used = {call[0].name for call in fake_kicad["png"]}
+        used = {call[0].name for call in fake_kicad["svg"]}
         assert used == {"vd_routed.kicad_pcb"}
 
     def test_falls_back_to_unrouted(self, tmp_path, fake_kicad):
         board = _make_board(tmp_path, "00-led", "led.kicad_pcb")
         rc = render_main([str(board)])
         assert rc == 0
-        used = {call[0].name for call in fake_kicad["png"]}
+        used = {call[0].name for call in fake_kicad["svg"]}
         assert used == {"led.kicad_pcb"}
 
 
@@ -193,8 +193,8 @@ class TestNo3d:
         assert rc == 0
 
         renders = board / "output" / "renders"
-        assert (renders / "pcb-front.png").exists()
-        assert (renders / "pcb-back.png").exists()
+        assert (renders / "pcb-front.svg").exists()
+        assert (renders / "pcb-back.svg").exists()
         assert not (renders / "3d-front.png").exists()
         assert not (renders / "3d-back.png").exists()
         # The 3D render helper was never called.
@@ -244,7 +244,7 @@ class TestEdgeCases:
         def failing(pcb_path, output_path, *a, **k):
             return KiCadCLIResult(success=False, stderr="boom")
 
-        monkeypatch.setattr(render_cmd, "run_pcb_export_png", failing)
+        monkeypatch.setattr(render_cmd, "run_pcb_export_svg", failing)
         monkeypatch.setattr(render_cmd, "run_pcb_render", failing)
 
         rc = render_main([str(board)])

@@ -1,6 +1,7 @@
 /**
- * Prebuild step: stage board render PNGs and manufacturing downloads into
- * `site/public/` so the static Astro build can serve them.
+ * Prebuild step: stage board renders (2D `.svg` layer plots + 3D `.png`) and
+ * manufacturing downloads into `site/public/` so the static Astro build can
+ * serve them.
  *
  * Why this exists
  * ---------------
@@ -9,14 +10,14 @@
  * import or bundle assets from outside its project root, so we copy the files
  * into `site/public/boards/<slug>/...` at build time. Anything under `public/`
  * is served verbatim at the site root, so a copied file at
- * `site/public/boards/<slug>/renders/pcb-front.png` is reachable at the URL
- * `/boards/<slug>/renders/pcb-front.png` — which is exactly what
+ * `site/public/boards/<slug>/renders/pcb-front.svg` is reachable at the URL
+ * `/boards/<slug>/renders/pcb-front.svg` — which is exactly what
  * `BoardCard.astro` (gallery thumbnails) and `[slug].astro` (detail gallery +
  * downloads) reference.
  *
  * What gets staged
  * ----------------
- *   - Renders:        `boards/<id>/output/renders/*.png`
+ *   - Renders:        `boards/<id>/output/renders/*.svg` and `*.png`
  *                  →  `site/public/boards/<slug>/renders/<file>`
  *                  →  served at `/boards/<slug>/renders/<file>`
  *   - Manufacturing:  the downloadable files under
@@ -163,13 +164,14 @@ function main() {
     // --- Renders ---
     const srcRenders = join(dir, "output", "renders");
     if (isDir(srcRenders)) {
-      const pngs = readdirSync(srcRenders).filter((f) =>
-        f.toLowerCase().endsWith(".png"),
-      );
-      if (pngs.length > 0) {
+      const renders = readdirSync(srcRenders).filter((f) => {
+        const lower = f.toLowerCase();
+        return lower.endsWith(".png") || lower.endsWith(".svg");
+      });
+      if (renders.length > 0) {
         const destRenders = join(destRoot, slug, "renders");
         mkdirSync(destRenders, { recursive: true });
-        for (const file of pngs) {
+        for (const file of renders) {
           copyFileSync(join(srcRenders, file), join(destRenders, file));
           copied += 1;
         }

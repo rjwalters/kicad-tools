@@ -1260,7 +1260,7 @@ def _run_fill_zones_via_drc(
         drc_report.unlink(missing_ok=True)
 
 
-def run_pcb_export_png(
+def run_pcb_export_svg(
     pcb_path: Path,
     output_path: Path,
     layers: list[str],
@@ -1269,11 +1269,18 @@ def run_pcb_export_png(
     timeout: int = 120,
     kicad_cli: Path | None = None,
 ) -> KiCadCLIResult:
-    """Export a 2D layer plot of a PCB to a PNG using ``kicad-cli pcb export png``.
+    """Export a 2D layer plot of a PCB to an SVG using ``kicad-cli pcb export svg``.
+
+    KiCad 10 removed the raster ``pcb export png`` subcommand entirely, so the
+    2D layer plots are produced as scalable SVGs instead (a better web format
+    for ``<img src>`` anyway). ``--mode-single`` writes the full output path as a
+    single file (avoiding the KiCad-9 deprecation warning that flips the default
+    to directory output); ``--page-size-mode 2`` and ``--fit-page-to-board`` keep
+    the plot trimmed to the board content.
 
     Args:
         pcb_path: Path to the ``.kicad_pcb`` file to plot.
-        output_path: Where to write the PNG.
+        output_path: Where to write the SVG.
         layers: Layer names to render (e.g. ``["F.Cu", "F.Silkscreen", "Edge.Cuts"]``).
         black_and_white: Render in black & white instead of color.
         theme: Optional KiCad color theme name.
@@ -1295,13 +1302,15 @@ def run_pcb_export_png(
         str(kicad_cli),
         "pcb",
         "export",
-        "png",
+        "svg",
+        "--mode-single",
         "--output",
         str(output_path),
         "--layers",
         ",".join(layers),
         "--page-size-mode",
         "2",  # fit page to board content
+        "--fit-page-to-board",
     ]
 
     if black_and_white:
@@ -1324,15 +1333,15 @@ def run_pcb_export_png(
             )
         return KiCadCLIResult(
             success=False,
-            stderr=result.stderr or "PNG export produced no output",
+            stderr=result.stderr or "SVG export produced no output",
             return_code=result.returncode,
         )
     except FileNotFoundError as e:
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.TimeoutExpired:
-        return KiCadCLIResult(success=False, stderr=f"PNG export timed out after {timeout} seconds")
+        return KiCadCLIResult(success=False, stderr=f"SVG export timed out after {timeout} seconds")
     except subprocess.SubprocessError as e:
-        return KiCadCLIResult(success=False, stderr=f"Failed to export PNG: {e}")
+        return KiCadCLIResult(success=False, stderr=f"Failed to export SVG: {e}")
 
 
 def run_pcb_render(

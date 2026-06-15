@@ -222,13 +222,13 @@ title: "fallback_board"
 def test_render_paths_attached_when_present(tmp_path: Path):
     board = _make_board(
         tmp_path,
-        renders=["pcb-front.png", "pcb-back.png", "3d-front.png", "3d-back.png"],
+        renders=["pcb-front.svg", "pcb-back.svg", "3d-front.png", "3d-back.png"],
     )
     m = extract_board_metrics(board)
 
     assert m["renders"] == {
-        "pcb_front": "renders/pcb-front.png",
-        "pcb_back": "renders/pcb-back.png",
+        "pcb_front": "renders/pcb-front.svg",
+        "pcb_back": "renders/pcb-back.svg",
         "3d_front": "renders/3d-front.png",
         "3d_back": "renders/3d-back.png",
     }
@@ -239,9 +239,9 @@ def test_render_paths_attached_when_present(tmp_path: Path):
 
 def test_render_paths_partial(tmp_path: Path):
     # Only some renders exist -> only those keys appear.
-    board = _make_board(tmp_path, renders=["pcb-front.png"])
+    board = _make_board(tmp_path, renders=["pcb-front.svg"])
     m = extract_board_metrics(board)
-    assert m["renders"] == {"pcb_front": "renders/pcb-front.png"}
+    assert m["renders"] == {"pcb_front": "renders/pcb-front.svg"}
 
 
 def test_renders_omitted_when_absent(tmp_path: Path):
