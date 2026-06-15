@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -221,6 +222,63 @@ class TestJsonOutput:
         for entry in payload["boards"]:
             assert entry["status"] == "ok"
             assert set(entry["outputs"]) == set(RENDER_OUTPUTS)
+
+
+# --------------------------------------------------------------------------
+# 3D render command flags (issue #3702): logical front/back -> oblique
+# top/bottom views, not kicad-cli's edge-on native front/back.
+# --------------------------------------------------------------------------
+
+
+class TestRenderObliqueFlags:
+    _RUNNER = "kicad_tools.cli.runner"
+
+    def _capture_cmd(self, tmp_path: Path, side: str):
+        from kicad_tools.cli.runner import run_pcb_render
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        out = tmp_path / f"3d-{side}.png"
+
+        def fake_run(cmd, *args, **kwargs):
+            out.write_bytes(b"PNG3D")
+            fake_run.cmd = cmd
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{self._RUNNER}.subprocess.run", side_effect=fake_run):
+            res = run_pcb_render(
+                pcb,
+                out,
+                side=side,
+                kicad_cli=Path("/usr/bin/kicad-cli"),
+            )
+
+        assert res.success
+        return fake_run.cmd
+
+    def test_front_uses_oblique_top_view(self, tmp_path):
+        cmd = self._capture_cmd(tmp_path, "front")
+        assert cmd[cmd.index("--side") + 1] == "top"
+        assert "--rotate" in cmd
+        assert cmd[cmd.index("--rotate") + 1] == "-70,0,0"
+        assert "--perspective" in cmd
+        # The native edge-on "front" must NOT be emitted.
+        assert "front" not in cmd
+
+    def test_back_uses_oblique_bottom_view(self, tmp_path):
+        cmd = self._capture_cmd(tmp_path, "back")
+        assert cmd[cmd.index("--side") + 1] == "bottom"
+        assert "--rotate" in cmd
+        assert cmd[cmd.index("--rotate") + 1] == "70,0,0"
+        assert "--perspective" in cmd
+        assert "back" not in cmd
+
+    def test_native_side_passes_through_without_rotate(self, tmp_path):
+        # Callers passing a native kicad-cli side get a straight-on view.
+        cmd = self._capture_cmd(tmp_path, "top")
+        assert cmd[cmd.index("--side") + 1] == "top"
+        assert "--rotate" not in cmd
+        assert "--perspective" not in cmd
 
 
 # --------------------------------------------------------------------------

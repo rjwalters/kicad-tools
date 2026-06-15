@@ -1357,11 +1357,20 @@ def run_pcb_render(
     ``kicad-cli pcb render`` was added in KiCad 8.0.4 and requires a display
     (or a virtual framebuffer such as ``xvfb-run`` on headless CI).
 
+    The logical ``"front"``/``"back"`` sides map to oblique 3/4 views of the
+    component (top) and solder (bottom) faces, not kicad-cli's native
+    ``front``/``back`` *edge* views (which look at the thin board edge and
+    render as a narrow sliver). Callers passing a native kicad-cli side
+    (``top``/``bottom``/``left``/``right``/``front``/``back``) directly get a
+    straight-on view with no auto-rotate.
+
     Args:
         pcb_path: Path to the ``.kicad_pcb`` file to render.
         output_path: Where to write the PNG.
-        side: Camera side — ``"front"`` or ``"back"`` (also accepts the other
-            ``kicad-cli`` presets like ``top``/``bottom``/``left``/``right``).
+        side: Camera side — ``"front"`` (oblique top/component view) or
+            ``"back"`` (oblique bottom/solder view). Native kicad-cli presets
+            (``top``/``bottom``/``left``/``right``/``front``/``back``) pass
+            through unchanged.
         quality: Render quality preset (``basic``/``high``/``user``).
         timeout: Subprocess timeout in seconds (ray-tracing is slow).
         kicad_cli: Path to kicad-cli (auto-detected when not provided).
@@ -1377,6 +1386,18 @@ def run_pcb_render(
                 stderr="kicad-cli not found. Install KiCad 8.0.4+ from https://www.kicad.org/download/",
             )
 
+    # Translate logical side → kicad-cli side + oblique rotate. The component
+    # faces are kicad-cli's "top"/"bottom"; an oblique tilt about X gives a 3/4
+    # view instead of a straight-down shot — and avoids the edge-on sliver you
+    # get from kicad-cli's native "front"/"back" edge views.
+    _SIDE_MAP = {
+        "front": ("top", "-70,0,0"),
+        "back": ("bottom", "70,0,0"),
+    }
+    # Native kicad-cli sides (top/bottom/left/right/front/back) pass through with
+    # no auto-rotate; logical front/back get the oblique mapping above.
+    kicad_side, rotate = _SIDE_MAP.get(side, (side, None))
+
     cmd = [
         str(kicad_cli),
         "pcb",
@@ -1384,11 +1405,13 @@ def run_pcb_render(
         "--output",
         str(output_path),
         "--side",
-        side,
+        kicad_side,
         "--quality",
         quality,
-        str(pcb_path),
     ]
+    if rotate:
+        cmd += ["--rotate", rotate, "--perspective"]
+    cmd.append(str(pcb_path))
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
