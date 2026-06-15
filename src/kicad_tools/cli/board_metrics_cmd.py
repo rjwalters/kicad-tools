@@ -39,8 +39,8 @@ absent or unparseable.
       "drc_violations": 14,
       "cost": {"per_board_usd": 9.16, "batch_qty": 5, "batch_total_usd": 45.78},
       "renders": {
-        "pcb_front": "renders/pcb-front.png",
-        "pcb_back": "renders/pcb-back.png",
+        "pcb_front": "renders/pcb-front.svg",
+        "pcb_back": "renders/pcb-back.svg",
         "3d_front": "renders/3d-front.png",
         "3d_back": "renders/3d-back.png"
       },
@@ -86,8 +86,8 @@ SCHEMA_URL = "https://kicad-tools.org/schemas/board/v1.json"
 # Render images written by `kct render` (#3675), relative to output/.
 # Keys are the board.json field names; values are paths relative to output/.
 RENDER_FILES = {
-    "pcb_front": "renders/pcb-front.png",
-    "pcb_back": "renders/pcb-back.png",
+    "pcb_front": "renders/pcb-front.svg",
+    "pcb_back": "renders/pcb-back.svg",
     "3d_front": "renders/3d-front.png",
     "3d_back": "renders/3d-back.png",
 }
