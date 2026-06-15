@@ -355,10 +355,43 @@ def run_fill_zones(
 
     # If a future KiCad ships a native fill-zones subcommand, prefer it.
     if _kicad_cli_has_fill_zones(kicad_cli):
-        return _run_fill_zones_native(pcb_path, output_path, kicad_cli)
+        result = _run_fill_zones_native(pcb_path, output_path, kicad_cli)
+    else:
+        # Fallback: use DRC which fills zones as a side effect.
+        result = _run_fill_zones_via_drc(pcb_path, output_path, kicad_cli)
 
-    # Fallback: use DRC which fills zones as a side effect.
-    return _run_fill_zones_via_drc(pcb_path, output_path, kicad_cli)
+    # Post-fill geometric correction (Issue #3711): kicad-cli's fill can
+    # leave the antipad around a foreign-net pad/via too small on boards
+    # serialized by kicad-tools, producing clearance_pad_zone /
+    # clearance_via_zone DRC errors.  Subtract foreign-net antipads from
+    # every filled_polygon so the fill clears foreign copper by at least
+    # the zone clearance.  No-op when shapely is unavailable.
+    if result.success and result.output_path is not None:
+        _apply_foreign_pad_clearance(result.output_path)
+
+    return result
+
+
+def _apply_foreign_pad_clearance(pcb_path: Path) -> None:
+    """Carve foreign-net antipads out of every zone fill (Issue #3711).
+
+    Loads the filled PCB, applies the pure-Python clearance correction,
+    and rewrites the file only when at least one filled_polygon changed.
+    Any failure (e.g. shapely missing) is swallowed — the fill is then
+    left exactly as kicad-cli produced it.
+    """
+    try:
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import apply_foreign_pad_clearance
+
+        doc = parse_file(pcb_path)
+        modified = apply_foreign_pad_clearance(doc)
+        if modified:
+            save_pcb(doc, pcb_path)
+    except Exception:
+        # Never let the correction abort a successful fill.
+        return
 
 
 def _run_fill_zones_native(
