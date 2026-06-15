@@ -266,12 +266,14 @@ if (board.manifest_generated_at !== undefined) {
       {
         /*
          * Drive the loading → ready / error transition for the KiCanvas embed.
-         * Astro bundles + dedupes this <script>; it runs after the DOM is parsed.
+         * Raw inline JS (is:inline emits it verbatim — do NOT wrap in a {`...`}
+         * template literal, which is:inline would ship as inert text). Placed
+         * after the embed/overlay markup, so it runs once those nodes exist.
          * Emitted only when a PCB is present so no-artifact boards stay JS-free.
          */
         hasPcb && (
           <script is:inline>
-            {`(() => {
+            (() => {
   // Grab the overlay up front so the hard-timeout fallback can reference it
   // even if everything below throws. querySelector never throws for a valid
   // selector, returning null at worst.
@@ -288,7 +290,7 @@ if (board.manifest_generated_at !== undefined) {
       pollTimer = null;
     }
   };
-  // KiCanvas signals completion via a JS PROPERTY \`embed.loaded\` (set true once
+  // KiCanvas signals completion via a JS PROPERTY embed.loaded (set true once
   // the board has parsed + rendered). It does NOT reflect a "loaded" attribute
   // and dispatches no "load" event on the <kicanvas-embed> host, so we must
   // read the property — earlier attribute/event checks never fired, which is
@@ -312,7 +314,7 @@ if (board.manifest_generated_at !== undefined) {
     try {
       overlay.classList.add("viewer-error");
       overlay.innerHTML =
-        '<span class="viewer-loading-text">Interactive view unavailable \\u2014 ' +
+        '<span class="viewer-loading-text">Interactive view unavailable — ' +
         'see the renders below.</span>';
     } catch (e) {
       // CSP or DOM error: just hide the whole overlay so no spinner persists.
@@ -335,7 +337,7 @@ if (board.manifest_generated_at !== undefined) {
     else showError();
   }, 8000);
 
-  // STEP 2 — Best-effort success path. Poll \`embed.loaded\` and reveal the board
+  // STEP 2 — Best-effort success path. Poll embed.loaded and reveal the board
   // as soon as it flips true. Wrapped in try/catch so any failure here cannot
   // prevent the timeout above from firing.
   try {
@@ -360,7 +362,7 @@ if (board.manifest_generated_at !== undefined) {
     // Setup failed — the timeout registered in STEP 1 will still clean up the
     // spinner and surface the fallback note.
   }
-})();`}
+})();
           </script>
         )
       }
