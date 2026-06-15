@@ -2546,6 +2546,72 @@ class TestPCBPageFit:
 
         assert _pairwise_nm(before) == _pairwise_nm(after)
 
+    def test_page_fit_preserves_45_degree_angle_through_save(self, tmp_path: Path):
+        """page_fit is angle-preserving: a 45-deg segment stays exactly 45 deg.
+
+        Regression test for issue #3714 (second defect): a rigid translation
+        must shift every endpoint by the IDENTICAL delta, so all relative
+        geometry -- including segment angles -- is preserved exactly.  The
+        bug shifted endpoints by slightly different amounts (re-snapping each
+        base coord, then losing a significant digit in the ``%.6g`` float
+        serializer, e.g. ``147.9252`` -> ``147.925``), tilting otherwise-exact
+        45-deg copper off-angle.  Off-45 copper is non-manufacturable.
+
+        The serializer truncation only surfaces after a save/reload, so this
+        test goes through disk -- exactly what the fleet 45-census measures.
+        """
+        import math
+
+        # A perfect 45-deg segment whose endpoint carries 7 significant
+        # digits (243.0748 + the -95mm page_fit delta -> 148.0748): the
+        # culprit precision the %.6g serializer used to drop.  dx == dy in
+        # magnitude => exactly 45 degrees.
+        pcb_text = """(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(gr_rect
+\t\t(start 100 100)
+\t\t(end 250 200)
+\t\t(layer "Edge.Cuts")
+\t\t(width 0.15)
+\t)
+\t(segment (start 243 112) (end 242.9252 112.0748) (width 0.25) (layer "F.Cu") (net 0))
+)
+"""
+        src = tmp_path / "ang.kicad_pcb"
+        src.write_text(pcb_text)
+
+        def _seg_angle_deg(path: Path) -> float:
+            reloaded = PCB.load(path)
+            seg = reloaded._sexp.find("segment")
+            sx = seg.find("start").get_float(0)
+            sy = seg.find("start").get_float(1)
+            ex = seg.find("end").get_float(0)
+            ey = seg.find("end").get_float(1)
+            return math.degrees(math.atan2(ey - sy, ex - sx))
+
+        before = _seg_angle_deg(src)
+        assert abs(before) == pytest.approx(135.0, abs=1e-9)  # exactly 45 off-axis
+
+        pcb = PCB.load(src)
+        pcb.page_fit(margin=5.0)
+        out = tmp_path / "ang_fit.kicad_pcb"
+        pcb.save(out)
+
+        after = _seg_angle_deg(out)
+        # The angle must be IDENTICAL through the page_fit + save roundtrip.
+        assert after == pytest.approx(before, abs=1e-9), (
+            f"page_fit tilted a 45-deg segment: {before} -> {after} deg"
+        )
+        # And it must still be on the legal {0,45,90,135} set (exact).
+        assert abs(after) % 45.0 == pytest.approx(0.0, abs=1e-6)
+
     def test_page_fit_roundtrip_idempotent_page_size(self, tmp_path: Path):
         """Running page_fit twice yields the same page size (idempotent)."""
         pcb = PCB.create(width=120, height=90)

@@ -2124,20 +2124,44 @@ class PCB:
         untouched.
 
         The translation delta is supplied in **integer nanometres** (KiCad's
-        native storage grid: mm to 6 decimals = 1 nm).  Each coordinate is
-        snapped to the nm grid, the on-grid delta is added in integer space,
-        and the result is converted straight back to mm.  This keeps the
-        transform *exactly* distance-preserving: there is no per-coordinate
-        re-rounding of a summed float, so pairwise distances between any two
-        translated points are identical to the originals.
+        native storage grid: mm to 6 decimals = 1 nm).  The delta is added to
+        each base coordinate as an exact-on-grid mm offset (``delta_nm / 1e6``)
+        **without re-snapping the base coordinate first**, so every point in
+        the board is shifted by the *identical* delta.  This makes the
+        transform a true rigid translation: it is both distance- AND
+        angle-preserving (a 45-degree segment stays exactly 45 degrees).
+
+        Re-snapping each base coordinate independently (``round(x * 1e6)``)
+        would shift the two endpoints of a segment by slightly different
+        amounts when they carry differing sub-nanometre fractions, tilting
+        otherwise-exact 45-degree copper off-angle.  Off-45 copper is
+        non-manufacturable, so we must NOT do that here.
+
+        The shifted value is written as a 6-decimal **string** (trailing
+        zeros stripped) rather than a Python ``float``: the SExp serializer
+        formats bare floats with ``%.6g`` (6 *significant* digits), which
+        silently truncates a coordinate like ``147.9252`` to ``147.925`` --
+        moving one endpoint of a 45-degree segment and tilting it off-angle.
+        Emitting the full 6-decimal text preserves the nm grid exactly, so
+        both endpoints shift by the identical delta and the angle is kept.
         """
         x, y = node.get_float(0), node.get_float(1)
         if x is None or y is None:
             return
-        x_nm = round(x * 1_000_000) + dx_nm
-        y_nm = round(y * 1_000_000) + dy_nm
-        node.set_value(0, round(x_nm / 1_000_000, 6))
-        node.set_value(1, round(y_nm / 1_000_000, 6))
+        node.set_value(0, PCB._format_coord_mm(x + dx_nm / 1_000_000))
+        node.set_value(1, PCB._format_coord_mm(y + dy_nm / 1_000_000))
+
+    @staticmethod
+    def _format_coord_mm(value: float) -> str:
+        """Format an mm coordinate on the KiCad nm grid (6 decimals).
+
+        Rounds to 6 decimal places (1 nm) and strips trailing zeros so the
+        text matches KiCad's own output (e.g. ``148`` not ``148.000000`` and
+        ``147.9252`` not ``147.925200``).  Returned as a string to bypass the
+        SExp serializer's lossy ``%.6g`` float formatting.
+        """
+        text = f"{round(value, 6):.6f}".rstrip("0").rstrip(".")
+        return text if text not in ("", "-0") else "0"
 
     def _translate_item_sexp(self, node: SExp, dx_nm: int, dy_nm: int) -> None:
         """Recursively translate all coordinate nodes within an item.
@@ -2207,10 +2231,10 @@ class PCB:
         bbox_h = max_y - min_y
 
         # Snap the translation delta to the KiCad nm grid (mm to 6 decimals)
-        # BEFORE applying it.  Coordinates are translated in integer-nm space
-        # (see _translate_coord_node), so an already-on-grid coordinate plus an
-        # on-grid delta lands exactly on the grid with no per-coordinate
-        # re-rounding drift -- making the transform exactly distance-preserving.
+        # ONCE here, then add this single on-grid delta to every coordinate
+        # (see _translate_coord_node).  Every point shifts by the identical
+        # delta, so the transform is a true rigid translation -- both
+        # distance- AND angle-preserving (45-degree copper stays 45 degrees).
         dx_nm = round((margin - min_x) * 1_000_000)
         dy_nm = round((margin - min_y) * 1_000_000)
 
