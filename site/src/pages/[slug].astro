@@ -1,0 +1,457 @@
+---
+/**
+ * Per-board detail page (issue #3681, Epic #3674 Phase 2).
+ *
+ * One static route `/<slug>` per board discovered by the build-time loader
+ * (including `no_artifacts` stubs, so index cards never 404). Each page shows:
+ *   - a four-render 2×2 gallery (real images or labelled placeholders),
+ *   - a metrics table mapping every present `board.json` field (omit-absent),
+ *   - a downloads section linking the manufacturing package + optional extras,
+ *   - a clearly-commented placeholder for the Phase 4 interactive viewer,
+ *   - back-links to the gallery index.
+ *
+ * Image / download serving mirrors the gallery index (#3680): the prebuild
+ * `copy-renders` step stages renders and the allow-listed manufacturing files
+ * into `site/public/boards/<slug>/...`, served at `/boards/<slug>/...`.
+ */
+import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts";
+import type { Board } from "../data/types.ts";
+import RenderGallery from "../components/RenderGallery.astro";
+
+/**
+ * The primary manufacturing download. It is also referenced by
+ * `board.manufacturing_package`. Optional supplementary downloads (report.pdf /
+ * BOM / CPL) are detected per-board at build time inside `getStaticPaths` and
+ * passed through as the `extras` prop. All are staged by `copy-renders` into
+ * `public/boards/<slug>/manufacturing/` when present in the source tree.
+ */
+const PRIMARY_MFG = { file: "kicad_project.zip", label: "Manufacturing package (ZIP)" };
+
+export async function getStaticPaths() {
+  const boards = loadBoards();
+
+  // Map slug → absolute board source directory so we can do build-time
+  // existence checks of manufacturing files. Discovery rules match the loader
+  // exactly. (Defined inline because Astro bundles `getStaticPaths` separately
+  // from the rest of the frontmatter — module-top helpers are not in scope.)
+  const dirs = new Map<string, string>();
+  for (const dir of discoverBoardDirs(boardsDir())) {
+    const slug = dir.split(/[\\/]/).filter(Boolean).pop();
+    if (slug) dirs.set(slug, dir);
+  }
+
+  return boards.map((board) => {
+    const dir = dirs.get(board.slug);
+    const mfgDir = dir ? join(dir, "output", "manufacturing") : null;
+
+    // Build-time existence check: only link download files that actually exist
+    // in the source tree (and were therefore staged by copy-renders). The
+    // file/label lists are duplicated as locals here (not the module-top
+    // consts) because Astro bundles `getStaticPaths` separately.
+    const primaryFile = "kicad_project.zip";
+    const extraFiles = [
+      { file: "report.pdf", label: "Fabrication report (PDF)" },
+      { file: "bom_jlcpcb.csv", label: "Bill of materials (CSV)" },
+      { file: "cpl_jlcpcb.csv", label: "Component placement (CSV)" },
+    ];
+
+    const hasPrimary =
+      board.manufacturing_package !== undefined &&
+      mfgDir !== null &&
+      existsSync(join(mfgDir, primaryFile));
+
+    const extras = mfgDir
+      ? extraFiles.filter((e) => existsSync(join(mfgDir, e.file)))
+      : [];
+
+    return {
+      params: { slug: board.slug },
+      props: { board, hasPrimary, extras },
+    };
+  });
+}
+
+interface DetailProps {
+  board: Board;
+  hasPrimary: boolean;
+  extras: Array<{ file: string; label: string }>;
+}
+
+const { board, hasPrimary, extras } = Astro.props as DetailProps;
+
+const displayName = board.name ?? board.slug;
+const isBuilt = board.status !== "no_artifacts";
+
+const STATUS_LABEL: Record<Board["status"], string> = {
+  ok: "Ready",
+  partial: "Partial",
+  no_artifacts: "No artifacts",
+};
+
+const mfgBase = `/boards/${board.slug}/manufacturing`;
+const hasDownloads = hasPrimary || extras.length > 0;
+
+/**
+ * Metrics rows, built in display order. Each entry is pushed only when its
+ * backing field is present — this enforces the omit-absent rule (no row ever
+ * shows "null" / "undefined" / "—"). `status` is always present.
+ */
+type Row = { label: string; value: string; warn?: boolean };
+const rows: Row[] = [];
+rows.push({ label: "Build Status", value: STATUS_LABEL[board.status] });
+if (board.nets_routed_pct !== undefined) {
+  rows.push({ label: "Nets Routed", value: `${board.nets_routed_pct.toFixed(1)}%` });
+}
+if (board.drc_violations !== undefined) {
+  rows.push({
+    label: "DRC Violations",
+    value: `${board.drc_violations}`,
+    warn: board.drc_violations > 0,
+  });
+}
+if (board.layer_count !== undefined) {
+  rows.push({ label: "Layers", value: `${board.layer_count}` });
+}
+if (board.board_size_mm !== undefined) {
+  rows.push({
+    label: "Board Size",
+    value: `${board.board_size_mm.width} × ${board.board_size_mm.height} mm`,
+  });
+}
+if (board.part_count !== undefined) {
+  rows.push({ label: "Parts", value: `${board.part_count}` });
+}
+if (board.cost?.per_board_usd !== undefined) {
+  rows.push({ label: "Cost (per board)", value: `$${board.cost.per_board_usd.toFixed(2)}` });
+}
+if (board.cost?.batch_qty !== undefined) {
+  rows.push({ label: "Batch Qty", value: `${board.cost.batch_qty} boards` });
+}
+if (board.cost?.batch_total_usd !== undefined) {
+  rows.push({ label: "Batch Total", value: `$${board.cost.batch_total_usd.toFixed(2)}` });
+}
+if (board.manifest_generated_at !== undefined) {
+  rows.push({ label: "Data Generated", value: board.manifest_generated_at });
+}
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{displayName} · kicad-tools demo gallery</title>
+    {
+      board.description && (
+        <meta name="description" content={board.description} />
+      )
+    }
+  </head>
+  <body>
+    <main>
+      <p class="back-top">
+        <a href="/">← Back to gallery</a>
+      </p>
+
+      <header class="detail-header">
+        <h1>{displayName}</h1>
+        <span class:list={["chip", `chip-${board.status}`]}>
+          {STATUS_LABEL[board.status]}
+        </span>
+        {board.description && <p class="desc">{board.description}</p>}
+        {board.slug !== displayName && <p class="slug">{board.slug}</p>}
+      </header>
+
+      {
+        !isBuilt && (
+          <p class="not-built">
+            This board has not been built yet — no renders, metrics, or
+            manufacturing package are available. Run <code>uv run kct
+            board-metrics --all</code> (and the render / manufacture steps) to
+            populate its data.
+          </p>
+        )
+      }
+
+      <RenderGallery board={board} />
+
+      <!--
+        Phase 4: interactive PCB viewer will embed here.
+        See Epic #3674 Phase 4 issue for implementation details.
+        This is an intentionally inert placeholder — do NOT treat it as a
+        functional feature.
+      -->
+      <section class="viewer-placeholder" aria-label="Interactive viewer (coming soon)">
+        <div id="pcb-viewer-placeholder">
+          <p>Interactive PCB viewer — coming in Phase 4</p>
+        </div>
+      </section>
+
+      <section class="metrics" aria-label="Board metrics">
+        <h2>Metrics</h2>
+        <table>
+          <tbody>
+            {
+              rows.map((row) => (
+                <tr>
+                  <th scope="row">{row.label}</th>
+                  <td class:list={[{ warn: row.warn }]}>{row.value}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </section>
+
+      <section class="downloads" aria-label="Downloads">
+        <h2>Downloads</h2>
+        {
+          hasDownloads ? (
+            <ul class="download-list">
+              {hasPrimary && (
+                <li>
+                  <a
+                    href={`${mfgBase}/${PRIMARY_MFG.file}`}
+                    download
+                  >
+                    {PRIMARY_MFG.label}
+                  </a>
+                </li>
+              )}
+              {extras.map((extra) => (
+                <li>
+                  <a href={`${mfgBase}/${extra.file}`} download>
+                    {extra.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p class="no-downloads">No manufacturing package available.</p>
+          )
+        }
+      </section>
+
+      <footer class="back-bottom">
+        <a href="/">← Back to gallery</a>
+      </footer>
+    </main>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0e12;
+    --text: #e6edf3;
+    --muted: #9aa7b2;
+    --accent: #3fae7a;
+    --border: #25303a;
+    --card-bg: #11171d;
+    --badge-bg: #1b2530;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family:
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Roboto,
+      Helvetica,
+      Arial,
+      sans-serif;
+    line-height: 1.5;
+  }
+</style>
+
+<style>
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 1.5rem 1.25rem 4rem;
+  }
+
+  a {
+    color: var(--accent);
+  }
+
+  .back-top,
+  .back-bottom {
+    margin: 0 0 1.5rem;
+  }
+
+  .back-bottom {
+    margin: 2.5rem 0 0;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .detail-header {
+    margin-bottom: 2rem;
+  }
+
+  .detail-header h1 {
+    display: inline;
+    margin: 0;
+    font-size: clamp(1.5rem, 4vw, 2.2rem);
+    word-break: break-word;
+  }
+
+  .detail-header .desc {
+    margin: 0.75rem 0 0;
+    color: var(--muted);
+  }
+
+  .detail-header .slug {
+    margin: 0.35rem 0 0;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+  }
+
+  .chip {
+    display: inline-block;
+    margin-left: 0.6rem;
+    vertical-align: middle;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .chip-ok {
+    background: rgba(63, 174, 122, 0.9);
+    color: #04150d;
+  }
+
+  .chip-partial {
+    background: rgba(224, 168, 0, 0.9);
+    color: #1a1300;
+  }
+
+  .chip-no_artifacts {
+    background: rgba(120, 134, 148, 0.85);
+    color: #0c1116;
+  }
+
+  .not-built {
+    margin: 0 0 2rem;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid #788694;
+    border-radius: 8px;
+    background: var(--card-bg);
+    color: var(--muted);
+  }
+
+  .not-built code {
+    background: var(--badge-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  section {
+    margin-top: 2.25rem;
+  }
+
+  section h2 {
+    margin: 0 0 1rem;
+    font-size: 1.2rem;
+  }
+
+  /* Phase 4 viewer placeholder — intentionally subtle so it is not mistaken
+     for a working feature. */
+  .viewer-placeholder #pcb-viewer-placeholder {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 2.5rem 1rem;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  .metrics table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .metrics th,
+  .metrics td {
+    text-align: left;
+    padding: 0.6rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+
+  .metrics tr:last-child th,
+  .metrics tr:last-child td {
+    border-bottom: none;
+  }
+
+  .metrics th {
+    width: 40%;
+    color: var(--muted);
+    font-weight: 500;
+    background: var(--card-bg);
+  }
+
+  .metrics td {
+    font-weight: 600;
+  }
+
+  .metrics td.warn {
+    color: #e0a800;
+  }
+
+  .download-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .download-list a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card-bg);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.9rem;
+  }
+
+  .download-list a:hover,
+  .download-list a:focus-visible {
+    border-color: var(--accent);
+    outline: none;
+  }
+
+  .no-downloads {
+    margin: 0;
+    color: var(--muted);
+  }
+</style>
