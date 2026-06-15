@@ -1,0 +1,59 @@
+---
+/**
+ * Header — shared site chrome for the kicad-tools demo gallery (issue #3699).
+ *
+ * Rendered at the top of every page (index + each board detail) by importing
+ * this component into `index.astro` and `[slug].astro`. Carries a "View on
+ * GitHub" link back to the project repo. Styling reuses the global CSS custom
+ * properties (`--accent`, `--border`, `--muted`) declared on `:root` by each
+ * page's `<style is:global>` block, so it inherits the dark theme.
+ */
+const REPO = "https://github.com/rjwalters/kicad-tools";
+---
+
+<header class="site-header">
+  <a class="site-title" href="/">kicad-tools</a>
+  <a
+    class="repo-link"
+    href={REPO}
+    target="_blank"
+    rel="noopener noreferrer"
+  >
+    View on GitHub
+  </a>
+</header>
+
+<style>
+  .site-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .site-title {
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.95rem;
+    letter-spacing: 0.01em;
+    text-decoration: none;
+  }
+
+  .repo-link {
+    color: var(--accent);
+    font-size: 0.85rem;
+    text-decoration: none;
+  }
+
+  .repo-link:hover,
+  .repo-link:focus-visible,
+  .site-title:hover,
+  .site-title:focus-visible {
+    text-decoration: underline;
+    outline: none;
+  }
+</style>

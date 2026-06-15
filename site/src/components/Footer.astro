@@ -1,0 +1,103 @@
+---
+/**
+ * Footer — shared site chrome for the kicad-tools demo gallery (issue #3699).
+ *
+ * Rendered at the bottom of every page (index + each board detail). Carries
+ * provenance + attribution: the build-time short git commit hash (linked to
+ * the commit on GitHub), a copyright line, the KiCad trademark/unaffiliated
+ * disclaimer, and a link to kicad.org. Styling reuses the global CSS custom
+ * properties (`--muted`, `--border`, `--accent`) so it stays small + muted.
+ */
+import { execSync } from "node:child_process";
+
+// Capture the short SHA at build time (this frontmatter runs in Node during
+// `astro build`, not in the browser). Fallback chain so `npm run build` NEVER
+// fails outside a git checkout:
+//   1. `git rev-parse --short HEAD` — local builds + deploys from the repo.
+//   2. `GITHUB_SHA` env var (40-char on GitHub Actions) sliced to 7 chars —
+//      CI where git history may be a shallow/unavailable clone.
+//   3. "unknown" — terminal fallback; the footer still renders correctly.
+let sha = "unknown";
+try {
+  sha = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+} catch {
+  const envSha = process.env.GITHUB_SHA;
+  if (envSha) sha = envSha.slice(0, 7);
+}
+
+const commitUrl =
+  sha !== "unknown"
+    ? `https://github.com/rjwalters/kicad-tools/commit/${sha}`
+    : "https://github.com/rjwalters/kicad-tools";
+
+// Copyright year is captured at build time; edit the holder name below freely.
+const year = new Date().getFullYear();
+---
+
+<footer class="site-footer">
+  <p class="line">
+    Build:
+    <a href={commitUrl} target="_blank" rel="noopener noreferrer">
+      <code>{sha}</code>
+    </a>
+  </p>
+  <p class="line">© {year} Robb Walters / kicad-tools contributors</p>
+  <p class="line disclaimer">
+    KiCad is a registered trademark of its respective owners; this is an
+    independent community project, not affiliated with or endorsed by the
+    KiCad project.
+  </p>
+  <p class="line">
+    <a href="https://www.kicad.org" target="_blank" rel="noopener noreferrer">
+      kicad.org
+    </a>
+    <span class="sep" aria-hidden="true">·</span>
+    <a
+      href="https://www.kicad.org/community/"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      KiCad community
+    </a>
+  </p>
+</footer>
+
+<style>
+  .site-footer {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 1.5rem 1.25rem 2rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.6;
+  }
+
+  .line {
+    margin: 0.25rem 0;
+  }
+
+  .disclaimer {
+    max-width: 70ch;
+  }
+
+  .site-footer a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .site-footer a:hover,
+  .site-footer a:focus-visible {
+    text-decoration: underline;
+    outline: none;
+  }
+
+  .site-footer code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .sep {
+    margin: 0 0.4rem;
+    color: var(--border);
+  }
+</style>
