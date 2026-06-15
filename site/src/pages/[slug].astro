@@ -17,6 +17,7 @@
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts";
+import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
 import type { Board } from "../data/types.ts";
 import RenderGallery from "../components/RenderGallery.astro";
 import SiteHeader from "../components/Header.astro";
@@ -109,11 +110,10 @@ const pcbHref = `/boards/${board.slug}/board.kicad_pcb`;
 const displayName = board.name ?? board.slug;
 const isBuilt = board.status !== "no_artifacts";
 
-const STATUS_LABEL: Record<Board["status"], string> = {
-  ok: "Ready",
-  partial: "Partial",
-  no_artifacts: "No artifacts",
-};
+// Displayed badge derived from BOTH status and drc_violations so a board with
+// DRC violations never reads "Ready", regardless of a stale `status` (#3717).
+const statusVariant = displayStatus(board);
+const statusLabel = displayStatusLabel(board);
 
 const mfgBase = `/boards/${board.slug}/manufacturing`;
 const hasDownloads = hasPrimary || extras.length > 0;
@@ -125,7 +125,7 @@ const hasDownloads = hasPrimary || extras.length > 0;
  */
 type Row = { label: string; value: string; warn?: boolean };
 const rows: Row[] = [];
-rows.push({ label: "Build Status", value: STATUS_LABEL[board.status] });
+rows.push({ label: "Build Status", value: statusLabel, warn: statusVariant === "drc" });
 if (board.nets_routed_pct !== undefined) {
   rows.push({ label: "Nets Routed", value: `${board.nets_routed_pct.toFixed(1)}%` });
 }
@@ -193,8 +193,8 @@ if (board.manifest_generated_at !== undefined) {
 
       <header class="detail-header">
         <h1>{displayName}</h1>
-        <span class:list={["chip", `chip-${board.status}`]}>
-          {STATUS_LABEL[board.status]}
+        <span class:list={["chip", `chip-${statusVariant}`]}>
+          {statusLabel}
         </span>
         {board.description && <p class="desc">{board.description}</p>}
         {board.slug !== displayName && <p class="slug">{board.slug}</p>}
@@ -513,9 +513,16 @@ if (board.manifest_generated_at !== undefined) {
     letter-spacing: 0.02em;
   }
 
-  .chip-ok {
+  .chip-ready {
     background: rgba(63, 174, 122, 0.9);
     color: #04150d;
+  }
+
+  /* DRC-violation chip (#3717): a distinct red warn tone so a violating board
+     is never confused with the amber "Partial" or green "Ready" states. */
+  .chip-drc {
+    background: rgba(214, 84, 79, 0.92);
+    color: #1c0605;
   }
 
   .chip-partial {

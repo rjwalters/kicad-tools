@@ -12,6 +12,7 @@
  * issue #3681. Until that page exists the link 404s, which is expected.
  */
 import type { Board } from "../data/types.ts";
+import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
 
 interface Props {
   board: Board;
@@ -48,15 +49,14 @@ const thumb = thumbnailFor(board);
 const displayName = board.name ?? board.slug;
 const href = `/${board.slug}`;
 
-const STATUS_LABEL: Record<Board["status"], string> = {
-  ok: "Ready",
-  partial: "Partial",
-  no_artifacts: "No artifacts",
-};
-const statusLabel = STATUS_LABEL[board.status];
+// The displayed badge is derived from BOTH status and drc_violations so a
+// board with DRC violations never reads "Ready", regardless of a stale
+// `status` field (#3717).
+const statusVariant = displayStatus(board);
+const statusLabel = displayStatusLabel(board);
 ---
 
-<a class="card" href={href} data-status={board.status}>
+<a class="card" href={href} data-status={statusVariant}>
   <div class="thumb">
     <img
       src={thumb.src}
@@ -67,7 +67,7 @@ const statusLabel = STATUS_LABEL[board.status];
       decoding="async"
       class:list={["thumb-img", { "is-placeholder": thumb.isPlaceholder }]}
     />
-    <span class:list={["chip", `chip-${board.status}`]}>{statusLabel}</span>
+    <span class:list={["chip", `chip-${statusVariant}`]}>{statusLabel}</span>
   </div>
 
   <div class="body">
@@ -190,9 +190,16 @@ const statusLabel = STATUS_LABEL[board.status];
     backdrop-filter: blur(4px);
   }
 
-  .chip-ok {
+  .chip-ready {
     background: rgba(63, 174, 122, 0.9);
     color: #04150d;
+  }
+
+  /* DRC-violation chip (#3717): a distinct red warn tone so a violating board
+     is never confused with the amber "Partial" or green "Ready" states. */
+  .chip-drc {
+    background: rgba(214, 84, 79, 0.92);
+    color: #1c0605;
   }
 
   .chip-partial {
