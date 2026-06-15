@@ -15,9 +15,17 @@ import type { Board } from "../data/types.ts";
 
 interface Props {
   board: Board;
+  /**
+   * Whether this board has a staged `.kicad_pcb` and therefore an interactive
+   * KiCanvas viewer on its detail page (#3691). Computed at build time by
+   * `index.astro` (same `existsSync` probe `[slug].astro` uses); defaults to
+   * false so boards without a PCB omit the affordance. Kept out of the `Board`
+   * schema intentionally — it is a presentation signal, not board data.
+   */
+  hasPcb?: boolean;
 }
 
-const { board } = Astro.props;
+const { board, hasPcb = false } = Astro.props;
 
 /**
  * Resolve the thumbnail URL via the fallback chain. `board.renders` values are
@@ -67,6 +75,21 @@ const statusLabel = STATUS_LABEL[board.status];
     {board.description && <p class="desc">{board.description}</p>}
 
     <ul class="badges">
+      {
+        /*
+         * Interactive-view affordance (#3691): a subtle pill signalling that the
+         * board's detail page has a live KiCanvas PCB viewer. Rendered only when
+         * `hasPcb` is true; boards without a staged `.kicad_pcb` omit it. The
+         * whole card already links to `/<slug>`, so the badge is informational —
+         * no extra link wrapping needed.
+         */
+        hasPcb && (
+          <li class="badge badge-interactive">
+            <span class="badge-icon" aria-hidden="true">▦</span>
+            <span class="badge-value">Interactive view</span>
+          </li>
+        )
+      }
       {
         board.nets_routed_pct !== undefined && (
           <li class="badge">
@@ -231,6 +254,24 @@ const statusLabel = STATUS_LABEL[board.status];
   .badge-warn {
     border-color: rgba(224, 168, 0, 0.6);
     background: rgba(224, 168, 0, 0.12);
+  }
+
+  /* Interactive-view affordance pill (#3691): tinted with the accent so it reads
+     as an action cue distinct from the neutral metric badges. */
+  .badge-interactive {
+    align-items: center;
+    border-color: rgba(63, 174, 122, 0.6);
+    background: rgba(63, 174, 122, 0.12);
+    color: var(--accent, #3fae7a);
+  }
+
+  .badge-icon {
+    font-size: 0.8rem;
+    line-height: 1;
+  }
+
+  .badge-interactive .badge-value {
+    color: var(--accent, #3fae7a);
   }
 
   .badge-label {

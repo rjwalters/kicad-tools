@@ -225,7 +225,27 @@ if (board.manifest_generated_at !== undefined) {
         <div id="pcb-viewer-placeholder">
           {
             hasPcb ? (
-              <kicanvas-embed src={pcbHref} controls="full" class="pcb-viewer" />
+              <Fragment>
+                <kicanvas-embed src={pcbHref} controls="full" class="pcb-viewer" />
+                {/*
+                  Phase 4 polish (#3691): loading + error overlay.
+
+                  KiCanvas reflects boolean `loading`/`loaded` attributes on the
+                  <kicanvas-embed> host and dispatches a native CustomEvent("load")
+                  once the PCB renders. It dispatches NO error event, so the inline
+                  script below uses an ~8s timeout: if `loaded` never appears (slow
+                  fetch, parse failure, blocked/failed script), the overlay swaps to
+                  an error message that points users to the static renders above.
+
+                  The overlay starts visible and is removed on the "load" event;
+                  the static <RenderGallery> stays on the page the whole time, so a
+                  failed viewer never leaves a blank box.
+                */}
+                <div class="viewer-loading" data-viewer-overlay role="status" aria-live="polite">
+                  <span class="viewer-spinner" aria-hidden="true" />
+                  <span class="viewer-loading-text">Loading interactive view…</span>
+                </div>
+              </Fragment>
             ) : (
               <p class="viewer-unavailable">
                 Interactive view unavailable — no PCB file for this board. The
@@ -235,6 +255,66 @@ if (board.manifest_generated_at !== undefined) {
           }
         </div>
       </section>
+
+      {
+        /*
+         * Drive the loading → ready / error transition for the KiCanvas embed.
+         * Astro bundles + dedupes this <script>; it runs after the DOM is parsed.
+         * Emitted only when a PCB is present so no-artifact boards stay JS-free.
+         */
+        hasPcb && (
+          <script is:inline>
+            {`(() => {
+  var placeholder = document.getElementById("pcb-viewer-placeholder");
+  if (!placeholder) return;
+  var embed = placeholder.querySelector("kicanvas-embed");
+  var overlay = placeholder.querySelector("[data-viewer-overlay]");
+  if (!embed || !overlay) return;
+
+  var settled = false;
+  var removeOverlay = function () {
+    if (settled) return;
+    settled = true;
+    overlay.remove();
+  };
+  var showError = function () {
+    if (settled) return;
+    settled = true;
+    overlay.classList.add("viewer-error");
+    overlay.innerHTML =
+      '<span class="viewer-loading-text">Interactive view could not load \\u2014 ' +
+      'the static renders above show the board layout.</span>';
+  };
+
+  // Already loaded (fast cache / earlier script run)?
+  if (embed.hasAttribute("loaded")) {
+    removeOverlay();
+    return;
+  }
+
+  // Success path: native CustomEvent("load") on the element.
+  embed.addEventListener("load", removeOverlay, { once: true });
+
+  // Belt-and-suspenders: observe the reflected "loaded" attribute too, in case
+  // the "load" event fired before this listener attached.
+  var observer = new MutationObserver(function () {
+    if (embed.hasAttribute("loaded")) {
+      observer.disconnect();
+      removeOverlay();
+    }
+  });
+  observer.observe(embed, { attributes: true, attributeFilter: ["loaded"] });
+
+  // Error path: KiCanvas dispatches no error event, so fall back to an ~8s
+  // timeout. If "loaded" never appears, degrade to the static renders.
+  window.setTimeout(function () {
+    observer.disconnect();
+    if (!embed.hasAttribute("loaded")) showError();
+  }, 8000);
+})();`}
+          </script>
+        )
+      }
 
       <section class="metrics" aria-label="Board metrics">
         <h2>Metrics</h2>
@@ -422,20 +502,77 @@ if (board.manifest_generated_at !== undefined) {
     font-size: 1.2rem;
   }
 
-  /* Phase 4 (#3690) interactive viewer container. */
+  /* Phase 4 (#3690) interactive viewer container. `position: relative` anchors
+     the absolutely-positioned loading/error overlay added in #3691. */
   .viewer-section #pcb-viewer-placeholder {
+    position: relative;
     border: 1px solid var(--border);
     border-radius: 10px;
     overflow: hidden;
     background: var(--card-bg);
   }
 
-  /* KiCanvas <kicanvas-embed> is a block custom element; give it an explicit
-     height so the canvas has room to render (it sizes to its container). */
+  /* KiCanvas <kicanvas-embed> is a block custom element; give it a responsive
+     height so the canvas has room to render (it sizes to its container).
+     `touch-action: none` lets KiCanvas own all touch gestures (pan/zoom) on the
+     viewer surface without the browser hijacking them — and, paired with the
+     responsive height, keeps page scroll usable around the viewer on mobile. */
   .pcb-viewer {
     display: block;
     width: 100%;
-    height: 560px;
+    height: clamp(300px, 45vw, 560px);
+    touch-action: none;
+  }
+
+  @media (max-width: 480px) {
+    .pcb-viewer {
+      /* Cap height on narrow viewports so the canvas never dominates the page. */
+      height: 320px;
+    }
+  }
+
+  /* Loading / error overlay (#3691). Starts visible over the embed and is
+     removed by the inline script on the "load" event, or swapped to an error
+     message after the timeout. Sits above the canvas via z-index. */
+  .viewer-loading {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 1rem;
+    text-align: center;
+    background: var(--card-bg);
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  .viewer-loading.viewer-error {
+    color: var(--muted);
+  }
+
+  .viewer-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: viewer-spin 0.8s linear infinite;
+  }
+
+  @keyframes viewer-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .viewer-spinner {
+      animation-duration: 2s;
+    }
   }
 
   /* Fallback note for boards with no staged `.kicad_pcb`. Mirrors the subtle
