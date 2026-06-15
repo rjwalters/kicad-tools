@@ -1693,6 +1693,40 @@ def _add_pcb_parser(subparsers) -> None:
         help="Preview moves without modifying the PCB file",
     )
 
+    # pcb page-fit
+    pcb_page_fit = pcb_subparsers.add_parser(
+        "page-fit",
+        help="Resize the drawing sheet to fit the board and center it",
+        description='Rewrite the (paper ...) node to a tight (paper "User" W H) '
+        "sized to the Edge.Cuts bounding box plus a uniform margin, and "
+        "translate all board items so the board is centered with that margin. "
+        "Pure geometric transform -- routing/DRC preserved, no re-route needed.",
+    )
+    pcb_page_fit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_page_fit.add_argument(
+        "--margin",
+        type=float,
+        default=5.0,
+        help="Margin around the board in mm (default: 5.0)",
+    )
+    pcb_page_fit.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input PCB)",
+    )
+    pcb_page_fit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_page_fit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview the new page size without modifying the PCB file",
+    )
+
     # pcb lock-footprints / unlock-footprints
     for _cmd_name, _help_verb in (
         ("lock-footprints", "Lock"),
@@ -5967,6 +6001,7 @@ def _add_build_parser(subparsers) -> None:
             "silkscreen",
             "route",
             "stitch",
+            "page-fit",
             "preflight-routing",
             "verify",
             "export",

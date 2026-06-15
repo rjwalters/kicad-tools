@@ -12,7 +12,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reannotate, sync-netlist, remove-footprint, move-footprint, page-fit, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
         )
         return 1
 
@@ -44,6 +44,10 @@ def run_pcb_command(args) -> int:
     # Handle move-footprint command
     if args.pcb_command == "move-footprint":
         return _run_move_footprint_command(args, pcb_path)
+
+    # Handle page-fit command
+    if args.pcb_command == "page-fit":
+        return _run_page_fit_command(args, pcb_path)
 
     # Handle lock-footprints / unlock-footprints commands
     if args.pcb_command in ("lock-footprints", "unlock-footprints"):
@@ -717,6 +721,25 @@ def _run_move_footprint_command(args, pcb_path: Path) -> int:
         to=to_tuple,
         rotation=rotation,
         batch_map=batch_map,
+        dry_run=dry_run,
+        output_path=output_path,
+        output_format=output_format,
+    )
+
+
+def _run_page_fit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb page-fit' command."""
+    from kicad_tools.cli.pcb_page_fit import run_page_fit
+
+    margin = getattr(args, "margin", 5.0)
+    output = getattr(args, "output", None)
+    output_path = Path(output) if output else None
+    dry_run = getattr(args, "dry_run", False)
+    output_format = getattr(args, "format", "text")
+
+    return run_page_fit(
+        pcb_path=pcb_path,
+        margin=margin,
         dry_run=dry_run,
         output_path=output_path,
         output_format=output_format,

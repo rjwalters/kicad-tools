@@ -2380,6 +2380,268 @@ class TestBoardOriginCoordinateConversion:
         assert 0 <= c1_final.position[1] <= 56, f"C1.y={c1_final.position[1]} outside board bounds"
 
 
+class TestPCBPageFit:
+    """Tests for PCB.page_fit() — tight User page + centered board."""
+
+    def test_page_fit_rewrites_paper_to_user(self):
+        """page_fit replaces (paper "A4") with (paper "User" W H)."""
+        # 200 x 120 board on default A4, centered at (48.5, 45).
+        pcb = PCB.create(width=200, height=120)
+        assert pcb._sexp.find("paper").get_string(0) == "A4"
+
+        new_w, new_h = pcb.page_fit(margin=5.0)
+
+        paper = pcb._sexp.find("paper")
+        assert paper is not None
+        assert paper.get_string(0) == "User"
+        # W = 200 + 2*5, H = 120 + 2*5
+        assert paper.get_float(1) == pytest.approx(210.0)
+        assert paper.get_float(2) == pytest.approx(130.0)
+        assert new_w == pytest.approx(210.0)
+        assert new_h == pytest.approx(130.0)
+
+    def test_page_fit_centers_board_with_uniform_margin(self):
+        """After page_fit the board outline sits at (margin, margin)."""
+        pcb = PCB.create(width=200, height=120)
+        margin = 7.5
+        new_w, new_h = pcb.page_fit(margin=margin)
+
+        gr_rect = pcb._sexp.find("gr_rect")
+        start = gr_rect.find("start")
+        end = gr_rect.find("end")
+
+        # Board outline min corner moved to (margin, margin).
+        assert start.get_float(0) == pytest.approx(margin)
+        assert start.get_float(1) == pytest.approx(margin)
+        # Max corner = margin + board size.
+        assert end.get_float(0) == pytest.approx(margin + 200)
+        assert end.get_float(1) == pytest.approx(margin + 120)
+
+        # Board center == page center.
+        board_cx = (start.get_float(0) + end.get_float(0)) / 2
+        board_cy = (start.get_float(1) + end.get_float(1)) / 2
+        assert board_cx == pytest.approx(new_w / 2)
+        assert board_cy == pytest.approx(new_h / 2)
+
+    def test_page_fit_translates_footprint_position(self, tmp_path: Path):
+        """A footprint's absolute position shifts by (margin - bbox_min)."""
+        # Non-centered board: outline at (0,0)..(50,40); a footprint at
+        # absolute (10, 20). page_fit(margin=5) shifts everything by +5.
+        pcb_text = """(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(footprint "Test:FP"
+\t\t(layer "F.Cu")
+\t\t(uuid "11111111-1111-1111-1111-111111111111")
+\t\t(at 10 20)
+\t\t(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+\t)
+\t(gr_rect
+\t\t(start 0 0)
+\t\t(end 50 40)
+\t\t(layer "Edge.Cuts")
+\t\t(width 0.15)
+\t)
+\t(segment (start 5 5) (end 45 35) (width 0.25) (layer "F.Cu") (net 0))
+)
+"""
+        pcb_file = tmp_path / "fp.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        pcb = PCB.load(pcb_file)
+        pcb.page_fit(margin=5.0)
+
+        # Footprint absolute (at ...) is bbox_min(0,0) -> (5,5), so +5 each.
+        fp_node = pcb._sexp.find("footprint")
+        at_node = fp_node.find_child("at")
+        assert at_node.get_float(0) == pytest.approx(15.0)
+        assert at_node.get_float(1) == pytest.approx(25.0)
+
+        # Pad inner (at 0 0) must NOT be translated (footprint-relative).
+        pad_at = fp_node.find_child("pad").find_child("at")
+        assert pad_at.get_float(0) == pytest.approx(0.0)
+        assert pad_at.get_float(1) == pytest.approx(0.0)
+
+        # Segment endpoints shift by +5 too.
+        seg = pcb._sexp.find("segment")
+        assert seg.find("start").get_float(0) == pytest.approx(10.0)
+        assert seg.find("start").get_float(1) == pytest.approx(10.0)
+        assert seg.find("end").get_float(0) == pytest.approx(50.0)
+        assert seg.find("end").get_float(1) == pytest.approx(40.0)
+
+    def test_page_fit_preserves_relative_geometry(self):
+        """Relative spacing between items is unchanged (DRC-preserving)."""
+        pcb = PCB.create(width=80, height=60)
+        gr_rect = pcb._sexp.find("gr_rect")
+        before = (
+            gr_rect.find("end").get_float(0) - gr_rect.find("start").get_float(0),
+            gr_rect.find("end").get_float(1) - gr_rect.find("start").get_float(1),
+        )
+        pcb.page_fit(margin=10.0)
+        gr_rect = pcb._sexp.find("gr_rect")
+        after = (
+            gr_rect.find("end").get_float(0) - gr_rect.find("start").get_float(0),
+            gr_rect.find("end").get_float(1) - gr_rect.find("start").get_float(1),
+        )
+        assert after[0] == pytest.approx(before[0])
+        assert after[1] == pytest.approx(before[1])
+
+    def test_page_fit_preserves_pairwise_distances_exactly(self):
+        """page_fit is exactly distance-preserving on the nm grid.
+
+        Regression test for issue #3714: re-rounding each summed coordinate
+        independently to 6 decimals introduced sub-nm drift that changed
+        pairwise distances and tipped near-miss clearances over the DRC rule.
+        The delta must be grid-snapped and applied in integer-nm space so that
+        every translated coordinate stays exactly on the grid and all pairwise
+        distances are bit-for-bit identical.
+        """
+
+        def _all_coords(pcb: PCB) -> list[tuple[float, float]]:
+            coords: list[tuple[float, float]] = []
+
+            def _walk(node):
+                if node.tag in {"at", "start", "end", "mid", "center", "xy"}:
+                    x, y = node.get_float(0), node.get_float(1)
+                    if x is not None and y is not None:
+                        coords.append((x, y))
+                for child in node.iter_children():
+                    _walk(child)
+
+            for child in pcb._sexp.iter_children():
+                _walk(child)
+            return coords
+
+        # Use a non-integer outline so the delta is a fractional mm value.
+        pcb = PCB.create(width=80.077, height=60.112)
+        before = _all_coords(pcb)
+        pcb.page_fit(margin=5.0)
+        after = _all_coords(pcb)
+
+        assert len(before) == len(after)
+
+        # Every coordinate must land exactly on the nm grid (no float dust
+        # beyond 6 decimals).
+        for x, y in after:
+            assert round(x * 1_000_000) == pytest.approx(x * 1_000_000, abs=1e-3)
+            assert round(y * 1_000_000) == pytest.approx(y * 1_000_000, abs=1e-3)
+
+        # Pairwise nm-grid distances must be IDENTICAL (integer-exact) before
+        # and after the translation -- this is what guarantees DRC parity.
+        def _pairwise_nm(coords):
+            nm = [(round(x * 1_000_000), round(y * 1_000_000)) for x, y in coords]
+            out = []
+            for i in range(len(nm)):
+                for j in range(i + 1, len(nm)):
+                    dx = nm[i][0] - nm[j][0]
+                    dy = nm[i][1] - nm[j][1]
+                    out.append(dx * dx + dy * dy)
+            return out
+
+        assert _pairwise_nm(before) == _pairwise_nm(after)
+
+    def test_page_fit_preserves_45_degree_angle_through_save(self, tmp_path: Path):
+        """page_fit is angle-preserving: a 45-deg segment stays exactly 45 deg.
+
+        Regression test for issue #3714 (second defect): a rigid translation
+        must shift every endpoint by the IDENTICAL delta, so all relative
+        geometry -- including segment angles -- is preserved exactly.  The
+        bug shifted endpoints by slightly different amounts (re-snapping each
+        base coord, then losing a significant digit in the ``%.6g`` float
+        serializer, e.g. ``147.9252`` -> ``147.925``), tilting otherwise-exact
+        45-deg copper off-angle.  Off-45 copper is non-manufacturable.
+
+        The serializer truncation only surfaces after a save/reload, so this
+        test goes through disk -- exactly what the fleet 45-census measures.
+        """
+        import math
+
+        # A perfect 45-deg segment whose endpoint carries 7 significant
+        # digits (243.0748 + the -95mm page_fit delta -> 148.0748): the
+        # culprit precision the %.6g serializer used to drop.  dx == dy in
+        # magnitude => exactly 45 degrees.
+        pcb_text = """(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(gr_rect
+\t\t(start 100 100)
+\t\t(end 250 200)
+\t\t(layer "Edge.Cuts")
+\t\t(width 0.15)
+\t)
+\t(segment (start 243 112) (end 242.9252 112.0748) (width 0.25) (layer "F.Cu") (net 0))
+)
+"""
+        src = tmp_path / "ang.kicad_pcb"
+        src.write_text(pcb_text)
+
+        def _seg_angle_deg(path: Path) -> float:
+            reloaded = PCB.load(path)
+            seg = reloaded._sexp.find("segment")
+            sx = seg.find("start").get_float(0)
+            sy = seg.find("start").get_float(1)
+            ex = seg.find("end").get_float(0)
+            ey = seg.find("end").get_float(1)
+            return math.degrees(math.atan2(ey - sy, ex - sx))
+
+        before = _seg_angle_deg(src)
+        assert abs(before) == pytest.approx(135.0, abs=1e-9)  # exactly 45 off-axis
+
+        pcb = PCB.load(src)
+        pcb.page_fit(margin=5.0)
+        out = tmp_path / "ang_fit.kicad_pcb"
+        pcb.save(out)
+
+        after = _seg_angle_deg(out)
+        # The angle must be IDENTICAL through the page_fit + save roundtrip.
+        assert after == pytest.approx(before, abs=1e-9), (
+            f"page_fit tilted a 45-deg segment: {before} -> {after} deg"
+        )
+        # And it must still be on the legal {0,45,90,135} set (exact).
+        assert abs(after) % 45.0 == pytest.approx(0.0, abs=1e-6)
+
+    def test_page_fit_roundtrip_idempotent_page_size(self, tmp_path: Path):
+        """Running page_fit twice yields the same page size (idempotent)."""
+        pcb = PCB.create(width=120, height=90)
+        w1, h1 = pcb.page_fit(margin=5.0)
+        pcb_file = tmp_path / "rt.kicad_pcb"
+        pcb.save(pcb_file)
+
+        reloaded = PCB.load(pcb_file)
+        w2, h2 = reloaded.page_fit(margin=5.0)
+        assert w2 == pytest.approx(w1)
+        assert h2 == pytest.approx(h1)
+
+    def test_page_fit_no_edge_cuts_raises(self, tmp_path: Path):
+        """page_fit raises ValueError when there is no Edge.Cuts outline."""
+        pcb_text = """(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t)
+)
+"""
+        pcb_file = tmp_path / "noedge.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+        pcb = PCB.load(pcb_file)
+        with pytest.raises(ValueError):
+            pcb.page_fit(margin=5.0)
+
+
 class TestPropertySetterProtection:
     """Tests for property setters that prevent silent data loss.
 
