@@ -1,12 +1,12 @@
 (kicad_pcb
 	(version 20240108)
-	(paper "User" 35 30)
 	(generator "kicad-tools-demo")
 	(generator_version "9.0")
 	(general
 		(thickness 1.6)
 		(legacy_teardrops no)
 	)
+	(paper "A4")
 	(layers
 		(0 "F.Cu" signal)
 		(31 "B.Cu" signal)
@@ -32,8 +32,8 @@
 	(net 2 "LED_ANODE")
 	(net 3 "GND")
 	(gr_rect
-		(start 5 5)
-		(end 30 25)
+		(start 100.0 100.0)
+		(end 125.0 120.0)
 		(stroke
 			(width 0.1)
 			(type default)
@@ -45,7 +45,7 @@
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
 		(layer "F.Cu")
 		(uuid "0490ef1d-4db6-4155-9baa-99dd2f290467")
-		(at 10 15)
+		(at 105.0 110.0)
 		(fp_text reference "J1"
 			(at 0 -2.5)
 			(layer "F.SilkS")
@@ -86,7 +86,7 @@
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(layer "F.Cu")
 		(uuid "e7d3608e-1d22-4fb9-9afc-91ef3db7d4c8")
-		(at 17.5 13 90)
+		(at 112.5 108.0 90)
 		(fp_text reference "R1"
 			(at 0 -1.5)
 			(layer "F.SilkS")
@@ -127,7 +127,7 @@
 	(footprint "LED_THT:LED_D5.0mm"
 		(layer "F.Cu")
 		(uuid "a7e344bd-81ea-4ad2-904f-3ed457972bc7")
-		(at 25 15 90)
+		(at 120.0 110.0 90)
 		(fp_text reference "D1"
 			(at 0 -3.5)
 			(layer "F.SilkS")
@@ -178,7 +178,7 @@
 		(filled_areas_thickness no)
 		(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
 		)
-		(polygon (pts (xy 5.3 5.3) (xy 5.3 24.7) (xy 29.7 24.7) (xy 29.7 5.3))
+		(polygon (pts (xy 100.3 100.3) (xy 100.3 119.7) (xy 124.7 119.7) (xy 124.7 100.3))
 		)
 	)
 	(zone
@@ -194,11 +194,11 @@
 		(filled_areas_thickness no)
 		(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4)
 		)
-		(polygon (pts (xy 5.3 5.3) (xy 5.3 24.7) (xy 29.7 24.7) (xy 29.7 5.3))
+		(polygon (pts (xy 100.3 100.3) (xy 100.3 119.7) (xy 124.7 119.7) (xy 124.7 100.3))
 		)
 	)
 	(gr_text "Simple LED Rev A"
-		(at 5 26.5)
+		(at 100 121.5)
 		(layer "F.SilkS")
 		(uuid "ac52fa57-071d-4ce7-bcb3-92b17e4211ee")
 		(effects

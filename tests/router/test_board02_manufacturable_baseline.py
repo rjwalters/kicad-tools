@@ -11,14 +11,10 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 327.93mm total
+- **Deterministic output**: 22 routes / 24 vias / 328.16mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (Re-baselined 2026-06-15 for the page_fit
-  transform of issue #3714, which rigidly repositions the committed
-  unrouted board on a tight "User" page; the route stays fully
-  manufacturable -- 8/8, 0 DRC -- at a marginally different length;
-  prior baseline 328.16mm / 397 segments.)  Segment count is 476 on
-  macOS-arm64 (platform-dependent collinear resplit at identical
+  has fully converged.  Segment count is 397 on macOS-arm64 and 399
+  on Linux-x86_64 (platform-dependent collinear resplit at identical
   geometry; see the #3545 PLATFORM NOTE in
   ``test_routing_output_deterministic_across_seeds``).  (387 segments
   before the #3545 static-halo rip-up survival; 193/325.08mm before
@@ -575,23 +571,12 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # lockstep -- still a measurable regression vs the PR #3265 baseline).
     EXPECTED_ROUTES = 22
     EXPECTED_VIAS = 24
-    # Re-baselined 2026-06-15 for the page_fit transform (issue #3714):
-    # the committed unrouted board is now sized + centered on a tight
-    # "User" page, which rigidly translates it by an exact integer-nm
-    # delta (-95mm, -95mm for board 02).  The geometry is preserved
-    # exactly (distance- AND angle-preserving), but the router's A* grid
-    # is anchored in absolute sheet space, so the board sitting at a new
-    # absolute position routes to a slightly different -- equally
-    # manufacturable -- solution: 8/8 nets, 24 vias, 0 DRC, full reach,
-    # bit-perfect across seeds 42/43/44.  Total length moves
-    # 328.16 -> 327.93mm and segments 397 -> 476 (more collinear splits
-    # at the new grid phase).  Prior pin (22, 397/399, 24, 328.16).
-    EXPECTED_LENGTH = 327.93
-    # Measured: 476 on macOS-arm64 (deterministic across seeds 42/43/44).
-    # CI Linux-x86_64 historically ran ~+2 segments vs macOS (397 vs 399);
-    # band widened to absorb that platform delta plus the documented +/-3
-    # collinear-splitting tolerance.
-    EXPECTED_SEGMENTS_RANGE = (471, 481)
+    EXPECTED_LENGTH = 328.16
+    # Measured: 397 on macOS-arm64, 399 on CI Linux-x86_64 (see
+    # PLATFORM NOTE above).  Band is deliberately tight (+/-3 around
+    # the two measured values) so a real collinear-handling regression
+    # still trips it.
+    EXPECTED_SEGMENTS_RANGE = (394, 402)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
     expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)

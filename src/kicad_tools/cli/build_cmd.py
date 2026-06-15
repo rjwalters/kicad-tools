@@ -1735,10 +1735,18 @@ def _run_step_page_fit(ctx: BuildContext, console: Console) -> BuildResult:
     appearing tiny in an A4 page.
 
     This is a pure geometric translate: every item shifts together, so
-    routing/DRC validity is preserved and no re-route is needed.  Operates
-    on the routed PCB when present, falling back to the unrouted PCB so
-    ``kct build --step page-fit`` works in isolation.  Idempotent: a second
-    run yields the same page size.
+    routing/DRC validity is preserved and no re-route is needed.
+
+    ROUTED-OUTPUT ONLY (issue #3714): page-fit must *never* touch the
+    unrouted ``*.kicad_pcb`` source.  The autorouter and the routing
+    regression baselines are absolute-grid-position-dependent, so
+    translating the unrouted board changes routing outcomes (board 02
+    segment counts shift; board 06/07 plane nets fracture under the
+    copper-union pour audit, #3509/#3617).  We therefore resolve the
+    routed PCB (``ctx.routed_pcb_file`` or the ``*_routed.kicad_pcb``
+    sibling of the unrouted PCB) and skip cleanly when no routed output
+    exists -- we do *not* fall back to the unrouted source.  Idempotent:
+    a second run yields the same page size.
     """
     pcb_to_fit = ctx.routed_pcb_file
     if (not pcb_to_fit or not pcb_to_fit.exists()) and ctx.pcb_file:
@@ -1747,13 +1755,13 @@ def _run_step_page_fit(ctx: BuildContext, console: Console) -> BuildResult:
             pcb_to_fit = expected_routed
 
     if not pcb_to_fit or not pcb_to_fit.exists():
-        pcb_to_fit = ctx.pcb_file
-
-    if not pcb_to_fit or not pcb_to_fit.exists():
+        # Deliberately do NOT page-fit the unrouted PCB -- doing so would
+        # move the absolute-grid board that routing/tests start from and
+        # silently change routing outcomes (issue #3714).
         return BuildResult(
             step="page-fit",
             success=True,
-            message="page-fit: no PCB file found — skipped",
+            message="page-fit: no routed PCB found — skipped (unrouted source left untouched)",
         )
 
     if ctx.dry_run:
