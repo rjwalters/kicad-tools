@@ -14,7 +14,7 @@
  * `copy-renders` step stages renders and the allow-listed manufacturing files
  * into `site/public/boards/<slug>/...`, served at `/boards/<slug>/...`.
  */
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts";
 import type { Board } from "../data/types.ts";
@@ -36,6 +36,13 @@ export async function getStaticPaths() {
   // existence checks of manufacturing files. Discovery rules match the loader
   // exactly. (Defined inline because Astro bundles `getStaticPaths` separately
   // from the rest of the frontmatter — module-top helpers are not in scope.)
+  // Absolute path to the `site/public/boards` staging root, used to probe each
+  // board's staged `.kicad_pcb`. `astro build`/`dev` run with cwd = `site/`, so
+  // `<cwd>/public/boards` is stable even after Vite bundles `getStaticPaths`
+  // (bundling rewrites `import.meta.url`, so we can't rely on this file's own
+  // location). This mirrors the resolution strategy in `loadBoards.ts`.
+  const stagedBoardsRoot = resolve(process.cwd(), "public", "boards");
+
   const dirs = new Map<string, string>();
   for (const dir of discoverBoardDirs(boardsDir())) {
     const slug = dir.split(/[\\/]/).filter(Boolean).pop();
@@ -66,9 +73,19 @@ export async function getStaticPaths() {
       ? extraFiles.filter((e) => existsSync(join(mfgDir, e.file)))
       : [];
 
+    // Build-time signal for the interactive viewer: the prebuild `copy-renders`
+    // step stages each board's `.kicad_pcb` (routed preferred) as
+    // `site/public/boards/<slug>/board.kicad_pcb`. Because that step runs before
+    // Astro, we can check the staged file directly here and only emit the
+    // KiCanvas embed (and its module script) for boards that actually have one.
+    // Boards without a PCB (e.g. `00-simple-led`, `no_artifacts`) fall back to
+    // the static render gallery with an "interactive view unavailable" note.
+    const stagedPcb = join(stagedBoardsRoot, board.slug, "board.kicad_pcb");
+    const hasPcb = existsSync(stagedPcb);
+
     return {
       params: { slug: board.slug },
-      props: { board, hasPrimary, extras },
+      props: { board, hasPrimary, extras, hasPcb },
     };
   });
 }
@@ -77,9 +94,15 @@ interface DetailProps {
   board: Board;
   hasPrimary: boolean;
   extras: Array<{ file: string; label: string }>;
+  hasPcb: boolean;
 }
 
-const { board, hasPrimary, extras } = Astro.props as DetailProps;
+const { board, hasPrimary, extras, hasPcb } = Astro.props as DetailProps;
+
+// Same-origin URL of the staged PCB (see `copy-renders.mjs`). KiCanvas fetches
+// this at runtime; served from `public/`, there are no CORS concerns on the
+// deployed static site. Only set when `hasPcb` so we never emit a broken embed.
+const pcbHref = `/boards/${board.slug}/board.kicad_pcb`;
 
 const displayName = board.name ?? board.slug;
 const isBuilt = board.status !== "no_artifacts";
@@ -148,6 +171,16 @@ if (board.manifest_generated_at !== undefined) {
         <meta name="description" content={board.description} />
       )
     }
+    {
+      /*
+       * KiCanvas (https://kicanvas.org, MIT) registers the <kicanvas-embed> /
+       * <kicanvas-source> custom elements on import. Vendored at
+       * `site/public/vendor/kicanvas.js` (served from same origin, no runtime
+       * CDN dependency — see site/public/vendor/README.md). Loaded only when a
+       * PCB was staged so no-artifact boards never download the ~466 KB bundle.
+       */
+      hasPcb && <script type="module" src="/vendor/kicanvas.js" />
+    }
   </head>
   <body>
     <main>
@@ -178,14 +211,28 @@ if (board.manifest_generated_at !== undefined) {
       <RenderGallery board={board} />
 
       <!--
-        Phase 4: interactive PCB viewer will embed here.
-        See Epic #3674 Phase 4 issue for implementation details.
-        This is an intentionally inert placeholder — do NOT treat it as a
-        functional feature.
+        Phase 4 (#3690): interactive PCB viewer.
+
+        When a routed/non-routed `.kicad_pcb` was staged for this board (see
+        copy-renders.mjs → `/boards/<slug>/board.kicad_pcb`), embed KiCanvas
+        pointed at it; pan/zoom + layer controls are built in. The static
+        <RenderGallery> above stays on the page regardless. Boards with no PCB
+        (e.g. 00-simple-led, no_artifacts) render the unavailable note instead
+        of a broken viewer.
       -->
-      <section class="viewer-placeholder" aria-label="Interactive viewer (coming soon)">
+      <section class="viewer-section" aria-label="Interactive PCB viewer">
+        <h2>Interactive Viewer</h2>
         <div id="pcb-viewer-placeholder">
-          <p>Interactive PCB viewer — coming in Phase 4</p>
+          {
+            hasPcb ? (
+              <kicanvas-embed src={pcbHref} controls="full" class="pcb-viewer" />
+            ) : (
+              <p class="viewer-unavailable">
+                Interactive view unavailable — no PCB file for this board. The
+                static renders above show the board layout.
+              </p>
+            )
+          }
         </div>
       </section>
 
@@ -375,11 +422,27 @@ if (board.manifest_generated_at !== undefined) {
     font-size: 1.2rem;
   }
 
-  /* Phase 4 viewer placeholder — intentionally subtle so it is not mistaken
-     for a working feature. */
-  .viewer-placeholder #pcb-viewer-placeholder {
-    border: 1px dashed var(--border);
+  /* Phase 4 (#3690) interactive viewer container. */
+  .viewer-section #pcb-viewer-placeholder {
+    border: 1px solid var(--border);
     border-radius: 10px;
+    overflow: hidden;
+    background: var(--card-bg);
+  }
+
+  /* KiCanvas <kicanvas-embed> is a block custom element; give it an explicit
+     height so the canvas has room to render (it sizes to its container). */
+  .pcb-viewer {
+    display: block;
+    width: 100%;
+    height: 560px;
+  }
+
+  /* Fallback note for boards with no staged `.kicad_pcb`. Mirrors the subtle
+     muted styling of the former placeholder so it reads as informational, not
+     as a broken/empty viewer. */
+  .viewer-unavailable {
+    margin: 0;
     padding: 2.5rem 1rem;
     text-align: center;
     color: var(--muted);

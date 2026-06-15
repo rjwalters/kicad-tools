@@ -27,6 +27,12 @@
  *                     directories are intentionally NOT staged.
  *                  →  `site/public/boards/<slug>/manufacturing/<file>`
  *                  →  served at `/boards/<slug>/manufacturing/<file>`
+ *   - PCB file:       the board's routed `.kicad_pcb` (preferred) or a
+ *                     non-routed `.kicad_pcb` fallback from `output/`, staged
+ *                     under a fixed name so the detail page's interactive
+ *                     KiCanvas viewer can fetch it.
+ *                  →  `site/public/boards/<slug>/board.kicad_pcb`
+ *                  →  served at `/boards/<slug>/board.kicad_pcb`
  *
  * Discovery rules mirror `src/data/loadBoards.ts` (and the Python producer):
  * immediate subdirectories of `boards/`, skipping hidden / `_`-prefixed
@@ -148,6 +154,7 @@ function main() {
   let boardsWithRenders = 0;
   let mfgCopied = 0;
   let boardsWithMfg = 0;
+  let pcbCopied = 0;
 
   for (const { slug, dir } of discoverBoards(root)) {
     // --- Renders ---
@@ -181,11 +188,32 @@ function main() {
         boardsWithMfg += 1;
       }
     }
+
+    // --- PCB file (for the interactive viewer) ---
+    // Stage the board's `.kicad_pcb` under a fixed name so the detail page can
+    // point KiCanvas at `/boards/<slug>/board.kicad_pcb`. Prefer a routed
+    // variant; fall back to any other `.kicad_pcb` in `output/`. Boards with no
+    // `output/` directory (e.g. `00-simple-led`) are skipped silently — the
+    // detail page renders a "no interactive view" fallback for those.
+    const srcOutput = join(dir, "output");
+    if (isDir(srcOutput)) {
+      const pcbs = readdirSync(srcOutput)
+        .filter((f) => f.endsWith(".kicad_pcb"))
+        .sort();
+      const chosen = pcbs.find((f) => f.includes("_routed")) ?? pcbs[0];
+      if (chosen) {
+        const destBoard = join(destRoot, slug);
+        mkdirSync(destBoard, { recursive: true });
+        copyFileSync(join(srcOutput, chosen), join(destBoard, "board.kicad_pcb"));
+        pcbCopied += 1;
+      }
+    }
   }
 
   console.log(
-    `[copy-renders] staged ${copied} render(s) from ${boardsWithRenders} board(s) ` +
-      `and ${mfgCopied} manufacturing file(s) from ${boardsWithMfg} board(s) ` +
+    `[copy-renders] staged ${copied} render(s) from ${boardsWithRenders} board(s), ` +
+      `${mfgCopied} manufacturing file(s) from ${boardsWithMfg} board(s), ` +
+      `and ${pcbCopied} PCB file(s) ` +
       `into ${destRoot}`,
   );
 }
