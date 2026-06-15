@@ -49,18 +49,29 @@ def point_to_segment_distance(
     dy = y2 - y1
     seg_len_sq = dx * dx + dy * dy
 
+    # Rebase everything to the segment's start point so the computation uses
+    # only coordinate *differences*.  This makes the result exactly invariant
+    # under a rigid translation of all three points: differences are unchanged
+    # by translation, whereas the earlier ``cx = x1 + t*dx`` / ``px - cx`` form
+    # mixed absolute magnitudes into the final subtraction, so its floating
+    # point rounding drifted with the board's absolute position (issue #3714 --
+    # page_fit shifted boards and tipped a knife-edge diffpair-continuity check).
+    apx = px - x1
+    apy = py - y1
+
     if seg_len_sq == 0:
         # Degenerate segment (a single point)
-        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+        return math.sqrt(apx * apx + apy * apy)
 
     # Projection parameter, clamped to segment
-    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
+    t = max(0.0, min(1.0, (apx * dx + apy * dy) / seg_len_sq))
 
-    # Closest point on segment
-    cx = x1 + t * dx
-    cy = y1 + t * dy
+    # Vector from the closest point on the segment to the query point, built
+    # entirely from translation-invariant differences.
+    rx = apx - t * dx
+    ry = apy - t * dy
 
-    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
+    return math.sqrt(rx * rx + ry * ry)
 
 
 # ---------------------------------------------------------------------------

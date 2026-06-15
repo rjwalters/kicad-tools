@@ -181,7 +181,18 @@ def _segment_coupled_overlap(
     clearance, _x, _y = _segment_segment_clearance(p_seg, n_seg)
     # Edge-to-edge clearance can be negative when traces overlap; treat
     # negative as "very close" (coupled).
-    if clearance > coupling_window_mm:
+    #
+    # Use a 1 nm grid-scale tolerance on the window comparison so a pair
+    # spaced *exactly* at the coupling window (a common router output -- a
+    # 0.5 mm window with traces laid at 0.5 mm edge-to-edge) counts as
+    # coupled regardless of sub-nm floating-point rounding.  Without this,
+    # the closest-point distance for a boundary-exact pair lands at
+    # 0.5 +/- 1 ULP depending on the board's absolute position, so a pure
+    # distance-preserving translation (PCB.page_fit, issue #3714) could flip
+    # the coupled/uncoupled verdict and tip the continuity fraction over its
+    # threshold.  1 nm is the KiCad coordinate quantum -- far below any real
+    # geometric difference -- so this only absorbs float noise.
+    if clearance > coupling_window_mm + 1e-6:
         return 0.0
     return _segment_length(p_seg)
 

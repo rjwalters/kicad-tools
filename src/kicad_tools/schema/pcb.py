@@ -2115,21 +2115,31 @@ class PCB:
         return (min(xs), min(ys), max(xs), max(ys))
 
     @staticmethod
-    def _translate_coord_node(node: SExp, dx: float, dy: float) -> None:
+    def _translate_coord_node(node: SExp, dx_nm: int, dy_nm: int) -> None:
         """Translate the first two atoms (X, Y) of a coordinate node in place.
 
         Used for ``(at X Y ...)``, ``(start X Y)``, ``(end X Y)``,
         ``(mid X Y)``, ``(center X Y)`` and ``(xy X Y)`` nodes.  Any trailing
         atoms (e.g. a rotation angle on ``(at X Y ANGLE)``) are left
         untouched.
+
+        The translation delta is supplied in **integer nanometres** (KiCad's
+        native storage grid: mm to 6 decimals = 1 nm).  Each coordinate is
+        snapped to the nm grid, the on-grid delta is added in integer space,
+        and the result is converted straight back to mm.  This keeps the
+        transform *exactly* distance-preserving: there is no per-coordinate
+        re-rounding of a summed float, so pairwise distances between any two
+        translated points are identical to the originals.
         """
         x, y = node.get_float(0), node.get_float(1)
         if x is None or y is None:
             return
-        node.set_value(0, round(x + dx, 6))
-        node.set_value(1, round(y + dy, 6))
+        x_nm = round(x * 1_000_000) + dx_nm
+        y_nm = round(y * 1_000_000) + dy_nm
+        node.set_value(0, round(x_nm / 1_000_000, 6))
+        node.set_value(1, round(y_nm / 1_000_000, 6))
 
-    def _translate_item_sexp(self, node: SExp, dx: float, dy: float) -> None:
+    def _translate_item_sexp(self, node: SExp, dx_nm: int, dy_nm: int) -> None:
         """Recursively translate all coordinate nodes within an item.
 
         Applies to every ``at`` / ``start`` / ``end`` / ``mid`` / ``center`` /
@@ -2144,11 +2154,11 @@ class PCB:
         """
         coord_tags = {"at", "start", "end", "mid", "center", "xy"}
         if node.tag in coord_tags:
-            self._translate_coord_node(node, dx, dy)
+            self._translate_coord_node(node, dx_nm, dy_nm)
         for child in node.iter_children():
-            self._translate_item_sexp(child, dx, dy)
+            self._translate_item_sexp(child, dx_nm, dy_nm)
 
-    def _translate_footprint_sexp(self, node: SExp, dx: float, dy: float) -> None:
+    def _translate_footprint_sexp(self, node: SExp, dx_nm: int, dy_nm: int) -> None:
         """Translate a footprint by shifting only its top-level ``(at ...)``.
 
         A footprint's position is its direct-child ``(at X Y [ANGLE])`` node;
@@ -2157,7 +2167,7 @@ class PCB:
         """
         at_node = node.find_child("at")
         if at_node is not None:
-            self._translate_coord_node(at_node, dx, dy)
+            self._translate_coord_node(at_node, dx_nm, dy_nm)
 
     def page_fit(self, margin: float = 5.0) -> tuple[float, float]:
         """Resize the drawing sheet to fit the board with a uniform margin.
@@ -2196,14 +2206,19 @@ class PCB:
         bbox_w = max_x - min_x
         bbox_h = max_y - min_y
 
-        dx = margin - min_x
-        dy = margin - min_y
+        # Snap the translation delta to the KiCad nm grid (mm to 6 decimals)
+        # BEFORE applying it.  Coordinates are translated in integer-nm space
+        # (see _translate_coord_node), so an already-on-grid coordinate plus an
+        # on-grid delta lands exactly on the grid with no per-coordinate
+        # re-rounding drift -- making the transform exactly distance-preserving.
+        dx_nm = round((margin - min_x) * 1_000_000)
+        dy_nm = round((margin - min_y) * 1_000_000)
 
         # Translate every positioned top-level item in the tree.
         for child in self._sexp.iter_children():
             tag = child.tag
             if tag == "footprint":
-                self._translate_footprint_sexp(child, dx, dy)
+                self._translate_footprint_sexp(child, dx_nm, dy_nm)
             elif tag in (
                 "segment",
                 "via",
@@ -2220,7 +2235,7 @@ class PCB:
                 "dimension",
                 "target",
             ):
-                self._translate_item_sexp(child, dx, dy)
+                self._translate_item_sexp(child, dx_nm, dy_nm)
 
         # Rewrite the (paper ...) node to a tight User page.
         new_w = round(bbox_w + 2 * margin, 6)

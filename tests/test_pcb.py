@@ -2492,6 +2492,60 @@ class TestPCBPageFit:
         assert after[0] == pytest.approx(before[0])
         assert after[1] == pytest.approx(before[1])
 
+    def test_page_fit_preserves_pairwise_distances_exactly(self):
+        """page_fit is exactly distance-preserving on the nm grid.
+
+        Regression test for issue #3714: re-rounding each summed coordinate
+        independently to 6 decimals introduced sub-nm drift that changed
+        pairwise distances and tipped near-miss clearances over the DRC rule.
+        The delta must be grid-snapped and applied in integer-nm space so that
+        every translated coordinate stays exactly on the grid and all pairwise
+        distances are bit-for-bit identical.
+        """
+
+        def _all_coords(pcb: PCB) -> list[tuple[float, float]]:
+            coords: list[tuple[float, float]] = []
+
+            def _walk(node):
+                if node.tag in {"at", "start", "end", "mid", "center", "xy"}:
+                    x, y = node.get_float(0), node.get_float(1)
+                    if x is not None and y is not None:
+                        coords.append((x, y))
+                for child in node.iter_children():
+                    _walk(child)
+
+            for child in pcb._sexp.iter_children():
+                _walk(child)
+            return coords
+
+        # Use a non-integer outline so the delta is a fractional mm value.
+        pcb = PCB.create(width=80.077, height=60.112)
+        before = _all_coords(pcb)
+        pcb.page_fit(margin=5.0)
+        after = _all_coords(pcb)
+
+        assert len(before) == len(after)
+
+        # Every coordinate must land exactly on the nm grid (no float dust
+        # beyond 6 decimals).
+        for x, y in after:
+            assert round(x * 1_000_000) == pytest.approx(x * 1_000_000, abs=1e-3)
+            assert round(y * 1_000_000) == pytest.approx(y * 1_000_000, abs=1e-3)
+
+        # Pairwise nm-grid distances must be IDENTICAL (integer-exact) before
+        # and after the translation -- this is what guarantees DRC parity.
+        def _pairwise_nm(coords):
+            nm = [(round(x * 1_000_000), round(y * 1_000_000)) for x, y in coords]
+            out = []
+            for i in range(len(nm)):
+                for j in range(i + 1, len(nm)):
+                    dx = nm[i][0] - nm[j][0]
+                    dy = nm[i][1] - nm[j][1]
+                    out.append(dx * dx + dy * dy)
+            return out
+
+        assert _pairwise_nm(before) == _pairwise_nm(after)
+
     def test_page_fit_roundtrip_idempotent_page_size(self, tmp_path: Path):
         """Running page_fit twice yields the same page size (idempotent)."""
         pcb = PCB.create(width=120, height=90)
