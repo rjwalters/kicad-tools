@@ -2,6 +2,11 @@
 dist/
 node_modules/
 
+# Board renders staged into public/ by the copy-renders prebuild step.
+# These are copied from boards/<id>/output/renders/ at build time and must
+# never be committed (the source PNGs are themselves generated artifacts).
+public/boards/
+
 # Astro generated types / cache
 .astro/
 

@@ -1,12 +1,15 @@
 ---
-// Placeholder home page for the kicad-tools.org demo gallery.
+// Gallery index for the kicad-tools.org demo gallery (issue #3680).
 //
-// Scope (issue #3679): prove the build-time data pipeline only. It lists each
-// discovered board's slug and status. The polished gallery index (cards,
-// renders, metrics) is issue #3680; the per-board detail page is #3681.
+// Renders one card per board discovered by the build-time loader. Cards link to
+// the per-board detail route `/<slug>` (issue #3681; a 404 there is expected
+// until that page lands). Thumbnails, status chips, and metric badges all
+// degrade gracefully when board.json / renders are absent.
 import { loadBoards } from "../data/loadBoards.ts";
+import BoardCard from "../components/BoardCard.astro";
 
 const boards = loadBoards();
+const withData = boards.filter((b) => b.status !== "no_artifacts").length;
 ---
 
 <!doctype html>
@@ -15,21 +18,140 @@ const boards = loadBoards();
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>kicad-tools demo gallery</title>
+    <meta
+      name="description"
+      content="A gallery of PCB designs produced end-to-end by kicad-tools' automated agent pipeline."
+    />
   </head>
   <body>
-    <h1>kicad-tools demo gallery</h1>
-    <p>
-      Placeholder index — lists boards discovered by the build-time data loader.
-      {boards.length} board{boards.length === 1 ? "" : "s"} found.
-    </p>
-    <ul>
+    <main>
+      <header class="page-header">
+        <h1>kicad-tools demo gallery</h1>
+        <p class="tagline">
+          PCB designs produced end-to-end by the kicad-tools automated pipeline.
+        </p>
+        <p class="count">
+          {boards.length} board{boards.length === 1 ? "" : "s"}
+          {withData > 0 && ` · ${withData} with generated artifacts`}
+        </p>
+      </header>
+
       {
-        boards.map((board) => (
-          <li>
-            {board.slug} — {board.status}
-          </li>
-        ))
+        boards.length === 0 ? (
+          <p class="empty">
+            No boards discovered. Add boards under <code>boards/</code> and run
+            <code>uv run kct board-metrics --all</code> to populate data.
+          </p>
+        ) : (
+          <ul class="grid" role="list">
+            {boards.map((board) => (
+              <li>
+                <BoardCard board={board} />
+              </li>
+            ))}
+          </ul>
+        )
       }
-    </ul>
+    </main>
   </body>
 </html>
+
+<style is:global>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0e12;
+    --text: #e6edf3;
+    --muted: #9aa7b2;
+    --accent: #3fae7a;
+    --border: #25303a;
+    --card-bg: #11171d;
+    --badge-bg: #1b2530;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family:
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Roboto,
+      Helvetica,
+      Arial,
+      sans-serif;
+    line-height: 1.5;
+  }
+</style>
+
+<style>
+  main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 4rem;
+  }
+
+  .page-header {
+    margin-bottom: 2rem;
+  }
+
+  h1 {
+    margin: 0 0 0.4rem;
+    font-size: clamp(1.6rem, 4vw, 2.4rem);
+  }
+
+  .tagline {
+    margin: 0;
+    color: var(--muted);
+    font-size: 1rem;
+  }
+
+  .count {
+    margin: 0.5rem 0 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .grid {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .grid > li {
+    display: flex;
+  }
+
+  .grid > li > :global(.card) {
+    width: 100%;
+  }
+
+  .empty {
+    color: var(--muted);
+  }
+
+  .empty code {
+    background: var(--badge-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  @media (max-width: 480px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
