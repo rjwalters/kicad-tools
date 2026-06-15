@@ -122,6 +122,52 @@ npm run dev
 With data present, the placeholder index lists every board's real `status`
 (`ok` / `partial` / `no_artifacts`).
 
+## Deploying
+
+The gallery is published **manually** to Cloudflare Pages with a locally
+authenticated `wrangler` — there is no CI auto-deploy. (The former
+`gallery-deploy.yml` GitHub Actions workflow was removed in favour of this
+script; manual `wrangler login` OAuth avoids managing Cloudflare API-token
+secrets — see operator issue #3686.)
+
+### Prerequisites (one-time)
+
+- **`uv`** — runs `kct board-metrics` + `kct render` ([install](https://astral.sh/uv)).
+- **`node` / `npm`** (Node 22+) — builds the Astro site.
+- **`kicad-cli`** — *optional*; needed only for board renders. Without it the
+  deploy still succeeds and the site serves placeholder thumbnails.
+- **`wrangler`**, authenticated once via `wrangler login` (OAuth). No
+  `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` env vars are required.
+
+### One command
+
+From the **repository root** (not `site/`):
+
+```bash
+./scripts/deploy-site.sh
+```
+
+This runs the full pipeline — board metrics → renders (3D via `xvfb-run` when
+available, with a 2D-only fallback) → `npm --prefix site ci && run build` →
+`wrangler pages deploy site/dist --project-name kicad-tools --branch main` —
+and prints the deployed URL.
+
+Useful flags:
+
+```bash
+./scripts/deploy-site.sh --no-deploy   # build only (metrics + render + build); skip wrangler
+./scripts/deploy-site.sh --preview     # deploy to a preview branch (not production main)
+./scripts/deploy-site.sh --no-3d       # skip 3D renders (headless machines without X)
+./scripts/deploy-site.sh --help        # show usage
+```
+
+Generated artifacts (`board.json`, renders, `site/public/boards/`,
+`site/dist/`) are git-ignored and never committed by the script.
+
+The custom domain (`kicad-tools.org` → `kicad-tools.pages.dev`) is operator
+issue #3686 and is out of scope for this script, which targets the default
+`kicad-tools.pages.dev` Pages hostname.
+
 ## Layout
 
 ```
