@@ -231,18 +231,22 @@ if (board.manifest_generated_at !== undefined) {
               <Fragment>
                 <kicanvas-embed src={pcbHref} controls="full" class="pcb-viewer" />
                 {/*
-                  Phase 4 polish (#3691): loading + error overlay.
+                  Phase 4 polish (#3691) + viewer-load fix (#3700): loading +
+                  error overlay.
 
-                  KiCanvas reflects boolean `loading`/`loaded` attributes on the
-                  <kicanvas-embed> host and dispatches a native CustomEvent("load")
-                  once the PCB renders. It dispatches NO error event, so the inline
-                  script below uses an ~8s timeout: if `loaded` never appears (slow
-                  fetch, parse failure, blocked/failed script), the overlay swaps to
-                  an error message that points users to the static renders above.
+                  KiCanvas signals completion via a JS PROPERTY `embed.loaded`
+                  (set true once the PCB has parsed + rendered). It does NOT
+                  reflect a `loaded` attribute and dispatches NO "load" or error
+                  event on the <kicanvas-embed> host — so the inline script below
+                  POLLS `embed.loaded` and removes the overlay (revealing the
+                  board) as soon as it is true. A hard ~8s timeout is registered
+                  first as a safety net: on timeout it reveals the board if it
+                  loaded, otherwise it swaps to an error note pointing at the
+                  static renders.
 
-                  The overlay starts visible and is removed on the "load" event;
-                  the static <RenderGallery> stays on the page the whole time, so a
-                  failed viewer never leaves a blank box.
+                  The overlay starts visible; the static <RenderGallery> stays on
+                  the page the whole time, so a failed viewer never leaves a blank
+                  box and the spinner can never hang indefinitely.
                 */}
                 <div class="viewer-loading" data-viewer-overlay role="status" aria-live="polite">
                   <span class="viewer-spinner" aria-hidden="true" />
@@ -268,52 +272,94 @@ if (board.manifest_generated_at !== undefined) {
         hasPcb && (
           <script is:inline>
             {`(() => {
-  var placeholder = document.getElementById("pcb-viewer-placeholder");
-  if (!placeholder) return;
-  var embed = placeholder.querySelector("kicanvas-embed");
-  var overlay = placeholder.querySelector("[data-viewer-overlay]");
-  if (!embed || !overlay) return;
+  // Grab the overlay up front so the hard-timeout fallback can reference it
+  // even if everything below throws. querySelector never throws for a valid
+  // selector, returning null at worst.
+  var overlay = document.querySelector(
+    "#pcb-viewer-placeholder [data-viewer-overlay]"
+  );
 
+  var embed = null;
   var settled = false;
-  var removeOverlay = function () {
+  var pollTimer = null;
+  var stopPolling = function () {
+    if (pollTimer) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+  // KiCanvas signals completion via a JS PROPERTY \`embed.loaded\` (set true once
+  // the board has parsed + rendered). It does NOT reflect a "loaded" attribute
+  // and dispatches no "load" event on the <kicanvas-embed> host, so we must
+  // read the property — earlier attribute/event checks never fired, which is
+  // why the spinner hung over an already-rendered board.
+  var isLoaded = function () {
+    return !!(embed && embed.loaded);
+  };
+  var hideOverlay = function () {
     if (settled) return;
     settled = true;
-    overlay.remove();
+    stopPolling();
+    try {
+      if (overlay && overlay.parentNode) overlay.remove();
+    } catch (e) {}
   };
   var showError = function () {
     if (settled) return;
     settled = true;
-    overlay.classList.add("viewer-error");
-    overlay.innerHTML =
-      '<span class="viewer-loading-text">Interactive view could not load \\u2014 ' +
-      'the static renders above show the board layout.</span>';
+    stopPolling();
+    if (!overlay) return;
+    try {
+      overlay.classList.add("viewer-error");
+      overlay.innerHTML =
+        '<span class="viewer-loading-text">Interactive view unavailable \\u2014 ' +
+        'see the renders below.</span>';
+    } catch (e) {
+      // CSP or DOM error: just hide the whole overlay so no spinner persists.
+      try {
+        overlay.style.display = "none";
+      } catch (e2) {}
+      if (overlay.parentNode) {
+        try {
+          overlay.remove();
+        } catch (e3) {}
+      }
+    }
   };
 
-  // Already loaded (fast cache / earlier script run)?
-  if (embed.hasAttribute("loaded")) {
-    removeOverlay();
-    return;
-  }
-
-  // Success path: native CustomEvent("load") on the element.
-  embed.addEventListener("load", removeOverlay, { once: true });
-
-  // Belt-and-suspenders: observe the reflected "loaded" attribute too, in case
-  // the "load" event fired before this listener attached.
-  var observer = new MutationObserver(function () {
-    if (embed.hasAttribute("loaded")) {
-      observer.disconnect();
-      removeOverlay();
-    }
-  });
-  observer.observe(embed, { attributes: true, attributeFilter: ["loaded"] });
-
-  // Error path: KiCanvas dispatches no error event, so fall back to an ~8s
-  // timeout. If "loaded" never appears, degrade to the static renders.
+  // STEP 1 — Register the hard timeout FIRST, before any null-guard, early
+  // return, or KiCanvas interaction, so the spinner can never hang. If the
+  // board loaded by then, reveal it; otherwise surface the static-render note.
   window.setTimeout(function () {
-    observer.disconnect();
-    if (!embed.hasAttribute("loaded")) showError();
+    if (isLoaded()) hideOverlay();
+    else showError();
   }, 8000);
+
+  // STEP 2 — Best-effort success path. Poll \`embed.loaded\` and reveal the board
+  // as soon as it flips true. Wrapped in try/catch so any failure here cannot
+  // prevent the timeout above from firing.
+  try {
+    var placeholder = document.getElementById("pcb-viewer-placeholder");
+    if (!placeholder) return;
+    embed = placeholder.querySelector("kicanvas-embed");
+    if (!embed || !overlay) return;
+
+    if (isLoaded()) {
+      hideOverlay();
+      return;
+    }
+
+    pollTimer = window.setInterval(function () {
+      if (settled) {
+        stopPolling();
+        return;
+      }
+      if (isLoaded()) hideOverlay();
+    }, 150);
+  } catch (e) {
+    // Setup failed — the timeout registered in STEP 1 will still clean up the
+    // spinner and surface the fallback note.
+  }
 })();`}
           </script>
         )
@@ -556,6 +602,15 @@ if (board.manifest_generated_at !== undefined) {
 
   .viewer-loading.viewer-error {
     color: var(--muted);
+  }
+
+  /* Safety net: when the overlay enters the error state, ensure any spinner
+     that survived the innerHTML swap (e.g. blocked by CSP or an extension's
+     MutationObserver) stops spinning and is removed from view. Pure CSS, so it
+     holds even if the script's DOM mutation is intercepted. */
+  .viewer-loading.viewer-error .viewer-spinner {
+    display: none;
+    animation: none;
   }
 
   .viewer-spinner {
