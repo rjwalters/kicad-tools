@@ -1,0 +1,4 @@
+Designator,Val,Package,Mid X,Mid Y,Rotation,Layer
+D1,LED,LED_THT:LED_D5.0mm,20.0000mm,10.0000mm,90.0,Top
+J1,PWR,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,5.0000mm,10.0000mm,0.0,Top
+R1,330,Resistor_SMD:R_0805_2012Metric,12.5000mm,8.0000mm,90.0,Top
