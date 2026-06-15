@@ -49,6 +49,7 @@ from .commands import (
     run_analyze_command,
     run_audit_command,
     run_benchmark_command,
+    run_board_metrics_command,
     run_build_command,
     run_build_native_command,
     run_check_command,
@@ -396,6 +397,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "render":
         return _run_render_command(args)
+
+    elif args.command == "board-metrics":
+        return run_board_metrics_command(args)
 
     elif args.command == "net-status":
         from .net_status_cmd import main as net_status_cmd
