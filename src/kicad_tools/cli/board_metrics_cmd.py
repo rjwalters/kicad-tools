@@ -310,9 +310,7 @@ def extract_board_metrics(board_dir: Path) -> dict:
     # zero DRC violations. A board that routed (report parsed) but still has
     # DRC errors is downgraded to "partial" — the gallery treats "ok" as the
     # "Ready" badge, which must never appear over a violating board (#3717).
-    if not report_parsed:
-        metrics["status"] = "partial"
-    elif metrics.get("drc_violations", 0) > 0:
+    if not report_parsed or metrics.get("drc_violations", 0) > 0:
         metrics["status"] = "partial"
     else:
         metrics["status"] = "ok"
