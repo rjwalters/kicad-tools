@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "kicad_tools_version": "0.13.0",
+  "generated_at": "2026-06-15T17:28:41.598171+00:00",
+  "manufacturer": "jlcpcb",
+  "files": {
+    "bom_jlcpcb.csv": {
+      "sha256": "ea75eafdf4a5a718c03f2856569e91408781be0dbd5d1a80f668f7d13f76043b",
+      "size": 192
+    },
+    "cpl_jlcpcb.csv": {
+      "sha256": "4c68d2f5290d9c87e99657b97724c6cf6d0bed77512f9f7f3f4bf7a16d1dec23",
+      "size": 264
+    },
+    "gerbers.zip": {
+      "sha256": "31883aea0ee9f4e60253a8558a175f5ce5f254467b9c5b323b117bacfeeb7105",
+      "size": 11134
+    },
+    "report.pdf": {
+      "sha256": "799f9a838dfe6e227e55b0f316fd6ecc27ff44fb12f52b05fd2bac32673e3706",
+      "size": 720698
+    },
+    "report.md": {
+      "sha256": "351e45cbb3a6859ea8de2acd4471777dccfc9552ebbed46c4213832a0ddd4cfd",
+      "size": 2452
+    },
+    "assembly.png": {
+      "sha256": "0c367cddd5e91becb17f20c38e795aae175cefa302fa4906f57644d87aedd558",
+      "size": 90831
+    },
+    "layer_B_Cu.png": {
+      "sha256": "846db5a8e1fd4b190d6b5adeda41f3ad21f672b6f19107f2c63121eb7ab143b2",
+      "size": 73542
+    },
+    "layer_F_Cu.png": {
+      "sha256": "937522cea30171d4a3ff933c6927b3ace6c7b9e17ca66f99807d488dd6cb6a61",
+      "size": 89411
+    },
+    "pcb_back.png": {
+      "sha256": "65fee81ce583b022c2baca9c957a9f1b8c1b8d639edfc72c6d9d136e9a6318a3",
+      "size": 75207
+    },
+    "pcb_copper.png": {
+      "sha256": "02413f1893d1c250a28c98ed39aea1852f7ee54a8eadc8455f45f5566eba0d84",
+      "size": 79247
+    },
+    "pcb_front.png": {
+      "sha256": "4a258f9db8c3c97c05f8f9c7a342d8d5a0a4ae87755e81b513f84a5bb334b2e4",
+      "size": 102993
+    },
+    "schematic_simple_led.png": {
+      "sha256": "63263d2a7d5643068cd4d7c8fa5b028dbc05355bdb32ee0f7eb7836efab6e9d5",
+      "size": 117508
+    },
+    "kicad_project.zip": {
+      "sha256": "ebe17761c97480ef8c0de4e4b53c7cd9456bbf13cc4ab460965fd3da2b5faacd",
+      "size": 11415
+    },
+    "README.txt": {
+      "sha256": "5b0383bd02fe7e1fc0c7d9147a6f18830b62e60238f06a8306fbf38e0428d57d",
+      "size": 876
+    }
+  },
+  "board": {
+    "name": "simple_led_routed",
+    "pcb_file": "simple_led_routed.kicad_pcb"
+  }
+}
