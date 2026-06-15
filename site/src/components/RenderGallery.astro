@@ -1,0 +1,124 @@
+---
+/**
+ * RenderGallery — the four-render 2×2 grid for a board detail page (issue #3681).
+ *
+ * Renders exactly four labelled cells in a fixed order (2D front/back, then 3D
+ * front/back). Each cell shows the staged render PNG when present, otherwise the
+ * static placeholder SVG — the grid never collapses to fewer cells, so the
+ * layout reads the same whether a board has all, some, or no renders.
+ *
+ * Render-path resolution mirrors `BoardCard.astro`: `board.renders` values are
+ * paths relative to `board.json` (e.g. `renders/pcb-front.png`); the prebuild
+ * `copy-renders` step stages them at `site/public/boards/<slug>/renders/<file>`
+ * so they are served from `/boards/<slug>/renders/<file>`.
+ */
+import type { Board } from "../data/types.ts";
+
+interface Props {
+  board: Board;
+}
+
+const { board } = Astro.props;
+
+/** Fixed cell order + display labels (see issue #3681 / board-json-schema). */
+const RENDER_CELLS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: "pcb_front", label: "2D Front" },
+  { key: "pcb_back", label: "2D Back" },
+  { key: "3d_front", label: "3D Front" },
+  { key: "3d_back", label: "3D Back" },
+];
+
+/**
+ * Resolve the served URL for a render key, or `null` when the board has no
+ * render registered for it. The returned path points at the prebuild-staged
+ * `public/boards/<slug>/...` copy.
+ */
+function renderUrl(b: Board, key: string): string | null {
+  const rel = b.renders?.[key];
+  if (!rel) return null;
+  const file = rel.replace(/^\.?\//, "");
+  return `/boards/${b.slug}/${file}`;
+}
+
+const cells = RENDER_CELLS.map((cell) => ({
+  ...cell,
+  url: renderUrl(board, cell.key),
+}));
+---
+
+<section class="render-gallery" aria-label="Board renders">
+  <h2>Renders</h2>
+  <div class="grid">
+    {
+      cells.map((cell) => (
+        <figure class:list={["cell", { "is-placeholder": cell.url === null }]}>
+          {cell.url ? (
+            <img
+              src={cell.url}
+              alt={`${cell.label} render of ${board.name ?? board.slug}`}
+              loading="lazy"
+              decoding="async"
+            />
+          ) : (
+            <img
+              src="/placeholder-board.svg"
+              alt={`${cell.label} render not available`}
+              class="placeholder-img"
+            />
+          )}
+          <figcaption>{cell.label}</figcaption>
+        </figure>
+      ))
+    }
+  </div>
+</section>
+
+<style>
+  .render-gallery h2 {
+    margin: 0 0 1rem;
+    font-size: 1.2rem;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+  }
+
+  .cell {
+    margin: 0;
+    border: 1px solid var(--border, #25303a);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0d1b14;
+  }
+
+  .cell img {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: contain;
+    display: block;
+    background: #0d1b14;
+  }
+
+  .cell.is-placeholder img.placeholder-img {
+    object-fit: cover;
+    opacity: 0.85;
+  }
+
+  figcaption {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+    color: var(--muted, #9aa7b2);
+    text-align: center;
+    border-top: 1px solid var(--border, #25303a);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  @media (max-width: 540px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
