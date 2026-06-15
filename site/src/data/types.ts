@@ -17,6 +17,13 @@ export const SCHEMA_VERSION = 1;
 /** Board status enum — see `docs/board-json-schema.md` "status values". */
 export type BoardStatus = "ok" | "partial" | "no_artifacts";
 
+/**
+ * Gallery section a board belongs to. Loader-assigned (NOT part of the
+ * `board.json` contract): `"project"` for boards under `boards/external/`,
+ * `"demo"` for the numbered tutorial boards.
+ */
+export type BoardCategory = "demo" | "project";
+
 /** Physical board dimensions in millimeters. */
 export interface BoardSize {
   width: number;
@@ -43,6 +50,8 @@ export interface Board {
   generated_at: string;
   slug: string;
   status: BoardStatus;
+  /** Gallery section, assigned by the loader (not from `board.json`). */
+  category: BoardCategory;
   name?: string;
   description?: string;
   layer_count?: number;

@@ -58,6 +58,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EXCLUDED_SLUGS } from "../src/data/galleryConfig.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SITE_DIR = resolve(SCRIPT_DIR, "..");
@@ -117,6 +118,7 @@ function discoverBoards(root) {
   const boards = [];
   for (const entry of readdirSync(root).sort()) {
     if (entry.startsWith(".") || entry.startsWith("_")) continue;
+    if (EXCLUDED_SLUGS.has(entry)) continue;
     const full = join(root, entry);
     if (!isDir(full)) continue;
 
@@ -124,6 +126,7 @@ function discoverBoards(root) {
       // Group directory: descend one level. The slug is the sub-entry name.
       for (const sub of readdirSync(full).sort()) {
         if (sub.startsWith(".")) continue;
+        if (EXCLUDED_SLUGS.has(sub)) continue;
         const subFull = join(full, sub);
         if (isDir(subFull)) boards.push({ slug: sub, dir: subFull });
       }

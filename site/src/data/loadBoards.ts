@@ -23,7 +23,13 @@ import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SCHEMA_VERSION } from "./types.ts";
-import type { Board, BoardStatus } from "./types.ts";
+import type { Board, BoardCategory, BoardStatus } from "./types.ts";
+import { EXCLUDED_SLUGS } from "./galleryConfig.mjs";
+
+/** True if a discovered board path lives under `boards/external/`. */
+function categoryForPath(boardPath: string): BoardCategory {
+  return /(^|[\\/])external[\\/]/.test(boardPath) ? "project" : "demo";
+}
 
 const VALID_STATUSES: ReadonlySet<string> = new Set<BoardStatus>([
   "ok",
@@ -78,6 +84,7 @@ export function discoverBoardDirs(root: string): string[] {
   const dirs: string[] = [];
   for (const entry of readdirSync(root).sort()) {
     if (entry.startsWith(".") || entry.startsWith("_")) continue;
+    if (EXCLUDED_SLUGS.has(entry)) continue;
     const full = join(root, entry);
     if (!isDir(full)) continue;
 
@@ -85,6 +92,7 @@ export function discoverBoardDirs(root: string): string[] {
       // Group directory: descend one level.
       for (const sub of readdirSync(full).sort()) {
         if (sub.startsWith(".")) continue;
+        if (EXCLUDED_SLUGS.has(sub)) continue;
         const subFull = join(full, sub);
         if (isDir(subFull)) dirs.push(subFull);
       }
@@ -96,13 +104,14 @@ export function discoverBoardDirs(root: string): string[] {
 }
 
 /** Construct a `no_artifacts` stub for a board with no parsable `board.json`. */
-function makeStub(slug: string): Board {
+function makeStub(slug: string, category: BoardCategory): Board {
   return {
     $schema: "https://kicad-tools.org/schemas/board/v1.json",
     schema_version: SCHEMA_VERSION,
     generated_at: new Date(0).toISOString(),
     slug,
     status: "no_artifacts",
+    category,
   };
 }
 
@@ -152,10 +161,11 @@ function validateBoard(data: unknown, slug: string): Board | null {
  */
 export function loadBoard(boardPath: string): Board {
   const slug = boardPath.split(/[\\/]/).filter(Boolean).pop() ?? boardPath;
+  const category = categoryForPath(boardPath);
   const jsonPath = join(boardPath, "output", "board.json");
 
   if (!existsSync(jsonPath)) {
-    return makeStub(slug);
+    return makeStub(slug, category);
   }
 
   let raw: string;
@@ -163,7 +173,7 @@ export function loadBoard(boardPath: string): Board {
     raw = readFileSync(jsonPath, "utf8");
   } catch (err) {
     console.warn(`[loadBoards] ${slug}: failed to read board.json (${String(err)}); using stub`);
-    return makeStub(slug);
+    return makeStub(slug, category);
   }
 
   let parsed: unknown;
@@ -171,11 +181,14 @@ export function loadBoard(boardPath: string): Board {
     parsed = JSON.parse(raw);
   } catch (err) {
     console.warn(`[loadBoards] ${slug}: board.json is not valid JSON (${String(err)}); using stub`);
-    return makeStub(slug);
+    return makeStub(slug, category);
   }
 
   const board = validateBoard(parsed, slug);
-  return board ?? makeStub(slug);
+  if (!board) return makeStub(slug, category);
+  // `category` is loader-assigned (not part of board.json); always set it.
+  board.category = category;
+  return board;
 }
 
 /**

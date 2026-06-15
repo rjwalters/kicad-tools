@@ -13,6 +13,11 @@ import BoardCard from "../components/BoardCard.astro";
 const boards = loadBoards();
 const withData = boards.filter((b) => b.status !== "no_artifacts").length;
 
+// Two gallery sections (issue #3696): the numbered tutorial boards ("Demo
+// boards") and real designs under boards/external/ ("Project gallery").
+const demoBoards = boards.filter((b) => b.category === "demo");
+const projectBoards = boards.filter((b) => b.category === "project");
+
 // Build-time interactive-viewer signal for the gallery affordance (#3691).
 // The prebuild `copy-renders` step stages each board's `.kicad_pcb` (routed
 // preferred) at `site/public/boards/<slug>/board.kicad_pcb`. We probe that same
@@ -49,22 +54,45 @@ const hasPcbFor = (slug: string): boolean =>
         </p>
       </header>
 
-      {
-        boards.length === 0 ? (
-          <p class="empty">
-            No boards discovered. Add boards under <code>boards/</code> and run
-            <code>uv run kct board-metrics --all</code> to populate data.
+      {boards.length === 0 && (
+        <p class="empty">
+          No boards discovered. Add boards under <code>boards/</code> and run
+          <code>uv run kct board-metrics --all</code> to populate data.
+        </p>
+      )}
+
+      {demoBoards.length > 0 && (
+        <section class="board-section">
+          <h2>Demo boards</h2>
+          <p class="section-copy">
+            Reference designs that exercise the kicad-tools pipeline end-to-end.
           </p>
-        ) : (
           <ul class="grid" role="list">
-            {boards.map((board) => (
+            {demoBoards.map((board) => (
               <li>
                 <BoardCard board={board} hasPcb={hasPcbFor(board.slug)} />
               </li>
             ))}
           </ul>
-        )
-      }
+        </section>
+      )}
+
+      {projectBoards.length > 0 && (
+        <section class="board-section">
+          <h2>Project gallery</h2>
+          <p class="section-copy">
+            Real-world boards built with kicad-tools. More designs — including
+            contributed work from others — will land here over time.
+          </p>
+          <ul class="grid" role="list">
+            {projectBoards.map((board) => (
+              <li>
+                <BoardCard board={board} hasPcb={hasPcbFor(board.slug)} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </main>
   </body>
 </html>
@@ -132,6 +160,22 @@ const hasPcbFor = (slug: string): boolean =>
     margin: 0.5rem 0 0;
     color: var(--muted);
     font-size: 0.85rem;
+  }
+
+  .board-section {
+    margin-top: 2.5rem;
+  }
+
+  .board-section h2 {
+    margin: 0 0 0.3rem;
+    font-size: 1.3rem;
+  }
+
+  .section-copy {
+    margin: 0 0 1.25rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+    max-width: 60ch;
   }
 
   .grid {
