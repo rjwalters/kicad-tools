@@ -30,9 +30,24 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from kicad_tools.core.layers import via_spans_layer
 from kicad_tools.sexp import SExp
+
+
+class _Geometry(Protocol):
+    """Minimal structural type for the shapely geometry methods used here.
+
+    shapely ships no type stubs, so the concrete classes are ``Any`` to
+    mypy.  This Protocol captures only the surface we touch (``buffer`` and
+    ``intersects``) so ``_Obstacle.shape`` type-checks without a hard
+    dependency on shapely's (untyped) classes.
+    """
+
+    def buffer(self, distance: float, *args: Any, **kwargs: Any) -> Any: ...
+
+    def intersects(self, other: Any) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -41,8 +56,8 @@ class _Obstacle:
 
     net_key: str
     layers: tuple[str, ...]
-    # Sheet-absolute footprint of the copper, as a list of (x, y) rings.
-    shape: object  # shapely geometry; typed loosely to avoid a hard import
+    # Sheet-absolute footprint of the copper, as a shapely geometry.
+    shape: _Geometry
 
 
 def _build_net_name_map(doc: SExp) -> dict[int, str]:
@@ -112,7 +127,7 @@ def _collect_obstacles(
     are modelled by their circular barrel.  Net-0 (unassigned) copper is
     skipped — it does not participate in clearance checks.
     """
-    from shapely.geometry import Point
+    from shapely.geometry import Point  # type: ignore[import-untyped]
 
     obstacles: list[_Obstacle] = []
 
@@ -280,7 +295,7 @@ def _vent_holes(poly):
     Returns the list of resulting hole-free Polygons.
     """
     from shapely.geometry import LineString
-    from shapely.ops import nearest_points
+    from shapely.ops import nearest_points  # type: ignore[import-untyped]
 
     polys = _iter_polygons(poly)
     if not any(p.interiors for p in polys):
@@ -311,7 +326,7 @@ def _vent_holes(poly):
     if not slits:
         return [p for p in polys if not p.is_empty and p.area > 0]
 
-    import shapely
+    import shapely  # type: ignore[import-untyped]
 
     vented = poly.difference(shapely.unary_union(slits))
     return [p for p in _iter_polygons(vented) if not p.is_empty and p.area > 0]
@@ -381,22 +396,28 @@ def apply_foreign_pad_clearance(
         connect_pads = zone.find("connect_pads")
         if connect_pads is not None:
             cl = connect_pads.find("clearance")
-            if cl is not None and cl.get_float(0) is not None:
-                clearance = cl.get_float(0)
+            if cl is not None:
+                cl_val = cl.get_float(0)
+                if cl_val is not None:
+                    clearance = cl_val
         min_thickness = 0.25
         mt = zone.find("min_thickness")
-        if mt is not None and mt.get_float(0) is not None:
-            min_thickness = mt.get_float(0)
+        if mt is not None:
+            mt_val = mt.get_float(0)
+            if mt_val is not None:
+                min_thickness = mt_val
 
         buffer_dist = clearance + min_thickness / 2.0
 
         for filled in zone.find_all("filled_polygon"):
             layer_node = filled.find("layer")
-            fill_layer = (
-                (layer_node.get_string(0) or "")
-                if layer_node is not None
-                else (zone.find("layer").get_string(0) if zone.find("layer") else "")
-            )
+            fill_layer = ""
+            if layer_node is not None:
+                fill_layer = layer_node.get_string(0) or ""
+            else:
+                zone_layer = zone.find("layer")
+                if zone_layer is not None:
+                    fill_layer = zone_layer.get_string(0) or ""
 
             pts_node = filled.find("pts")
             if pts_node is None:
@@ -507,7 +528,7 @@ def _reconstruct_fill(rings, make_valid_fn):
     from shapely import unary_union
     from shapely.geometry import Polygon
 
-    polys = []
+    polys: list[Any] = []
     for ring in rings:
         poly = Polygon(ring)
         if not poly.is_valid:
