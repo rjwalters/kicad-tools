@@ -268,52 +268,86 @@ if (board.manifest_generated_at !== undefined) {
         hasPcb && (
           <script is:inline>
             {`(() => {
-  var placeholder = document.getElementById("pcb-viewer-placeholder");
-  if (!placeholder) return;
-  var embed = placeholder.querySelector("kicanvas-embed");
-  var overlay = placeholder.querySelector("[data-viewer-overlay]");
-  if (!embed || !overlay) return;
+  // Grab the overlay up front so the hard-timeout fallback can reference it
+  // even if everything below throws. querySelector never throws for a valid
+  // selector, returning null at worst.
+  var overlay = document.querySelector(
+    "#pcb-viewer-placeholder [data-viewer-overlay]"
+  );
 
   var settled = false;
-  var removeOverlay = function () {
-    if (settled) return;
+  var hideOverlay = function () {
+    if (settled || !overlay) {
+      settled = true;
+      return;
+    }
     settled = true;
-    overlay.remove();
+    if (overlay.parentNode) overlay.remove();
   };
   var showError = function () {
-    if (settled) return;
+    if (settled || !overlay) {
+      settled = true;
+      return;
+    }
     settled = true;
-    overlay.classList.add("viewer-error");
-    overlay.innerHTML =
-      '<span class="viewer-loading-text">Interactive view could not load \\u2014 ' +
-      'the static renders above show the board layout.</span>';
+    try {
+      overlay.classList.add("viewer-error");
+      overlay.innerHTML =
+        '<span class="viewer-loading-text">Interactive view unavailable \\u2014 ' +
+        'see the renders below.</span>';
+    } catch (e) {
+      // CSP or DOM error: just hide the whole overlay so no spinner persists.
+      try {
+        overlay.style.display = "none";
+      } catch (e2) {}
+      if (overlay.parentNode) {
+        try {
+          overlay.remove();
+        } catch (e3) {}
+      }
+    }
   };
 
-  // Already loaded (fast cache / earlier script run)?
-  if (embed.hasAttribute("loaded")) {
-    removeOverlay();
-    return;
-  }
-
-  // Success path: native CustomEvent("load") on the element.
-  embed.addEventListener("load", removeOverlay, { once: true });
-
-  // Belt-and-suspenders: observe the reflected "loaded" attribute too, in case
-  // the "load" event fired before this listener attached.
-  var observer = new MutationObserver(function () {
-    if (embed.hasAttribute("loaded")) {
-      observer.disconnect();
-      removeOverlay();
-    }
-  });
-  observer.observe(embed, { attributes: true, attributeFilter: ["loaded"] });
-
-  // Error path: KiCanvas dispatches no error event, so fall back to an ~8s
-  // timeout. If "loaded" never appears, degrade to the static renders.
+  // STEP 1 — Register the hard timeout FIRST, before any null-guard, early
+  // return, or KiCanvas interaction. This guarantees the spinner is removed
+  // within a bounded time no matter what happens below. Assets are
+  // same-origin (/vendor/kicanvas.js), so 6s is ample; the static renders are
+  // already on the page, so users are never left without board visuals.
   window.setTimeout(function () {
-    observer.disconnect();
-    if (!embed.hasAttribute("loaded")) showError();
-  }, 8000);
+    showError();
+  }, 6000);
+
+  // STEP 2 — Best-effort success path. Wrapped in try/catch so that any
+  // failure here (missing element, KiCanvas not defining the custom element,
+  // a thrown error) cannot prevent the timeout above from firing.
+  try {
+    var placeholder = document.getElementById("pcb-viewer-placeholder");
+    if (!placeholder) return;
+    var embed = placeholder.querySelector("kicanvas-embed");
+    if (!embed || !overlay) return;
+
+    // Already loaded (fast cache / earlier script run)?
+    if (embed.hasAttribute("loaded")) {
+      hideOverlay();
+      return;
+    }
+
+    // Success path: native CustomEvent("load") on the element.
+    embed.addEventListener("load", hideOverlay, { once: true });
+
+    // Belt-and-suspenders: observe the reflected "loaded" attribute too, in
+    // case the "load" event fired before this listener attached.
+    var observer = new MutationObserver(function () {
+      if (embed.hasAttribute("loaded")) {
+        observer.disconnect();
+        hideOverlay();
+      }
+    });
+    observer.observe(embed, { attributes: true, attributeFilter: ["loaded"] });
+  } catch (e) {
+    // Setup failed — the timeout registered in STEP 1 will still clean up the
+    // spinner and surface the fallback note.
+  }
 })();`}
           </script>
         )
@@ -556,6 +590,15 @@ if (board.manifest_generated_at !== undefined) {
 
   .viewer-loading.viewer-error {
     color: var(--muted);
+  }
+
+  /* Safety net: when the overlay enters the error state, ensure any spinner
+     that survived the innerHTML swap (e.g. blocked by CSP or an extension's
+     MutationObserver) stops spinning and is removed from view. Pure CSS, so it
+     holds even if the script's DOM mutation is intercepted. */
+  .viewer-loading.viewer-error .viewer-spinner {
+    display: none;
+    animation: none;
   }
 
   .viewer-spinner {
