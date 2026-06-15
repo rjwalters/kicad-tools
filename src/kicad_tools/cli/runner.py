@@ -1260,6 +1260,155 @@ def _run_fill_zones_via_drc(
         drc_report.unlink(missing_ok=True)
 
 
+def run_pcb_export_png(
+    pcb_path: Path,
+    output_path: Path,
+    layers: list[str],
+    black_and_white: bool = False,
+    theme: str | None = None,
+    timeout: int = 120,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Export a 2D layer plot of a PCB to a PNG using ``kicad-cli pcb export png``.
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file to plot.
+        output_path: Where to write the PNG.
+        layers: Layer names to render (e.g. ``["F.Cu", "F.Silkscreen", "Edge.Cuts"]``).
+        black_and_white: Render in black & white instead of color.
+        theme: Optional KiCad color theme name.
+        timeout: Subprocess timeout in seconds.
+        kicad_cli: Path to kicad-cli (auto-detected when not provided).
+
+    Returns:
+        KiCadCLIResult with success status and output path.
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+            )
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "export",
+        "png",
+        "--output",
+        str(output_path),
+        "--layers",
+        ",".join(layers),
+        "--page-size-mode",
+        "2",  # fit page to board content
+    ]
+
+    if black_and_white:
+        cmd.append("--black-and-white")
+    if theme:
+        cmd.extend(["--theme", theme])
+
+    cmd.append(str(pcb_path))
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+        if output_path.exists() and output_path.stat().st_size > 0:
+            return KiCadCLIResult(
+                success=True,
+                output_path=output_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        return KiCadCLIResult(
+            success=False,
+            stderr=result.stderr or "PNG export produced no output",
+            return_code=result.returncode,
+        )
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.TimeoutExpired:
+        return KiCadCLIResult(
+            success=False, stderr=f"PNG export timed out after {timeout} seconds"
+        )
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to export PNG: {e}")
+
+
+def run_pcb_render(
+    pcb_path: Path,
+    output_path: Path,
+    side: str = "front",
+    quality: str = "high",
+    timeout: int = 300,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Ray-trace a 3D render of a PCB to a PNG using ``kicad-cli pcb render``.
+
+    ``kicad-cli pcb render`` was added in KiCad 8.0.4 and requires a display
+    (or a virtual framebuffer such as ``xvfb-run`` on headless CI).
+
+    Args:
+        pcb_path: Path to the ``.kicad_pcb`` file to render.
+        output_path: Where to write the PNG.
+        side: Camera side — ``"front"`` or ``"back"`` (also accepts the other
+            ``kicad-cli`` presets like ``top``/``bottom``/``left``/``right``).
+        quality: Render quality preset (``basic``/``high``/``user``).
+        timeout: Subprocess timeout in seconds (ray-tracing is slow).
+        kicad_cli: Path to kicad-cli (auto-detected when not provided).
+
+    Returns:
+        KiCadCLIResult with success status and output path.
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8.0.4+ from https://www.kicad.org/download/",
+            )
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "render",
+        "--output",
+        str(output_path),
+        "--side",
+        side,
+        "--quality",
+        quality,
+        str(pcb_path),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+        if output_path.exists() and output_path.stat().st_size > 0:
+            return KiCadCLIResult(
+                success=True,
+                output_path=output_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        return KiCadCLIResult(
+            success=False,
+            stderr=result.stderr or "3D render produced no output",
+            return_code=result.returncode,
+        )
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.TimeoutExpired:
+        return KiCadCLIResult(
+            success=False, stderr=f"3D render timed out after {timeout} seconds"
+        )
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to render 3D: {e}")
+
+
 def get_kicad_version(kicad_cli: Path | None = None) -> str | None:
     """Get KiCad version string.
 

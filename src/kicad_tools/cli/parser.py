@@ -174,6 +174,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_suggest_parser(subparsers)
     _add_net_status_parser(subparsers)
     _add_fleet_parser(subparsers)
+    _add_render_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -5038,6 +5039,45 @@ def _add_fleet_parser(subparsers) -> None:
         dest="fleet_ship_strict",
         action="store_true",
         help=("Exit non-zero (2) if any board fails. Default is warn-only (always exit 0)."),
+    )
+
+
+def _add_render_parser(subparsers) -> None:
+    """Add the ``render`` subcommand parser (Epic #3674, Phase 1).
+
+    Generates per-board 2D layer plots and 3D ray-traced PNGs into
+    ``boards/<id>/output/renders/`` for downstream gallery consumption.
+    """
+    render_parser = subparsers.add_parser(
+        "render",
+        help="Render per-board 2D layer plots + 3D PNGs into output/renders/",
+        description=(
+            "Generate visual artifacts for one board or every board under a "
+            "root: 2D front/back layer plots (copper + silkscreen + edge cuts) "
+            "via 'kicad-cli pcb export png', and 3D front/back ray-traced PNGs "
+            "via 'kicad-cli pcb render'. Outputs go to a fixed, documented path "
+            "(boards/<id>/output/renders/{pcb-front,pcb-back,3d-front,3d-back}.png). "
+            "The routed PCB is preferred with graceful fallback to the unrouted "
+            "PCB. 3D render requires KiCad 8.0.4+ and a display (xvfb on CI)."
+        ),
+    )
+    render_parser.add_argument(
+        "render_path",
+        metavar="path",
+        help="Board directory or a root containing board directories",
+    )
+    render_parser.add_argument(
+        "--no-3d",
+        dest="render_no_3d",
+        action="store_true",
+        help="Skip 3D ray-traced renders (for headless CI without a display)",
+    )
+    render_parser.add_argument(
+        "--format",
+        dest="render_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
     )
 
 
