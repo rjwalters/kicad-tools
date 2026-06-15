@@ -1330,9 +1330,7 @@ def run_pcb_export_png(
     except FileNotFoundError as e:
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.TimeoutExpired:
-        return KiCadCLIResult(
-            success=False, stderr=f"PNG export timed out after {timeout} seconds"
-        )
+        return KiCadCLIResult(success=False, stderr=f"PNG export timed out after {timeout} seconds")
     except subprocess.SubprocessError as e:
         return KiCadCLIResult(success=False, stderr=f"Failed to export PNG: {e}")
 
@@ -1402,9 +1400,7 @@ def run_pcb_render(
     except FileNotFoundError as e:
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.TimeoutExpired:
-        return KiCadCLIResult(
-            success=False, stderr=f"3D render timed out after {timeout} seconds"
-        )
+        return KiCadCLIResult(success=False, stderr=f"3D render timed out after {timeout} seconds")
     except subprocess.SubprocessError as e:
         return KiCadCLIResult(success=False, stderr=f"Failed to render 3D: {e}")
 

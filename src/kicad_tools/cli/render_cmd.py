@@ -217,8 +217,7 @@ def run_render(args: argparse.Namespace) -> int:
     kicad_cli = find_kicad_cli()
     if kicad_cli is None:
         print(
-            "Error: kicad-cli not found. Install KiCad 8.0.4+ from "
-            "https://www.kicad.org/download/",
+            "Error: kicad-cli not found. Install KiCad 8.0.4+ from https://www.kicad.org/download/",
             file=sys.stderr,
         )
         return 1
