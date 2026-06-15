@@ -157,3 +157,52 @@ describe("loadBoards", () => {
     expect(loadBoards(root)).toEqual([]);
   });
 });
+
+describe("excluded slugs (#3696)", () => {
+  it("drops chorus-test-revA from discovery under external/", () => {
+    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
+    mkdirSync(join(root, "external", "chorus-test-revA", "output"), { recursive: true });
+
+    const slugs = discoverBoardDirs(root).map((d) =>
+      d.split(/[\\/]/).filter(Boolean).pop(),
+    );
+    expect(slugs).toContain("softstart");
+    expect(slugs).not.toContain("chorus-test-revA");
+  });
+
+  it("emits no Board for an excluded slug", () => {
+    mkdirSync(join(root, "external", "chorus-test-revA", "output"), { recursive: true });
+    writeBoardJson("00-simple-led", validBoard("00-simple-led"));
+
+    const boards = loadBoards(root);
+    expect(boards.map((b) => b.slug)).not.toContain("chorus-test-revA");
+    expect(boards.map((b) => b.slug)).toContain("00-simple-led");
+  });
+});
+
+describe("board category (#3696)", () => {
+  it("tags numbered top-level boards as demo", () => {
+    const board = loadBoard(makeBoardDir("00-simple-led"));
+    expect(board.category).toBe("demo");
+  });
+
+  it("tags boards under external/ as project", () => {
+    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
+    const board = loadBoard(join(root, "external", "softstart"));
+    expect(board.category).toBe("project");
+  });
+
+  it("assigns category across a mixed set", () => {
+    writeBoardJson("01-voltage-divider", validBoard("01-voltage-divider"));
+    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
+    writeFileSync(
+      join(root, "external", "softstart", "output", "board.json"),
+      JSON.stringify(validBoard("softstart")),
+    );
+
+    const boards = loadBoards(root);
+    const bySlug = Object.fromEntries(boards.map((b) => [b.slug, b.category]));
+    expect(bySlug["01-voltage-divider"]).toBe("demo");
+    expect(bySlug["softstart"]).toBe("project");
+  });
+});
