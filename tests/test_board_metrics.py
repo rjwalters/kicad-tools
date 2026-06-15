@@ -1,0 +1,339 @@
+"""Tests for the board-metrics extractor (issue #3676).
+
+Covers:
+* full extraction against a synthetic report.md + manifest.json fixture,
+* graceful handling of missing/unparseable report fields (status=partial),
+* the no-artifacts path (status=no_artifacts),
+* BOM fallback for part_count,
+* render-path attachment and relativity,
+* emit_board_json writing to the default and overridden paths,
+* the CLI main() single-board, --all and --dry-run modes.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.cli.board_metrics_cmd import (
+    SCHEMA_VERSION,
+    emit_board_json,
+    extract_board_metrics,
+    main,
+)
+
+# A trimmed but faithful copy of board 05's report.md structure.
+SAMPLE_REPORT_MD = """---
+title: "bldc_controller_routed"
+subtitle: "Design Report"
+author: "kicad-tools 0.13.0"
+---
+
+## Board Summary
+
+| Property | Value |
+|----------|-------|
+| Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
+| Footprints | 55 (40 SMD, 11 THT, 4 other) |
+| Nets | 52 |
+| Board Size | 80.0 x 100.0 mm |
+
+## Design Overview
+
+### Theory of Operation
+
+3-Phase Brushless DC Motor Driver
+
+### Power Architecture
+
+**Power Rails**: +24V
+
+## DRC Status
+
+| Metric | Count |
+|--------|-------|
+| Errors | 14 |
+| Warnings | 0 |
+
+## Routing Status
+
+| Metric | Value |
+|--------|-------|
+| Signal Net Completion | 82.1% (32/39) |
+| Overall Completion | 84.6% |
+
+## Cost Estimate
+
+| Metric | Per Board (estimated) |
+|--------|-------|
+| **Total (estimated)** | **~9.16 USD** |
+| Batch Quantity | 5 |
+| Batch Total (estimated) | ~45.78 USD |
+"""
+
+SAMPLE_MANIFEST = {
+    "version": 1,
+    "generated_at": "2026-06-12T05:03:41.535120+00:00",
+    "board": {
+        "name": "bldc_controller_routed",
+        "pcb_file": "bldc_controller_routed.kicad_pcb",
+    },
+}
+
+
+def _make_board(
+    tmp_path: Path,
+    slug: str = "05-bldc-motor-controller",
+    *,
+    report: str | None = SAMPLE_REPORT_MD,
+    manifest: dict | None = None,
+    bom: str | None = None,
+    package: bool = False,
+    renders: list[str] | None = None,
+    make_mfg: bool = True,
+) -> Path:
+    """Build a synthetic board directory tree and return it."""
+    board_dir = tmp_path / slug
+    output_dir = board_dir / "output"
+    output_dir.mkdir(parents=True)
+
+    if make_mfg:
+        mfg = output_dir / "manufacturing"
+        mfg.mkdir()
+        if report is not None:
+            (mfg / "report.md").write_text(report)
+        if manifest is not None:
+            (mfg / "manifest.json").write_text(json.dumps(manifest))
+        if bom is not None:
+            (mfg / "bom_jlcpcb.csv").write_text(bom)
+        if package:
+            (mfg / "kicad_project.zip").write_bytes(b"PK\x03\x04zip")
+
+    if renders:
+        renders_dir = output_dir / "renders"
+        renders_dir.mkdir()
+        for name in renders:
+            (renders_dir / name).write_bytes(b"\x89PNG")
+
+    return board_dir
+
+
+def test_extract_full_metrics(tmp_path: Path):
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST, package=True)
+    m = extract_board_metrics(board)
+
+    assert m["schema_version"] == SCHEMA_VERSION
+    assert m["slug"] == "05-bldc-motor-controller"
+    assert m["status"] == "ok"
+    assert m["name"] == "bldc_controller_routed"
+    assert m["layer_count"] == 4
+    assert m["board_size_mm"] == {"width": 80.0, "height": 100.0}
+    assert m["part_count"] == 55
+    assert m["nets_routed_pct"] == 82.1
+    assert m["drc_violations"] == 14
+    assert m["cost"] == {
+        "per_board_usd": 9.16,
+        "batch_qty": 5,
+        "batch_total_usd": 45.78,
+    }
+    assert m["manufacturing_package"] == "manufacturing/kicad_project.zip"
+    assert m["manifest_generated_at"] == "2026-06-12T05:03:41.535120+00:00"
+    assert "3-Phase Brushless DC Motor Driver" in m["description"]
+    # generated_at is an ISO-8601 string.
+    assert isinstance(m["generated_at"], str) and "T" in m["generated_at"]
+
+
+def test_no_artifacts_path(tmp_path: Path):
+    # Board with an output dir but no manufacturing subdir.
+    board = _make_board(tmp_path, slug="00-simple-led", make_mfg=False)
+    m = extract_board_metrics(board)
+
+    assert m["status"] == "no_artifacts"
+    assert m["slug"] == "00-simple-led"
+    # Identity fields present; metric fields omitted (not null).
+    for omitted in ("layer_count", "nets_routed_pct", "drc_violations", "name"):
+        assert omitted not in m
+
+
+def test_no_output_dir_at_all(tmp_path: Path):
+    # Board directory exists but has no output/ at all.
+    board = tmp_path / "00-simple-led"
+    board.mkdir()
+    m = extract_board_metrics(board)
+    assert m["status"] == "no_artifacts"
+    assert "renders" not in m
+
+
+def test_partial_when_report_missing(tmp_path: Path):
+    # manufacturing/ exists but report.md is absent -> partial.
+    board = _make_board(tmp_path, report=None, manifest=SAMPLE_MANIFEST)
+    m = extract_board_metrics(board)
+
+    assert m["status"] == "partial"
+    assert m["name"] == "bldc_controller_routed"  # from manifest
+    assert "layer_count" not in m  # no report to parse
+
+
+def test_unparseable_fields_omitted(tmp_path: Path):
+    # report.md present but missing several rows -> those fields omitted,
+    # status still ok (report parsed, just sparse).
+    sparse_report = """---
+title: "sparse_board"
+---
+
+## Board Summary
+
+| Property | Value |
+|----------|-------|
+| Layers | 2 copper (F.Cu, B.Cu) |
+"""
+    board = _make_board(tmp_path, report=sparse_report)
+    m = extract_board_metrics(board)
+
+    assert m["status"] == "ok"
+    assert m["layer_count"] == 2
+    for omitted in ("board_size_mm", "part_count", "nets_routed_pct", "cost"):
+        assert omitted not in m
+    # No DRC Status section -> drc_violations omitted.
+    assert "drc_violations" not in m
+
+
+def test_bom_fallback_for_part_count(tmp_path: Path):
+    # report.md without a Footprints row falls back to BOM data-row count.
+    report_no_footprints = """---
+title: "fallback_board"
+---
+
+## Board Summary
+
+| Property | Value |
+|----------|-------|
+| Layers | 2 copper (F.Cu, B.Cu) |
+"""
+    bom = "Comment,Designator,Footprint,LCSC\n100nF,C1,C_0402,C123\n10k,R1,R_0402,C456\n"
+    board = _make_board(tmp_path, report=report_no_footprints, bom=bom)
+    m = extract_board_metrics(board)
+
+    assert m["part_count"] == 2  # two data rows, header dropped
+
+
+def test_render_paths_attached_when_present(tmp_path: Path):
+    board = _make_board(
+        tmp_path,
+        renders=["pcb-front.png", "pcb-back.png", "3d-front.png", "3d-back.png"],
+    )
+    m = extract_board_metrics(board)
+
+    assert m["renders"] == {
+        "pcb_front": "renders/pcb-front.png",
+        "pcb_back": "renders/pcb-back.png",
+        "3d_front": "renders/3d-front.png",
+        "3d_back": "renders/3d-back.png",
+    }
+    # Paths resolve relative to output/board.json.
+    for rel in m["renders"].values():
+        assert (board / "output" / rel).is_file()
+
+
+def test_render_paths_partial(tmp_path: Path):
+    # Only some renders exist -> only those keys appear.
+    board = _make_board(tmp_path, renders=["pcb-front.png"])
+    m = extract_board_metrics(board)
+    assert m["renders"] == {"pcb_front": "renders/pcb-front.png"}
+
+
+def test_renders_omitted_when_absent(tmp_path: Path):
+    board = _make_board(tmp_path)
+    m = extract_board_metrics(board)
+    assert "renders" not in m
+
+
+def test_corrupt_manifest_does_not_crash(tmp_path: Path):
+    board = _make_board(tmp_path)
+    (board / "output" / "manufacturing" / "manifest.json").write_text("{not json")
+    m = extract_board_metrics(board)
+    # Still ok from report.md; name simply omitted.
+    assert m["status"] == "ok"
+    assert "name" not in m
+
+
+def test_emit_board_json_default_path(tmp_path: Path):
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    out = emit_board_json(board)
+
+    assert out == board / "output" / "board.json"
+    assert out.is_file()
+    data = json.loads(out.read_text())
+    assert data["slug"] == "05-bldc-motor-controller"
+    assert data["status"] == "ok"
+
+
+def test_emit_board_json_override_path(tmp_path: Path):
+    board = _make_board(tmp_path)
+    target = tmp_path / "custom" / "out.json"
+    out = emit_board_json(board, target)
+
+    assert out == target
+    assert target.is_file()
+
+
+def test_main_single_board(tmp_path: Path, capsys):
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    rc = main([str(board)])
+    assert rc == 0
+    assert (board / "output" / "board.json").is_file()
+    out = capsys.readouterr().out
+    assert "05-bldc-motor-controller" in out
+    assert "ok" in out
+
+
+def test_main_dry_run_writes_nothing(tmp_path: Path, capsys):
+    board = _make_board(tmp_path)
+    rc = main([str(board), "--dry-run"])
+    assert rc == 0
+    assert not (board / "output" / "board.json").exists()
+    # stdout is valid JSON.
+    data = json.loads(capsys.readouterr().out)
+    assert data["slug"] == "05-bldc-motor-controller"
+
+
+def test_main_all_mode(tmp_path: Path, capsys):
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    # Two boards: one full, one no-artifacts.
+    _make_board(boards_dir, slug="05-bldc-motor-controller", manifest=SAMPLE_MANIFEST)
+    _make_board(boards_dir, slug="00-simple-led", make_mfg=False)
+
+    rc = main(["--all", "--boards-dir", str(boards_dir)])
+    assert rc == 0
+
+    full = json.loads(
+        (boards_dir / "05-bldc-motor-controller" / "output" / "board.json").read_text()
+    )
+    minimal = json.loads((boards_dir / "00-simple-led" / "output" / "board.json").read_text())
+    assert full["status"] == "ok"
+    assert minimal["status"] == "no_artifacts"
+
+
+def test_main_all_descends_external(tmp_path: Path):
+    boards_dir = tmp_path / "boards"
+    boards_dir.mkdir()
+    external = boards_dir / "external"
+    external.mkdir()
+    _make_board(external, slug="softstart", manifest=SAMPLE_MANIFEST)
+
+    rc = main(["--all", "--boards-dir", str(boards_dir)])
+    assert rc == 0
+    assert (external / "softstart" / "output" / "board.json").is_file()
+
+
+def test_main_missing_board_dir_errors(tmp_path: Path):
+    rc = main([str(tmp_path / "does-not-exist")])
+    assert rc == 1
+
+
+def test_main_requires_board_or_all(capsys):
+    with pytest.raises(SystemExit):
+        main([])

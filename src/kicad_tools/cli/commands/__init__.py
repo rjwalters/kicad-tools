@@ -17,6 +17,7 @@ This package contains command handler modules organized by domain:
 
 from .analyze import run_analyze_command
 from .benchmark import run_benchmark_command
+from .board_metrics import run_board_metrics_command
 from .build import run_build_command
 from .config import run_config_command, run_interactive_command
 from .create_pcb import run_create_pcb_command
@@ -103,6 +104,8 @@ __all__ = [
     "run_decisions_command",
     # Fleet
     "run_fleet_command",
+    # Board metrics
+    "run_board_metrics_command",
     # Reasoning
     "run_reason_command",
     # Placement

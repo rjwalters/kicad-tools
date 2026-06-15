@@ -175,6 +175,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_net_status_parser(subparsers)
     _add_fleet_parser(subparsers)
     _add_render_parser(subparsers)
+    _add_board_metrics_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -4925,6 +4926,56 @@ def _add_net_status_parser(subparsers) -> None:
         dest="net_status_verbose",
         action="store_true",
         help="Show all pads with coordinates",
+    )
+
+
+def _add_board_metrics_parser(subparsers) -> None:
+    """Add the ``board-metrics`` parser (normalized board.json per board, #3676).
+
+    Emits a stable ``board.json`` data contract per demo board by aggregating
+    artifacts that already exist under ``output/manufacturing/`` (report.md,
+    manifest.json, BOM, kicad_project.zip) plus render images from ``kct render``.
+    """
+    bm_parser = subparsers.add_parser(
+        "board-metrics",
+        help="Emit a normalized board.json per board from existing artifacts",
+        description=(
+            "Aggregate already-computed manufacturing artifacts (report.md, "
+            "manifest.json, BOM, kicad_project.zip) and render images into a "
+            "normalized board.json per board. Sources existing output; never "
+            "recomputes from KiCad. Default output: boards/<id>/output/board.json."
+        ),
+    )
+    bm_parser.add_argument(
+        "board_metrics_board",
+        nargs="?",
+        metavar="board",
+        help="Path to a board directory (e.g. boards/05-bldc-motor-controller)",
+    )
+    bm_parser.add_argument(
+        "--all",
+        dest="board_metrics_all",
+        action="store_true",
+        help="Process every board under --boards-dir instead of a single board",
+    )
+    bm_parser.add_argument(
+        "--boards-dir",
+        dest="board_metrics_boards_dir",
+        default="boards",
+        help="Root directory containing per-board subdirs (default: boards)",
+    )
+    bm_parser.add_argument(
+        "--output",
+        "-o",
+        dest="board_metrics_output",
+        default=None,
+        help="Override output path (single-board mode only)",
+    )
+    bm_parser.add_argument(
+        "--dry-run",
+        dest="board_metrics_dry_run",
+        action="store_true",
+        help="Print board.json to stdout without writing any file",
     )
 
 
