@@ -394,6 +394,9 @@ def _dispatch_command(args) -> int:
     elif args.command == "fleet":
         return run_fleet_command(args)
 
+    elif args.command == "render":
+        return _run_render_command(args)
+
     elif args.command == "net-status":
         from .net_status_cmd import main as net_status_cmd
 
@@ -755,6 +758,20 @@ def _run_report_command(args) -> int:
             sub_argv.append("--skip-collect")
 
     return report_cmd(sub_argv)
+
+
+def _run_render_command(args) -> int:
+    """Run the render command (Epic #3674, Phase 1)."""
+    import argparse as _argparse
+
+    from .render_cmd import run_render
+
+    render_args = _argparse.Namespace(
+        path=args.render_path,
+        no_3d=getattr(args, "render_no_3d", False),
+        format=getattr(args, "render_format", "text"),
+    )
+    return run_render(render_args)
 
 
 def _run_export_command(args) -> int:
