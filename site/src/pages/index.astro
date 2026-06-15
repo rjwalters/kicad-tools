@@ -9,6 +9,8 @@ import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { loadBoards } from "../data/loadBoards.ts";
 import BoardCard from "../components/BoardCard.astro";
+import SiteHeader from "../components/Header.astro";
+import SiteFooter from "../components/Footer.astro";
 
 const boards = loadBoards();
 const withData = boards.filter((b) => b.status !== "no_artifacts").length;
@@ -42,6 +44,7 @@ const hasPcbFor = (slug: string): boolean =>
     />
   </head>
   <body>
+    <SiteHeader />
     <main>
       <header class="page-header">
         <h1>kicad-tools demo gallery</h1>
@@ -94,6 +97,7 @@ const hasPcbFor = (slug: string): boolean =>
         </section>
       )}
     </main>
+    <SiteFooter />
   </body>
 </html>
 

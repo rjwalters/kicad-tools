@@ -19,6 +19,8 @@ import { existsSync } from "node:fs";
 import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts";
 import type { Board } from "../data/types.ts";
 import RenderGallery from "../components/RenderGallery.astro";
+import SiteHeader from "../components/Header.astro";
+import SiteFooter from "../components/Footer.astro";
 
 /**
  * The primary manufacturing download. It is also referenced by
@@ -183,6 +185,7 @@ if (board.manifest_generated_at !== undefined) {
     }
   </head>
   <body>
+    <SiteHeader />
     <main>
       <p class="back-top">
         <a href="/">← Back to gallery</a>
@@ -365,6 +368,7 @@ if (board.manifest_generated_at !== undefined) {
         <a href="/">← Back to gallery</a>
       </footer>
     </main>
+    <SiteFooter />
   </body>
 </html>
 
