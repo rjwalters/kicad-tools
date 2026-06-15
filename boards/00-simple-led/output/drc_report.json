@@ -1,0 +1,16 @@
+{
+  "file": "/Users/rwalters/GitHub/kicad-tools/boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+  "manufacturer": "jlcpcb",
+  "layers": 2,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 0,
+    "rules_checked": 29,
+    "rules_checked_by_rule": {
+      "connectivity": 1
+    },
+    "passed": true
+  },
+  "violations": []
+}

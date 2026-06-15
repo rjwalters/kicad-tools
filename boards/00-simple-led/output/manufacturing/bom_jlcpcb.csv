@@ -1,0 +1,4 @@
+Comment,Designator,Footprint,LCSC Part #
+330,R1,Resistor_SMD:R_0805_2012Metric,C17630
+LED,D1,LED_THT:LED_D5.0mm,C84256
+PWR,J1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C49257

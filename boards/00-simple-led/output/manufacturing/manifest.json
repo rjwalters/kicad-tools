@@ -1,0 +1,129 @@
+{
+  "version": "1.0",
+  "kicad_tools_version": "0.13.0",
+  "generated_at": "2026-06-15T19:20:43.635714+00:00",
+  "manufacturer": "jlcpcb",
+  "files": {
+    "gerbers.zip": {
+      "sha256": "c5b4b3634d208f9164f0a9eb64c5b5f2ad2b01a44cc812e91ace35cf86de3d55",
+      "size": 10336
+    },
+    "report.pdf": {
+      "sha256": "6876d37630faeff47be0c8cde1ce1250ce3940aa2172624ee252e69638c2ee40",
+      "size": 707194
+    },
+    "report.md": {
+      "sha256": "351e45cbb3a6859ea8de2acd4471777dccfc9552ebbed46c4213832a0ddd4cfd",
+      "size": 2452
+    },
+    "assembly.png": {
+      "sha256": "055169c9cdf74d1f85e72363f3cfef3e00f0a99860692291346047b4c69b895e",
+      "size": 92199
+    },
+    "layer_B_Cu.png": {
+      "sha256": "fbd99a34c2eeade04e16433c2f2b9120c5f211c7c3a3606e90a9757ffd9846aa",
+      "size": 75243
+    },
+    "layer_F_Cu.png": {
+      "sha256": "8b71d17206b4852bdccc016ed3a6afef0136e116085578eae04b1459c26bb20c",
+      "size": 80457
+    },
+    "pcb_back.png": {
+      "sha256": "d9c4131bb9a9b78ea8aedadba4790a256fadcfba67ecd5a5e9f22b8fddfc8808",
+      "size": 76876
+    },
+    "pcb_copper.png": {
+      "sha256": "68b45875836de4ad8e7cdcdc663c147ebf4ae4c732d3bb73c127ae0f1b67ff4e",
+      "size": 80573
+    },
+    "pcb_front.png": {
+      "sha256": "3f67ce44a269fab27dd230a5f3d76c849455f37f3399dc55336e7b2e84bd9703",
+      "size": 94029
+    },
+    "schematic_simple_led.png": {
+      "sha256": "63263d2a7d5643068cd4d7c8fa5b028dbc05355bdb32ee0f7eb7836efab6e9d5",
+      "size": 117508
+    },
+    "kicad_project.zip": {
+      "sha256": "ec3d7ac0ca2323b11ada2bde237b1ca57017ed95672a880ad1955b941afcd3bf",
+      "size": 9829
+    },
+    "README.txt": {
+      "sha256": "8b6657bd2c5fd574ef21912f6e0ec3618752307887e0afe9a35d246fd4145eb8",
+      "size": 690
+    }
+  },
+  "board": {
+    "name": "simple_led_routed",
+    "pcb_file": "simple_led_routed.kicad_pcb"
+  },
+  "preflight": [
+    {
+      "name": "pcb_file",
+      "status": "OK",
+      "message": "PCB file parsed successfully",
+      "details": "Footprints: 3"
+    },
+    {
+      "name": "schematic_file",
+      "status": "OK",
+      "message": "Schematic file found: simple_led.kicad_sch"
+    },
+    {
+      "name": "board_outline",
+      "status": "OK",
+      "message": "Board outline is closed (5 points)"
+    },
+    {
+      "name": "footprints",
+      "status": "OK",
+      "message": "All 3 footprints have library footprint names"
+    },
+    {
+      "name": "board_dimensions",
+      "status": "OK",
+      "message": "Board dimensions within limits (25.00 x 20.00 mm)"
+    },
+    {
+      "name": "drill_holes",
+      "status": "OK",
+      "message": "Drill holes present (0 vias, 4 TH pads)"
+    },
+    {
+      "name": "tht_in_cpl",
+      "status": "OK",
+      "message": "No through-hole components in CPL-eligible footprints"
+    },
+    {
+      "name": "bom_fields",
+      "status": "WARN",
+      "message": "BOM field issues: 1 problem(s)",
+      "details": "3/3 active item(s) missing LCSC part number"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
+    },
+    {
+      "name": "bom_pcb_match",
+      "status": "OK",
+      "message": "BOM and PCB references match (3 components)"
+    },
+    {
+      "name": "bom_cpl_match",
+      "status": "OK",
+      "message": "BOM and CPL references match (3 components)"
+    },
+    {
+      "name": "drc",
+      "status": "OK",
+      "message": "DRC: 0 errors, 0 warnings"
+    },
+    {
+      "name": "erc",
+      "status": "OK",
+      "message": "ERC: 0 errors, 0 warnings"
+    }
+  ]
+}
