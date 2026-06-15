@@ -1,0 +1,181 @@
+# Build the kicad-tools.org demo gallery (Astro site under site/) and deploy
+# it to Cloudflare Pages.  Epic #3674, Phase 3 (#3685).
+#
+# Pipeline (single job, kept linear so the data/render/build steps are
+# independent of the deploy step):
+#   1. board.json   -- `kct board-metrics --all`           (Phase 1, #3676)
+#   2. renders      -- `kct render boards/` per-board PNGs  (Phase 1, #3675)
+#   3. site build   -- `npm --prefix site ci && run build`  (Phase 2, #3679+)
+#                      the `prebuild` hook (copy-renders.mjs) stages the
+#                      generated renders + manufacturing files into
+#                      site/public/ automatically.
+#   4. deploy       -- `wrangler pages deploy site/dist`     (this issue)
+#
+# Container choice: this workflow needs `kicad-cli` for `kct render`
+# (PCB layer export + 3D ray-trace), so it MUST use the official
+# kicad/kicad:10.0 image -- the same container pattern the test /
+# kicad-cli-smoke jobs in ci.yml use.  See ci.yml's inline rationale for
+# why apt/PPA KiCad installs are NOT used.  This is a NEW workflow; ci.yml
+# is intentionally left untouched.
+#
+# TOKEN GUARD (critical): the CLOUDFLARE_API_TOKEN secret is provisioned
+# separately by an operator (#3686).  Until it exists, the deploy steps
+# read the secret into an env var and gate on it being non-empty, so
+# pushes to main BEFORE the token lands SKIP the deploy gracefully (green
+# CI, not red).  The data / render / build steps run regardless --
+# host-decoupled -- so the site still builds and validates.
+#
+# Custom domain (kicad-tools.org) is operator issue #3686 and is
+# deliberately OUT OF SCOPE here: this workflow only targets the default
+# Pages hostname kicad-tools.pages.dev.
+
+name: Deploy Gallery
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy Gallery
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: kicad/kicad:10.0
+      # Run as root so apt/uv installs write system locations and
+      # actions/checkout can write $GITHUB_WORKSPACE (mirrors ci.yml's
+      # container jobs).
+      options: --user 0:0
+    defaults:
+      run:
+        # The kicad/kicad:10.0 image links /bin/sh to dash, which does not
+        # support `set -o pipefail`; force bash for every run step (mirrors
+        # the container jobs in ci.yml).
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap.  xvfb gives
+        # `kct render --3d` a virtual display in the headless container
+        # (the image has no X server).  The kicad-cli probe makes a missing
+        # /broken kicad-cli fail THIS step with an attributable error.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git xvfb
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      # Note: deliberately NOT using actions/setup-python@v5 inside the
+      # container -- it exports Python_ROOT_DIR into the tool-cache, which
+      # breaks downstream native builds (see ci.yml's cpp-build-check
+      # rationale).  uv pins the interpreter via --python 3.12 instead.
+      - name: Install uv
+        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # coupling inside the container (mirrors ci.yml's container jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Python dependencies
+        # Pin the interpreter via uv (parity with the rest of CI); the
+        # container image's own Python version is irrelevant.
+        run: uv sync --extra dev --python 3.12
+
+      - name: Set up Node.js
+        # The Astro build needs Node (the project itself is Python-only, so
+        # ci.yml has no Node setup).  setup-node works inside the container.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "site/package-lock.json"
+
+      - name: Generate board.json metrics
+        # Phase 1 (#3676): emit a normalized board.json per board from
+        # existing artifacts.  Non-fatal -- a metrics regression should not
+        # take down the whole gallery deploy; the site tolerates a board
+        # without board.json.
+        run: uv run kct board-metrics --all || true
+
+      - name: Render board images (3D via xvfb)
+        # Phase 1 (#3675): `kct render boards/` walks every board dir and
+        # emits 2D layer plots + 3D ray-traced PNGs into
+        # boards/<id>/output/renders/.  The 3D pass (`kicad-cli pcb render`)
+        # needs a display, so wrap the whole invocation in xvfb-run to give
+        # it a virtual framebuffer in the headless container.
+        #
+        # Resilience (per #3685 guidance): rendering must NOT block the
+        # deploy.  If xvfb-run or 3D ray-tracing regresses, fall back to a
+        # 2D-only render (`--no-3d`, no display needed); if even that fails,
+        # continue with whatever renders exist.  copy-renders.mjs treats
+        # missing renders as a no-op and the site serves
+        # placeholder-board.svg for any board without images.
+        timeout-minutes: 12
+        run: |
+          set -uo pipefail
+          if xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" \
+               uv run kct render boards/; then
+            echo "Renders complete (2D + 3D)."
+          else
+            echo "::warning::3D render failed under xvfb; retrying 2D-only."
+            uv run kct render boards/ --no-3d \
+              || echo "::warning::Render step failed; continuing with existing renders (placeholders will be served)."
+          fi
+
+      - name: Build the Astro site
+        # `prebuild` (copy-renders.mjs) runs automatically before `build`
+        # and stages site/public/boards/<slug>/... from the renders +
+        # manufacturing files generated above.  Generated artifacts
+        # (board.json, renders, site/public/boards, site/dist) are all
+        # git-ignored and never committed.
+        run: |
+          set -euo pipefail
+          npm --prefix site ci
+          npm --prefix site run build
+
+      # --- Deploy (token-guarded) ----------------------------------------
+      # GitHub expressions cannot test `secrets.*` directly in an `if:`, so
+      # the secret is read into the CF_TOKEN env var first; an unset secret
+      # resolves to an empty string, and `env.CF_TOKEN != ''` then skips the
+      # step cleanly when the token is absent.  Both deploy steps are
+      # mutually exclusive on github.event_name, and each guards on the
+      # token, so a pre-#3686 main push leaves the whole deploy un-run
+      # (green) while still building + validating the site above.
+
+      - name: Deploy to Cloudflare Pages (production)
+        if: ${{ github.event_name == 'push' && env.CF_TOKEN != '' }}
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler pages deploy site/dist --project-name kicad-tools --branch main
+
+      - name: Deploy to Cloudflare Pages (PR preview)
+        if: ${{ github.event_name == 'pull_request' && env.CF_TOKEN != '' }}
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # Omit --branch so wrangler auto-names the preview deploy by the PR
+        # branch.  The preview URL is printed in this step's log; Cloudflare's
+        # GitHub integration (if enabled on the project) also surfaces it as
+        # a PR status check.
+        run: npx wrangler pages deploy site/dist --project-name kicad-tools
+
+      - name: Note skipped deploy (token absent)
+        # Make the skip explicit in the run summary so a green-but-not-deployed
+        # run is not mistaken for a successful publish before #3686 lands.
+        if: ${{ env.CF_TOKEN == '' }}
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "CLOUDFLARE_API_TOKEN is not set; skipping Cloudflare Pages deploy." >> "$GITHUB_STEP_SUMMARY"
+          echo "Site built successfully (site/dist). Deploy is unblocked once #3686 provisions the token." >> "$GITHUB_STEP_SUMMARY"
