@@ -1,0 +1,35 @@
+---
+// Placeholder home page for the kicad-tools.org demo gallery.
+//
+// Scope (issue #3679): prove the build-time data pipeline only. It lists each
+// discovered board's slug and status. The polished gallery index (cards,
+// renders, metrics) is issue #3680; the per-board detail page is #3681.
+import { loadBoards } from "../data/loadBoards.ts";
+
+const boards = loadBoards();
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>kicad-tools demo gallery</title>
+  </head>
+  <body>
+    <h1>kicad-tools demo gallery</h1>
+    <p>
+      Placeholder index — lists boards discovered by the build-time data loader.
+      {boards.length} board{boards.length === 1 ? "" : "s"} found.
+    </p>
+    <ul>
+      {
+        boards.map((board) => (
+          <li>
+            {board.slug} — {board.status}
+          </li>
+        ))
+      }
+    </ul>
+  </body>
+</html>
