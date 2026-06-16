@@ -600,6 +600,8 @@ class SExp:
             # Zone connection types
             "thermal_reliefs",
             "full",
+            # Zone connect_pads modes (e.g. (connect_pads thru_hole_only ...))
+            "thru_hole_only",
             # Zone fill modes
             "hatch",
             "hatched",

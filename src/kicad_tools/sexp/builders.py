@@ -577,6 +577,7 @@ def zone_node(
     clearance: float = 0.2,
     thermal_gap: float = 0.3,
     thermal_bridge_width: float = 0.3,
+    pad_connection: str = "yes",
 ) -> SExp:
     """Build a PCB copper zone (pour) S-expression.
 
@@ -591,6 +592,25 @@ def zone_node(
         clearance: Pad clearance in mm
         thermal_gap: Thermal relief gap in mm
         thermal_bridge_width: Thermal relief bridge width in mm
+        pad_connection: Pad-to-zone connection mode written into
+            ``(connect_pads ...)``.  KiCad understands:
+
+            * ``""`` (default keyword absent) -- thermal relief for *all*
+              pads.  Small SMD pads cannot host the 2 thermal spokes the
+              geometric DRC requires, and some through-hole power pads sit
+              where only one spoke can form, so this mode produces
+              ``starved_thermal`` errors (issue #3727).
+            * ``"yes"`` -- **solid** full-copper connection for *all* pads.
+              This is the generator default: a solid connection is strictly
+              stronger than a 2-spoke thermal relief, so it eliminates
+              ``starved_thermal`` honestly (without lowering the required
+              spoke count) and gives the lowest-impedance power/ground
+              delivery -- the right choice for reflow-assembled fab boards.
+            * ``"thru_hole_only"`` -- thermal relief for through-hole pads
+              (eases hand-soldering) and solid for SMD pads.  Clears the
+              SMD ``starved_thermal`` errors but leaves single-spoke THT
+              power pads unaddressed.
+            * ``"no"`` -- no copper connection (pads isolated from the pour).
 
     Example output:
         (zone
@@ -599,7 +619,7 @@ def zone_node(
             (layer "In1.Cu")
             (uuid "...")
             (hatch edge 0.5)
-            (connect_pads (clearance 0.2))
+            (connect_pads yes (clearance 0.2))
             (min_thickness 0.2)
             (filled_areas_thickness no)
             (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
@@ -623,8 +643,17 @@ def zone_node(
     if priority > 0:
         zone.append(SExp.list("priority", priority))
 
-    # Add standard zone properties
-    zone.append(SExp.list("connect_pads", SExp.list("clearance", fmt(clearance))))
+    # Add standard zone properties.  The optional pad-connection mode token
+    # (e.g. ``thru_hole_only``) sits between ``connect_pads`` and the
+    # ``(clearance ...)`` child, matching KiCad's S-expression grammar.  An
+    # empty string omits the token (legacy "thermal relief for all pads").
+    connect_pads = SExp.list("connect_pads")
+    if pad_connection:
+        # Bare keyword atom (e.g. ``yes`` / ``thru_hole_only``), not a
+        # named list -- it must render without surrounding quotes.
+        connect_pads.append(SExp(value=pad_connection))
+    connect_pads.append(SExp.list("clearance", fmt(clearance)))
+    zone.append(connect_pads)
     zone.append(SExp.list("min_thickness", fmt(min_thickness)))
     zone.append(SExp.list("filled_areas_thickness", "no"))
     zone.append(

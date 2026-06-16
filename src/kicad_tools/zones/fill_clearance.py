@@ -436,6 +436,70 @@ def _keep_connected_rings(rings: list, anchors: list, polygon_cls) -> list:
     return [max(rings, key=lambda r: abs(polygon_cls(r).buffer(0).area))]
 
 
+# Pad-connection mode keywords KiCad accepts in ``(connect_pads MODE ...)``.
+# When the mode token is *absent* the zone uses thermal relief for ALL pads
+# (the legacy default), which starves small SMD pads of the 2 spokes the
+# geometric DRC requires (issue #3727).
+_CONNECT_PAD_MODES = frozenset({"thru_hole_only", "yes", "no"})
+
+
+def normalize_zone_pad_connection(
+    doc: SExp,
+    mode: str = "yes",
+) -> int:
+    """Upgrade legacy thermal-for-all zones to a stronger pad connection.
+
+    KiCad's ``(connect_pads ...)`` carries an optional leading *mode* token:
+
+    * **absent** -- thermal relief for every pad.  Small SMD pads cannot
+      host the 2 thermal spokes KiCad's geometric DRC requires, and some
+      through-hole power pads sit where only one spoke can form, so a pour
+      that uses this default reports ``starved_thermal`` errors (issue
+      #3727, across boards 03/04/05/softstart).
+    * ``yes`` -- a **solid** full-copper connection for every pad (the
+      default applied here).  A solid connection is strictly stronger than
+      a 2-spoke thermal relief, so it eliminates ``starved_thermal``
+      honestly -- it does not lower the required spoke count -- and gives
+      the lowest-impedance power/ground delivery on a reflow-assembled
+      board.
+    * ``thru_hole_only`` -- thermal relief for THT pads, solid for SMD.
+    * ``no`` -- no copper connection.
+
+    This function adds the ``mode`` token to every copper zone whose
+    ``connect_pads`` node currently lacks one.  Zones that already declare a
+    mode (set deliberately by an upstream generator) are left untouched, as
+    are keepout zones (which have no ``connect_pads``).  The document is
+    mutated in place; the number of zones changed is returned so callers can
+    skip a needless rewrite when nothing changed.
+
+    Run this *before* the kicad-cli fill so the refilled copper reflects the
+    new connection mode.
+    """
+    if mode not in _CONNECT_PAD_MODES:
+        raise ValueError(
+            f"Unsupported pad-connection mode {mode!r}; "
+            f"expected one of {sorted(_CONNECT_PAD_MODES)}"
+        )
+
+    changed = 0
+    for zone in doc.find_all("zone"):
+        connect_pads = zone.find("connect_pads")
+        if connect_pads is None:
+            continue
+        # An existing mode token is a bare atom child (e.g. "thru_hole_only");
+        # the clearance sub-list is a named child.  Skip zones that already
+        # carry any leading mode token so deliberate settings are preserved.
+        has_mode = any(
+            child.is_atom and isinstance(child.value, str) for child in connect_pads.children
+        )
+        if has_mode:
+            continue
+        # Insert the mode token as the first child, before (clearance ...).
+        connect_pads.children.insert(0, SExp(value=mode))
+        changed += 1
+    return changed
+
+
 def apply_foreign_pad_clearance(
     doc: SExp,
     default_clearance: float = 0.3,

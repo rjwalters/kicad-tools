@@ -163,6 +163,13 @@ class ZoneConfig:
         min_thickness: Minimum copper thickness in mm
         thermal_gap: Thermal relief gap in mm
         thermal_bridge_width: Thermal relief spoke width in mm
+        pad_connection: Pad-to-zone connection mode. Defaults to ``"yes"``
+            (solid full-copper connection for every pad), which avoids the
+            ``starved_thermal`` DRC error pads trigger when fewer than the
+            required 2 thermal spokes can form -- a solid connection is
+            strictly stronger than a 2-spoke thermal, not a relaxed check.
+            See :func:`kicad_tools.sexp.builders.zone_node` for the full
+            set of accepted modes (issue #3727).
         boundary: Custom boundary polygon, or None for board outline
     """
 
@@ -173,6 +180,7 @@ class ZoneConfig:
     min_thickness: float = 0.25
     thermal_gap: float = 0.3
     thermal_bridge_width: float = 0.4
+    pad_connection: str = "yes"
     boundary: list[tuple[float, float]] | None = None
 
 
@@ -212,6 +220,7 @@ class GeneratedZone:
             self.config.clearance,
             self.config.thermal_gap,
             self.config.thermal_bridge_width,
+            self.config.pad_connection,
         )
 
 
@@ -649,6 +658,7 @@ class ZoneGenerator:
         min_thickness: float = 0.25,
         thermal_gap: float = 0.3,
         thermal_bridge_width: float = 0.4,
+        pad_connection: str = "yes",
         boundary: list[tuple[float, float]] | None = None,
     ) -> GeneratedZone:
         """Add a copper pour zone.
@@ -664,6 +674,10 @@ class ZoneGenerator:
             min_thickness: Minimum copper thickness in mm
             thermal_gap: Thermal relief gap in mm
             thermal_bridge_width: Thermal relief spoke width in mm
+            pad_connection: Pad-to-zone connection mode (default ``"yes"``:
+                solid full-copper connection for every pad).  See
+                :class:`ZoneConfig` and
+                :func:`kicad_tools.sexp.builders.zone_node` (issue #3727).
             boundary: Custom boundary polygon, or None for board outline
 
         Returns:
@@ -680,6 +694,7 @@ class ZoneGenerator:
             min_thickness=min_thickness,
             thermal_gap=thermal_gap,
             thermal_bridge_width=thermal_bridge_width,
+            pad_connection=pad_connection,
             boundary=boundary,
         )
 

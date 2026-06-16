@@ -286,3 +286,114 @@ class TestNetIdentityResolution:
         # The same-net VCC pad must NOT be carved out (identity resolved).
         same = _pad_box(15.0, 15.0, 1.7, 1.7)
         assert fill.intersection(same).area > 0.0
+
+
+class TestNormalizeZonePadConnection:
+    """Issue #3727: upgrade thermal-for-all zones to a stronger connection.
+
+    A legacy ``(connect_pads (clearance ...))`` zone uses thermal relief for
+    *every* pad.  Small SMD pads (and some single-spoke THT power pads) cannot
+    form the 2 spokes KiCad's geometric DRC requires, producing
+    ``starved_thermal`` errors.  ``normalize_zone_pad_connection`` adds a solid
+    (``yes``) mode token so pads get a full-copper connection instead -- a
+    strictly stronger connection, not a relaxed spoke count.
+    """
+
+    _ZONE_THERMAL = """
+    (kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (net 0 "")
+      (net 1 "GND")
+      (zone
+        (net 1)
+        (net_name "GND")
+        (layer "F.Cu")
+        (uuid "z1")
+        (hatch edge 0.5)
+        (connect_pads (clearance 0.3))
+        (min_thickness 0.25)
+        (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+        (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+      )
+    )
+    """
+
+    def _connect_pads_mode(self, doc):
+        zone = doc.find_all("zone")[0]
+        connect_pads = zone.find("connect_pads")
+        atoms = [c.value for c in connect_pads.children if c.is_atom]
+        return atoms[0] if atoms else None
+
+    def test_adds_solid_mode_to_legacy_zone(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._ZONE_THERMAL)
+        assert self._connect_pads_mode(doc) is None  # thermal-for-all
+
+        changed = normalize_zone_pad_connection(doc)
+        assert changed == 1
+        assert self._connect_pads_mode(doc) == "yes"
+        # Must render as a bare keyword for KiCad, never a quoted string.
+        rendered = doc.find_all("zone")[0].to_string()
+        assert "(connect_pads yes (clearance" in rendered
+        assert '"yes"' not in rendered
+
+    def test_idempotent(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._ZONE_THERMAL)
+        assert normalize_zone_pad_connection(doc) == 1
+        # A second pass finds the mode already present and makes no change.
+        assert normalize_zone_pad_connection(doc) == 0
+        assert self._connect_pads_mode(doc) == "yes"
+
+    def test_preserves_existing_mode(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        board = self._ZONE_THERMAL.replace(
+            "(connect_pads (clearance 0.3))",
+            "(connect_pads thru_hole_only (clearance 0.3))",
+        )
+        doc = parse_string(board)
+        # An explicit upstream mode is never clobbered.
+        assert normalize_zone_pad_connection(doc) == 0
+        assert self._connect_pads_mode(doc) == "thru_hole_only"
+
+    def test_thru_hole_only_mode(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._ZONE_THERMAL)
+        assert normalize_zone_pad_connection(doc, mode="thru_hole_only") == 1
+        assert self._connect_pads_mode(doc) == "thru_hole_only"
+
+    def test_rejects_unknown_mode(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._ZONE_THERMAL)
+        with pytest.raises(ValueError, match="Unsupported pad-connection mode"):
+            normalize_zone_pad_connection(doc, mode="bogus")
+
+    def test_keepout_zone_untouched(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        keepout = """
+        (kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (net 0 "")
+          (zone
+            (net 0)
+            (net_name "")
+            (layers "F.Cu" "B.Cu")
+            (uuid "k1")
+            (hatch edge 0.5)
+            (keepout (tracks not_allowed) (vias not_allowed) (copperpour not_allowed))
+            (fill yes)
+            (polygon (pts (xy 0 0) (xy 5 0) (xy 5 5) (xy 0 5)))
+          )
+        )
+        """
+        doc = parse_string(keepout)
+        # Keepout zones have no connect_pads -> nothing to normalize.
+        assert normalize_zone_pad_connection(doc) == 0

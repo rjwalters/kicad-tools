@@ -73,6 +73,9 @@ class TestZoneConfig:
         assert config.min_thickness == 0.25
         assert config.thermal_gap == 0.3
         assert config.thermal_bridge_width == 0.4
+        # Issue #3727: zones default to a solid pad connection so SMD (and
+        # single-spoke THT) pads do not trigger ``starved_thermal``.
+        assert config.pad_connection == "yes"
         assert config.boundary is None
 
     def test_custom_values(self):
@@ -120,6 +123,24 @@ class TestGeneratedZone:
         assert '(uuid "test-uuid-123")' in sexp_str
         assert "(polygon" in sexp_str
         assert "(priority 1)" in sexp_str
+
+    def test_to_sexp_node_solid_pad_connection_default(self):
+        """Issue #3727: generated zones write a solid ``connect_pads yes``.
+
+        A solid connection is strictly stronger than a 2-spoke thermal, so it
+        clears ``starved_thermal`` honestly instead of lowering the required
+        spoke count.
+        """
+        config = ZoneConfig(net="GND", layer="B.Cu", priority=1)
+        zone = GeneratedZone(
+            config=config,
+            net_number=1,
+            boundary=[(0, 0), (100, 0), (100, 100), (0, 100)],
+            uuid="test-uuid",
+        )
+        sexp_str = zone.to_sexp_node().to_string()
+        assert "(connect_pads yes (clearance" in sexp_str
+        assert '"yes"' not in sexp_str
 
 
 class TestZoneGeneratorUnit:
