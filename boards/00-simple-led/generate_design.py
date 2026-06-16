@@ -17,6 +17,7 @@ Usage:
     python generate_design.py [output_dir]
 """
 
+import json
 import subprocess
 import sys
 import uuid
@@ -24,6 +25,7 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.lvs import BoardNetlistMismatch, compare_netlists
 from kicad_tools.schematic.models.schematic import Schematic
 
 # Warn if running source scripts with stale pipx install
@@ -868,6 +870,61 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     return False
 
 
+def run_lvs(sch_path: Path, routed_pcb_path: Path, output_dir: Path) -> bool:
+    """Step 6.5: assert schematic <-> routed-PCB netlist equivalence (#3748).
+
+    Compares each ``(ref, pad)`` pair's net name between the schematic
+    (the design intent) and the routed PCB (what manufacturing receives)
+    and writes the result to ``output/lvs.json`` for downstream tools
+    (``kct fleet status``, the demo site, etc.) following the v1 schema
+    documented in ``docs/board-json-schema.md``.
+
+    Returns ``True`` iff the comparison was clean.  Raises
+    :class:`BoardNetlistMismatch` when it is dirty so the caller's exit
+    gate trips -- a silent dirty board would defeat the purpose of
+    wiring LVS into the recipe.
+    """
+    print("\n" + "=" * 60)
+    print("Running LVS (schematic <-> PCB netlist match)...")
+    print("=" * 60)
+
+    result = compare_netlists(sch_path, routed_pcb_path)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lvs_path = output_dir / "lvs.json"
+    lvs_path.write_text(
+        json.dumps(
+            {
+                "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+                "clean": result.clean,
+                "mismatches": [
+                    {
+                        "ref": m.ref,
+                        "pad": m.pad,
+                        "schematic_net": m.schematic_net,
+                        "pcb_net": m.pcb_net,
+                    }
+                    for m in result.mismatches
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+    if result.clean:
+        print(f"\n   PASS: {lvs_path.name} clean (0 mismatches)")
+        return True
+
+    # Print up to the first 5 mismatches before raising, so the recipe
+    # log surfaces what went wrong without forcing the user to crack
+    # open lvs.json.
+    print(f"\n   FAIL: {len(result.mismatches)} schematic/PCB mismatch(es):")
+    for m in result.mismatches[:5]:
+        print(f"      - {m.ref}.{m.pad}: schematic={m.schematic_net!r} pcb={m.pcb_net!r}")
+    raise BoardNetlistMismatch(result)
+
+
 def main() -> int:
     """Main entry point."""
     if len(sys.argv) > 1:
@@ -895,6 +952,13 @@ def main() -> int:
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
+        # Step 6.5: LVS (#3748) -- assert the routed PCB's nets match the
+        # schematic's design intent.  This is the post-route guard that
+        # caught #3747 (D1 polarity flipped on the schematic side); it
+        # raises ``BoardNetlistMismatch`` on disagreement so the recipe
+        # exits non-zero instead of silently shipping a bad board.
+        lvs_success = run_lvs(sch_path, routed_path, output_dir)
+
         # Step 7: Export manufacturing bundle (#3147).  Run unconditionally
         # so the manifest mtime stays newer than the routed PCB even when
         # routing is incomplete (board 00 routing is tracked by #3148);
@@ -916,6 +980,7 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
+        print(f"  LVS: {'PASS' if lvs_success else 'FAIL'}")
         print(f"  MFG bundle: {'PASS' if mfg_success else 'FAIL'}")
         print("\nCircuit description:")
         print("  - J1: 2-pin power input (VCC, GND)")
@@ -923,8 +988,10 @@ def main() -> int:
         print("  - D1: LED indicator")
         print("  - 5V input -> ~10mA LED current")
 
-        # Partial routing is acceptable; success if ERC and DRC pass
-        return 0 if erc_success and drc_success else 1
+        # Partial routing is acceptable; success if ERC, DRC, and LVS pass.
+        # (``run_lvs`` raises on a dirty LVS so a False ``lvs_success`` here
+        # would mean LVS itself short-circuited -- belt-and-braces guard.)
+        return 0 if erc_success and drc_success and lvs_success else 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)

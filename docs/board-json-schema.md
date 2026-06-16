@@ -108,3 +108,80 @@ This file is the data contract for the Phase 2 Astro site, so stability matters:
 
 Consumers should read `schema_version` and reject documents whose major version
 they do not understand.
+
+## `lvs.json` Schema (v1)
+
+`lvs.json` is the per-board LVS (Layout-vs-Schematic) verification report
+produced by the board recipe's LVS step (issue #3748; board 00 only in v1, with
+the fleet-wide rollout tracked by issue #3742). It is emitted next to
+`board.json` at `boards/<id>/output/lvs.json` and records whether every
+schematic pin's net name matches the corresponding PCB pad's net name.
+
+### Source artifacts
+
+| `lvs.json` field | Source artifact | Notes |
+|------------------|-----------------|-------|
+| `clean`          | comparison result | `true` iff `mismatches == []` |
+| `mismatches[*].ref`            | schematic / PCB reference designator | e.g. `"D1"` |
+| `mismatches[*].pad`            | pin or pad number                   | e.g. `"1"` |
+| `mismatches[*].schematic_net`  | `Schematic.get_net_for_pin(ref, pad)` | `null` for floating |
+| `mismatches[*].pcb_net`        | `(pad N ... (net K "NAME"))` in `.kicad_pcb` | `null` for unconnected |
+
+### Example (clean)
+
+```json
+{
+  "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+  "clean": true,
+  "mismatches": []
+}
+```
+
+### Example (dirty — D1 polarity flipped)
+
+```json
+{
+  "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+  "clean": false,
+  "mismatches": [
+    {
+      "ref": "D1",
+      "pad": "1",
+      "schematic_net": "LED_ANODE",
+      "pcb_net": "GND"
+    },
+    {
+      "ref": "D1",
+      "pad": "2",
+      "schematic_net": "GND",
+      "pcb_net": "LED_ANODE"
+    }
+  ]
+}
+```
+
+### Field reference
+
+| Field                          | Type    | Required | Description |
+|--------------------------------|---------|----------|-------------|
+| `$schema`                      | string  | yes      | Schema URL identifier |
+| `clean`                        | boolean | yes      | `true` iff `mismatches` is empty |
+| `mismatches`                   | array   | yes      | Always present; empty when clean (never omitted, never `null`) |
+| `mismatches[*].ref`            | string  | yes      | Reference designator (e.g. `"R1"`) |
+| `mismatches[*].pad`            | string  | yes      | Pin/pad number as a string (e.g. `"1"`) |
+| `mismatches[*].schematic_net`  | string &#124; null | yes | Net the pin sits on in the schematic, or `null` for floating |
+| `mismatches[*].pcb_net`        | string &#124; null | yes | Net the pad sits on in the PCB, or `null` for unconnected |
+
+### `mismatches` is always present
+
+Unlike `board.json`, where optional fields are *omitted*, `lvs.json` always
+emits `mismatches` (as `[]` when clean). This keeps the type contract simple
+for downstream consumers — they can always `len(report["mismatches"])` without
+a presence check.
+
+### Schema versioning policy
+
+Same rules as `board.json`: additive changes are allowed within v1; renames,
+type changes, or removed fields require bumping the version in the `$schema`
+URL. Consumers should reject documents whose `$schema` references a major
+version they do not understand.
