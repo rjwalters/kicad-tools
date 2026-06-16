@@ -132,12 +132,13 @@ def _pad_absolute_position(fp: Footprint, pad: Pad) -> tuple[float, float]:
     """Compute the pad's absolute (board-relative) position.
 
     Footprint pad coords are relative to the footprint origin and rotated by
-    the footprint's rotation (CCW in KiCad's coord convention).  This helper
+    the footprint's rotation. KiCad applies the orientation as a NEGATED angle
+    vs standard CCW math (verified vs pcbnew, issue #3739).  This helper
     converts to board-relative coords.
     """
     px, py = pad.position
     if fp.rotation:
-        theta = math.radians(fp.rotation)
+        theta = math.radians(-fp.rotation)
         cos_t = math.cos(theta)
         sin_t = math.sin(theta)
         rx = px * cos_t - py * sin_t

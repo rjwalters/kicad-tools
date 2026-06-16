@@ -392,19 +392,19 @@ class TestCheckZonesEpsilon:
 
 
 class TestCheckPadsRotationSignConvention:
-    """Verify that _check_pads applies the canonical CCW-positive rotation.
+    """Verify that _check_pads applies KiCad's negated-angle pad rotation.
 
-    Regression coverage for issue #2788: prior code computed
-    ``math.radians(-footprint.rotation)`` which mirrored the pad across the
-    footprint origin for 90°/270° rotations and reflected it about the
-    diagonal for 45°.  Pure 0°/180° tests pass under BOTH sign conventions
-    because cos is even and sin*y_local terms vanish when y_local==0,
-    so the parametrization MUST include {45°, 90°, 270°} to catch the bug.
+    Regression coverage for issue #3739 (which OVERTURNED #2788/#738):
+    KiCad's ``pcbnew`` 10.0.1 applies the footprint orientation as the
+    NEGATED angle (``math.radians(-footprint.rotation)``) relative to
+    standard CCW math.  Pure 0°/180° tests pass under BOTH sign
+    conventions, so the parametrization MUST include {45°, 90°, 270°} to
+    catch a divergence.
 
     The fixture uses ``board_origin = (0, 0)`` to isolate rotation from
     any origin-offset asymmetries, and the footprint is placed in the
-    interior of the board with a pad offset chosen so the correct and
-    buggy positions differ.
+    interior of the board with a pad offset chosen so the two sign
+    conventions land the pad on opposite sides of the edge threshold.
     """
 
     @staticmethod
@@ -434,10 +434,10 @@ class TestCheckPadsRotationSignConvention:
         rotation_deg: float,
         pad_local: tuple[float, float],
     ) -> tuple[float, float]:
-        """Canonical forward transform (CCW-positive, matches schema/pcb.py)."""
+        """KiCad forward transform (negated angle, matches schema/pcb.py)."""
         import math
 
-        rot_rad = math.radians(rotation_deg)
+        rot_rad = math.radians(-rotation_deg)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
         px, py = pad_local
         return (
@@ -456,13 +456,13 @@ class TestCheckPadsRotationSignConvention:
         fp_pos = (10.0, 15.0)
 
         for rot in (45.0, 90.0, 270.0):
-            rot_rad = math.radians(rot)
+            rot_rad = math.radians(-rot)  # KiCad negated-angle convention
             cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
             correct = (
                 fp_pos[0] + pad_local[0] * cos_r - pad_local[1] * sin_r,
                 fp_pos[1] + pad_local[0] * sin_r + pad_local[1] * cos_r,
             )
-            # Buggy (negated angle) → cos same, sin flipped sign
+            # Buggy (un-negated standard CCW, PR #738) → sin flipped sign
             buggy = (
                 fp_pos[0] + pad_local[0] * cos_r + pad_local[1] * sin_r,
                 fp_pos[1] - pad_local[0] * sin_r + pad_local[1] * cos_r,
@@ -477,30 +477,30 @@ class TestCheckPadsRotationSignConvention:
             )
 
     # Per-rotation fixtures: footprint x-position chosen so that, under
-    # the CANONICAL CCW-positive transform, the pad lands close enough
-    # to the left board edge (x=0) to violate (or not violate) the
-    # 0.3mm copper-to-edge minimum, while under the BUGGY negated
-    # rotation the pad lands somewhere else with the OPPOSITE violation
-    # status.  This makes the violation *count* a clean discriminator
-    # between the two sign conventions.
+    # the CANONICAL KiCad (negated-angle) transform, the pad lands close
+    # enough to the left board edge (x=0) to violate (or not violate) the
+    # 0.3mm copper-to-edge minimum, while under the OLD un-negated CCW
+    # rotation (PR #738) the pad lands with the OPPOSITE violation status.
+    # This makes the violation *count* a clean discriminator between the
+    # two sign conventions.
     #
     # pad_local = (3.0, 1.0) — nonzero, distinct x/y so 0°/180°
-    # symmetries do not paper over the bug.
+    # symmetries do not paper over the divergence.
     #
-    # Pre-computed pad positions (see negative-control test below for
-    # proof that canonical and buggy diverge at these rotations):
-    #   rot=45°,  fp_x=-1.9: canonical pad_x ~ -0.486 (violates),
-    #                        buggy     pad_x ~  0.928 (clears)
-    #   rot=90°,  fp_x= 0.6: canonical pad_x = -0.4   (violates),
-    #                        buggy     pad_x =  1.6   (clears)
-    #   rot=270°, fp_x= 0.6: canonical pad_x =  1.6   (clears),
-    #                        buggy     pad_x = -0.4   (violates)
+    # Pre-computed pad positions under the KiCad (negated) oracle
+    # (the negative-control test proves the two conventions diverge):
+    #   rot=45°,  fp_x=-1.9: kicad pad_x ~  0.928 (clears),
+    #                        old-ccw   pad_x ~ -0.486 (violates)
+    #   rot=90°,  fp_x= 0.6: kicad pad_x =  1.6   (clears),
+    #                        old-ccw   pad_x = -0.4   (violates)
+    #   rot=270°, fp_x= 0.6: kicad pad_x = -0.4   (violates),
+    #                        old-ccw   pad_x =  1.6   (clears)
     @pytest.mark.parametrize(
         "rotation, fp_x, expect_canonical_violation",
         [
-            (45.0, -1.9, True),
-            (90.0, 0.6, True),
-            (270.0, 0.6, False),
+            (45.0, -1.9, False),
+            (90.0, 0.6, False),
+            (270.0, 0.6, True),
         ],
     )
     def test_violation_count_matches_canonical_convention(

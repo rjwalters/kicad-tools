@@ -1260,7 +1260,9 @@ class ClearanceRepairer:
             fp_y = float(fp_atoms[1]) if len(fp_atoms) > 1 else 0.0
             fp_rot = float(fp_atoms[2]) if len(fp_atoms) > 2 else 0.0
 
-            angle_rad = math.radians(fp_rot)
+            # KiCad applies the footprint orientation as a NEGATED angle vs
+            # standard CCW math (verified vs pcbnew, issue #3739).
+            angle_rad = math.radians(-fp_rot)
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
 
@@ -2007,8 +2009,10 @@ class ClearanceRepairer:
         new_x = round(old_x + dx, 4)
         new_y = round(old_y + dy, 4)
 
-        # Compute absolute pad positions before the move
-        angle_rad = math.radians(fp_rot)
+        # Compute absolute pad positions before the move.
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        angle_rad = math.radians(-fp_rot)
         cos_a = math.cos(angle_rad)
         sin_a = math.sin(angle_rad)
 

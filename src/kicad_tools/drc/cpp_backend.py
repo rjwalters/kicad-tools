@@ -152,8 +152,12 @@ def check_pair_clearance_cpp(
         return None
 
     pos1 = fp1_position if fp1_position is not None else fp1.position
-    rot1_rad = math.radians(fp1.rotation)
-    rot2_rad = math.radians(fp2.rotation)
+    # The C++ kernel applies the standard CCW rotation matrix to the angle it
+    # receives; KiCad uses the NEGATED footprint orientation (verified vs
+    # pcbnew, issue #3739), so we pass -rotation here. This keeps the convention
+    # in one place (Python) without recompiling the native extension.
+    rot1_rad = math.radians(-fp1.rotation)
+    rot2_rad = math.radians(-fp2.rotation)
 
     result = drc_cpp.check_pair_clearance(
         lx1,

@@ -237,8 +237,9 @@ class TestRotatedFootprint:
     listed in the issue)."""
 
     def test_rotated_footprint_off_grid(self, tmp_path: Path) -> None:
-        # Local pad at (0.0333, 0.0) with footprint rotated 90 deg CCW:
-        # absolute offset becomes (0.0, 0.0333), still off the 0.1 mm
+        # Local pad at (0.0333, 0.0) with footprint rotated 90 deg.
+        # KiCad applies the orientation as a NEGATED angle (#3739), so the
+        # absolute offset becomes (0.0, -0.0333), still off the 0.1 mm
         # grid.  Use a strict threshold (the 0.05 mm default would clear
         # this offset, but the test is about rotation handling).
         text = _pcb_with_pads(
@@ -259,8 +260,8 @@ class TestRotatedFootprint:
         violation = report.off_grid_pads[0]
         # X should be near 100.0 (was rotated to that axis)
         assert violation.x == pytest.approx(100.0, abs=1e-3)
-        # Y should be ~100.0333 -> off-grid
-        assert violation.y == pytest.approx(100.0333, abs=1e-3)
+        # Y should be ~99.9667 -> off-grid (negated-angle convention)
+        assert violation.y == pytest.approx(99.9667, abs=1e-3)
 
 
 class TestThreshold:

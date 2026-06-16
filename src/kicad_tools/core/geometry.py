@@ -198,3 +198,61 @@ def segment_clearance(
     """
     center_dist = segment_to_segment_distance(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
     return center_dist - width_a / 2 - width_b / 2
+
+
+# ---------------------------------------------------------------------------
+# Footprint pad rotation (KiCad convention)
+# ---------------------------------------------------------------------------
+
+
+def rotate_pad_offset(
+    local_x: float,
+    local_y: float,
+    rotation_deg: float,
+) -> tuple[float, float]:
+    """Rotate a pad's footprint-local offset into board-frame offset.
+
+    This is the canonical forward local->world rotation for pad/footprint
+    geometry. It MUST match KiCad's own ``pcbnew`` transform.
+
+    KiCad applies the footprint orientation as a **negated** angle relative
+    to the standard counter-clockwise math convention (verified directly
+    against pcbnew 10.0.1, issue #3739)::
+
+        rotated_x =  lx*cos(theta) + ly*sin(theta)
+        rotated_y = -lx*sin(theta) + ly*cos(theta)
+
+    which is equivalent to evaluating the standard CCW matrix at
+    ``-rotation_deg``. For a footprint at (100,100) with a pad at local
+    offset (2,0), this yields the pcbnew-verified world positions:
+
+        ===  ====================
+        deg  world (mm)
+        ===  ====================
+          0  (102, 100)
+         90  (100,  98)
+        180  ( 98, 100)
+        270  (100, 102)
+        ===  ====================
+
+    The earlier standard-CCW form (PR #738) produced the mirror-image
+    positions at 90/270 degrees (0/180 agree under both signs -- the
+    "test trap" that hid the bug). To recover a board-frame offset back to
+    footprint-local coordinates (the *inverse* transform), call this with
+    ``-rotation_deg``.
+
+    Args:
+        local_x: Pad x offset in footprint-local frame.
+        local_y: Pad y offset in footprint-local frame.
+        rotation_deg: Footprint orientation in degrees.
+
+    Returns:
+        Tuple ``(rotated_x, rotated_y)`` board-frame offset (not yet
+        translated by the footprint origin).
+    """
+    angle_rad = math.radians(-rotation_deg)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    rotated_x = local_x * cos_a - local_y * sin_a
+    rotated_y = local_x * sin_a + local_y * cos_a
+    return rotated_x, rotated_y

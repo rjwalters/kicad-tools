@@ -8,7 +8,6 @@ is referencing an undeclared net.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 from ..violations import DRCResults, DRCViolation
@@ -102,12 +101,14 @@ def _absolute_pad_position(fp, pad) -> tuple[float, float]:
     Returns:
         (x, y) tuple in board coordinates.
     """
+    from kicad_tools.core.geometry import rotate_pad_offset
+
     fx, fy = fp.position
     px, py = pad.position
-    rot_rad = math.radians(fp.rotation)
 
-    # Rotate pad offset by footprint rotation
-    abs_x = fx + px * math.cos(rot_rad) - py * math.sin(rot_rad)
-    abs_y = fy + px * math.sin(rot_rad) + py * math.cos(rot_rad)
+    # Rotate pad offset by footprint rotation (KiCad negated-angle convention)
+    rotated_x, rotated_y = rotate_pad_offset(px, py, fp.rotation)
+    abs_x = fx + rotated_x
+    abs_y = fy + rotated_y
 
     return (abs_x, abs_y)

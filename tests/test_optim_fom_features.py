@@ -156,9 +156,10 @@ def test_pad_absolute_position_with_rotation_90():
     fp = _make_fp(position=(0.0, 0.0), rotation=90.0)
     pad = Pad(number="1", type="smd", shape="rect", position=(1.0, 0.0), size=(0.5, 0.5), layers=[])
     x, y = _pad_absolute_position(fp, pad)
-    # 90 deg CCW rotation of (1, 0) -> (0, 1).
+    # KiCad negated-angle convention (#3739): a +90° footprint maps the pad
+    # offset (1, 0) -> (0, -1), not (0, +1).
     assert x == pytest.approx(0.0, abs=1e-9)
-    assert y == pytest.approx(1.0, abs=1e-9)
+    assert y == pytest.approx(-1.0, abs=1e-9)
 
 
 # --------------------------------------------------------------------

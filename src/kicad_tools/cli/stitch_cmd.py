@@ -685,8 +685,10 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
             pad_rel_x = pad_at.get_float(0) or 0.0
             pad_rel_y = pad_at.get_float(1) or 0.0
 
-            # Transform pad position to board coordinates
-            rad = math.radians(fp_rotation)
+            # Transform pad position to board coordinates.
+            # KiCad applies the footprint orientation as a NEGATED angle vs
+            # standard CCW math (verified vs pcbnew, issue #3739).
+            rad = math.radians(-fp_rotation)
             cos_r = math.cos(rad)
             sin_r = math.sin(rad)
             pad_x = fp_x + pad_rel_x * cos_r - pad_rel_y * sin_r
@@ -757,7 +759,9 @@ def find_smd_pad_bboxes_on_nets(
         fp_x = at_node.get_float(0) or 0.0
         fp_y = at_node.get_float(1) or 0.0
         fp_rotation_deg = at_node.get_float(2) or 0.0
-        rad = math.radians(fp_rotation_deg)
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        rad = math.radians(-fp_rotation_deg)
         cos_r = math.cos(rad)
         sin_r = math.sin(rad)
 
@@ -862,7 +866,9 @@ def find_all_pad_bboxes(
         fp_x = at_node.get_float(0) or 0.0
         fp_y = at_node.get_float(1) or 0.0
         fp_rotation_deg = at_node.get_float(2) or 0.0
-        rad = math.radians(fp_rotation_deg)
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        rad = math.radians(-fp_rotation_deg)
         cos_r = math.cos(rad)
         sin_r = math.sin(rad)
 
@@ -1145,7 +1151,9 @@ def find_all_pads(
             continue
         fp_x = at_node.get_float(0) or 0.0
         fp_y = at_node.get_float(1) or 0.0
-        fp_rot = math.radians(at_node.get_float(2) or 0.0)
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        fp_rot = math.radians(-(at_node.get_float(2) or 0.0))
 
         cos_rot = math.cos(fp_rot)
         sin_rot = math.sin(fp_rot)
@@ -3129,7 +3137,9 @@ def find_thermal_pad_candidates(
         fp_match = _matches_footprint_pattern(footprint_name, footprint_patterns)
         ref_match = _matches_reference_prefix(reference, reference_prefixes)
 
-        rad = math.radians(fp_rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        rad = math.radians(-fp_rotation)
         cos_r = math.cos(rad)
         sin_r = math.sin(rad)
 

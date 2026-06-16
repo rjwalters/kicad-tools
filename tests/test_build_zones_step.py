@@ -1164,13 +1164,12 @@ class TestAutoPourGeometricOutlines:
 
 
 class TestNetPadPositionsRotationConvention:
-    """Regression guard for #2778.
+    """Regression guard for #3739 (which overturned #2778/#738).
 
     ``_net_pad_positions_absolute`` must use the same rotation-sign
-    convention as the canonical :meth:`PCB.get_pad_position` (positive
-    ``math.radians(fp.rotation)``).  A previous implementation used the
-    negative sign, which silently produced mirrored pad positions for
-    rotated footprints.  Existing fixtures in
+    convention as the canonical :meth:`PCB.get_pad_position`, which is
+    KiCad's negated-angle form ``math.radians(-fp.rotation)`` (verified
+    vs pcbnew 10.0.1).  Existing fixtures in
     :class:`TestAutoPourGeometricOutlines` all use ``rotation=0`` and
     therefore did not catch the drift.
 
@@ -1243,7 +1242,7 @@ class TestNetPadPositionsRotationConvention:
 
         Must include at least one rotation in {45, 90, 270}.  Pure 0/180
         cases are sign-symmetric and would pass even with the buggy
-        ``math.radians(-fp.rotation)`` implementation.
+        un-negated ``math.radians(fp.rotation)`` implementation (PR #738).
         """
         import math
 
@@ -1294,13 +1293,13 @@ class TestNetPadPositionsRotationConvention:
         canonical = pcb.get_pad_position("U1", "1")
         assert canonical is not None
 
-        # Manually compute what the pre-fix code (negative sign) would have
-        # produced for the single rotated pad.
+        # Manually compute what the pre-#3739 code (un-negated standard CCW,
+        # PR #738) would have produced for the single rotated pad.
         fp = pcb.get_footprint("U1")
         assert fp is not None
         fp_x, fp_y = fp.position
         ox, oy = pcb.board_origin
-        rot_rad_buggy = math.radians(-fp.rotation)
+        rot_rad_buggy = math.radians(fp.rotation)
         cos_b, sin_b = math.cos(rot_rad_buggy), math.sin(rot_rad_buggy)
         pad = fp.pads[0]
         px, py = pad.position

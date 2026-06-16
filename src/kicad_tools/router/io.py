@@ -1765,8 +1765,9 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
         fp_y = float(at_match.group(2))
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
-        # Precompute rotation values
-        rot_rad = math.radians(fp_rot)
+        # Precompute rotation values. KiCad applies the footprint orientation
+        # as a NEGATED angle vs standard CCW math (verified vs pcbnew, #3739).
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         # Find all pad blocks
@@ -1839,8 +1840,9 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         fp_y = float(at_match.group(2))
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
-        # Precompute rotation values
-        rot_rad = math.radians(fp_rot)
+        # Precompute rotation values. KiCad applies the footprint orientation
+        # as a NEGATED angle vs standard CCW math (verified vs pcbnew, #3739).
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         # Find all pad blocks
@@ -2839,11 +2841,11 @@ def route_pcb(
         rotation = comp.get("rotation", 0)
 
         # Transform pad positions based on component placement.
-        # KiCad stores rotation in degrees, positive = counter-clockwise;
-        # the standard 2D rotation matrix applies directly (no negation).
-        # See PCB.get_pad_position (schema/pcb.py) and the canonical
-        # implementation later in this file (~line 2661) for reference.
-        rot_rad = math.radians(rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle relative
+        # to standard CCW math (verified vs pcbnew 10.0.1, issue #3739), so we
+        # evaluate the rotation matrix at -rotation. See
+        # core.geometry.rotate_pad_offset for the canonical implementation.
+        rot_rad = math.radians(-rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         pads: list[dict] = []
@@ -3367,10 +3369,11 @@ def load_pcb_for_routing(
             if net_name in skip_nets:
                 net_num = 0  # Treat as obstacle, not a routable net
 
-            # Transform pad position by footprint rotation
-            # KiCad stores rotation in degrees, positive = counter-clockwise
-            # Standard 2D rotation matrix applies directly (no negation needed)
-            rot_rad = math.radians(fp_rot)
+            # Transform pad position by footprint rotation.
+            # KiCad applies the footprint orientation as a NEGATED angle vs
+            # standard CCW math (verified vs pcbnew 10.0.1, issue #3739), so we
+            # evaluate the rotation matrix at -fp_rot.
+            rot_rad = math.radians(-fp_rot)
             cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
             abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r

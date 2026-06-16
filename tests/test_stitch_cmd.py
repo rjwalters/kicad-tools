@@ -2378,16 +2378,16 @@ class TestFindAllPads:
     def test_handles_rotated_footprints(self, stitch_rotated_pad_pcb: Path):
         """Pad positions should be correctly transformed for rotated footprints."""
         sexp = load_pcb(stitch_rotated_pad_pcb)
-        # Find pad from rotated U2 (at 10, 20, rotated 90 degrees)
-        # Pad at relative (1, 0) -> after 90-degree rotation:
-        # board_x = 10 + 1*cos(90) - 0*sin(90) = 10 + 0 = 10
-        # board_y = 20 + 1*sin(90) + 0*cos(90) = 20 + 1 = 21
+        # Find pad from rotated U2 (at 10, 20, rotated 90 degrees).
+        # KiCad applies the orientation as a NEGATED angle (#3739):
+        # board_x = 10 + 1*cos(-90) - 0*sin(-90) = 10 + 0 = 10
+        # board_y = 20 + 1*sin(-90) + 0*cos(-90) = 20 - 1 = 19
         pads = find_all_pads(sexp, exclude_nets={1})  # Exclude GND
 
         assert len(pads) == 1  # Only U2.1 (SIG, net 2)
         px, py, radius, net = pads[0]
         assert abs(px - 10.0) < 0.01
-        assert abs(py - 21.0) < 0.01
+        assert abs(py - 19.0) < 0.01
         assert net == 2
 
     def test_pad_radius_from_size(self, stitch_pad_clearance_pcb: Path):

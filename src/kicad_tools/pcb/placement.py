@@ -43,8 +43,11 @@ class ComponentPlacement:
         # Start with pad position relative to component
         p = self.pads[pad_name]
 
-        # Rotate by component rotation
-        p = p.rotate(self.rotation)
+        # Rotate by component rotation. KiCad applies the footprint orientation
+        # as a NEGATED angle vs standard CCW math (verified vs pcbnew, #3739),
+        # so we rotate the pad offset by -rotation to match KiCad pad world
+        # positions. (Point.rotate itself stays standard-CCW for generic use.)
+        p = p.rotate(-self.rotation)
 
         # Translate to component position (relative to block)
         p = p + self.position

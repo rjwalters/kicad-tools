@@ -271,11 +271,10 @@ def route_net(
 
         fp_x, fp_y = fp.position
         rotation = fp.rotation
-        # NOTE: positive sign matches PCB.get_pad_position (the canonical
-        # local->world transform used throughout the codebase).  KiCad
-        # stores rotation in degrees, positive = counter-clockwise, and
-        # the standard 2D rotation matrix applies directly (no negation).
-        rot_rad = math.radians(rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle vs standard
+        # CCW math (verified vs pcbnew 10.0.1, issue #3739); matches
+        # PCB.get_pad_position / core.geometry.rotate_pad_offset.
+        rot_rad = math.radians(-rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.pads:
@@ -684,11 +683,10 @@ def _build_pad_positions(pcb: PCB) -> dict[int, list[tuple[float, float]]]:
 
         fp_x, fp_y = fp.position
         rotation = fp.rotation
-        # NOTE: positive sign matches PCB.get_pad_position (the canonical
-        # local->world transform used throughout the codebase).  KiCad
-        # stores rotation in degrees, positive = counter-clockwise, and
-        # the standard 2D rotation matrix applies directly (no negation).
-        rot_rad = math.radians(rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle vs standard
+        # CCW math (verified vs pcbnew 10.0.1, issue #3739); matches
+        # PCB.get_pad_position / core.geometry.rotate_pad_offset.
+        rot_rad = math.radians(-rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.pads:
@@ -725,8 +723,9 @@ def _build_pads_for_net(pcb: PCB, net_number: int, net_name: str) -> list:
             continue
 
         fp_x, fp_y = fp.position
-        # KiCad rotation is CCW-positive; standard 2D rotation matrix applies directly
-        rot_rad = math.radians(fp.rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle vs standard
+        # CCW math (verified vs pcbnew 10.0.1, issue #3739).
+        rot_rad = math.radians(-fp.rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.pads:

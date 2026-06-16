@@ -240,9 +240,11 @@ def create_keepout_from_component(
             min_y = min(min_y, py - ph / 2)
             max_y = max(max_y, py + ph / 2)
 
-        # Transform to absolute coordinates
+        # Transform to absolute coordinates.
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
         fx, fy = footprint.position
-        rot = math.radians(footprint.rotation)
+        rot = math.radians(-footprint.rotation)
         cos_r, sin_r = math.cos(rot), math.sin(rot)
 
         # Compute corners in component-local space

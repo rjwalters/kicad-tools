@@ -940,10 +940,10 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
                 ref = fp.reference
                 cx, cy = fp.position
                 rotation = fp.rotation
-                # NOTE: positive sign matches PCB.get_pad_position (the
-                # canonical local->world transform used throughout the
-                # codebase).  KiCad rotation is positive counter-clockwise.
-                rot_rad = math.radians(rotation)
+                # KiCad applies the footprint orientation as a NEGATED angle vs
+                # standard CCW math (verified vs pcbnew 10.0.1, issue #3739);
+                # matches PCB.get_pad_position / core.geometry.rotate_pad_offset.
+                rot_rad = math.radians(-rotation)
                 cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
                 pads = []
