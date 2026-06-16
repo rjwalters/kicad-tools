@@ -53,23 +53,41 @@ _NON_BLOCKING_SEVERITIES: dict[str, str] = {
     "isolated_copper": "warning",
 }
 
-# Built-in via floors that accommodate micro vias (Issue #3734).
+# Built-in via floors and the micro-via split (Issues #3734, #3736).
 #
 # KiCad's built-in ``via_diameter`` / ``annular_width`` / ``hole_size``
-# checks read ``design_settings.rules`` and have NO micro-via exemption --
-# they fire on every via, including the ``(via micro ...)`` structures that
-# the router's ``--micro-via-in-pad-fallback`` emits for fine-pitch escape
-# (e.g. LQFP-48 0.5 mm pitch, where a 0.6 mm via cannot fit between adjacent
-# pads).  Because KiCad applies the *most restrictive* of built-in + custom
-# rules, the ``A.Via_Type != 'Micro'`` exemption in the generated
-# ``.kicad_dru`` cannot relax the built-in minimum; the built-in floor has
-# to be lowered to the micro-via process minimum here.  The standard
-# through-via floor is still enforced -- by the ``.kicad_dru`` "Via Diameter"
-# / "Annular Ring" / "Via Drill" rules, which apply to non-micro vias only.
-# This mirrors the kct-check engine, which flatly exempts ``via_type ==
-# "micro"`` from the standard floors (see validate/rules/dimensions.py) on
-# the basis that jlcpcb-tier1's Capability+ tier supports ~0.1 mm drill /
-# 0.2 mm OD micro vias natively.
+# checks read ``design_settings.rules`` and fire on every via, including the
+# ``(via micro ...)`` structures the router's ``--micro-via-in-pad-fallback``
+# emits for fine-pitch escape (e.g. LQFP-48 0.5 mm pitch, where a 0.6 mm via
+# cannot fit between adjacent pads).  jlcpcb-tier1's Capability+ tier supports
+# these micro vias natively, so the kct-check engine flatly exempts
+# ``via_type == "micro"`` from the standard floors (see
+# validate/rules/dimensions.py) and we mirror that here.
+#
+# #3734 lowered the *built-in* ``min_via_*`` floor to the micro minimum for
+# ALL vias and relied on the ``A.Via_Type != 'Micro'`` guarded ``.kicad_dru``
+# rules as the standard-via backstop.  #3736 (board-04 judge) found that
+# backstop is non-functional under kicad-cli 10.0.1: any custom
+# ``solder_mask_margin`` rule (the unconditional "Solder Mask Clearance" rule
+# this generator always emits) SILENTLY SUPPRESSES ``via_diameter`` /
+# ``annular_width`` reporting from the other custom DRU rules -- a kicad-cli
+# bug, reproduced in tests/test_drc_constraints_export.py.  Net effect: a
+# genuinely sub-spec STANDARD via passed kicad-cli silently.
+#
+# Fix: keep the BUILT-IN ``min_via_diameter`` / ``min_via_hole`` at the
+# manufacturer's STANDARD floor (built-in checks are NOT masked by the
+# solder-mask quirk, so they catch sub-spec standard vias independently) and
+# exempt micro vias from those two checks via KiCad's dedicated
+# ``min_microvia_diameter`` / ``min_microvia_drill`` keys.
+#
+# ``annular_width`` is the one exception: KiCad 10.0.1 has NO micro-via
+# annular key (``min_microvia_annular_width`` is silently ignored), so the
+# built-in ``annular_width`` floor applies to micro vias too.  Holding it at
+# the standard floor would falsely flag board-04's legitimate micro vias, so
+# ``min_via_annular_width`` stays at the micro floor; standard-via annular is
+# enforced by ``kct check --mfr`` (the primary CI gate, with its own
+# micro-via exemption) plus the guarded DRU "Annular Ring" rule.  This is a
+# documented kicad-cli limitation, not a coverage gap in the primary gate.
 _MICRO_VIA_FLOOR_DIAMETER_MM = 0.2
 _MICRO_VIA_FLOOR_ANNULAR_MM = 0.05
 _MICRO_VIA_FLOOR_HOLE_MM = 0.1
@@ -132,15 +150,23 @@ def build_project_rules(rules: DesignRules) -> dict[str, float]:
     return {
         "min_clearance": rules.min_clearance_mm,
         "min_track_width": rules.min_trace_width_mm,
-        # Built-in via floors are set to the micro-via process minimum so
-        # KiCad's exemption-less built-in checks do not flag the router's
-        # fine-pitch micro vias; the standard through-via floor is enforced
-        # by the ``.kicad_dru`` "Via Diameter"/"Annular Ring"/"Via Drill"
-        # rules (non-micro only).  See ``_MICRO_VIA_FLOOR_*`` above.
-        "min_via_diameter": _MICRO_VIA_FLOOR_DIAMETER_MM,
+        # Standard via diameter / hole floors stay at the manufacturer
+        # minimum so KiCad's built-in checks independently catch sub-spec
+        # STANDARD vias (the #3734 DRU backstop is masked by the
+        # solder_mask_margin quirk -- see _MICRO_VIA_FLOOR_* above).  Micro
+        # vias are exempted from these two built-in checks via the dedicated
+        # ``min_microvia_diameter`` / ``min_microvia_drill`` keys.
+        "min_via_diameter": rules.min_via_diameter_mm,
+        "min_microvia_diameter": _MICRO_VIA_FLOOR_DIAMETER_MM,
+        # ``annular_width`` has no micro-via key in KiCad 10.0.1, so this
+        # floor applies to micro vias too -- it must stay at the micro
+        # minimum to avoid false positives on legitimate micro vias.
+        # Standard-via annular is enforced by ``kct check --mfr`` + the
+        # guarded DRU "Annular Ring" rule.
         "min_via_annular_width": _MICRO_VIA_FLOOR_ANNULAR_MM,
         "min_through_hole_diameter": rules.min_hole_diameter_mm,
-        "min_via_hole": _MICRO_VIA_FLOOR_HOLE_MM,
+        "min_via_hole": rules.min_via_drill_mm,
+        "min_microvia_drill": _MICRO_VIA_FLOOR_HOLE_MM,
         "min_hole_to_hole": rules.min_hole_to_edge_mm,
         "min_copper_edge_clearance": rules.min_copper_to_edge_mm,
         "min_silk_clearance": rules.min_solder_mask_clearance_mm,

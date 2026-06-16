@@ -33,6 +33,7 @@ from kicad_tools.manufacturers.project_generator import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOARD_03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+BOARD_04 = REPO_ROOT / "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +49,18 @@ def test_project_rules_match_profile_minimums():
 
     assert pro_rules["min_track_width"] == rules.min_trace_width_mm
     assert pro_rules["min_clearance"] == rules.min_clearance_mm
-    # The built-in via floors are relaxed to the micro-via process minimum
-    # so KiCad's exemption-less built-in checks do not flag the router's
-    # fine-pitch micro vias (Issue #3734).  The standard through-via floor
-    # is enforced by the .kicad_dru "Via Diameter"/"Annular Ring"/"Via
-    # Drill" rules (A.Via_Type != 'Micro') and the netclass via size.
-    assert pro_rules["min_via_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
-    assert pro_rules["min_via_hole"] == _MICRO_VIA_FLOOR_HOLE_MM
+    # #3736: the built-in via *diameter* and *hole* floors stay at the
+    # manufacturer STANDARD minimum so kicad-cli's built-in checks catch
+    # sub-spec standard vias independently (the #3734 DRU backstop is masked
+    # by the solder_mask_margin quirk).  Micro vias are exempted from those
+    # two built-in checks via the dedicated min_microvia_* keys.
+    assert pro_rules["min_via_diameter"] == rules.min_via_diameter_mm
+    assert pro_rules["min_via_hole"] == rules.min_via_drill_mm
+    assert pro_rules["min_microvia_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
+    assert pro_rules["min_microvia_drill"] == _MICRO_VIA_FLOOR_HOLE_MM
+    # annular_width has no micro-via key in KiCad 10.0.1, so its built-in
+    # floor must stay at the micro minimum to avoid false positives on
+    # legitimate micro vias; standard-via annular is enforced by kct check.
     assert pro_rules["min_via_annular_width"] == _MICRO_VIA_FLOOR_ANNULAR_MM
     assert pro_rules["min_through_hole_diameter"] == rules.min_hole_diameter_mm
     assert pro_rules["min_copper_edge_clearance"] == rules.min_copper_to_edge_mm
@@ -255,8 +261,105 @@ def test_export_emits_sibling_kicad_pro(tmp_path: Path):
     # Board 03 is 2-layer -> 2-layer profile minimums.
     assert pro_rules["min_track_width"] == rules.min_trace_width_mm
     assert pro_rules["min_clearance"] == rules.min_clearance_mm
-    # Built-in via floor is the micro-via process minimum (Issue #3734);
-    # the standard 2-layer via size lives in the Default netclass.
-    assert pro_rules["min_via_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
+    # #3736: built-in via diameter floor stays at the standard 2-layer
+    # minimum; micro vias are exempted via min_microvia_diameter.
+    assert pro_rules["min_via_diameter"] == rules.min_via_diameter_mm
+    assert pro_rules["min_microvia_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
     assert data["net_settings"]["classes"][0]["via_diameter"] == rules.min_via_diameter_mm
     assert data["net_settings"]["classes"][0]["clearance"] == rules.min_clearance_mm
+
+
+# ---------------------------------------------------------------------------
+# Regression (#3736): kicad-cli independently catches sub-spec STANDARD vias
+# ---------------------------------------------------------------------------
+#
+# #3734 lowered the built-in via floors to the micro minimum for ALL vias and
+# relied on the A.Via_Type != 'Micro' guarded .kicad_dru rules to gate
+# standard vias.  The board-04 judge found those DRU rules are silently
+# suppressed by the unconditional solder_mask_margin rule under kicad-cli
+# 10.0.1, so a sub-spec STANDARD via passed kicad-cli silently.  #3736 keeps
+# the built-in min_via_diameter / min_via_hole at the standard floor (built-in
+# checks are NOT masked) while exempting micro vias via min_microvia_*.
+
+
+def _kicad_cli() -> Path | None:
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    return find_kicad_cli()
+
+
+def _run_drc(cli: Path, pcb: Path, report: Path) -> str:
+    import subprocess
+
+    subprocess.run(
+        [
+            str(cli),
+            "pcb",
+            "drc",
+            "--severity-error",
+            str(pcb),
+            "-o",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return report.read_text()
+
+
+@pytest.mark.skipif(not BOARD_04.exists(), reason="board 04 routed PCB not available")
+@pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+def test_subspec_standard_via_fires_under_kicad_cli(tmp_path: Path):
+    """A sub-spec STANDARD via must fire via_diameter under kicad-cli on the
+    full emitted ruleset (regression for #3736)."""
+    cli = _kicad_cli()
+    assert cli is not None
+
+    pcb = tmp_path / "board.kicad_pcb"
+    text = BOARD_04.read_text()
+
+    # Shrink one legitimate standard 0.6 mm / 0.3 mm via to a sub-spec
+    # 0.4 mm diameter (0.05 mm annular) -- below the jlcpcb-tier1 standard
+    # 0.6 mm diameter / 0.15 mm annular floors.  This is NOT a micro via, so
+    # it must be caught by the built-in standard-via floor.
+    needle = "(at 32.5 38.15)\n\t\t(size 0.6)\n\t\t(drill 0.3)"
+    replacement = "(at 32.5 38.15)\n\t\t(size 0.4)\n\t\t(drill 0.3)"
+    assert needle in text, "expected standard via at (32.5, 38.15) in board 04"
+    pcb.write_text(text.replace(needle, replacement, 1))
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+    write_drc_constraints(pcb, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    report = _run_drc(cli, pcb, tmp_path / "drc.rpt")
+
+    # The sub-spec standard via must be flagged on the FULL ruleset (which
+    # includes the solder_mask_margin rule that masks the custom DRU via
+    # rules).  Before #3736 this reported 0 via_diameter violations.
+    assert "via_diameter" in report, (
+        "sub-spec STANDARD via was not flagged by kicad-cli on the full "
+        f"ruleset -- #3736 regression. Report:\n{report}"
+    )
+
+
+@pytest.mark.skipif(not BOARD_04.exists(), reason="board 04 routed PCB not available")
+@pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+def test_board_04_micro_vias_stay_clean_under_kicad_cli(tmp_path: Path):
+    """Board 04's legitimate micro vias must stay exempt: 0 kicad-cli errors
+    on the full emitted ruleset (the micro-via exemption survives #3736)."""
+    cli = _kicad_cli()
+    assert cli is not None
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(BOARD_04.read_text())
+
+    profile = get_profile("jlcpcb-tier1")
+    rules = profile.get_design_rules(layers=4, copper_oz=1.0)
+    write_drc_constraints(pcb, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    report = _run_drc(cli, pcb, tmp_path / "drc.rpt")
+
+    # Micro vias must not trip via_diameter / annular_width.
+    assert "via_diameter" not in report, f"micro via flagged via_diameter:\n{report}"
+    assert "annular_width" not in report, f"micro via flagged annular_width:\n{report}"
