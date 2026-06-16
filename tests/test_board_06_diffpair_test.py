@@ -767,9 +767,25 @@ class TestBoard06StrictGateGuard:
     fill (< 0.102mm jlcpcb minimum), a stale-pour-carve that was invisible
     because no gate compared pad copper to zone fill.  20 -> 21; the
     tolerance floor in .github/routed-drc-tolerance.yml rises to match.
+
+    Re-baselined 2026-06-16 (Issue #3740): the residual combined-engine
+    cleanup retired the 3 fixable findings.  The 2 ``clearance_segment_via``
+    near-shorts (USB_CC2 vs USB2_D+ via, ~0.011/0.014mm) were re-routed to
+    clear the via by >= 0.1016mm; the 2 sub-minimum 0.100mm MIPI_RST
+    neck-down escapes were widened to 0.1016mm (and the recipe's
+    ``min_trace_width`` corrected 0.10 -> 0.1016 so a future regenerate
+    keeps them legal); the 1 ``clearance_pad_zone`` (J1-S2 GND vs +3V3 fill)
+    was cleared by regenerating the +3V3 B.Cu fill via ``kct zones fill``.
+    The +1V8 B.Cu zone was preserved from the pre-refill artifact because a
+    fresh fill strands U4.6 (the historical incident behind PR #3725) -- the
+    copper-union audit below confirms all 5 pour nets remain one component.
+    kicad-cli now reports 0 errors / 0 unconnected against the board's own
+    ``.kicad_dru``.  The remaining 21 -> 18 is the diff-pair quality block
+    (9 ``diffpair_length_skew`` + 9 ``diffpair_routing_continuity``; coupled
+    convergence is still 0/9, exit clause (a) tracked in #3540-#3544).
     """
 
-    EXPECTED_STRICT_GATE_ERRORS = 21
+    EXPECTED_STRICT_GATE_ERRORS = 18
     EXPECTED_ADVISORY_CONNECTIVITY = 2
 
     @pytest.fixture(scope="class")
@@ -852,11 +868,12 @@ class TestBoard06StrictGateGuard:
         * A real routing regression that introduced new DRC violations
           (e.g., a refresh PR drifted on impedance widths and triggered
           ~hundreds of impedance violations -- the PR #3273 trap).
-        * A router improvement that DROPPED the count below 17 -- in that
+        * A router improvement that DROPPED the count below 18 -- in that
           case tighten ``EXPECTED_STRICT_GATE_ERRORS`` in the SAME PR
           and tighten the allowlist in ``.github/routed-drc-tolerance.yml``
-          (currently 21; the strict gate's drift warning will be your
-          guide).  This is the OUT-OF-SCOPE follow-up from issue #3338.
+          (currently 18; the strict gate's drift warning will be your
+          guide).  Driving the remaining 18 to 0 is the diff-pair coupled-
+          convergence work tracked in #3540-#3544.
         """
         from kicad_tools.validate.checker import DRCChecker
 
@@ -903,9 +920,10 @@ class TestBoard06StrictGateGuard:
         key = "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb"
         assert key in tolerances, (
             f"Board 06 entry {key!r} missing from allowlist {allowlist_path}.  "
-            f"Issue #3326 tightened the floor from 39 to 21; if board 06 "
-            f"now reaches 0 the entry should be removed entirely (per the "
-            f"file's policy header) and this test updated."
+            f"Issue #3740 tightened the floor to 18 (the residual diff-pair "
+            f"coupled-convergence block); if board 06 now reaches 0 the entry "
+            f"should be removed entirely (per the file's policy header) and "
+            f"this test updated."
         )
         allowed = tolerances[key]
 
