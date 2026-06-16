@@ -146,21 +146,21 @@ UNROUTED_PCB = BOARD_DIR / "output" / "charlieplex_3x3.kicad_pcb"
 REQUIRED_SIGNAL_NETS_ROUTED = 8  # all 4 LINE_x + 4 NODE_x signal nets
 REQUIRED_SIGNAL_NETS_TOTAL = 8
 
-# Issue #3556 grandfather (June 13 2026): the new ``clearance_pad_zone``
-# rule (pad copper vs foreign-net zone *fill* copper -- the pad sibling
-# of #3527's segment-vs-fill rule) surfaces 4 pre-existing findings on
-# this board's fresh route: 3x GND pads overlapping the VCC F.Cu fill and
-# 1x VCC pad overlapping the GND B.Cu fill, all at the U1 DIP-8 cluster
-# (~29.59, 42-50mm) with a sub-0.01mm overlap depth.  These are the same
-# legitimate stale-pour-carve class grandfathered for boards 04-07 (the
-# fill is not re-carved after the final pad placement settles), NOT false
-# positives -- the rule correctly skips same-net fills.  They were
-# invisible before #3556 because no gate compared pad copper to zone fill.
-# The board's reach + determinism baseline is unchanged (8/8, bit-perfect
-# across seeds).  Burn-down: refill the VCC/GND pours against the final
-# pad geometry (sibling of #3549-#3553); tracked alongside the #3556
-# tolerance entry in .github/routed-drc-tolerance.yml.
-MAX_DRC_ERRORS = 4  # 4 grandfathered clearance_pad_zone (#3556)
+# Issue #3724 (June 15 2026): tightened 4 -> 0.  The 4 grandfathered
+# ``clearance_pad_zone`` findings added by #3556 (3x GND pads overlapping
+# the VCC F.Cu fill + 1x VCC pad overlapping the GND B.Cu fill, all
+# sub-0.01mm at the U1 DIP-8 cluster) were stale-pour-carve copper from
+# before the final pad geometry settled.  ``kct zones fill`` regenerated
+# the VCC/GND pours against the final trace + pad set (refill-only, no
+# copper re-route, the #3712 antipad clearance re-carves the pad antipads),
+# clearing all 4.  The copper-union pour audit confirms GND and VCC each
+# remain ONE connected copper component after the refill (no stranded
+# pads / split fills) and kicad-cli ``unconnected_items`` stays 0.  Both
+# the committed-PCB tolerance entry (.github/routed-drc-tolerance.yml) and
+# this ceiling are now 0 -- the board is honestly manufacturable.  The
+# board's reach + determinism baseline is unchanged (8/8, bit-perfect
+# across seeds).
+MAX_DRC_ERRORS = 0  # strict 0 gate after #3724 zone refill
 GRANDFATHERED_DRC_RULES = {"clearance_pad_zone"}
 
 
