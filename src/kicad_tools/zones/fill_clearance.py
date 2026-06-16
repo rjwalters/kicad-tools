@@ -350,6 +350,92 @@ def _result_polygons(result) -> list:
     return [p for p in _iter_polygons(result) if not p.is_empty and p.area > 0]
 
 
+def _collect_same_net_anchors(
+    doc: SExp,
+    shapely_mod,
+    name_map: dict[int, str],
+    zone_net: str,
+    fill_layer: str,
+) -> list:
+    """Collect copper anchors that tie a zone net to the rest of its net.
+
+    Returns the sheet-absolute shapely shapes of every pad, via, and track
+    *belonging to ``zone_net``* that sits on ``fill_layer``.  A
+    ``filled_polygon`` part is only electrically part of the pour when it
+    overlaps at least one of these anchors — KiCad's island-removal
+    (``island_removal_mode 0``) discards any fill region that does not.
+
+    The antipad subtraction in :func:`apply_foreign_pad_clearance` can split
+    a pour into several parts; carrying the anchor list lets us drop the
+    disconnected fragments (the ``isolated_copper`` islands seen on board-02
+    after the #3712 carve) instead of emitting them as copper.
+    """
+    from shapely.geometry import LineString
+
+    anchors: list = []
+
+    # Same-net pads (boxes) and vias (barrels) — reuse the obstacle geometry.
+    for obs in _collect_obstacles(doc, shapely_mod, name_map):
+        if obs.net_key != zone_net:
+            continue
+        if not _obstacle_on_layer(obs, fill_layer):
+            continue
+        anchors.append(obs.shape)
+
+    # Same-net track segments on this copper layer.
+    for seg in doc.find_all("segment"):
+        if _net_key(seg.find("net"), name_map) != zone_net:
+            continue
+        layer_node = seg.find("layer")
+        if layer_node is None or (layer_node.get_string(0) or "") != fill_layer:
+            continue
+        start = seg.find("start")
+        end = seg.find("end")
+        if start is None or end is None:
+            continue
+        sx = start.get_float(0) or 0.0
+        sy = start.get_float(1) or 0.0
+        ex = end.get_float(0) or 0.0
+        ey = end.get_float(1) or 0.0
+        width_node = seg.find("width")
+        width = (width_node.get_float(0) if width_node is not None else None) or 0.0
+        line = LineString([(sx, sy), (ex, ey)])
+        anchors.append(line.buffer(max(width, 0.0) / 2.0) if width > 0 else line)
+
+    return anchors
+
+
+def _keep_connected_rings(rings: list, anchors: list, polygon_cls) -> list:
+    """Drop fill rings not electrically connected to the zone net.
+
+    A ring is kept when its polygon intersects at least one same-net anchor
+    (pad, via, or track).  When no anchors are known (e.g. a pour with no
+    copper connection on this layer) every ring is kept — removing copper
+    with no evidence it is stranded would be more dangerous than leaving it.
+
+    This mirrors KiCad's ``island_removal_mode 0`` (remove all isolated
+    islands): the antipad subtraction plus hole-venting can shed stranded
+    sliver fragments; only the rings tied to the net's copper are real.
+    """
+    if not anchors:
+        return rings
+    kept = []
+    for ring in rings:
+        poly = polygon_cls(ring)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            continue
+        if any(poly.intersects(a) for a in anchors):
+            kept.append(ring)
+    # Never delete the whole fill: if the connectivity test rejects every
+    # ring (anchor geometry just misses every fill edge), fall back to the
+    # largest ring by area so the correction can only ever improve a board.
+    if kept:
+        return kept
+    return [max(rings, key=lambda r: abs(polygon_cls(r).buffer(0).area))]
+
+
 def apply_foreign_pad_clearance(
     doc: SExp,
     default_clearance: float = 0.3,
@@ -488,6 +574,17 @@ def apply_foreign_pad_clearance(
             rings = [r for r in rings if len(r) >= 3]
             if not rings:
                 continue
+
+            # Island removal (matches KiCad ``island_removal_mode 0``).
+            # Subtracting the foreign antipads — and venting the resulting
+            # holes out to the exterior — can shed thin sliver lobes that are
+            # no longer electrically tied to the pour.  Emitting them produces
+            # ``isolated_copper`` warnings (the board-06 split-fill regression
+            # class).  Keep only rings that overlap a same-net pad/via/track so
+            # the rewritten pour stays a single connected copper component.
+            if len(rings) > 1:
+                anchors = _collect_same_net_anchors(doc, shapely, name_map, zone_net, fill_layer)
+                rings = _keep_connected_rings(rings, anchors, Polygon)
 
             # Safety gate: reconstruct exactly what the DRC will read from
             # the rewritten rings (via the same _repair_fill_polygon path)

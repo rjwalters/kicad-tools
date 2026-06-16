@@ -519,26 +519,20 @@ tolerances:
   # tests/router/test_board03_routing_baseline.py is pinned to the same 14.
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 14
 
-  # Board 02 (charlieplex-led).  Measured at the default ``--mfr jlcpcb``
-  # tier-0 profile (no manufacturers: override).  Issue #3556 grandfather
-  # (June 13 2026): the new ``clearance_via_zone`` / ``clearance_pad_zone``
-  # DRC rule (vias and pads vs foreign-net zone *fill* copper -- the
-  # via/pad sibling of #3527's segment-vs-fill rule) surfaced 4
-  # pre-existing ``clearance_pad_zone`` findings on this committed
-  # artifact: 3x GND pads overlapping the VCC F.Cu fill + 1x VCC pad
-  # overlapping the GND B.Cu fill, all at the U1 DIP-8 cluster
-  # (~29.59, 42-50mm), sub-0.01mm overlap depth.  No gate previously
-  # compared pad copper to zone fill, so board 02's effective gate was 0;
-  # this adds an entry at 4 to lock the new gate in.  These are the same
-  # legitimate stale-pour-carve class as boards 04-07, NOT false positives
-  # (the rule correctly skips same-net fills).  The fresh re-route
-  # reproduces the identical 4 findings at the identical coordinates, so
-  # the board-02 manufacturable-baseline test
-  # (tests/router/test_board02_manufacturable_baseline.py:
-  # ``MAX_DRC_ERRORS = 4``) grandfathers the same family.  Burn-down:
-  # refill the VCC/GND pours against the final pad geometry (sibling of
-  # #3549-#3553) and drop both this entry and the test ceiling to 0.
-  boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb: 4
+  # Board 02 (charlieplex-led): entry REMOVED (strict 0 gate) by Issue
+  # #3724 (June 15 2026).  The 4 grandfathered ``clearance_pad_zone``
+  # findings added by #3556 (3x GND pads overlapping the VCC F.Cu fill +
+  # 1x VCC pad overlapping the GND B.Cu fill, all sub-0.01mm at the U1
+  # DIP-8 cluster) were stale-pour-carve copper left over from before the
+  # final pad geometry settled.  ``kct zones fill`` regenerated the VCC/GND
+  # pours against the final trace + pad set (refill-only, no copper
+  # re-route, sibling of the board-03 #3551 fix), which re-carved the
+  # antipads (#3712 clearance) and cleared all 4 findings.  The copper-union
+  # pour audit confirms GND and VCC each remain ONE connected copper
+  # component after the refill (no stranded pads / split fills, unlike the
+  # board-06 incident), and kicad-cli ``unconnected_items`` stays 0.  Fresh
+  # measurement: 0 errors under both ``kicad-cli pcb drc`` and ``kct check
+  # --mfr jlcpcb``.  Absence of this entry is now the strict 0-error gate.
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
