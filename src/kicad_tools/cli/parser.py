@@ -459,6 +459,17 @@ def _add_check_parser(subparsers) -> None:
         help="Suppress silkscreen warnings from standard KiCad library footprints",
     )
     check_parser.add_argument(
+        "--drc-only",
+        dest="drc_only",
+        action="store_true",
+        help=(
+            "Legacy DRC-only mode (issue #3750): skip the ERC / LVS / "
+            "Manifest meta sub-checks and preserve the pre-#3750 stdout "
+            "and exit-code contract.  Use this in CI scripts and recipes "
+            "that depend on the historical 'kct check' semantics."
+        ),
+    )
+    check_parser.add_argument(
         "--netlist-sync",
         action="store_true",
         help=(

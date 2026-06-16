@@ -154,8 +154,15 @@ class TestAdvisoryBanner:
         # The banner is routed to stderr (not stdout) so it does not pollute
         # ``--format json`` payloads consumed by the CI gate at
         # ``scripts/ci/check_routed_drc.py`` (see ``_emit_drift_banner``).
+        #
+        # Note (issue #3750): pass ``--drc-only`` so the new LVS meta
+        # sub-check does not (correctly) flag the schematic/PCB pin
+        # mismatch and flip the exit code to 2 -- that is the new default
+        # contract.  This test is specifically asserting the *advisory
+        # banner* contract, which is the pre-#3750 behaviour preserved
+        # under ``--drc-only``.
         pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, PCB_MISSING_R1)
-        rc = check_main([str(pcb), "--format", "summary"])
+        rc = check_main([str(pcb), "--format", "summary", "--drc-only"])
         captured = capsys.readouterr()
         assert "PCB out of sync with schematic" in captured.err
         assert "1 schematic-only" in captured.err

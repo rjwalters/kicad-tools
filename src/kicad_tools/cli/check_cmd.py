@@ -24,11 +24,82 @@ Difference from `kct drc`:
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from kicad_tools.manufacturers import get_manufacturer_ids
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
+
+# Issue #3750: meta-check status set.  ``NOT RUN`` is rendered with a space
+# in human output and ``"NOT RUN"`` in JSON; we treat it as a single token
+# so callers can compare against the literal.
+SubCheckStatus = Literal["PASSED", "FAILED", "NOT RUN"]
+
+
+@dataclass
+class SubCheckResult:
+    """Outcome of a single :mod:`kct check` sub-check (issue #3750).
+
+    ``status`` is one of ``PASSED`` / ``FAILED`` / ``NOT RUN``.  ``detail``
+    is the one-line human-readable summary that appears in parentheses on
+    the human stanza and as the ``detail`` field in the JSON envelope.
+    """
+
+    status: SubCheckStatus
+    detail: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"status": self.status, "detail": self.detail}
+
+
+@dataclass
+class MetaCheckResult:
+    """Aggregated meta-check rollup (issue #3750).
+
+    Each of the four sub-checks (DRC, ERC, LVS, Manifest) has its own
+    :class:`SubCheckResult`; ``overall`` is the rollup status that drives
+    the exit code.
+    """
+
+    drc: SubCheckResult
+    erc: SubCheckResult
+    lvs: SubCheckResult
+    manifest: SubCheckResult
+    overall: Literal["PASSED", "FAILED", "INCOMPLETE"] = "PASSED"
+
+    def _subs(self) -> tuple[SubCheckResult, ...]:
+        return (self.drc, self.erc, self.lvs, self.manifest)
+
+    def compute_overall(self, strict: bool = False) -> None:
+        """Roll up the four sub-statuses into ``self.overall``.
+
+        Rules (per issue #3750):
+
+        * ``FAILED`` if any sub-check is ``FAILED``.
+        * ``INCOMPLETE`` if any sub-check is ``NOT RUN`` (and none is
+          ``FAILED``) -- unless ``strict`` is set, in which case the
+          rollup is ``FAILED``.
+        * ``PASSED`` only when every sub-check is ``PASSED``.
+        """
+        subs = self._subs()
+        if any(s.status == "FAILED" for s in subs):
+            self.overall = "FAILED"
+        elif any(s.status == "NOT RUN" for s in subs):
+            self.overall = "FAILED" if strict else "INCOMPLETE"
+        else:
+            self.overall = "PASSED"
+
+    def to_dict(self) -> dict:
+        return {
+            "drc": self.drc.to_dict(),
+            "erc": self.erc.to_dict(),
+            "lvs": self.lvs.to_dict(),
+            "manifest": self.manifest.to_dict(),
+            "overall": self.overall,
+        }
+
 
 # Available check categories
 
@@ -131,6 +202,230 @@ def run_netlist_sync_gate(
     return 0
 
 
+def _erc_subcheck(sch_path: Path | None, strict: bool) -> SubCheckResult:
+    """Run kicad-cli ERC against the discovered schematic (issue #3750).
+
+    Returns ``NOT RUN`` when no schematic is found.  Returns ``FAILED``
+    when kicad-cli is missing, the schematic fails to load, or the report
+    contains any errors (and, under ``strict``, any warnings).
+    """
+    if sch_path is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="no schematic discovered next to PCB",
+        )
+
+    from kicad_tools.cli.runner import find_kicad_cli, run_erc
+    from kicad_tools.erc import ERCReport
+
+    if find_kicad_cli() is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="kicad-cli not found in PATH; install KiCad 8+ to enable ERC",
+        )
+
+    cli_result = run_erc(sch_path, format="json")
+    if not cli_result.success or cli_result.output_path is None:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"kicad-cli ERC failed: {(cli_result.stderr or '').strip().splitlines()[-1] if cli_result.stderr else 'unknown error'}",
+        )
+
+    try:
+        report = ERCReport.load(cli_result.output_path)
+    except Exception as e:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"failed to parse ERC report: {e}",
+        )
+
+    err_count = report.error_count
+    warn_count = report.warning_count
+    detail = f"{err_count} error(s), {warn_count} warning(s)"
+    if err_count > 0:
+        return SubCheckResult(status="FAILED", detail=detail)
+    if strict and warn_count > 0:
+        return SubCheckResult(status="FAILED", detail=detail + " (strict)")
+    return SubCheckResult(status="PASSED", detail=detail)
+
+
+def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
+    """Run live LVS via :func:`compare_netlists` (issue #3750).
+
+    Always recomputes -- never reads ``output/lvs.json`` -- so a fresh
+    PCB edit that breaks LVS is surfaced immediately.  Returns
+    ``NOT RUN`` when no schematic is found.
+    """
+    if sch_path is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="no schematic discovered; cannot compare",
+        )
+
+    try:
+        from kicad_tools.lvs.board_lvs import compare_netlists
+
+        result = compare_netlists(sch_path, pcb_path)
+    except Exception as e:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"LVS comparator raised {type(e).__name__}: {e}",
+        )
+
+    if result.clean:
+        return SubCheckResult(
+            status="PASSED",
+            detail=f"{len(result.mismatches)} mismatch(es)",
+        )
+
+    # Show up to the first 3 mismatches in stable (ref, pad) order so
+    # the detail line is bounded but informative.
+    mismatches = sorted(result.mismatches, key=lambda m: (m.ref, m.pad))
+    preview = ", ".join(
+        f"{m.ref}.{m.pad} sch={m.schematic_net!r} pcb={m.pcb_net!r}" for m in mismatches[:3]
+    )
+    suffix = "" if len(mismatches) <= 3 else f" (+{len(mismatches) - 3} more)"
+    return SubCheckResult(
+        status="FAILED",
+        detail=f"{len(mismatches)} mismatch(es): {preview}{suffix}",
+    )
+
+
+def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
+    """Compare ``output/manufacturing/manifest.json`` mtime against the PCB.
+
+    Resolution path (issue #3750):
+
+    * Look for ``<pcb-dir>/manufacturing/manifest.json`` first (recipes
+      that place the routed PCB next to a ``manufacturing/`` peer).
+    * Then ``<pcb-dir>/../manufacturing/manifest.json`` for layouts where
+      the PCB is one level deeper.
+
+    Returns ``NOT RUN`` when neither manifest is present, ``FAILED``
+    (rendered as ``STALE`` in human output) when the routed PCB is newer
+    than the manifest, and ``PASSED`` otherwise.
+    """
+    candidates = [
+        pcb_path.parent / "manufacturing" / "manifest.json",
+        pcb_path.parent.parent / "manufacturing" / "manifest.json",
+    ]
+    manifest_path: Path | None = None
+    for cand in candidates:
+        if cand.exists():
+            manifest_path = cand
+            break
+
+    if manifest_path is None:
+        return SubCheckResult(
+            status="NOT RUN",
+            detail="no manufacturing bundle; run `kct export` first",
+        )
+
+    try:
+        pcb_mtime = pcb_path.stat().st_mtime
+        manifest_mtime = manifest_path.stat().st_mtime
+    except OSError as e:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"failed to stat manifest or PCB: {e}",
+        )
+
+    # Allow a small mtime tolerance so a fresh ``git checkout`` (which
+    # writes files sequentially with sub-microsecond gaps) does not
+    # spuriously flag the manifest as stale: the PCB and manifest are
+    # written within milliseconds of each other by ``kct export``, while
+    # a *real* stale manifest lags by minutes or longer (any rebuild of
+    # the routed PCB that skipped ``kct export`` produces a multi-second
+    # gap).  ``MANIFEST_FRESHNESS_TOLERANCE_S`` carves that gap.
+    MANIFEST_FRESHNESS_TOLERANCE_S = 5.0
+    delta = pcb_mtime - manifest_mtime
+    if delta > MANIFEST_FRESHNESS_TOLERANCE_S:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"STALE: routed PCB is {delta:.1f}s newer than manifest.json",
+        )
+
+    return SubCheckResult(
+        status="PASSED",
+        detail="manifest.json mtime within tolerance of routed PCB mtime",
+    )
+
+
+def run_meta_checks(
+    pcb_path: Path,
+    drc_status: SubCheckResult,
+    schematic: str | None = None,
+    strict: bool = False,
+) -> MetaCheckResult:
+    """Run the four meta sub-checks (DRC + ERC + LVS + Manifest).
+
+    DRC is supplied by the caller (it has already run as part of the
+    main check pipeline); this helper layers ERC, LVS, and manifest
+    freshness on top and rolls them up into a single
+    :class:`MetaCheckResult` (issue #3750).
+
+    Args:
+        pcb_path: Path to the routed ``.kicad_pcb`` under test.
+        drc_status: Pre-computed DRC :class:`SubCheckResult` from the
+            current invocation's DRC pipeline.  Folded in directly so the
+            meta rollup doesn't redo the DRC work.
+        schematic: Optional explicit ``.kicad_sch`` override.  When
+            omitted, schematic discovery falls back to
+            :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb`
+            (handles the ``_routed`` suffix strip used by recipes).
+        strict: When True, ``NOT RUN`` rolls up to ``FAILED`` (instead of
+            ``INCOMPLETE``) and ERC warnings become fatal.
+    """
+    from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+    if schematic is not None:
+        resolved_sch: Path | None = Path(schematic).resolve()
+        if not resolved_sch.exists():
+            resolved_sch = None
+    else:
+        resolved_sch = resolve_schematic_for_pcb(pcb_path)
+
+    erc = _erc_subcheck(resolved_sch, strict)
+    lvs = _lvs_subcheck(resolved_sch, pcb_path)
+    manifest = _manifest_subcheck(pcb_path)
+
+    result = MetaCheckResult(drc=drc_status, erc=erc, lvs=lvs, manifest=manifest)
+    result.compute_overall(strict=strict)
+    return result
+
+
+def _format_meta_status_line(name: str, sub: SubCheckResult) -> str:
+    """Render one human-output ``DRC: PASSED (...)`` line.
+
+    ``STALE`` is rendered in place of ``FAILED`` for the Manifest
+    sub-check when the detail starts with ``STALE:`` (issue #3750's
+    human-clarity convention).  The JSON status is still ``FAILED``.
+    """
+    display_status = sub.status
+    detail = sub.detail
+    if name == "Manifest" and sub.status == "FAILED" and detail.startswith("STALE:"):
+        display_status = "STALE"
+        # Trim the "STALE: " prefix from the detail since the status
+        # column already carries it.
+        detail = detail[len("STALE: ") :]
+    return f"{name + ':':10} {display_status:8} ({detail})"
+
+
+def print_meta_check_stanza(result: MetaCheckResult) -> None:
+    """Print the per-sub-check status block + overall rollup (issue #3750).
+
+    Output goes to stdout in a stable column layout so humans can
+    diff it across runs.  The ``Overall:`` line is the rollup that
+    matches the exit-code decision.
+    """
+    print()
+    print(_format_meta_status_line("DRC", result.drc))
+    print(_format_meta_status_line("ERC", result.erc))
+    print(_format_meta_status_line("LVS", result.lvs))
+    print(_format_meta_status_line("Manifest", result.manifest))
+    print(f"{'Overall:':10} {result.overall}")
+
+
 CHECK_CATEGORIES = [
     "clearance",
     "connectivity",
@@ -229,6 +524,19 @@ def main(argv: list[str] | None = None) -> int:
         "--suppress-library",
         action="store_true",
         help="Suppress silkscreen warnings from standard KiCad library footprints",
+    )
+    parser.add_argument(
+        "--drc-only",
+        dest="drc_only",
+        action="store_true",
+        help=(
+            "Legacy DRC-only mode (issue #3750).  Skips the ERC / LVS / "
+            "Manifest meta sub-checks and preserves the pre-#3750 stdout "
+            "and exit-code contract.  Intended for CI scripts and recipes "
+            "that depend on the historical 'kct check' semantics (e.g. "
+            "scripts/ci/check_routed_drc.py and the per-board allowlists "
+            "in .github/routed-drc-tolerance.yml)."
+        ),
     )
     parser.add_argument(
         "--netlist-sync",
@@ -459,29 +767,69 @@ def main(argv: list[str] | None = None) -> int:
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
 
+    # Issue #3750: build the DRC SubCheckResult that will feed both the
+    # exit-code computation and the meta-check rollup (when not in
+    # --drc-only mode).  DRC status mirrors the legacy exit-code rule:
+    # PASSED iff 0 errors and (0 warnings under --strict).
+    error_count = sum(1 for v in violations if v.is_error)
+    warning_count = sum(1 for v in violations if v.is_warning)
+    drc_passed = error_count == 0 and not (warning_count > 0 and args.strict)
+    drc_sub = SubCheckResult(
+        status="PASSED" if drc_passed else "FAILED",
+        detail=(
+            f"{results.rules_checked} rules checked, "
+            f"{error_count} error(s), {warning_count} warning(s)"
+        ),
+    )
+
+    # Issue #3750: compute the meta-check rollup once and reuse it for
+    # both the human stanza and the JSON envelope.  Skipped entirely
+    # under --drc-only to preserve the legacy stdout/exit-code contract.
+    drc_only = getattr(args, "drc_only", False)
+    meta: MetaCheckResult | None = None
+    if not drc_only:
+        meta = run_meta_checks(
+            pcb_path,
+            drc_status=drc_sub,
+            schematic=getattr(args, "schematic", None),
+            strict=args.strict,
+        )
+
     # Output results
     if args.format == "json":
-        output_json(violations, results, pcb_path, args.mfr, layers)
+        output_json(violations, results, pcb_path, args.mfr, layers, meta=meta)
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
+        if meta is not None:
+            print_meta_check_stanza(meta)
     else:
         output_table(violations, results, pcb_path, args.mfr, layers, args.verbose)
+        if meta is not None:
+            print_meta_check_stanza(meta)
 
     # Write JSON report to file if --output specified
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json_report(violations, results, pcb_path, args.mfr, layers, output_path)
+        write_json_report(violations, results, pcb_path, args.mfr, layers, output_path, meta=meta)
 
     # Determine exit code
     # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
     # Exit 1 = reserved for tool-level failures (file not found, parse error) above
     # Exit 0 = no errors (warnings may be present without --strict; infos
     #   never affect exit code -- they are advisory by definition).
-    error_count = sum(1 for v in violations if v.is_error)
-    warning_count = sum(1 for v in violations if v.is_warning)
+    # Issue #3750: when the meta-check rollup is in play (default mode),
+    # exit 2 also when any sub-check is FAILED (or, under --strict, any
+    # sub-check is NOT RUN -- captured in ``meta.overall == 'FAILED'``).
+    if drc_only:
+        if error_count > 0 or (warning_count > 0 and args.strict):
+            return 2
+        return 0
 
-    if error_count > 0 or (warning_count > 0 and args.strict):
+    # Default (meta) mode: PASSED -> 0, FAILED -> 2, INCOMPLETE -> 0
+    # (the user opted out of strict; INCOMPLETE is advisory-only).
+    assert meta is not None  # guaranteed by the branch above
+    if meta.overall == "FAILED":
         return 2
     return 0
 
@@ -692,8 +1040,16 @@ def output_json(
     pcb_path: Path,
     mfr: str,
     layers: int,
+    meta: MetaCheckResult | None = None,
 ) -> None:
-    """Output violations as JSON."""
+    """Output violations as JSON.
+
+    Issue #3750: when ``meta`` is provided (default mode), the envelope
+    grows a top-level ``meta_checks`` field.  Legacy consumers that read
+    ``summary.passed`` / ``summary.errors`` / ``violations`` are
+    unaffected.  Under ``--drc-only`` the ``meta`` parameter is ``None``
+    and the field is omitted (``OMIT-when-absent`` convention).
+    """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
     info_count = sum(1 for v in violations if v.is_info)
@@ -718,13 +1074,15 @@ def output_json(
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
 
-    data = {
+    data: dict = {
         "file": str(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
     }
+    if meta is not None:
+        data["meta_checks"] = meta.to_dict()
     print(json.dumps(data, indent=2))
 
 
@@ -735,8 +1093,14 @@ def write_json_report(
     mfr: str,
     layers: int,
     output_path: Path,
+    meta: MetaCheckResult | None = None,
 ) -> None:
-    """Write DRC results as a JSON report file."""
+    """Write DRC results as a JSON report file.
+
+    Issue #3750: ``meta_checks`` is added to the envelope when meta-mode
+    is active.  Omitted under ``--drc-only`` to preserve the legacy
+    on-disk schema.
+    """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
     info_count = sum(1 for v in violations if v.is_info)
@@ -755,13 +1119,15 @@ def write_json_report(
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
 
-    data = {
+    data: dict = {
         "file": str(pcb_path),
         "manufacturer": mfr,
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
     }
+    if meta is not None:
+        data["meta_checks"] = meta.to_dict()
     output_path.write_text(json.dumps(data, indent=2) + "\n")
 
 

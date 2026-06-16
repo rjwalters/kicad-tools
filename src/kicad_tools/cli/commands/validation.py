@@ -227,6 +227,9 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--output", args.output])
     if getattr(args, "suppress_library", False):
         sub_argv.append("--suppress-library")
+    # Issue #3750: forward the legacy DRC-only opt-out flag.
+    if getattr(args, "drc_only", False):
+        sub_argv.append("--drc-only")
     # Issue #3154: forward the netlist-sync gate flags.
     if getattr(args, "netlist_sync", False):
         sub_argv.append("--netlist-sync")
