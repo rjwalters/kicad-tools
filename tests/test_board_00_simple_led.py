@@ -98,6 +98,131 @@ def _connectivity_error_count(check_stdout: str) -> int:
     )
 
 
+class TestBoard00D1Polarity:
+    """Regression test for #3747: schematic↔PCB D1 polarity disagreement.
+
+    The schematic generator originally wired R1.2 to D1 pin 1 (cathode, K)
+    and D1 pin 2 (anode, A) to GND, leaving the LED reverse-biased per the
+    schematic. The PCB generator at ``generate_led("D1", ..., "LED_ANODE",
+    "GND")`` already binds pad 1 → GND and pad 2 → LED_ANODE (forward
+    biased). The two halves of the recipe disagreed.
+
+    This test runs the generator end-to-end and asserts that:
+
+    - Schematic: D1 pin 1 (K) is on net ``GND``; pin 2 (A) is on net
+      ``LED_ANODE``.
+    - PCB: pad 1 is on net ``GND`` (net 3); pad 2 is on net ``LED_ANODE``
+      (net 2).
+
+    Fails on ``origin/main`` at the pre-fix commit; passes after the fix
+    in ``boards/00-simple-led/generate_design.py``. Sub-second, no
+    ``@pytest.mark.slow`` -- runs in PR CI.
+    """
+
+    @pytest.fixture(scope="class")
+    def generated_design(self, tmp_path_factory: pytest.TempPathFactory) -> Path:
+        """Run ``generate_design.py`` and return the output directory."""
+        out_dir = tmp_path_factory.mktemp("board00_polarity")
+        proc = subprocess.run(
+            [sys.executable, str(GENERATOR), str(out_dir)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        sch = out_dir / "simple_led.kicad_sch"
+        pcb = out_dir / "simple_led.kicad_pcb"
+        if not sch.exists() or not pcb.exists():
+            pytest.fail(
+                f"Generator did not produce expected artifacts "
+                f"(exit {proc.returncode}).\n"
+                f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}\n"
+                f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
+            )
+        return out_dir
+
+    def test_schematic_d1_cathode_on_gnd(self, generated_design: Path) -> None:
+        """D1 pin 1 (K, cathode) must be on the GND net in the schematic."""
+        from kicad_tools.schematic.models.schematic import Schematic
+
+        sch = Schematic.load(generated_design / "simple_led.kicad_sch")
+        net = sch.get_net_for_pin("D1", "1")
+        assert net == "GND", (
+            f"D1 pin 1 (cathode K) is on net {net!r}, expected 'GND'. "
+            "The schematic generator wired the LED reverse-biased "
+            "(see #3747)."
+        )
+
+    def test_schematic_d1_anode_on_led_anode(self, generated_design: Path) -> None:
+        """D1 pin 2 (A, anode) must be on the LED_ANODE net in the schematic."""
+        from kicad_tools.schematic.models.schematic import Schematic
+
+        sch = Schematic.load(generated_design / "simple_led.kicad_sch")
+        net = sch.get_net_for_pin("D1", "2")
+        assert net == "LED_ANODE", (
+            f"D1 pin 2 (anode A) is on net {net!r}, expected 'LED_ANODE'. "
+            "The schematic generator wired the LED reverse-biased "
+            "(see #3747)."
+        )
+
+    def test_pcb_d1_pad_to_net_mapping(self, generated_design: Path) -> None:
+        """The PCB must agree with the schematic on D1's pin-to-net mapping.
+
+        ``generate_led("D1", D1_POS, "LED_ANODE", "GND")`` binds pad 1 to
+        GND (net 3) and pad 2 to LED_ANODE (net 2). The schematic must
+        match this mapping for LVS sanity.
+        """
+        pcb_text = (generated_design / "simple_led.kicad_pcb").read_text()
+        # Net header declarations (id-to-name binding):
+        assert '(net 2 "LED_ANODE")' in pcb_text, (
+            "PCB net 2 is not LED_ANODE; net numbering changed."
+        )
+        assert '(net 3 "GND")' in pcb_text, "PCB net 3 is not GND; net numbering changed."
+        # Locate D1's footprint and verify each pad's net. The KiCad
+        # serializer uses either ``(fp_text reference "D1" ...)`` (the form
+        # this repo's PCB generator emits) or ``(property "Reference" "D1"
+        # ...)`` (KiCad 8 stable form); accept either.
+        d1_marker = re.search(
+            r'\(fp_text\s+reference\s+"D1"|\(property\s+"Reference"\s+"D1"',
+            pcb_text,
+        )
+        assert d1_marker is not None, "Could not find D1 footprint block in PCB."
+        # Walk back to the enclosing ``(footprint`` opening, then bound the
+        # block to its matching close paren so the pad search is scoped to D1.
+        start = pcb_text.rfind("(footprint", 0, d1_marker.start())
+        assert start >= 0, "Could not find enclosing (footprint for D1."
+        depth = 0
+        end = start
+        for i in range(start, len(pcb_text)):
+            ch = pcb_text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        d1_block = pcb_text[start:end]
+        # Match each pad and its (net N "NAME") binding.
+        pad_to_net: dict[str, tuple[str, str]] = {
+            m.group(1): (m.group(2), m.group(3))
+            for m in re.finditer(
+                r'\(pad\s+"(\d+)"[^()]*(?:\([^()]*\)[^()]*)*?\(net\s+(\d+)\s+"([^"]+)"\)',
+                d1_block,
+            )
+        }
+        pad1 = pad_to_net.get("1")
+        pad2 = pad_to_net.get("2")
+        assert pad1 is not None and pad1[1] == "GND", (
+            f"D1 pad 1 is on net {pad1!r}, expected GND. "
+            "PCB net assignment changed; the schematic↔PCB agreement (#3747) "
+            "now needs re-verification."
+        )
+        assert pad2 is not None and pad2[1] == "LED_ANODE", (
+            f"D1 pad 2 is on net {pad2!r}, expected LED_ANODE."
+        )
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(
     not _kicad_cli_available(),

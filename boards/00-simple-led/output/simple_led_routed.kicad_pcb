@@ -77,152 +77,14 @@
 	(net 1 "VCC")
 	(net 2 "LED_ANODE")
 	(net 3 "GND")
-	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
-		(layer "F.Cu")
-		(uuid "501c72d3-70f7-4e3e-9c9f-c70a9d3fb322")
-		(at 105 110)
-		(property "Reference" "J1"
-			(at 0 -2.5 0)
-			(layer "F.SilkS")
-			(uuid "07ceb17c-a14b-490c-a919-f9b70dd59f50")
-			(effects
-				(font
-					(size 1 1)
-					(thickness 0.15)
-				)
-			)
-		)
-		(property "Value" "PWR"
-			(at 0 4 0)
-			(layer "F.Fab")
-			(uuid "6d1e5763-b067-471c-a037-5df0a92f9599")
-			(effects
-				(font
-					(size 1 1)
-					(thickness 0.15)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 0 0 0)
-			(layer "F.Fab")
-			(hide yes)
-			(uuid "eb02d1ec-4bf1-4e3b-acb3-0de0423d7fe6")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" ""
-			(at 0 0 0)
-			(layer "F.Fab")
-			(hide yes)
-			(uuid "cd8f531f-f30d-4d92-a65f-22970832f05c")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(duplicate_pad_numbers_are_jumpers no)
-		(pad "1" thru_hole rect
-			(at 0 -1.27)
-			(size 1.7 1.7)
-			(drill 1)
-			(layers "*.Cu" "*.Mask")
-			(remove_unused_layers no)
-			(uuid "147af7d7-54e4-470c-abfc-351c874771fe")
-			(net 1 "VCC")
-		)
-		(pad "2" thru_hole oval
-			(at 0 1.27)
-			(size 1.7 1.7)
-			(drill 1)
-			(layers "*.Cu" "*.Mask")
-			(remove_unused_layers no)
-			(uuid "8fdd1cb3-dd2f-4578-a709-dd5b2a366cc1")
-			(net 3 "GND")
-		)
-		(embedded_fonts no)
-	)
-	(footprint "LED_THT:LED_D5.0mm"
-		(layer "F.Cu")
-		(uuid "8e3e9ad4-0cfa-45aa-8ea8-ffe5e5f1004c")
-		(at 120 110)
-		(property "Reference" "D1"
-			(at 0 -3.5 0)
-			(layer "F.SilkS")
-			(uuid "a80def96-dd71-43bd-bd6c-0ad771b2f902")
-			(effects
-				(font
-					(size 1 1)
-					(thickness 0.15)
-				)
-			)
-		)
-		(property "Value" "LED"
-			(at 0 3.5 0)
-			(layer "F.Fab")
-			(uuid "5a7badbd-b159-4f49-91db-73b620d9c880")
-			(effects
-				(font
-					(size 1 1)
-					(thickness 0.15)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 0 0 0)
-			(layer "F.Fab")
-			(hide yes)
-			(uuid "deb10399-95d9-4caf-a43c-947a7886ca02")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" ""
-			(at 0 0 0)
-			(layer "F.Fab")
-			(hide yes)
-			(uuid "5a549275-4aa3-4dc8-be25-19e2726e19a8")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(duplicate_pad_numbers_are_jumpers no)
-		(pad "1" thru_hole rect
-			(at -1.27 0)
-			(size 1.8 1.8)
-			(drill 0.9)
-			(layers "*.Cu" "*.Mask")
-			(remove_unused_layers no)
-			(uuid "d843c538-3dd2-436e-8093-3f5a6b672743")
-			(net 3 "GND")
-		)
-		(pad "2" thru_hole circle
-			(at 1.27 0)
-			(size 1.8 1.8)
-			(drill 0.9)
-			(layers "*.Cu" "*.Mask")
-			(remove_unused_layers no)
-			(uuid "9d038397-a588-4d4f-b7e1-137bfcd99bf7")
-			(net 2 "LED_ANODE")
-		)
-		(embedded_fonts no)
-	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(layer "F.Cu")
-		(uuid "eb26b2a8-b24e-48c2-bf3e-ffb82d1dc6d4")
+		(uuid "794749bb-a3d6-4349-b8c9-a34c059c3537")
 		(at 112.5 108)
 		(property "Reference" "R1"
 			(at 0 -1.5 0)
 			(layer "F.SilkS")
-			(uuid "0aae81bb-414a-4528-b08b-1579add70495")
+			(uuid "777775c2-3eee-457a-8a94-60640715f8d1")
 			(effects
 				(font
 					(size 1 1)
@@ -233,7 +95,7 @@
 		(property "Value" "330"
 			(at 0 1.5 0)
 			(layer "F.Fab")
-			(uuid "71b490a0-b910-4b7e-9335-9e1adb5b4d00")
+			(uuid "b54046ce-f189-44a4-b392-8f96f154b11c")
 			(effects
 				(font
 					(size 1 1)
@@ -245,7 +107,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "3dd1a420-8f88-4734-808f-7f93ae5aed08")
+			(uuid "a52d032e-b9b2-47f6-b7f3-53fbf0e2f966")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -256,7 +118,7 @@
 			(at 0 0 0)
 			(layer "F.Fab")
 			(hide yes)
-			(uuid "637c66e8-f0de-486a-8108-fe271a3d6b3c")
+			(uuid "93ab8687-8c61-4146-b6e3-750907368a1d")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -270,7 +132,7 @@
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
 			(zone_connect 2)
-			(uuid "9e575ade-69f6-4c44-84bc-d4b1a3211e05")
+			(uuid "75b2b779-2018-4825-88ac-a3754784884d")
 			(net 1 "VCC")
 		)
 		(pad "2" smd roundrect
@@ -278,8 +140,146 @@
 			(size 1 1.3)
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(roundrect_rratio 0.25)
-			(uuid "cbc5513a-11d6-4327-af7b-12bfe19e630c")
+			(uuid "20165c6d-8bd1-4f8f-a3c7-82e994aade50")
 			(net 2 "LED_ANODE")
+		)
+		(embedded_fonts no)
+	)
+	(footprint "LED_THT:LED_D5.0mm"
+		(layer "F.Cu")
+		(uuid "eb49265c-e1d7-4e69-9cd8-4066fbfd4061")
+		(at 120 110)
+		(property "Reference" "D1"
+			(at 0 -3.5 0)
+			(layer "F.SilkS")
+			(uuid "31236f41-dd5b-47b1-bdbb-64882e3f58a8")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Value" "LED"
+			(at 0 3.5 0)
+			(layer "F.Fab")
+			(uuid "49374437-df80-4304-90a1-3b3cca0f7ef8")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "ee0ebc2f-eb6b-4427-9296-42fa1a616bab")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 0 0 0)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "2770ef54-8693-4bef-a813-ff3872c90092")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(duplicate_pad_numbers_are_jumpers no)
+		(pad "1" thru_hole rect
+			(at -1.27 0)
+			(size 1.8 1.8)
+			(drill 0.9)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "d77807e7-6361-45ca-af23-37898f645777")
+			(net 3 "GND")
+		)
+		(pad "2" thru_hole circle
+			(at 1.27 0)
+			(size 1.8 1.8)
+			(drill 0.9)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "c4459d8e-e33d-49c8-b1fb-c1d1c303c41c")
+			(net 2 "LED_ANODE")
+		)
+		(embedded_fonts no)
+	)
+	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+		(layer "F.Cu")
+		(uuid "fa709e94-8e70-4b41-a70c-9f1ca3afd72b")
+		(at 105 110)
+		(property "Reference" "J1"
+			(at 0 -2.5 0)
+			(layer "F.SilkS")
+			(uuid "68bd3523-4b47-45ac-862c-b85904a549b5")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Value" "PWR"
+			(at 0 4 0)
+			(layer "F.Fab")
+			(uuid "0543b3da-eb91-4177-b9ed-5dcf94f09fbb")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "df1e1bf5-7ea2-441b-a055-22f05125f9f8")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 0 0 0)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "23c11d2f-376e-40ca-8bd7-1cc179c9513a")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(duplicate_pad_numbers_are_jumpers no)
+		(pad "1" thru_hole rect
+			(at 0 -1.27)
+			(size 1.7 1.7)
+			(drill 1)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "ecb92030-0195-42f1-b16a-70bc04a1ae48")
+			(net 1 "VCC")
+		)
+		(pad "2" thru_hole oval
+			(at 0 1.27)
+			(size 1.7 1.7)
+			(drill 1)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "4fc1af12-57f3-4d73-9067-fc966d818970")
+			(net 3 "GND")
 		)
 		(embedded_fonts no)
 	)
@@ -292,14 +292,14 @@
 		)
 		(fill no)
 		(layer "Edge.Cuts")
-		(uuid "5058f66d-6486-4ef1-9a62-324867f8d676")
+		(uuid "f4f3208a-8b6c-42e5-a432-61a61bca6f23")
 	)
 	(segment
 		(start 113.5 108)
 		(end 119.27 108)
 		(width 0.2)
 		(layer "F.Cu")
-		(uuid "132e76bd-2bc4-4fbd-9519-9d78165e32c9")
+		(uuid "0fe6beda-b770-42a4-863f-60dc5e8f94be")
 		(net 2)
 	)
 	(segment
@@ -307,13 +307,13 @@
 		(end 121.27 110)
 		(width 0.2)
 		(layer "F.Cu")
-		(uuid "170a8a95-9143-46f5-a51d-5b96576d03e4")
+		(uuid "e4ac64cb-48ed-455d-aa02-e91ee4823c4a")
 		(net 2)
 	)
 	(zone
 		(net "VCC")
 		(layer "F.Cu")
-		(uuid "dcc55b11-9683-4e5e-9a58-b0254e1a7990")
+		(uuid "a34b581a-6b41-4dbd-9bc7-68fd32937f55")
 		(hatch edge 0.5)
 		(priority 1)
 		(connect_pads (clearance 0.3)
@@ -332,7 +332,7 @@
 	(zone
 		(net "GND")
 		(layer "B.Cu")
-		(uuid "26a301f6-3e84-471d-83d0-dc28dcb4e13e")
+		(uuid "aa1d9e97-799f-4b74-ad04-be44ad531d5f")
 		(hatch edge 0.5)
 		(priority 1)
 		(connect_pads (clearance 0.3)

@@ -2,7 +2,7 @@
 title: "simple_led_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
+date: "Rev 1 | 2026-06-16 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
