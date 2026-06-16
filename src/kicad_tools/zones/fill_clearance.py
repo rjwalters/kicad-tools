@@ -585,11 +585,11 @@ def _apply_selective_pad_connection(doc: SExp) -> int:
     # (force-solid-if-any-zone-would-starve) choice.
     net_required: dict[str, float] = {}
     for zone in doc.find_all("zone"):
-        if zone.find("connect_pads") is None:
+        connect_pads = zone.find("connect_pads")
+        if connect_pads is None:
             continue  # keepout / non-copper zone
         # A zone with an explicit mode token opts out of selective per-pad
         # treatment — its zone-level mode already governs every pad.
-        connect_pads = zone.find("connect_pads")
         has_mode = any(
             child.is_atom and isinstance(child.value, str) for child in connect_pads.children
         )
@@ -613,11 +613,11 @@ def _apply_selective_pad_connection(doc: SExp) -> int:
             net_key = _net_key(pad.find("net"), name_map)
             if net_key is None:
                 continue
-            required = net_required.get(net_key)
-            if required is None:
+            pad_required = net_required.get(net_key)
+            if pad_required is None:
                 continue  # pad's net has no thermal-relief zone
             min_dim = _pad_min_dimension(pad)
-            if min_dim is not None and min_dim >= required:
+            if min_dim is not None and min_dim >= pad_required:
                 continue  # comfortably hosts 2 spokes -> keep thermal relief
             if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
                 changed += 1

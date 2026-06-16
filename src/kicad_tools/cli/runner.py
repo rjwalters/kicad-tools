@@ -497,7 +497,8 @@ def _remediate_starved_thermal(
             _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
             if not report_path.exists() or report_path.stat().st_size == 0:
                 return None
-            return json.loads(report_path.read_text())
+            parsed = json.loads(report_path.read_text())
+            return parsed if isinstance(parsed, dict) else None
         finally:
             report_path.unlink(missing_ok=True)
 
