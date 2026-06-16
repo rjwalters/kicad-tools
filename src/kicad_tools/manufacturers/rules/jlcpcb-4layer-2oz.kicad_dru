@@ -5,12 +5,13 @@
 (rule "Clearance - JLCPCB"
   (constraint clearance (min 0.1016mm)))
 (rule "Via Drill - JLCPCB"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.2mm)))
 (rule "Via Diameter - JLCPCB"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.45mm)))
 (rule "Annular Ring - JLCPCB"
+  (condition "A.Via_Type != 'Micro'")
   (constraint annular_width (min 0.1mm)))
 (rule "Copper to Edge - JLCPCB"
   (constraint edge_clearance (min 0.3mm)))

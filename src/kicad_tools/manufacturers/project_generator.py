@@ -53,6 +53,27 @@ _NON_BLOCKING_SEVERITIES: dict[str, str] = {
     "isolated_copper": "warning",
 }
 
+# Built-in via floors that accommodate micro vias (Issue #3734).
+#
+# KiCad's built-in ``via_diameter`` / ``annular_width`` / ``hole_size``
+# checks read ``design_settings.rules`` and have NO micro-via exemption --
+# they fire on every via, including the ``(via micro ...)`` structures that
+# the router's ``--micro-via-in-pad-fallback`` emits for fine-pitch escape
+# (e.g. LQFP-48 0.5 mm pitch, where a 0.6 mm via cannot fit between adjacent
+# pads).  Because KiCad applies the *most restrictive* of built-in + custom
+# rules, the ``A.Via_Type != 'Micro'`` exemption in the generated
+# ``.kicad_dru`` cannot relax the built-in minimum; the built-in floor has
+# to be lowered to the micro-via process minimum here.  The standard
+# through-via floor is still enforced -- by the ``.kicad_dru`` "Via Diameter"
+# / "Annular Ring" / "Via Drill" rules, which apply to non-micro vias only.
+# This mirrors the kct-check engine, which flatly exempts ``via_type ==
+# "micro"`` from the standard floors (see validate/rules/dimensions.py) on
+# the basis that jlcpcb-tier1's Capability+ tier supports ~0.1 mm drill /
+# 0.2 mm OD micro vias natively.
+_MICRO_VIA_FLOOR_DIAMETER_MM = 0.2
+_MICRO_VIA_FLOOR_ANNULAR_MM = 0.05
+_MICRO_VIA_FLOOR_HOLE_MM = 0.1
+
 
 def build_default_netclass(rules: DesignRules) -> dict:
     """Build the ``Default`` netclass entry for ``net_settings.classes``.
@@ -78,8 +99,14 @@ def build_default_netclass(rules: DesignRules) -> dict:
         "diff_pair_via_gap": 0.25,
         "diff_pair_width": rules.min_trace_width_mm,
         "line_style": 0,
-        "microvia_diameter": rules.min_via_diameter_mm,
-        "microvia_drill": rules.min_via_drill_mm,
+        # Micro vias use the micro-via process floor, not the standard
+        # through-via size: KiCad's ``via_diameter`` DRC check measures a
+        # ``(via micro ...)`` against the netclass ``microvia_diameter``,
+        # so leaving this at the 0.6 mm standard size flags every
+        # fine-pitch micro via (Issue #3734).  The standard through-via
+        # size remains ``via_diameter`` below.
+        "microvia_diameter": _MICRO_VIA_FLOOR_DIAMETER_MM,
+        "microvia_drill": _MICRO_VIA_FLOOR_HOLE_MM,
         "name": "Default",
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
@@ -105,10 +132,15 @@ def build_project_rules(rules: DesignRules) -> dict[str, float]:
     return {
         "min_clearance": rules.min_clearance_mm,
         "min_track_width": rules.min_trace_width_mm,
-        "min_via_diameter": rules.min_via_diameter_mm,
-        "min_via_annular_width": rules.min_annular_ring_mm,
+        # Built-in via floors are set to the micro-via process minimum so
+        # KiCad's exemption-less built-in checks do not flag the router's
+        # fine-pitch micro vias; the standard through-via floor is enforced
+        # by the ``.kicad_dru`` "Via Diameter"/"Annular Ring"/"Via Drill"
+        # rules (non-micro only).  See ``_MICRO_VIA_FLOOR_*`` above.
+        "min_via_diameter": _MICRO_VIA_FLOOR_DIAMETER_MM,
+        "min_via_annular_width": _MICRO_VIA_FLOOR_ANNULAR_MM,
         "min_through_hole_diameter": rules.min_hole_diameter_mm,
-        "min_via_hole": rules.min_via_drill_mm,
+        "min_via_hole": _MICRO_VIA_FLOOR_HOLE_MM,
         "min_hole_to_hole": rules.min_hole_to_edge_mm,
         "min_copper_edge_clearance": rules.min_copper_to_edge_mm,
         "min_silk_clearance": rules.min_solder_mask_clearance_mm,

@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-12 | jlcpcb"
+date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -123,16 +123,15 @@ Demonstrates circuit blocks API
 
 | Metric | Count |
 |--------|-------|
-| Errors | 4 |
+| Errors | 0 |
 | Warnings | 0 |
-| Blocking | 4 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| via_in_pad | 4 |
 | connectivity | 1 |
 
 
@@ -144,7 +143,6 @@ Demonstrates circuit blocks API
 
 ### Action Items
 
-- **[CRITICAL]** Fix 4 blocking DRC violations (via_in_pad (4))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.300mm required
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 

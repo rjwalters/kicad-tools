@@ -5,12 +5,13 @@
 (rule "Clearance - PCBWay"
   (constraint clearance (min 0.127mm)))
 (rule "Via Drill - PCBWay"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.2mm)))
 (rule "Via Diameter - PCBWay"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.4mm)))
 (rule "Annular Ring - PCBWay"
+  (condition "A.Via_Type != 'Micro'")
   (constraint annular_width (min 0.15mm)))
 (rule "Copper to Edge - PCBWay"
   (constraint edge_clearance (min 0.25mm)))

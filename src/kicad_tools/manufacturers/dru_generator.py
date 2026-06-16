@@ -54,22 +54,34 @@ def generate_dru(
     )
 
     # --- Via Drill ---
+    # Issue #3118 / #3734: exempt micro vias from the standard through-via
+    # floors.  The router's ``--micro-via-in-pad-fallback`` (and ``kct stitch
+    # --micro-via``) emit ``(via micro ...)`` structures that are
+    # intentionally smaller than the manufacturer's standard via floor for
+    # fine-pitch escape (e.g. LQFP-48 0.5 mm pitch, where a 0.6 mm via cannot
+    # fit between adjacent pads).  jlcpcb-tier1's published Capability+ tier
+    # supports these micro vias natively, so the kct-check engine flatly
+    # exempts ``via_type == "micro"`` (see validate/rules/dimensions.py).
+    # Mirror that exemption here so ``kicad-cli pcb drc`` agrees -- otherwise
+    # the same micro via is exempt under one engine and a hard error under
+    # the other.  KiCad scopes via type via ``A.Via_Type``.
     lines.append(
         f'(rule "Via Drill{label_suffix}"\n'
-        f"  (condition \"A.Type == 'via'\")\n"
+        f"  (condition \"A.Type == 'via' && A.Via_Type != 'Micro'\")\n"
         f"  (constraint hole_size (min {rules.min_via_drill_mm}mm)))"
     )
 
     # --- Via Diameter ---
     lines.append(
         f'(rule "Via Diameter{label_suffix}"\n'
-        f"  (condition \"A.Type == 'via'\")\n"
+        f"  (condition \"A.Type == 'via' && A.Via_Type != 'Micro'\")\n"
         f"  (constraint via_diameter (min {rules.min_via_diameter_mm}mm)))"
     )
 
     # --- Annular Ring ---
     lines.append(
         f'(rule "Annular Ring{label_suffix}"\n'
+        f"  (condition \"A.Via_Type != 'Micro'\")\n"
         f"  (constraint annular_width (min {rules.min_annular_ring_mm}mm)))"
     )
 

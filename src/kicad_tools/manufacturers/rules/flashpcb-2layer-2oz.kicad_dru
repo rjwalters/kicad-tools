@@ -5,12 +5,13 @@
 (rule "Clearance - FlashPCB"
   (constraint clearance (min 0.2032mm)))
 (rule "Via Drill - FlashPCB"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.2mm)))
 (rule "Via Diameter - FlashPCB"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.86mm)))
 (rule "Annular Ring - FlashPCB"
+  (condition "A.Via_Type != 'Micro'")
   (constraint annular_width (min 0.33mm)))
 (rule "Copper to Edge - FlashPCB"
   (constraint edge_clearance (min 1.0mm)))

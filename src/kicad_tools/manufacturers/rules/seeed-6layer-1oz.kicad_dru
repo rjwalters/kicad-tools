@@ -5,12 +5,13 @@
 (rule "Clearance - Seeed Fusion"
   (constraint clearance (min 0.127mm)))
 (rule "Via Drill - Seeed Fusion"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.25mm)))
 (rule "Via Diameter - Seeed Fusion"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.5mm)))
 (rule "Annular Ring - Seeed Fusion"
+  (condition "A.Via_Type != 'Micro'")
   (constraint annular_width (min 0.125mm)))
 (rule "Copper to Edge - Seeed Fusion"
   (constraint edge_clearance (min 0.5mm)))
