@@ -160,8 +160,10 @@ class MSTRouter:
                 # Build and sort MST edges by length
                 edges = self.build_mst(pad_objs)
                 edges.sort(
-                    key=lambda e: abs(pad_objs[e[0]].x - pad_objs[e[1]].x)
-                    + abs(pad_objs[e[0]].y - pad_objs[e[1]].y)
+                    key=lambda e: (
+                        abs(pad_objs[e[0]].x - pad_objs[e[1]].x)
+                        + abs(pad_objs[e[0]].y - pad_objs[e[1]].y)
+                    )
                 )
 
             # Issue #3485: cumulative per-net deadline.  ``per_net_timeout``

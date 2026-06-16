@@ -71,6 +71,12 @@ class ManufacturingConfig(AssemblyConfig):
     # When True (default), generate a README.txt explaining the output files.
     include_readme: bool = True
 
+    # When True (default), emit a sibling ``<board>.kicad_pro`` (and
+    # ``.kicad_dru``) next to the source PCB populated from the target
+    # manufacturer profile, so ``kicad-cli pcb drc`` loads the fab's
+    # relaxed built-in minimums instead of KiCad's stricter defaults.
+    emit_drc_constraints: bool = True
+
 
 @dataclass
 class ManufacturingResult:
@@ -84,6 +90,9 @@ class ManufacturingResult:
     manifest_path: Path | None = None
     readme_path: Path | None = None
     image_paths: list[Path] = field(default_factory=list)
+    # Sibling DRC-constraint sources (.kicad_pro / .kicad_dru) written next
+    # to the source board so kicad-cli loads the manufacturer profile.
+    drc_constraint_paths: list[Path] = field(default_factory=list)
     preflight_results: list[PreflightResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -349,6 +358,15 @@ class ManufacturingPackage:
             logger.error(f"Assembly generation failed: {e}")
             return result
 
+        # Step 0a: Emit DRC-constraint sources next to the source board so
+        # that kicad-cli pcb drc (run here in preflight, in CI, or by the
+        # gallery render pipeline) loads the manufacturer profile's relaxed
+        # built-in minimums instead of KiCad's stricter hard-coded defaults.
+        # Written before preflight so the constraints exist even when a
+        # strict-preflight failure aborts the rest of the pipeline.
+        if self.config.emit_drc_constraints:
+            self._write_drc_constraints(result)
+
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
         if preflight_cfg is None or not preflight_cfg.skip_all:
@@ -449,6 +467,71 @@ class ManufacturingPackage:
             bom_source=self.config.bom_source,
         )
         return checker.run_all()
+
+    def _detect_layer_config(self) -> tuple[int, float]:
+        """Determine (copper-layer count, copper weight) for the board.
+
+        The layer count is read from the PCB so the DRC rules selected
+        from the manufacturer profile match the board (a 4-layer board
+        uses finer via/drill minimums than a 2-layer board).  Copper
+        weight is not encoded in the board file, so it defaults to 1oz.
+
+        Returns:
+            ``(layers, copper_oz)`` -- falls back to ``(2, 1.0)`` when the
+            board cannot be parsed.
+        """
+        try:
+            from ..schema.pcb import PCB
+
+            pcb = PCB.load(str(self.pcb_path))
+            layers = len(pcb.copper_layers)
+            if layers < 1:
+                layers = 2
+        except Exception as e:
+            logger.debug("Could not detect layer count from %s: %s", self.pcb_path, e)
+            layers = 2
+        return layers, 1.0
+
+    def _write_drc_constraints(self, result: ManufacturingResult) -> None:
+        """Emit sibling .kicad_pro / .kicad_dru from the manufacturer profile.
+
+        Populates the project file's ``board.design_settings.rules`` block
+        (and a companion .kicad_dru) from the target manufacturer profile
+        so that ``kicad-cli pcb drc`` checks the board against the fab's
+        actual capabilities rather than KiCad's stricter built-in defaults.
+        """
+        try:
+            from ..manufacturers import get_profile, write_drc_constraints
+
+            profile = get_profile(self.manufacturer)
+        except Exception as e:
+            logger.warning(
+                "Skipping DRC-constraint emission (profile '%s' unavailable): %s",
+                self.manufacturer,
+                e,
+            )
+            result.warnings.append(
+                f"Could not emit DRC constraints for manufacturer '{self.manufacturer}': {e}"
+            )
+            return
+
+        layers, copper_oz = self._detect_layer_config()
+        rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+
+        try:
+            written = write_drc_constraints(
+                self.pcb_path,
+                rules,
+                manufacturer_id=profile.id,
+                layers=layers,
+                copper_oz=copper_oz,
+            )
+        except OSError as e:
+            logger.warning("Could not write DRC-constraint files: %s", e)
+            result.warnings.append(f"Could not write DRC constraints: {e}")
+            return
+
+        result.drc_constraint_paths = written
 
     def _dry_run(self, out_dir: Path, result: ManufacturingResult) -> ManufacturingResult:
         """Populate result with what *would* be generated."""
