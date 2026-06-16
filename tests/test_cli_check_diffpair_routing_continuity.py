@@ -84,7 +84,17 @@ class TestDiffPairRoutingContinuityCLI:
         """
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(minimal_diffpair_pcb), "--only", "diffpair_routing_continuity"])
+        # Issue #3750: tmp PCB has no schematic, so the meta rollup is
+        # INCOMPLETE; ``--allow-incomplete`` preserves the rule-only
+        # assertion (no violations -> 0).
+        result = main(
+            [
+                str(minimal_diffpair_pcb),
+                "--only",
+                "diffpair_routing_continuity",
+                "--allow-incomplete",
+            ]
+        )
         # 0 = passed (no violations reported because no engaged pairs).
         assert result == 0
 

@@ -500,6 +500,9 @@ class TestCLIDefaults:
         from kicad_tools.cli.check_cmd import main as check_main
 
         # Tight 0.01 mm threshold -> flag.
+        # Issue #3750: tmp PCB has no schematic, so the meta rollup is
+        # INCOMPLETE; ``--allow-incomplete`` preserves the rule-only
+        # assertion (warning != error -> exit 0).
         rc = check_main(
             [
                 str(pcb),
@@ -509,6 +512,7 @@ class TestCLIDefaults:
                 "pad_grid",
                 "--pad-grid-tolerance",
                 "0.01",
+                "--allow-incomplete",
             ]
         )
         tight_output = capsys.readouterr().out

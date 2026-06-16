@@ -88,7 +88,10 @@ class TestMatchGroupLengthSkewCLI:
         """
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(minimal_pcb), "--only", "match_group_length_skew"])
+        # Issue #3750: tmp PCBs have no sibling schematic/manifest, so
+        # the meta rollup is INCOMPLETE; pass ``--allow-incomplete`` to
+        # preserve the rule-only assertion (no violations -> exit 0).
+        result = main([str(minimal_pcb), "--only", "match_group_length_skew", "--allow-incomplete"])
         # 0 = passed (no violations reported because no group_skew_data).
         assert result == 0
 

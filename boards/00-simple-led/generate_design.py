@@ -791,6 +791,13 @@ def run_drc(pcb_path: Path) -> bool:
 
     Uses kct check as a subprocess to ensure the same DRC rules
     are applied as when running kct check manually.
+
+    Issue #3750: pass ``--allow-incomplete`` because this DRC pass runs
+    BEFORE ``export_manufacturing_bundle`` writes ``output/manufacturing/
+    manifest.json``.  Without the opt-in, the Manifest sub-check would
+    report ``NOT RUN`` (-> Overall INCOMPLETE -> exit 2) and the recipe
+    would fail here even though every other meta sub-check passes.  LVS
+    is run separately by ``run_lvs`` further down the recipe.
     """
     print("\n" + "=" * 60)
     print("Running DRC (via kct check)...")
@@ -798,7 +805,14 @@ def run_drc(pcb_path: Path) -> bool:
 
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--allow-incomplete",
+            ],
             capture_output=True,
             text=True,
         )

@@ -459,6 +459,30 @@ def _add_check_parser(subparsers) -> None:
         help="Suppress silkscreen warnings from standard KiCad library footprints",
     )
     check_parser.add_argument(
+        "--drc-only",
+        dest="drc_only",
+        action="store_true",
+        help=(
+            "Legacy DRC-only mode (issue #3750): skip the ERC / LVS / "
+            "Manifest meta sub-checks and preserve the pre-#3750 stdout "
+            "and exit-code contract.  Use this in CI scripts and recipes "
+            "that depend on the historical 'kct check' semantics."
+        ),
+    )
+    check_parser.add_argument(
+        "--allow-incomplete",
+        dest="allow_incomplete",
+        action="store_true",
+        help=(
+            "Treat Overall: INCOMPLETE (any sub-check NOT RUN) as exit 0 "
+            "(issue #3750).  By default INCOMPLETE exits non-zero so "
+            "consumers that read the exit code do not silently accept a "
+            "partially verified board.  Use this for boards / recipes that "
+            "legitimately lack a sub-check input (no schematic, or "
+            "kct check runs before kct export produces the manifest)."
+        ),
+    )
+    check_parser.add_argument(
         "--netlist-sync",
         action="store_true",
         help=(

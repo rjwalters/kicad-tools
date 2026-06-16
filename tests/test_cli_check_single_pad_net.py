@@ -149,7 +149,19 @@ class TestCheckSinglePadNetCli:
         pcb_path = tmp_path / "synthetic_nc.kicad_pcb"
         pcb_path.write_text(pcb_content)
 
-        rc = main([str(pcb_path), "--only", "single_pad_net", "--format", "json"])
+        # Issue #3750: tmp PCB has no schematic, so the meta rollup is
+        # INCOMPLETE; ``--allow-incomplete`` preserves the rule-only
+        # assertion (no errors, infos don't affect exit code -> 0).
+        rc = main(
+            [
+                str(pcb_path),
+                "--only",
+                "single_pad_net",
+                "--format",
+                "json",
+                "--allow-incomplete",
+            ]
+        )
         # Exit 0: no errors, infos do not affect exit code.
         assert rc == 0
 

@@ -227,6 +227,15 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--output", args.output])
     if getattr(args, "suppress_library", False):
         sub_argv.append("--suppress-library")
+    # Issue #3750: forward the legacy DRC-only opt-out flag.
+    if getattr(args, "drc_only", False):
+        sub_argv.append("--drc-only")
+    # Issue #3750: forward the --allow-incomplete opt-in.  By default the
+    # meta-check rollup exits non-zero when any sub-check is NOT RUN
+    # (e.g. no schematic next to the PCB); this flag preserves exit 0
+    # for boards that legitimately lack a sub-check input.
+    if getattr(args, "allow_incomplete", False):
+        sub_argv.append("--allow-incomplete")
     # Issue #3154: forward the netlist-sync gate flags.
     if getattr(args, "netlist_sync", False):
         sub_argv.append("--netlist-sync")

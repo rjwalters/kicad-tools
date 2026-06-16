@@ -96,7 +96,17 @@ class TestDiffPairClearanceIntraCLI:
         """
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(diffpair_tight_pcb), "--skip", "diffpair_clearance_intra"])
+        # Issue #3750: tmp PCB has no schematic, so the meta rollup is
+        # INCOMPLETE; ``--allow-incomplete`` preserves the rule-only
+        # assertion (no violations -> 0).
+        result = main(
+            [
+                str(diffpair_tight_pcb),
+                "--skip",
+                "diffpair_clearance_intra",
+                "--allow-incomplete",
+            ]
+        )
         # No violations reach the user.
         assert result == 0
 
