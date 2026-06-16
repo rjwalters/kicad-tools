@@ -353,12 +353,37 @@ def run_fill_zones(
                 stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
             )
 
-    # If a future KiCad ships a native fill-zones subcommand, prefer it.
-    if _kicad_cli_has_fill_zones(kicad_cli):
-        result = _run_fill_zones_native(pcb_path, output_path, kicad_cli)
+    # Pre-fill normalization (Issue #3727): legacy zones use thermal relief
+    # for *all* pads, which starves pads that cannot form the 2 spokes
+    # KiCad's geometric DRC requires (``starved_thermal``).  Upgrade such
+    # zones to a solid pad connection *before* the fill so the refilled
+    # copper reflects the stronger connection.
+    #
+    # When the normalization actually changes a zone, the fill must read the
+    # *normalized* board.
+    #
+    # * ``output_path is None`` (fill in place): the caller already accepts
+    #   that ``pcb_path`` is rewritten, so normalize it directly.
+    # * ``output_path`` given: mutating ``pcb_path`` would be a surprising
+    #   side effect, so stage the normalized board in a temp file and feed
+    #   that to the fill as input.  The fill's own ``output_path`` handling
+    #   (and the native ``--output`` contract) is left completely unchanged.
+    normalized_tmp: Path | None = None
+    if output_path is None:
+        _normalize_pad_connection_in_place(pcb_path)
+        fill_input = pcb_path
     else:
-        # Fallback: use DRC which fills zones as a side effect.
-        result = _run_fill_zones_via_drc(pcb_path, output_path, kicad_cli)
+        normalized_tmp = _stage_normalized_pad_connection(pcb_path)
+        fill_input = normalized_tmp if normalized_tmp is not None else pcb_path
+
+    try:
+        if _kicad_cli_has_fill_zones(kicad_cli):
+            result = _run_fill_zones_native(fill_input, output_path, kicad_cli)
+        else:
+            result = _run_fill_zones_via_drc(fill_input, output_path, kicad_cli)
+    finally:
+        if normalized_tmp is not None:
+            normalized_tmp.unlink(missing_ok=True)
 
     # Post-fill geometric correction (Issue #3711): kicad-cli's fill can
     # leave the antipad around a foreign-net pad/via too small on boards
@@ -370,6 +395,56 @@ def run_fill_zones(
         _apply_foreign_pad_clearance(result.output_path)
 
     return result
+
+
+def _normalize_pad_connection_in_place(pcb_path: Path) -> None:
+    """Upgrade legacy thermal-for-all zones to solid pad connection (Issue #3727).
+
+    Loads the PCB, adds a solid (``yes``) pad-connection mode to every zone
+    whose ``connect_pads`` lacks one (so pads get a full-copper connection
+    instead of a single starved thermal spoke), and rewrites the file only
+    when at least one zone changed.  Any failure is swallowed so the fill is
+    never aborted by the normalization.
+    """
+    try:
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_file(pcb_path)
+        changed = normalize_zone_pad_connection(doc)
+        if changed:
+            save_pcb(doc, pcb_path)
+    except Exception:
+        # Never let normalization abort a fill.
+        return
+
+
+def _stage_normalized_pad_connection(pcb_path: Path) -> Path | None:
+    """Stage a solid-pad-connection copy of ``pcb_path`` for the fill (Issue #3727).
+
+    Returns the path to a temp ``.kicad_pcb`` whose zones have been upgraded to
+    a solid pad connection, or ``None`` when no zone needed changing (so the
+    caller can feed the original file unchanged and skip a needless copy).  Any
+    failure returns ``None`` so the fill proceeds on the original board.
+    """
+    try:
+        import os
+
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_file(pcb_path)
+        if normalize_zone_pad_connection(doc) == 0:
+            return None
+        fd, tmp_name = tempfile.mkstemp(suffix=".kicad_pcb", prefix="zonenorm_")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        save_pcb(doc, tmp_path)
+        return tmp_path
+    except Exception:
+        return None
 
 
 def _apply_foreign_pad_clearance(pcb_path: Path) -> None:

@@ -593,6 +593,45 @@ class TestZoneNode:
         priority_node = node.get("priority")
         assert priority_node.children[0].value == 1
 
+    def test_zone_node_defaults_to_solid_pad_connection(self):
+        """Issue #3727: zones default to a solid (``yes``) pad connection.
+
+        Thermal relief for *all* pads starves small SMD pads (and some THT
+        power pads) of the 2 spokes the geometric DRC requires.  A solid
+        connection is strictly stronger, so it is the honest default that
+        clears ``starved_thermal`` without lowering the spoke count.
+        """
+        points = [(0, 0), (100, 0), (100, 50), (0, 50)]
+        node = zone_node(1, "GND", "F.Cu", points, "zone-uuid")
+
+        connect_pads = node.get("connect_pads")
+        # The leading mode token is a bare atom child before (clearance ...).
+        mode_atoms = [c.value for c in connect_pads.children if c.is_atom]
+        assert mode_atoms == ["yes"], mode_atoms
+        # The mode must serialize as a bare keyword, never a quoted string.
+        rendered = node.to_string()
+        assert "(connect_pads yes (clearance" in rendered
+        assert '"yes"' not in rendered
+
+    def test_zone_node_pad_connection_thru_hole_only(self):
+        """A caller can request ``thru_hole_only`` (solid SMD, thermal THT)."""
+        points = [(0, 0), (100, 0), (100, 50), (0, 50)]
+        node = zone_node(
+            1, "GND", "F.Cu", points, "zone-uuid", pad_connection="thru_hole_only"
+        )
+        rendered = node.to_string()
+        assert "(connect_pads thru_hole_only (clearance" in rendered
+        assert '"thru_hole_only"' not in rendered
+
+    def test_zone_node_pad_connection_empty_omits_mode(self):
+        """An empty mode reproduces the legacy thermal-for-all grammar."""
+        points = [(0, 0), (100, 0), (100, 50), (0, 50)]
+        node = zone_node(1, "GND", "F.Cu", points, "zone-uuid", pad_connection="")
+        connect_pads = node.get("connect_pads")
+        # No leading mode atom -- only the (clearance ...) child remains.
+        assert [c.name for c in connect_pads.children] == ["clearance"]
+        assert "(connect_pads (clearance" in node.to_string()
+
 
 class TestFootprintAtNode:
     """Tests for the footprint_at_node() builder."""
