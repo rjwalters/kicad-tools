@@ -54,7 +54,7 @@ author: "kicad-tools 0.13.0"
 
 | Metric | Count |
 |--------|-------|
-| Errors | 14 |
+| Errors | 0 |
 | Warnings | 0 |
 
 ## Routing Status
@@ -132,7 +132,7 @@ def test_extract_full_metrics(tmp_path: Path):
     assert m["board_size_mm"] == {"width": 80.0, "height": 100.0}
     assert m["part_count"] == 55
     assert m["nets_routed_pct"] == 82.1
-    assert m["drc_violations"] == 14
+    assert m["drc_violations"] == 0
     assert m["cost"] == {
         "per_board_usd": 9.16,
         "batch_qty": 5,
@@ -198,6 +198,30 @@ title: "sparse_board"
         assert omitted not in m
     # No DRC Status section -> drc_violations omitted.
     assert "drc_violations" not in m
+
+
+def test_status_downgraded_to_partial_when_drc_violations(tmp_path: Path):
+    # A board whose report parses fine but still has DRC errors is NOT
+    # manufacturable, so status must NOT be "ok" — it downgrades to "partial".
+    # The gallery renders status=="ok" as the "Ready" badge (#3717).
+    drc_report = SAMPLE_REPORT_MD.replace(
+        "| Errors | 0 |",
+        "| Errors | 14 |",
+    )
+    board = _make_board(tmp_path, report=drc_report)
+    m = extract_board_metrics(board)
+
+    assert m["drc_violations"] == 14
+    assert m["status"] == "partial"
+
+
+def test_status_ok_requires_zero_drc(tmp_path: Path):
+    # The mirror case: report parses and drc_violations == 0 -> status "ok".
+    board = _make_board(tmp_path)
+    m = extract_board_metrics(board)
+
+    assert m["drc_violations"] == 0
+    assert m["status"] == "ok"
 
 
 def test_bom_fallback_for_part_count(tmp_path: Path):

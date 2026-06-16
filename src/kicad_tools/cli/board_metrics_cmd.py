@@ -51,10 +51,12 @@ absent or unparseable.
 
 ``status`` is one of:
 
-* ``"ok"``           — ``output/manufacturing/`` exists and ``report.md`` parsed.
+* ``"ok"``           — ``output/manufacturing/`` exists, ``report.md`` parsed,
+                        and ``drc_violations == 0`` (manufacturable).
 * ``"partial"``      — ``output/manufacturing/`` exists but ``report.md`` is
                         absent/unparseable (only identity + whatever fields we
-                        could recover).
+                        could recover), OR ``report.md`` parsed but the board
+                        still has ``drc_violations > 0`` (not manufacturable).
 * ``"no_artifacts"`` — no ``output/manufacturing/`` directory at all.
 
 Schema versioning policy: this schema is the Phase 2 (Astro site) data contract.
@@ -304,7 +306,14 @@ def extract_board_metrics(board_dir: Path) -> dict:
 
     _attach_render_paths(metrics, output_dir)
 
-    metrics["status"] = "ok" if report_parsed else "partial"
+    # `status == "ok"` asserts the board is manufacturable, so it MUST require
+    # zero DRC violations. A board that routed (report parsed) but still has
+    # DRC errors is downgraded to "partial" — the gallery treats "ok" as the
+    # "Ready" badge, which must never appear over a violating board (#3717).
+    if not report_parsed or metrics.get("drc_violations", 0) > 0:
+        metrics["status"] = "partial"
+    else:
+        metrics["status"] = "ok"
     return metrics
 
 
