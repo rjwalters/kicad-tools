@@ -35,17 +35,17 @@ from .base import (
     match_rotation_correction,
 )
 from .dru_generator import generate_dru
+from .flashpcb import FLASHPCB_PROFILE
+from .jlcpcb import JLCPCB_PROFILE
+from .jlcpcb_tier1 import JLCPCB_TIER1_PROFILE
+from .oshpark import OSHPARK_PROFILE
+from .pcbway import PCBWAY_PROFILE
 from .project_generator import (
     build_default_netclass,
     build_project_data,
     build_project_rules,
     write_drc_constraints,
 )
-from .flashpcb import FLASHPCB_PROFILE
-from .jlcpcb import JLCPCB_PROFILE
-from .jlcpcb_tier1 import JLCPCB_TIER1_PROFILE
-from .oshpark import OSHPARK_PROFILE
-from .pcbway import PCBWAY_PROFILE
 from .seeed import SEEED_PROFILE
 
 __all__ = [
