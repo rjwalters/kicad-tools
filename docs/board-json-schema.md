@@ -24,6 +24,8 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
 | `renders`               | `output/renders/*.png` (from `kct render`, #3675) | only existing files |
 | `manufacturing_package` | `output/manufacturing/kicad_project.zip` | omitted if absent |
 | `manifest_generated_at` | `manifest.json` → `generated_at`      | ISO-8601 string |
+| `lvs_clean`             | `output/lvs.json` → `clean`           | omitted when `lvs.json` is absent (#3748, #3749) |
+| `lvs_mismatches`        | `output/lvs.json` → `len(mismatches)` | omitted when `lvs.json` is absent (#3748, #3749) |
 
 ## Example
 
@@ -49,6 +51,8 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
   },
   "manufacturing_package": "manufacturing/kicad_project.zip",
   "manifest_generated_at": "2026-06-12T05:03:41.535120+00:00",
+  "lvs_clean": true,
+  "lvs_mismatches": 0,
   "status": "ok"
 }
 ```
@@ -73,6 +77,8 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
 | `renders`               | object  | no       | Map of render id → path relative to `board.json` |
 | `manufacturing_package` | string  | no       | Path to downloadable `kicad_project.zip` |
 | `manifest_generated_at` | string  | no       | Manifest build timestamp (ISO-8601) |
+| `lvs_clean`             | boolean | no       | `true` iff `output/lvs.json` reports `clean: true`. Omitted when `lvs.json` is absent (board has not run LVS yet). |
+| `lvs_mismatches`        | integer | no       | Count of mismatches recorded in `output/lvs.json`. Omitted when `lvs.json` is absent. |
 
 ### Paths are relative to `board.json`
 
@@ -84,9 +90,14 @@ resolves to `boards/<id>/output/renders/pcb-front.png`.
 
 | Value          | Meaning |
 |----------------|---------|
-| `ok`           | `output/manufacturing/` exists and `report.md` parsed successfully |
-| `partial`      | `output/manufacturing/` exists but `report.md` is absent/unparseable; only identity and recoverable fields are present |
+| `ok`           | `output/manufacturing/` exists, `report.md` parsed successfully, `drc_violations == 0`, and (when `lvs.json` is present) `lvs_clean == true` |
+| `partial`      | `output/manufacturing/` exists but `report.md` is absent/unparseable (only identity and recoverable fields are present), OR `drc_violations > 0`, OR an explicit `lvs_clean == false` |
 | `no_artifacts` | the board has no `output/manufacturing/` directory at all |
+
+Note: a *missing* `lvs.json` does **not** downgrade `status` at the producer
+layer — boards without an LVS step yet keep their existing status. The site
+gallery enforces a stricter gate ("Ready" requires `lvs_clean === true`) by
+rendering a neutral "LVS not run" chip when the field is absent (#3749).
 
 ## Optional fields are omitted, never `null`
 

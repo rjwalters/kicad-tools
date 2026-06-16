@@ -93,8 +93,16 @@ def _make_board(
     package: bool = False,
     renders: list[str] | None = None,
     make_mfg: bool = True,
+    lvs: dict | None = None,
+    lvs_raw: str | None = None,
 ) -> Path:
-    """Build a synthetic board directory tree and return it."""
+    """Build a synthetic board directory tree and return it.
+
+    ``lvs``: if provided, writes ``output/lvs.json`` with this dict content.
+    ``lvs_raw``: if provided, writes raw text to ``output/lvs.json`` (used to
+    inject malformed JSON for error-handling tests). Mutually exclusive with
+    ``lvs``.
+    """
     board_dir = tmp_path / slug
     output_dir = board_dir / "output"
     output_dir.mkdir(parents=True)
@@ -116,6 +124,13 @@ def _make_board(
         renders_dir.mkdir()
         for name in renders:
             (renders_dir / name).write_bytes(b"\x89PNG")
+
+    if lvs is not None and lvs_raw is not None:
+        raise ValueError("lvs and lvs_raw are mutually exclusive")
+    if lvs is not None:
+        (output_dir / "lvs.json").write_text(json.dumps(lvs))
+    elif lvs_raw is not None:
+        (output_dir / "lvs.json").write_text(lvs_raw)
 
     return board_dir
 
@@ -361,3 +376,64 @@ def test_main_missing_board_dir_errors(tmp_path: Path):
 def test_main_requires_board_or_all(capsys):
     with pytest.raises(SystemExit):
         main([])
+
+
+# ── LVS sourcing (#3749) ───────────────────────────────────────────────────
+
+
+def test_lvs_clean_when_lvs_json_present_and_clean(tmp_path: Path):
+    # An LVS-clean board: lvs_clean=True, lvs_mismatches=0, status stays ok.
+    board = _make_board(
+        tmp_path,
+        lvs={
+            "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+            "clean": True,
+            "mismatches": [],
+        },
+    )
+    m = extract_board_metrics(board)
+    assert m["lvs_clean"] is True
+    assert m["lvs_mismatches"] == 0
+    assert m["status"] == "ok"
+
+
+def test_lvs_dirty_downgrades_status_to_partial(tmp_path: Path):
+    # An LVS-dirty board: lvs_clean=False, status downgrades to partial even
+    # when DRC is clean and report.md parses.
+    board = _make_board(
+        tmp_path,
+        lvs={
+            "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+            "clean": False,
+            "mismatches": [
+                {"ref": "D1", "pad": "1", "schematic_net": "LED_ANODE", "pcb_net": "GND"},
+                {"ref": "D1", "pad": "2", "schematic_net": "GND", "pcb_net": "LED_ANODE"},
+            ],
+        },
+    )
+    m = extract_board_metrics(board)
+    assert m["lvs_clean"] is False
+    assert m["lvs_mismatches"] == 2
+    # An explicit LVS mismatch downgrades status, mirroring DRC-violation logic.
+    assert m["status"] == "partial"
+
+
+def test_lvs_fields_omitted_when_lvs_json_absent(tmp_path: Path):
+    # No lvs.json on disk -> both LVS fields are OMITTED (never null), and
+    # status follows the existing DRC-only logic (does NOT downgrade).
+    board = _make_board(tmp_path)
+    m = extract_board_metrics(board)
+    assert "lvs_clean" not in m
+    assert "lvs_mismatches" not in m
+    # status stays "ok" — a missing lvs.json must not downgrade boards that
+    # have not run LVS yet. The site layer renders "LVS not run" instead.
+    assert m["status"] == "ok"
+
+
+def test_lvs_fields_omitted_when_lvs_json_malformed(tmp_path: Path):
+    # Malformed JSON in lvs.json -> warning logged, fields omitted, no crash.
+    board = _make_board(tmp_path, lvs_raw="{not json")
+    m = extract_board_metrics(board)
+    assert "lvs_clean" not in m
+    assert "lvs_mismatches" not in m
+    assert m["status"] == "ok"

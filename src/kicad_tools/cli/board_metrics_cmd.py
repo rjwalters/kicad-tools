@@ -13,6 +13,9 @@ artifacts that already exist under a board's ``output/manufacturing/`` directory
 * ``bom_jlcpcb.csv`` -> fallback part count (row count minus header).
 * ``kicad_project.zip`` -> downloadable manufacturing package path.
 * ``../renders/*.png`` -> render image paths (written by ``kct render``, #3675).
+* ``../lvs.json``    -> Layout-vs-Schematic verification (#3748, #3749);
+                        sourced from ``output/lvs.json`` (NOT under
+                        ``manufacturing/``).
 
 Output is written to ``boards/<id>/output/board.json``.
 
@@ -46,17 +49,21 @@ absent or unparseable.
       },
       "manufacturing_package": "manufacturing/kicad_project.zip",
       "manifest_generated_at": "2026-06-12T05:03:41.535120+00:00",
+      "lvs_clean": true,
+      "lvs_mismatches": 0,
       "status": "ok"
     }
 
 ``status`` is one of:
 
 * ``"ok"``           — ``output/manufacturing/`` exists, ``report.md`` parsed,
-                        and ``drc_violations == 0`` (manufacturable).
+                        ``drc_violations == 0`` (manufacturable), and (when
+                        ``lvs.json`` is present) ``lvs_clean == True``.
 * ``"partial"``      — ``output/manufacturing/`` exists but ``report.md`` is
                         absent/unparseable (only identity + whatever fields we
                         could recover), OR ``report.md`` parsed but the board
-                        still has ``drc_violations > 0`` (not manufacturable).
+                        still has ``drc_violations > 0`` (not manufacturable),
+                        OR an explicit ``lvs_clean == False`` LVS mismatch.
 * ``"no_artifacts"`` — no ``output/manufacturing/`` directory at all.
 
 Schema versioning policy: this schema is the Phase 2 (Astro site) data contract.
@@ -206,6 +213,27 @@ def _parse_cost(text: str) -> dict | None:
     return cost or None
 
 
+def _parse_lvs(lvs_path: Path, slug: str) -> dict:
+    """Source LVS fields from ``output/lvs.json`` (#3748, #3749).
+
+    Returns ``{"lvs_clean": bool, "lvs_mismatches": int}`` when the file is
+    present and readable; returns ``{}`` when the file is absent or unparseable
+    so the keys are *omitted* from the emitted ``board.json`` rather than set
+    to ``null`` (the board.json contract: missing artifact → field omitted).
+    """
+    if not lvs_path.is_file():
+        return {}
+    try:
+        data = json.loads(lvs_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("board %s: could not read lvs.json (%s)", slug, exc)
+        return {}
+    return {
+        "lvs_clean": bool(data.get("clean", False)),
+        "lvs_mismatches": len(data.get("mismatches") or []),
+    }
+
+
 def _parse_manifest(manifest_path: Path, slug: str) -> dict:
     """Parse identity fields from ``manifest.json`` (board name + timestamp)."""
     out: dict = {}
@@ -291,6 +319,11 @@ def extract_board_metrics(board_dir: Path) -> dict:
     if manifest_path.is_file():
         metrics.update(_parse_manifest(manifest_path, slug))
 
+    # lvs.json lives at output/lvs.json (NOT under output/manufacturing/) per
+    # the #3748 producer. When absent the LVS fields are *omitted* — the site
+    # renders a neutral "LVS not run" chip in that case rather than "Ready".
+    metrics.update(_parse_lvs(output_dir / "lvs.json", slug))
+
     # Fall back to BOM row count when report.md did not yield a part_count.
     if "part_count" not in metrics:
         bom_path = mfg_dir / "bom_jlcpcb.csv"
@@ -310,7 +343,15 @@ def extract_board_metrics(board_dir: Path) -> dict:
     # zero DRC violations. A board that routed (report parsed) but still has
     # DRC errors is downgraded to "partial" — the gallery treats "ok" as the
     # "Ready" badge, which must never appear over a violating board (#3717).
-    if not report_parsed or metrics.get("drc_violations", 0) > 0:
+    #
+    # An *explicit* LVS mismatch (`lvs_clean == False`) is also a downgrade:
+    # the schematic and PCB disagree, so the board will not function as
+    # designed even if it DRC-cleans (#3749). A *missing* lvs.json does NOT
+    # downgrade — boards without an LVS step yet keep their existing status,
+    # and the site layer enforces the stricter "Ready requires lvs_clean ===
+    # true" gate via the "LVS not run" (`unverified`) display variant.
+    lvs_dirty = metrics.get("lvs_clean") is False
+    if not report_parsed or metrics.get("drc_violations", 0) > 0 or lvs_dirty:
         metrics["status"] = "partial"
     else:
         metrics["status"] = "ok"

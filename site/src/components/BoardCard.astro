@@ -207,6 +207,22 @@ const statusLabel = displayStatusLabel(board);
     color: #1a1300;
   }
 
+  /* LVS-mismatch chip (#3749): the schematic and PCB disagree, so the board
+     will not function as designed even though it may be DRC-clean. We use a
+     warmer orange to distinguish it from amber "Partial" and red "DRC". */
+  .chip-lvs {
+    background: rgba(214, 130, 50, 0.92);
+    color: #1a0d00;
+  }
+
+  /* LVS-not-run chip (#3749): neutral gray for "unknown" — visually similar
+     to no_artifacts so the message is "we have not verified" rather than "we
+     verified and it is a problem". Never reads as Ready. */
+  .chip-unverified {
+    background: rgba(120, 134, 148, 0.85);
+    color: #0c1116;
+  }
+
   .chip-no_artifacts {
     background: rgba(120, 134, 148, 0.85);
     color: #0c1116;
