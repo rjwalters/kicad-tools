@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-12 | jlcpcb"
+date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -49,6 +49,14 @@ Demonstrates autolayout functionality
 1 fine-pitch component
 
 - **Fine-pitch components**: 1 (U1)
+
+## Hand-Solder (THT) Components
+
+The following 1 through-hole component is **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. It appears in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| Joystick | Joystick_Analog | 1 | J2 |
 
 ## ERC Status
 
@@ -122,28 +130,26 @@ Demonstrates autolayout functionality
 
 | Metric | Count |
 |--------|-------|
-| Errors | 4 |
+| Errors | 0 |
 | Warnings | 16 |
-| Blocking | 4 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
 | silkscreen_text_height | 16 |
-| via_in_pad | 4 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 4 blocking DRC violations (via_in_pad (4))
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 - **[OPTIONAL]** Review 16 DRC warnings
 

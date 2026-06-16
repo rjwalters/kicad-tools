@@ -501,23 +501,28 @@ tolerances:
   # regenerated the pours against the final trace set (refill-only, no
   # copper re-route), restoring the strict 0-error gate.
   #
-  # Issue #3556 grandfather (June 13 2026): the new ``clearance_via_zone``
-  # / ``clearance_pad_zone`` DRC rule (vias and pads vs foreign-net zone
-  # *fill* copper -- the via/pad sibling of #3527's segment-vs-fill rule)
-  # surfaced 14 pre-existing ``clearance_pad_zone`` findings on this
-  # committed artifact: foreign-net pads (GND / JOY_X / JOY_Y / JOY_BTN /
-  # XTAL1 / XTAL2 / VCC) overlapping the opposite-net pours (the VCC F.Cu
-  # fill and GND B.Cu fill) by 0.003-0.008mm at the dense MCU/connector
-  # cluster.  No gate previously compared pad copper to zone fill, so
-  # board 03's effective gate was 0; this re-adds an entry at 14 to lock
-  # the new gate in.  These are the same legitimate stale-pour-carve class
-  # as boards 04-07 (the fill was not re-carved after the final pad
-  # geometry settled), NOT false positives -- the rule correctly skips
-  # same-net fills.  The per-board fill regeneration (refill the VCC/GND
-  # pours against the final pads) is artifact cleanup, sibling of
-  # #3549-#3553.  ``MAX_COMMITTED_DRC_ERRORS`` in
-  # tests/router/test_board03_routing_baseline.py is pinned to the same 14.
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 14
+  # Board 03 (usb-joystick): entry REMOVED (strict 0 gate) by Issue #3730
+  # (June 15 2026).  The 14 grandfathered ``clearance_pad_zone`` findings
+  # added by #3556 (foreign-net GND / JOY_X / JOY_Y / JOY_BTN / XTAL1 /
+  # XTAL2 / VCC pads overlapping the VCC F.Cu and GND B.Cu pours by
+  # 0.003-0.008mm at the dense MCU/connector cluster) were stale-pour-carve
+  # copper left over from before the final pad geometry settled, plus the
+  # 11 ``starved_thermal`` findings the #3728 solid-thermal logic clears on
+  # SMD/THT pads.  ``kct zones fill`` regenerated the VCC/GND pours against
+  # the final trace + pad set (refill-only, no copper re-route, sibling of
+  # the board-02 #3724 / board-03 #3551 fixes), applying the merged #3728
+  # solid-thermal + #3725 island-removal logic.  Connectivity preserved:
+  # kicad-cli ``unconnected_items`` went 15 -> 14 (did NOT increase) and 0
+  # ``isolated_copper`` -- no stranded pads / split fills (cf. the board-06
+  # incident).  Fresh measurement on the committed artifact: 0 errors under
+  # both ``kicad-cli pcb drc --severity-error`` and ``kct check --mfr
+  # jlcpcb-tier1`` (16 ``silkscreen_text_height`` are warnings, not blocking
+  # errors).  Absence of this entry is now the strict 0-error gate.  The
+  # jlcpcb-tier1 ``manufacturers:`` override below is retained (the J1
+  # USB-C escape lands a standard via-in-pad that tier-0 jlcpcb forbids).
+  # ``MAX_COMMITTED_DRC_ERRORS`` in
+  # tests/router/test_board03_routing_baseline.py is tightened to 0 in the
+  # same commit.
 
   # Board 02 (charlieplex-led): entry REMOVED (strict 0 gate) by Issue
   # #3724 (June 15 2026).  The 4 grandfathered ``clearance_pad_zone``

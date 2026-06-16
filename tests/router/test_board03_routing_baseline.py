@@ -263,10 +263,20 @@ EXPECTED_TOTAL_NETS = 13
 # fill.  Ceiling raised 0 -> 14 and the rule added to the allowlist set;
 # burn-down (re-fill the VCC/GND pours against the final pads, sibling of
 # #3549-#3553) drops it back to 0.
-MAX_COMMITTED_DRC_ERRORS = 14
+# Issue #3730 (June 15 2026): the burn-down landed.  ``kct zones fill``
+# regenerated the VCC/GND pours against the final pad set (applying the
+# merged #3728 solid-thermal + #3725 island-removal logic, refill-only --
+# no copper re-route), clearing all 14 ``clearance_pad_zone`` findings and
+# the 11 ``starved_thermal`` findings.  Connectivity preserved (kicad-cli
+# ``unconnected_items`` 15 -> 14, 0 ``isolated_copper``).  Fresh
+# measurement: 0 errors under both ``kicad-cli pcb drc`` and ``kct check
+# --mfr jlcpcb-tier1``.  Ceiling tightened 14 -> 0 and ``clearance_pad_zone``
+# dropped from the allowlist set; the board-03 entry is removed from
+# ``.github/routed-drc-tolerance.yml`` (absence = strict 0 gate).  The only
+# BY-RULE entries remaining are ``silkscreen_text_height`` WARNINGS.
+MAX_COMMITTED_DRC_ERRORS = 0
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
-    "clearance_pad_zone",
 }
 
 
