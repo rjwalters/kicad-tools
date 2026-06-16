@@ -1231,14 +1231,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #   * ``manufacturer="jlcpcb"`` activates the validator's JLCPCB
     #     impedance regex defaults (synthesised onto net classes that
     #     do not declare an explicit ``target_*_impedance``).
-    #   * ``min_trace_width=0.10`` (4 mil JLCPCB 4-layer 1oz minimum)
-    #     enables the existing neck-down taper mechanic so the escape
-    #     router can fit narrow traces through fine-pitch BGA-49 / QFN /
-    #     FFC corridors while the corridor-region trace widens back to
-    #     the impedance-resolved width (~0.39 mm for 50 Ω SE / ~0.20 mm
-    #     for 100 Ω diff, etc.).  Without this, enabling the impedance
-    #     resolver would brick the BGA escapes (the 0.39 mm wide trace
-    #     does not fit through the 0.5 mm pad-pitch escape channel).
+    #   * ``min_trace_width=0.1016`` (4 mil = 0.1016 mm, the exact JLCPCB
+    #     4-layer 1oz minimum) enables the existing neck-down taper
+    #     mechanic so the escape router can fit narrow traces through
+    #     fine-pitch BGA-49 / QFN / FFC corridors while the corridor-region
+    #     trace widens back to the impedance-resolved width (~0.39 mm for
+    #     50 Ω SE / ~0.20 mm for 100 Ω diff, etc.).  Without this, enabling
+    #     the impedance resolver would brick the BGA escapes (the 0.39 mm
+    #     wide trace does not fit through the 0.5 mm pad-pitch escape
+    #     channel).  Issue #3740: this was previously 0.10 mm, which
+    #     clamped neck-down escapes to exactly 0.100 mm -- 1.6 µm below the
+    #     real 4 mil floor -- and tripped kicad-cli's ``track_width`` rule.
+    #     Using the exact 0.1016 mm keeps the escapes legal under both
+    #     DRC engines.
     rules = DesignRules(
         grid_resolution=0.05,
         trace_width=0.15,
@@ -1246,7 +1251,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         via_drill=0.25,
         via_diameter=0.45,
         manufacturer="jlcpcb",
-        min_trace_width=0.10,
+        min_trace_width=0.1016,
         neck_down_distance=1.0,
         neck_down_threshold=0.8,
     )

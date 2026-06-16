@@ -2,7 +2,7 @@
 title: "diffpair_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-12 | jlcpcb"
+date: "Rev 1 | 2026-06-16 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -38,7 +38,6 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Protocol | Signals |
 |----------|---------|
-| UART | PCIE_RX-, PCIE_TX+ |
 | USB | USB2_D+, USB2_D-, VBUS_USB |
 
 ### Power Architecture
@@ -129,16 +128,15 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 2 |
+| Errors | 0 |
 | Warnings | 3 |
-| Blocking | 2 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| clearance_segment_via | 2 |
 | connectivity | 2 |
 | silkscreen_text_height | 2 |
 | silkscreen_over_pad | 1 |
@@ -148,12 +146,10 @@ Epic #2556 Phase 4L (issue #2658)
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 2 blocking DRC violations (clearance_segment_via (2))
-- **[CRITICAL]** Increase min trace width: 0.100mm < 0.102mm required
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
 - **[OPTIONAL]** Review 3 DRC warnings
 

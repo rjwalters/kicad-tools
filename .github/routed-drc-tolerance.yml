@@ -944,9 +944,24 @@ tolerances:
   # 0.093 mm from the +3V3 fill (< 0.102 mm jlcpcb minimum), the exact
   # stale-pour-carve class that motivated #3556 but for pad copper rather
   # than a track. The fill was not regenerated after the pad's net/position
-  # settled. Floor rises 20 -> 21 to lock the new gate in; the underlying
-  # pad-vs-fill cleanup is per-board artifact work (sibling of #3549-#3553).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 21
+  # settled. Floor rose 20 -> 21 to lock the new gate in.
+  # Issue #3740 (June 16 2026): the residual combined-engine cleanup retired
+  # the 3 fixable findings -- the 2 ``clearance_segment_via`` USB_CC2-vs-
+  # USB2_D+-via near-shorts (~0.011/0.014 mm) were re-routed to clear the via
+  # by >= 0.1016 mm (USB_CC2 vertical run shifted 21.1988 -> 21.3 mm), the 2
+  # sub-minimum 0.100 mm MIPI_RST neck-down escapes were widened to 0.1016 mm
+  # (and ``min_trace_width`` in generate_design.py corrected 0.10 -> 0.1016),
+  # and the 1 ``clearance_pad_zone`` (J1-S2 GND vs +3V3 fill) was cleared by
+  # regenerating the +3V3 B.Cu fill via ``kct zones fill``.  The +1V8 B.Cu
+  # zone was preserved from the pre-refill artifact (the fresh fill strands
+  # U4.6 -- the historical incident behind PR #3725; the copper-union pour
+  # audit confirms all 5 pour nets stay one component).  kicad-cli now reports
+  # 0 errors / 0 unconnected with the board's own ``.kicad_dru``.  The
+  # remaining 18 are the diff-pair quality block (9 ``diffpair_length_skew`` +
+  # 9 ``diffpair_routing_continuity`` -- single-ended fallback measurements;
+  # coupled convergence is still 0/9, exit clause (a) tracked in #3540-#3544).
+  # Floor tightens 21 -> 18.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 18
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
