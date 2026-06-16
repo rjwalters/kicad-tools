@@ -68,6 +68,167 @@ class TestDRCStatusViolationsByType:
         assert "violations_by_type" not in d
 
 
+class _FakeCliViolation:
+    """Minimal stand-in for a kicad-cli DRCViolation (error severity)."""
+
+    def __init__(self, type_str: str, is_error: bool = True):
+        self.type_str = type_str
+        self.is_error = is_error
+
+
+class _FakeCliReport:
+    """Minimal stand-in for drc.DRCReport with only ``violations``."""
+
+    def __init__(self, violations):
+        self.violations = violations
+
+
+class TestMergeGeometricDrc:
+    """Tests for ManufacturingAudit._merge_geometric_drc (issue #3721).
+
+    The combined-count logic is exercised by mocking both engines' outputs
+    so the test never requires kicad-cli to be installed.
+    """
+
+    def _make_audit(self, tmp_path):
+        """Build an audit instance without running anything."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    def _patch_cli(self, monkeypatch, *, cli_violations, found=True):
+        """Patch kicad-cli discovery, subprocess, and report parsing.
+
+        When ``found`` is False, simulates kicad-cli missing from PATH.
+        Otherwise ``cli_violations`` is returned from DRCReport.load.
+        """
+        from kicad_tools import drc as drc_mod
+        from kicad_tools.audit import auditor as auditor_mod
+        from kicad_tools.cli import runner as runner_mod
+
+        # _merge_geometric_drc imports find_kicad_cli from cli.runner at call
+        # time, so patch the source module.
+        monkeypatch.setattr(
+            runner_mod,
+            "find_kicad_cli",
+            lambda: (Path("/fake/kicad-cli") if found else None),
+        )
+
+        def _fake_run(cmd, *args, **kwargs):
+            # Materialise the --output path so the method proceeds to parse.
+            out_idx = cmd.index("--output") + 1
+            Path(cmd[out_idx]).write_text("{}")
+
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _R()
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", _fake_run)
+        monkeypatch.setattr(
+            drc_mod.DRCReport,
+            "load",
+            classmethod(lambda cls, path: _FakeCliReport(cli_violations)),
+        )
+
+    def test_combined_count_sums_both_engines(self, tmp_path, monkeypatch):
+        """Errors = --mfr errors + kicad-cli errors; both types in table."""
+        audit = self._make_audit(tmp_path)
+        # Pre-populate a --mfr engine result (e.g. 4 clearance_pad_zone).
+        status = DRCStatus(
+            error_count=4,
+            warning_count=0,
+            blocking_count=4,
+            passed=False,
+            violations_by_type={"clearance_pad_zone": 4},
+        )
+        self._patch_cli(
+            monkeypatch,
+            cli_violations=[
+                _FakeCliViolation("starved_thermal"),
+                _FakeCliViolation("starved_thermal"),
+                _FakeCliViolation("track_width"),
+            ],
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 7  # 4 + 3
+        assert status.blocking_count == 7
+        assert status.passed is False
+        # Both engines represented in the by-type table.
+        assert status.violations_by_type["clearance_pad_zone"] == 4
+        assert status.violations_by_type["kicad-cli:starved_thermal"] == 2
+        assert status.violations_by_type["kicad-cli:track_width"] == 1
+
+    def test_zero_mfr_but_cli_errors_reports_them(self, tmp_path, monkeypatch):
+        """A board clean by --mfr but dirty by kicad-cli is NOT passing."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+        self._patch_cli(
+            monkeypatch,
+            cli_violations=[_FakeCliViolation("starved_thermal")] * 10,
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 10
+        assert status.blocking_count == 10
+        assert status.passed is False
+        assert status.violations_by_type["kicad-cli:starved_thermal"] == 10
+
+    def test_clean_by_both_reports_zero(self, tmp_path, monkeypatch):
+        """0 --mfr + 0 kicad-cli stays at 0 and passing."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+        self._patch_cli(monkeypatch, cli_violations=[])
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 0
+        assert status.blocking_count == 0
+        assert status.passed is True
+        assert status.violations_by_type == {}
+
+    def test_graceful_fallback_when_kicad_cli_absent(self, tmp_path, monkeypatch):
+        """Missing kicad-cli leaves --mfr count intact and adds a note."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(
+            error_count=4,
+            blocking_count=4,
+            passed=False,
+            violations_by_type={"clearance_pad_zone": 4},
+        )
+        self._patch_cli(monkeypatch, cli_violations=[], found=False)
+
+        audit._merge_geometric_drc(status)
+
+        # --mfr count unchanged; no crash; note recorded.
+        assert status.error_count == 4
+        assert status.blocking_count == 4
+        assert status.violations_by_type == {"clearance_pad_zone": 4}
+        assert "kicad-cli not found" in status.details
+
+    def test_cli_warnings_do_not_count(self, tmp_path, monkeypatch):
+        """Non-error kicad-cli violations are ignored (severity-error guard)."""
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+        self._patch_cli(
+            monkeypatch,
+            cli_violations=[
+                _FakeCliViolation("silk_over_copper", is_error=False),
+                _FakeCliViolation("starved_thermal", is_error=True),
+            ],
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.error_count == 1
+        assert status.violations_by_type == {"kicad-cli:starved_thermal": 1}
+
+
 class TestAuditResult:
     """Tests for AuditResult class."""
 
@@ -1246,6 +1407,22 @@ class TestCorruptionGuard:
 
 class TestZoneConnectedNets:
     """Tests for zone-connected net reclassification in connectivity check."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_geometric_drc(self, monkeypatch):
+        """Isolate the connectivity-verdict assertions from kicad-cli DRC.
+
+        These tests assert on the *connectivity* advisory verdict using
+        minimal synthetic boards.  Since issue #3721 the audit also folds in
+        KiCad's geometric DRC (kicad-cli pcb drc), which finds unrelated
+        geometric defects on these hand-written boards and would flip the
+        verdict to NOT_READY.  Simulate the documented "kicad-cli absent"
+        graceful-fallback path so the geometric engine does not perturb the
+        connectivity subject under test.
+        """
+        from kicad_tools.cli import runner as runner_mod
+
+        monkeypatch.setattr(runner_mod, "find_kicad_cli", lambda: None)
 
     # PCB where GND net has a zone definition but no filled_polygons.
     # Two footprints with pads on GND (net 1) and +3V3 (net 2).
