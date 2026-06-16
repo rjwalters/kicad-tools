@@ -1,30 +1,30 @@
 (version 1)
-(rule "Trace Width - jlcpcb-tier1"
+(rule "Trace Width - jlcpcb"
   (condition "A.Type == 'track'")
   (constraint track_width (min 0.127mm)))
-(rule "Clearance - jlcpcb-tier1"
+(rule "Clearance - jlcpcb"
   (constraint clearance (min 0.127mm)))
-(rule "Via Drill - jlcpcb-tier1"
+(rule "Via Drill - jlcpcb"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.3mm)))
-(rule "Via Diameter - jlcpcb-tier1"
+(rule "Via Diameter - jlcpcb"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.6mm)))
-(rule "Annular Ring - jlcpcb-tier1"
+(rule "Annular Ring - jlcpcb"
   (condition "A.Via_Type != 'Micro'")
   (constraint annular_width (min 0.15mm)))
-(rule "Copper to Edge - jlcpcb-tier1"
+(rule "Copper to Edge - jlcpcb"
   (constraint edge_clearance (min 0.3mm)))
-(rule "Hole to Edge - jlcpcb-tier1"
+(rule "Hole to Edge - jlcpcb"
   (condition "A.Type == 'via' || A.Type == 'pad'")
   (constraint hole_clearance (min 0.5mm)))
-(rule "Silkscreen Width - jlcpcb-tier1"
+(rule "Silkscreen Width - jlcpcb"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_thickness (min 0.15mm)))
-(rule "Silkscreen Height - jlcpcb-tier1"
+(rule "Silkscreen Height - jlcpcb"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 1.0mm)))
-(rule "Solder Mask Clearance - jlcpcb-tier1"
+(rule "Solder Mask Clearance - jlcpcb"
   (constraint solder_mask_margin (min 0.05mm)))
-(rule "Solder Mask Dam - jlcpcb-tier1"
+(rule "Solder Mask Dam - jlcpcb"
   (constraint physical_hole_clearance (min 0.1mm)))

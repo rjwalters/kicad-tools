@@ -116,7 +116,7 @@ def create_led_schematic(output_dir: Path) -> Path:
     # Get component X positions
     x_j1 = j1_pin1[0]
     x_r1 = r1_pin1[0]
-    x_d1 = d1_pin2[0]
+    x_d1 = d1_pin1[0]
 
     # VCC rail segments (only from power symbol to last VCC connection - R1)
     vcc_x_points = sorted([x_left, x_j1, x_r1])
@@ -162,12 +162,12 @@ def create_led_schematic(output_dir: Path) -> Path:
     sch.add_junction(x_r1, rail_vcc_y)
     print("   R1 -> VCC rail")
 
-    # R1 Pin 2 to D1 Pin 1 (Cathode) - LED_ANODE net
-    sch.add_wire(r1_pin2, d1_pin1, warn_on_collision=False)
+    # R1 Pin 2 to D1 Pin 2 (Anode) - LED_ANODE net
+    sch.add_wire(r1_pin2, d1_pin2, warn_on_collision=False)
     print("   R1 <-> D1 (internal connection)")
 
-    # D1 Pin 2 (Anode) to GND rail
-    sch.add_wire(d1_pin2, (x_d1, rail_gnd_y))
+    # D1 Pin 1 (Cathode) to GND rail
+    sch.add_wire(d1_pin1, (x_d1, rail_gnd_y))
     sch.add_junction(x_d1, rail_gnd_y)
     print("   D1 -> GND rail")
 
