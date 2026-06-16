@@ -895,9 +895,7 @@ class ManufacturingAudit:
 
                 top = sorted(cli_summary.items(), key=lambda x: -x[1])[:3]
                 cli_detail = "kicad-cli: " + ", ".join(f"{t} ({c})" for t, c in top)
-                status.details = (
-                    f"{status.details}; {cli_detail}" if status.details else cli_detail
-                )
+                status.details = f"{status.details}; {cli_detail}" if status.details else cli_detail
         except subprocess.TimeoutExpired:
             note = "kicad-cli DRC timed out (geometric DRC skipped)"
             status.details = f"{status.details}; {note}" if status.details else note
