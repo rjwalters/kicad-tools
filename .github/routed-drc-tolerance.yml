@@ -1470,18 +1470,37 @@ tolerances:
   # tests/test_board_05_drc_allowlist.py is pinned to the same 30.
   boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 30
 
-  # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Issue #3556 grandfather
-  # (June 13 2026): the new ``clearance_via_zone`` / ``clearance_pad_zone``
-  # DRC rule (vias and pads vs foreign-net zone *fill* copper -- the
-  # via/pad sibling of #3527's segment-vs-fill rule) surfaced 13
-  # pre-existing ``clearance_pad_zone`` findings on the committed artifact:
-  # SWDIO/SWCLK/SWO/NRST/OSC_IN/GND escape-side pads sub-clearance to the
-  # +3.3V pour.  No gate previously compared pad copper to zone fill, so
-  # board 04's effective floor was 0; this re-adds an entry at 13 to lock
-  # the new gate in.  The per-board fill regeneration (refill the +3.3V/GND
-  # pours against the final escape geometry) is artifact cleanup, sibling
-  # of #3549-#3553.  tests/test_board_04_mfr_gate.py reads this floor.
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 13
+  # Board 04 (STM32F103C8T6 LQFP-48 devboard): entry REMOVED (strict 0
+  # gate) by Issue #3734 (June 16 2026).  The 13 grandfathered
+  # ``clearance_pad_zone`` findings added by #3556 (SWDIO/SWCLK/SWO/NRST/
+  # OSC_IN/GND escape-side pads sub-clearance to the +3.3V / GND pours)
+  # were stale-pour-carve copper left over from before the final escape
+  # geometry settled.  ``kct zones fill`` regenerated the +3.3V / GND
+  # pours against the final trace + pad set (refill-only, no copper
+  # re-route, sibling of the board-02 #3724 / board-03 #3730 fixes),
+  # clearing every finding under ``kct check --mfr jlcpcb-tier1`` (only the
+  # advisory GND/NRST ``connectivity`` finding remains, and that is
+  # excluded from the gate per ``DRCChecker.ADVISORY_RULE_IDS`` #3074).
+  #
+  # The 3 sub-spec via_diameter + 3 annular_width findings that ``kicad-cli
+  # pcb drc`` previously reported on the OSC_OUT/NRST/SWO LQFP-48 0.5 mm
+  # pitch escape are ``(via micro ...)`` structures the router's
+  # ``--micro-via-in-pad-fallback`` emits (a 0.6 mm standard via cannot fit
+  # between 0.5 mm-pitch pads; see the board-04 history below and #2951 /
+  # #3073 / #3118).  ``kct check`` already exempts ``via_type == "micro"``
+  # from the standard via floors; #3734 brings ``kicad-cli`` into agreement
+  # by (a) emitting ``A.Via_Type != 'Micro'`` conditions on the generated
+  # ``.kicad_dru`` via rules and (b) relaxing the ``.kicad_pro`` built-in /
+  # netclass micro-via floor (KiCad applies the most restrictive of
+  # built-in + custom, so the DRU exemption alone is insufficient).  Fresh
+  # measurement on the committed artifact: 0 errors under BOTH
+  # ``kicad-cli pcb drc --severity-error`` and ``kct check --mfr
+  # jlcpcb-tier1``; 0 ``isolated_copper``; kicad-cli ``unconnected_items``
+  # 6 -> 4 (refill reconnected 2 GND pads -- did NOT increase).  Absence of
+  # this entry is now the strict 0-error gate.  The jlcpcb-tier1
+  # ``manufacturers:`` override below is retained (the micro-via escape is
+  # only legal under tier-1's Capability+ process).  ``MAX_DRC_ERRORS`` in
+  # tests/test_board_04_mfr_gate.py is tightened to 0 in the same commit.
 
   # Board 04 history (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12
   # by Issue #2908.  The narrowing introduced in #2871 / #2874

@@ -24,6 +24,9 @@ from kicad_tools.manufacturers import (
     write_drc_constraints,
 )
 from kicad_tools.manufacturers.project_generator import (
+    _MICRO_VIA_FLOOR_ANNULAR_MM,
+    _MICRO_VIA_FLOOR_DIAMETER_MM,
+    _MICRO_VIA_FLOOR_HOLE_MM,
     _NON_BLOCKING_SEVERITIES,
     merge_project_rules,
 )
@@ -45,26 +48,38 @@ def test_project_rules_match_profile_minimums():
 
     assert pro_rules["min_track_width"] == rules.min_trace_width_mm
     assert pro_rules["min_clearance"] == rules.min_clearance_mm
-    assert pro_rules["min_via_diameter"] == rules.min_via_diameter_mm
-    assert pro_rules["min_via_hole"] == rules.min_via_drill_mm
+    # The built-in via floors are relaxed to the micro-via process minimum
+    # so KiCad's exemption-less built-in checks do not flag the router's
+    # fine-pitch micro vias (Issue #3734).  The standard through-via floor
+    # is enforced by the .kicad_dru "Via Diameter"/"Annular Ring"/"Via
+    # Drill" rules (A.Via_Type != 'Micro') and the netclass via size.
+    assert pro_rules["min_via_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
+    assert pro_rules["min_via_hole"] == _MICRO_VIA_FLOOR_HOLE_MM
+    assert pro_rules["min_via_annular_width"] == _MICRO_VIA_FLOOR_ANNULAR_MM
     assert pro_rules["min_through_hole_diameter"] == rules.min_hole_diameter_mm
-    assert pro_rules["min_via_annular_width"] == rules.min_annular_ring_mm
     assert pro_rules["min_copper_edge_clearance"] == rules.min_copper_to_edge_mm
     assert pro_rules["min_hole_to_hole"] == rules.min_hole_to_edge_mm
 
 
 def test_project_rules_change_with_layer_config():
-    """A 4-layer profile selects finer via/drill minimums than 2-layer."""
+    """A 4-layer profile selects finer via/drill minimums than 2-layer.
+
+    The built-in ``min_via_*`` floors are now pinned to the micro-via
+    process minimum (Issue #3734), so the layer-dependent *standard*
+    via/drill floor is reflected in the ``Default`` netclass via size
+    instead -- that is what the .kicad_dru "Via Diameter" rule and KiCad's
+    via-size DRC enforce for non-micro vias.
+    """
     profile = get_profile("jlcpcb-tier1")
     rules_2l = profile.get_design_rules(layers=2, copper_oz=1.0)
     rules_4l = profile.get_design_rules(layers=4, copper_oz=1.0)
 
-    pro_2l = build_project_rules(rules_2l)
-    pro_4l = build_project_rules(rules_4l)
+    nc_2l = build_default_netclass(rules_2l)
+    nc_4l = build_default_netclass(rules_4l)
 
-    # 4-layer JLCPCB allows smaller vias/holes than 2-layer
-    assert pro_4l["min_via_diameter"] < pro_2l["min_via_diameter"]
-    assert pro_4l["min_via_hole"] < pro_2l["min_via_hole"]
+    # 4-layer JLCPCB allows smaller standard vias/holes than 2-layer.
+    assert nc_4l["via_diameter"] < nc_2l["via_diameter"]
+    assert nc_4l["via_drill"] < nc_2l["via_drill"]
 
 
 def test_project_rules_differ_by_manufacturer():
@@ -240,5 +255,8 @@ def test_export_emits_sibling_kicad_pro(tmp_path: Path):
     # Board 03 is 2-layer -> 2-layer profile minimums.
     assert pro_rules["min_track_width"] == rules.min_trace_width_mm
     assert pro_rules["min_clearance"] == rules.min_clearance_mm
-    assert pro_rules["min_via_diameter"] == rules.min_via_diameter_mm
+    # Built-in via floor is the micro-via process minimum (Issue #3734);
+    # the standard 2-layer via size lives in the Default netclass.
+    assert pro_rules["min_via_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
+    assert data["net_settings"]["classes"][0]["via_diameter"] == rules.min_via_diameter_mm
     assert data["net_settings"]["classes"][0]["clearance"] == rules.min_clearance_mm

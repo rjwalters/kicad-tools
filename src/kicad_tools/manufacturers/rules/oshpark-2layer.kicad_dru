@@ -5,12 +5,13 @@
 (rule "Clearance - OSHPark"
   (constraint clearance (min 0.1524mm)))
 (rule "Via Drill - OSHPark"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.254mm)))
 (rule "Via Diameter - OSHPark"
-  (condition "A.Type == 'via'")
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.508mm)))
 (rule "Annular Ring - OSHPark"
+  (condition "A.Via_Type != 'Micro'")
   (constraint annular_width (min 0.127mm)))
 (rule "Copper to Edge - OSHPark"
   (constraint edge_clearance (min 0.381mm)))

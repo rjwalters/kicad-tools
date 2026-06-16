@@ -13,8 +13,8 @@ the same gate the CI ``routed-pcb-drc-check`` job uses
    ``.github/routed-drc-tolerance.yml``'s ``manufacturers:`` block.
 
 2. The gate's blocking error count stays at or below the floor declared
-   for board 04 in the same YAML (currently 1, post-#3118 micro-via
-   in-pad rescue).
+   for board 04 in the same YAML (strict 0 since #3734 -- the board-04
+   ``tolerances:`` entry was removed, so the floor defaults to 0).
 
 3. The advisory ``connectivity`` finding documented in
    ``.github/routed-drc-tolerance.yml`` (a single stranded GND-stitch
@@ -149,9 +149,10 @@ def test_board_04_blocking_errors_within_ci_floor(board_04_mfr_check: dict) -> N
     a blocking DRC error that the CI gate does not allowlist, this pin
     fires immediately at PR time rather than after a fleet-status sweep.
 
-    The current floor is 1 (post-#3118).  If the floor is tightened, the
-    YAML and this test must move in lockstep -- the test reads the floor
-    from the YAML so a YAML edit is sufficient.
+    The current floor is 0 (strict, since #3734 removed the board-04
+    ``tolerances:`` entry).  If the floor is loosened, the YAML and this
+    test stay in lockstep -- the test reads the floor from the YAML
+    (defaulting to 0 when no entry exists) so a YAML edit is sufficient.
     """
     summary = board_04_mfr_check.get("summary", {})
     violations = board_04_mfr_check.get("violations", [])
