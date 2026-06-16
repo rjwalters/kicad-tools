@@ -2,7 +2,7 @@
 title: "simple_led_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-15 | jlcpcb"
+date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 3 (1 SMD, 2 THT, 0 other) |
 | Nets | 3 |
-| Traces | 4 segments |
+| Traces | 2 segments |
 | Vias | 0 |
 | Board Size | 25.0 x 20.0 mm |
 

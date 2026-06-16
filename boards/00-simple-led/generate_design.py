@@ -249,11 +249,24 @@ def create_led_pcb(output_dir: Path) -> Path:
     }
 
     # Component positions (compact layout)
-    # J1 on left, R1 in middle (offset up for GND clearance), D1 on right
-    # R1 is rotated 90° so its pin 2 extends downward; moving R1 up
-    # ensures the GND trace from J1.2 to D1.2 can route below R1
+    # J1 on left, R1 in middle, D1 on right.
+    #
+    # All footprints are placed at rotation 0 (no 90° rotation).  KiCad's
+    # on-disk footprint angle is applied in a Y-down frame (effectively a
+    # clockwise screen rotation), which kicad-tools' internal pad-position
+    # transform models as a counter-clockwise math rotation -- the two
+    # conventions disagree for cardinal 90°/270° rotations and AGREE only
+    # when sin(angle) == 0 (i.e. 0° or 180°).  Board 00 was the only demo
+    # board using a 90° rotation, so its routed pads landed at mirror-image
+    # positions under kicad-cli vs ``kct check`` and no single routing could
+    # satisfy both DRC engines (issue #3737).  Keeping every footprint at 0°
+    # removes the ambiguity so both engines see identical pad positions.
+    #
+    # With rotation 0 the resistor/LED pads run horizontally (pin 1 left,
+    # pin 2 right), so R1 sits on the VCC row and D1 on the GND row; the
+    # LED_ANODE net links R1 pin 2 to D1 pin 2 across the middle.
     J1_POS = (BOARD_ORIGIN_X + 5, BOARD_ORIGIN_Y + 10)
-    R1_POS = (BOARD_ORIGIN_X + 12.5, BOARD_ORIGIN_Y + 8)  # Offset up by 2mm
+    R1_POS = (BOARD_ORIGIN_X + 12.5, BOARD_ORIGIN_Y + 8)
     D1_POS = (BOARD_ORIGIN_X + 20, BOARD_ORIGIN_Y + 10)
 
     def generate_header() -> str:
@@ -342,15 +355,15 @@ def create_led_pcb(output_dir: Path) -> Path:
         return f"""  (footprint "Resistor_SMD:R_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
-    (at {x} {y} 90)
+    (at {x} {y} 0)
     (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd roundrect (at {-pad_offset} 0 90) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin1_num} "{pin1_net}"))
-    (pad "2" smd roundrect (at {pad_offset} 0 90) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin2_num} "{pin2_net}"))
+    (pad "1" smd roundrect (at {-pad_offset} 0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin1_num} "{pin1_net}"))
+    (pad "2" smd roundrect (at {pad_offset} 0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin2_num} "{pin2_net}"))
   )"""
 
     def generate_led(ref: str, pos: tuple, anode_net: str, cathode_net: str) -> str:
@@ -369,15 +382,15 @@ def create_led_pcb(output_dir: Path) -> Path:
         return f"""  (footprint "LED_THT:LED_D5.0mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
-    (at {x} {y} 90)
+    (at {x} {y} 0)
     (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "LED" (at 0 3.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" thru_hole rect (at {-pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
-    (pad "2" thru_hole circle (at {pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
+    (pad "1" thru_hole rect (at {-pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
+    (pad "2" thru_hole circle (at {pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
   )"""
 
     # Build the PCB file
@@ -416,6 +429,139 @@ def create_led_pcb(output_dir: Path) -> Path:
     print(f"   Nets: {len([n for n in NETS.values() if n > 0])} (VCC, LED_ANODE, GND)")
 
     return pcb_path
+
+
+def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
+    """Replace LED_ANODE's routed segments with a short-free route (issue #3737).
+
+    The grid autorouter's LED_ANODE route grazes D1's GND pad on this board,
+    a real copper short under kicad-cli's DRC.  Rather than depend on the
+    router for this trivial two-pad net, recompute an explicit L-shaped route
+    from the actual pad positions in the written PCB:
+
+      * Read R1 pin 2 (LED_ANODE source) and D1 pins 1/2 (GND + LED_ANODE).
+      * Run east along R1's row (above the D1 pad row), then drop onto D1's
+        anode at 45 degrees from due north so the diagonal stays clear of
+        D1's GND pin (which sits west of the anode).
+
+    Every existing ``(segment ... (net N))`` for the LED_ANODE net is dropped
+    and replaced by this chain (0.2 mm wide, ``F.Cu``).  Rewritten in place.
+    """
+    import math
+
+    from kicad_tools.sexp import SExp, parse_file
+
+    doc = parse_file(pcb_path)
+
+    # Resolve the LED_ANODE net number from the header net table.
+    net_num: int | None = None
+    for net in doc.find_all("net"):
+        if net.get_string(1) == net_name:
+            net_num = net.get_int(0)
+            break
+    if net_num is None:
+        raise ValueError(f"net {net_name!r} not found in PCB net table")
+
+    # Read the relevant pad positions (sheet-absolute, KiCad rotation).
+    def _pad_pos(fp: SExp, pad: SExp) -> tuple[float, float]:
+        fat = fp.find("at")
+        fx, fy = fat.get_float(0) or 0.0, fat.get_float(1) or 0.0
+        frot = fat.get_float(2) or 0.0
+        pat = pad.find("at")
+        lx, ly = pat.get_float(0) or 0.0, pat.get_float(1) or 0.0
+        # KiCad applies the footprint angle clockwise in its Y-down frame.
+        a = math.radians(-frot)
+        c, s = math.cos(a), math.sin(a)
+        return fx + (lx * c - ly * s), fy + (lx * s + ly * c)
+
+    def _ref_of(fp: SExp) -> str | None:
+        # Generator output uses (fp_text reference "R1" ...); a KiCad-CLI
+        # round-trip rewrites it to (property "Reference" "R1" ...).
+        for ft in fp.find_all("fp_text"):
+            if ft.get_string(0) == "reference":
+                return ft.get_string(1)
+        for p in fp.find_all("property"):
+            if p.get_string(0) == "Reference":
+                return p.get_string(1)
+        return None
+
+    r1_anode = d1_anode = d1_gnd = None
+    for fp in doc.find_all("footprint"):
+        ref = _ref_of(fp)
+        for pad in fp.find_all("pad"):
+            net = pad.find("net")
+            pn = net.get_string(1) if net is not None else None
+            pos = _pad_pos(fp, pad)
+            if ref == "R1" and pn == net_name:
+                r1_anode = pos
+            elif ref == "D1" and pn == net_name:
+                d1_anode = pos
+            elif ref == "D1" and pn == "GND":
+                d1_gnd = pos
+    if r1_anode is None or d1_anode is None:
+        raise ValueError("could not locate R1/D1 LED_ANODE pads for routing")
+
+    # Eastward run along R1's row, then a 45-degree descent onto D1's anode.
+    # The knee is placed exactly ``dy`` west of the anode so the descent
+    # leg has equal dx/dy -- a true 45-degree diagonal (the only off-axis
+    # angle in the legal {0,45,90,135} set; issue #3532's census gate).
+    # Because the diagonal runs *south-east* (down and toward the anode),
+    # it moves away from D1's GND pad, which sits west of the anode, so
+    # the corridor stays clear without breaking the 45-degree geometry.
+    dy = d1_anode[1] - r1_anode[1]
+    knee = (d1_anode[0] - abs(dy), r1_anode[1])
+
+    def _clearance_to_gnd(seg_start: tuple[float, float], seg_end: tuple[float, float]) -> float:
+        """Perpendicular distance from D1's GND pad centre to a segment."""
+        if d1_gnd is None:
+            return math.inf
+        ax, ay = seg_start
+        bx, by = seg_end
+        px, py = d1_gnd
+        abx, aby = bx - ax, by - ay
+        denom = abx * abx + aby * aby
+        t = 0.0 if denom == 0 else ((px - ax) * abx + (py - ay) * aby) / denom
+        t = max(0.0, min(1.0, t))
+        cx, cy = ax + t * abx, ay + t * aby
+        return math.hypot(px - cx, py - cy)
+
+    # Safety check: the true-45 diagonal must clear D1's GND pad.  If it
+    # ever did not (e.g. a future footprint change), fall back to a due-north
+    # descent (a 90-degree leg directly above the anode), which is also on
+    # the legal angle set -- never re-introduce an off-45 nudge.
+    GND_CLEARANCE_MM = 0.5  # 0.1 mm trace half-width + ample pad margin
+    if _clearance_to_gnd(knee, d1_anode) < GND_CLEARANCE_MM:
+        knee = (d1_anode[0], r1_anode[1])
+
+    points = [r1_anode, knee, d1_anode]
+
+    # Drop the autorouter's segments for this net.
+    doc.children = [
+        child
+        for child in doc.children
+        if not (
+            child.name == "segment"
+            and child.find("net") is not None
+            and child.find("net").get_int(0) == net_num
+        )
+    ]
+
+    # Append explicit segments connecting the polyline.
+    for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+        doc.append(
+            SExp.list(
+                "segment",
+                SExp.list("start", round(sx, 3), round(sy, 3)),
+                SExp.list("end", round(ex, 3), round(ey, 3)),
+                SExp.list("width", 0.2),
+                SExp.list("layer", "F.Cu"),
+                SExp.list("uuid", generate_uuid()),
+                SExp.list("net", net_num),
+            )
+        )
+
+    pcb_path.write_text(doc.to_string() + "\n")
+    print(f"   LED_ANODE: deterministic route, {len(points) - 1} segment(s)")
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
@@ -510,6 +656,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         print("   Warning: No routes generated!")
 
     output_path.write_text(output_content)
+
+    # Deterministic LED_ANODE route (issue #3737).
+    #
+    # The grid autorouter routes the single signal net (LED_ANODE, R1.2 ->
+    # D1.2) with a diagonal that grazes D1 pin 1 (GND), producing a genuine
+    # copper short under kicad-cli's DRC.  The net is a trivial two-pad
+    # connection on this "Hello World" board, so we replace the autorouter's
+    # segments with an explicit L-shaped route that clears the foreign GND
+    # pad with margin (geometry derived from the actual pad positions in the
+    # written PCB; see ``_rewrite_led_anode_route``).
+    _rewrite_led_anode_route(output_path, net_name="LED_ANODE")
 
     # Step 7: Create + fill copper pours for power/ground nets.
     #
