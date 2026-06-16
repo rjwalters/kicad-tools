@@ -87,7 +87,7 @@ class TestRunInitialPassGraceHelper:
         committed: dict[int, list] = {}
         routed, attempted, skipped = run_initial_pass_grace(
             [1, 2, 3],
-            route_fn=lambda net, cap: (calls.append((net, cap)) or [f"r{net}"]),
+            route_fn=lambda net, cap: calls.append((net, cap)) or [f"r{net}"],
             commit_fn=lambda net, routes: committed.__setitem__(net, routes),
             per_net_timeout=30.0,
         )
@@ -121,7 +121,7 @@ class TestRunInitialPassGraceHelper:
         seen_caps: set[float] = set()
         run_initial_pass_grace(
             [1],
-            route_fn=lambda net, cap: (seen_caps.add(cap) or []),
+            route_fn=lambda net, cap: seen_caps.add(cap) or [],
             commit_fn=lambda net, routes: None,
             per_net_timeout=0.1,
         )

@@ -120,7 +120,7 @@ def find_stale_nets(pcb: PCB) -> list[StaleNetGroup]:
 
         # Sort by total routing (segments + vias), descending. The one with
         # the most routing is "active".
-        scored.sort(key=lambda x: (x[0] + x[1]), reverse=True)
+        scored.sort(key=lambda x: x[0] + x[1], reverse=True)
 
         active_segs, active_vias, active_num, active_name = scored[0]
 
