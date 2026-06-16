@@ -186,6 +186,92 @@ class TestEndToEndDRC:
         assert pad_zone == [], f"expected no pad/via-zone errors, got: {pad_zone}"
 
 
+class TestIslandRemoval:
+    """The carve must not strand disconnected fill fragments.
+
+    Regression for the board-02 split-fill regression (PR #3725): the
+    foreign-antipad subtraction + hole venting can shed thin sliver lobes
+    that are no longer electrically tied to the pour.  Emitting them
+    produces ``isolated_copper`` DRC warnings (the board-06 split-fill
+    class).  :func:`apply_foreign_pad_clearance` now drops every fill ring
+    not connected to a same-net pad/via/track, mirroring KiCad's
+    ``island_removal_mode 0``.
+    """
+
+    # A long thin VCC fill bridged at its waist by a foreign GND pad.  The
+    # only same-net VCC anchor is a pad in the LEFT lobe; carving the GND
+    # antipad severs the RIGHT lobe, which must then be removed as an island.
+    _SPLIT_BOARD = """
+    (kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (net 0 "")
+      (net 1 "VCC")
+      (net 3 "GND")
+      (footprint "lib:vcc"
+        (layer "F.Cu")
+        (at 2 2.5)
+        (pad "1" thru_hole rect (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "VCC"))
+      )
+      (footprint "lib:gnd"
+        (layer "F.Cu")
+        (at 10 2.5)
+        (pad "1" thru_hole rect (at 0 0) (size 4.0 5.0) (drill 1.0) (layers "*.Cu" "*.Mask") (net 3 "GND"))
+      )
+      (zone
+        (net "VCC")
+        (layer "F.Cu")
+        (uuid "split-zone")
+        (hatch edge 0.5)
+        (connect_pads (clearance 0.3))
+        (min_thickness 0.25)
+        (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+        (polygon (pts (xy 0 0) (xy 20 0) (xy 20 5) (xy 0 5)))
+        (filled_polygon
+          (layer "F.Cu")
+          (pts (xy 0 0) (xy 20 0) (xy 20 5) (xy 0 5))
+        )
+      )
+    )
+    """
+
+    def test_disconnected_lobe_is_removed(self):
+        doc = _parse(self._SPLIT_BOARD)
+        apply_foreign_pad_clearance(doc)
+
+        # After the carve the GND pad antipad severs the bar in two.  Only
+        # the LEFT lobe (holding the VCC pad at x=2) is connected to the net;
+        # the RIGHT lobe (x>~12) must be dropped, leaving a single component.
+        fill = _fill_polygon(doc)
+        ncomp = 1 if fill.geom_type == "Polygon" else len(fill.geoms)
+        assert ncomp == 1, f"expected one connected component, got {ncomp}"
+
+        # The surviving copper must still hold the same-net VCC pad...
+        same = _pad_box(2.0, 2.5, 1.7, 1.7)
+        assert fill.intersection(same).area > 0.0
+        # ...and must not include the stranded right lobe.
+        right_lobe_probe = _pad_box(18.0, 2.5, 1.0, 1.0)
+        assert fill.intersection(right_lobe_probe).area == pytest.approx(0.0, abs=1e-9)
+
+    def test_keep_connected_rings_drops_island(self):
+        from kicad_tools.zones.fill_clearance import _keep_connected_rings
+
+        # Two square rings; the anchor only touches the first.
+        left = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+        right = [(10.0, 0.0), (12.0, 0.0), (12.0, 2.0), (10.0, 2.0)]
+        anchor = shapely.box(0.5, 0.5, 1.5, 1.5)  # inside `left` only
+        kept = _keep_connected_rings([left, right], [anchor], Polygon)
+        assert kept == [left]
+
+    def test_keep_connected_rings_no_anchors_keeps_all(self):
+        from kicad_tools.zones.fill_clearance import _keep_connected_rings
+
+        a = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]
+        b = [(5.0, 5.0), (6.0, 5.0), (6.0, 6.0)]
+        kept = _keep_connected_rings([a, b], [], Polygon)
+        assert kept == [a, b]
+
+
 class TestNetIdentityResolution:
     def test_name_only_zone_matches_numbered_pad(self):
         """Zone declared as (net "VCC") matches a pad declared (net 1 "VCC")."""
