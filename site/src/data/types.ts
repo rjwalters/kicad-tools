@@ -64,4 +64,17 @@ export interface Board {
   renders?: Record<string, string>;
   manufacturing_package?: string;
   manifest_generated_at?: string;
+  /**
+   * LVS (Layout-vs-Schematic) verification result (#3748, #3749). Sourced from
+   * `output/lvs.json` → `clean`. Omitted when the board has not run LVS yet
+   * (e.g. boards 01-05 in v1 — the fleet rollout is tracked by #3742). A
+   * missing `lvs_clean` is treated as "unverified" and must NOT display as
+   * "Ready" by the gallery chip.
+   */
+  lvs_clean?: boolean;
+  /**
+   * Number of schematic-vs-PCB mismatches recorded in `output/lvs.json`
+   * (#3748, #3749). Omitted when the board has not run LVS yet.
+   */
+  lvs_mismatches?: number;
 }
