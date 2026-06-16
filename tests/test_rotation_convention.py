@@ -133,15 +133,11 @@ class TestLivePcbnewOracle:
     """Re-derive the oracle from a live pcbnew if it is importable."""
 
     def test_helper_matches_live_pcbnew(self) -> None:
-        pcbnew = pytest.importorskip(
-            "pcbnew", reason="pcbnew not importable in this environment"
-        )
+        pcbnew = pytest.importorskip("pcbnew", reason="pcbnew not importable in this environment")
 
         board = pcbnew.BOARD()
         fp = pcbnew.FOOTPRINT(board)
-        fp.SetPosition(
-            pcbnew.VECTOR2I(pcbnew.FromMM(FP_POS[0]), pcbnew.FromMM(FP_POS[1]))
-        )
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(FP_POS[0]), pcbnew.FromMM(FP_POS[1])))
         board.Add(fp)
 
         pad = pcbnew.PAD(fp)
