@@ -370,7 +370,7 @@ def _collect_same_net_anchors(
     disconnected fragments (the ``isolated_copper`` islands seen on board-02
     after the #3712 carve) instead of emitting them as copper.
     """
-    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+    from shapely.geometry import LineString
 
     anchors: list = []
 
@@ -583,9 +583,7 @@ def apply_foreign_pad_clearance(
             # class).  Keep only rings that overlap a same-net pad/via/track so
             # the rewritten pour stays a single connected copper component.
             if len(rings) > 1:
-                anchors = _collect_same_net_anchors(
-                    doc, shapely, name_map, zone_net, fill_layer
-                )
+                anchors = _collect_same_net_anchors(doc, shapely, name_map, zone_net, fill_layer)
                 rings = _keep_connected_rings(rings, anchors, Polygon)
 
             # Safety gate: reconstruct exactly what the DRC will read from
