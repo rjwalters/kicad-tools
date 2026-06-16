@@ -31,10 +31,6 @@
 .loom/claude-config/
 .loom/logs/
 .loom/spawn-loop-state.json
-.loom/worktrees/
-.loom/state.json
-.loom/*.log
-.loom/*.sock
 
 # Build artifacts
 # Compiled native extension (rebuilt locally via `uv run kct build-native`)
@@ -59,3 +55,7 @@ boards/*/*/output/renders/
 # Board metrics (generated at runtime by `kct board-metrics`, Epic #3674)
 boards/*/output/board.json
 boards/*/*/output/board.json
+.loom/worktrees/
+.loom/state.json
+.loom/*.log
+.loom/*.sock
