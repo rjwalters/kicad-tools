@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-16T15:12:04.968212+00:00",
+  "generated_at": "2026-06-16T15:36:08.303227+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "bom_jlcpcb.csv": {
@@ -13,28 +13,28 @@
       "size": 583
     },
     "gerbers.zip": {
-      "sha256": "d77505ea5c692922f7e04152db4a5329de361a680c5c4306cb6e2c86c7e63ae6",
-      "size": 157796
+      "sha256": "7a00c089c10d445d0b4dade152a4c01f64684554bed5d523c3de9a566f4bae68",
+      "size": 157814
     },
     "report.pdf": {
-      "sha256": "c2740b7f60b72edd1e54bee0f65e95a0899a9450bd9315850d6bf04abfcbed61",
-      "size": 2315962
+      "sha256": "bdeb592eff6f31ca13ddfaa9eab92830c960c4e241cee25c215bccf0996b53ff",
+      "size": 2315878
     },
     "report.md": {
-      "sha256": "a0397bd588d7f2f6f08db2fbae0903b068560005e12e06f38d283f0a4de92185",
+      "sha256": "ace58cf06eb3776fe3b2f205774ce01fbe7b52e0b8efdf9ac8a9e8ab36eba435",
       "size": 3172
     },
     "assembly.png": {
-      "sha256": "e9c39986e23e106d744597933b3d00af8d1f8e618a5b2e0d6b4d8f04696c3e94",
-      "size": 284991
+      "sha256": "5e0434b1c40dba5e9e7d12249de060db23099c6dd9b808e29fefb459eedcced8",
+      "size": 284988
     },
     "layer_B_Cu.png": {
       "sha256": "139d9c14dd779b6e237351d77be92ca3abe18c94ce06869f15f6d7b3e54938fb",
       "size": 243436
     },
     "layer_F_Cu.png": {
-      "sha256": "560ff284f6a01a03dbc081ad3059f824a50bfb97e731f2b57431840e9247e1fa",
-      "size": 191453
+      "sha256": "4437aa66ee59e72e6a342e3c4932686d495c899f8f32b4ed0b942386072831c6",
+      "size": 191398
     },
     "layer_In1_Cu.png": {
       "sha256": "ccc30cf51f66f61c3ac39c690773e376aa0cce5c0f69b9b0f2e34f06dacaafd1",
@@ -49,23 +49,23 @@
       "size": 243773
     },
     "pcb_copper.png": {
-      "sha256": "14ed1199b049e82cd0046c35d32a8ee22d3c6153a777d56e8b65eaf5c78da88e",
-      "size": 277404
+      "sha256": "c6ddc7b2bf28b193174d354258b6d9289e8e7eec09a61906c32d671acf045650",
+      "size": 277399
     },
     "pcb_front.png": {
-      "sha256": "fea3fe62892fac2b3442a45bb1631470bff965e46950bde78c72bf76a064d3fa",
-      "size": 202406
+      "sha256": "dfba2276523d8338842d5015a53d271def9a001903f1e18dea244ffa9528b523",
+      "size": 202325
     },
     "schematic_diffpair_test.png": {
       "sha256": "ff6a508fd86a4624f922ec6aec66550d9398a4acc72c49b4e62936cb11ffcbbd",
       "size": 321809
     },
     "kicad_project.zip": {
-      "sha256": "2198cd1510b1ee1ec0d5a84f758b9aa218343765ca651c5184b95e14d5d803d3",
-      "size": 191983
+      "sha256": "06239e231d15558d033f5f3e9f7be8520c6738a9768add6ad73aa2747fd50c19",
+      "size": 192061
     },
     "README.txt": {
-      "sha256": "890ade7b2e3d7dc6e1bb2ab3570b1859bc2da3b4040d4c69c3ee5a382a810339",
+      "sha256": "2c012d80713f2508f8863652589ceee74a1450d2f8741a80578f0ad2106d8859",
       "size": 879
     }
   },
@@ -133,9 +133,8 @@
     },
     {
       "name": "drc",
-      "status": "WARN",
-      "message": "No DRC report found; run kicad-cli or kct check first",
-      "details": "Use --drc-report to specify a report file, or --skip-drc to skip"
+      "status": "OK",
+      "message": "DRC: 0 errors, 0 warnings"
     },
     {
       "name": "erc",
