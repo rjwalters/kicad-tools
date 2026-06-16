@@ -828,3 +828,160 @@ jobs:
             "${{ matrix.board }}" \
             --seed 42
 
+  board-00-end-to-end:
+    # Issue #3751: regenerate board 00 ("simple-led", the canonical
+    # "Hello World" fixture) from its recipe (boards/00-simple-led/
+    # generate_design.py) on every PR and assert that the resulting
+    # artifacts cross the manufacturability bar.  This is the PR-time
+    # complement to ``tests/test_board_00_simple_led.py::TestBoard00SimpleLed``
+    # (which is @pytest.mark.slow and only runs nightly via
+    # ``slow-tests.yml``) and the recipe-side regression gate that
+    # ``routed-pcb-drc-check`` cannot provide -- the diff-driven DRC
+    # gate only fires when a PR touches the committed *_routed.kicad_pcb,
+    # so a recipe bug that produces a wrong-but-still-DRC-clean PCB (the
+    # exact failure mode of #3747's D1 polarity bug) goes undetected.
+    #
+    # What the gate does:
+    #   1. Re-run ``generate_design.py`` against a clean tmp directory.
+    #   2. Run ``kct check`` on the routed PCB; require ``Overall: PASSED``
+    #      (DRC + ERC + LVS + Manifest sub-checks all PASSED -- the meta
+    #      contract from #3750).
+    #   3. Re-emit board.json via ``kct board-metrics`` against the regen
+    #      output and assert ``status: ok``, ``drc_violations: 0``,
+    #      ``lvs_clean: true`` -- the public contract the demo gallery
+    #      (#3749) consumes.
+    #
+    # The gate intentionally does NOT diff the regenerated artifacts
+    # against the committed ``output/`` tree (the original AC's step 7):
+    # copper UUIDs, segment ordering, and generator timestamps are
+    # nondeterministic, so a naive byte-diff would false-positive on
+    # every PR.  Netlist equivalence is already covered by LVS; component
+    # placement and routing topology need a semantic comparator that is
+    # out of scope for this issue.
+    #
+    # Runner setup mirrors the ``test`` job: official kicad/kicad:10.0
+    # container so kicad-cli is present (the recipe's ``run_erc()`` and
+    # the meta ``ERC`` sub-check both shell out to kicad-cli; on a bare
+    # ubuntu-latest runner the ERC step is silently skipped and the gate
+    # defeats itself).  The C++ backend build is required per CLAUDE.md
+    # ("Routing performance: build the C++ backend first") -- without it
+    # the router falls back to pure Python (10-100x slower) and risks
+    # missing the 15-minute ceiling.
+    #
+    # IMPORTANT (branch-protection note): adding this job to the list of
+    # *required* status checks on ``main`` is a separate repo-admin
+    # action.  The PR landing this job calls that out explicitly so the
+    # human approver can flip the GitHub setting after merge.  Until then
+    # the job runs on every PR but is advisory -- its failure does not
+    # block the merge button.  Same pattern as
+    # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
+    name: Board 00 End-to-End
+    runs-on: ubuntu-latest
+    # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
+    # the C++ backend build is ~2 min, ``kct export`` + ``kct check`` +
+    # ``kct board-metrics`` add ~30s total, and the gate-side asserter
+    # is sub-second.  15 min leaves >2x headroom on a slow 2-core
+    # ubuntu runner without masking a hang.
+    timeout-minutes: 15
+    container:
+      image: kicad/kicad:10.0
+      # Run as root so installs write system locations and actions/checkout
+      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
+      options: --user 0:0
+    defaults:
+      run:
+        # The image's /bin/sh is dash; force bash (mirrors the test job).
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
+        # build-essential for the C++ router backend build below.  The
+        # ``kicad-cli --version`` probe makes a missing/broken kicad-cli
+        # fail THIS step with an attributable error instead of surfacing
+        # later as a silently-skipped ERC sub-check.
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        # Official one-liner instead of setup-uv@v4: avoids action-host
+        # coupling inside the container (mirrors the test + smoke jobs).
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        # Pin the interpreter via uv (parity with the sibling jobs that
+        # use actions/setup-python with python-version: "3.12"); the
+        # container image's own Python version is irrelevant.  ``--extra
+        # dev`` is required because ``kct check`` imports ``shapely`` for
+        # the geometry-based DRC rules (see the [project.optional-dependencies]
+        # dev block in pyproject.toml for the ``shapely>=2.0`` pin).
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        # ``uv sync`` does NOT build the native extension (see repo
+        # CLAUDE.md "Routing performance: build the C++ backend first").
+        # Without this step the recipe's routing step falls back to pure
+        # Python which is 10-100x slower.
+        run: uv run kct build-native
+
+      - name: Regenerate board 00 from recipe (clean tmp directory)
+        # The recipe's main() accepts an optional output directory as
+        # argv[1] (boards/00-simple-led/generate_design.py:944-947); we
+        # point it at a tmp directory so the gate never touches the
+        # committed boards/00-simple-led/output/ tree.  Exits non-zero
+        # if any of ERC/DRC/LVS/MFG fail OR run_lvs() raises
+        # BoardNetlistMismatch -- the polarity-class regression the gate
+        # is designed to catch.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board00-ci
+          mkdir -p /tmp/board00-ci
+          uv run python boards/00-simple-led/generate_design.py /tmp/board00-ci
+
+      - name: Assert kct check Overall PASSED on regenerated routed PCB
+        # The meta sub-check pattern from #3750: DRC + ERC + LVS +
+        # Manifest must ALL be PASSED for ``Overall: PASSED`` and exit
+        # 0.  No ``--allow-incomplete`` -- the recipe just wrote
+        # manufacturing/manifest.json, so Manifest is fresh.  ``tee``
+        # surfaces the full output in the log AND lets the grep gate
+        # the build on the exact "Overall: PASSED" line (defence in
+        # depth against future verdict-string renames).
+        run: |
+          set -euo pipefail
+          uv run kct check /tmp/board00-ci/simple_led_routed.kicad_pcb \
+            | tee /tmp/board00-ci/check.out
+          grep -qE '^Overall:[[:space:]]+PASSED' /tmp/board00-ci/check.out
+
+      - name: Emit board.json via kct board-metrics
+        # board.json is NOT written by the recipe -- it's the public
+        # data contract emitted by the ``kct board-metrics`` aggregator
+        # (src/kicad_tools/cli/board_metrics_cmd.py) that the demo
+        # gallery (#3749) consumes.  The command expects a board-layout
+        # directory in the standard ``<board_dir>/output/`` shape, so
+        # we mirror the tmp regen into that shape and point the command
+        # at it.  This validates the same contract a downstream demo-
+        # site build would.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board00-staging
+          mkdir -p /tmp/board00-staging/00-simple-led/output
+          cp -r /tmp/board00-ci/. /tmp/board00-staging/00-simple-led/output/
+          uv run kct board-metrics /tmp/board00-staging/00-simple-led
+
+      - name: Assert artifacts + lvs.json + board.json fields
+        # The gate-side asserter: presence of every required artifact,
+        # lvs.json clean=true, and board.json status=ok / drc_violations=0
+        # / lvs_clean=true.  Sibling of scripts/ci/check_routed_drc.py;
+        # see its docstring for the GitHub-Actions annotation contract.
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            /tmp/board00-staging/00-simple-led
