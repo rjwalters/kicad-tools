@@ -1268,17 +1268,16 @@ class TestAdaptiveAutorouterComponentTransform:
         stack = LayerStack.two_layer()
         router = adaptive._create_autorouter(stack)
 
-        # Rotation is CCW-positive standard math applied directly to
-        # file coordinates with NO y negation (repo-wide convention since
-        # PR #738; cleanups #2778/#2788/#2789): (1, 0) rotated 90 deg
-        # becomes (0, +1), i.e. pad.y = 20 + 1 = 21
-        # (stale-test update, issue #3436 burn-down).
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew 10.0.1, issue #3739, which
+        # overturned PR #738/#2778/#2788/#2789): (1, 0) under a +90°
+        # footprint becomes (0, -1), i.e. pad.y = 20 - 1 = 19.
         pad = router.pads.get(("R1", "1"))
         assert pad is not None
         # x should be close to 25.0 (component center)
         assert abs(pad.x - 25.0) < 0.01
-        # y should be offset by approximately +1.0 from center
-        assert abs(pad.y - 21.0) < 0.01
+        # y should be offset by approximately -1.0 from center
+        assert abs(pad.y - 19.0) < 0.01
 
 
 class TestAutorouterIntraICRoutes:

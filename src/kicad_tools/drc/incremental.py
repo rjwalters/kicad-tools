@@ -582,8 +582,10 @@ class IncrementalDRC:
         max_x = float("-inf")
         max_y = float("-inf")
 
-        cos_a = math.cos(math.radians(fp.rotation))
-        sin_a = math.sin(math.radians(fp.rotation))
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        cos_a = math.cos(math.radians(-fp.rotation))
+        sin_a = math.sin(math.radians(-fp.rotation))
 
         for pad in fp.pads:
             # Transform pad position to board coordinates
@@ -739,10 +741,12 @@ class IncrementalDRC:
 
         pos1 = fp1_position if fp1_position is not None else fp1.position
 
-        cos1 = math.cos(math.radians(fp1.rotation))
-        sin1 = math.sin(math.radians(fp1.rotation))
-        cos2 = math.cos(math.radians(fp2.rotation))
-        sin2 = math.sin(math.radians(fp2.rotation))
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        cos1 = math.cos(math.radians(-fp1.rotation))
+        sin1 = math.sin(math.radians(-fp1.rotation))
+        cos2 = math.cos(math.radians(-fp2.rotation))
+        sin2 = math.sin(math.radians(-fp2.rotation))
 
         for pad1 in fp1.pads:
             # Transform pad1 to board coordinates

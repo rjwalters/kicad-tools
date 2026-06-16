@@ -567,7 +567,9 @@ class NetStatusAnalyzer:
         Returns:
             Pad position in board coordinates
         """
-        angle = math.radians(rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        angle = math.radians(-rotation)
         px, py = pad_local
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)

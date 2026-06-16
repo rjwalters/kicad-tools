@@ -61,13 +61,16 @@ def _pad_absolute_bbox(
     Returns:
         (min_x, min_y, max_x, max_y) tuple in mm.
     """
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    # cos/sin magnitudes for the (orientation-independent) AABB below; the
+    # signed center rotation goes through the shared KiCad-convention helper.
     angle_rad = math.radians(footprint.rotation)
     cos_a = math.cos(angle_rad)
     sin_a = math.sin(angle_rad)
 
     local_x, local_y = pad.position
-    rotated_x = local_x * cos_a - local_y * sin_a
-    rotated_y = local_x * sin_a + local_y * cos_a
+    rotated_x, rotated_y = rotate_pad_offset(local_x, local_y, footprint.rotation)
     abs_x = footprint.position[0] + rotated_x
     abs_y = footprint.position[1] + rotated_y
 

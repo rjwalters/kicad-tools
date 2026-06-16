@@ -1,27 +1,26 @@
 """Cross-subsystem audit tests for the local->world rotation sign convention.
 
-Regression coverage for issue #2789 (follow-up to #2778 and #2788).
+Regression coverage for issue #3739 (which OVERTURNED #2789/#2778/#2788/#738).
 
-Seven distinct call sites across the codebase computed the forward
-local->world pad transform with a *negated* angle:
+KiCad's ``pcbnew`` 10.0.1 was probed directly (the authoritative engine)
+and its forward local->world pad transform uses the *negated* footprint
+angle relative to standard CCW math::
 
     rot_rad = math.radians(-fp.rotation)
     rx = px * cos(rot_rad) - py * sin(rot_rad)
     ry = px * sin(rot_rad) + py * cos(rot_rad)
 
-The canonical KiCad convention (documented at ``src/kicad_tools/router/io.py``
-lines 2661-2667 and implemented at ``src/kicad_tools/schema/pcb.py:3628``)
-is that rotation is positive counter-clockwise and the standard 2D
-rotation matrix applies *directly* with no negation.  Using the negated
-angle mirrors the pad about the footprint y-axis, which under 90° and
-270° rotations sends pads to the wrong half of the board.
+For a footprint at (100,100) with a pad at local (2,0), pcbnew places the
+pad at: deg0 (102,100), deg90 (100,98), deg180 (98,100), deg270 (100,102).
+The earlier standard-CCW form (PR #738 / this module's pre-#3739 oracle)
+produced the *mirror-image* world positions at 90°/270°, which sent pads
+to the wrong half of the board and let ``kct check`` pass copper shorts
+that ``kicad-cli`` flagged.
 
-Pure 0°/180° rotations pass under BOTH sign conventions (cos is even,
-and the sin*y_local terms cancel symmetrically), so these tests MUST
-exercise {45°, 90°, 270°} to discriminate the bug from a correct fix.
-Each test includes a negative-control assertion that the chosen fixture
-coordinates actually differ between the two conventions at those
-rotations — otherwise the test would silently pass against buggy code.
+This module's canonical oracle is therefore KiCad's negated-angle
+transform (``core.geometry.rotate_pad_offset`` / ``PCB.get_pad_position``).
+The negative control still asserts the two sign conventions differ at
+{45°, 90°, 270°}; 0°/180° agree under both (the long-known "test trap").
 
 Affected sites covered by this module (one test class each):
 
@@ -63,13 +62,13 @@ def _canonical_world(
     rotation_deg: float,
     pad_local: tuple[float, float],
 ) -> tuple[float, float]:
-    """Canonical CCW-positive forward transform.
+    """Canonical KiCad forward transform (negated footprint angle).
 
-    This is the reference oracle.  It is mathematically identical to
-    ``PCB.get_pad_position`` (``schema/pcb.py:3628``) and the inline
-    transform at ``router/io.py:2661-2667``.
+    This is the reference oracle, verified against pcbnew 10.0.1 (#3739).
+    It is mathematically identical to ``PCB.get_pad_position`` and the
+    shared helper ``core.geometry.rotate_pad_offset``.
     """
-    rot_rad = math.radians(rotation_deg)
+    rot_rad = math.radians(-rotation_deg)
     cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
     px, py = pad_local
     return (
@@ -83,8 +82,8 @@ def _buggy_world(
     rotation_deg: float,
     pad_local: tuple[float, float],
 ) -> tuple[float, float]:
-    """The (incorrect) negated-angle transform that the bug used."""
-    rot_rad = math.radians(-rotation_deg)
+    """The (incorrect) standard-CCW transform that PR #738 used."""
+    rot_rad = math.radians(rotation_deg)
     cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
     px, py = pad_local
     return (

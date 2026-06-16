@@ -433,11 +433,10 @@ class PCBState:
         pads: list[PadState] = []
         import math
 
-        # NOTE: positive sign matches PCB.get_pad_position (the canonical
-        # local->world transform used throughout the codebase).  KiCad
-        # stores rotation in degrees, positive = counter-clockwise; the
-        # standard 2D rotation matrix applies directly (no negation).
-        rot_rad = math.radians(rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle vs standard
+        # CCW math (verified vs pcbnew 10.0.1, issue #3739); matches
+        # PCB.get_pad_position / core.geometry.rotate_pad_offset.
+        rot_rad = math.radians(-rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad_node in fp_node.find_all("pad"):

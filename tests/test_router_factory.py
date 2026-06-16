@@ -144,17 +144,22 @@ class TestFactoryCall:
         assert new_router.pads[("U2", "1")].y == pytest.approx(0.0)
 
     def test_rotation_rotates_pad_offset(self):
-        """A 90° rotation should rotate pad offsets accordingly."""
+        """A 90° rotation should rotate pad offsets per KiCad's convention.
+
+        KiCad applies the footprint orientation as a NEGATED angle vs standard
+        CCW math (verified vs pcbnew 10.0.1, issue #3739), so a +90° rotation
+        of offset (+1, 0) lands at (0, -1), not (0, +1).
+        """
         # Two-pin component with pin 2 at +x offset.
         router = _two_pin_component_router()
         factory = _build_factory_from_router(router, component_positions=None)
-        # Place U1 at origin and rotate 90°: pin 2 (offset +1, 0) becomes (0, +1).
+        # Place U1 at origin and rotate 90°: pin 2 (offset +1, 0) becomes (0, -1).
         new_router = factory({"U1": (0.0, 0.0)}, {"U1": 90.0})
         assert new_router.pads[("U1", "2")].x == pytest.approx(0.0, abs=1e-9)
-        assert new_router.pads[("U1", "2")].y == pytest.approx(1.0)
-        # Pin 1 (offset -1, 0) becomes (0, -1).
+        assert new_router.pads[("U1", "2")].y == pytest.approx(-1.0)
+        # Pin 1 (offset -1, 0) becomes (0, +1).
         assert new_router.pads[("U1", "1")].x == pytest.approx(0.0, abs=1e-9)
-        assert new_router.pads[("U1", "1")].y == pytest.approx(-1.0)
+        assert new_router.pads[("U1", "1")].y == pytest.approx(1.0)
 
     def test_translation_after_rotation(self):
         """Combined: move centroid to (10, 20) and rotate 180°."""

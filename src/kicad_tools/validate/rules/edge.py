@@ -192,8 +192,10 @@ class EdgeClearanceRule(DRCRule):
 
         for footprint in pcb.footprints:
             fp_x, fp_y = footprint.position
-            # KiCad rotation is CCW-positive; standard 2D rotation matrix applies directly
-            fp_rotation = math.radians(footprint.rotation)
+            # KiCad applies the footprint orientation as a NEGATED angle relative
+            # to standard CCW math (verified vs pcbnew, issue #3739). Use -rotation
+            # so the 2D rotation matrix below matches KiCad's pad world positions.
+            fp_rotation = math.radians(-footprint.rotation)
             cos_rot = math.cos(fp_rotation)
             sin_rot = math.sin(fp_rotation)
 

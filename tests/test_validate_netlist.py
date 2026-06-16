@@ -192,9 +192,10 @@ class TestNetlistRule:
         pad = _StubPad(number="1", position=(1.0, 0.0))
 
         x, y = _absolute_pad_position(fp, pad)
-        # 90-degree rotation: (1,0) -> (0,1) relative, so absolute = (100, 51)
+        # KiCad negated-angle convention (#3739): a +90° footprint maps
+        # (1, 0) -> (0, -1) relative, so absolute = (100, 49).
         assert x == pytest.approx(100.0, abs=1e-6)
-        assert y == pytest.approx(51.0, abs=1e-6)
+        assert y == pytest.approx(49.0, abs=1e-6)
 
     def test_declared_net_with_nonzero_number_not_flagged(self):
         """A pad whose net_number > 0 with a declared name is fine."""

@@ -4182,17 +4182,14 @@ class PCB:
         if not fp:
             return None
 
+        from kicad_tools.core.geometry import rotate_pad_offset
+
         for pad in fp.pads:
             if pad.number == pad_number:
-                # Apply rotation to pad offset
-                rot_rad = math.radians(fp.rotation)
-                cos_r = math.cos(rot_rad)
-                sin_r = math.sin(rot_rad)
-
-                # Rotate pad position around footprint center
+                # Rotate pad offset around footprint origin using KiCad's
+                # negated-angle convention (see core.geometry.rotate_pad_offset).
                 pad_x, pad_y = pad.position
-                rotated_x = pad_x * cos_r - pad_y * sin_r
-                rotated_y = pad_x * sin_r + pad_y * cos_r
+                rotated_x, rotated_y = rotate_pad_offset(pad_x, pad_y, fp.rotation)
 
                 # Add footprint position
                 abs_x = fp.position[0] + rotated_x

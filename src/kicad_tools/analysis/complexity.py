@@ -261,7 +261,9 @@ class ComplexityAnalyzer:
 
         for footprint in board.footprints:
             fx, fy = footprint.position
-            rotation = math.radians(footprint.rotation or 0)
+            # KiCad applies the footprint orientation as a NEGATED angle vs
+            # standard CCW math (verified vs pcbnew, issue #3739).
+            rotation = math.radians(-(footprint.rotation or 0))
 
             for pad in footprint.pads:
                 # Transform pad position to board coordinates

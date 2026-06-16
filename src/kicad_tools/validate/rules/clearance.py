@@ -14,6 +14,9 @@ from kicad_tools.core.geometry import (
     point_to_segment_distance as _point_to_segment_distance,
 )
 from kicad_tools.core.geometry import (
+    rotate_pad_offset as _rotate_pad_offset,
+)
+from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
 from kicad_tools.core.geometry import (
@@ -125,17 +128,12 @@ class CopperElement:
 def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, float]:
     """Transform pad position from footprint-local to board coordinates.
 
-    KiCad uses counter-clockwise positive rotation (standard math convention).
+    Uses KiCad's negated-angle pad rotation convention (see
+    :func:`kicad_tools.core.geometry.rotate_pad_offset`).
     """
-    # Apply rotation using standard 2D rotation matrix
-    angle_rad = math.radians(footprint.rotation)
-    cos_a = math.cos(angle_rad)
-    sin_a = math.sin(angle_rad)
-
-    # Rotate pad position around footprint origin
+    # Rotate pad position around footprint origin (KiCad convention)
     local_x, local_y = pad.position
-    rotated_x = local_x * cos_a - local_y * sin_a
-    rotated_y = local_x * sin_a + local_y * cos_a
+    rotated_x, rotated_y = _rotate_pad_offset(local_x, local_y, footprint.rotation)
 
     # Translate to board coordinates
     abs_x = footprint.position[0] + rotated_x

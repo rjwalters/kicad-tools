@@ -143,7 +143,9 @@ def _collect_obstacles(
         fp_x = fp_at.get_float(0) or 0.0
         fp_y = fp_at.get_float(1) or 0.0
         fp_rot = fp_at.get_float(2) or 0.0
-        rot_rad = math.radians(fp_rot)
+        # KiCad applies the footprint orientation as a NEGATED angle vs
+        # standard CCW math (verified vs pcbnew, issue #3739).
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.find_all("pad"):
@@ -168,7 +170,7 @@ def _collect_obstacles(
             if w <= 0 or h <= 0:
                 continue
 
-            # Footprint-local -> sheet-absolute (CCW-positive convention,
+            # Footprint-local -> sheet-absolute (KiCad negated-angle convention,
             # matching PCB.get_pad_position used throughout the codebase).
             abs_x = fp_x + (local_x * cos_r - local_y * sin_r)
             abs_y = fp_y + (local_x * sin_r + local_y * cos_r)

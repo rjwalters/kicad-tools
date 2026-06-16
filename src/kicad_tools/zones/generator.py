@@ -1114,10 +1114,11 @@ def _net_pad_positions_absolute(
             continue
 
         fp_x, fp_y = fp.position
-        # NOTE: positive sign matches PCB.get_pad_position (the canonical
-        # local->world transform used throughout the codebase).  See #2778
-        # for the previous drift bug where a negative sign was used here.
-        rot_rad = math.radians(fp.rotation)
+        # KiCad applies the footprint orientation as a NEGATED angle vs standard
+        # CCW math (verified vs pcbnew 10.0.1, issue #3739); this matches
+        # PCB.get_pad_position / core.geometry.rotate_pad_offset, the canonical
+        # local->world transform used throughout the codebase.
+        rot_rad = math.radians(-fp.rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         for pad in fp.pads:

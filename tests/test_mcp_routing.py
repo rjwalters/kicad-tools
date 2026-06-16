@@ -789,19 +789,17 @@ def _rotated_pcb_text(rotation_deg: float) -> str:
 
 
 class TestBuildPadsForNetRotationSignConvention:
-    """Verify that _build_pads_for_net applies the canonical CCW-positive
-    rotation when projecting pad-local offsets into world coordinates.
+    """Verify that _build_pads_for_net agrees with ``PCB.get_pad_position``
+    when projecting pad-local offsets into world coordinates.
 
-    Regression coverage for issue #2788: prior code computed
-    ``math.radians(-fp.rotation)`` which mirrored pad world positions for
-    rotated footprints, feeding the autorouter wrong anchors and causing
-    unroutable nets / off-pad escape attempts.
+    Both use KiCad's negated-angle convention (verified vs pcbnew 10.0.1,
+    issue #3739, which overturned the standard-CCW form of #2788/#738).
+    This test asserts the two implementations agree with each other to
+    within 1e-9 mm; the dedicated pcbnew-oracle check lives in
+    ``tests/test_rotation_convention.py``.
 
-    Pure 0°/180° rotations pass under BOTH sign conventions (cos is even
-    and sin*y_local terms cancel when chosen symmetrically), so the
-    parametrization MUST include {45°, 90°, 270°} to catch the bug.
-    Agreement is asserted against the canonical reference implementation
-    in ``PCB.get_pad_position`` to within 1e-9 mm.
+    Pure 0°/180° rotations pass under BOTH sign conventions, so the
+    parametrization MUST include {45°, 90°, 270°} to catch a divergence.
     """
 
     @pytest.mark.parametrize("rotation", [45.0, 90.0, 270.0])
@@ -816,8 +814,8 @@ class TestBuildPadsForNetRotationSignConvention:
 
         pcb = PCB.load(str(pcb_file))
 
-        # Canonical reference: PCB.get_pad_position uses the correct,
-        # un-negated forward rotation (schema/pcb.py:3628).
+        # Canonical reference: PCB.get_pad_position uses KiCad's negated-angle
+        # forward rotation (core.geometry.rotate_pad_offset, #3739).
         expected = pcb.get_pad_position("U1", "1")
         assert expected is not None, (
             f"Reference get_pad_position returned None for rotation={rotation}°"

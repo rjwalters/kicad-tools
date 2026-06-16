@@ -355,12 +355,12 @@ class MCUCoreStrategy(PlacementStrategy):
             return None
 
         # Rotate pad-local offsets into the world frame using the
-        # footprint's rotation. KiCad rotation is positive CCW; the
-        # standard 2D rotation matrix applies directly (no negation).
-        # This matches PCB.get_pad_position and the router's
-        # adaptive._add_component_to_router transform.
+        # footprint's rotation. KiCad applies the orientation as a NEGATED
+        # angle vs standard CCW math (verified vs pcbnew 10.0.1, #3739).
+        # This matches PCB.get_pad_position / core.geometry.rotate_pad_offset
+        # and the router's adaptive._add_component_to_router transform.
         rotation_deg = float(getattr(mcu_fp, "rotation", 0.0) or 0.0)
-        rot_rad = math.radians(rotation_deg)
+        rot_rad = math.radians(-rotation_deg)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
         sum_x = 0.0

@@ -180,7 +180,10 @@ class PlacementRouterFactory:
             new_x, new_y = positions.get(off.ref, (comp_ref.base_x, comp_ref.base_y))
             new_rot = rotations.get(off.ref, comp_ref.base_rotation)
 
-            delta_rot = math.radians(new_rot - off.base_rotation)
+            # base offsets are real board-frame pad positions; a footprint
+            # re-rotation rotates them by the NEGATED delta to match KiCad's
+            # pad world positions (verified vs pcbnew 10.0.1, issue #3739).
+            delta_rot = math.radians(-(new_rot - off.base_rotation))
             cos_t = math.cos(delta_rot)
             sin_t = math.sin(delta_rot)
             rx = off.local_dx * cos_t - off.local_dy * sin_t

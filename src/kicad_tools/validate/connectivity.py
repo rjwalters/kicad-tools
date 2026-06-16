@@ -581,19 +581,12 @@ class ConnectivityValidator:
         Returns:
             Pad position in board coordinates
         """
-        import math
+        from kicad_tools.core.geometry import rotate_pad_offset
 
-        # Convert rotation to radians
-        # KiCad uses counter-clockwise positive rotation (standard math convention)
-        angle = math.radians(rotation)
-
-        # Rotate pad position
+        # Rotate pad position using KiCad's negated-angle convention
+        # (see kicad_tools.core.geometry.rotate_pad_offset).
         px, py = pad_local
-        cos_a = math.cos(angle)
-        sin_a = math.sin(angle)
-
-        rotated_x = px * cos_a - py * sin_a
-        rotated_y = px * sin_a + py * cos_a
+        rotated_x, rotated_y = rotate_pad_offset(px, py, rotation)
 
         # Translate to board coordinates
         board_x = fp_x + rotated_x

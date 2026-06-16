@@ -253,9 +253,12 @@ class PlacementAnalyzer:
         holes: list[HoleInfo] = []
 
         for pad in fp.pads:
-            # Calculate absolute pad position (considering rotation)
+            # Calculate absolute pad position (considering rotation).
+            # KiCad applies the footprint orientation as a NEGATED angle vs
+            # standard CCW math (verified vs pcbnew, issue #3739); _rotate_point
+            # is standard-CCW, so pass -rotation to match KiCad pad positions.
             rel_x, rel_y = pad.position
-            abs_pos = self._rotate_point(Point(rel_x, rel_y), fp.rotation, position)
+            abs_pos = self._rotate_point(Point(rel_x, rel_y), -fp.rotation, position)
 
             pad_info = PadInfo(
                 name=pad.number,

@@ -20,16 +20,16 @@ class TestPadPositionRotation:
         fp_rot = 90  # degrees
         pad_x, pad_y = -1.0, 0  # local pad position
 
-        # Apply rotation (fixed: no negation)
-        rot_rad = math.radians(fp_rot)
+        # KiCad applies the footprint orientation as a NEGATED angle (#3739).
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
         abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
         abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
-        # Expected: pad at (-1, 0) rotated 90° CCW becomes (0, -1)
-        # So absolute position should be (112.5, 109.0)
+        # KiCad: pad at (-1, 0) under a +90° footprint lands at local->world
+        # offset (0, +1), so absolute position is (112.5, 111.0).
         assert abs_x == pytest.approx(112.5, abs=0.001)
-        assert abs_y == pytest.approx(109.0, abs=0.001)
+        assert abs_y == pytest.approx(111.0, abs=0.001)
 
     def test_router_io_pad_rotation_180_degrees(self):
         """Test pad position with 180° rotation."""
@@ -37,12 +37,13 @@ class TestPadPositionRotation:
         fp_rot = 180
         pad_x, pad_y = 1.0, 0.5
 
-        rot_rad = math.radians(fp_rot)
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
         abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
         abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
-        # Pad at (1, 0.5) rotated 180° becomes (-1, -0.5)
+        # Pad at (1, 0.5) rotated 180° becomes (-1, -0.5) under both
+        # conventions (180° is sign-blind).
         assert abs_x == pytest.approx(99.0, abs=0.001)
         assert abs_y == pytest.approx(99.5, abs=0.001)
 
@@ -52,14 +53,15 @@ class TestPadPositionRotation:
         fp_rot = 270
         pad_x, pad_y = 1.0, 0
 
-        rot_rad = math.radians(fp_rot)
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
         abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
         abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
-        # Pad at (1, 0) rotated 270° CCW (or 90° CW) becomes (0, 1)
+        # KiCad: pad at (1, 0) under a +270° footprint lands at offset (0, +1),
+        # so absolute position is (100.0, 101.0).
         assert abs_x == pytest.approx(100.0, abs=0.001)
-        assert abs_y == pytest.approx(99.0, abs=0.001)
+        assert abs_y == pytest.approx(101.0, abs=0.001)
 
     def test_router_io_pad_rotation_0_degrees(self):
         """Test pad position with no rotation."""
@@ -67,7 +69,7 @@ class TestPadPositionRotation:
         fp_rot = 0
         pad_x, pad_y = 2.0, 1.0
 
-        rot_rad = math.radians(fp_rot)
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
         abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
         abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
@@ -82,15 +84,16 @@ class TestPadPositionRotation:
         fp_rot = 45
         pad_x, pad_y = 1.0, 0
 
-        rot_rad = math.radians(fp_rot)
+        rot_rad = math.radians(-fp_rot)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
         abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
         abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
 
-        # Pad at (1, 0) rotated 45° becomes (cos45, sin45) ≈ (0.707, 0.707)
+        # KiCad (negated angle): pad at (1, 0) under +45° lands at
+        # (cos(-45), sin(-45)) ≈ (0.707, -0.707).
         sqrt2_2 = math.sqrt(2) / 2
         assert abs_x == pytest.approx(100.0 + sqrt2_2, abs=0.001)
-        assert abs_y == pytest.approx(100.0 + sqrt2_2, abs=0.001)
+        assert abs_y == pytest.approx(100.0 - sqrt2_2, abs=0.001)
 
 
 class TestConnectivityValidationRotation:
@@ -109,9 +112,9 @@ class TestConnectivityValidationRotation:
 
         board_x, board_y = validator._transform_pad_position(pad_local, fp_x, fp_y, rotation)
 
-        # Expected: (112.5, 109.0)
+        # KiCad negated-angle convention (#3739): (112.5, 111.0)
         assert board_x == pytest.approx(112.5, abs=0.001)
-        assert board_y == pytest.approx(109.0, abs=0.001)
+        assert board_y == pytest.approx(111.0, abs=0.001)
 
 
 class TestClearanceValidationRotation:
@@ -137,9 +140,9 @@ class TestClearanceValidationRotation:
 
         abs_x, abs_y = _transform_pad_position(pad, footprint)
 
-        # Expected: (112.5, 109.0)
+        # KiCad negated-angle convention (#3739): (112.5, 111.0)
         assert abs_x == pytest.approx(112.5, abs=0.001)
-        assert abs_y == pytest.approx(109.0, abs=0.001)
+        assert abs_y == pytest.approx(111.0, abs=0.001)
 
 
 def _make_pcb_text(fp_rotation: float, pad_rotation: float | None = None) -> str:

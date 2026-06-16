@@ -253,8 +253,9 @@ class RoutingOrchestrator:
         1. Autorouter-style ``self.pcb.pads`` dict keyed by
            ``(ref, pin)`` with router ``Pad`` values.
         2. Document-model ``self.pcb.footprints`` with relative pad
-           positions (rotated into world coordinates with the standard
-           CCW-positive convention, mirroring
+           positions (rotated into world coordinates with KiCad's
+           negated-angle convention -- see core.geometry.rotate_pad_offset,
+           #3739 -- mirroring
            ``kicad_tools.mcp.tools.routing._build_pads_for_net``).
 
         Returns ``None`` when neither shape is usable (e.g. mock PCBs in
@@ -281,9 +282,9 @@ class RoutingOrchestrator:
                     if not ref or ref.startswith("#"):
                         continue
                     fp_x, fp_y = fp.position
-                    # KiCad rotation is CCW-positive; standard 2D
-                    # rotation matrix applies directly.
-                    rot_rad = math.radians(getattr(fp, "rotation", 0.0) or 0.0)
+                    # KiCad applies the footprint orientation as a NEGATED angle
+                    # vs standard CCW math (verified vs pcbnew 10.0.1, #3739).
+                    rot_rad = math.radians(-(getattr(fp, "rotation", 0.0) or 0.0))
                     cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
                     for pad in fp.pads:
                         net = getattr(pad, "net_number", 0)
