@@ -502,17 +502,38 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
         raise ValueError("could not locate R1/D1 LED_ANODE pads for routing")
 
     # Eastward run along R1's row, then a 45-degree descent onto D1's anode.
-    # The knee is placed so the diagonal's horizontal extent never reaches
-    # D1's GND pad (west of the anode) -- approach the anode from due north.
+    # The knee is placed exactly ``dy`` west of the anode so the descent
+    # leg has equal dx/dy -- a true 45-degree diagonal (the only off-axis
+    # angle in the legal {0,45,90,135} set; issue #3532's census gate).
+    # Because the diagonal runs *south-east* (down and toward the anode),
+    # it moves away from D1's GND pad, which sits west of the anode, so
+    # the corridor stays clear without breaking the 45-degree geometry.
     dy = d1_anode[1] - r1_anode[1]
-    knee = (d1_anode[0] - dy, r1_anode[1])
-    points = [r1_anode, knee, d1_anode]
+    knee = (d1_anode[0] - abs(dy), r1_anode[1])
 
-    # Sanity: the descent must not pass over D1's GND pad.
-    if d1_gnd is not None and abs(knee[0] - d1_gnd[0]) < 1.5 and knee[0] >= d1_gnd[0]:
-        # GND pad lies within the descent corridor; nudge the knee east.
-        knee = (d1_gnd[0] + 1.5, r1_anode[1])
-        points = [r1_anode, knee, d1_anode]
+    def _clearance_to_gnd(seg_start: tuple[float, float], seg_end: tuple[float, float]) -> float:
+        """Perpendicular distance from D1's GND pad centre to a segment."""
+        if d1_gnd is None:
+            return math.inf
+        ax, ay = seg_start
+        bx, by = seg_end
+        px, py = d1_gnd
+        abx, aby = bx - ax, by - ay
+        denom = abx * abx + aby * aby
+        t = 0.0 if denom == 0 else ((px - ax) * abx + (py - ay) * aby) / denom
+        t = max(0.0, min(1.0, t))
+        cx, cy = ax + t * abx, ay + t * aby
+        return math.hypot(px - cx, py - cy)
+
+    # Safety check: the true-45 diagonal must clear D1's GND pad.  If it
+    # ever did not (e.g. a future footprint change), fall back to a due-north
+    # descent (a 90-degree leg directly above the anode), which is also on
+    # the legal angle set -- never re-introduce an off-45 nudge.
+    GND_CLEARANCE_MM = 0.5  # 0.1 mm trace half-width + ample pad margin
+    if _clearance_to_gnd(knee, d1_anode) < GND_CLEARANCE_MM:
+        knee = (d1_anode[0], r1_anode[1])
+
+    points = [r1_anode, knee, d1_anode]
 
     # Drop the autorouter's segments for this net.
     doc.children = [
