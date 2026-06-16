@@ -2129,8 +2129,16 @@ def create_softstart_pcb(output_dir: Path) -> Path:
 
     # Zero-crossing detection (H11AA1 in DIP-6)
     U2_POS = (BOARD_ORIGIN_X + 75, BOARD_ORIGIN_Y + 28)  # H11AA1 DIP-6
+    # R3/R4 are the opto-LED input current limiters.  They were originally
+    # placed on the same row 3 mm apart (centres), which put R3 pad 2 and
+    # R4 pad 1 edge-to-edge with 0.0 mm clearance -- a hard kicad-cli short
+    # (issue #3743), made worse by R3 pad 2 carrying no net.  Nudge R4
+    # 0.5 mm east so the two adjacent pad edges open a ~0.5 mm gap (well
+    # over the 0.1016 mm jlcpcb-tier1 floor) while R4 stays inside the
+    # AC_NEUTRAL pour pocket -- a larger move splits the AC_NEUTRAL F.Cu
+    # zone into a stranded island (a new unconnected_items).
     R3_POS = (BOARD_ORIGIN_X + 70, BOARD_ORIGIN_Y + 22)
-    R4_POS = (BOARD_ORIGIN_X + 73, BOARD_ORIGIN_Y + 22)
+    R4_POS = (BOARD_ORIGIN_X + 73.5, BOARD_ORIGIN_Y + 22)
     R5_POS = (BOARD_ORIGIN_X + 85, BOARD_ORIGIN_Y + 22)
 
     # Charging circuit (right of zero-crossing)
@@ -3068,6 +3076,15 @@ def create_softstart_pcb(output_dir: Path) -> Path:
 
     print("\n4. Adding zero-crossing detection...")
     parts.append(generate_dip6("U2", U2_POS, "H11AA1"))
+    # R3/R4 pad 2 are intentionally unconnected (the opto LED inputs, U2
+    # pads 1/2, carry AC_LINE/AC_NEUTRAL directly via the AC pours; R3/R4
+    # are vestigial in the routed copper).  The original defect (issue
+    # #3743) was purely geometric: with R3 and R4 on the same row 3 mm
+    # apart, R3 pad 2 and R4 pad 1 abutted at 0.0 mm clearance -- and
+    # because R3 pad 2 has no net, kicad-cli reported it as a hard short.
+    # Staggering R4 onto its own row (R4_POS above) opens that gap; the
+    # pad 2 nets are left empty (no zone-connectivity obligation, so no new
+    # unconnected-zone islands).
     parts.append(generate_resistor_0805("R3", R3_POS, "33k", "AC_LINE", ""))
     parts.append(generate_resistor_0805("R4", R4_POS, "33k", "AC_NEUTRAL", ""))
     parts.append(generate_resistor_0805("R5", R5_POS, "10k", "+3.3V", "ZC_DETECT"))
@@ -3146,7 +3163,17 @@ def create_softstart_pcb(output_dir: Path) -> Path:
                 2: "V_OC_TH",  # 1A IN-
                 3: "I_SENSE_OUT",  # 1A IN+
                 4: "GND",  # GND
-                5: "",  # 2B IN+ NC
+                # Unused comparator B (pins 5/6/7): tie IN+ (pin 5) to a
+                # defined rail rather than leaving it floating.  An LM393
+                # with floating inputs can oscillate and couple noise into the
+                # shared supply; pulling IN+ to +3.3V keeps unit B's output
+                # in a defined state.  This also matches the routed-PCB
+                # copper -- the +3.3V VCC pour at pad 8 already reaches pad 5,
+                # so assigning pad 5 to +3.3V turns what kicad-cli otherwise
+                # reports as a "+3.3V shorting to <no net>" defect (issue
+                # #3743) into a legitimate net connection.  Pins 6/7 are left
+                # NC: no copper reaches them, so they raise no DRC finding.
+                5: "+3.3V",  # 2B IN+ -> +3.3V (unused, tie to rail)
                 6: "",  # 2B IN- NC
                 7: "",  # 2B OUT NC
                 8: "+3.3V",  # VCC
