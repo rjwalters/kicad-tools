@@ -73,9 +73,10 @@ class TestZoneConfig:
         assert config.min_thickness == 0.25
         assert config.thermal_gap == 0.3
         assert config.thermal_bridge_width == 0.4
-        # Issue #3727: zones default to a solid pad connection so SMD (and
-        # single-spoke THT) pads do not trigger ``starved_thermal``.
-        assert config.pad_connection == "yes"
+        # Issue #3729: zones default to *zone-level thermal relief* (empty
+        # mode).  The selective per-pad policy forces solid only on pads that
+        # cannot host 2 spokes, so larger pads keep thermal relief.
+        assert config.pad_connection == ""
         assert config.boundary is None
 
     def test_custom_values(self):
@@ -124,12 +125,13 @@ class TestGeneratedZone:
         assert "(polygon" in sexp_str
         assert "(priority 1)" in sexp_str
 
-    def test_to_sexp_node_solid_pad_connection_default(self):
-        """Issue #3727: generated zones write a solid ``connect_pads yes``.
+    def test_to_sexp_node_thermal_relief_default(self):
+        """Issue #3729: generated zones default to zone-level thermal relief.
 
-        A solid connection is strictly stronger than a 2-spoke thermal, so it
-        clears ``starved_thermal`` honestly instead of lowering the required
-        spoke count.
+        The selective policy keeps thermal relief at the zone level (no
+        ``connect_pads`` mode token) and forces solid only on the pads that
+        cannot host 2 spokes via per-pad ``(zone_connect 2)`` overrides, so
+        the generated zone emits a bare ``(connect_pads (clearance ...))``.
         """
         config = ZoneConfig(net="GND", layer="B.Cu", priority=1)
         zone = GeneratedZone(
@@ -139,8 +141,20 @@ class TestGeneratedZone:
             uuid="test-uuid",
         )
         sexp_str = zone.to_sexp_node().to_string()
+        assert "(connect_pads (clearance" in sexp_str
+        assert "connect_pads yes" not in sexp_str
+
+    def test_to_sexp_node_yes_override(self):
+        """An explicit ``pad_connection="yes"`` still writes the blanket-solid mode."""
+        config = ZoneConfig(net="GND", layer="B.Cu", priority=1, pad_connection="yes")
+        zone = GeneratedZone(
+            config=config,
+            net_number=1,
+            boundary=[(0, 0), (100, 0), (100, 100), (0, 100)],
+            uuid="test-uuid",
+        )
+        sexp_str = zone.to_sexp_node().to_string()
         assert "(connect_pads yes (clearance" in sexp_str
-        assert '"yes"' not in sexp_str
 
 
 class TestZoneGeneratorUnit:

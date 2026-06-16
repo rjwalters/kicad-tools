@@ -58,6 +58,10 @@ class _Obstacle:
     layers: tuple[str, ...]
     # Sheet-absolute footprint of the copper, as a shapely geometry.
     shape: _Geometry
+    # The pad ``SExp`` this obstacle came from, when it is a footprint pad
+    # (``None`` for vias).  Lets the isolated-island remediator set a per-pad
+    # ``zone_connect`` override on the exact pad that stranded a sliver.
+    source_pad: SExp | None = None
 
 
 def _build_net_name_map(doc: SExp) -> dict[int, str]:
@@ -186,7 +190,14 @@ def _collect_obstacles(
                 else []
             )
 
-            obstacles.append(_Obstacle(net_key=net_key, layers=tuple(pad_layers), shape=shape))
+            obstacles.append(
+                _Obstacle(
+                    net_key=net_key,
+                    layers=tuple(pad_layers),
+                    shape=shape,
+                    source_pad=pad,
+                )
+            )
 
     # --- Vias (top level) ---
     for via in doc.find_all("via"):
@@ -442,43 +453,392 @@ def _keep_connected_rings(rings: list, anchors: list, polygon_cls) -> list:
 # geometric DRC requires (issue #3727).
 _CONNECT_PAD_MODES = frozenset({"thru_hole_only", "yes", "no"})
 
+# The selective policy is a *meta* mode handled by this module rather than a
+# KiCad ``connect_pads`` keyword: it keeps the zone-level default as thermal
+# relief and forces a solid connection only on the individual pads that
+# physically cannot host 2 spokes (via a per-pad ``(zone_connect 2)``).
+_SELECTIVE_MODE = "selective"
+
+# KiCad per-pad ``(zone_connect N)`` override codes.  This overrides the
+# zone-level ``connect_pads`` mode for the single pad it sits on:
+#   0 = none, 1 = thermal relief, 2 = solid (full copper).
+_ZONE_CONNECT_SOLID = 2
+
+# Thermal-relief parameters fall back to these when a zone does not declare
+# them.  They match the generator defaults (``ZoneConfig.thermal_gap`` /
+# ``thermal_bridge_width``) so the spoke-viability test below reflects the
+# geometry KiCad will actually attempt to fill.
+_DEFAULT_THERMAL_GAP_MM = 0.3
+_DEFAULT_THERMAL_BRIDGE_WIDTH_MM = 0.4
+
+# Safety margin (mm) added to the spoke-fit requirement.  A pad that only
+# *just* clears the arithmetic minimum can still fail KiCad's geometric
+# spoke placement (corner rounding, antipad encroachment), so we require a
+# little slack before trusting a pad to host 2 spokes and keep thermal
+# relief.  Tuned so the demo boards report 0 ``starved_thermal`` while
+# generously-sized power pads retain thermal relief.
+_SPOKE_FIT_MARGIN_MM = 0.1
+
+
+def _zone_thermal_params(zone: SExp) -> tuple[float, float]:
+    """Return ``(thermal_gap, thermal_bridge_width)`` for a zone in mm.
+
+    Reads the ``(fill ... (thermal_gap G) (thermal_bridge_width W))`` block,
+    falling back to the generator defaults when a value is absent so the
+    spoke-viability test always has concrete numbers to reason about.
+    """
+    gap = _DEFAULT_THERMAL_GAP_MM
+    bridge = _DEFAULT_THERMAL_BRIDGE_WIDTH_MM
+    fill = zone.find("fill")
+    if fill is not None:
+        g = fill.find("thermal_gap")
+        if g is not None:
+            gv = g.get_float(0)
+            if gv is not None:
+                gap = gv
+        b = fill.find("thermal_bridge_width")
+        if b is not None:
+            bv = b.get_float(0)
+            if bv is not None:
+                bridge = bv
+    return gap, bridge
+
+
+def _pad_min_dimension(pad: SExp) -> float | None:
+    """Smallest copper dimension of a pad in mm, or ``None`` if unknown.
+
+    The 2-spoke thermal relief that KiCad's geometric DRC requires must fit
+    across the *narrow* axis of the pad — the limiting dimension — so we key
+    the spoke-viability test on ``min(width, height)``.
+    """
+    size = pad.find("size")
+    if size is None:
+        return None
+    w = size.get_float(0)
+    if w is None or w <= 0:
+        return None
+    h = size.get_float(1)
+    if h is None:
+        h = w
+    if h <= 0:
+        return None
+    return min(w, h)
+
+
+def _pad_can_host_two_spokes(
+    pad: SExp,
+    thermal_bridge_width: float,
+    thermal_gap: float,
+) -> bool:
+    """Whether a pad is wide enough to host the 2 thermal spokes DRC wants.
+
+    KiCad's default thermal relief places two spokes on opposite sides of a
+    pad.  For both spokes to actually form, the pad must be wide enough
+    across its *narrow* axis to seat a spoke of ``thermal_bridge_width`` with
+    the thermal antipad (``thermal_gap``) on either side of it; otherwise the
+    surrounding copper only admits a single spoke and the geometric DRC
+    reports ``starved_thermal`` (issue #3727).
+
+    The fit requirement is ``thermal_bridge_width + 2 * thermal_gap`` plus a
+    small safety margin.  Pads at or below that width get a solid connection
+    instead; pads comfortably above it keep their thermal relief.  Pads with
+    no readable size are treated conservatively as *unable* to host spokes
+    (force solid) so a malformed pad never silently keeps a starved thermal.
+    """
+    min_dim = _pad_min_dimension(pad)
+    if min_dim is None:
+        return False
+    required = thermal_bridge_width + 2.0 * thermal_gap + _SPOKE_FIT_MARGIN_MM
+    return min_dim >= required
+
+
+def _set_pad_zone_connect(pad: SExp, code: int) -> bool:
+    """Set a pad's ``(zone_connect N)`` override, returning whether it changed.
+
+    A pad that already declares any ``zone_connect`` carries a deliberate
+    upstream choice and is left untouched.  Otherwise the override is appended
+    so the per-pad connection mode wins over the zone-level default.
+    """
+    if pad.find("zone_connect") is not None:
+        return False
+    pad.append(SExp.list("zone_connect", code))
+    return True
+
+
+def _apply_selective_pad_connection(doc: SExp) -> int:
+    """Force a solid connection only on pads that cannot host 2 thermal spokes.
+
+    Implements the selective default (issue #3729): the zone keeps its
+    thermal-relief default (no ``connect_pads`` mode token), and every
+    footprint pad on a zone's net that is too small to seat the 2 spokes
+    KiCad's DRC requires gets a per-pad ``(zone_connect 2)`` solid override.
+    Pads that *can* host 2 spokes keep thermal relief, preserving the
+    hand-rework benefit where it is geometrically valid.
+
+    Returns the number of pads that received a new solid override.
+    """
+    name_map = _build_net_name_map(doc)
+
+    # Collect, per net, the tightest spoke-fit threshold across the zones on
+    # that net.  A pad must clear the threshold of every zone it sits in to
+    # keep thermal relief; using the largest required width is the safe
+    # (force-solid-if-any-zone-would-starve) choice.
+    net_required: dict[str, float] = {}
+    for zone in doc.find_all("zone"):
+        connect_pads = zone.find("connect_pads")
+        if connect_pads is None:
+            continue  # keepout / non-copper zone
+        # A zone with an explicit mode token opts out of selective per-pad
+        # treatment — its zone-level mode already governs every pad.
+        has_mode = any(
+            child.is_atom and isinstance(child.value, str) for child in connect_pads.children
+        )
+        if has_mode:
+            continue
+        zone_net = _net_key(zone.find("net"), name_map)
+        if zone_net is None:
+            continue
+        gap, bridge = _zone_thermal_params(zone)
+        required = bridge + 2.0 * gap + _SPOKE_FIT_MARGIN_MM
+        prev = net_required.get(zone_net)
+        if prev is None or required > prev:
+            net_required[zone_net] = required
+
+    if not net_required:
+        return 0
+
+    changed = 0
+    for fp in doc.find_all("footprint"):
+        for pad in fp.find_all("pad"):
+            net_key = _net_key(pad.find("net"), name_map)
+            if net_key is None:
+                continue
+            pad_required = net_required.get(net_key)
+            if pad_required is None:
+                continue  # pad's net has no thermal-relief zone
+            min_dim = _pad_min_dimension(pad)
+            if min_dim is not None and min_dim >= pad_required:
+                continue  # comfortably hosts 2 spokes -> keep thermal relief
+            if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
+                changed += 1
+    return changed
+
+
+def starved_thermal_pad_uuids(drc_report: dict) -> set[str]:
+    """Extract the pad UUIDs flagged ``starved_thermal`` in a kicad-cli report.
+
+    A ``starved_thermal`` violation lists two items: the zone and the
+    offending pad.  KiCad describes the pad item as e.g. ``Pad 4 [+3V3] of J3``
+    (SMD) or ``PTH pad 2 [+24V] of Q5`` (through-hole) and the zone item as
+    ``Zone [...] on ...``.  We collect every item UUID whose description names
+    a pad (``"pad"`` appears, ``"zone"`` does not), which captures both the
+    SMD ``Pad`` and through-hole ``PTH pad`` forms while skipping the paired
+    zone item.  Returns the set of such UUIDs (empty when the report has no
+    starved-thermal violations).
+    """
+    uuids: set[str] = set()
+    for violation in drc_report.get("violations", []):
+        if violation.get("type") != "starved_thermal":
+            continue
+        for item in violation.get("items", []):
+            desc = item.get("description", "").lower()
+            uid = item.get("uuid")
+            if uid and "pad" in desc and "zone" not in desc:
+                uuids.add(uid)
+    return uuids
+
+
+def isolated_copper_zone_uuids(drc_report: dict) -> set[str]:
+    """Extract the zone UUIDs flagged ``isolated_copper`` in a kicad-cli report.
+
+    An ``isolated_copper`` violation lists the offending zone (``Zone [...] on
+    ...``).  KiCad does not name the specific island geometry, so we collect
+    the zone UUIDs and resolve the islands geometrically in
+    :func:`force_solid_on_isolated_island_pads`.  Returns the set of zone
+    UUIDs (empty when the report has none).
+    """
+    uuids: set[str] = set()
+    for violation in drc_report.get("violations", []):
+        if violation.get("type") != "isolated_copper":
+            continue
+        for item in violation.get("items", []):
+            uid = item.get("uuid")
+            if uid:
+                uuids.add(uid)
+    return uuids
+
+
+# A fill polygon at or below this area (mm^2) is treated as a candidate
+# "island sliver" when resolving an ``isolated_copper`` warning.  KiCad's
+# isolated-copper islands on these boards are sub-mm^2 slivers left around a
+# thermal-relief pad whose lone spoke barely ties the region to the pour;
+# real pour lobes are orders of magnitude larger.  Keeping the threshold
+# small avoids ever touching a substantial connected region.
+_ISLAND_SLIVER_AREA_MM2 = 2.0
+
+
+def force_solid_on_isolated_island_pads(doc: SExp, zone_uuids: set[str]) -> int:
+    """Force solid connection on the pads anchoring isolated-copper slivers.
+
+    Resolves each ``isolated_copper`` warning (issue #3729) to its cause: a
+    same-net thermal-relief pad whose single spoke leaves a tiny copper
+    sliver that KiCad flags as an isolated island.  For every zone in
+    ``zone_uuids`` we find the small (``<= _ISLAND_SLIVER_AREA_MM2``) fill
+    polygons and set ``(zone_connect 2)`` on each same-net pad whose copper
+    footprint touches one — merging the sliver back into the pour on the next
+    refill.  Larger fill lobes are never touched, so substantial copper is
+    safe.  Returns the number of pads that received a new solid override.
+
+    A no-op (returns 0) when shapely is unavailable, since the island
+    geometry cannot be reasoned about without it.
+    """
+    if not zone_uuids:
+        return 0
+    try:
+        import shapely
+        from shapely.geometry import Polygon
+    except ImportError:
+        return 0
+
+    name_map = _build_net_name_map(doc)
+    obstacles = _collect_obstacles(doc, shapely, name_map)
+
+    changed = 0
+    for zone in doc.find_all("zone"):
+        uuid_node = zone.find("uuid")
+        if uuid_node is None or (uuid_node.get_string(0) or "") not in zone_uuids:
+            continue
+        zone_net = _net_key(zone.find("net"), name_map)
+        if zone_net is None:
+            continue
+
+        for filled in zone.find_all("filled_polygon"):
+            layer_node = filled.find("layer")
+            fill_layer = ""
+            if layer_node is not None:
+                fill_layer = layer_node.get_string(0) or ""
+            else:
+                zl = zone.find("layer")
+                if zl is not None:
+                    fill_layer = zl.get_string(0) or ""
+
+            pts_node = filled.find("pts")
+            if pts_node is None:
+                continue
+            ring = [
+                (xy.get_float(0) or 0.0, xy.get_float(1) or 0.0) for xy in pts_node.find_all("xy")
+            ]
+            if len(ring) < 3:
+                continue
+            poly = Polygon(ring)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty or poly.area > _ISLAND_SLIVER_AREA_MM2:
+                continue  # substantial lobe -> never a sliver to remediate
+
+            # Force solid on every same-net pad whose copper touches the
+            # sliver -- its thermal spoke is what stranded the sliver.
+            for obs in obstacles:
+                if obs.net_key != zone_net:
+                    continue
+                if not _obstacle_on_layer(obs, fill_layer):
+                    continue
+                if not obs.shape.intersects(poly):
+                    continue
+                pad = obs.source_pad
+                if pad is None:
+                    continue  # a via, not a pad -- has no thermal relief
+                if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
+                    changed += 1
+    return changed
+
+
+def force_solid_on_pads_by_uuid(doc: SExp, pad_uuids: set[str]) -> int:
+    """Set ``(zone_connect 2)`` on every pad whose UUID is in ``pad_uuids``.
+
+    This is the *measurement-driven* half of the selective policy
+    (issue #3729): the size heuristic (:func:`_apply_selective_pad_connection`)
+    handles the obvious small-SMD pads up front, but a handful of pads form
+    only a single spoke for reasons the pad size cannot predict (the pad sits
+    at the pour edge, or its only spoke lands on a fill island).  KiCad's own
+    geometric DRC names exactly those pads, so we read the fill's DRC report
+    back and force a solid connection on precisely that set -- guaranteeing
+    0 ``starved_thermal`` without touching any pad DRC did not flag, so pads
+    that genuinely host 2 spokes keep their thermal relief.
+
+    A pad that already carries a ``zone_connect`` is left untouched.  Returns
+    the number of pads that received a new solid override.
+    """
+    if not pad_uuids:
+        return 0
+    changed = 0
+    for fp in doc.find_all("footprint"):
+        for pad in fp.find_all("pad"):
+            uuid_node = pad.find("uuid")
+            if uuid_node is None:
+                continue
+            if (uuid_node.get_string(0) or "") not in pad_uuids:
+                continue
+            if _set_pad_zone_connect(pad, _ZONE_CONNECT_SOLID):
+                changed += 1
+    return changed
+
 
 def normalize_zone_pad_connection(
     doc: SExp,
-    mode: str = "yes",
+    mode: str = _SELECTIVE_MODE,
 ) -> int:
-    """Upgrade legacy thermal-for-all zones to a stronger pad connection.
+    """Apply the zone pad-connection policy, defaulting to *selective*.
 
-    KiCad's ``(connect_pads ...)`` carries an optional leading *mode* token:
+    KiCad's ``(connect_pads ...)`` carries an optional leading *mode* token
+    that governs how **every** pad in the zone ties to the pour:
 
     * **absent** -- thermal relief for every pad.  Small SMD pads cannot
       host the 2 thermal spokes KiCad's geometric DRC requires, and some
       through-hole power pads sit where only one spoke can form, so a pour
       that uses this default reports ``starved_thermal`` errors (issue
       #3727, across boards 03/04/05/softstart).
-    * ``yes`` -- a **solid** full-copper connection for every pad (the
-      default applied here).  A solid connection is strictly stronger than
-      a 2-spoke thermal relief, so it eliminates ``starved_thermal``
-      honestly -- it does not lower the required spoke count -- and gives
-      the lowest-impedance power/ground delivery on a reflow-assembled
-      board.
+    * ``yes`` -- a **solid** full-copper connection for every pad.  A solid
+      connection is strictly stronger than a 2-spoke thermal relief, so it
+      eliminates ``starved_thermal`` honestly -- it does not lower the
+      required spoke count.
     * ``thru_hole_only`` -- thermal relief for THT pads, solid for SMD.
     * ``no`` -- no copper connection.
 
-    This function adds the ``mode`` token to every copper zone whose
-    ``connect_pads`` node currently lacks one.  Zones that already declare a
-    mode (set deliberately by an upstream generator) are left untouched, as
-    are keepout zones (which have no ``connect_pads``).  The document is
-    mutated in place; the number of zones changed is returned so callers can
-    skip a needless rewrite when nothing changed.
+    ``mode`` selects the policy:
+
+    * ``"selective"`` (the **default**, issue #3729) -- keep each zone's
+      thermal-relief default and force a solid connection *only on the
+      individual pads that cannot host 2 spokes*, via a per-pad
+      ``(zone_connect 2)`` override.  Pads that can host 2 spokes keep their
+      thermal relief (which eases hand-soldering / rework), so the fix is
+      surgical rather than a blanket solid-for-everything.  PR #3728 made
+      solid the global default; this refines it to the minimal set of pads
+      that genuinely need it while still clearing every ``starved_thermal``.
+    * ``"yes"`` / ``"thru_hole_only"`` / ``"no"`` -- an explicit override:
+      the zone-level ``connect_pads`` mode token is added to every copper
+      zone that lacks one, applying that mode uniformly (the #3728 behavior
+      for ``"yes"``).
+
+    For the zone-level modes, zones that already declare a mode (set
+    deliberately by an upstream generator) are left untouched, as are
+    keepout zones (which have no ``connect_pads``).  For the selective mode,
+    pads that already declare a ``zone_connect`` are likewise preserved, and
+    zones carrying an explicit ``connect_pads`` mode opt out of per-pad
+    treatment.  The document is mutated in place; the number of zones (mode
+    token added) or pads (selective override added) changed is returned so
+    callers can skip a needless rewrite when nothing changed.
 
     Run this *before* the kicad-cli fill so the refilled copper reflects the
-    new connection mode.
+    new connection.
     """
+    if mode == _SELECTIVE_MODE:
+        return _apply_selective_pad_connection(doc)
+
     if mode not in _CONNECT_PAD_MODES:
         raise ValueError(
             f"Unsupported pad-connection mode {mode!r}; "
-            f"expected one of {sorted(_CONNECT_PAD_MODES)}"
+            f"expected {_SELECTIVE_MODE!r} or one of {sorted(_CONNECT_PAD_MODES)}"
         )
 
     changed = 0

@@ -593,22 +593,29 @@ class TestZoneNode:
         priority_node = node.get("priority")
         assert priority_node.children[0].value == 1
 
-    def test_zone_node_defaults_to_solid_pad_connection(self):
-        """Issue #3727: zones default to a solid (``yes``) pad connection.
+    def test_zone_node_defaults_to_thermal_relief_for_selective_policy(self):
+        """Issue #3729: zones default to *zone-level thermal relief*.
 
-        Thermal relief for *all* pads starves small SMD pads (and some THT
-        power pads) of the 2 spokes the geometric DRC requires.  A solid
-        connection is strictly stronger, so it is the honest default that
-        clears ``starved_thermal`` without lowering the spoke count.
+        The selective policy (issue #3729) keeps thermal relief at the zone
+        level (no ``connect_pads`` mode token) and forces a solid connection
+        only on the individual pads that cannot host 2 spokes, via per-pad
+        ``(zone_connect 2)`` overrides applied by
+        ``normalize_zone_pad_connection``.  So the *zone* default emits no
+        mode token, preserving thermal relief for the pads that can host it.
         """
         points = [(0, 0), (100, 0), (100, 50), (0, 50)]
         node = zone_node(1, "GND", "F.Cu", points, "zone-uuid")
 
         connect_pads = node.get("connect_pads")
-        # The leading mode token is a bare atom child before (clearance ...).
+        # No leading mode atom -- only the (clearance ...) child remains.
         mode_atoms = [c.value for c in connect_pads.children if c.is_atom]
-        assert mode_atoms == ["yes"], mode_atoms
-        # The mode must serialize as a bare keyword, never a quoted string.
+        assert mode_atoms == [], mode_atoms
+        assert "(connect_pads (clearance" in node.to_string()
+
+    def test_zone_node_pad_connection_yes_is_explicit_override(self):
+        """A caller can still request the #3728 blanket-solid (``yes``) mode."""
+        points = [(0, 0), (100, 0), (100, 50), (0, 50)]
+        node = zone_node(1, "GND", "F.Cu", points, "zone-uuid", pad_connection="yes")
         rendered = node.to_string()
         assert "(connect_pads yes (clearance" in rendered
         assert '"yes"' not in rendered
