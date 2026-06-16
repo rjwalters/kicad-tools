@@ -106,6 +106,9 @@ class TestNetClassMapFlagWiring:
         """Without --net-class-map both diff-pair rules check 0 (AC #3)."""
         from kicad_tools.cli.check_cmd import main
 
+        # Issue #3750: tmp PCB has no schematic, so the meta rollup is
+        # INCOMPLETE; ``--allow-incomplete`` preserves the rule-only
+        # assertion (rules no-op -> no violations -> exit 0).
         result = main(
             [
                 str(diffpair_pcb),
@@ -113,6 +116,7 @@ class TestNetClassMapFlagWiring:
                 "json",
                 "--only",
                 "diffpair_routing_continuity,diffpair_length_skew",
+                "--allow-incomplete",
             ]
         )
         # No errors -> exit 0 (rules degrade to no-op, no spurious violations).

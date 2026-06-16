@@ -42,10 +42,16 @@ class TestCheckCommand:
         assert ".kicad_pcb" in captured.err
 
     def test_check_basic_table_output(self, drc_clean_pcb: Path, capsys):
-        """Test check command with table output format."""
+        """Test check command with table output format.
+
+        Note (issue #3750): tmp PCBs have no sibling schematic / manifest,
+        so the meta-check rollup is INCOMPLETE.  Pass ``--allow-incomplete``
+        to assert the legacy "DRC clean -> exit 0" contract under the new
+        default where INCOMPLETE exits non-zero.
+        """
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb)])
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -56,7 +62,7 @@ class TestCheckCommand:
         """Test check command with JSON output format."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb), "--format", "json"])
+        result = main([str(drc_clean_pcb), "--format", "json", "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -75,7 +81,7 @@ class TestCheckCommand:
         """Test check command with summary output format."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb), "--format", "summary"])
+        result = main([str(drc_clean_pcb), "--format", "summary", "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -87,14 +93,14 @@ class TestCheckCommand:
 
         # Test with different manufacturers
         for mfr in ["jlcpcb", "seeed", "pcbway", "oshpark"]:
-            result = main([str(drc_clean_pcb), "--mfr", mfr])
+            result = main([str(drc_clean_pcb), "--mfr", mfr, "--allow-incomplete"])
             assert result == 0, f"Failed for manufacturer {mfr}"
 
     def test_check_layers_option(self, drc_clean_pcb: Path, capsys):
         """Test check command with layers option."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb), "--layers", "4"])
+        result = main([str(drc_clean_pcb), "--layers", "4", "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -105,11 +111,11 @@ class TestCheckCommand:
         from kicad_tools.cli.check_cmd import main
 
         # Run only clearance checks
-        result = main([str(drc_clean_pcb), "--only", "clearance"])
+        result = main([str(drc_clean_pcb), "--only", "clearance", "--allow-incomplete"])
         assert result == 0
 
         # Run multiple categories
-        result = main([str(drc_clean_pcb), "--only", "clearance,dimensions"])
+        result = main([str(drc_clean_pcb), "--only", "clearance,dimensions", "--allow-incomplete"])
         assert result == 0
 
     def test_check_skip_filter(self, drc_clean_pcb: Path, capsys):
@@ -117,11 +123,11 @@ class TestCheckCommand:
         from kicad_tools.cli.check_cmd import main
 
         # Skip silkscreen checks
-        result = main([str(drc_clean_pcb), "--skip", "silkscreen"])
+        result = main([str(drc_clean_pcb), "--skip", "silkscreen", "--allow-incomplete"])
         assert result == 0
 
         # Skip multiple categories
-        result = main([str(drc_clean_pcb), "--skip", "silkscreen,edge"])
+        result = main([str(drc_clean_pcb), "--skip", "silkscreen,edge", "--allow-incomplete"])
         assert result == 0
 
     def test_check_invalid_filter_category(self, minimal_pcb: Path, capsys):
@@ -138,21 +144,21 @@ class TestCheckCommand:
         """Test check command with --errors-only flag."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb), "--errors-only"])
+        result = main([str(drc_clean_pcb), "--errors-only", "--allow-incomplete"])
         assert result == 0  # No errors with clean PCB
 
     def test_check_verbose_flag(self, drc_clean_pcb: Path, capsys):
         """Test check command with --verbose flag."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb), "--verbose"])
+        result = main([str(drc_clean_pcb), "--verbose", "--allow-incomplete"])
         assert result == 0
 
     def test_check_copper_weight_option(self, drc_clean_pcb: Path, capsys):
         """Test check command with copper weight option."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb), "--copper", "2.0"])
+        result = main([str(drc_clean_pcb), "--copper", "2.0", "--allow-incomplete"])
         assert result == 0
 
     def test_check_help_text(self, capsys):
@@ -175,7 +181,7 @@ class TestCheckOutputFlag:
         from kicad_tools.cli.check_cmd import main
 
         output_file = tmp_path / "drc_report.json"
-        result = main([str(drc_clean_pcb), "--output", str(output_file)])
+        result = main([str(drc_clean_pcb), "--output", str(output_file), "--allow-incomplete"])
         assert result == 0
 
         assert output_file.exists()
@@ -190,7 +196,7 @@ class TestCheckOutputFlag:
         from kicad_tools.cli.check_cmd import main
 
         output_file = tmp_path / "drc_report.json"
-        result = main([str(drc_clean_pcb), "--output", str(output_file)])
+        result = main([str(drc_clean_pcb), "--output", str(output_file), "--allow-incomplete"])
         assert result == 0
 
         # Table output should still go to stdout
@@ -207,7 +213,7 @@ class TestCheckOutputFlag:
         from kicad_tools.cli.check_cmd import main
 
         output_file = tmp_path / "subdir" / "nested" / "drc_report.json"
-        result = main([str(drc_clean_pcb), "--output", str(output_file)])
+        result = main([str(drc_clean_pcb), "--output", str(output_file), "--allow-incomplete"])
         assert result == 0
 
         assert output_file.exists()
@@ -218,7 +224,7 @@ class TestCheckOutputFlag:
         """Test that no file is written when --output is not specified."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb)])
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
         assert result == 0
 
         # No drc_report.json should exist in the PCB directory
@@ -247,7 +253,7 @@ class TestCheckCommandIntegration:
         """Test check command through the main CLI dispatcher."""
         from kicad_tools.cli import main
 
-        result = main(["check", str(drc_clean_pcb)])
+        result = main(["check", str(drc_clean_pcb), "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -267,6 +273,7 @@ class TestCheckCommandIntegration:
                 "4",
                 "--format",
                 "json",
+                "--allow-incomplete",
             ]
         )
         assert result == 0
@@ -281,10 +288,15 @@ class TestCheckExitCodes:
     """Tests for check command exit codes."""
 
     def test_exit_code_0_no_violations(self, drc_clean_pcb: Path):
-        """Test exit code 0 when no violations found."""
+        """Test exit code 0 when no violations found (with --allow-incomplete).
+
+        Issue #3750: tmp PCBs have no sibling schematic / manifest, so
+        the meta rollup is INCOMPLETE.  The opt-in flag preserves the
+        "DRC clean -> 0" semantics for this test.
+        """
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb)])
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
         assert result == 0
 
     def test_exit_code_0_warnings_only_no_strict(self, drc_clean_pcb: Path):
@@ -293,7 +305,7 @@ class TestCheckExitCodes:
 
         # With clean PCB, no warnings to test
         # But this confirms the code path works
-        result = main([str(drc_clean_pcb)])
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
         assert result == 0
 
     def test_exit_code_with_strict_flag(self, drc_clean_pcb: Path):
@@ -384,7 +396,7 @@ class TestCheckLayerAutoDetection:
         """Test that a 2-layer board auto-detects 2 layers (no regression)."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(drc_clean_pcb), "--format", "json"])
+        result = main([str(drc_clean_pcb), "--format", "json", "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -395,7 +407,7 @@ class TestCheckLayerAutoDetection:
         """Test that a 4-layer board auto-detects 4 layers without --layers flag."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(four_layer_pcb), "--format", "json"])
+        result = main([str(four_layer_pcb), "--format", "json", "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -406,7 +418,7 @@ class TestCheckLayerAutoDetection:
         """Test that a 6-layer board auto-detects 6 layers."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(six_layer_pcb), "--format", "json"])
+        result = main([str(six_layer_pcb), "--format", "json", "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -417,7 +429,9 @@ class TestCheckLayerAutoDetection:
         """Test that --layers flag overrides auto-detection."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(four_layer_pcb), "--layers", "2", "--format", "json"])
+        result = main(
+            [str(four_layer_pcb), "--layers", "2", "--format", "json", "--allow-incomplete"]
+        )
         assert result == 0
 
         captured = capsys.readouterr()
@@ -428,7 +442,7 @@ class TestCheckLayerAutoDetection:
         """Test that table output shows auto-detected layer count."""
         from kicad_tools.cli.check_cmd import main
 
-        result = main([str(four_layer_pcb)])
+        result = main([str(four_layer_pcb), "--allow-incomplete"])
         assert result == 0
 
         captured = capsys.readouterr()
@@ -551,15 +565,20 @@ class TestCheckMetaCheck:
         assert "PASSED" in overall_line
 
     def test_meta_check_no_schematic_marks_erc_lvs_not_run(self, drc_clean_pcb: Path, capsys):
-        """Tmp PCB with no sibling schematic -> ERC/LVS NOT RUN, Overall INCOMPLETE."""
+        """Tmp PCB with no sibling schematic -> ERC/LVS NOT RUN, Overall INCOMPLETE -> exit 2.
+
+        Issue #3750 AC #3: exit code is 0 only when every sub-check is
+        PASSED.  A board that cannot be fully verified (no schematic =
+        no ERC, no LVS) must exit non-zero so CI consumers that read
+        the exit code do not silently accept a partially verified board.
+        Boards that legitimately lack a sub-check input can opt in to
+        ``--allow-incomplete`` to flip the exit back to 0.
+        """
         from kicad_tools.cli.check_cmd import main
 
         result = main([str(drc_clean_pcb)])
-        # Default (non-strict) mode: NOT RUN sub-checks roll up to
-        # INCOMPLETE, which the exit-code policy treats as a soft 0 so a
-        # bare ``kct check <pcb>`` is still backward-compatible with
-        # recipes that don't ship a schematic.
-        assert result == 0
+        # Default mode (no --allow-incomplete): INCOMPLETE -> exit 2.
+        assert result == 2
         captured = capsys.readouterr()
         assert "ERC:" in captured.out and "NOT RUN" in captured.out
         assert "LVS:" in captured.out
@@ -570,12 +589,46 @@ class TestCheckMetaCheck:
         )
         assert "INCOMPLETE" in overall_line
 
-    def test_meta_check_strict_fails_on_not_run(self, drc_clean_pcb: Path):
-        """Under --strict, NOT RUN sub-checks roll up to FAILED -> exit 2."""
+    def test_meta_check_allow_incomplete_passes(self, drc_clean_pcb: Path, capsys):
+        """--allow-incomplete lets NOT RUN sub-checks exit 0 (issue #3750).
+
+        Counterpart to ``test_meta_check_no_schematic_marks_erc_lvs_not_run``:
+        a board with no schematic still rolls up to ``Overall: INCOMPLETE``,
+        but the opt-in flag suppresses the non-zero exit code so recipes
+        that legitimately lack a sub-check input can keep passing.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--allow-incomplete"])
+        assert result == 0
+        captured = capsys.readouterr()
+        # The human stanza still reports the truthful INCOMPLETE rollup --
+        # only the exit code changes.
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "INCOMPLETE" in overall_line
+
+    def test_meta_check_strict_does_not_rescue_incomplete(self, drc_clean_pcb: Path, capsys):
+        """--strict does not affect the NOT RUN -> INCOMPLETE rollup.
+
+        ``--strict`` only escalates DRC / ERC warnings.  NOT RUN rollup is
+        controlled by ``--allow-incomplete`` (default: exit 2).  Verify
+        that running --strict on a tmp PCB with no schematic still exits
+        2 (the new default already exits 2 on INCOMPLETE; --strict simply
+        does not rescue or differ here).
+        """
         from kicad_tools.cli.check_cmd import main
 
         result = main([str(drc_clean_pcb), "--strict"])
         assert result == 2
+        captured = capsys.readouterr()
+        # Rollup should still report the truthful INCOMPLETE -- --strict
+        # no longer collapses NOT RUN into FAILED at the rollup level.
+        overall_line = next(
+            line for line in captured.out.splitlines() if line.startswith("Overall:")
+        )
+        assert "INCOMPLETE" in overall_line
 
     def test_meta_check_lvs_mismatch_fails_overall(self, tmp_path: Path, capsys):
         """A swapped-pad PCB triggers LVS FAILED -> Overall FAILED -> exit 2."""

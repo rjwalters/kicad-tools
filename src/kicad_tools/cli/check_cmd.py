@@ -12,9 +12,10 @@ Usage:
     kct check board.kicad_pcb --skip silkscreen    # Exclude checks
 
 Exit Codes:
-    0 - No errors (warnings may be present without --strict)
+    0 - All meta sub-checks PASSED (or --drc-only: no errors)
     1 - Command failure (file not found, parse error, etc.)
-    2 - Errors found, or warnings found with --strict
+    2 - Any sub-check FAILED, or rollup is INCOMPLETE (any sub-check
+        NOT RUN) without --allow-incomplete, or warnings found with --strict
 
 Difference from `kct drc`:
     - kct drc: Uses kicad-cli to run DRC (requires KiCad)
@@ -72,22 +73,28 @@ class MetaCheckResult:
     def _subs(self) -> tuple[SubCheckResult, ...]:
         return (self.drc, self.erc, self.lvs, self.manifest)
 
-    def compute_overall(self, strict: bool = False) -> None:
+    def compute_overall(self) -> None:
         """Roll up the four sub-statuses into ``self.overall``.
 
-        Rules (per issue #3750):
+        Rules (per issue #3750 acceptance criterion #3):
 
         * ``FAILED`` if any sub-check is ``FAILED``.
         * ``INCOMPLETE`` if any sub-check is ``NOT RUN`` (and none is
-          ``FAILED``) -- unless ``strict`` is set, in which case the
-          rollup is ``FAILED``.
+          ``FAILED``).
         * ``PASSED`` only when every sub-check is ``PASSED``.
+
+        The rollup intentionally reports the truthful aggregate state and
+        does not collapse ``INCOMPLETE`` into ``FAILED`` under ``--strict``
+        -- the exit-code policy is the right place to make that decision
+        (``INCOMPLETE`` is non-zero by default; ``--allow-incomplete``
+        opts back in to exit 0 for boards that legitimately lack the
+        inputs for a sub-check).
         """
         subs = self._subs()
         if any(s.status == "FAILED" for s in subs):
             self.overall = "FAILED"
         elif any(s.status == "NOT RUN" for s in subs):
-            self.overall = "FAILED" if strict else "INCOMPLETE"
+            self.overall = "INCOMPLETE"
         else:
             self.overall = "PASSED"
 
@@ -373,15 +380,18 @@ def run_meta_checks(
             omitted, schematic discovery falls back to
             :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb`
             (handles the ``_routed`` suffix strip used by recipes).
-        strict: When True, ``NOT RUN`` rolls up to ``FAILED`` (instead of
-            ``INCOMPLETE``) and ERC warnings become fatal.
+        strict: When True, ERC warnings become fatal (sub-check ``FAILED``).
+            ``NOT RUN`` rollup behaviour is independent of ``strict`` --
+            the exit-code policy in :func:`main` controls whether
+            ``INCOMPLETE`` exits non-zero (the new default) or 0 (with
+            ``--allow-incomplete``).
     """
     from kicad_tools.sync.discover import resolve_schematic_for_pcb
 
+    resolved_sch: Path | None
     if schematic is not None:
-        resolved_sch: Path | None = Path(schematic).resolve()
-        if not resolved_sch.exists():
-            resolved_sch = None
+        candidate = Path(schematic).resolve()
+        resolved_sch = candidate if candidate.exists() else None
     else:
         resolved_sch = resolve_schematic_for_pcb(pcb_path)
 
@@ -390,7 +400,7 @@ def run_meta_checks(
     manifest = _manifest_subcheck(pcb_path)
 
     result = MetaCheckResult(drc=drc_status, erc=erc, lvs=lvs, manifest=manifest)
-    result.compute_overall(strict=strict)
+    result.compute_overall()
     return result
 
 
@@ -401,7 +411,11 @@ def _format_meta_status_line(name: str, sub: SubCheckResult) -> str:
     sub-check when the detail starts with ``STALE:`` (issue #3750's
     human-clarity convention).  The JSON status is still ``FAILED``.
     """
-    display_status = sub.status
+    # ``display_status`` is intentionally widened to ``str`` so we can
+    # substitute the human-only ``STALE`` token for the Manifest row
+    # without violating the narrow ``SubCheckStatus`` literal type that
+    # ``sub.status`` is annotated as.
+    display_status: str = sub.status
     detail = sub.detail
     if name == "Manifest" and sub.status == "FAILED" and detail.startswith("STALE:"):
         display_status = "STALE"
@@ -536,6 +550,20 @@ def main(argv: list[str] | None = None) -> int:
             "that depend on the historical 'kct check' semantics (e.g. "
             "scripts/ci/check_routed_drc.py and the per-board allowlists "
             "in .github/routed-drc-tolerance.yml)."
+        ),
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        dest="allow_incomplete",
+        action="store_true",
+        help=(
+            "Treat ``Overall: INCOMPLETE`` (any sub-check is NOT RUN) as a "
+            "passing run for exit-code purposes (issue #3750).  By default "
+            "INCOMPLETE exits non-zero so consumers that read the exit code "
+            "do not silently accept a board that was only partially verified.  "
+            "Use this for boards / recipes that legitimately lack a sub-check "
+            "input (e.g. no schematic next to the PCB, or a recipe that runs "
+            "``kct check`` before ``kct export`` produces the manifest)."
         ),
     )
     parser.add_argument(
@@ -819,17 +847,23 @@ def main(argv: list[str] | None = None) -> int:
     # Exit 0 = no errors (warnings may be present without --strict; infos
     #   never affect exit code -- they are advisory by definition).
     # Issue #3750: when the meta-check rollup is in play (default mode),
-    # exit 2 also when any sub-check is FAILED (or, under --strict, any
-    # sub-check is NOT RUN -- captured in ``meta.overall == 'FAILED'``).
+    # exit 2 also when any sub-check is FAILED, and -- per AC #3 --
+    # exit 2 when the rollup is INCOMPLETE (any sub-check is NOT RUN)
+    # unless the caller opted in to ``--allow-incomplete``.
     if drc_only:
         if error_count > 0 or (warning_count > 0 and args.strict):
             return 2
         return 0
 
-    # Default (meta) mode: PASSED -> 0, FAILED -> 2, INCOMPLETE -> 0
-    # (the user opted out of strict; INCOMPLETE is advisory-only).
+    # Default (meta) mode: PASSED -> 0, FAILED -> 2, INCOMPLETE -> 2
+    # (exit 0 only with --allow-incomplete).  Issue #3750 AC #3:
+    # honest exit codes mean "exit 0 only when every sub-check is
+    # PASSED" -- silently exiting 0 on NOT RUN re-introduces the
+    # false-positive class the issue exists to eliminate.
     assert meta is not None  # guaranteed by the branch above
     if meta.overall == "FAILED":
+        return 2
+    if meta.overall == "INCOMPLETE" and not getattr(args, "allow_incomplete", False):
         return 2
     return 0
 

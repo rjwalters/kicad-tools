@@ -470,6 +470,19 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--allow-incomplete",
+        dest="allow_incomplete",
+        action="store_true",
+        help=(
+            "Treat Overall: INCOMPLETE (any sub-check NOT RUN) as exit 0 "
+            "(issue #3750).  By default INCOMPLETE exits non-zero so "
+            "consumers that read the exit code do not silently accept a "
+            "partially verified board.  Use this for boards / recipes that "
+            "legitimately lack a sub-check input (no schematic, or "
+            "kct check runs before kct export produces the manifest)."
+        ),
+    )
+    check_parser.add_argument(
         "--netlist-sync",
         action="store_true",
         help=(
