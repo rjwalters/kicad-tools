@@ -41,7 +41,7 @@ R27,270k,Resistor_SMD:R_0805_2012Metric,18.0000mm,88.0000mm,0.0,Top
 R28,9.1k,Resistor_SMD:R_0805_2012Metric,22.0000mm,88.0000mm,0.0,Top
 R29,10k,Resistor_SMD:R_0805_2012Metric,135.0000mm,60.0000mm,0.0,Top
 R3,33k,Resistor_SMD:R_0805_2012Metric,70.0000mm,22.0000mm,0.0,Top
-R4,33k,Resistor_SMD:R_0805_2012Metric,73.0000mm,22.0000mm,0.0,Top
+R4,33k,Resistor_SMD:R_0805_2012Metric,73.5000mm,22.0000mm,0.0,Top
 R5,10k,Resistor_SMD:R_0805_2012Metric,85.0000mm,22.0000mm,0.0,Top
 R9,5mR,Resistor_SMD:R_2512_6332Metric,75.0000mm,58.0000mm,0.0,Top
 R_GB1,10k,Resistor_SMD:R_0805_2012Metric,45.0000mm,49.0000mm,0.0,Top
