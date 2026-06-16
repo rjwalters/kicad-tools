@@ -1,8 +1,8 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T06:34:54.417675+00:00",
-  "manufacturer": "jlcpcb",
+  "generated_at": "2026-06-16T01:46:41.750137+00:00",
+  "manufacturer": "jlcpcb-tier1",
   "files": {
     "bom_jlcpcb.csv": {
       "sha256": "0f30a0fba20ff5d69aa9e94fdb429cb0b9d72b695ce0677fec5664dd4055fbf7",
@@ -13,52 +13,52 @@
       "size": 945
     },
     "gerbers.zip": {
-      "sha256": "703a48666851291799f66b53d1c292387280599a1a0517d6613d472ce57a579c",
-      "size": 31987
+      "sha256": "0df5b57030e85e4f1dabef7eaeb721c5c7c7a4ab593e1718f8a676a31283a16b",
+      "size": 44310
     },
     "report.pdf": {
-      "sha256": "6616ab6c49b6da35032d356509e702ee6e26bd22414af0a2b274317c8ec97dc3",
-      "size": 1505585
+      "sha256": "7f352cb2c59cda0131999ff1b2e124b707e061d0ac4511e3841ad8d92b5f78f3",
+      "size": 1566299
     },
     "report.md": {
-      "sha256": "e73918217d543a9bec8506d8b17add0855391af8f3ec27b334cbec3c0510f5bd",
-      "size": 3064
+      "sha256": "f86e053266ba4d7e3df2bfea17369ed91c10cd7684f7bc0e503d0640394958bd",
+      "size": 3070
     },
     "assembly.png": {
-      "sha256": "a2e6faa0113256418d4afdf32922e69cfe7e27346eba62bb3b2e88009b66466f",
-      "size": 223199
+      "sha256": "bab0d541fb0345948b501510a09cfb92ecbb327d08f5435b70541db04db1506f",
+      "size": 235074
     },
     "layer_B_Cu.png": {
-      "sha256": "b7d4b3714a0a258faae5b9a421814a3829afafa5a752b980cf492f799a76f0b5",
-      "size": 159669
+      "sha256": "58f1c312a2f9765c7e88468aa9283b0c1b92144ef2e3095b33db902fbea2f0b7",
+      "size": 174784
     },
     "layer_F_Cu.png": {
-      "sha256": "9f40d77513f1c6378d1fd5b7cd25b528992ccf3f7e16ce737055ac58733c2923",
-      "size": 183587
+      "sha256": "87e1c3b608933ad035936d8295282de8049355a16f15add63396ed8f67d75659",
+      "size": 182322
     },
     "pcb_back.png": {
-      "sha256": "f17fd101985a8cc87225909f49ddd9317f2d24c7b1adb949d3d70f10765948d9",
-      "size": 161701
+      "sha256": "06d8fb78a7765d58102e90b685943f1b762626cad4bb577b03f8937b5d245383",
+      "size": 176743
     },
     "pcb_copper.png": {
-      "sha256": "034a8481619ce0018993b06b36d972e014f42d4d219ff1246a9ead6a5d02291c",
-      "size": 188402
+      "sha256": "60187c6b25c9e43ec1d43f0ce65a05359918ed203c8d166455d9e805a76b1de3",
+      "size": 201023
     },
     "pcb_front.png": {
-      "sha256": "6aaf7664cf9b9397561643e0f3d895f9516b8bb46cf5b03023c2d3999f168cab",
-      "size": 223355
+      "sha256": "3858e9face784442675258c595d99397f2592ec8ce98182c84064815a04eacea",
+      "size": 222944
     },
     "schematic_charlieplex_3x3.png": {
       "sha256": "e48f1144f3001194a9c24b02d2ceaa5557324b284266d24e6119a3b0f7466910",
       "size": 230835
     },
     "kicad_project.zip": {
-      "sha256": "c68cab3c46f0269884b6fa536f3eeebde9236ce8c31f762931be8fba11de5ae9",
-      "size": 41136
+      "sha256": "21476e35a75fce6eead74aff4b938f3365af10df08819bf48393f5d5ecc8e00e",
+      "size": 53419
     },
     "README.txt": {
-      "sha256": "690570f79addb4e915a4d054492e62377a26e52e2154d64f7dd36fdf1c52c0e0",
-      "size": 881
+      "sha256": "3cdb42b54451f1b7df804c125e18fa861cfe500aa00a99140cf5e1a0f5ceafc0",
+      "size": 887
     }
   },
   "board": {
@@ -107,6 +107,11 @@
       "status": "WARN",
       "message": "BOM field issues: 1 problem(s)",
       "details": "14/14 active item(s) missing LCSC part number"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
     },
     {
       "name": "bom_pcb_match",

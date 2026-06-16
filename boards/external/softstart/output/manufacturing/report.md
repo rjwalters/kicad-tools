@@ -2,7 +2,7 @@
 title: "softstart_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-12 | jlcpcb-tier1"
+date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -50,6 +50,24 @@ STM32G031K8T6 MCU, 2x30S supercap banks, back-to-back FETs + UCC27211 drivers
 - **Fine-pitch components**: 1 (U1)
 - **Polarized components**: 6 -- check orientation markings
 
+## Hand-Solder (THT) Components
+
+The following 18 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| DB107 | Diode_Bridge_DIP-4_W7.62mm_P5.08mm | 1 | D1 |
+| 15A | Fuseholder_Cylinder-5x20mm_Schurter_0031.8201_Horizontal_Open | 1 | F1 |
+| TB | TerminalBlock_bornier-2_P5.08mm | 4 | J1, J2, J3, J4 |
+| SWD | PinHeader_1x06_P2.54mm_Vertical | 1 | J5 |
+| IRFB4110 | TO-220-3_Vertical | 4 | Q1A, Q1B, Q2A, Q2B |
+| 150R 5W | R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal | 1 | R6 |
+| 100R 5W | R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal | 2 | R20, R21 |
+| 275VAC | RV_Disc_D12mm_W4.2mm_P7.5mm | 1 | RV1 |
+| RESET | SW_PUSH_6mm | 1 | SW1 |
+| H11AA1 | DIP-6_W7.62mm | 1 | U2 |
+| LM7812 | TO-220-3_Vertical | 1 | U9 |
+
 ## Off-board Assemblies
 
 The following subsystems are part of the design but are **not placed on
@@ -58,33 +76,33 @@ hand (DNP for fab assembly).
 
 ### SUPERCAP_BANK_POS
 
-Positive half-cycle supercapacitor bank (off-board, 30S string)
+Positive half-cycle supercapacitor bank (off-board, 30S string + per-cell balance resistors)
 
 | Property | Value |
 |----------|-------|
 | Board connector | J3 |
-| Part | Tecate TPLH-2R7/12WR10X30 |
+| Part | Abracon ADCR-S03R0SA256MB + 30x 3.3k 1/4W balance resistors |
 | Quantity | 30 |
-| Voltage | 81V nominal |
-| Capacitance | 0.4F |
+| Voltage | 75V charge target (90V stack rating) |
+| Capacitance | 0.83F |
 | Assembly | hand solder (DNP for fab assembly) |
 
-**Wiring**: J3 pin 1 -> SCAP_POS+ (bank positive terminal); J3 pin 2 -> SCAP_POS_GND (bank return, star ground). 30 cells in series, 12F 2.7V each.
+**Wiring**: J3 pin 1 -> SCAP_POS+ (bank positive terminal); J3 pin 2 -> SCAP_POS_GND (bank return, star ground). 30 cells in series, 25F 3.0V each, one 3.3k resistor soldered lead-to-lead across each cell.
 
 ### SUPERCAP_BANK_NEG
 
-Negative half-cycle supercapacitor bank (off-board, 30S string)
+Negative half-cycle supercapacitor bank (off-board, 30S string + per-cell balance resistors)
 
 | Property | Value |
 |----------|-------|
 | Board connector | J4 |
-| Part | Tecate TPLH-2R7/12WR10X30 |
+| Part | Abracon ADCR-S03R0SA256MB + 30x 3.3k 1/4W balance resistors |
 | Quantity | 30 |
-| Voltage | 81V nominal |
-| Capacitance | 0.4F |
+| Voltage | 75V charge target (90V stack rating) |
+| Capacitance | 0.83F |
 | Assembly | hand solder (DNP for fab assembly) |
 
-**Wiring**: J4 pin 1 -> SCAP_NEG+ (bank positive terminal); J4 pin 2 -> SCAP_NEG_GND (bank return, star ground). 30 cells in series, 12F 2.7V each.
+**Wiring**: J4 pin 1 -> SCAP_NEG+ (bank positive terminal); J4 pin 2 -> SCAP_NEG_GND (bank return, star ground). 30 cells in series, 25F 3.0V each, one 3.3k resistor soldered lead-to-lead across each cell.
 
 ## ERC Status
 
@@ -150,32 +168,30 @@ Negative half-cycle supercapacitor bank (off-board, 30S string)
 | Value | Package | Qty | References | MPN |
 |-------|---------|-----|------------|-----|
 | 100nF |  | 5 | C5, C20, C22, C23, C25 |  |
-| 100nF | C_0402_1005Metric | 8 | C1, C2, C3, C8, C30, C31, C33, C34 |  |
+| 100nF | C_0805_2012Metric | 8 | C1, C2, C3, C8, C30, C31, C33, C34 |  |
 | 10uF |  | 2 | C21, C24 |  |
 | 10uF | C_0805_2012Metric | 3 | C6, C7, C32 |  |
 | 4.7uF | C_0805_2012Metric | 1 | C4 |  |
-| RB157 | Diode_Bridge_DIP-4_W7.62mm_P5.08mm | 1 | D1 |  |
-| SMBJ18A | D_SMB | 4 | D_TVS1, D_TVS2, D_TVS3, D_TVS4 |  |
-| STATUS |  | 1 | D2 |  |
+| DB107 | Diode_Bridge_DIP-4_W7.62mm_P5.08mm | 1 | D1 |  |
+| LED |  | 1 | D2 |  |
+| SMBJ18A | D_SMA | 4 | D_TVS1, D_TVS2, D_TVS3, D_TVS4 |  |
 | 15A |  | 1 | F1 |  |
-| AC_INPUT | TerminalBlock_bornier-2_P5.08mm | 1 | J1 |  |
-| AC_OUTPUT | TerminalBlock_bornier-2_P5.08mm | 1 | J2 |  |
-| SCAP_NEG | TerminalBlock_bornier-2_P5.08mm | 1 | J4 |  |
-| SCAP_POS | TerminalBlock_bornier-2_P5.08mm | 1 | J3 |  |
-| SWD-6 |  | 1 | J5 |  |
+| SWD |  | 1 | J5 |  |
+| TB | TerminalBlock_bornier-2_P5.08mm | 4 | J1, J2, J3, J4 |  |
 | 2N7002 | SOT-23 | 2 | Q7, Q8 |  |
 | AO3400 | SOT-23 | 2 | Q5, Q6 |  |
 | IRFB4110 | TO-220-3_Vertical | 4 | Q1A, Q1B, Q2A, Q2B |  |
-| 100R | R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal | 2 | R20, R21 |  |
-| 10k |  | 7 | R2, R10, R11, R23, R24, R26, R28 |  |
+| 100R 5W | R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal | 2 | R20, R21 |  |
+| 10k |  | 5 | R2, R10, R11, R23, R24 |  |
 | 10k | R_0805_2012Metric | 6 | R_GB1, R_GB2, R_GB3, R_GB4, R5, R29 |  |
 | 150R 5W | R_Axial_DIN0617_L17.0mm_D6.0mm_P25.40mm_Horizontal | 1 | R6 |  |
+| 1M |  | 1 | R1 |  |
 | 1k |  | 2 | R12, R22 |  |
+| 270k |  | 2 | R25, R27 |  |
 | 275VAC | RV_Disc_D12mm_W4.2mm_P7.5mm | 1 | RV1 |  |
-| 290.0k |  | 2 | R25, R27 |  |
 | 33k | R_0805_2012Metric | 2 | R3, R4 |  |
 | 5mR | R_2512_6332Metric | 1 | R9 |  |
-| 990.0k |  | 1 | R1 |  |
+| 9.1k |  | 2 | R26, R28 |  |
 | RESET |  | 1 | SW1 |  |
 | H11AA1 | DIP-6_W7.62mm | 1 | U2 |  |
 | INA180A3 | SOT-23-5 | 1 | U3 |  |
@@ -185,8 +201,8 @@ Negative half-cycle supercapacitor bank (off-board, 30S string)
 | STM32G031K8T6 | LQFP-32_7x7mm_P0.8mm | 1 | U1 |  |
 | UCC27211 | SOIC-8_3.9x4.9mm_P1.27mm | 2 | U5, U6 |  |
 | XC6206-3.3V |  | 1 | U4 |  |
-| Tecate TPLH-2R7/12WR10X30 | Off-board via J3 (hand solder, DNP for fab assembly) | 30 | SUPERCAP_BANK_POS | Tecate TPLH-2R7/12WR10X30 |
-| Tecate TPLH-2R7/12WR10X30 | Off-board via J4 (hand solder, DNP for fab assembly) | 30 | SUPERCAP_BANK_NEG | Tecate TPLH-2R7/12WR10X30 |
+| Abracon ADCR-S03R0SA256MB + 30x 3.3k 1/4W balance resistors | Off-board via J3 (hand solder, DNP for fab assembly) | 30 | SUPERCAP_BANK_POS | Abracon ADCR-S03R0SA256MB + 30x 3.3k 1/4W balance resistors |
+| Abracon ADCR-S03R0SA256MB + 30x 3.3k 1/4W balance resistors | Off-board via J4 (hand solder, DNP for fab assembly) | 30 | SUPERCAP_BANK_NEG | Abracon ADCR-S03R0SA256MB + 30x 3.3k 1/4W balance resistors |
 
 
 \newpage
@@ -195,21 +211,31 @@ Negative half-cycle supercapacitor bank (off-board, 30S string)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
+| Errors | 10 |
 | Warnings | 0 |
-| Blocking | 0 |
+| Blocking | 10 |
 
-**Status**: PASS
+**Status**: FAIL
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| kicad-cli:starved_thermal | 3 |
+| kicad-cli:clearance | 2 |
+| kicad-cli:shorting_items | 2 |
+| kicad-cli:solder_mask_bridge | 2 |
+| kicad-cli:hole_clearance | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: NOT_READY
 
 ### Action Items
 
+- **[CRITICAL]** Fix 10 blocking DRC violations (kicad-cli: starved_thermal (3), clearance (2), shorting_items (2))
 - **[OPTIONAL]** Verify zone fill in KiCad for 12 zone-connected nets
 - **[OPTIONAL]** Analog-sensitive: U3 (INA180A3) — instrumentation amplifier (TI INA); manual layout review recommended
 - **[OPTIONAL]** Analog net: AC_LINE — audio signal; keep short, away from digital/switching nets

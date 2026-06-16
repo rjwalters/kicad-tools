@@ -59,3 +59,6 @@ boards/*/*/output/renders/
 # Board metrics (generated at runtime by `kct board-metrics`, Epic #3674)
 boards/*/output/board.json
 boards/*/*/output/board.json
+
+# KiCad project-local UI state (per-user); never committed
+*.kicad_prl

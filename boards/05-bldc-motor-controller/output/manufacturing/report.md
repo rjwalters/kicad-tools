@@ -2,7 +2,7 @@
 title: "bldc_controller_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-12 | jlcpcb"
+date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -148,18 +148,21 @@ Thermal analysis and high-current routing demo
 
 | Metric | Count |
 |--------|-------|
-| Errors | 14 |
+| Errors | 36 |
 | Warnings | 0 |
-| Blocking | 14 |
+| Blocking | 36 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| via_in_pad | 14 |
-| connectivity | 8 |
+| kicad-cli:starved_thermal | 12 |
+| kicad-cli:annular_width | 10 |
+| kicad-cli:via_diameter | 10 |
+| connectivity | 9 |
 | single_pad_net | 8 |
+| kicad-cli:hole_clearance | 4 |
 
 
 \newpage
@@ -170,7 +173,7 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[CRITICAL]** Fix 14 blocking DRC violations (via_in_pad (14))
+- **[CRITICAL]** Fix 36 blocking DRC violations (kicad-cli: starved_thermal (12), annular_width (10), via_diameter (10))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.200mm required
 - **[OPTIONAL]** Verify zone fill in KiCad: 7 nets appear incomplete but may be connected via zone fills
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
@@ -189,12 +192,12 @@ Thermal analysis and high-current routing demo
 | Metric | Value |
 |--------|-------|
 | Signal Net Completion | 82.1% (32/39) |
-| Overall Completion | 84.6% |
-| Complete Nets | 44 / 52 |
+| Overall Completion | 82.7% |
+| Complete Nets | 43 / 52 |
 | Zone-Connected Nets | 5 |
 | Single-Pad Nets | 8 (no routing needed) |
-| Incomplete Nets | 8 |
-| Unconnected Pads | 56 |
+| Incomplete Nets | 9 |
+| Unconnected Pads | 63 |
 
 ### Zone-Connected Nets
 
@@ -234,9 +237,9 @@ Thermal analysis and high-current routing demo
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~3.6 USD |
-| Components (estimated) | ~3.2 USD |
+| Components (estimated) | ~3.17 USD |
 | Assembly (estimated) | ~2.35 USD |
-| **Total (estimated)** | **~9.16 USD** |
+| **Total (estimated)** | **~9.12 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~45.78 USD |
+| Batch Total (estimated) | ~45.61 USD |
 

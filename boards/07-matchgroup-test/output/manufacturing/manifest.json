@@ -1,8 +1,8 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.13.0",
-  "generated_at": "2026-06-12T06:37:26.505528+00:00",
-  "manufacturer": "jlcpcb",
+  "generated_at": "2026-06-16T01:48:25.770327+00:00",
+  "manufacturer": "jlcpcb-tier1",
   "files": {
     "bom_jlcpcb.csv": {
       "sha256": "50f8099e0a50276067a08f7e9e2342750b592983881da79f16c1d252dbaf66e1",
@@ -13,60 +13,60 @@
       "size": 702
     },
     "gerbers.zip": {
-      "sha256": "4f6971f62d1be580c5a713214be98a77db3fcf170a34ea5d8410aede59d02333",
-      "size": 104462
+      "sha256": "d6e5e290f35fe24c3db230c82330df1e845b681a7e06c792cc5361477413089e",
+      "size": 398359
     },
     "report.pdf": {
-      "sha256": "6f6f8e8df51fd163fb6bc88b798214171dc9d432abb8dc0be5bfbe876d72ce5b",
-      "size": 1954182
+      "sha256": "64185a6a87a355e713a28758ed26d62bbdac40ac58d40a11e4349a75e9bf2939",
+      "size": 3061200
     },
     "report.md": {
-      "sha256": "2c92e3a8f84347a106e93c90747523230a70f1c9a02dc774d911df6fe19457fc",
-      "size": 3595
+      "sha256": "b33454a043787f775ee07f5aea9147dadd3437d43cc5bab6abf526c0bf67453e",
+      "size": 3724
     },
     "assembly.png": {
-      "sha256": "adf5503a95404275f0e33d18787aa6afd8126e9afa77a352262e4c584846d916",
-      "size": 243005
+      "sha256": "3b3f4886f98dbdc8bcfd8f9c20b574c5a01dbbbfae713ff505438a76f1fb74b4",
+      "size": 400747
     },
     "layer_B_Cu.png": {
-      "sha256": "1583bc692e0eadb13c6a9965da7605e455b47ac30da9f4862115f1763c8727e9",
-      "size": 101261
+      "sha256": "cc6d3abf27edcdbc42a391630f3105a2c9c05cfdeae8db3adaed001a7c16cabe",
+      "size": 234708
     },
     "layer_F_Cu.png": {
-      "sha256": "1f5414320fb91b2b77d3ac553d0e1c1f699641b4e69dd7f998c9f3bd89590304",
-      "size": 207389
+      "sha256": "f60c24f16a73989dfe4713d3765a5678ebc7b20a14fc46fd071b7911eecef444",
+      "size": 335906
     },
     "layer_In1_Cu.png": {
-      "sha256": "4e206340c383285cd49a21f742eb5a6585a0c0af14a3305641a48a8caa069f03",
-      "size": 173607
+      "sha256": "0cbc150e41b121e6f20f474995ff9f83d61bd929d5a837ef7e4a0ef14963cf23",
+      "size": 239190
     },
     "layer_In2_Cu.png": {
-      "sha256": "a95255e48ec2c5e4d414619dacbbf82b770f2819fbd180893a177760897aaed5",
-      "size": 164059
+      "sha256": "53d5ee3c161abed37734c903495f4491214553d536e9e815deb85f3366221e80",
+      "size": 312578
     },
     "pcb_back.png": {
-      "sha256": "3e55db80d7e78255c0f696ffd006bf6450d37deb0f79ac5dae4ded2386e0c524",
-      "size": 102581
+      "sha256": "8626d6a132b757ab420b11eaaa11cb4d859c1f4c5dbfa8f17e96dbb8be38ee53",
+      "size": 236273
     },
     "pcb_copper.png": {
-      "sha256": "9c0c973c8f8b021e416e0cb788e44872f64ada604c6c5a69977fc9224c9bca08",
-      "size": 234659
+      "sha256": "6ee8b2d84d721c8fca249b6bfcdcd3c007dc274e2daf049d6db96f2f51716360",
+      "size": 393481
     },
     "pcb_front.png": {
-      "sha256": "f3c0e2dfb9ec0f54d3bf8b5b41c39dcea8426786f49d435fad7f7ed6bde26262",
-      "size": 219512
+      "sha256": "b785b0f66d44944b1763d20462550768eab63a0c7cfcaf34ee7a4995ca1edf21",
+      "size": 347854
     },
     "schematic_matchgroup_test.png": {
       "sha256": "9a62fb9aa1802ba72002213c29d5894373f8ba96007cb4012ad824d170fc89ed",
       "size": 347446
     },
     "kicad_project.zip": {
-      "sha256": "6a0f96fd2ea87f735c621f445bf5c00a59e19f0dfabed7cdeba1a1162d8f4d83",
-      "size": 147603
+      "sha256": "6c513abcbf535b01af65fa37191479253ef1252acbcb03e862bed297da8cb375",
+      "size": 438687
     },
     "README.txt": {
-      "sha256": "5397743263aa80608cfc978fd9b5a4c4c2ce2df331b4fd22a1ac89d58a59bbae",
-      "size": 881
+      "sha256": "d84ad2eee5e703dac8cb9278a4cf39c7dc65171861ef7e0a10e604b01d23fa7b",
+      "size": 887
     }
   },
   "board": {
@@ -103,7 +103,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (48 vias, 13 TH pads)"
+      "message": "Drill holes present (243 vias, 13 TH pads)"
     },
     {
       "name": "tht_in_cpl",
@@ -115,6 +115,11 @@
       "status": "WARN",
       "message": "BOM field issues: 1 problem(s)",
       "details": "8/8 active item(s) missing LCSC part number"
+    },
+    {
+      "name": "bom_lcsc_values",
+      "status": "OK",
+      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
     },
     {
       "name": "bom_pcb_match",

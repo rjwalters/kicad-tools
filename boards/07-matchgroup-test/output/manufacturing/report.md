@@ -2,7 +2,7 @@
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-12 | jlcpcb"
+date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 8 (5 SMD, 3 THT, 0 other) |
 | Nets | 34 |
-| Traces | 1150 segments |
-| Vias | 48 |
+| Traces | 1269 segments |
+| Vias | 243 |
 | Board Size | 110.0 x 95.0 mm |
 
 ## Design Overview
@@ -123,23 +123,30 @@ Epic #2661 Phase 3L (issue #2724)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 4 |
-| Warnings | 8 |
-| Blocking | 4 |
+| Errors | 125 |
+| Warnings | 5 |
+| Blocking | 125 |
 
 **Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| connectivity | 5 |
+| kicad-cli:clearance | 26 |
+| clearance_segment_via | 23 |
+| kicad-cli:hole_clearance | 18 |
+| kicad-cli:shorting_items | 13 |
+| clearance_pad_via | 12 |
+| clearance_pad_segment | 10 |
+| kicad-cli:solder_mask_bridge | 8 |
+| clearance_segment_segment | 7 |
 | silkscreen_text_height | 4 |
-| zone_unfilled | 3 |
-| clearance_segment_via | 1 |
-| clearance_pad_segment | 1 |
-| clearance_pad_via | 1 |
-| diffpair_clearance_intra | 1 |
+| kicad-cli:zones_intersect | 3 |
+| clearance_via_via | 2 |
+| kicad-cli:tracks_crossing | 2 |
+| connectivity | 1 |
 | silkscreen_over_pad | 1 |
+| kicad-cli:starved_thermal | 1 |
 
 
 \newpage
@@ -150,10 +157,9 @@ Epic #2661 Phase 3L (issue #2724)
 
 ### Action Items
 
-- **[CRITICAL]** Fix 4 blocking DRC violations (clearance_segment_via (1), clearance_pad_segment (1), clearance_pad_via (1))
-- **[OPTIONAL]** Verify zone fill in KiCad: 3 nets appear incomplete but may be connected via zone fills
+- **[CRITICAL]** Fix 125 blocking DRC violations (clearance_segment_via (23), clearance_pad_via (12), clearance_pad_segment (10); kicad-cli: clearance (26), hole_clearance (18), shorting_items (13))
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
-- **[OPTIONAL]** Review 8 DRC warnings
+- **[OPTIONAL]** Review 5 DRC warnings
 
 
 \newpage
@@ -162,12 +168,12 @@ Epic #2661 Phase 3L (issue #2724)
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 90.3% (28/31) |
-| Overall Completion | 85.3% |
-| Complete Nets | 29 / 34 |
+| Signal Net Completion | 100.0% (31/31) |
+| Overall Completion | 97.1% |
+| Complete Nets | 33 / 34 |
 | Zone-Connected Nets | 3 |
-| Incomplete Nets | 5 |
-| Unconnected Pads | 161 |
+| Incomplete Nets | 1 |
+| Unconnected Pads | 6 |
 
 ### Zone-Connected Nets
 
@@ -175,17 +181,9 @@ Epic #2661 Phase 3L (issue #2724)
 - +1V8
 - GND
 
-### Unrouted Signal Nets
+### Incomplete Nets
 
-- DQS_P
-- MIPI_DAT1_N
-- TMDS_D0_N
-
-### Unrouted Signal Nets
-
-- DQS_P
-- MIPI_DAT1_N
-- TMDS_D0_N
+- GND
 
 
 ## Cost Estimate

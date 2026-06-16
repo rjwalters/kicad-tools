@@ -1,0 +1,67 @@
+{
+  "meta": {
+    "filename": "matchgroup_test_routed.kicad_pro",
+    "version": 1,
+    "manufacturer": "jlcpcb-tier1",
+    "layers": 4,
+    "copper_oz": 1.0
+  },
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_clearance": 0.1016,
+        "min_track_width": 0.1016,
+        "min_via_diameter": 0.45,
+        "min_via_annular_width": 0.1,
+        "min_through_hole_diameter": 0.2,
+        "min_via_hole": 0.2,
+        "min_hole_to_hole": 0.4,
+        "min_copper_edge_clearance": 0.3,
+        "min_silk_clearance": 0.05,
+        "min_text_thickness": 0.15,
+        "min_text_height": 1.0
+      },
+      "rule_severities": {
+        "lib_footprint_mismatch": "ignore",
+        "isolated_copper": "warning"
+      },
+      "defaults": {
+        "track_min_width": 0.1016,
+        "clearance_min": 0.1016,
+        "via_min_diameter": 0.45,
+        "via_min_drill": 0.2
+      }
+    }
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.1016,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.1016,
+        "line_style": 0,
+        "microvia_diameter": 0.45,
+        "microvia_drill": 0.2,
+        "name": "Default",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.1016,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
+        "wire_width": 6
+      }
+    ],
+    "meta": {
+      "version": 3
+    }
+  },
+  "schematic": {
+    "meta": {
+      "version": 1
+    }
+  },
+  "sheets": [],
+  "text_variables": {}
+}

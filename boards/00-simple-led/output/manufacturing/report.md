@@ -2,7 +2,7 @@
 title: "simple_led_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-15 | jlcpcb"
+date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -110,21 +110,28 @@ Minimal LED circuit
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
+| Errors | 4 |
 | Warnings | 0 |
-| Blocking | 0 |
+| Blocking | 4 |
 
-**Status**: PASS
+**Status**: FAIL
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| kicad-cli:shorting_items | 2 |
+| kicad-cli:solder_mask_bridge | 2 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: NOT_READY
 
 ### Action Items
 
+- **[CRITICAL]** Fix 4 blocking DRC violations (kicad-cli: shorting_items (2), solder_mask_bridge (2))
 - **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
 
 

@@ -517,7 +517,10 @@ tolerances:
   # pours against the final pads) is artifact cleanup, sibling of
   # #3549-#3553.  ``MAX_COMMITTED_DRC_ERRORS`` in
   # tests/router/test_board03_routing_baseline.py is pinned to the same 14.
-  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: 14
+  # RESOLVED to 0 by the zone-refill regen (#3712 antipad clearance): the 14
+  # clearance_pad_zone findings cleared when the pours were re-filled against
+  # final pad geometry. Entry removed -> board is now held to the strict
+  # 0-error gate (jlcpcb-tier1 per the manufacturers: override below).
 
   # Board 02 (charlieplex-led).  Measured at the default ``--mfr jlcpcb``
   # tier-0 profile (no manufacturers: override).  Issue #3556 grandfather
@@ -538,7 +541,10 @@ tolerances:
   # ``MAX_DRC_ERRORS = 4``) grandfathers the same family.  Burn-down:
   # refill the VCC/GND pours against the final pad geometry (sibling of
   # #3549-#3553) and drop both this entry and the test ceiling to 0.
-  boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb: 4
+  # RESOLVED to 0 by the zone-refill regen (#3712 antipad clearance): the 4
+  # clearance_pad_zone findings at the U1 DIP-8 cluster cleared when the
+  # VCC/GND pours were re-filled against final pad geometry. Entry removed
+  # -> board is now held to the strict 0-error gate.
 
   # Held at 31 by issue #2781's rect-pad fix.  Board 06 carries 3
   # legitimate ``clearance_pad_segment`` violations (diff-pair partner
@@ -947,7 +953,10 @@ tolerances:
   # than a track. The fill was not regenerated after the pad's net/position
   # settled. Floor rises 20 -> 21 to lock the new gate in; the underlying
   # pad-vs-fill cleanup is per-board artifact work (sibling of #3549-#3553).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 21
+  # Tightened 21 -> 20 by the zone-refill regen (re-fill VCC/GND pours against
+  # final pad geometry, #3712 antipad clearance). Remaining 20 blocking are
+  # genuine diff-pair clearance defects tracked for Phase B re-routing.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -1445,7 +1454,10 @@ tolerances:
   # were invisible. Floor rises 69 -> 120 (= 69 prior blocking + 51 new)
   # to lock the gate in; the per-board fill regeneration is artifact
   # cleanup tracked alongside the #3633 stitcher/pour-repair work.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 120
+  # Tightened 120 -> 69 by the zone-refill regen (#3712 antipad clearance).
+  # Remaining 69 blocking are genuine routing-density defects on this dense
+  # board, tracked for Phase B.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 69
 
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a
@@ -1469,7 +1481,10 @@ tolerances:
   # zones after the final pad placement is artifact cleanup (sibling of
   # #3549-#3553).  ``BOARD_05_EXPECTED_TOLERANCE`` in
   # tests/test_board_05_drc_allowlist.py is pinned to the same 30.
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 30
+  # RESOLVED to 0 blocking by the zone-refill regen (#3712 antipad clearance):
+  # the prior clearance_pad_zone findings cleared; the remaining 9 are advisory
+  # `connectivity` (excluded from the gate). Entry removed -> strict 0-error
+  # gate (jlcpcb-tier1 per the manufacturers: override below).
 
   # Board 04 (STM32F103C8T6 LQFP-48 devboard).  Issue #3556 grandfather
   # (June 13 2026): the new ``clearance_via_zone`` / ``clearance_pad_zone``
@@ -1482,7 +1497,10 @@ tolerances:
   # the new gate in.  The per-board fill regeneration (refill the +3.3V/GND
   # pours against the final escape geometry) is artifact cleanup, sibling
   # of #3549-#3553.  tests/test_board_04_mfr_gate.py reads this floor.
-  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 13
+  # RESOLVED to 0 blocking by the zone-refill regen (#3712 antipad clearance):
+  # the prior clearance_pad_zone findings cleared; the remaining 1 is advisory
+  # `connectivity` (excluded from the gate). Entry removed -> strict 0-error
+  # gate (jlcpcb-tier1 per the manufacturers: override below).
 
   # Board 04 history (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12
   # by Issue #2908.  The narrowing introduced in #2871 / #2874
