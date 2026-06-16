@@ -577,7 +577,7 @@ def zone_node(
     clearance: float = 0.2,
     thermal_gap: float = 0.3,
     thermal_bridge_width: float = 0.3,
-    pad_connection: str = "yes",
+    pad_connection: str = "",
 ) -> SExp:
     """Build a PCB copper zone (pour) S-expression.
 
@@ -592,20 +592,25 @@ def zone_node(
         clearance: Pad clearance in mm
         thermal_gap: Thermal relief gap in mm
         thermal_bridge_width: Thermal relief bridge width in mm
-        pad_connection: Pad-to-zone connection mode written into
+        pad_connection: Zone-level pad-to-zone connection mode written into
             ``(connect_pads ...)``.  KiCad understands:
 
-            * ``""`` (default keyword absent) -- thermal relief for *all*
-              pads.  Small SMD pads cannot host the 2 thermal spokes the
-              geometric DRC requires, and some through-hole power pads sit
-              where only one spoke can form, so this mode produces
-              ``starved_thermal`` errors (issue #3727).
-            * ``"yes"`` -- **solid** full-copper connection for *all* pads.
-              This is the generator default: a solid connection is strictly
-              stronger than a 2-spoke thermal relief, so it eliminates
-              ``starved_thermal`` honestly (without lowering the required
-              spoke count) and gives the lowest-impedance power/ground
-              delivery -- the right choice for reflow-assembled fab boards.
+            * ``""`` (default keyword absent, the generator default) --
+              thermal relief for *all* pads at the zone level.  This pairs
+              with the **selective** per-pad policy (issue #3729): the zone
+              keeps thermal relief, while individual pads too small to host
+              the 2 spokes the geometric DRC requires get a per-pad
+              ``(zone_connect 2)`` solid override applied by
+              :func:`kicad_tools.zones.fill_clearance.normalize_zone_pad_connection`.
+              Pads that *can* host 2 spokes keep thermal relief (eases
+              hand-soldering / rework).  An empty mode here is therefore the
+              right default -- the per-pad overrides clear ``starved_thermal``
+              surgically rather than forcing solid on every pad.
+            * ``"yes"`` -- **solid** full-copper connection for *all* pads
+              (the #3728 blanket behavior, now an explicit override).  A
+              solid connection is strictly stronger than a 2-spoke thermal
+              relief, so it eliminates ``starved_thermal`` honestly (without
+              lowering the required spoke count).
             * ``"thru_hole_only"`` -- thermal relief for through-hole pads
               (eases hand-soldering) and solid for SMD pads.  Clears the
               SMD ``starved_thermal`` errors but leaves single-spoke THT

@@ -288,15 +288,14 @@ class TestNetIdentityResolution:
         assert fill.intersection(same).area > 0.0
 
 
-class TestNormalizeZonePadConnection:
-    """Issue #3727: upgrade thermal-for-all zones to a stronger connection.
+class TestNormalizeZonePadConnectionModes:
+    """Issue #3727 / #3729: the zone-level pad-connection modes.
 
-    A legacy ``(connect_pads (clearance ...))`` zone uses thermal relief for
-    *every* pad.  Small SMD pads (and some single-spoke THT power pads) cannot
-    form the 2 spokes KiCad's geometric DRC requires, producing
-    ``starved_thermal`` errors.  ``normalize_zone_pad_connection`` adds a solid
-    (``yes``) mode token so pads get a full-copper connection instead -- a
-    strictly stronger connection, not a relaxed spoke count.
+    ``normalize_zone_pad_connection`` accepts the explicit KiCad zone-level
+    modes (``yes`` / ``thru_hole_only`` / ``no``), each of which adds a leading
+    mode token to every copper zone's ``connect_pads`` that lacks one.  The
+    *default* mode is now ``selective`` (tested separately in
+    :class:`TestSelectivePadConnection`).
     """
 
     _ZONE_THERMAL = """
@@ -331,7 +330,7 @@ class TestNormalizeZonePadConnection:
         doc = parse_string(self._ZONE_THERMAL)
         assert self._connect_pads_mode(doc) is None  # thermal-for-all
 
-        changed = normalize_zone_pad_connection(doc)
+        changed = normalize_zone_pad_connection(doc, mode="yes")
         assert changed == 1
         assert self._connect_pads_mode(doc) == "yes"
         # Must render as a bare keyword for KiCad, never a quoted string.
@@ -339,13 +338,13 @@ class TestNormalizeZonePadConnection:
         assert "(connect_pads yes (clearance" in rendered
         assert '"yes"' not in rendered
 
-    def test_idempotent(self):
+    def test_yes_mode_idempotent(self):
         from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
 
         doc = parse_string(self._ZONE_THERMAL)
-        assert normalize_zone_pad_connection(doc) == 1
+        assert normalize_zone_pad_connection(doc, mode="yes") == 1
         # A second pass finds the mode already present and makes no change.
-        assert normalize_zone_pad_connection(doc) == 0
+        assert normalize_zone_pad_connection(doc, mode="yes") == 0
         assert self._connect_pads_mode(doc) == "yes"
 
     def test_preserves_existing_mode(self):
@@ -357,7 +356,7 @@ class TestNormalizeZonePadConnection:
         )
         doc = parse_string(board)
         # An explicit upstream mode is never clobbered.
-        assert normalize_zone_pad_connection(doc) == 0
+        assert normalize_zone_pad_connection(doc, mode="yes") == 0
         assert self._connect_pads_mode(doc) == "thru_hole_only"
 
     def test_thru_hole_only_mode(self):
@@ -396,4 +395,300 @@ class TestNormalizeZonePadConnection:
         """
         doc = parse_string(keepout)
         # Keepout zones have no connect_pads -> nothing to normalize.
+        assert normalize_zone_pad_connection(doc, mode="yes") == 0
+
+
+class TestSelectivePadConnection:
+    """Issue #3729: the selective per-pad policy is the default.
+
+    The default mode keeps the zone's thermal-relief default and forces a
+    solid ``(zone_connect 2)`` override only on pads too small to host the 2
+    thermal spokes KiCad's geometric DRC requires.  Pads that can host 2
+    spokes keep their thermal relief (which eases hand-soldering / rework).
+    """
+
+    # A GND zone (F.Cu) with three pads of varying size on its net:
+    #  - small SMD 0.5x0.5  -> cannot host 2 spokes -> force solid
+    #  - large SMD 3.0x3.0  -> hosts 2 spokes        -> keep thermal relief
+    #  - THT   1.6x1.6      -> hosts 2 spokes        -> keep thermal relief
+    # Plus a foreign-net SMD pad that must never be touched.
+    _BOARD = """
+    (kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (net 0 "")
+      (net 1 "GND")
+      (net 2 "SIG")
+      (footprint "lib:small" (layer "F.Cu") (at 5 5)
+        (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu")
+          (net 1 "GND") (uuid "pad-small")))
+      (footprint "lib:big" (layer "F.Cu") (at 10 10)
+        (pad "1" smd rect (at 0 0) (size 3.0 3.0) (layers "F.Cu")
+          (net 1 "GND") (uuid "pad-big")))
+      (footprint "lib:tht" (layer "F.Cu") (at 15 15)
+        (pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu")
+          (net 1 "GND") (uuid "pad-tht")))
+      (footprint "lib:foreign" (layer "F.Cu") (at 2 2)
+        (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu")
+          (net 2 "SIG") (uuid "pad-foreign")))
+      (zone
+        (net 1)
+        (net_name "GND")
+        (layer "F.Cu")
+        (uuid "z1")
+        (hatch edge 0.5)
+        (connect_pads (clearance 0.3))
+        (min_thickness 0.25)
+        (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+        (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+      )
+    )
+    """
+
+    def _zone_connect(self, doc, pad_uuid):
+        for fp in doc.find_all("footprint"):
+            for pad in fp.find_all("pad"):
+                u = pad.find("uuid")
+                if u is not None and u.get_string(0) == pad_uuid:
+                    zc = pad.find("zone_connect")
+                    return zc.get_int(0) if zc is not None else None
+        raise AssertionError(f"pad {pad_uuid} not found")
+
+    def test_default_mode_is_selective(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._BOARD)
+        # Default call -> selective: only the small pad is forced solid.
+        changed = normalize_zone_pad_connection(doc)
+        assert changed == 1
+        # The zone keeps thermal relief (no mode token added).
+        zone = doc.find_all("zone")[0]
+        connect_pads = zone.find("connect_pads")
+        assert [c.value for c in connect_pads.children if c.is_atom] == []
+
+    def test_small_pad_forced_solid(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._BOARD)
+        normalize_zone_pad_connection(doc)
+        assert self._zone_connect(doc, "pad-small") == 2
+
+    def test_large_pads_keep_thermal_relief(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._BOARD)
+        normalize_zone_pad_connection(doc)
+        # Large SMD and THT pads can host 2 spokes -> no override (thermal).
+        assert self._zone_connect(doc, "pad-big") is None
+        assert self._zone_connect(doc, "pad-tht") is None
+
+    def test_foreign_net_pad_never_touched(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._BOARD)
+        normalize_zone_pad_connection(doc)
+        # A pad whose net has no thermal-relief zone is left alone, even if it
+        # is tiny.
+        assert self._zone_connect(doc, "pad-foreign") is None
+
+    def test_idempotent(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        doc = parse_string(self._BOARD)
+        assert normalize_zone_pad_connection(doc) == 1
+        # A second pass finds the small pad already solid -> no change.
         assert normalize_zone_pad_connection(doc) == 0
+
+    def test_preserves_existing_zone_connect(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        board = self._BOARD.replace(
+            '(net 1 "GND") (uuid "pad-small")',
+            '(net 1 "GND") (zone_connect 1) (uuid "pad-small")',
+        )
+        doc = parse_string(board)
+        # A deliberate upstream per-pad zone_connect is never clobbered.
+        normalize_zone_pad_connection(doc)
+        assert self._zone_connect(doc, "pad-small") == 1
+
+    def test_zone_with_explicit_mode_opts_out(self):
+        from kicad_tools.zones.fill_clearance import normalize_zone_pad_connection
+
+        board = self._BOARD.replace(
+            "(connect_pads (clearance 0.3))",
+            "(connect_pads yes (clearance 0.3))",
+        )
+        doc = parse_string(board)
+        # The zone-level mode governs every pad, so no per-pad override added.
+        assert normalize_zone_pad_connection(doc) == 0
+        assert self._zone_connect(doc, "pad-small") is None
+
+
+class TestStarvedThermalReportParsing:
+    """Issue #3729: read pad/zone UUIDs back from a kicad-cli DRC report."""
+
+    _REPORT = {
+        "violations": [
+            {
+                "type": "starved_thermal",
+                "items": [
+                    {"description": "Zone [+24V] on F.Cu, priority 5", "uuid": "zone-1"},
+                    {"description": "Pad 4 [+3V3] of J3", "uuid": "pad-smd"},
+                ],
+            },
+            {
+                "type": "starved_thermal",
+                "items": [
+                    {"description": "Zone [+24V] on F.Cu", "uuid": "zone-1"},
+                    {"description": "PTH pad 2 [+24V] of Q5", "uuid": "pad-tht"},
+                ],
+            },
+            {
+                "type": "isolated_copper",
+                "items": [
+                    {"description": "Zone [+3.3V] on In2.Cu, priority 0", "uuid": "zone-iso"},
+                ],
+            },
+            {
+                "type": "clearance",
+                "items": [{"description": "Pad 1 of U1", "uuid": "pad-other"}],
+            },
+        ]
+    }
+
+    def test_starved_pad_uuids_match_smd_and_tht(self):
+        from kicad_tools.zones.fill_clearance import starved_thermal_pad_uuids
+
+        # Both the SMD ``Pad`` and through-hole ``PTH pad`` forms are caught,
+        # the paired zone item is skipped, and unrelated violations ignored.
+        assert starved_thermal_pad_uuids(self._REPORT) == {"pad-smd", "pad-tht"}
+
+    def test_isolated_zone_uuids(self):
+        from kicad_tools.zones.fill_clearance import isolated_copper_zone_uuids
+
+        assert isolated_copper_zone_uuids(self._REPORT) == {"zone-iso"}
+
+    def test_empty_report(self):
+        from kicad_tools.zones.fill_clearance import (
+            isolated_copper_zone_uuids,
+            starved_thermal_pad_uuids,
+        )
+
+        assert starved_thermal_pad_uuids({}) == set()
+        assert isolated_copper_zone_uuids({}) == set()
+
+
+class TestForceSolidByUuid:
+    """Issue #3729: force a solid connection on pads named by the DRC report."""
+
+    _BOARD = """
+    (kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (net 0 "")
+      (net 1 "GND")
+      (footprint "lib:a" (layer "F.Cu") (at 5 5)
+        (pad "1" smd rect (at 0 0) (size 2.0 2.0) (layers "F.Cu")
+          (net 1 "GND") (uuid "pad-a")))
+      (footprint "lib:b" (layer "F.Cu") (at 9 5)
+        (pad "1" smd rect (at 0 0) (size 2.0 2.0) (layers "F.Cu")
+          (net 1 "GND") (uuid "pad-b")))
+    )
+    """
+
+    def test_forces_named_pads_solid(self):
+        from kicad_tools.zones.fill_clearance import force_solid_on_pads_by_uuid
+
+        doc = parse_string(self._BOARD)
+        changed = force_solid_on_pads_by_uuid(doc, {"pad-a"})
+        assert changed == 1
+        for fp in doc.find_all("footprint"):
+            for pad in fp.find_all("pad"):
+                u = pad.find("uuid").get_string(0)
+                zc = pad.find("zone_connect")
+                if u == "pad-a":
+                    assert zc is not None and zc.get_int(0) == 2
+                else:
+                    assert zc is None  # pad-b untouched
+
+    def test_empty_uuid_set_is_noop(self):
+        from kicad_tools.zones.fill_clearance import force_solid_on_pads_by_uuid
+
+        doc = parse_string(self._BOARD)
+        assert force_solid_on_pads_by_uuid(doc, set()) == 0
+
+
+class TestForceSolidOnIsolatedIslandPads:
+    """Issue #3729: resolve isolated-copper slivers to their anchoring pad.
+
+    An ``isolated_copper`` warning names only the zone, so the remediator
+    finds the small (sliver) filled_polygons in that zone and forces the
+    same-net pad whose copper touches one to a solid connection.  Substantial
+    fill lobes and pads not touching a sliver are never touched.
+    """
+
+    # A GND/F.Cu zone with two fill polygons: a large main pour and a tiny
+    # 0.3x0.3 sliver around a same-net pad whose lone spoke stranded it.
+    _BOARD = """
+    (kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (net 0 "")
+      (net 1 "GND")
+      (footprint "lib:sliver" (layer "F.Cu") (at 10 0.5)
+        (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu")
+          (net 1 "GND") (uuid "pad-sliver")))
+      (footprint "lib:main" (layer "F.Cu") (at 2 2.5)
+        (pad "1" smd rect (at 0 0) (size 2.0 2.0) (layers "F.Cu")
+          (net 1 "GND") (uuid "pad-main")))
+      (zone
+        (net 1)
+        (net_name "GND")
+        (layer "F.Cu")
+        (uuid "z-iso")
+        (hatch edge 0.5)
+        (connect_pads (clearance 0.3))
+        (min_thickness 0.25)
+        (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+        (polygon (pts (xy 0 0) (xy 20 0) (xy 20 5) (xy 0 5)))
+        (filled_polygon (layer "F.Cu")
+          (pts (xy 0 0) (xy 5 0) (xy 5 5) (xy 0 5)))
+        (filled_polygon (layer "F.Cu")
+          (pts (xy 9.8 0.3) (xy 10.2 0.3) (xy 10.2 0.7) (xy 9.8 0.7)))
+      )
+    )
+    """
+
+    def _zc(self, doc, uuid):
+        for fp in doc.find_all("footprint"):
+            for pad in fp.find_all("pad"):
+                u = pad.find("uuid")
+                if u is not None and u.get_string(0) == uuid:
+                    zc = pad.find("zone_connect")
+                    return zc.get_int(0) if zc is not None else None
+        raise AssertionError(uuid)
+
+    def test_forces_sliver_anchor_pad_solid(self):
+        from kicad_tools.zones.fill_clearance import force_solid_on_isolated_island_pads
+
+        doc = parse_string(self._BOARD)
+        changed = force_solid_on_isolated_island_pads(doc, {"z-iso"})
+        assert changed == 1
+        # The pad whose copper touches the tiny sliver is forced solid...
+        assert self._zc(doc, "pad-sliver") == 2
+        # ...while the pad in the substantial main pour keeps thermal relief.
+        assert self._zc(doc, "pad-main") is None
+
+    def test_noop_for_unlisted_zone(self):
+        from kicad_tools.zones.fill_clearance import force_solid_on_isolated_island_pads
+
+        doc = parse_string(self._BOARD)
+        # A zone UUID not in the set is ignored entirely.
+        assert force_solid_on_isolated_island_pads(doc, {"other-zone"}) == 0
+        assert self._zc(doc, "pad-sliver") is None
+
+    def test_empty_set_is_noop(self):
+        from kicad_tools.zones.fill_clearance import force_solid_on_isolated_island_pads
+
+        doc = parse_string(self._BOARD)
+        assert force_solid_on_isolated_island_pads(doc, set()) == 0

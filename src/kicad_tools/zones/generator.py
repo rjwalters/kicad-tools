@@ -163,13 +163,15 @@ class ZoneConfig:
         min_thickness: Minimum copper thickness in mm
         thermal_gap: Thermal relief gap in mm
         thermal_bridge_width: Thermal relief spoke width in mm
-        pad_connection: Pad-to-zone connection mode. Defaults to ``"yes"``
-            (solid full-copper connection for every pad), which avoids the
-            ``starved_thermal`` DRC error pads trigger when fewer than the
-            required 2 thermal spokes can form -- a solid connection is
-            strictly stronger than a 2-spoke thermal, not a relaxed check.
+        pad_connection: Zone-level pad-to-zone connection mode. Defaults to
+            ``""`` (thermal relief at the zone level), which pairs with the
+            **selective** per-pad policy (issue #3729): pads too small to
+            host the 2 thermal spokes KiCad's DRC requires get a per-pad
+            solid override while larger pads keep thermal relief.  Set
+            ``"yes"`` for the #3728 blanket-solid behavior, or
+            ``"thru_hole_only"`` / ``"no"`` for the other KiCad modes.
             See :func:`kicad_tools.sexp.builders.zone_node` for the full
-            set of accepted modes (issue #3727).
+            set of accepted modes.
         boundary: Custom boundary polygon, or None for board outline
     """
 
@@ -180,7 +182,7 @@ class ZoneConfig:
     min_thickness: float = 0.25
     thermal_gap: float = 0.3
     thermal_bridge_width: float = 0.4
-    pad_connection: str = "yes"
+    pad_connection: str = ""
     boundary: list[tuple[float, float]] | None = None
 
 
@@ -658,7 +660,7 @@ class ZoneGenerator:
         min_thickness: float = 0.25,
         thermal_gap: float = 0.3,
         thermal_bridge_width: float = 0.4,
-        pad_connection: str = "yes",
+        pad_connection: str = "",
         boundary: list[tuple[float, float]] | None = None,
     ) -> GeneratedZone:
         """Add a copper pour zone.
@@ -674,10 +676,11 @@ class ZoneGenerator:
             min_thickness: Minimum copper thickness in mm
             thermal_gap: Thermal relief gap in mm
             thermal_bridge_width: Thermal relief spoke width in mm
-            pad_connection: Pad-to-zone connection mode (default ``"yes"``:
-                solid full-copper connection for every pad).  See
+            pad_connection: Zone-level pad-to-zone connection mode (default
+                ``""``: thermal relief at the zone level, paired with the
+                selective per-pad solid policy of issue #3729).  See
                 :class:`ZoneConfig` and
-                :func:`kicad_tools.sexp.builders.zone_node` (issue #3727).
+                :func:`kicad_tools.sexp.builders.zone_node`.
             boundary: Custom boundary polygon, or None for board outline
 
         Returns:

@@ -7,6 +7,7 @@ ERC validation, DRC validation, netlist export, and more.
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -353,11 +354,12 @@ def run_fill_zones(
                 stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
             )
 
-    # Pre-fill normalization (Issue #3727): legacy zones use thermal relief
-    # for *all* pads, which starves pads that cannot form the 2 spokes
-    # KiCad's geometric DRC requires (``starved_thermal``).  Upgrade such
-    # zones to a solid pad connection *before* the fill so the refilled
-    # copper reflects the stronger connection.
+    # Pre-fill normalization (Issues #3727 / #3729): legacy zones use thermal
+    # relief for *all* pads, which starves pads that cannot form the 2 spokes
+    # KiCad's geometric DRC requires (``starved_thermal``).  The selective
+    # policy keeps thermal relief on pads that CAN host 2 spokes and forces a
+    # solid per-pad connection only on the pads that would otherwise starve,
+    # applied *before* the fill so the refilled copper reflects it.
     #
     # When the normalization actually changes a zone, the fill must read the
     # *normalized* board.
@@ -385,26 +387,165 @@ def run_fill_zones(
         if normalized_tmp is not None:
             normalized_tmp.unlink(missing_ok=True)
 
-    # Post-fill geometric correction (Issue #3711): kicad-cli's fill can
-    # leave the antipad around a foreign-net pad/via too small on boards
-    # serialized by kicad-tools, producing clearance_pad_zone /
-    # clearance_via_zone DRC errors.  Subtract foreign-net antipads from
-    # every filled_polygon so the fill clears foreign copper by at least
-    # the zone clearance.  No-op when shapely is unavailable.
+    # Post-fill thermal remediation (Issue #3729) + foreign-pad clearance
+    # (Issue #3711), run together so they settle to a single consistent fill:
+    #
+    #   * Remediation forces a solid connection on every pad KiCad's DRC flags
+    #     ``starved_thermal`` (single spoke) or whose lone spoke strands an
+    #     ``isolated_copper`` sliver, then refills via kicad-cli.
+    #   * The foreign-pad carve subtracts foreign-net antipads from each
+    #     filled_polygon so the fill clears foreign copper by the zone
+    #     clearance (kicad-cli's own fill can leave it too tight on
+    #     kicad-tools-serialized boards).
+    #
+    # The carve is a pure-Python edit that a later kicad-cli refill would
+    # revert, and the carve itself can strand a thermal-relief sliver that
+    # DRC then flags.  So the carve is applied *inside* each remediation pass
+    # (before that pass's DRC check), letting remediation force the offending
+    # pad solid until the post-carve board is clean.  Both are no-ops without
+    # shapely / kicad-cli; guarded so they never disturb a successful fill.
     if result.success and result.output_path is not None:
-        _apply_foreign_pad_clearance(result.output_path)
+        _remediate_starved_thermal(
+            result.output_path,
+            kicad_cli,
+            settle=_apply_foreign_pad_clearance,
+        )
 
     return result
 
 
-def _normalize_pad_connection_in_place(pcb_path: Path) -> None:
-    """Upgrade legacy thermal-for-all zones to solid pad connection (Issue #3727).
+def _remediate_starved_thermal(
+    pcb_path: Path,
+    kicad_cli: Path,
+    max_passes: int = 4,
+    settle: Callable[[Path], None] | None = None,
+) -> None:
+    """Force solid connection on the pads KiCad's DRC flags (Issue #3729).
 
-    Loads the PCB, adds a solid (``yes``) pad-connection mode to every zone
-    whose ``connect_pads`` lacks one (so pads get a full-copper connection
-    instead of a single starved thermal spoke), and rewrites the file only
-    when at least one zone changed.  Any failure is swallowed so the fill is
-    never aborted by the normalization.
+    The size-based selective pass clears the obvious small-SMD starved pads;
+    this measurement-driven pass mops up the residue that pad size cannot
+    predict, using KiCad's own geometric DRC as the source of truth:
+
+    * ``starved_thermal`` (error) -- the pad forms only one spoke (pour edge,
+      single-spoke THT power tab).  KiCad names the pad UUID, so we force that
+      exact pad solid.
+    * ``isolated_copper`` (warning) -- a thermal-relief pad's lone spoke left
+      a tiny copper sliver KiCad considers an island.  KiCad names only the
+      zone, so we resolve the sliver geometrically and force its anchoring
+      same-net pad solid (merging the sliver into the pour on refill).
+
+    Each pass: (1) ``kicad-cli pcb drc --refill-zones --save-board`` refills
+    the zones (baking in the previous pass's overrides); (2) the optional
+    ``settle`` callback runs -- the foreign-pad clearance carve (#3711) -- so
+    the geometry checked includes the carve; (3) a read-only DRC reports the
+    flags against that settled geometry; (4) the flagged pads are forced solid
+    and saved.  Repeating lets a pad whose thermal sliver the carve strands be
+    forced solid on the next pass.  Because the carve is reverted by the next
+    refill, ``settle`` is re-applied every pass and once more at the end so the
+    shipped copper carries it.  A pass that finds nothing returns early.  Any
+    failure (kicad-cli missing, malformed report) is swallowed so the fill is
+    left as produced.
+    """
+    import json
+    import os
+
+    try:
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_file
+        from kicad_tools.zones.fill_clearance import (
+            force_solid_on_isolated_island_pads,
+            force_solid_on_pads_by_uuid,
+            isolated_copper_zone_uuids,
+            starved_thermal_pad_uuids,
+        )
+    except Exception:
+        return
+
+    def _run_drc(refill: bool) -> dict | None:
+        """Run DRC on ``pcb_path`` and return the parsed report (or ``None``).
+
+        ``refill`` adds ``--refill-zones --save-board`` so the pass also
+        refills and persists the zones.  The default (all) severity is used so
+        ``isolated_copper`` *warnings* are visible alongside ``starved_thermal``
+        *errors*; ``--schematic-parity`` is omitted because the fill output may
+        lack a paired schematic.  The input net table is snapshotted and
+        restored around every invocation -- kicad-cli's ``--save-board`` can
+        strip the net declarations on kicad-tools-serialized boards, the same
+        quirk :func:`_run_fill_zones_via_drc` guards against -- so a refill
+        never drops the nets that segments/vias/pads depend on.
+        """
+        input_net_nodes = _snapshot_net_declarations(pcb_path)
+        input_element_nets = _snapshot_element_nets(pcb_path)
+
+        fd, report_name = tempfile.mkstemp(suffix=".json", prefix="thermal_drc_")
+        os.close(fd)
+        report_path = Path(report_name)
+        try:
+            cmd = [
+                str(kicad_cli),
+                "pcb",
+                "drc",
+                "--output",
+                str(report_path),
+                "--format",
+                "json",
+            ]
+            if refill and _kicad_drc_supports_refill(kicad_cli):
+                cmd.extend(["--refill-zones", "--save-board"])
+            cmd.append(str(pcb_path))
+            subprocess.run(cmd, capture_output=True, text=True)
+            _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+            if not report_path.exists() or report_path.stat().st_size == 0:
+                return None
+            return json.loads(report_path.read_text())
+        finally:
+            report_path.unlink(missing_ok=True)
+
+    def _settle() -> None:
+        if settle is not None:
+            settle(pcb_path)
+
+    try:
+        for _ in range(max_passes):
+            # Refill the zones (bakes in prior overrides), then apply the
+            # foreign-pad carve so the DRC we read reflects the shipped copper.
+            if _run_drc(refill=True) is None:
+                return
+            _settle()
+            report = _run_drc(refill=False)
+            if report is None:
+                return
+            starved_pads = starved_thermal_pad_uuids(report)
+            isolated_zones = isolated_copper_zone_uuids(report)
+            if not starved_pads and not isolated_zones:
+                return  # board is clean (carve already applied) -> done
+            doc = parse_file(pcb_path)
+            applied = force_solid_on_pads_by_uuid(doc, starved_pads)
+            applied += force_solid_on_isolated_island_pads(doc, isolated_zones)
+            if applied == 0:
+                # Flagged but nothing new to force solid -- the carve geometry
+                # is already on disk and we cannot improve it; stop here.
+                return
+            save_pcb(doc, pcb_path)
+            # Next pass refills (reverting the carve), re-applies it, re-checks.
+        # Pass budget exhausted with overrides still pending: do a final
+        # refill + carve so the shipped copper reflects both.
+        if _run_drc(refill=True) is not None:
+            _settle()
+    except Exception:
+        # Never let remediation abort a successful fill.
+        return
+
+
+def _normalize_pad_connection_in_place(pcb_path: Path) -> None:
+    """Apply the selective pad-connection policy in place (Issues #3727 / #3729).
+
+    Loads the PCB and runs :func:`normalize_zone_pad_connection` in its
+    default *selective* mode: zones keep thermal relief, while pads too small
+    to host the 2 spokes KiCad's DRC requires get a per-pad solid
+    ``(zone_connect 2)`` override.  Rewrites the file only when at least one
+    pad changed.  Any failure is swallowed so the fill is never aborted by
+    the normalization.
     """
     try:
         from kicad_tools.core.sexp_file import save_pcb
@@ -421,12 +562,13 @@ def _normalize_pad_connection_in_place(pcb_path: Path) -> None:
 
 
 def _stage_normalized_pad_connection(pcb_path: Path) -> Path | None:
-    """Stage a solid-pad-connection copy of ``pcb_path`` for the fill (Issue #3727).
+    """Stage a selectively-connected copy of ``pcb_path`` for the fill (Issues #3727 / #3729).
 
-    Returns the path to a temp ``.kicad_pcb`` whose zones have been upgraded to
-    a solid pad connection, or ``None`` when no zone needed changing (so the
-    caller can feed the original file unchanged and skip a needless copy).  Any
-    failure returns ``None`` so the fill proceeds on the original board.
+    Returns the path to a temp ``.kicad_pcb`` whose pads-that-cannot-host-2-spokes
+    have received a per-pad solid ``(zone_connect 2)`` override (selective
+    policy), or ``None`` when no pad needed changing (so the caller can feed
+    the original file unchanged and skip a needless copy).  Any failure
+    returns ``None`` so the fill proceeds on the original board.
     """
     try:
         import os

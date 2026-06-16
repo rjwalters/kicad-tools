@@ -336,7 +336,9 @@ class TestRunFillZonesNative:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
         assert result.success is True
-        cmd = mock_run.call_args[0][0]
+        # The fill is the first subprocess call (post-fill thermal remediation,
+        # issue #3729, adds trailing DRC calls).
+        cmd = mock_run.call_args_list[0][0][0]
         assert cmd[0] == "/usr/bin/kicad-cli"
         assert cmd[1:3] == ["pcb", "fill-zones"]
         assert str(tmp_pcb) == cmd[-1]
@@ -352,7 +354,8 @@ class TestRunFillZonesNative:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
         assert result.success is True
-        cmd = mock_run.call_args[0][0]
+        # The fill is the first subprocess call (issue #3729 adds trailing DRC).
+        cmd = mock_run.call_args_list[0][0][0]
         assert "--output" in cmd
         idx = cmd.index("--output")
         assert cmd[idx + 1] == str(out)
@@ -478,9 +481,11 @@ class TestRunFillZonesDRCFallback:
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
 
-        # The temp DRC report should have been deleted
-        assert len(created_reports) == 1
-        assert not Path(created_reports[0]).exists()
+        # Every temp DRC report (the fill report plus any from the post-fill
+        # thermal remediation in issue #3729) must be cleaned up.
+        assert len(created_reports) >= 1
+        for report in created_reports:
+            assert not Path(report).exists()
 
     def test_kicad8_no_refill_flags(self, tmp_pcb):
         """KiCad 8/9: DRC command should NOT include --refill-zones."""
@@ -518,7 +523,8 @@ class TestRunFillZonesDRCFallback:
         ):
             run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
 
-        cmd = mock_run.call_args[0][0]
+        # Inspect the fill DRC (first call); issue #3729 adds trailing calls.
+        cmd = mock_run.call_args_list[0][0][0]
         assert "--refill-zones" in cmd
         assert "--save-board" in cmd
 
