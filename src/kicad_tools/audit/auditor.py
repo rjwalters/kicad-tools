@@ -795,7 +795,117 @@ class ManufacturingAudit:
             status.details = str(e)
             status.passed = True  # Don't fail on check errors
 
+        # Merge KiCad's geometric DRC (kicad-cli pcb drc) into the same
+        # status.  The two engines catch different real defects: the --mfr
+        # rule engine above catches manufacturer-capability violations
+        # (e.g. clearance_pad_zone), while kicad-cli catches geometric
+        # defects (starved_thermal, shorts, sub-spec traces, zones_intersect)
+        # that the rule engine does not.  A board is manufacturable only
+        # when BOTH report zero errors (issue #3721).
+        self._merge_geometric_drc(status)
+
         return status
+
+    def _merge_geometric_drc(self, status: DRCStatus) -> None:
+        """Run ``kicad-cli pcb drc`` and fold its errors into ``status``.
+
+        kicad-cli loads the sibling ``<board>.kicad_pro`` emitted by
+        ``kct export`` (issue #3720), so a ``--severity-error`` run checks
+        against the manufacturer's fab-accurate rules with
+        ``lib_footprint_mismatch`` / ``isolated_copper`` already downgraded
+        below error severity (they will not appear and so are not counted
+        as blocking).
+
+        Counts are *additive* on top of the ``--mfr`` engine's tally:
+        ``error_count`` / ``blocking_count`` grow by the kicad-cli error
+        count, and each kicad-cli violation type is recorded in
+        ``violations_by_type`` under a ``kicad-cli:`` namespace so it is
+        clearly attributed to the geometric engine and never collides with
+        a ``--mfr`` rule_id.
+
+        Graceful fallback: if kicad-cli is not on PATH (e.g. CI without
+        KiCad), the report still generates -- a note is appended to
+        ``status.details`` and only the ``--mfr`` count stands.  The
+        ``status`` is mutated in place; this method never raises.
+        """
+        import tempfile
+
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            note = "kicad-cli not found; geometric DRC skipped (--mfr count only)"
+            status.details = f"{status.details}; {note}" if status.details else note
+            return
+
+        report_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+                report_path = Path(f.name)
+
+            # kicad-cli loads the sibling .kicad_pro automatically from the
+            # board's directory/stem, so the fab-accurate rules apply.
+            # --severity-error restricts the report to error-severity
+            # violations, which (per the emitted .kicad_pro rule_severities)
+            # already excludes lib_footprint_mismatch / isolated_copper.
+            cmd = [
+                str(kicad_cli),
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--severity-error",
+                "--units",
+                "mm",
+                "--output",
+                str(report_path),
+                str(self.pcb_path),
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=120, check=False)
+
+            if report_path is None or not report_path.exists():
+                note = "kicad-cli produced no DRC report (geometric DRC skipped)"
+                status.details = f"{status.details}; {note}" if status.details else note
+                return
+
+            from kicad_tools.drc import DRCReport
+
+            report = DRCReport.load(report_path)
+
+            # --severity-error already filters to errors, but guard defensively
+            # in case a future kicad-cli emits mixed severities.
+            cli_errors = [v for v in report.violations if v.is_error]
+            cli_error_count = len(cli_errors)
+
+            if cli_error_count > 0:
+                status.error_count += cli_error_count
+                status.blocking_count += cli_error_count
+                status.passed = status.blocking_count == 0
+
+                # Record per-type counts under a kicad-cli namespace so the
+                # report's by-type table makes the engine explicit and the
+                # geometric types never collide with --mfr rule_ids.
+                by_type = status.violations_by_type
+                cli_summary: dict[str, int] = {}
+                for v in cli_errors:
+                    key = f"kicad-cli:{v.type_str}"
+                    by_type[key] = by_type.get(key, 0) + 1
+                    cli_summary[v.type_str] = cli_summary.get(v.type_str, 0) + 1
+                status.violations_by_type = by_type
+
+                top = sorted(cli_summary.items(), key=lambda x: -x[1])[:3]
+                cli_detail = "kicad-cli: " + ", ".join(f"{t} ({c})" for t, c in top)
+                status.details = f"{status.details}; {cli_detail}" if status.details else cli_detail
+        except subprocess.TimeoutExpired:
+            note = "kicad-cli DRC timed out (geometric DRC skipped)"
+            status.details = f"{status.details}; {note}" if status.details else note
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Geometric DRC (kicad-cli) failed: %s", e)
+            note = f"geometric DRC failed: {e}"
+            status.details = f"{status.details}; {note}" if status.details else note
+        finally:
+            if report_path is not None:
+                report_path.unlink(missing_ok=True)
 
     def _check_connectivity(self, pcb: PCB) -> ConnectivityStatus:
         """Check net connectivity.
