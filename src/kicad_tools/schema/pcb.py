@@ -4176,7 +4176,6 @@ class PCB:
             >>> pos = pcb.get_pad_position("U1", "1")
             >>> print(f"Pad at ({pos[0]:.2f}, {pos[1]:.2f})")
         """
-        import math
 
         fp = self.get_footprint(reference)
         if not fp:

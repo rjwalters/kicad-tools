@@ -8,7 +8,6 @@ is referencing an undeclared net.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 from ..violations import DRCResults, DRCViolation

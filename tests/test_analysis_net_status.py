@@ -663,11 +663,12 @@ class TestAnalyzerHelperMethods:
         """Test pad position transform with 90 degree rotation."""
         analyzer = NetStatusAnalyzer(fully_routed_pcb)
 
-        # 90 degree rotation: (1, 0) should become (0, 1)
+        # KiCad pcbnew negated-angle convention: a +90 deg footprint
+        # rotation maps local pad (1, 0) to (0, -1) (verified against pcbnew).
         result = analyzer._transform_pad_position((1.0, 0.0), 0.0, 0.0, 90.0)
 
         assert result[0] == pytest.approx(0.0, abs=0.001)
-        assert result[1] == pytest.approx(1.0, abs=0.001)
+        assert result[1] == pytest.approx(-1.0, abs=0.001)
 
     def test_via_spans_layer_direct_match(self, fully_routed_pcb: Path):
         """Test _via_spans_layer with direct layer match."""

@@ -1945,14 +1945,15 @@ class TestPadClearanceRepair:
 
         repairer = ClearanceRepairer(pcb_file)
 
-        # Footprint at (105, 100) rotated 90deg, pad local (0.5, 0)
-        # After rotation: abs = (105, 100.5)
-        pads = repairer._find_pads_near(105.0, 100.5, 0.5, "F.Cu", ["GND"])
+        # Footprint at (105, 100) rotated 90deg, pad local (0.5, 0).
+        # KiCad pcbnew negated-angle convention: +90 deg maps (0.5, 0) to
+        # (0, -0.5), so abs = (105, 99.5) (verified against pcbnew).
+        pads = repairer._find_pads_near(105.0, 99.5, 0.5, "F.Cu", ["GND"])
         assert len(pads) >= 1
         pad_info = pads[0]
         assert pad_info[1] == "pad"
         assert abs(pad_info[2] - 105.0) < 0.01
-        assert abs(pad_info[3] - 100.5) < 0.01
+        assert abs(pad_info[3] - 99.5) < 0.01
 
     def test_choose_target_never_moves_pad(self, tmp_path: Path):
         """_choose_target should always return the non-pad object."""

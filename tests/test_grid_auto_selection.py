@@ -898,11 +898,15 @@ class TestExtractPadPositions:
 
         positions = extract_pad_positions(pcb_file)
         assert len(positions) == 1
-        # With 90 degree rotation, pad at (1, 0) relative becomes (0, 1) relative
-        # Absolute: (100 + 0, 100 + 1) = (100, 101)
+        # KiCad pcbnew uses a negated-angle (clockwise) pad transform for a
+        # positive footprint orientation, so a 90 degree rotation maps the
+        # local pad at (1, 0) to relative (0, -1).
+        # Absolute: (100 + 0, 100 - 1) = (100, 99)
+        # Verified against pcbnew: footprint@(100,100,90), pad local (1,0)
+        # -> world (100.0, 99.0).
         pos = positions[0]
         assert abs(pos.x - 100.0) < 0.01
-        assert abs(pos.y - 101.0) < 0.01
+        assert abs(pos.y - 99.0) < 0.01
 
 
 class TestRecommendGridForBoardSize:

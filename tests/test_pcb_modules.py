@@ -229,10 +229,11 @@ class TestComponentPlacement:
             ref="U1", footprint="Test", position=Point(10, 20), rotation=90, pads={"1": Point(5, 0)}
         )
         pad_pos = comp.pad_position("1")
-        # 90 degree rotation of (5, 0) around origin = (0, 5)
-        # Then add component position (10, 20)
+        # KiCad pcbnew negated-angle convention: a +90 deg rotation maps
+        # local (5, 0) to (0, -5) (verified against pcbnew).
+        # Then add component position (10, 20) -> (10, 15).
         assert pad_pos.x == pytest.approx(10.0, abs=0.01)
-        assert pad_pos.y == pytest.approx(25.0, abs=0.01)
+        assert pad_pos.y == pytest.approx(15.0, abs=0.01)
 
     def test_component_pad_position_not_found(self):
         """Test pad position with invalid pad name."""

@@ -141,25 +141,29 @@ class TestXTALEdgeAngleDetection:
     @pytest.mark.parametrize(
         "xtal_edge,rotation,expected_angle",
         [
-            # North XTAL pads (-y locally) rotated 90 deg CCW =>
-            # rotated to +x (east). Confirms rotation-awareness.
-            ("N", 90.0, 0.0),
-            # West XTAL pads (-x locally) rotated 90 deg CCW => -y (north).
-            ("W", 90.0, 270.0),
-            # West rotated 180 deg => east.
+            # KiCad pcbnew applies a footprint's positive orientation as a
+            # NEGATED (clockwise) rotation of the local pad frame (verified
+            # vs pcbnew, #3739). Expected world-frame edges below are
+            # cross-checked against the pcbnew oracle.
+            # North XTAL pads (-y locally) @ +90 deg => world -x (west).
+            ("N", 90.0, 180.0),
+            # West XTAL pads (-x locally) @ +90 deg => world +y (south).
+            ("W", 90.0, 90.0),
+            # West rotated 180 deg => east (convention-invariant).
             ("W", 180.0, 0.0),
-            # East rotated 270 deg => north (-y).
-            ("E", 270.0, 270.0),
-            # West rotated 90 deg CW (= -90 / 270 deg CCW) => south (+y).
-            ("W", 270.0, 90.0),
+            # East XTAL pads (+x locally) @ +270 deg => world +y (south).
+            ("E", 270.0, 90.0),
+            # West XTAL pads (-x locally) @ +270 deg => world -y (north).
+            ("W", 270.0, 270.0),
         ],
     )
     def test_xtal_edge_with_rotation(self, xtal_edge: str, rotation: float, expected_angle: float):
         """Footprint rotation moves XTAL pads to a different world-frame edge.
 
-        TQFP-32 packages have XTAL on the west edge. If the MCU is
-        rotated 90 deg CCW, the XTAL pads end up on the south edge in the
-        world frame. The placer must follow.
+        TQFP-32 packages have XTAL on the west edge. Under KiCad's
+        negated-angle convention, a +90 deg footprint rotation sends the
+        west-edge XTAL pads to the south edge in the world frame. The
+        placer must follow.
         """
         mcu = _make_tqfp32_mcu(xtal_edge=xtal_edge, rotation=rotation)
         pcb = _make_pcb_with_mcu(mcu)
@@ -308,13 +312,14 @@ class TestMCUCoreStrategyCrystalPlacement:
         assert math.isclose(crystal.y - anchor_pos[1], expected_dy, abs_tol=1e-6)
 
     def test_crystal_follows_mcu_rotation(self):
-        """Rotating the MCU 90 deg CCW moves XTAL pads from west to north.
+        """Rotating the MCU 90 deg moves XTAL pads from west to south.
 
-        TQFP-32 XTAL pads are natively on the west edge (local -x). The
-        standard 2D rotation matrix R(theta) with theta = +90 deg maps
-        the vector (-1, 0) to (0, -1). In screen-Y conventions that's
-        "north" (angle 270 deg in our 0=east, 90=south, 180=west,
-        270=north scheme). The crystal must follow.
+        TQFP-32 XTAL pads are natively on the west edge (local -x). KiCad
+        pcbnew applies a +90 deg footprint orientation as a NEGATED
+        (clockwise) rotation of the local frame (verified vs pcbnew,
+        #3739), mapping the vector (-1, 0) to (0, +1). In screen-Y
+        conventions that's "south" (angle 90 deg in our 0=east, 90=south,
+        180=west, 270=north scheme). The crystal must follow.
         """
         mcu = _make_tqfp32_mcu(xtal_edge="W", rotation=90.0)
         pcb = _make_pcb_with_mcu(mcu)
@@ -333,10 +338,10 @@ class TestMCUCoreStrategyCrystalPlacement:
         dy = crystal.y - anchor_pos[1]
         # Distance is 5.0 mm and the crystal lies on a cardinal axis.
         assert math.isclose(math.hypot(dx, dy), 5.0, abs_tol=1e-6)
-        # West edge rotated 90 deg CCW => north edge (angle 270 deg).
-        # Position vector = 5 * (cos(270), sin(270)) = (0, -5).
+        # West edge @ +90 deg (negated-angle) => south edge (angle 90 deg).
+        # Position vector = 5 * (cos(90), sin(90)) = (0, +5).
         assert math.isclose(dx, 0.0, abs_tol=1e-6)
-        assert math.isclose(dy, -5.0, abs_tol=1e-6)
+        assert math.isclose(dy, 5.0, abs_tol=1e-6)
 
     def test_crystal_fallback_when_no_xtal_pads(self):
         """When MCU has no XTAL pads, fall back to 270 deg (legacy behaviour).
