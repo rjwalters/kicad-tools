@@ -616,9 +616,7 @@ class TestZoneNode:
     def test_zone_node_pad_connection_thru_hole_only(self):
         """A caller can request ``thru_hole_only`` (solid SMD, thermal THT)."""
         points = [(0, 0), (100, 0), (100, 50), (0, 50)]
-        node = zone_node(
-            1, "GND", "F.Cu", points, "zone-uuid", pad_connection="thru_hole_only"
-        )
+        node = zone_node(1, "GND", "F.Cu", points, "zone-uuid", pad_connection="thru_hole_only")
         rendered = node.to_string()
         assert "(connect_pads thru_hole_only (clearance" in rendered
         assert '"thru_hole_only"' not in rendered
