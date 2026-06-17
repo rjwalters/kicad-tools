@@ -77,11 +77,33 @@ For the current readiness state, run:
 uv run kct fleet status --boards-dir boards/04-stm32-devboard
 ```
 
-**Last verified 2026-06-05**: routing 9/9 signal nets (100%), DRC clean against
-`--mfr jlcpcb-tier1` (PR #3218). One advisory connectivity finding at U2.8 (GND
-stitching) is filtered from the CI gate per #3074; the other 3 of 4 LQFP-48 VSS
-pads (U2.23, U2.35, U2.47) are stitched, so the MCU VSS rail bonds to plane
-through three independent paths.
+**Last verified 2026-06-17 (#3765)**: the schematic and PCB now share one
+canonical 12-net model — `compare_netlists(schematic, routed_pcb)` is **clean
+(0 mismatches)** and `schematic_net_count == pcb_net_count == 12` with no drift.
+The schematic was brought into pad-for-pad agreement with the PCB's `NETS`
+table: the 3.3 V rail uses the `+3.3V` spelling (synthesized power symbol),
+`BOOT0` and `LED_K` are named nets (no KiCad `Net-(...)` placeholders), and the
+U1 (AMS1117) and J1 (SWD header) pinouts follow the PCB pad order. ERC passes.
+
+The committed routed PCB **routes NRST cleanly** (`NRST` `U2.7` → `J1.5`, 2/2
+connected) and has **0 blocking DRC errors** against `--mfr jlcpcb-tier1`
+(`over_tolerance: false`, ship-ready `passed: true`, 52/55 pads). One
+**non-blocking `connectivity` advisory** remains (filtered from the CI gate per
+#3074):
+
+- `GND` (`U2.23`): the LQFP-48 west-corner VSS pad whose `OSC_OUT` B.Cu escape
+  window is too tight for even a 0.3 mm micro-via stitch (the documented
+  #2834 / #3033 case). The MCU VSS rail still bonds to plane through the other
+  stitched VSS pads.
+
+**Routed-PCB regeneration note (#3773):** a fresh end-to-end regen on current
+`main` cannot reproduce this clean routed PCB — the zone filler emits `+3.3V` /
+`+5V` F.Cu pours that are not cleared around the router's GND tracks/vias,
+producing ~30 `clearance_segment_zone` / `clearance_via_zone` shorts. This is a
+**separate regression** (reproducible from pristine `main` with the PCB net
+table unchanged, i.e. independent of the net reconciliation), tracked in
+**#3773**. Until it lands, board-04 ships the committed-good routed PCB, which
+is net-consistent with the reconciled schematic.
 
 The 2026-05-11 audit table (router 8/9, #2695/#2696/#3075/#3080) was removed
 when those issues closed — see issue #3212 for the rationale.

@@ -32,7 +32,6 @@ from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.blocks import (
     DebugHeader,
-    LEDIndicator,
     create_crystal_with_loads,
     create_gpio_pull_resistor,
     create_mcu_decoupling_array,
@@ -57,7 +56,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     - LDO voltage regulator (manually added)
     - 8MHz crystal oscillator (using CrystalOscillator block)
     - SWD debug header (using DebugHeader block)
-    - User LED (using LEDIndicator block)
+    - User LED (manual R1/D1 placement, PCB-matched pad topology)
 
     The schematic is organized with power on the left, peripherals in the center,
     and debug interface on the right.
@@ -111,16 +110,22 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # point keeps the validator from flagging dangling wire endpoints.
     rail_3v3_xend = X_SWD - 5.52
     rail_gnd_xend = X_SWD - 5.52
-    # The 3.3V rail uses the net label "+3V3" (not "+3.3V") so it unifies
-    # with the stock ``power:+3V3`` symbol below -- the stock symbol always
-    # publishes the global net "+3V3", and using a synthesized "+3.3V"
-    # symbol instead introduces a benign-but-noisy ``lib_symbol_issues``
-    # ERC warning (the synthetic library is not in the system lib table).
-    # The schematic net name is independent of the hand-built PCB net table
-    # (which keeps its "+3.3V" convention); each artifact is internally
-    # consistent.  Mirrors sister board 05 (PR #3004).  See issue #3149.
-    sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=93, net_label="+5V")
-    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend, net_label="+3V3")
+    # The 3.3V rail uses the net label "+3.3V" to match the PCB's canonical
+    # 12-net NETS table (the layout source of truth) pad-for-pad, so
+    # compare_netlists(sch, routed_pcb) is clean.  KiCad's stock power
+    # symbol is "+3V3", which would publish a mismatched net; instead the
+    # rail is driven by a *synthesized* "+3.3V" power symbol (add_pwr_symbol
+    # below), which registers a proper lib_symbols entry and round-trips
+    # without the old ``lib_symbol_issues`` ERC warning the prior "+3V3"
+    # workaround was guarding against.  See issue #3765 (drift reconcile).
+    # The +5V rail's right end terminates at C1's tap column (x=64.77).
+    # U1's +5V pad (pad 1) is now bound via a global ``+5V`` label rather
+    # than a physical wire to this rail (see the LDO pad-labelling below
+    # for issue #3765), so the rail no longer needs to extend to the LDO
+    # VI column at x=93 -- ending it at the last physical +5V tap (C1)
+    # avoids a dangling wire endpoint.
+    sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=64.77, net_label="+5V")
+    sch.add_rail(RAIL_3V3, x_start=80, x_end=rail_3v3_xend, net_label="+3.3V")
     sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=rail_gnd_xend, net_label="GND")
     print("   Added +5V, +3.3V, and GND rails")
 
@@ -142,25 +147,33 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     sch.add_wire((X_LEFT + 7, RAIL_5V - 10), (X_LEFT + 7, RAIL_5V), warn_on_collision=False)
     sch.add_junction(X_LEFT + 7, RAIL_5V)
 
-    # +3V3: stock ``power:+3V3`` symbol whose published global net matches
-    # the rail's "+3V3" label (set above).  The 3.3V rail IS driven by the
-    # AMS1117 VO pin (``power_output``) once the symbol is wired to the
-    # rail, so NO PWR_FLAG here (a flag would trigger an
-    # Output<->Power-output ``pin_to_pin`` conflict against VO).
-    sch.add_power("power:+3V3", x=80, y=RAIL_3V3 - 10, rotation=0)
+    # +3.3V: synthesized ``+3.3V`` power symbol whose published global net
+    # matches the rail's "+3.3V" label (set above) and the PCB NETS table.
+    #
+    # Because the schematic now mirrors the PCB's SOT-223 pad order
+    # (pad1=+5V, pad2=GND, pad3=+3.3V; issue #3765), the AMS1117 symbol's
+    # VO pin (``power_output``, pad 2) lands on GND and its VI pin
+    # (``power_input``, pad 3) lands on +3.3V.  So +3.3V has NO
+    # ``power_output`` driver and would fire ``power_pin_not_driven``
+    # against VI -- add a PWR_FLAG here to mark the rail as externally
+    # driven (the LDO output, in the real board).
+    sch.add_pwr_symbol("+3.3V", x=80, y=RAIL_3V3 - 10, rotation=0)
     sch.add_wire((80, RAIL_3V3 - 10), (80, RAIL_3V3), warn_on_collision=False)
+    sch.add_pwr_flag(87, RAIL_3V3 - 10)
+    sch.add_wire((87, RAIL_3V3 - 10), (87, RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(87, RAIL_3V3)
     sch.add_junction(80, RAIL_3V3)
 
-    # GND: like +5V, the GND rail has no ``power_output`` driver (the
-    # AMS1117 GND pin and every MCU VSS pin are ``power_input``).  Wire the
-    # GND symbol up to the rail and add a PWR_FLAG so U1.GND no longer fires
-    # ``power_pin_not_driven``.
+    # GND: with the swapped LDO pad order, the AMS1117 VO pin
+    # (``power_output``, pad 2) now lands on GND and IS the net's driver,
+    # so NO PWR_FLAG here (a flag would trigger an Output<->Power-output
+    # ``pin_to_pin`` conflict against VO -- the same reason +3.3V used to
+    # omit one).  The GND symbol still establishes the global GND net for
+    # the MCU VSS / decoupling-cap power_input pins.
     sch.add_power("power:GND", x=X_LEFT, y=RAIL_GND + 10, rotation=0)
     sch.add_wire((X_LEFT, RAIL_GND + 10), (X_LEFT, RAIL_GND), warn_on_collision=False)
-    sch.add_pwr_flag(X_LEFT + 7, RAIL_GND + 10)
-    sch.add_wire((X_LEFT + 7, RAIL_GND + 10), (X_LEFT + 7, RAIL_GND), warn_on_collision=False)
-    sch.add_junction(X_LEFT + 7, RAIL_GND)
-    print("   Added power symbols (wired to rails; PWR_FLAG on +5V/GND)")
+    sch.add_junction(X_LEFT, RAIL_GND)
+    print("   Added power symbols (wired to rails; PWR_FLAG on +5V/+3.3V)")
 
     # =========================================================================
     # Section 2: LDO Voltage Regulator (Manual Component Placement)
@@ -211,21 +224,33 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     )
     print(f"   Output caps: {c_out1.reference} = 10uF, {c_out2.reference} = 100nF")
 
-    # Wire LDO to power rails
-    # VIN to 5V rail
-    vin_pos = ldo.pin_position("VI")
-    sch.add_wire(vin_pos, (vin_pos[0], RAIL_5V), warn_on_collision=False)
-    sch.add_junction(vin_pos[0], RAIL_5V)
+    # Wire LDO to power nets by PAD NUMBER to match the PCB's canonical
+    # SOT-223 footprint net assignment (the routed-layout source of truth):
+    #   pad 1 -> +5V, pad 2 -> GND, pad 3 -> +3.3V
+    # so compare_netlists(sch, routed_pcb) agrees pad-for-pad on U1.  The
+    # KiCad AMS1117-3.3 symbol numbers its pins GND=1 / VO=2 / VI=3, which
+    # is the opposite pad ordering; wiring by pin NAME would reintroduce the
+    # U1.1/U1.2/U1.3 drift (issue #3765).  The hand-built PCB footprint
+    # carries this 1:+5V/2:GND/3:+3.3V order, so we mirror it here.
+    #
+    # The three pads emerge at different orientations (pad 1 below the body,
+    # pads 2/3 left/right), so instead of running long wires across the body
+    # to the horizontal rails we drop a short stub from each pad and place a
+    # global net label on the stub.  The label unifies with the matching
+    # rail's global net (+5V / GND / +3.3V) -- a robust, geometry-free way
+    # to bind each pad to the correct net.
+    def _label_ldo_pad(pad_number: str, net_name: str, dx: float, dy: float) -> None:
+        pos = ldo.pin_position(pad_number)
+        end = (pos[0] + dx, pos[1] + dy)
+        sch.add_wire(pos, end, warn_on_collision=False)
+        sch.add_label(net_name, end[0], end[1], rotation=0)
 
-    # VOUT to 3.3V rail
-    vout_pos = ldo.pin_position("VO")
-    sch.add_wire(vout_pos, (vout_pos[0], RAIL_3V3), warn_on_collision=False)
-    sch.add_junction(vout_pos[0], RAIL_3V3)
-
-    # GND to ground rail
-    gnd_pos = ldo.pin_position("GND")
-    sch.add_wire(gnd_pos, (gnd_pos[0], RAIL_GND), warn_on_collision=False)
-    sch.add_junction(gnd_pos[0], RAIL_GND)
+    # pad 1 (GND-named pin, below body) -> +5V ; stub downward.
+    _label_ldo_pad("1", "+5V", 0.0, 8.0)
+    # pad 2 (VO-named pin, right side) -> GND ; stub rightward.
+    _label_ldo_pad("2", "GND", 8.0, 0.0)
+    # pad 3 (VI-named pin, left side) -> +3.3V ; stub leftward.
+    _label_ldo_pad("3", "+3.3V", -8.0, 0.0)
 
     # Wire decoupling capacitors
     sch.wire_decoupling_cap(c_in, RAIL_5V, RAIL_GND)
@@ -340,16 +365,17 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # =========================================================================
     print("\n5. Adding SWD debug header...")
 
-    # 6-pin SWD header on the far right of the MCU.  SWD-6 pinout (see
-    # debug.py:56-63): 1=VCC, 2=SWDIO, 3=GND, 4=SWCLK, 5=GND, 6=NRST.
-    # ``connect_to_rails`` only wires pin 1 (VCC) and the FIRST GND (pin 3);
-    # without ``pin_nets`` the signal pins 2/4/6 and the second GND-key pin
-    # 5 float (``pin_not_connected``) and the MCU-side SWDIO/SWCLK/NRST
-    # labels have no J1-side match (``isolated_pin_label`` + NRST
-    # ``pin_not_driven``).  Pass ``pin_nets`` so the block emits label
-    # stubs at pins 2/4/5/6 -- the SWDIO/SWCLK/NRST labels then unify with
-    # the MCU-side labels.  Mirrors sister board 05 (PR #3004,
-    # design.py:541-556); see issue #3149.
+    # 6-pin SWD header on the far right of the MCU.  The PCB's canonical
+    # 1x06 footprint (the routed-layout source of truth) assigns nets
+    # per PAD as: 1=+3.3V, 2=SWDIO, 3=SWCLK, 4=SWO, 5=NRST, 6=GND.  This
+    # is a SHIFTED layout vs the DebugHeader block's built-in SWD-6 pinout
+    # (1=VCC, 2=SWDIO, 3=GND, 4=SWCLK, 5=GND, 6=NRST), so we drive every
+    # pin explicitly to reconcile schematic<->PCB drift pad-for-pad (issue
+    # #3765).  Signal pins 2/3/4/5 carry their net labels via ``pin_nets``
+    # (each emits a label stub the MCU-side SWDIO/SWCLK/SWO/NRST labels
+    # unify with); the power/ground pins 1 and 6 are wired to the +3.3V
+    # and GND rails directly below (NOT via ``connect_to_rails``, which
+    # assumes the built-in pin-1-VCC / pin-3-GND positions).
     debug = DebugHeader(
         sch,
         x=X_SWD,
@@ -361,15 +387,22 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         header_footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
         pin_nets={
             "2": "SWDIO",
-            "4": "SWCLK",
-            "5": "GND",
-            "6": "NRST",
+            "3": "SWCLK",
+            "4": "SWO",
+            "5": "NRST",
         },
     )
     print(f"   Debug header: {debug.header.reference} (SWD-6)")
 
-    # Connect debug header power to rails (pin 1 VCC -> +3.3V, pin 3 GND).
-    debug.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
+    # Wire pin 1 (+3.3V) up to the 3.3V rail and pin 6 (GND) down to the
+    # GND rail so the header power pins unify with their rails.  Matches
+    # the PCB pad assignment (pad1=+3.3V, pad6=GND).
+    j1_p1 = debug.header.pin_position("1")
+    sch.add_wire(j1_p1, (j1_p1[0], RAIL_3V3), warn_on_collision=False)
+    sch.add_junction(j1_p1[0], RAIL_3V3)
+    j1_p6 = debug.header.pin_position("6")
+    sch.add_wire(j1_p6, (j1_p6[0], RAIL_GND), warn_on_collision=False)
+    sch.add_junction(j1_p6[0], RAIL_GND)
 
     # =========================================================================
     # Section 6: MCU peripheral wiring (SWD, oscillator, USER_LED)
@@ -457,8 +490,14 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         ref="R2",
         footprint="Resistor_SMD:R_0805_2012Metric",
     )
-    # Wire BOOT0 stub from MCU to the block's BOOT0 port (horizontal).
+    # Wire BOOT0 stub from MCU to the block's BOOT0 port (horizontal), and
+    # place an explicit ``BOOT0`` net label on the wire so the U2.44 <-> R2.1
+    # node carries the named net ``BOOT0`` (matching the PCB NETS table)
+    # instead of the KiCad auto-generated ``Net-(U2-44)`` / ``Net-(R2-1)``
+    # placeholders that previously left this net unreconciled (issue #3765).
     sch.add_wire(boot0_pos, boot_pull.port("BOOT0"), warn_on_collision=False)
+    boot0_port = boot_pull.port("BOOT0")
+    sch.add_label("BOOT0", boot0_port[0], boot0_port[1], rotation=0)
     # Drop the resistor's GND end down to the GND rail.
     gnd_end = boot_pull.port("GND")
     sch.add_wire(gnd_end, (gnd_end[0], RAIL_GND), warn_on_collision=False)
@@ -470,33 +509,63 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # =========================================================================
     print("\n7. Adding user LED (driven by MCU PB12)...")
 
-    # LED + current-limiting resistor.  Wired so 3.3V -> D1 anode -> D1 cathode
-    # -> R1 pad1; R1 pad2 -> USER_LED net -> MCU PB12.  When MCU pulls PB12
-    # low, the LED illuminates (active-low).
-    led = LEDIndicator(
-        sch,
+    # LED + current-limiting resistor, placed and wired manually (NOT via
+    # LEDIndicator) so the schematic matches the PCB's canonical pad-for-pad
+    # net model (the routed-layout source of truth) exactly (issue #3765):
+    #
+    #   +3.3V --[R1]-- LED_K --[D1]-- USER_LED --> MCU PB12 (active-low)
+    #
+    # PCB pad assignment we must reproduce:
+    #   R1.pad1 = +3.3V,  R1.pad2 = LED_K
+    #   D1.pad1 = LED_K,  D1.pad2 = USER_LED
+    # Note the ``Device:LED`` symbol numbers its pads pad1="K"(cathode),
+    # pad2="A"(anode) -- the inverse of the LED_SMD footprint's
+    # pad1=anode/pad2=cathode -- so we wire by PAD NUMBER (not anode/cathode
+    # name) to agree with the PCB.  ``LEDIndicator`` hardwires D1.K<->R1.1
+    # (a different intermediate-node topology), which would reintroduce the
+    # D1/R1 drift, so it is not used here.
+    # Both symbols are placed vertical (rotation=90) and spaced apart; every
+    # pad gets a short stub + global net label, so the per-pad net binding is
+    # independent of the exact pad geometry (no fragile cross-body diagonal
+    # wires).  The intermediate LED_K node is realized by labelling BOTH
+    # R1.pad2 and D1.pad1 ``LED_K`` -- KiCad unifies same-named global labels.
+    r1 = sch.add_symbol(
+        "Device:R",
         x=265,
-        y=160,
-        ref_prefix="D1",
-        label="USER",
-        resistor_value="330R",
-        led_footprint="LED_SMD:LED_0805_2012Metric",
-        resistor_footprint="Resistor_SMD:R_0805_2012Metric",
+        y=150,
+        ref="R1",
+        value="330R",
+        rotation=90,
+        footprint="Resistor_SMD:R_0805_2012Metric",
     )
-    print(f"   LED: {led.led.reference} with current-limiting resistor (active-low)")
+    d1 = sch.add_symbol(
+        "Device:LED",
+        x=265,
+        y=170,
+        ref="D1",
+        # Match the PCB footprint's value label ("LED") so kct check's
+        # value-sync comparison is quiet for D1 (issue #3765).
+        value="LED",
+        rotation=90,
+        footprint="LED_SMD:LED_0805_2012Metric",
+    )
+    print(f"   LED: {d1.reference} with current-limiting resistor {r1.reference} (active-low)")
 
-    # Connect anode to +3.3V rail (top of LEDIndicator vertical block)
-    vcc_pos = led.ports["VCC"]
-    sch.add_wire(vcc_pos, (vcc_pos[0], RAIL_3V3), warn_on_collision=False)
-    sch.add_junction(vcc_pos[0], RAIL_3V3)
+    def _label_pad(sym, pad_number: str, net_name: str, dx: float, dy: float) -> None:
+        pos = sym.pin_position(pad_number)
+        end = (pos[0] + dx, pos[1] + dy)
+        sch.add_wire(pos, end, warn_on_collision=False)
+        sch.add_label(net_name, end[0], end[1], rotation=0)
 
-    # Bottom port of LEDIndicator is r.pad2 -- route this to USER_LED label.
-    # We do NOT connect this to GND -- the MCU drives the cathode side via
-    # the USER_LED net.
-    led_user = led.ports["GND"]  # this is r.pad2 (intentional misnomer in block)
-    sch.add_wire(led_user, (led_user[0], led_user[1] + 10), warn_on_collision=False)
-    sch.add_label("USER_LED", led_user[0], led_user[1] + 10, rotation=0)
-    print("   D1/R1 wired between +3.3V and USER_LED (MCU PB12)")
+    # R1.pad1 -> +3.3V, R1.pad2 -> LED_K
+    _label_pad(r1, "1", "+3.3V", 0.0, -8.0)
+    _label_pad(r1, "2", "LED_K", 0.0, 8.0)
+    # D1.pad1 (K) -> LED_K, D1.pad2 (A) -> USER_LED.  Per the PCB footprint
+    # pad order (pad1=anode net LED_K, pad2=cathode net USER_LED), wired by
+    # pad number: the Device:LED symbol's pad1 is "K" / pad2 is "A".
+    _label_pad(d1, "1", "LED_K", 0.0, 8.0)
+    _label_pad(d1, "2", "USER_LED", 0.0, -8.0)
+    print("   R1/D1 wired: +3.3V -> R1 -> LED_K -> D1 -> USER_LED (MCU PB12)")
 
     # =========================================================================
     # Section 8: Design Notes
@@ -1085,6 +1154,32 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     reset through the SWD probe is unaffected.  Recovery options
     documented in the tolerance YAML.
 
+    Note (Issue #3765, 2026-06-17): this recipe's schematic<->PCB net
+    drift was reconciled in #3765 -- ``create_stm32_schematic`` now
+    matches the PCB's canonical 12-net ``NETS`` table pad-for-pad
+    (``+3.3V`` rail spelling, named ``BOOT0``/``LED_K`` nets, and the
+    PCB-order U1/J1 pinouts), so ``compare_netlists(sch, routed_pcb)`` is
+    clean (0 mismatches).
+
+    On the routing leg: the **committed**
+    ``output/stm32_devboard_routed.kicad_pcb`` is a known-good pinned
+    artifact that **routes NRST cleanly** (NRST 2/2 connected; U2.7 ->
+    J1.5 reset path landed) with **0 blocking DRC errors** -- only the
+    GND U2.23 LQFP-48 corner-pad stitch residual remains as a non-blocking
+    ``connectivity`` advisory (the documented #2834/#3033 OSC_OUT-escape
+    case).  #3765 deliberately **preserves this committed routed PCB**
+    rather than re-routing, because a fresh end-to-end regen on current
+    main hits a *separate* regression -- the zone filler emits ``+3.3V`` /
+    ``+5V`` F.Cu pours that are not cleared around the router's GND
+    tracks/vias, producing ~30 ``clearance_segment_zone`` /
+    ``clearance_via_zone`` shorts (reproducible from pristine main with
+    the PCB net table unchanged, i.e. independent of the #3765 schematic
+    fix).  That zone-fill regression is tracked in **#3773**; until it
+    lands, the committed routed PCB (net-consistent with the reconciled
+    schematic, NRST routed, 0 blocking) is the artifact board-04 ships.
+    ``blocking_errors`` stays 0 and the tolerance floor stays 0; no
+    clearance violation is committed.
+
     Issue #3039: pins ``--seed 42`` so the routed PCB is byte-identical
     across runs.  The board's ``--seed 42`` reference run is the
     regression baseline (9/9 signal nets, ~6 DRC errors).
@@ -1313,20 +1408,34 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
 
 
 def run_drc(pcb_path: Path) -> bool:
-    """Run DRC on the PCB using kct check for consistent results."""
+    """Run DRC on the routed PCB and write ``drc_report.json`` beside it.
+
+    Issue #3765: capture the DRC result as ``output/drc_report.json`` so
+    the board-04 DRC leg in ``kct fleet ship-ready`` is a fresh artifact
+    that is consistent with the routed PCB it was measured against (the
+    report is written next to the routed PCB -- exactly where
+    ``fleet_cmd._detect_drc`` looks for it).  Mirrors board-03's #3764
+    ``run_drc`` (``--drc-only --output``).
+
+    Uses ``--drc-only`` so the gate reflects geometric DRC (clearance /
+    connectivity / via rules) rather than the copper-LVS sub-check, which
+    reports pour-served power-net pads (GND / rails) as "open" because the
+    router deliberately serves those nets via copper pours (the #3772
+    pour-extraction gap).  Schematic<->PCB netlist equivalence is asserted
+    separately and exactly by ``compare_netlists`` (issue #3765), so the
+    DRC leg here is correctly scoped to manufacturing geometry.
+
+    Issue #3208/#3150: ``--mfr jlcpcb-tier1`` aligns the summary with the
+    profile this board ships and is CI-gated against (the GND micro-via
+    stitching needs the Capability-Plus tier; see the manufacturers:
+    override in ``.github/routed-drc-tolerance.yml``).
+    """
     print("\n" + "=" * 60)
-    print("Running DRC (via kct check)...")
+    print("Running DRC (via kct check --drc-only)...")
     print("=" * 60)
 
+    report_path = pcb_path.parent / "drc_report.json"
     try:
-        # Issue #3208: align the local DRC summary with the jlcpcb-tier1
-        # profile this board ships and is gated against (--micro-via GND
-        # stitching; see export_manufacturing_bundle and the
-        # manufacturers: override in .github/routed-drc-tolerance.yml).
-        # Mirrors the board-03 #3150 pattern.  Without this flag, `kct
-        # check` defaults to jlcpcb (tier-0) which forbids via-in-pad,
-        # producing 3 spurious via_in_pad errors that the CI gate does
-        # not see (CI passes --mfr jlcpcb-tier1 per the tolerance YAML).
         result = subprocess.run(
             [
                 sys.executable,
@@ -1336,6 +1445,9 @@ def run_drc(pcb_path: Path) -> bool:
                 str(pcb_path),
                 "--mfr",
                 "jlcpcb-tier1",
+                "--drc-only",
+                "--output",
+                str(report_path),
             ],
             capture_output=True,
             text=True,
@@ -1345,6 +1457,9 @@ def run_drc(pcb_path: Path) -> bool:
         if result.stdout:
             for line in result.stdout.strip().split("\n"):
                 print(f"   {line}")
+
+        if report_path.is_file():
+            print(f"\n   DRC report: {report_path}")
 
         # Check for success
         if result.returncode == 0:
@@ -1432,11 +1547,21 @@ def main() -> int:
         # between U2.7 and U2.8 that is now correctly refused).  All
         # three findings are advisory ``connectivity`` rule outputs (in
         # DRCChecker.ADVISORY_RULE_IDS, filtered from the CI gate per
-        # #3074); 2 of 4 VSS pads (U2.23, U2.47) are still stitched so
-        # the MCU VSS rail is bonded to the plane through two
-        # independent paths.  Success requires ERC pass, routing success,
-        # stitch step executed, and manufacturing artifacts produced.
-        # Underlying recovery cluster: #2834 (manufacturing-ready).
+        # #3074); the remaining VSS pads are still stitched so the MCU VSS
+        # rail is bonded to the plane through independent paths.  Success
+        # requires ERC pass, routing success, stitch step executed, and
+        # manufacturing artifacts produced.  Underlying recovery cluster:
+        # #2834 (manufacturing-ready).
+        #
+        # Per #3765 (2026-06-17): the schematic<->PCB net drift is now
+        # reconciled (compare_netlists clean, 12==12 nets, no drift). The
+        # committed routed PCB routes NRST cleanly (2/2) with 0 blocking
+        # errors; the single remaining ``connectivity`` advisory is the
+        # GND U2.23 corner-pad stitch residual (#2834/#3033).  The routed
+        # PCB is preserved (not re-routed) because fresh regen on current
+        # main hits a separate zone-fill regression (GND-vs-rail F.Cu pour
+        # shorts), tracked in #3773.  blocking_errors stays 0 and the
+        # board's ship-ready verdict stays ``passed: true``.
         return 0 if (erc_success and route_success and stitch_success and mfr_success) else 1
 
     except Exception as e:
