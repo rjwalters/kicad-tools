@@ -257,7 +257,17 @@ def _erc_subcheck(sch_path: Path | None, strict: bool) -> SubCheckResult:
 
 
 def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
-    """Run live LVS via :func:`compare_netlists` (issue #3750).
+    """Run live LVS (issue #3750, extended for independent copper LVS #3742).
+
+    Runs *two* complementary comparisons and fails if **either** dirties:
+
+    * **label-based** (:func:`board_lvs.compare_netlists`) — trusts each
+      pad's declared ``(net ...)`` label; catches generator/router
+      bookkeeping drift.
+    * **copper-extracted** (:func:`copper_lvs.compare_copper_netlist`) —
+      ignores pad labels entirely and diffs the *physical* copper partition
+      against the schematic; catches shorts/opens a mislabeled router would
+      hide from the label-based path (the board-00 soundness gap, #3742).
 
     Always recomputes -- never reads ``output/lvs.json`` -- so a fresh
     PCB edit that breaks LVS is surfaced immediately.  Returns
@@ -279,10 +289,33 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
             detail=f"LVS comparator raised {type(e).__name__}: {e}",
         )
 
+    try:
+        from kicad_tools.lvs.copper_lvs import compare_copper_netlist
+
+        copper = compare_copper_netlist(sch_path, pcb_path)
+    except Exception as e:
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"copper LVS comparator raised {type(e).__name__}: {e}",
+        )
+
+    if not copper.clean:
+        # The copper-extracted gate is the soundness-critical one: surface
+        # it first.  Show up to the first 3 records in a stable order.
+        records = sorted(copper.mismatches, key=lambda m: (m.kind, m.pad_a, m.pad_b))
+        preview = ", ".join(
+            f"{m.kind} {m.pad_a}({m.net_a})/{m.pad_b}({m.net_b})" for m in records[:3]
+        )
+        suffix = "" if len(records) <= 3 else f" (+{len(records) - 3} more)"
+        return SubCheckResult(
+            status="FAILED",
+            detail=f"copper: {len(records)} mismatch(es): {preview}{suffix}",
+        )
+
     if result.clean:
         return SubCheckResult(
             status="PASSED",
-            detail=f"{len(result.mismatches)} mismatch(es)",
+            detail="label + copper: 0 mismatch(es)",
         )
 
     # Show up to the first 3 mismatches in stable (ref, pad) order so
@@ -294,7 +327,7 @@ def _lvs_subcheck(sch_path: Path | None, pcb_path: Path) -> SubCheckResult:
     suffix = "" if len(mismatches) <= 3 else f" (+{len(mismatches) - 3} more)"
     return SubCheckResult(
         status="FAILED",
-        detail=f"{len(mismatches)} mismatch(es): {preview}{suffix}",
+        detail=f"label: {len(mismatches)} mismatch(es): {preview}{suffix}",
     )
 
 

@@ -308,6 +308,197 @@ class ConnectivityValidator:
         result.zone_connected_nets = zone_connected_count
         return result
 
+    def extract_pad_partition(self) -> list[frozenset[str]]:
+        """Extract the *physical* pad partition from routed copper.
+
+        This is the independent-LVS primitive (issue #3742): it floods the
+        routed copper graph and returns the set of galvanically connected
+        pad groups.
+
+        **Autorouter copper (track segments + vias) is traced with zero
+        reference to pad net labels** — two pads land in the same group iff
+        physical copper connects them, regardless of what net the router
+        *claims*.  This is the load-bearing soundness property: it catches a
+        router that wires segments to the wrong pads while labeling them
+        correctly (the board-00 rotation-convention bug, #3739).
+
+        Zone pours are handled with a deliberately narrower, documented
+        model (see the ``2d`` block below): because robust label-free
+        extraction of which pads a pour is *thermally tied* to is a known
+        follow-up, the pour leg groups pads by the zone's declared net.
+        That re-introduces a label dependency for the FILL step alone — never
+        for autorouter copper — and can never fuse two different nets, so it
+        cannot manufacture a false short.
+
+        Why this matters: the label-based comparator
+        (:func:`kicad_tools.lvs.board_lvs.compare_netlists`) trusts the
+        ``(net K "NAME")`` child the router writes onto each pad, so a router
+        that mislabels its own copper passes.  This extractor never reads a
+        net label — it derives connectivity purely from copper geometry — so
+        the partition it returns reflects what manufacturing will actually
+        see.  Diffing it against the schematic partition catches shorts
+        (different schematic nets fused by copper) and opens (same schematic
+        net split across copper islands) that the label-based path cannot.
+
+        Note on coordinate convention: pad geometry still flows through
+        :meth:`_transform_pad_position` / ``rotate_pad_offset``.  The gate's
+        *correctness claim* does not rest on that transform being right —
+        that is what the 90°/270° decoupling test asserts independently
+        against kicad-cli (or a committed golden).  What this method
+        guarantees is that the partition ignores *labels*, which is the
+        load-bearing soundness property.
+
+        Returns:
+            A list of ``frozenset`` pad-id groups (``"REF.PAD"`` form, e.g.
+            ``"U1.3"``).  Every footprint pad with a numeric pad number and a
+            non-comment reference appears in exactly one group.  A pad with
+            no copper touching it forms a singleton group.  Groups are
+            returned sorted by their smallest member for determinism.
+        """
+        # 1. Collect every pad on the board (label-independent) with its
+        #    board-frame position and layer set.
+        pad_positions: dict[str, tuple[float, float]] = {}
+        pad_layers: dict[str, list[str]] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            fp_x, fp_y = fp.position
+            rotation = fp.rotation
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                pad_id = f"{fp.reference}.{pad.number}"
+                pad_positions[pad_id] = self._transform_pad_position(
+                    pad.position, fp_x, fp_y, rotation
+                )
+                pad_layers[pad_id] = pad.layers
+
+        # 2. Build a copper adjacency graph over pads, ignoring net labels.
+        #    Every pad starts as its own node; copper fuses them.
+        graph: dict[str, set[str]] = {pad_id: set() for pad_id in pad_positions}
+
+        def _connect(a: str, b: str) -> None:
+            if a != b:
+                graph[a].add(b)
+                graph[b].add(a)
+
+        # 2a. Track segments: union the pads at each endpoint, and union
+        #     pads sharing an endpoint.  Crucially we walk *all* segments
+        #     (``self.pcb.segments``), not segments filtered by a net number,
+        #     so a mislabeled segment still physically connects whatever it
+        #     touches.
+        segments = list(self.pcb.segments)
+        for seg in segments:
+            start_pads = self._find_pads_at_point(seg.start, pad_positions)
+            end_pads = self._find_pads_at_point(seg.end, pad_positions)
+            for sp in start_pads:
+                for ep in end_pads:
+                    _connect(sp, ep)
+            for group in (start_pads, end_pads):
+                for i, p in enumerate(group):
+                    for other in group[i + 1 :]:
+                        _connect(p, other)
+
+        # 2b. Segment chains: pads connected through a chain of segments that
+        #     share endpoints are galvanically connected even with no pad at
+        #     the intermediate junctions.  Reuse the existing chain builder,
+        #     which is itself label-agnostic (it only looks at endpoints).
+        graph = self._build_segment_chains(segments, pad_positions, graph)
+
+        # 2c. Vias: pads coincident with a via are connected (layer bridge).
+        for via in self.pcb.vias:
+            via_pads = self._find_pads_at_point(via.position, pad_positions)
+            for i, p in enumerate(via_pads):
+                for other in via_pads[i + 1 :]:
+                    _connect(p, other)
+
+        # 2d. Filled zones (copper pours).
+        #
+        #     SCOPE NOTE (issue #3742, bounded first slice): the
+        #     load-bearing soundness property of this extractor is that
+        #     *autorouter copper* — track segments and vias — is traced
+        #     fully independently of pad net labels.  That is exactly where
+        #     the board-00 rotation-convention bug manifested: the router
+        #     wired SEGMENTS to the wrong pads while labeling them
+        #     correctly, and steps 2a–2c above will catch that regardless of
+        #     any shared coordinate convention.
+        #
+        #     Zone pours are different in kind.  A copper pour connects only
+        #     the pads it is *electrically tied* to (via thermal spokes);
+        #     pads of other nets sit inside the pour's outline but are carved
+        #     out by clearance moats.  Recovering that tie purely from the
+        #     flattened ``filled_polygons`` geometry is not reliable — the
+        #     outer hull and inner thermal/clearance cutout loops are
+        #     concatenated into one point list, which breaks naive
+        #     point-in-polygon, and pad-center-to-fill distance does not
+        #     separate tied pads from neighbouring foreign-net pads (verified
+        #     on board 00).  Robust pour extraction (spoke tracing /
+        #     kicad-cli cross-check) is an explicit #3742 follow-up.
+        #
+        #     So for the pour leg ONLY we group pads by the zone's *declared
+        #     net*: a pad enclosed by a pour's boundary on a matching layer
+        #     is treated as tied to that pour iff the pad's own declared net
+        #     equals the zone's.  This re-introduces a label dependency for
+        #     the FILL step alone (a deterministic, label-driven generator
+        #     step — not the autorouter), while keeping segment/via tracing
+        #     100% label-independent.  Crucially it can never fuse two
+        #     different nets, so it cannot manufacture a false short.
+        pad_declared_net: dict[str, str] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                pad_declared_net[f"{fp.reference}.{pad.number}"] = pad.net_name
+
+        for zone in self.pcb.zones:
+            if not zone.filled_polygons:
+                continue
+            if not zone.polygon or len(zone.polygon) < 3:
+                continue
+            if not zone.net_name:
+                continue
+            pads_in_zone: list[str] = []
+            for pad_id, pad_pos in pad_positions.items():
+                if pad_declared_net.get(pad_id) != zone.net_name:
+                    continue
+                if not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), zone.layer):
+                    continue
+                if self._point_in_polygon(pad_pos, zone.polygon):
+                    pads_in_zone.append(pad_id)
+            for i, p in enumerate(pads_in_zone):
+                for other in pads_in_zone[i + 1 :]:
+                    _connect(p, other)
+
+        # 2e. Coincident pads with no intervening copper still share metal
+        #     if they occupy the same point (e.g. stacked pads).
+        pad_ids = list(pad_positions)
+        for i, p in enumerate(pad_ids):
+            for other in pad_ids[i + 1 :]:
+                if self._points_close(pad_positions[p], pad_positions[other]):
+                    _connect(p, other)
+
+        # 3. Flood-fill connected components of the pad graph.
+        visited: set[str] = set()
+        partition: list[frozenset[str]] = []
+        for pad_id in pad_positions:
+            if pad_id in visited:
+                continue
+            component: set[str] = set()
+            queue = [pad_id]
+            while queue:
+                current = queue.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                component.add(current)
+                queue.extend(graph[current] - visited)
+            partition.append(frozenset(component))
+
+        partition.sort(key=lambda comp: min(comp))
+        return partition
+
     def _get_net_pads(self, net_number: int) -> list[str]:
         """Get all pads on a specific net.
 
