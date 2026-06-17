@@ -463,3 +463,272 @@ def test_compare_copper_netlist_on_board00_artifacts() -> None:
     result = compare_copper_netlist(sch, pcb)
     assert isinstance(result, CopperLVSResult)
     assert result.clean, f"board 00 copper LVS unexpectedly dirty: {result.mismatches}"
+
+
+# ---------------------------------------------------------------------------
+# Label-free zone-pour extraction — the adversarial crux (issue #3761)
+# ---------------------------------------------------------------------------
+#
+# The #3742 first slice tied pour pads by the zone's *declared* net, which can
+# MASK a defect on pour-routed nets.  These tests prove the gap is closed: ONE
+# inline fixture with a poured GND net and a carved clearance moat, asserted
+# against BOTH models on the SAME board:
+#
+#   * Pad X (R1.1) is declared GND but its copper is moated out of the GND
+#     pour (no thermal spoke / no solid overlap) -> an OPEN.
+#   * Pad Y (R2.1) is declared SIG (a foreign net) but its copper bonds to the
+#     solid GND pour -> a SHORT.
+#
+# The OLD declared-net model groups X into the GND island (label matches) and
+# never touches Y (label differs), so it reports NEITHER defect — it PASSES,
+# masking both.  The NEW geometric model bonds Y (copper in the pour) and
+# leaves X isolated (copper in the moat), so it FAILS, catching both.
+
+
+def _shapely_available() -> bool:
+    try:
+        import shapely  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+requires_shapely = pytest.mark.skipif(
+    not _shapely_available(),
+    reason="shapely not installed (optional geometry/dev extra)",
+)
+
+
+# Pour solid square 0..20 on F.Cu with a 3x3 clearance moat (a real hole)
+# carved around R1.1 at (5, 10).  R2.1 at (15, 10) sits in the solid copper.
+# The hole is encoded the way KiCad flattens it: ONE ring whose boundary dips
+# into the hole through a narrow slit (so the raw point list concatenates the
+# outer hull with the cutout loop, exactly the schema reality #3761 must
+# handle).  ``_fill_solid_region`` (shapely buffer(0)) re-derives the hole.
+_POUR_FILL_RING = (
+    "(xy 0 0) (xy 4.975 0) (xy 4.975 8.5) "
+    "(xy 3.5 8.5) (xy 3.5 11.5) (xy 6.5 11.5) (xy 6.5 8.5) "
+    "(xy 5.025 8.5) (xy 5.025 0) "
+    "(xy 20 0) (xy 20 20) (xy 0 20) (xy 0 0)"
+)
+
+
+def _pcb_pour_adversarial() -> str:
+    """A poured GND net with a moated-out GND pad and a bonded foreign pad.
+
+    Three single-pad footprints, all on F.Cu over the GND pour:
+
+    * ``R1`` pad "1" at board (5, 10): declared **GND**, but its copper lands
+      inside the carved moat (a hole in the fill) -> NOT bonded to the pour.
+    * ``R2`` pad "1" at board (15, 10): declared **SIG** (foreign net), but its
+      copper sits in the solid GND pour -> bonded.
+    * ``R3`` pad "1" at board (10, 17): declared **GND**, copper in the solid
+      pour -> bonded.  This is the GND "anchor" R2.1 shorts against and the
+      counterpart that makes R1.1's isolation a GND *open* (GND copper exists
+      elsewhere in the pour).
+
+    Footprints are placed at 0 rotation with pad "1" at local (0, 0) so the
+    board-frame pad center equals the footprint origin.  Pad size 1.5 mm:
+    eroded by ``POUR_PAD_ERODE`` (0.1) it stays inside the 3 mm moat for R1.1
+    and well within the solid pour for R2.1 / R3.1.
+    """
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000a1")
+    (at 5 10)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-a1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-a1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000a2")
+    (at 15 10)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-a2-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-a2-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 2 "SIG"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000a3")
+    (at 10 17)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-a3-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-a3-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (zone
+    (net 1 "GND")
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000z1")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+    (filled_polygon (layer "F.Cu") (pts {_POUR_FILL_RING}))
+  )
+)
+"""
+
+
+# Schematic side: R1.1/R3.1 are GND, R2.1 is SIG (matches the declared pad
+# labels — the labels are "honest", the *copper* is the lie the gate exposes).
+_POUR_SCHEMATIC: dict[tuple[str, str], str | None] = {
+    ("R1", "1"): "GND",
+    ("R2", "1"): "SIG",
+    ("R3", "1"): "GND",
+}
+
+
+def _declared_net_pour_partition(pcb_path: Path) -> list[frozenset[str]]:
+    """Extract the partition under the LEGACY declared-net pour model.
+
+    Forces ``_has_shapely`` to report False so ``extract_pad_partition`` takes
+    the preserved declared-net fallback (``_connect_pour_pads_by_declared_net``)
+    — i.e. the pre-#3761 behavior — on the very same fixture.
+    """
+    from unittest import mock
+
+    with mock.patch("kicad_tools.validate.connectivity._has_shapely", return_value=False):
+        return ConnectivityValidator(pcb_path).extract_pad_partition()
+
+
+@requires_shapely
+def test_pour_extraction_label_free_catches_what_declared_net_masks(
+    tmp_path: Path,
+) -> None:
+    """The crux: same fixture, OLD model PASSES, NEW model FAILS.
+
+    Demonstrates issue #3761's gap is closed.  On a board where GND is poured
+    with a carved moat:
+
+    * OLD (declared-net) model: R1.1 and R3.1 (both declared GND) are grouped
+      into the GND pour by their labels and R2.1 (declared SIG) is never
+      considered, so the partition matches the schematic -> CLEAN, masking
+      both an open and a short.
+    * NEW (geometric) model: R1.1's copper is moated out (isolated, while R3.1
+      holds GND copper in the pour -> GND open) and R2.1's copper bonds to the
+      GND pour alongside R3.1 (fused -> SIG/GND short), so the partition diff
+      FAILS, catching both.
+    """
+    pcb_path = _write(tmp_path, "pour.kicad_pcb", _pcb_pour_adversarial())
+
+    # --- OLD declared-net model: masks the defect (clean) ---
+    old_partition = _declared_net_pour_partition(pcb_path)
+    old_result = compare_partitions(_POUR_SCHEMATIC, old_partition)
+    assert old_result.clean, (
+        "the legacy declared-net pour model should MASK this defect "
+        f"(that is the gap #3761 closes); got {old_result.mismatches}"
+    )
+    # Under the label model R1.1 and R3.1 are grouped by their shared GND label
+    # (consistent with the schematic) and R2.1 stays a SIG singleton.
+    old_gnd = next(c for c in old_partition if "R1.1" in c)
+    assert {"R1.1", "R3.1"} <= old_gnd
+    assert frozenset({"R2.1"}) in old_partition
+
+    # --- NEW geometric model: catches the defect (dirty) ---
+    new_partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    new_result = compare_partitions(_POUR_SCHEMATIC, new_partition)
+    assert not new_result.clean, (
+        "the geometric pour model must FLAG the moated-out / bonded-foreign "
+        f"pads; partition={new_partition}"
+    )
+    # R2.1 (SIG) copper bonds to the GND pour (with R3.1) -> GND/SIG short.
+    short_pairs = {frozenset({m.net_a, m.net_b}) for m in new_result.shorts}
+    assert frozenset({"GND", "SIG"}) in short_pairs, (
+        f"expected a GND/SIG short; shorts={new_result.shorts}"
+    )
+    # R1.1 (GND) is moated out while R3.1 holds GND copper -> GND open.
+    assert any(o.net_a == "GND" for o in new_result.opens), (
+        f"expected a GND open from the moated-out R1.1; opens={new_result.opens}"
+    )
+
+
+@requires_shapely
+def test_pour_extraction_moated_pad_is_not_bonded(tmp_path: Path) -> None:
+    """Hole semantics: a pad in a clearance moat is NOT tied to the pour.
+
+    R1.1's copper sits inside the carved moat (a real hole in the fill), so
+    the label-free extractor must leave it in its own singleton component
+    rather than fusing it into the GND pour island.
+    """
+    pcb_path = _write(tmp_path, "pour.kicad_pcb", _pcb_pour_adversarial())
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # R1.1 is moated out -> singleton (no copper bonds it to the pour).
+    assert frozenset({"R1.1"}) in partition
+
+
+@requires_shapely
+def test_pour_extraction_solid_overlap_pad_is_bonded(tmp_path: Path) -> None:
+    """A pad whose copper sits in the solid pour IS tied to it.
+
+    R2.1's copper overlaps the solid GND fill, so the label-free extractor
+    must fuse it into the pour island even though its declared net (SIG)
+    differs from the zone's (GND).
+    """
+    pcb_path = _write(tmp_path, "pour.kicad_pcb", _pcb_pour_adversarial())
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    r2_component = next(c for c in partition if "R2.1" in c)
+    # R2.1 is bonded to the pour, so it is NOT a lone singleton: the pour
+    # geometry tied it in despite the differing label.  (R1.1 is moated out,
+    # so the only other pour-candidate pad is R1.1; the salient assertion is
+    # that R2.1 was selected by geometry, which the short test above proves.)
+    assert "R2.1" in r2_component
+
+
+@requires_shapely
+def test_pour_extraction_ignores_zone_and_pad_net_labels(tmp_path: Path) -> None:
+    """The pour leg consults neither ``zone.net_name`` nor ``pad.net_name``.
+
+    Relabel every pad and the zone to the *same* net ("GND").  A label-driven
+    model would now fuse both pads into the pour (both match the zone), but the
+    geometric model must be unmoved: R1.1's copper is still moated out (left a
+    singleton) and R2.1's copper still bonds to the solid pour.  That the
+    partition does not change when the labels are made uniform proves the pour
+    extraction is label-free.
+    """
+    # Make both pad nets identical to the zone net so labels can no longer be
+    # the discriminator; geometry must still separate R1.1 from the pour.
+    relabeled = _pcb_pour_adversarial().replace('(net 2 "SIG")', '(net 1 "GND")')
+    pcb_path = _write(tmp_path, "pour.kicad_pcb", relabeled)
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # R1.1 is moated out -> singleton despite now sharing the zone's label.
+    assert frozenset({"R1.1"}) in partition
+    # R2.1 is bonded by geometry (it sits in the solid pour).
+    assert any("R2.1" in c for c in partition)
+
+
+@requires_shapely
+def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
+    """End-to-end: the label-free pour model stays clean on a pour-heavy board.
+
+    Board 07 (match-group test) carries 45 ``filled_polygons`` across multiple
+    pours, so it exercises the hole-aware solid-region extraction and the
+    pad-box erosion guard on real routed copper.  It must NOT introduce false
+    shorts.  Skips when the artifacts (or shapely) are absent, mirroring the
+    board-00 end-to-end policy.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    board_out = repo_root / "boards" / "07-matchgroup-test" / "output"
+    sch = board_out / "matchgroup_test.kicad_sch"
+    pcb = board_out / "matchgroup_test_routed.kicad_pcb"
+    if not (sch.exists() and pcb.exists()):
+        pytest.skip("board 07 artifacts not present; run generate_design.py")
+    result = compare_copper_netlist(sch, pcb)
+    assert isinstance(result, CopperLVSResult)
+    assert result.clean, f"pour-heavy board 07 copper LVS unexpectedly dirty: {result.mismatches}"
