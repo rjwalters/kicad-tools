@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-06-16
+
+### Added
+
+#### Demo Gallery Website (kicad-tools.org)
+
+- **Astro demo gallery** (#3682, #3683, #3684) — Build-time board data loader, gallery index with one card per board, and per-board detail pages with renders, metrics, and downloads
+- **Interactive PCB viewer** (#3692, #3693, #3706, #3708) — Embedded KiCanvas viewer on board detail pages with loading/error states, mobile CSS, and a bulletproof loading overlay
+- **Gallery structure & chrome** (#3698, #3703) — Separate "Demo boards" vs "Project" sections (excludes `chorus-test`) and shared Header/Footer across gallery pages
+- **LVS status chip in gallery** (#3754) — Surface schematic-vs-layout LVS status on board cards
+- **DRC-aware "Ready" badge** (#3718) — Never show a "Ready" badge for boards with DRC violations
+- **Cloudflare Pages deploy** (#3687, #3689, #3697) — Token-guarded manual deploy script and workflow (renders before board-metrics, with a Cloudflare account guard)
+- **Live demo link** (#3710) — README now links to the live gallery at kicad-tools.org
+
+#### Rendering & Board Metrics
+
+- **`kct render`** (#3677) — Per-board 2D layer plots and 3D PNG renders
+- **`kct board-metrics`** (#3678) — Emit a normalized `board.json` per board
+- **2D layer plots as SVG** (#3701) — Emit 2D plots as SVG for kicad-cli 10 compatibility
+- **Oblique 3D views** (#3704) — Map 3D front/back to oblique top/bottom views
+
+#### PCB & Layout
+
+- **`page_fit`** (#3715) — Auto-size the drawing sheet to the board and center it
+- **Auto-size schematic sheet to content** (#3536) — Plus footprint census and off-board supercap docs
+
+#### Checks & Verification
+
+- **ERC/LVS/Manifest meta sub-checks for `kct check`** (#3755) — Roll up ERC, LVS, and manifest verification into `kct check`
+- **Independent copper-extracted netlist LVS gate** (#3757)
+- **Schematic ↔ routed-PCB LVS guard in board-00 recipe** (#3748, #3753)
+- **Board 00 end-to-end regeneration CI gate** (#3751, #3756)
+- **`clearance_segment_zone` / via-and-pad-vs-zone-fill DRC rules** (#3527, #3558, #3636) — Detect traces and vias/pads violating clearance against foreign zone fills
+- **Connectivity DRC rule** (#3041, #3060) — Flag unrouted multi-pad nets
+- **`kct fleet status` / `fleet ship-ready`** (#2832, #2843, #2932, #2939, #3099, #3113) — Survey routing and manufacturing readiness with a warn-only ship-ready gate
+
+#### Routing & CLI
+
+- **`kct route --preserve-existing`** (#3155, #3169) — Incremental routing mode
+- **`kct route --net-class-map`** (#2996, #3000) and **`--length-match-groups`** (#2736) — Rich per-net-class routing and length-match tuning
+- **`kct pcb lock-footprints` / `unlock-footprints`** (#2978)
+- **`kct sch assign-footprints` + footprint suggestion** (#3158, #3173, #3175, #3182, #3196) — Bulk and ref-only footprint suggestion with pin-count validation
+- **Auto PCB sizing** (#3352, #3359, #3404) — `--auto-pcb-size` with a sum-of-clearances area heuristic and edge-cut grow
+- **Fine-pitch escape routing** (#3374, #3378) — Adaptive-radius escape detector with per-net-class clearance threading
+
+### Fixed
+
+- **Zone-fill foreign-pad clearance** (#3712) — Carve foreign-net antipads out of zone fills
+- **Foreign-pad-metal traversal** (#3225, #3226, #3227, #3545, #3565) — Reject A* routes through static foreign-pad halos and sync the `pad_blocked` bitmap into the C++ grid
+- **Euclidean clearance kernels** (#3232, #3248) — Switch trace- and via-clearance kernels from Chebyshev to Euclidean discs
+- **Multi-layer via-barrel clearance** (#3487, #3517, #3522, #3578) — `clearance_segment_via` checks every layer a barrel spans; certify global-min clearance in R-tree queries
+- **Board zone-fill refreshes** (#3552, #3576, #3584, #3725) — Refill stale zones on boards 02/04/05 to clear segment-vs-foreign-fill findings
+- **Manufacturing manifest hashing** (#3529, #3572) — Write BOM/CPL CSVs with LF endings so manifest hashes match committed content
+- **PCB viewer overlay** (#3706, #3708) — Emit the viewer overlay script as raw JS so it actually runs
+
+### Changed
+
+- **C++ router parity** (#864, #3657, #3654, #3659) — Align C++ standard-mode via/pad-clearance behavior with the Python reference path
+- **Hybrid placement objective** (#3186, #3189) — Hard-constraint gate plus 10-term soft objectives for `kct placement optimize`
+
 ## [0.13.0] - 2026-04-28
 
 ### Added
@@ -1394,6 +1454,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.14.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.14.0
 [0.9.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.9.0
 [0.8.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.8.0
 [0.7.2]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.2

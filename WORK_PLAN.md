@@ -44,6 +44,7 @@ The May 1–8 sprint cleared an enormous backlog of router-pipeline polish, boar
 | **v0.11.0 release** | Multi-resolution routing, R-tree spatial indexing, crossing-aware A* pathfinding (2026-04-12) |
 | **v0.12.0 release** | Manufacturing export pipeline (BOM, CPL, gerber), JLCPCB integration, Jinja2 design report (2026-04-15) |
 | **v0.13.0 release** | Two-phase global routing with RSMT decomposition, RUDY congestion estimator, Specctra DSN export (2026-04-28) |
+| **v0.14.0 release (current)** | Demo gallery website (kicad-tools.org), zone-fill foreign-pad clearance fix, PCB `page_fit`, oblique 3D + 2D-SVG renders, `kct render` / `board-metrics` / `pcb page-fit` commands, gallery LVS status, ERC/LVS/Manifest meta sub-checks for `kct check` (2026-06-16) |
 | **C++ pathfinder hardening** | `cpp_backend` with stale-`.so` build-version guard (#2501), DRC violation cost feedback (#2442), pre-computed blocked bitmap (#2437), pad metal area expansion (#2434), resumable A* (#2449) |
 | **Auto-pour zones** | Power-net pour zones generated automatically with proper edge-clearance inset and per-net priority (#2407, #2417, #2422, #2461, #2519) |
 | **Boards 02–05 brought online** | Placement and full routing for charlieplex (boards/02), USB joystick (boards/03, polished by #2536), STM32F103 board 04 (#2538, #2545), BLDC controller / DRV8301 (#2535, #2551) |

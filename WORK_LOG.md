@@ -4,6 +4,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ---
 
+### 2026-06-16
+
+- **Release**: v0.14.0 (prepared) — demo gallery website (kicad-tools.org), zone-fill foreign-pad clearance fix, PCB `page_fit`, oblique 3D + 2D-SVG renders, `kct render` / `board-metrics` / `pcb page-fit` commands, LVS status in gallery, ERC/LVS/Manifest meta sub-checks for `kct check`. Version bumped to 0.14.0; CHANGELOG `[0.14.0]` entry backfilled from `git log v0.13.0..main` (751 commits). Tag/publish deferred to operator (push `v0.14.0` triggers `publish.yml`).
+
 ### 2026-05-08
 
 - **PR #2555**: fix(route): auto-pour preserves INPUT.kicad_pcb when output path differs (closes #2548)
