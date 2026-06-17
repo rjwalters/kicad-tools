@@ -984,7 +984,7 @@ class ConnectivityValidator:
         """Union pads bonded to the same poured copper island (label-free).
 
         For every ``filled_polygon`` of every zone, build the hole-aware
-        solid region (:meth:`_fill_solid_region`) and union all pads whose
+        solid region (:meth:`_fill_solid_region`) and collect all pads whose
         *copper geometry* overlaps that region on a matching copper layer.  No
         pad/zone ``net_name`` is consulted — pads are tied solely by shared
         metal, so a pad moated out of a pour is left isolated and a
@@ -995,6 +995,19 @@ class ConnectivityValidator:
         sits in the antipad hole, but its copper edge reaches the thermal
         spokes / solid pour, so the box intersects the solid region while the
         center alone would (wrongly) read as moated-out.
+
+        Bonded pads are accumulated **per ``zone`` object across all of its
+        ``filled_polygon`` indices**, then unioned once per zone — not per
+        fill index.  KiCad stores a single poured zone as multiple
+        ``filled_polygon`` entries when thermal reliefs / clearance moats
+        fragment the copper (e.g. board 03's GND F.Cu zone is one main pour
+        plus a dozen tiny per-pad fragments).  All fragments of one ``zone``
+        are the same net by KiCad's data model — DRC guarantees retained
+        fragments are electrically bonded — so unioning across a zone's fill
+        islands cannot fuse two different nets (those are different ``zone``
+        objects).  Without this, a pad alone in its own thermal-relief
+        fragment would land in a singleton component and be reported as a
+        false ``open``.
         """
         # Board-frame pad copper polygons, keyed by pad id.  Built once here
         # so each fill island can be tested against every candidate pad.
@@ -1012,12 +1025,17 @@ class ConnectivityValidator:
         for zone in self.pcb.zones:
             if not zone.filled_polygons:
                 continue
+            # Accumulate the bonded-pad set across ALL fill islands of this
+            # zone (see method docstring): the zone is one net, and KiCad may
+            # fragment its pour into many ``filled_polygon`` entries.  Order is
+            # preserved and duplicates are dropped before unioning so a pad
+            # bonded to several fragments is unioned exactly once.
+            zone_bonded: list[str] = []
             for i, fill_pts in enumerate(zone.filled_polygons):
                 region = self._fill_solid_region(fill_pts)
                 if region is None:
                     continue
                 fill_layer = zone.filled_polygon_layer(i)
-                bonded: list[str] = []
                 for pad_id in pad_positions:
                     if not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), fill_layer):
                         continue
@@ -1037,10 +1055,19 @@ class ConnectivityValidator:
                     # removes all spurious multi-net bridges while preserving
                     # board 00's genuine thermal-relief ties.
                     if region.intersects(pad_geom):
-                        bonded.append(pad_id)
-                for a, p in enumerate(bonded):
-                    for other in bonded[a + 1 :]:
-                        connect(p, other)
+                        zone_bonded.append(pad_id)
+            # De-duplicate preserving first-seen order, then union the whole
+            # zone's bonded set so pads on disjoint fill fragments of one zone
+            # share a single component.
+            seen: set[str] = set()
+            bonded: list[str] = []
+            for pad_id in zone_bonded:
+                if pad_id not in seen:
+                    seen.add(pad_id)
+                    bonded.append(pad_id)
+            for a, p in enumerate(bonded):
+                for other in bonded[a + 1 :]:
+                    connect(p, other)
 
     def _connect_pour_pads_by_declared_net(
         self,
