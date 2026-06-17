@@ -8,6 +8,6 @@ Comment,Designator,Footprint,LCSC Part #
 4.7uF,C16,Capacitor_SMD:C_0805_2012Metric,C1779
 8MHz,Y1,Crystal:Crystal_HC49-4H_Vertical,C12674
 AMS1117-3.3,U1,Package_TO_SOT_SMD:SOT-223-3_TabPin2,C6186
+LED,D1,LED_SMD:LED_0805_2012Metric,C72038
 STM32F103C8T6,U2,Package_QFP:LQFP-48_7x7mm_P0.5mm,C8734
 SWD-6,J1,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,C40877
-USER,D1,LED_SMD:LED_0805_2012Metric,C72038

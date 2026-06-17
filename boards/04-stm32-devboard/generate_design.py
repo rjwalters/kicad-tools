@@ -1388,7 +1388,7 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
         "export",
         str(routed_path),
         "--mfr",
-        "jlcpcb",
+        "jlcpcb-tier1",
         "--output",
         str(mfr_dir),
     ]
@@ -1507,16 +1507,18 @@ def main() -> int:
         drc_success = run_drc(routed_path)
 
         # Step 7.5: LVS (advisory, #3780) -- board 04 is in
-        # ``ADVISORY_LVS_BOARDS`` and is genuinely copper-dirty today
-        # (notably the real ``OSC_IN<->OSC_OUT`` B.Cu escape-stub short
-        # bridging the HSE crystal pins, tracked in #3785), so
-        # ``require_clean=False``: ``write_lvs_report`` logs the mismatch
-        # summary and writes ``output/lvs.json`` but does NOT raise.  This
-        # surfaces ``lvs_clean=false`` (with ``copper_mismatches`` detail) in
-        # board.json / the gallery LVS chip without gating CI.  ``run_label``
-        # is off because the board is label-dirty too and the copper
-        # comparator is the meaningful leg.  Graduation to a hard gate is
-        # deferred (blocked on #3785).
+        # ``ADVISORY_LVS_BOARDS``.  The real ``OSC_IN<->OSC_OUT`` B.Cu
+        # escape-stub short bridging the HSE crystal pins was CLEARED in #3785
+        # (localized OSC_OUT-only re-route; no segment now joins the U2.5/U2.6
+        # pad centers).  The copper comparator still reports ``open`` mismatches
+        # because the GND / +3.3V power nets are served by copper pours that the
+        # comparator's pour extraction does not fully trace (#3772), so
+        # ``require_clean=False``: ``write_lvs_report`` logs the mismatch summary
+        # and writes ``output/lvs.json`` but does NOT raise.  This surfaces
+        # ``lvs_clean=false`` (with ``copper_mismatches`` detail) in board.json /
+        # the gallery LVS chip without gating CI.  ``run_label`` is off because
+        # the board is label-dirty too and the copper comparator is the
+        # meaningful leg.  Graduation to a hard gate is tracked in #3780.
         write_lvs_report(
             sch_path,
             routed_path,
@@ -1583,6 +1585,16 @@ def main() -> int:
         # main hits a separate zone-fill regression (GND-vs-rail F.Cu pour
         # shorts), tracked in #3773.  blocking_errors stays 0 and the
         # board's ship-ready verdict stays ``passed: true``.
+        #
+        # Per #3785 (2026-06-17): the real ``OSC_IN<->OSC_OUT`` B.Cu
+        # escape-stub short (U2.6 dropping straight through the U2.5 pad
+        # center) was cleared by a localized OSC_OUT-only edit -- the two
+        # bridging B.Cu segments were deleted and replaced with an escape
+        # that jogs west of the OSC_IN pad column (via -> (26.6875, 21.55)
+        # -> (26.6875, 21.1) -> ... -> C11).  Only OSC_OUT copper changed;
+        # NRST/SWO and every other net stayed byte-identical, so the
+        # #3765/#3773 preserve-the-pinned-artifact rationale above still
+        # holds and the advisory GND-stitch residual is unchanged.
         return 0 if (erc_success and route_success and stitch_success and mfr_success) else 1
 
     except Exception as e:

@@ -841,20 +841,21 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
 #     ``+5V<->GND`` short.  No extractor change is warranted; the report was an
 #     artifact of the older (pre-#3774) net assignment.
 #
-#   * ``OSC_IN <-> OSC_OUT`` (witnesses C10.1, C11.1) — REAL routing defect.
-#     A B.Cu track segment runs straight from U2.6 (26.8375, 21.75 = OSC_OUT)
-#     to U2.5 (26.8375, 21.25 = OSC_IN), galvanically bridging the STM32's two
-#     crystal pins on a single copper layer.  This is the documented
-#     #2834/#3033 OSC_OUT-escape stub landing on the adjacent OSC_IN pad.  The
-#     committed routed PCB is a deliberately pinned (--seed 42, byte-identical
-#     per #3039) artifact that #3765/#3774 preserve; breaking the short needs a
-#     re-route that risks regression, so it is routed to a scoped board-04
-#     layout-fix follow-up (gates #3780) rather than edited in place here.
+#   * ``OSC_IN <-> OSC_OUT`` (witnesses C10.1, C11.1) — REAL routing defect,
+#     now CLEARED by #3785.  A B.Cu track segment used to run straight from
+#     U2.6 (26.8375, 21.75 = OSC_OUT) through U2.5 (26.8375, 21.25 = OSC_IN),
+#     galvanically bridging the STM32's two crystal pins on a single copper
+#     layer (the documented #2834/#3033 OSC_OUT-escape stub landing on the
+#     adjacent OSC_IN pad).  #3785 performed a localized OSC_OUT-only re-route:
+#     the offending B.Cu stub was deleted and replaced with an escape that jogs
+#     west of the OSC_IN pad column (via -> (26.6875, 21.55) -> (26.6875, 21.1)
+#     -> ... -> C11), so the two crystal nets are no longer bridged.  NRST/SWO
+#     and all other nets stayed byte-identical (no full re-route).
 #
 # These assertions pin both verdicts as executable regression guards: if a
-# future change either re-introduces the +5V<->GND short or silently makes the
-# real OSC short vanish (e.g. by re-routing the board), this test flags it so
-# the verdict and its follow-up can be revisited.
+# future change either re-introduces the +5V<->GND short or re-introduces the
+# real OSC short (e.g. by re-routing the board straight through the OSC_IN pad),
+# this test flags it.
 
 
 def _load_board_04() -> tuple[Path, Path] | None:
@@ -924,31 +925,38 @@ def test_board04_plus5v_gnd_witness_component_is_same_net() -> None:
     )
 
 
-def test_board04_osc_in_out_real_short_present() -> None:
-    """Issue #3781 verdict: ``OSC_IN<->OSC_OUT`` is a REAL copper short.
+def test_board04_osc_in_out_short_absent() -> None:
+    """Issue #3785: the ``OSC_IN<->OSC_OUT`` B.Cu escape stub short is CLEARED.
 
-    A single-layer (B.Cu) track segment from U2.6 (OSC_OUT) straight to U2.5
-    (OSC_IN) galvanically bridges the crystal pins.  This guard documents the
-    defect until the scoped board-04 re-route follow-up lands; if a future
-    re-route clears it, this test flips to a failure prompting the verdict and
-    follow-up to be closed/updated.
+    Previously (issues #3781/#3786) a single B.Cu segment ran straight from
+    U2.6 (OSC_OUT, 26.8375, 21.75) through the U2.5 (OSC_IN, 26.8375, 21.25)
+    pad center, galvanically bridging the STM32's HSE crystal pins -- a
+    manufacturing-fatal short.  #3785 re-routed only OSC_OUT so its B.Cu
+    escape jogs west of the OSC_IN pad column (via -> (26.6875, 21.55) ->
+    (26.6875, 21.1) -> ... -> C11) instead of dropping straight through pad 5.
+
+    This is now a permanent regression guard: it asserts the OSC pair is
+    ABSENT from the copper-LVS shorts AND that no single track segment joins
+    the two OSC pad centers.  If a future re-route re-introduces the stub,
+    this test flags it.
     """
     paths = _load_board_04()
     if paths is None:
         pytest.skip("board 04 artifacts not present; run generate_design.py")
     sch, pcb_path = paths
 
-    # 1. The comparator reports the OSC short (witness load caps C10.1/C11.1).
+    # 1. The comparator no longer reports an OSC_IN<->OSC_OUT short.
     result = compare_copper_netlist(sch, pcb_path)
     osc_short = [m for m in result.shorts if {m.net_a, m.net_b} == {"OSC_IN", "OSC_OUT"}]
-    assert osc_short, (
-        "expected the documented board-04 OSC_IN<->OSC_OUT real short; "
-        "if a re-route cleared it, update issue #3781's follow-up."
+    assert not osc_short, (
+        "regression: the board-04 OSC_IN<->OSC_OUT copper short re-appeared "
+        f"(witnesses: {[(m.pad_a, m.pad_b) for m in osc_short]}). "
+        "Per #3785 the OSC_OUT escape must jog clear of the OSC_IN pad."
     )
 
-    # 2. The fusing copper is a single B.Cu segment joining U2.6 -> U2.5,
-    #    i.e. the OSC_OUT pad-6 center (26.8375, 21.75) straight to the
-    #    OSC_IN pad-5 center (26.8375, 21.25).  Confirm it exists on one layer.
+    # 2. No single track segment joins the two OSC pad centers, i.e. the
+    #    OSC_OUT pad-6 center (26.8375, 21.75) straight to the OSC_IN pad-5
+    #    center (26.8375, 21.25).  The fusing escape stub must be gone.
     from kicad_tools.schema.pcb import PCB
 
     pcb = PCB.load(str(pcb_path))
@@ -966,7 +974,8 @@ def test_board04_osc_in_out_real_short_present() -> None:
             or (_close(seg.start, osc_in) and _close(seg.end, osc_out))
         )
     ]
-    assert bridging, "no single segment found directly joining the OSC pads"
-    assert all(seg.layer == "B.Cu" for seg in bridging), (
-        "the OSC bridging segment is expected on B.Cu (the OSC_OUT escape stub)"
+    assert not bridging, (
+        "regression: a track segment still directly joins the OSC pads "
+        f"({[(seg.start, seg.end, seg.layer) for seg in bridging]}); "
+        "the OSC_OUT escape stub must not pass through the OSC_IN pad center."
     )
