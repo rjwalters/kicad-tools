@@ -20,7 +20,15 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 ## Proposals Awaiting Human Approval (`loom:architect`)
 
-*An Architect pass was kicked off on 2026-06-16 to repopulate the backlog* (focus: finishing the independent-LVS soundness story from #3742/PR #3757, board-parity re-scope of #2394, and other high-value next epics). New `loom:architect` proposals will be listed here once filed and reviewed.
+An Architect pass on 2026-06-16 repopulated the backlog with three proposals:
+
+| Issue | Title | Focus |
+|-------|-------|-------|
+| **#3761** | Robust label-free zone-pour copper extraction for independent LVS (#3742 follow-up) | LVS soundness — closes the declared-net false-negative gap in `extract_pad_partition()`; sequence-first |
+| **#3762** | Make copper-LVS a first-class manufacturability leg across all demo boards (#3742 follow-up) | LVS soundness — rolls board 00's LVS recipe/CI pattern fleet-wide; depends conceptually on #3761 |
+| **#3763** | Board parity refresh: re-audit boards 02–07 against board-01 end-state (supersedes #2394) | Board parity — read-only audit deliverable that scopes remaining per-board slices |
+
+Suggested order: **#3761 → #3762** (robust extraction before fleet rollout); **#3763** is a cheap, read-only audit that can run anytime and will scope further board work.
 
 ## Recently Completed
 
