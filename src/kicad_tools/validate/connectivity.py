@@ -23,10 +23,31 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
+
+# Optional geometry backend.  ``shapely`` is NOT a core dependency (it lives
+# only under the ``geometry``/``dev`` extras in pyproject.toml), so we import
+# it lazily/guardedly here.  When it is absent the label-free pour extractor
+# (``_connect_pour_pads_label_free`` / step 2d) transparently falls back to
+# the legacy declared-net pour grouping, so importing this module — and
+# tracing autorouter segment/via copper — never hard-fails on a core-only
+# install.
+_SHAPELY_AVAILABLE = False
+try:  # pragma: no cover - import guard exercised by environment, not tests
+    from shapely.geometry import Point as _ShapelyPoint  # type: ignore[import-untyped]
+    from shapely.geometry import Polygon as _ShapelyPolygon
+
+    _SHAPELY_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    pass
+
+
+def _has_shapely() -> bool:
+    """Return True when the optional ``shapely`` backend is importable."""
+    return _SHAPELY_AVAILABLE
 
 
 @dataclass(frozen=True)
@@ -322,13 +343,16 @@ class ConnectivityValidator:
         router that wires segments to the wrong pads while labeling them
         correctly (the board-00 rotation-convention bug, #3739).
 
-        Zone pours are handled with a deliberately narrower, documented
-        model (see the ``2d`` block below): because robust label-free
-        extraction of which pads a pour is *thermally tied* to is a known
-        follow-up, the pour leg groups pads by the zone's declared net.
-        That re-introduces a label dependency for the FILL step alone — never
-        for autorouter copper — and can never fuse two different nets, so it
-        cannot manufacture a false short.
+        Zone pours are now traced label-free as well (issue #3761, see the
+        ``2d`` block below): each ``filled_polygon`` is a poured copper island
+        and a pad is tied to it iff the pad's copper geometrically overlaps
+        the island's *hole-aware solid* region on a matching layer — clearance
+        moats / thermal antipads carved out of the pour are excluded.  No
+        pad/zone ``net_name`` is consulted, so a pad bonded to the wrong pour
+        is no longer masked by a matching declared label.  This requires the
+        optional ``shapely`` backend; when it is absent the pour leg falls
+        back to the legacy declared-net grouping so core-only installs still
+        import and run.
 
         Why this matters: the label-based comparator
         (:func:`kicad_tools.lvs.board_lvs.compare_netlists`) trusts the
@@ -412,64 +436,59 @@ class ConnectivityValidator:
                 for other in via_pads[i + 1 :]:
                     _connect(p, other)
 
-        # 2d. Filled zones (copper pours).
+        # 2d. Filled zones (copper pours) — LABEL-FREE (issue #3761).
         #
-        #     SCOPE NOTE (issue #3742, bounded first slice): the
-        #     load-bearing soundness property of this extractor is that
-        #     *autorouter copper* — track segments and vias — is traced
-        #     fully independently of pad net labels.  That is exactly where
-        #     the board-00 rotation-convention bug manifested: the router
-        #     wired SEGMENTS to the wrong pads while labeling them
-        #     correctly, and steps 2a–2c above will catch that regardless of
-        #     any shared coordinate convention.
+        #     SCOPE NOTE: the load-bearing soundness property of this
+        #     extractor is that copper connectivity is derived from *physical
+        #     geometry*, never from pad/zone net labels.  Steps 2a–2c trace
+        #     autorouter copper (segments + vias) independently of labels;
+        #     this step does the same for pours.
         #
-        #     Zone pours are different in kind.  A copper pour connects only
-        #     the pads it is *electrically tied* to (via thermal spokes);
-        #     pads of other nets sit inside the pour's outline but are carved
-        #     out by clearance moats.  Recovering that tie purely from the
-        #     flattened ``filled_polygons`` geometry is not reliable — the
-        #     outer hull and inner thermal/clearance cutout loops are
-        #     concatenated into one point list, which breaks naive
-        #     point-in-polygon, and pad-center-to-fill distance does not
-        #     separate tied pads from neighbouring foreign-net pads (verified
-        #     on board 00).  Robust pour extraction (spoke tracing /
-        #     kicad-cli cross-check) is an explicit #3742 follow-up.
+        #     The previous model (the #3742 first slice) grouped pads by the
+        #     zone's *declared* net (``pad_declared_net[pad] == zone.net_name``).
+        #     That re-introduced a label dependency for the fill step and could
+        #     MASK a real defect on pour-routed nets: a pad whose copper is
+        #     physically bonded to the *wrong* pour island, but whose declared
+        #     net matches a different (correct) pour, was partitioned by its
+        #     label rather than by metal (issue #3761).
         #
-        #     So for the pour leg ONLY we group pads by the zone's *declared
-        #     net*: a pad enclosed by a pour's boundary on a matching layer
-        #     is treated as tied to that pour iff the pad's own declared net
-        #     equals the zone's.  This re-introduces a label dependency for
-        #     the FILL step alone (a deterministic, label-driven generator
-        #     step — not the autorouter), while keeping segment/via tracing
-        #     100% label-independent.  Crucially it can never fuse two
-        #     different nets, so it cannot manufacture a false short.
-        pad_declared_net: dict[str, str] = {}
-        for fp in self.pcb.footprints:
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pad in fp.pads:
-                if pad.number is None or pad.number == "":
-                    continue
-                pad_declared_net[f"{fp.reference}.{pad.number}"] = pad.net_name
-
-        for zone in self.pcb.zones:
-            if not zone.filled_polygons:
-                continue
-            if not zone.polygon or len(zone.polygon) < 3:
-                continue
-            if not zone.net_name:
-                continue
-            pads_in_zone: list[str] = []
-            for pad_id, pad_pos in pad_positions.items():
-                if pad_declared_net.get(pad_id) != zone.net_name:
-                    continue
-                if not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), zone.layer):
-                    continue
-                if self._point_in_polygon(pad_pos, zone.polygon):
-                    pads_in_zone.append(pad_id)
-            for i, p in enumerate(pads_in_zone):
-                for other in pads_in_zone[i + 1 :]:
-                    _connect(p, other)
+        #     We now tie pads to pours purely geometrically.  Each
+        #     ``filled_polygon`` is one poured copper *island*.  A pad is
+        #     bonded to an island iff its copper geometry overlaps the
+        #     island's *solid* region on a matching copper layer — clearance
+        #     moats / thermal antipads carved out of the pour are real holes
+        #     that the pad must NOT be tied across.
+        #
+        #     KiCad encodes a fill island's holes inside a single flat
+        #     ``(pts ...)`` list: the outer hull and each carved-out loop are
+        #     joined by a narrow bridge, so the boundary dips *around* every
+        #     moat.  A ray-cast against that raw list mis-counts the bridge
+        #     crossings and reports a moated-out pad as "inside" (the exact
+        #     failure ``_point_in_polygon`` exhibits, verified on board 00).
+        #     ``shapely`` resolves the bridged representation correctly:
+        #     ``Polygon(pts).buffer(0)`` yields the true solid region with the
+        #     moats excluded, so a hole-aware ``contains`` test is sound.
+        #
+        #     Pad-shape approximation: we test the pad's *size box* (board
+        #     frame, footprint-rotated — see ``_pad_copper_polygon``) against
+        #     the hole-aware solid region, not just the pad center.  The box
+        #     is required, not a nicety: a thermally-relieved pad's center
+        #     sits in the antipad moat (a hole), yet its copper edge reaches
+        #     the thermal spokes / surrounding solid pour, so only the box
+        #     intersects the solid region.  A pad fully moated out (clearance
+        #     all around, no spoke) stays clear of the solid region and is
+        #     correctly left untied.  Corner rounding (roundrect/oval) and
+        #     per-pad rotation are ignored; an exact pad outline is a
+        #     documented follow-up.
+        #
+        #     ``shapely`` is an optional dependency; when it is absent we fall
+        #     back to the legacy declared-net pour grouping so core-only
+        #     installs keep working (the soundness upgrade simply requires the
+        #     ``geometry``/``dev`` extra to be installed).
+        if _has_shapely():
+            self._connect_pour_pads_label_free(pad_positions, pad_layers, _connect)
+        else:  # pragma: no cover - exercised only on core-only installs
+            self._connect_pour_pads_by_declared_net(pad_positions, pad_layers, _connect)
 
         # 2e. Coincident pads with no intervening copper still share metal
         #     if they occupy the same point (e.g. stacked pads).
@@ -874,6 +893,198 @@ class ConnectivityValidator:
             if pad_layer.startswith("*.") and zone_layer.endswith(pad_layer[1:]):
                 return True
         return False
+
+    # Erosion (mm) applied to a pad's copper box before the pour-overlap
+    # test.  Sized just above the corner-graze scale and below a real thermal
+    # spoke's penetration so that an oversized through-hole pad poking a
+    # corner across a narrow clearance moat into a foreign pour does NOT bond,
+    # while a genuine spoke/solid tie (which reaches well past the clearance
+    # line) keeps a non-empty eroded overlap.  Verified on boards 00/03/05.
+    POUR_PAD_ERODE: float = 0.1
+
+    def _pad_copper_polygon(self, fp: Any, pad: Any) -> Any | None:
+        """Build a board-frame shapely polygon approximating a pad's copper.
+
+        The pad's ``size`` box is rotated by the footprint rotation (KiCad's
+        negated-angle convention, matching :meth:`_transform_pad_position`)
+        and translated to the board frame, then eroded inward by
+        :data:`POUR_PAD_ERODE`.  This rectangular approximation is
+        deliberately coarse — it ignores ``roundrect``/``oval`` corner
+        rounding and per-pad rotation — but it is what lets the pour test see
+        a *thermally-relieved* pad: such a pad's center sits in the antipad
+        moat (a hole in the fill), yet its copper edge reaches the thermal
+        spokes / surrounding solid pour, so the pad *polygon* intersects the
+        solid region while the bare center point does not.  The inward erosion
+        keeps an oversized pad's corner from grazing across a clearance moat
+        into a foreign pour (which would manufacture a false short).  A pad
+        fully moated out (clearance all around, no spoke) stays clear of the
+        solid region and is correctly left untied.
+
+        Returns ``None`` when shapely is unavailable.  Falls back to a
+        zero-area point geometry when the pad has no positive size.
+        """
+        if not _has_shapely():
+            return None
+        import math
+
+        cx, cy = self._transform_pad_position(
+            pad.position, fp.position[0], fp.position[1], fp.rotation
+        )
+        w, h = pad.size
+        if w <= 0 or h <= 0:
+            return _ShapelyPoint((cx, cy))
+        # Negated-angle convention (see rotate_pad_offset): the footprint
+        # rotation maps the pad's local box into the board frame.
+        a = math.radians(-fp.rotation)
+        cos_a, sin_a = math.cos(a), math.sin(a)
+        corners = [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
+        pts = [(cx + ox * cos_a - oy * sin_a, cy + ox * sin_a + oy * cos_a) for ox, oy in corners]
+        box = _ShapelyPolygon(pts)
+        if self.POUR_PAD_ERODE > 0:
+            eroded = box.buffer(-self.POUR_PAD_ERODE)
+            # Erosion can empty a very small pad; keep the original box so the
+            # pad is still testable rather than silently dropped.
+            if not eroded.is_empty:
+                return eroded
+        return box
+
+    @staticmethod
+    def _fill_solid_region(points: list[tuple[float, float]]) -> Any | None:
+        """Build a hole-aware shapely solid region from a fill point list.
+
+        ``filled_polygons`` stores each poured island as a single flat
+        ``(pts ...)`` list in which the outer hull and every carved-out
+        clearance moat / thermal antipad are joined by narrow bridges (the
+        boundary dips *around* each hole).  Constructing ``Polygon(points)``
+        directly and then calling ``buffer(0)`` resolves that bridged
+        representation into the true solid region with the moats excluded as
+        real holes — exactly what a label-free "is this pad bonded to the
+        pour?" test needs.
+
+        Returns ``None`` when shapely is unavailable or the fill is
+        degenerate (fewer than 3 points / empty geometry).
+        """
+        if not _has_shapely() or len(points) < 3:
+            return None
+        poly = _ShapelyPolygon(points)
+        # buffer(0) is the canonical shapely idiom for repairing a
+        # self-touching ring into a valid (multi)polygon with proper holes.
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            return None
+        return poly
+
+    def _connect_pour_pads_label_free(
+        self,
+        pad_positions: dict[str, tuple[float, float]],
+        pad_layers: dict[str, list[str]],
+        connect: Any,
+    ) -> None:
+        """Union pads bonded to the same poured copper island (label-free).
+
+        For every ``filled_polygon`` of every zone, build the hole-aware
+        solid region (:meth:`_fill_solid_region`) and union all pads whose
+        *copper geometry* overlaps that region on a matching copper layer.  No
+        pad/zone ``net_name`` is consulted — pads are tied solely by shared
+        metal, so a pad moated out of a pour is left isolated and a
+        foreign-net pad whose copper bonds to the pour is fused into it.
+
+        Pads are approximated by their size box (:meth:`_pad_copper_polygon`)
+        rather than a bare center point: a thermally-relieved pad's center
+        sits in the antipad hole, but its copper edge reaches the thermal
+        spokes / solid pour, so the box intersects the solid region while the
+        center alone would (wrongly) read as moated-out.
+        """
+        # Board-frame pad copper polygons, keyed by pad id.  Built once here
+        # so each fill island can be tested against every candidate pad.
+        pad_polygons: dict[str, Any] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                poly = self._pad_copper_polygon(fp, pad)
+                if poly is not None:
+                    pad_polygons[f"{fp.reference}.{pad.number}"] = poly
+
+        for zone in self.pcb.zones:
+            if not zone.filled_polygons:
+                continue
+            for i, fill_pts in enumerate(zone.filled_polygons):
+                region = self._fill_solid_region(fill_pts)
+                if region is None:
+                    continue
+                fill_layer = zone.filled_polygon_layer(i)
+                bonded: list[str] = []
+                for pad_id in pad_positions:
+                    if not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), fill_layer):
+                        continue
+                    pad_geom = pad_polygons.get(pad_id)
+                    if pad_geom is None:
+                        continue
+                    # ``intersects`` bonds a pad whose copper touches or
+                    # overlaps the solid pour; a pad sitting in a carved moat
+                    # (a hole), clear of every thermal spoke, does not
+                    # intersect and is correctly excluded.  The pad box is
+                    # eroded by ``_POUR_PAD_ERODE`` first so that a corner of
+                    # an oversized through-hole pad merely *grazing* across a
+                    # narrow clearance moat into a foreign pour does not count
+                    # as a bond — only copper that penetrates past the
+                    # clearance line (a real thermal spoke / solid tie) keeps
+                    # a non-empty eroded overlap.  Verified on board 05: this
+                    # removes all spurious multi-net bridges while preserving
+                    # board 00's genuine thermal-relief ties.
+                    if region.intersects(pad_geom):
+                        bonded.append(pad_id)
+                for a, p in enumerate(bonded):
+                    for other in bonded[a + 1 :]:
+                        connect(p, other)
+
+    def _connect_pour_pads_by_declared_net(
+        self,
+        pad_positions: dict[str, tuple[float, float]],
+        pad_layers: dict[str, list[str]],
+        connect: Any,
+    ) -> None:
+        """Legacy declared-net pour grouping (shapely-absent fallback).
+
+        Preserves the pre-#3761 behavior for core-only installs where the
+        optional ``shapely`` backend is missing: pads enclosed by a zone's
+        boundary on a matching layer are tied to the pour iff their declared
+        net equals the zone's.  This re-introduces a label dependency for the
+        fill step alone and cannot fabricate a false short (it only fuses
+        same-declared-net pads), but it can mask one — hence the geometric
+        path above is preferred whenever shapely is installed.
+        """
+        pad_declared_net: dict[str, str] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                pad_declared_net[f"{fp.reference}.{pad.number}"] = pad.net_name
+
+        for zone in self.pcb.zones:
+            if not zone.filled_polygons:
+                continue
+            if not zone.polygon or len(zone.polygon) < 3:
+                continue
+            if not zone.net_name:
+                continue
+            pads_in_zone: list[str] = []
+            for pad_id, pad_pos in pad_positions.items():
+                if pad_declared_net.get(pad_id) != zone.net_name:
+                    continue
+                if not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), zone.layer):
+                    continue
+                if self._point_in_polygon(pad_pos, zone.polygon):
+                    pads_in_zone.append(pad_id)
+            for a, p in enumerate(pads_in_zone):
+                for other in pads_in_zone[a + 1 :]:
+                    connect(p, other)
 
     def _find_islands(
         self,
