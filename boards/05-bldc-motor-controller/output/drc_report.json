@@ -1,0 +1,971 @@
+{
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3766/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "layers": 4,
+  "summary": {
+    "errors": 39,
+    "warnings": 0,
+    "infos": 8,
+    "rules_checked": 33,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "diffpair_clearance_intra": 3
+    },
+    "passed": false
+  },
+  "violations": [
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net '+24V' is partially routed: 7 of 13 pads stranded (connected island has 6 pads)",
+      "location": [
+        29.0,
+        8.0
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C1.1"
+      ],
+      "nets": [
+        "+24V"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'GND' is partially routed: 33 of 36 pads stranded (connected island has 3 pads)",
+      "location": [
+        31.0,
+        8.0
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C1.2"
+      ],
+      "nets": [
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'ISENSE_A-' is partially routed: 3 of 4 pads stranded (connected island has 1 pads)",
+      "location": [
+        43.1,
+        84.0
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "R12.2"
+      ],
+      "nets": [
+        "ISENSE_A-"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'ISENSE_B+' is partially routed: 3 of 4 pads stranded (connected island has 1 pads)",
+      "location": [
+        20.9,
+        84.0
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "R11.1"
+      ],
+      "nets": [
+        "ISENSE_B+"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'ISENSE_B-' is partially routed: 3 of 4 pads stranded (connected island has 1 pads)",
+      "location": [
+        32.825,
+        40.7
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10.6"
+      ],
+      "nets": [
+        "ISENSE_B-"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'ISENSE_C-' is partially routed: 2 of 3 pads stranded (connected island has 1 pads)",
+      "location": [
+        32.825,
+        41.5
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10.7"
+      ],
+      "nets": [
+        "ISENSE_C-"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'PHASE_A' is partially routed: 4 of 5 pads stranded (connected island has 1 pads)",
+      "location": [
+        5.0,
+        59.0
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C14.2"
+      ],
+      "nets": [
+        "PHASE_A"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'PHASE_B' is partially routed: 4 of 5 pads stranded (connected island has 1 pads)",
+      "location": [
+        5.0,
+        53.0
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C13.2"
+      ],
+      "nets": [
+        "PHASE_B"
+      ]
+    },
+    {
+      "rule_id": "connectivity",
+      "type": "connectivity",
+      "severity": "error",
+      "message": "Net 'PHASE_C' is partially routed: 4 of 5 pads stranded (connected island has 1 pads)",
+      "location": [
+        5.0,
+        47.0
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "C12.2"
+      ],
+      "nets": [
+        "PHASE_C"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'SWDIO' overlaps zone fill of net '+3V3' on F.Cu (overlap depth 0.013mm)",
+      "location": [
+        64.168,
+        17.376
+      ],
+      "layer": "F.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J4-2",
+        "ZoneFill-+3V3"
+      ],
+      "nets": [
+        "SWDIO",
+        "+3V3"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'SWO' overlaps zone fill of net '+3V3' on F.Cu (overlap depth 0.013mm)",
+      "location": [
+        64.168,
+        22.456
+      ],
+      "layer": "F.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J4-4",
+        "ZoneFill-+3V3"
+      ],
+      "nets": [
+        "SWO",
+        "+3V3"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.018mm)",
+      "location": [
+        27.414,
+        67.151
+      ],
+      "layer": "F.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q3-3",
+        "ZoneFill-+24V"
+      ],
+      "nets": [
+        "PHASE_B",
+        "+24V"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'GND' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.013mm)",
+      "location": [
+        4.168,
+        10.084
+      ],
+      "layer": "F.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J1-2",
+        "ZoneFill-+24V"
+      ],
+      "nets": [
+        "GND",
+        "+24V"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'HALL_C' overlaps zone fill of net '+3V3' on F.Cu (overlap depth 0.013mm)",
+      "location": [
+        64.168,
+        58.814
+      ],
+      "layer": "F.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J3-3",
+        "ZoneFill-+3V3"
+      ],
+      "nets": [
+        "HALL_C",
+        "+3V3"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.018mm)",
+      "location": [
+        9.666,
+        68.849
+      ],
+      "layer": "F.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q1-3",
+        "ZoneFill-+24V"
+      ],
+      "nets": [
+        "PHASE_C",
+        "+24V"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.018mm)",
+      "location": [
+        11.414,
+        67.151
+      ],
+      "layer": "F.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q1-3",
+        "ZoneFill-+24V"
+      ],
+      "nets": [
+        "PHASE_C",
+        "+24V"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'SWDIO' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        19.004
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J4-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "SWDIO",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'SWCLK' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        21.544
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J4-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "SWCLK",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'SWO' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        24.084
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J4-4",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "SWO",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'NRST' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        24.996
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J4-5",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "NRST",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        24.874,
+        75.151
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q4-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_B",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'ISENSE_B+' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        27.414,
+        75.151
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q4-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "ISENSE_B+",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'OSC_IN' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.003mm)",
+      "location": [
+        50.306,
+        37.743
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0025,
+      "required_value": 0.1016,
+      "items": [
+        "Y1-1",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "OSC_IN",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'OSC_OUT' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.003mm)",
+      "location": [
+        55.186,
+        37.743
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0025,
+      "required_value": 0.1016,
+      "items": [
+        "Y1-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "OSC_OUT",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        7.126,
+        76.849
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q2-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_C",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'ISENSE_C+' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        9.666,
+        76.849
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q2-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "ISENSE_C+",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net '+24V' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        24.874,
+        67.151
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q3-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "+24V",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        27.414,
+        67.151
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q3-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_B",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_A' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        40.874,
+        75.151
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q6-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_A",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'ISENSE_A+' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        41.666,
+        76.849
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q6-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "ISENSE_A+",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net '+24V' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        40.874,
+        67.151
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q5-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "+24V",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_A' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        43.414,
+        67.151
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q5-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_A",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'HALL_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        56.274
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J3-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "HALL_B",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'HALL_C' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        57.186
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J3-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "HALL_C",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net '+3V3' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        59.726
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J3-4",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "+3V3",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net '+24V' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        7.126,
+        68.849
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q1-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "+24V",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "location": [
+        9.666,
+        68.849
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0181,
+      "required_value": 0.1016,
+      "items": [
+        "Q1-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_C",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        75.186
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J2-2",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_B",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "clearance_pad_zone",
+      "type": "clearance",
+      "severity": "error",
+      "message": "Short: pad on net 'PHASE_A' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "location": [
+        65.832,
+        77.726
+      ],
+      "layer": "B.Cu",
+      "actual_value": -0.0129,
+      "required_value": 0.1016,
+      "items": [
+        "J2-3",
+        "ZoneFill-GND"
+      ],
+      "nets": [
+        "PHASE_A",
+        "GND"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PA3-Pad8)' has only 1 pad on U10-8 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        32.825,
+        42.3
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-8"
+      ],
+      "nets": [
+        "unconnected-(U10-PA3-Pad8)"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PA4-Pad9)' has only 1 pad on U10-9 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        34.2,
+        43.675
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-9"
+      ],
+      "nets": [
+        "unconnected-(U10-PA4-Pad9)"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PA5-Pad10)' has only 1 pad on U10-10 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        35.0,
+        43.675
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-10"
+      ],
+      "nets": [
+        "unconnected-(U10-PA5-Pad10)"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PA11-Pad21)' has only 1 pad on U10-21 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        41.175,
+        39.1
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-21"
+      ],
+      "nets": [
+        "unconnected-(U10-PA11-Pad21)"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PA12-Pad22)' has only 1 pad on U10-22 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        41.175,
+        38.3
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-22"
+      ],
+      "nets": [
+        "unconnected-(U10-PA12-Pad22)"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PA15-Pad25)' has only 1 pad on U10-25 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        39.8,
+        35.325
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-25"
+      ],
+      "nets": [
+        "unconnected-(U10-PA15-Pad25)"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PB4-Pad27)' has only 1 pad on U10-27 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        38.2,
+        35.325
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-27"
+      ],
+      "nets": [
+        "unconnected-(U10-PB4-Pad27)"
+      ]
+    },
+    {
+      "rule_id": "single_pad_net",
+      "type": "single_pad_net",
+      "severity": "info",
+      "message": "Net 'unconnected-(U10-PB5-Pad28)' has only 1 pad on U10-28 -- KiCad-emitted explicit no-connect (symbol pin marked NC); no action required",
+      "location": [
+        37.4,
+        35.325
+      ],
+      "layer": null,
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "U10-28"
+      ],
+      "nets": [
+        "unconnected-(U10-PB5-Pad28)"
+      ]
+    }
+  ]
+}
