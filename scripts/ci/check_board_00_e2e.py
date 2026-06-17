@@ -51,16 +51,36 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Artifacts required to exist under ``<board_dir>/output/``.  Paths are
-# slash-joined relative to the output directory.
-REQUIRED_ARTIFACTS: tuple[str, ...] = (
-    "simple_led.kicad_sch",
-    "simple_led.kicad_pcb",
-    "simple_led_routed.kicad_pcb",
+# Artifacts always required under ``<board_dir>/output/`` regardless of the
+# board's name.  The board-specific schematic/PCB artifacts are derived from
+# ``--stem`` (defaulting to board 00's ``simple_led``) so this asserter works
+# for any board, not just board 00 (issue #3762).
+BASE_REQUIRED_ARTIFACTS: tuple[str, ...] = (
     "lvs.json",
     "manufacturing/manifest.json",
     "board.json",
 )
+
+# Default board stem (board 00) so the historical board-00 invocation that
+# passes no ``--stem`` keeps asserting the same artifact set.
+DEFAULT_STEM = "simple_led"
+
+
+def required_artifacts(stem: str) -> tuple[str, ...]:
+    """Return the full required-artifact list for a board with this stem.
+
+    ``stem`` is the board's file prefix (e.g. ``simple_led`` for board 00,
+    ``voltage_divider`` for board 01).  The schematic, unrouted PCB and
+    routed PCB names are derived from it; the base artifacts (lvs.json,
+    manifest, board.json) are board-independent.
+    """
+    return (
+        f"{stem}.kicad_sch",
+        f"{stem}.kicad_pcb",
+        f"{stem}_routed.kicad_pcb",
+        *BASE_REQUIRED_ARTIFACTS,
+    )
+
 
 # board.json fields that must match these exact values for the gate to
 # pass.  The values are deliberately hardcoded (not loaded from the file's
@@ -87,13 +107,13 @@ def _err(msg: str, file: str | Path | None = None) -> None:
         print(f"::error::{msg}")
 
 
-def assert_artifacts_exist(output_dir: Path) -> list[str]:
-    """Assert every member of REQUIRED_ARTIFACTS exists under ``output_dir``.
+def assert_artifacts_exist(output_dir: Path, artifacts: tuple[str, ...]) -> list[str]:
+    """Assert every member of ``artifacts`` exists under ``output_dir``.
 
     Returns the list of *missing* relative paths (empty list = all present).
     """
     missing: list[str] = []
-    for rel in REQUIRED_ARTIFACTS:
+    for rel in artifacts:
         if not (output_dir / rel).is_file():
             missing.append(rel)
     return missing
@@ -138,8 +158,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="check_board_00_e2e.py",
         description=(
-            "Assert post-recipe artifact correctness for board 00. "
-            "Pass the board-layout directory (the one containing output/)."
+            "Assert post-recipe artifact correctness for a demo board. "
+            "Pass the board-layout directory (the one containing output/). "
+            "Defaults to board 00's artifact names; override with --stem."
         ),
     )
     parser.add_argument(
@@ -148,6 +169,15 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Board-layout directory (must contain output/). "
             "Example: /tmp/board00-staging/00-simple-led"
+        ),
+    )
+    parser.add_argument(
+        "--stem",
+        default=DEFAULT_STEM,
+        help=(
+            "Board file stem used to derive the schematic/PCB artifact names "
+            f"(default: {DEFAULT_STEM!r} for board 00; e.g. 'voltage_divider' "
+            "for board 01)."
         ),
     )
     args = parser.parse_args(argv)
@@ -162,16 +192,17 @@ def main(argv: list[str] | None = None) -> int:
         _err(f"output dir does not exist: {output_dir}")
         return 1
 
+    artifacts = required_artifacts(args.stem)
     failed = False
 
     # 1. Artifact presence ----------------------------------------------------
-    missing = assert_artifacts_exist(output_dir)
+    missing = assert_artifacts_exist(output_dir, artifacts)
     if missing:
         for rel in missing:
             _err(f"missing required artifact: {rel}", file=output_dir / rel)
         failed = True
     else:
-        print(f"[ok] all {len(REQUIRED_ARTIFACTS)} required artifacts present")
+        print(f"[ok] all {len(artifacts)} required artifacts present")
 
     # 2. LVS clean ------------------------------------------------------------
     lvs_path = output_dir / "lvs.json"

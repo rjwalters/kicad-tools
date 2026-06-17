@@ -985,3 +985,82 @@ jobs:
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             /tmp/board00-staging/00-simple-led
+
+  board-01-end-to-end:
+    # Issue #3762: same end-to-end gate as ``board-00-end-to-end``, applied
+    # to board 01 ("voltage-divider").  Board 01 is verified clean on both
+    # the copper-extracted and label-based LVS comparators, so its recipe
+    # now runs ``write_lvs_report(..., require_clean=True)`` and emits
+    # ``output/lvs.json``.  This job regenerates the board, asserts
+    # ``kct check`` Overall PASSED, emits board.json, and asserts
+    # lvs.json clean=true + board.json lvs_clean=true via the generalized
+    # ``scripts/ci/check_board_00_e2e.py`` asserter (parametrized with
+    # ``--stem voltage_divider``).  See the board-00 job above for the
+    # full rationale on container choice, the C++ backend build, and the
+    # advisory (non-required-check) status until a repo admin flips the
+    # branch-protection setting.
+    name: Board 01 End-to-End
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: kicad/kicad:10.0
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 01 from recipe (clean tmp directory)
+        # The recipe exits non-zero if ERC/DRC/LVS fail OR write_lvs_report
+        # raises BoardNetlistMismatch -- board 01 hard-gates on both
+        # comparators (require_clean=True).
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board01-ci
+          mkdir -p /tmp/board01-ci
+          uv run python boards/01-voltage-divider/generate_design.py /tmp/board01-ci
+
+      - name: Assert kct check Overall PASSED on regenerated routed PCB
+        run: |
+          set -euo pipefail
+          uv run kct check /tmp/board01-ci/voltage_divider_routed.kicad_pcb \
+            | tee /tmp/board01-ci/check.out
+          grep -qE '^Overall:[[:space:]]+PASSED' /tmp/board01-ci/check.out
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board01-staging
+          mkdir -p /tmp/board01-staging/01-voltage-divider/output
+          cp -r /tmp/board01-ci/. /tmp/board01-staging/01-voltage-divider/output/
+          uv run kct board-metrics /tmp/board01-staging/01-voltage-divider
+
+      - name: Assert artifacts + lvs.json + board.json fields
+        # Reuse the generalized board-00 asserter with --stem so it derives
+        # board 01's artifact names (voltage_divider*.kicad_{sch,pcb}).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem voltage_divider \
+            /tmp/board01-staging/01-voltage-divider
