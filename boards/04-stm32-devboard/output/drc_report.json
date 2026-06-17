@@ -1,12 +1,12 @@
 {
-  "file": "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3765/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 2,
   "summary": {
-    "errors": 2,
+    "errors": 1,
     "warnings": 0,
     "infos": 0,
-    "rules_checked": 27,
+    "rules_checked": 29,
     "rules_checked_by_rule": {
       "connectivity": 1
     },
@@ -17,38 +17,19 @@
       "rule_id": "connectivity",
       "type": "connectivity",
       "severity": "error",
-      "message": "Net 'GND' is partially routed: 2 of 18 pads stranded (connected island has 16 pads)",
+      "message": "Net 'GND' is partially routed: 3 of 18 pads stranded (connected island has 15 pads)",
       "location": [
-        35.1625,
-        19.75
+        33.25,
+        26.1625
       ],
       "layer": null,
       "actual_value": null,
       "required_value": null,
       "items": [
-        "U2.35"
+        "U2.23"
       ],
       "nets": [
         "GND"
-      ]
-    },
-    {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'NRST' is partially routed: 1 of 2 pads stranded (connected island has 1 pads)",
-      "location": [
-        26.8375,
-        22.25
-      ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "U2.7"
-      ],
-      "nets": [
-        "NRST"
       ]
     }
   ]
