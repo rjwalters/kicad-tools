@@ -29,6 +29,7 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.lvs import write_lvs_report
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -542,6 +543,26 @@ def main() -> int:
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
+
+        # Step 6.5: LVS (advisory, #3780) -- board 03 is in
+        # ``ADVISORY_LVS_BOARDS`` and is genuinely copper-dirty today (the
+        # J1 USB-C connector's F.Cu-only pads sit over the B.Cu pour with no
+        # stitching via, leaving residual opens), so ``require_clean=False``:
+        # ``write_lvs_report`` logs the mismatch summary and writes
+        # ``output/lvs.json`` but does NOT raise.  This surfaces
+        # ``lvs_clean=false`` (with ``copper_mismatches`` detail) in
+        # board.json / the gallery LVS chip without gating CI.  ``run_label``
+        # is off because the board is label-dirty too and the copper
+        # comparator is the meaningful leg.  Graduation to a hard gate is
+        # deferred (see #3785 + the board-03 residual-opens follow-up).
+        write_lvs_report(
+            sch_path,
+            routed_path,
+            output_dir,
+            require_clean=False,
+            run_copper=True,
+            run_label=False,
+        )
 
         # Step 7: Export manufacturing bundle (gerbers, BOM, CPL,
         # report).  Required by AC of #3095 so ``kct fleet status``

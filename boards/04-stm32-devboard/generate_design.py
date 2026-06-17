@@ -30,6 +30,7 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.lvs import write_lvs_report
 from kicad_tools.schematic.blocks import (
     DebugHeader,
     create_crystal_with_loads,
@@ -1504,6 +1505,26 @@ def main() -> int:
 
         # Step 7: Run DRC
         drc_success = run_drc(routed_path)
+
+        # Step 7.5: LVS (advisory, #3780) -- board 04 is in
+        # ``ADVISORY_LVS_BOARDS`` and is genuinely copper-dirty today
+        # (notably the real ``OSC_IN<->OSC_OUT`` B.Cu escape-stub short
+        # bridging the HSE crystal pins, tracked in #3785), so
+        # ``require_clean=False``: ``write_lvs_report`` logs the mismatch
+        # summary and writes ``output/lvs.json`` but does NOT raise.  This
+        # surfaces ``lvs_clean=false`` (with ``copper_mismatches`` detail) in
+        # board.json / the gallery LVS chip without gating CI.  ``run_label``
+        # is off because the board is label-dirty too and the copper
+        # comparator is the meaningful leg.  Graduation to a hard gate is
+        # deferred (blocked on #3785).
+        write_lvs_report(
+            sch_path,
+            routed_path,
+            output_dir,
+            require_clean=False,
+            run_copper=True,
+            run_label=False,
+        )
 
         # Step 8: Generate manufacturing artifacts (Gerbers, BOM, CPL)
         mfr_success = generate_manufacturing(routed_path, output_dir)
