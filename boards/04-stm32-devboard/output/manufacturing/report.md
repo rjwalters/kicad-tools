@@ -1,8 +1,8 @@
 ---
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
+author: "kicad-tools 0.14.0"
+date: "Rev 1 | 2026-06-17 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -36,7 +36,7 @@ Demonstrates circuit blocks API
 
 ### Power Architecture
 
-**Power Rails**: +3V3, +5V, GND, PWR_FLAG
+**Power Rails**: +5V, GND, PWR_FLAG
 
 | Regulator | Device |
 |-----------|--------|
@@ -108,7 +108,7 @@ Demonstrates circuit blocks API
 | 10uF | C_0805_2012Metric | 2 | C1, C2 |
 | 20pF | C_0805_2012Metric | 2 | C10, C11 |
 | 4.7uF | C_0805_2012Metric | 1 | C16 |
-| USER | LED_0805_2012Metric | 1 | D1 |
+| LED | LED_0805_2012Metric | 1 | D1 |
 | SWD-6 | PinHeader_1x06_P2.54mm_Vertical | 1 | J1 |
 | 10k | R_0805_2012Metric | 1 | R2 |
 | 330R | R_0805_2012Metric | 1 | R1 |
@@ -123,15 +123,17 @@ Demonstrates circuit blocks API
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
+| Errors | 6 |
 | Warnings | 0 |
-| Blocking | 0 |
+| Blocking | 6 |
 
-**Status**: PASS
+**Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
+| via_in_pad | 4 |
+| kicad-cli:clearance | 2 |
 | connectivity | 1 |
 
 
@@ -143,6 +145,7 @@ Demonstrates circuit blocks API
 
 ### Action Items
 
+- **[CRITICAL]** Fix 6 blocking DRC violations (via_in_pad (4); kicad-cli: clearance (2))
 - **[CRITICAL]** Increase min via drill: 0.150mm < 0.300mm required
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 
