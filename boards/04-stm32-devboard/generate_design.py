@@ -1388,7 +1388,7 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
         "export",
         str(routed_path),
         "--mfr",
-        "jlcpcb",
+        "jlcpcb-tier1",
         "--output",
         str(mfr_dir),
     ]
