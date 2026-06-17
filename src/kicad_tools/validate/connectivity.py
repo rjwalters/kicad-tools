@@ -50,6 +50,14 @@ def _has_shapely() -> bool:
     return _SHAPELY_AVAILABLE
 
 
+# Sentinel layer-set meaning "every copper layer".  Used to model a ``*.Cu``
+# through-hole pad as a universal copper bridge in the layer-aware segment
+# chainer (issue #3783): a multi-layer pad joins copper on any layer at its
+# position, so any two copper segments meeting there are fused regardless of
+# their individual layers.
+_ALL_COPPER_LAYERS: frozenset[str] = frozenset({"*.Cu"})
+
+
 @dataclass(frozen=True)
 class ConnectivityIssue:
     """Represents a single net connectivity issue.
@@ -427,7 +435,9 @@ class ConnectivityValidator:
         #     share endpoints are galvanically connected even with no pad at
         #     the intermediate junctions.  Reuse the existing chain builder,
         #     which is itself label-agnostic (it only looks at endpoints).
-        graph = self._build_segment_chains(segments, pad_positions, graph)
+        #     It is layer-aware (issue #3783): cross-layer hops require a via /
+        #     multi-layer pad bridge, so pad_layers is passed through.
+        graph = self._build_segment_chains(segments, pad_positions, graph, pad_layers)
 
         # 2c. Vias: pads coincident with a via are connected (layer bridge).
         for via in self.pcb.vias:
@@ -648,8 +658,10 @@ class ConnectivityValidator:
                         graph[other].add(pad)
 
         # Build full transitive closure through segment chains
-        # Track endpoints can form chains connecting distant pads
-        graph = self._build_segment_chains(segments, pad_positions, graph)
+        # Track endpoints can form chains connecting distant pads.
+        # Layer-aware (issue #3783): cross-layer hops require a via /
+        # multi-layer pad bridge at the shared point.
+        graph = self._build_segment_chains(segments, pad_positions, graph, pad_layers)
 
         # --- Zone boundary polygon containment checks ---
         # For each zone on this net, check if pads fall inside the zone
@@ -709,34 +721,201 @@ class ConnectivityValidator:
 
         return graph
 
+    def _copper_layer_order(self) -> list[str]:
+        """Return the board's copper layers in physical stack order.
+
+        KiCad's canonical copper order is ``F.Cu``, then the inner layers
+        ``In1.Cu, In2.Cu, ...`` (ascending), then ``B.Cu``.  The numeric
+        ``Layer.number`` does NOT encode physical order (B.Cu is index 2 even
+        though it stacks last), so we derive the order by name.  This order
+        lets a through-hole / multi-span via bridge *every* copper layer it
+        physically passes through, not just the two endpoints named in
+        ``via.layers`` (issue #3783): a standard ``["F.Cu","B.Cu"]`` via on a
+        4-layer board electrically joins ``In1.Cu`` and ``In2.Cu`` too.
+        """
+        names = {layer.name for layer in self.pcb.copper_layers}
+        if not names:
+            # Fall back to the two outer layers, which exist on every board.
+            names = {"F.Cu", "B.Cu"}
+
+        def _inner_index(layer_name: str) -> int:
+            digits = layer_name[2:-3]  # strip "In" prefix and ".Cu" suffix
+            try:
+                return int(digits)
+            except ValueError:
+                return 0
+
+        inner = sorted(
+            (name for name in names if name.startswith("In") and name.endswith(".Cu")),
+            key=_inner_index,
+        )
+
+        order: list[str] = []
+        if "F.Cu" in names:
+            order.append("F.Cu")
+        order.extend(inner)
+        if "B.Cu" in names:
+            order.append("B.Cu")
+        return order
+
+    def _via_bridged_layers(self, via_layers: list[str]) -> frozenset[str]:
+        """Expand a via's named layer span into every copper layer it joins.
+
+        ``via.layers`` records only the *endpoints* of the via's span (e.g.
+        ``["F.Cu", "B.Cu"]`` for a through-hole via).  A through-hole / buried
+        via physically connects every copper layer between (and including)
+        those endpoints, so we expand the span across the board's physical
+        copper order (issue #3783).  A degenerate or unrecognised span falls
+        back to the named layers themselves.
+        """
+        copper_span = [layer_str for layer_str in via_layers if layer_str.endswith(".Cu")]
+        order = self._copper_layer_order()
+        indices = [order.index(layer_str) for layer_str in copper_span if layer_str in order]
+        if len(indices) < 2:
+            return frozenset(copper_span)
+        lo, hi = min(indices), max(indices)
+        return frozenset(order[lo : hi + 1])
+
+    def _collect_layer_bridges(
+        self,
+        pad_positions: dict[str, tuple[float, float]] | None = None,
+        pad_layers: dict[str, list[str]] | None = None,
+    ) -> list[tuple[tuple[float, float], frozenset[str]]]:
+        """Collect points where a via (or multi-layer pad) bridges copper layers.
+
+        A via electrically joins the copper layers listed in ``via.layers``
+        (e.g. ``["F.Cu", "B.Cu"]``) at its position.  A through-hole /
+        multi-layer pad (``*.Cu`` or two or more explicit ``.Cu`` layers)
+        bridges all copper layers it spans at its position.
+
+        This index is consulted by :meth:`_build_segment_chains` so that two
+        copper segments meeting at a shared XY point are only fused across
+        *different* copper layers when a real layer bridge exists there.  A
+        via-less F.Cu/B.Cu crossover (two traces that merely cross at the same
+        XY on opposite layers, with nothing joining them) is a legal,
+        DRC-clean layer crossover and must NOT be fused (issue #3783).
+
+        Args:
+            pad_positions: Optional pad-id -> board-frame position mapping.
+            pad_layers: Optional pad-id -> layer-list mapping.  When both pad
+                maps are supplied, multi-layer pads also contribute bridges.
+
+        Returns:
+            A list of ``(point, layer_set)`` tuples.  ``layer_set`` is the
+            frozenset of copper layers the bridge joins at ``point``.
+        """
+        bridges: list[tuple[tuple[float, float], frozenset[str]]] = []
+
+        # Vias: bridge every copper layer the via physically passes through.
+        # ``via.layers`` names only the span endpoints (e.g. ["F.Cu","B.Cu"]),
+        # so expand the span across the stackup — a through-hole via joins the
+        # inner layers too (issue #3783).
+        for via in self.pcb.vias:
+            via_layer_set = self._via_bridged_layers(via.layers)
+            if len(via_layer_set) >= 2:
+                bridges.append((via.position, via_layer_set))
+
+        # Multi-layer pads (through-hole / ``*.Cu``): bridge every copper layer
+        # they span.  ``*.Cu`` is treated as a universal copper bridge so any
+        # two copper segments meeting at the pad are joined (mirroring the
+        # wildcard handling in :meth:`_pad_layer_matches_zone`).
+        if pad_positions is not None and pad_layers is not None:
+            for pad_id, pad_layer_list in pad_layers.items():
+                copper = [layer_str for layer_str in pad_layer_list if layer_str.endswith(".Cu")]
+                if not copper:
+                    continue
+                wildcard = any(layer_str.startswith("*.") for layer_str in copper)
+                if wildcard or len(set(copper)) >= 2:
+                    pos = pad_positions.get(pad_id)
+                    if pos is None:
+                        continue
+                    layer_set = _ALL_COPPER_LAYERS if wildcard else frozenset(copper)
+                    bridges.append((pos, layer_set))
+
+        return bridges
+
+    def _layers_bridged_at(
+        self,
+        point: tuple[float, float],
+        layer_a: str,
+        layer_b: str,
+        bridges: list[tuple[tuple[float, float], frozenset[str]]],
+    ) -> bool:
+        """Return True if a via/multi-layer pad bridges two layers at a point.
+
+        ``layer_a`` and ``layer_b`` are joined at ``point`` when some bridge
+        coincident with ``point`` spans both layers (``_ALL_COPPER_LAYERS``
+        matches any copper layer, modelling a ``*.Cu`` through-hole pad).
+        """
+        for bridge_point, layer_set in bridges:
+            if not self._points_close(point, bridge_point):
+                continue
+            a_ok = layer_set is _ALL_COPPER_LAYERS or layer_a in layer_set
+            b_ok = layer_set is _ALL_COPPER_LAYERS or layer_b in layer_set
+            if a_ok and b_ok:
+                return True
+        return False
+
+    def _segments_chain_at_shared_point(
+        self,
+        seg_a: Any,
+        seg_b: Any,
+        bridges: list[tuple[tuple[float, float], frozenset[str]]],
+    ) -> bool:
+        """Decide whether two segments chain where they share an endpoint.
+
+        Same-layer segments chain whenever they share an XY endpoint (the
+        historic behaviour).  Different-layer segments chain only at a shared
+        XY endpoint that a via / multi-layer pad bridges across their two
+        layers — a bare cross-layer crossover does NOT chain (issue #3783).
+        """
+        same_layer = seg_a.layer == seg_b.layer
+        for pa in (seg_a.start, seg_a.end):
+            for pb in (seg_b.start, seg_b.end):
+                if not self._points_close(pa, pb):
+                    continue
+                if same_layer:
+                    return True
+                # Cross-layer: require an actual layer bridge at the point.
+                if self._layers_bridged_at(pa, seg_a.layer, seg_b.layer, bridges):
+                    return True
+        return False
+
     def _build_segment_chains(
         self,
         segments: list,
         pad_positions: dict[str, tuple[float, float]],
         graph: dict[str, set[str]],
+        pad_layers: dict[str, list[str]] | None = None,
     ) -> dict[str, set[str]]:
         """Build connectivity through chains of connected segments.
 
         Segments that share endpoints form chains. Pads at any point
         in a chain are connected to all other pads in the chain.
+
+        The chain builder is **layer-aware** (issue #3783): two segments on
+        *different* copper layers are only chained where they share an XY
+        endpoint if a via (``via.layers`` spanning both layers) or a
+        multi-layer pad actually bridges the layers at that point.  Two
+        traces that merely cross at the same XY on opposite layers with no
+        via — a legal, DRC-clean layer crossover — are NOT fused.  Same-layer
+        chaining is unchanged.
         """
         if not segments:
             return graph
 
+        # Per-point layer bridges (vias + multi-layer pads) used to gate
+        # cross-layer chain hops.
+        bridges = self._collect_layer_bridges(pad_positions, pad_layers)
+
         # Build segment adjacency graph
         segment_graph: dict[int, set[int]] = defaultdict(set)
         for i, seg_a in enumerate(segments):
-            for j, seg_b in enumerate(segments):
-                if i != j:
-                    # Check if segments share an endpoint
-                    if (
-                        self._points_close(seg_a.start, seg_b.start)
-                        or self._points_close(seg_a.start, seg_b.end)
-                        or self._points_close(seg_a.end, seg_b.start)
-                        or self._points_close(seg_a.end, seg_b.end)
-                    ):
-                        segment_graph[i].add(j)
-                        segment_graph[j].add(i)
+            for j in range(i + 1, len(segments)):
+                seg_b = segments[j]
+                if self._segments_chain_at_shared_point(seg_a, seg_b, bridges):
+                    segment_graph[i].add(j)
+                    segment_graph[j].add(i)
 
         # Find connected components of segments
         visited: set[int] = set()

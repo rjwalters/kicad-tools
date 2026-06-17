@@ -979,3 +979,80 @@ def test_board04_osc_in_out_short_absent() -> None:
         f"({[(seg.start, seg.end, seg.layer) for seg in bridging]}); "
         "the OSC_OUT escape stub must not pass through the OSC_IN pad center."
     )
+
+
+# ---------------------------------------------------------------------------
+# Layer-aware crossover (issue #3783): a via-less F.Cu/B.Cu crossover of two
+# different nets is a legal layer crossover and must NOT be reported as a
+# copper short.  This is the end-to-end gate behaviour behind board-02's
+# false-positive NODE_B<->NODE_C "short".
+# ---------------------------------------------------------------------------
+
+
+def _pcb_crossover_via_less() -> str:
+    """Two different-net traces crossing at the same XY on opposite layers.
+
+    R1.1 (NODE_B) routes vertically on F.Cu through (110, 110); R2.1
+    (NODE_C) routes horizontally on B.Cu through (110, 110).  No via joins
+    them, so the copper-LVS gate must keep them on separate nets.
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NODE_B")
+  (net 2 "NODE_C")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000fb1")
+    (at 110 105)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-fb1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-fb1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "NODE_B"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-000000000fb2")
+    (at 105 110)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-fb2-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-fb2-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 2 "NODE_C"))
+  )
+  (segment (start 110 105) (end 110 110) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000fb3"))
+  (segment (start 110 110) (end 110 115) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000fb4"))
+  (segment (start 105 110) (end 110 110) (width 0.25) (layer "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-000000000fb5"))
+  (segment (start 110 110) (end 115 110) (width 0.25) (layer "B.Cu") (net 2)
+    (uuid "00000000-0000-0000-0000-000000000fb6"))
+)
+"""
+
+
+def test_via_less_crossover_copper_lvs_clean(tmp_path: Path) -> None:
+    """A via-less F.Cu/B.Cu crossover is clean copper-LVS (issue #3783).
+
+    The two traces cross at one XY on opposite layers with no via — a legal,
+    DRC-clean layer crossover.  The copper extractor must keep NODE_B and
+    NODE_C separate, so the partition diff against the schematic is clean
+    (no spurious NODE_B<->NODE_C short).
+    """
+    pcb_path = _write(tmp_path, "crossover.kicad_pcb", _pcb_crossover_via_less())
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+
+    # Each net keeps its own pad — no phantom short.
+    assert frozenset({"R1.1"}) in partition
+    assert frozenset({"R2.1"}) in partition
+
+    sch = {("R1", "1"): "NODE_B", ("R2", "1"): "NODE_C"}
+    result = compare_partitions(sch, partition)
+    assert result.clean
+    assert result.mismatches == ()
