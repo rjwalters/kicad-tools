@@ -1365,6 +1365,66 @@ def stitch_pcb(routed_path: Path) -> bool:
     return True
 
 
+def fill_zones(routed_path: Path) -> bool:
+    """
+    Re-pour the copper zones (GND B.Cu plane) after stitching.
+
+    `kct route` and `kct stitch` modify copper without refreshing the GND
+    B.Cu pour, so the committed fill is stale relative to the final
+    routed/stitched copper.  In particular the ``OSC_OUT`` net-5 escape
+    carries a 45 west jog (PR #3790, the #3785 crystal-pin short fix)
+    that runs only ~0.2661 mm from the un-refreshed GND fill -- a
+    0.034 mm shortfall against this board's own 0.3 mm zone clearance
+    (``connect_pads (clearance 0.3)``).  KiCad's geometric
+    ``kicad-cli pcb drc`` flags this as 2 ``Zone [GND] on B.Cu`` vs
+    ``Track [OSC_OUT] on B.Cu`` clearance violations.  It is tier1-legal
+    (0.2661 mm clears the jlcpcb-tier1 0.127 mm fab rule, so
+    ``kct check --mfr jlcpcb-tier1`` stays 0-blocking), but the stale pour
+    is a cosmetic / self-consistency defect.
+
+    ``kct zones fill --net GND`` re-pours the zone so the GND fill backs
+    off the relocated OSC_OUT jog by the full 0.3 mm clearance
+    (min GND-fill-to-OSC_OUT 0.2661 mm -> 0.3005 mm; the 2 GND-zone DRC
+    violations drop to 0).  This is **fill-only**: every routed
+    ``segment`` and ``via`` is byte-identical before and after -- only the
+    zone ``filled_polygon`` points change.  Running it as a deterministic
+    final step (after ``stitch_pcb``, before ``run_drc``) keeps the
+    refreshed pour reproducible from the recipe rather than a one-off hand
+    run.  The ``--net GND`` filter is advisory (kicad-cli re-fills all
+    zones), which is fine here because GND is the only B.Cu pour.
+
+    See issue #3791.  Returns True if the fill step ran.
+    """
+    print("\n" + "=" * 60)
+    print("Re-pouring zones (kct zones fill --net GND)...")
+    print("=" * 60)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "zones",
+        "fill",
+        str(routed_path),
+        "--net",
+        "GND",
+    ]
+    print(f"\n   Command: {' '.join(cmd)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            print(f"   {line}")
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"\n   Fill stderr:\n{result.stderr}")
+        print(f"\n   FAILED: kct zones fill exited {result.returncode}")
+        return False
+
+    print("\n   SUCCESS: kct zones fill completed")
+    return True
+
+
 def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     """
     Generate manufacturing artifacts (Gerbers, drill, BOM, CPL, project zip,
@@ -1503,6 +1563,14 @@ def main() -> int:
         # Step 6: Stitch GND plane (route -> stitch -> mfr pipeline)
         stitch_success = stitch_pcb(routed_path)
 
+        # Step 6.5: Re-pour zones (#3791) -- refresh the GND B.Cu fill so it
+        # backs off the relocated OSC_OUT 45 jog (#3790) by the full 0.3mm
+        # zone clearance.  Fill-only: routed copper is byte-identical, only
+        # the GND filled_polygon points change.  Must run after stitch_pcb
+        # (which adds copper) and before run_drc (so DRC measures the
+        # refreshed pour).
+        fill_success = fill_zones(routed_path)
+
         # Step 7: Run DRC
         drc_success = run_drc(routed_path)
 
@@ -1546,6 +1614,7 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  Stitch: {'SUCCESS' if stitch_success else 'FAIL'}")
+        print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
         print(f"  Manufacturing: {'SUCCESS' if mfr_success else 'FAIL'}")
         print("\nBoard description:")
@@ -1595,7 +1664,19 @@ def main() -> int:
         # NRST/SWO and every other net stayed byte-identical, so the
         # #3765/#3773 preserve-the-pinned-artifact rationale above still
         # holds and the advisory GND-stitch residual is unchanged.
-        return 0 if (erc_success and route_success and stitch_success and mfr_success) else 1
+        #
+        # Per #3791 (2026-06-17): a deterministic final ``fill_zones`` step
+        # re-pours the GND B.Cu plane after stitching so the fill backs off
+        # the relocated OSC_OUT jog by the full 0.3mm zone clearance,
+        # clearing the 2 geometric ``Zone [GND]``-vs-``Track [OSC_OUT]``
+        # clearance violations (min 0.2661mm -> 0.3005mm).  Fill-only: routed
+        # copper stays byte-identical, only GND ``filled_polygon`` points
+        # change, so the preserve-the-pinned-copper rationale above holds.
+        return (
+            0
+            if (erc_success and route_success and stitch_success and fill_success and mfr_success)
+            else 1
+        )
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
