@@ -364,6 +364,57 @@ New atomic schematic editing commands for fully programmatic circuit constructio
 - **Dead `SessionExpiredError` and error-mapping code** (#1725)
 - **Dead `detect_signal_type` and `assign_layer_preferences` router functions** (#1730)
 
+## [0.12.0] - 2026-04-15
+
+### Summary
+
+Manufacturing-export release: a complete `kct export` package generator with pre-flight
+validation, JLCPCB LCSC auto-matching, and an EXPORT pipeline stage — plus substantial
+routing and DRC/ERC auto-repair improvements and KiCad 10 compatibility fixes.
+
+### Added
+
+#### Manufacturing Export
+
+- **`kct export`** (#1469) — Manufacturing package generation (Gerber, drill, BOM, placement)
+- **Pre-flight validation checklist** (#1475) — Validate a design before manufacturing export
+- **BOM–CPL cross-reference check** (#1487) — Catch BOM/placement mismatches before export
+- **LCSC auto-match** (#1473) — Auto-match LCSC part numbers during JLCPCB BOM export, with `--auto-lcsc` / `--no-auto-lcsc` flags (#1484)
+
+#### Pipeline
+
+- **EXPORT step** (#1472) — Final pipeline step after REPORT
+- **REPORT step** (#1377) — Final pipeline step after AUDIT
+- **FIX_ERC step** (#1378) — Automatic ERC remediation, with `fix-erc` command (#1379)
+- **fix-silkscreen step** (#1376) — Inserted between ERC and fix-vias
+- **DRC/ERC/verdict summary** (#1416) — Printed after pipeline completion
+- Raised default `--max-passes` 3 → 20 (#1437) and `--max-displacement` 0.5mm → 2.0mm (#1429)
+- ERC errors partitioned into blocking and non-blocking (#1406)
+
+#### Routing & DRC Repair
+
+- **All copper layers routable** including PLANE-type layers (#1474)
+- **`--layers 4-all`** — 4-layer all-signal routing (#1466)
+- **Local A\* rerouting** for infeasible clearance violations (#1399), with multi-segment cluster rerouting for grouped via violations (#1408)
+- **Post-pass connectivity check** with automatic rollback (#1439)
+- Handle `clearance_pad_segment` / `clearance_pad_via` violations in fix-drc (#1470)
+- Partial-routing UX improvements with actionable suggestions (#1387, #1467)
+
+#### Audit & Report
+
+- **Analog component detection** with advisory audit action item (#1489)
+- **Orphaned-footprint detection** — footprints on PCB but not in schematic (#1488)
+- Zone connectivity treated as advisory when core checks pass (#1465, #1431)
+- Five missing ERC violation types and suggestion handlers (#1385); non-electrical ERC violations classified as warnings (#1386)
+
+### Fixed
+
+- **KiCad 10 compatibility**: version-aware drill origin (#1486); recover `net_number` from PCB header for name-only net format (#1432)
+- **fix-drc**: preserve trace terminal endpoints during corner chamfering (#1438); use audit step result for summary verdict instead of DRC-only (#1464)
+- **zones**: restore per-element net assignments after zone fill (#1389); stable keys for net restoration under KiCad 10 net format (#1395)
+- **export**: capitalize JLCPCB CPL layer values and wire aux-origin auto-detection (#1463)
+- **report**: prevent double-nesting of figures path in `_embed_images` (#1384)
+
 ## [0.11.0] - 2026-04-12
 
 ### Added
@@ -523,6 +574,41 @@ Automatic GPU acceleration for computationally intensive operations with cross-p
 - **Acceleration**: Consolidate duplicate `GPUBackend`/`BackendType` enums (#1080)
   - Single `BackendType` enum as source of truth
   - Removed redundant `GPUBackend` from detection module
+
+## [0.10.2] - 2026-01-18
+
+### Summary
+
+Programmatic PCB-construction release: a full board-editing API surface — trace routing,
+copper pours/zones, silkscreen management, footprint import from schematic, and
+placement optimization — alongside new schematic netlist-query and ERC capabilities.
+
+### Added
+
+#### PCB API
+
+- **Trace routing API** for programmatic PCB routing (#926)
+- **Copper pour / zone API** for ground planes (#927)
+- **Silkscreen management APIs** for reference-designator visibility and placement (#931)
+- **Manufacturing export API** — Gerber, drill, BOM, placement (#928)
+- **Collision detection and DRC-aware placement validation** (#925)
+- **`import_from_schematic()`** — programmatically import footprints (#919)
+- **Zone-based placement optimization API** (#921)
+- **Node insertion methods** for position control (#917)
+
+#### Schematic API
+
+- **Netlist query API** for verifying connectivity (#903)
+- **Wire endpoint collision detection** (#904)
+- **`run_erc()`** — invoke KiCad ERC programmatically (#906)
+- **Power net connectivity validation** (#900)
+
+### Fixed
+
+- **PCB**: `update_footprint_position()` rotation now persists (#922)
+- **PCB**: insert at-node after layer node in `add_footprint_from_file`
+- **netlist**: parse reference from `(ref ...)` child node in `NetNode.from_sexp()`
+- **schematic**: flatten symbols with `extends` for embedding in `lib_symbols` (#896); fix missing `lib_symbols` for complex symbol types (#892, #893)
 
 ## [0.10.1] - 2026-01-17
 
