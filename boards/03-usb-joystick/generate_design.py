@@ -25,379 +25,48 @@ If no output directory is specified, files are written to ./output/
 
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
-from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
-
-
-def generate_uuid() -> str:
-    """Generate a KiCad-format UUID."""
-    return str(uuid.uuid4())
-
-
-# =============================================================================
-# Net Definitions
-# =============================================================================
-
-NETS = {
-    "": 0,
-    "VBUS": 1,
-    "VCC": 2,
-    "GND": 3,
-    "USB_D+": 4,
-    "USB_D-": 5,
-    "USB_CC1": 6,
-    "USB_CC2": 7,
-    "JOY_X": 8,
-    "JOY_Y": 9,
-    "JOY_BTN": 10,
-    "BTN1": 11,
-    "BTN2": 12,
-    "BTN3": 13,
-    "BTN4": 14,
-    "XTAL1": 15,
-    "XTAL2": 16,
-}
 
 
 # =============================================================================
 # Schematic Generation
 # =============================================================================
 
-WIRE_STUB = 5.08  # 200 mils
-
-
-def add_pin_label(sch: Schematic, pin_pos: tuple, net_name: str, direction: str = "right"):
-    """Add a wire stub from a pin position to a global label."""
-    if not pin_pos:
-        return
-
-    x, y = pin_pos
-    if direction == "right":
-        end_x = x + WIRE_STUB
-        rotation = 180
-    else:
-        end_x = x - WIRE_STUB
-        rotation = 0
-
-    sch.add_wire((x, y), (end_x, y), snap=False)
-    sch.add_global_label(net_name, end_x, y, shape="bidirectional", rotation=rotation, snap=False)
-
 
 def create_usb_joystick_schematic(output_dir: Path) -> Path:
-    """
-    Create a USB Joystick schematic.
+    """Create the USB Joystick schematic by delegating to ``generate_schematic.py``.
+
+    Issue #3764: this recipe previously carried its OWN inline, simplified
+    schematic (4-pin ``Conn_01x04`` USB stub, generic connectors, a
+    ``power:+5V`` rail, and an MCU pinout that disagreed with the PCB).
+    That third, divergent net model meant the canonical end-to-end recipe
+    never reproduced the schematic that actually ships, so the
+    schematic↔PCB netlist could not reconcile.
+
+    Mirroring the way :func:`create_usb_joystick_pcb` already delegates to
+    ``generate_pcb.py``, the schematic step now delegates to
+    ``generate_schematic.py`` so there is exactly ONE schematic generator.
+    The PCB's 16-net model is the source of truth and the shared schematic
+    generator is aligned to it pad-for-pad.
 
     Returns the path to the generated schematic file.
     """
     print("\n" + "=" * 60)
-    print("Creating USB Joystick Schematic...")
+    print("Creating USB Joystick Schematic (delegates to generate_schematic.py)...")
     print("=" * 60)
 
-    sch = Schematic(
-        title="USB Joystick Controller",
-        date="2025-01",
-        revision="A",
-        company="kicad-tools Demo",
-        comment1="USB game controller with analog joystick",
-        comment2="Demonstrates autolayout functionality",
-        snap_mode=SnapMode.AUTO,
-        grid=2.54,
-    )
+    sys.path.insert(0, str(Path(__file__).parent))
+    import generate_schematic as _sch_gen
 
-    RAIL_VCC = 25.4
-    RAIL_GND = 177.8
-
-    # =========================================================================
-    # Section 1: Place MCU
-    # =========================================================================
-    print("\n1. Placing MCU...")
-
-    try:
-        mcu = sch.add_symbol(
-            "Connector_Generic:Conn_02x16_Counter_Clockwise",
-            x=101.6,
-            y=88.9,
-            ref="U1",
-            value="MCU",
-        )
-    except Exception:
-        mcu = sch.add_symbol(
-            "Device:R",
-            x=101.6,
-            y=88.9,
-            ref="U1",
-            value="MCU",
-        )
-    print(f"   U1 (MCU): placed at ({mcu.x}, {mcu.y})")
-
-    # =========================================================================
-    # Section 2: Place USB connector
-    # =========================================================================
-    print("\n2. Placing USB connector...")
-
-    suggested_pos = sch.suggest_position(
-        "Connector_Generic:Conn_01x04",
-        near=(50.8, 50.8),
-        padding=5.08,
-    )
-
-    usb_conn = sch.add_symbol(
-        "Connector_Generic:Conn_01x04",
-        x=suggested_pos[0],
-        y=suggested_pos[1],
-        ref="J1",
-        value="USB-C",
-    )
-    print(f"   J1 (USB-C): placed at ({usb_conn.x}, {usb_conn.y})")
-
-    # =========================================================================
-    # Section 3: Place Joystick connector
-    # =========================================================================
-    print("\n3. Placing Joystick connector...")
-
-    joy_pos = sch.suggest_position(
-        "Connector_Generic:Conn_01x05",
-        near=(50.8, 101.6),
-        padding=5.08,
-    )
-
-    joy_conn = sch.add_symbol(
-        "Connector_Generic:Conn_01x05",
-        x=joy_pos[0],
-        y=joy_pos[1],
-        ref="J2",
-        value="Joystick",
-    )
-    print(f"   J2 (Joystick): placed at ({joy_conn.x}, {joy_conn.y})")
-
-    # =========================================================================
-    # Section 4: Place Crystal
-    # =========================================================================
-    print("\n4. Placing Crystal...")
-
-    xtal_pos = sch.suggest_position(
-        "Device:Crystal",
-        near=(127.0, 76.2),
-        padding=5.08,
-    )
-
-    try:
-        xtal = sch.add_symbol(
-            "Device:Crystal",
-            x=xtal_pos[0],
-            y=xtal_pos[1],
-            ref="Y1",
-            value="16MHz",
-        )
-    except Exception:
-        xtal = sch.add_symbol(
-            "Device:R",
-            x=xtal_pos[0],
-            y=xtal_pos[1],
-            ref="Y1",
-            value="16MHz",
-        )
-    print(f"   Y1 (Crystal): placed at ({xtal.x}, {xtal.y})")
-
-    # =========================================================================
-    # Section 5: Place Buttons
-    # =========================================================================
-    print("\n5. Placing Buttons...")
-
-    button_refs = ["SW1", "SW2", "SW3", "SW4"]
-    base_x, base_y = 152.4, 88.9
-
-    buttons = []
-    for ref in button_refs:
-        pos = sch.suggest_position(
-            "Device:R",
-            near=(base_x, base_y),
-            padding=7.62,
-        )
-
-        btn = sch.add_symbol(
-            "Device:R",
-            x=pos[0],
-            y=pos[1],
-            ref=ref,
-            value="Button",
-        )
-        buttons.append(btn)
-        print(f"   {ref}: placed at ({btn.x}, {btn.y})")
-
-    # =========================================================================
-    # Section 6: Place Decoupling Capacitors
-    # =========================================================================
-    print("\n6. Placing Decoupling Capacitors...")
-
-    cap_positions = [
-        ("C1", 88.9, 63.5),
-        ("C2", 114.3, 63.5),
-        ("C3", 88.9, 114.3),
-        ("C4", 55.88, 38.1),
-    ]
-
-    caps = []
-    for ref, x, y in cap_positions:
-        pos = sch.suggest_position(
-            "Device:C",
-            near=(x, y),
-            padding=2.54,
-        )
-
-        try:
-            cap = sch.add_symbol(
-                "Device:C",
-                x=pos[0],
-                y=pos[1],
-                ref=ref,
-                value="100nF",
-            )
-        except Exception:
-            cap = sch.add_symbol(
-                "Device:R",
-                x=pos[0],
-                y=pos[1],
-                ref=ref,
-                value="100nF",
-            )
-        caps.append(cap)
-        print(f"   {ref}: placed at ({cap.x}, {cap.y})")
-
-    # =========================================================================
-    # Section 7: Add signal wiring
-    # =========================================================================
-    print("\n7. Adding signal wiring...")
-
-    MCU_PIN_MAP = {
-        "1": "VCC",
-        "16": "GND",
-        "17": "VCC",
-        "32": "GND",
-        "29": "USB_D+",
-        "30": "USB_D-",
-        "7": "XTAL1",
-        "8": "XTAL2",
-        "2": "JOY_X",
-        "3": "JOY_Y",
-        "9": "BTN1",
-        "10": "BTN2",
-        "11": "BTN3",
-        "12": "BTN4",
-        "13": "JOY_BTN",
-        # Unused inputs tied to GND to prevent JLCPCB review holds
-        "5": "GND",
-        "6": "GND",
-        "18": "GND",
-        "19": "GND",
-        "20": "GND",
-        "21": "GND",
-        "22": "GND",
-        "31": "GND",
-    }
-
-    USB_PIN_MAP = {"1": "VCC", "2": "USB_D-", "3": "USB_D+", "4": "GND"}
-    JOY_PIN_MAP = {"1": "VCC", "2": "GND", "3": "JOY_X", "4": "JOY_Y", "5": "JOY_BTN"}
-
-    for pin_num, net_name in MCU_PIN_MAP.items():
-        pin_pos = mcu.pin_position(pin_num)
-        if pin_pos:
-            direction = "left" if int(pin_num) <= 16 else "right"
-            add_pin_label(sch, pin_pos, net_name, direction=direction)
-
-    used_pins = set(MCU_PIN_MAP.keys())
-    for pin_num in range(1, 33):
-        pin_str = str(pin_num)
-        if pin_str not in used_pins:
-            pin_pos = mcu.pin_position(pin_str)
-            if pin_pos:
-                sch.add_no_connect(pin_pos[0], pin_pos[1], snap=False)
-
-    for pin_num, net_name in USB_PIN_MAP.items():
-        pin_pos = usb_conn.pin_position(pin_num)
-        if pin_pos:
-            add_pin_label(sch, pin_pos, net_name, direction="right")
-
-    for pin_num, net_name in JOY_PIN_MAP.items():
-        pin_pos = joy_conn.pin_position(pin_num)
-        if pin_pos:
-            add_pin_label(sch, pin_pos, net_name, direction="right")
-
-    xtal_pin1 = xtal.pin_position("1")
-    xtal_pin2 = xtal.pin_position("2")
-    if xtal_pin1:
-        add_pin_label(sch, xtal_pin1, "XTAL1", direction="left")
-    if xtal_pin2:
-        add_pin_label(sch, xtal_pin2, "XTAL2", direction="right")
-
-    button_nets = ["BTN1", "BTN2", "BTN3", "BTN4"]
-    for btn, net_name in zip(buttons, button_nets, strict=True):
-        pin1_pos = btn.pin_position("1")
-        pin2_pos = btn.pin_position("2")
-        if pin1_pos:
-            add_pin_label(sch, pin1_pos, net_name, direction="left")
-        if pin2_pos:
-            add_pin_label(sch, pin2_pos, "GND", direction="right")
-
-    for cap in caps:
-        pin1_pos = cap.pin_position("1")
-        pin2_pos = cap.pin_position("2")
-        if pin1_pos:
-            add_pin_label(sch, pin1_pos, "VCC", direction="left")
-        if pin2_pos:
-            add_pin_label(sch, pin2_pos, "GND", direction="right")
-
-    # Power symbols
-    vcc_pwr = sch.add_power("power:+5V", x=25.4, y=RAIL_VCC, rotation=0)
-    sch.add_wire((vcc_pwr.x, vcc_pwr.y), (vcc_pwr.x + WIRE_STUB, vcc_pwr.y), snap=False)
-    sch.add_global_label(
-        "VCC", vcc_pwr.x + WIRE_STUB, vcc_pwr.y, shape="input", rotation=180, snap=False
-    )
-    sch.add_pwr_flag(vcc_pwr.x, vcc_pwr.y)
-
-    gnd_pwr = sch.add_power("power:GND", x=25.4, y=RAIL_GND, rotation=180)
-    sch.add_wire((gnd_pwr.x, gnd_pwr.y), (gnd_pwr.x + WIRE_STUB, gnd_pwr.y), snap=False)
-    sch.add_global_label(
-        "GND", gnd_pwr.x + WIRE_STUB, gnd_pwr.y, shape="input", rotation=180, snap=False
-    )
-    sch.add_pwr_flag(gnd_pwr.x, gnd_pwr.y)
-
-    print("   Added VCC and GND power symbols with PWR_FLAG")
-
-    # =========================================================================
-    # Section 8: Validate and Write
-    # =========================================================================
-    print("\n8. Validating schematic...")
-
-    issues = sch.validate()
-    errors = [i for i in issues if i["severity"] == "error"]
-    warnings = [i for i in issues if i["severity"] == "warning"]
-
-    if errors:
-        print(f"   Found {len(errors)} errors")
-    else:
-        print("   No errors found")
-
-    if warnings:
-        print(f"   Found {len(warnings)} warnings")
-
-    stats = sch.get_statistics()
-    print("\n   Schematic statistics:")
-    print(f"      Symbols: {stats['symbol_count']}")
-    print(f"      Power symbols: {stats['power_symbol_count']}")
-    print(f"      Wires: {stats['wire_count']}")
-
-    print("\n9. Writing schematic...")
     output_dir.mkdir(parents=True, exist_ok=True)
     sch_path = output_dir / "usb_joystick.kicad_sch"
-    sch.write(sch_path)
+    _sch_gen.create_usb_joystick_schematic(sch_path)
     print(f"   Schematic: {sch_path}")
 
     return sch_path
@@ -486,6 +155,12 @@ def run_erc(sch_path: Path) -> bool:
         print(f"\n   Error running ERC: {result.stderr}")
         return False
 
+    # Issue #3764: persist the ERC report as ``output/erc_report.json``
+    # (the location ``fleet_cmd._detect_erc`` looks for) so the board-03
+    # ERC leg in ``kct fleet ship-ready`` is a captured artifact instead
+    # of ``n/a``.  Previously this report was parsed then immediately
+    # deleted.
+    erc_report_path = sch_path.parent / "erc_report.json"
     try:
         report = ERCReport.load(result.output_path)
     except Exception as e:
@@ -493,6 +168,11 @@ def run_erc(sch_path: Path) -> bool:
         return False
     finally:
         if result.output_path:
+            try:
+                erc_report_path.write_text(Path(result.output_path).read_text())
+                print(f"\n   ERC report: {erc_report_path}")
+            except OSError as exc:
+                print(f"\n   WARNING: could not persist ERC report: {exc}")
             result.output_path.unlink(missing_ok=True)
 
     violations = [v for v in report.violations if not v.excluded]
@@ -760,11 +440,27 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
 
 
 def run_drc(pcb_path: Path) -> bool:
-    """Run DRC on the PCB."""
+    """Run DRC on the routed PCB and write ``drc_report.json`` beside it.
+
+    Issue #3764: capture the DRC result as ``output/drc_report.json`` so
+    the board-03 DRC leg in ``kct fleet ship-ready`` becomes a real
+    artifact instead of ``n/a``.  The report is written next to the
+    routed PCB (``<routed>.parent/drc_report.json``) — exactly where
+    ``fleet_cmd._detect_drc`` looks for it.
+
+    Uses ``--drc-only`` so the gate reflects geometric DRC (clearance /
+    connectivity / via rules) rather than the copper-LVS sub-check, which
+    reports pour-served power-net pads (VCC / VBUS / GND) as "open"
+    because the router deliberately skips those nets and serves them via
+    copper pours.  Schematic↔PCB netlist equivalence is asserted
+    separately and exactly by ``compare_netlists`` (issue #3764), so the
+    DRC leg here is correctly scoped to manufacturing geometry.
+    """
     print("\n" + "=" * 60)
-    print("Running DRC (via kct check)...")
+    print("Running DRC (via kct check --drc-only)...")
     print("=" * 60)
 
+    report_path = pcb_path.parent / "drc_report.json"
     try:
         # Issue #3150: align the local DRC summary with the jlcpcb-tier1
         # profile this board ships and is gated against (see
@@ -779,6 +475,9 @@ def run_drc(pcb_path: Path) -> bool:
                 str(pcb_path),
                 "--mfr",
                 "jlcpcb-tier1",
+                "--drc-only",
+                "--output",
+                str(report_path),
             ],
             capture_output=True,
             text=True,
@@ -787,6 +486,9 @@ def run_drc(pcb_path: Path) -> bool:
         if result.stdout:
             for line in result.stdout.strip().split("\n"):
                 print(f"   {line}")
+
+        if report_path.is_file():
+            print(f"\n   DRC report: {report_path}")
 
         if result.returncode == 0:
             return True

@@ -788,6 +788,59 @@ def test_pcb_sync_clean_against_schematic(regenerated_board: Path) -> None:
     )
 
 
+def test_schematic_pcb_lvs_clean_and_net_counts_match(regenerated_board: Path) -> None:
+    """Schematic↔PCB netlist reconciles pad-for-pad (issue #3764).
+
+    The board-03 fleet-parity audit (#3763 gap A) found three diverging
+    net models on this board: ``generate_schematic.py``,
+    ``generate_pcb.py``, and a third simplified inline schematic inside
+    ``generate_design.py:main()``.  After the #3764 reconciliation the
+    schematic and PCB must agree on every ``(ref, pad)`` net AND expose
+    the same 16-net label set, so that ``kct fleet ship-ready`` no longer
+    reports a schematic-drift blocker.
+
+    This pins both halves so a future generator edit that re-diverges the
+    two sides (e.g. a changed MCU pinout, a re-introduced ``+5V`` power
+    symbol, or an unwired joystick pin) fails at PR time.
+    """
+    from kicad_tools.cli.fleet_cmd import (
+        _extract_pcb_named_nets,
+        _extract_schematic_nets,
+    )
+    from kicad_tools.lvs import compare_netlists
+
+    sch = regenerated_board / "usb_joystick.kicad_sch"
+    pcb = regenerated_board / "usb_joystick.kicad_pcb"
+
+    # 1. Per-(ref, pad) LVS must be perfectly clean (0 mismatches).
+    result = compare_netlists(sch, pcb)
+    assert result.clean, (
+        "schematic↔PCB LVS is dirty (regression of issue #3764): "
+        f"{len(result.mismatches)} mismatch(es); first few: "
+        f"{[(m.ref, m.pad, m.schematic_net, m.pcb_net) for m in result.mismatches[:8]]}"
+    )
+
+    # 2. Named-net label sets must be identical and both equal to the
+    #    canonical 16-net model (drift detector parity).
+    sch_nets = _extract_schematic_nets(sch)
+    pcb_nets = _extract_pcb_named_nets(pcb)
+    assert sch_nets is not None and pcb_nets is not None
+    assert sch_nets == pcb_nets, (
+        "schematic vs PCB named-net sets diverge (issue #3764): "
+        f"only-in-sch={sorted(sch_nets - pcb_nets)}, "
+        f"only-in-pcb={sorted(pcb_nets - sch_nets)}"
+    )
+    assert len(sch_nets) == 16, (
+        f"expected the canonical 16-net board-03 model, got "
+        f"{len(sch_nets)} schematic nets: {sorted(sch_nets)}"
+    )
+    # The spurious ``+5V`` rail must be gone (folded into VCC).
+    assert "+5V" not in sch_nets, (
+        "the +5V power symbol leaked back into the schematic net set "
+        "(issue #3764 required replacing power:+5V with power:VCC)"
+    )
+
+
 def _parse_routed_net_count(stdout: str) -> tuple[int, int] | None:
     """Extract ``Routed N/M [signal] nets`` from route_demo.py output.
 
