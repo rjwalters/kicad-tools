@@ -74,6 +74,31 @@ _DRIFT_ADDED_ONLY_TOLERANCE = 2
 # grandfathered non-zero error count; boards NOT listed must report 0.
 _DRC_TOLERANCE_PATH = Path(".github/routed-drc-tolerance.yml")
 
+# Issue #3767: the manufacturing-staleness check compares the routed PCB's
+# mtime against the manifest.json mtime ("the manufacturing bundle was
+# exported BEFORE the last route, so it may be out of date"). The trap is
+# that **git does not preserve mtimes** -- on a fresh ``git clone`` /
+# ``git checkout`` every file is stamped with the checkout time, and the
+# relative ordering of two committed siblings is decided purely by the
+# order git happens to write them (effectively alphabetical within a
+# directory tree), NOT by their content.
+#
+# Empirically (boards 00/01/07 vs 02/06 at #3767), this produced
+# sub-10-millisecond mtime deltas that flipped boards between STALE and
+# fresh based solely on whether the ``*_routed.kicad_pcb`` filename sorts
+# before or after the ``manufacturing/`` subdirectory -- a pure filename
+# artifact with zero manufacturability signal. Regenerating the artifacts
+# does NOT fix this: any subsequent clone re-derives the same ordering.
+#
+# The fix: only treat the bundle as stale when the routed PCB is newer by
+# more than this tolerance. A genuine staleness gap (route re-run minutes,
+# hours, or days after the last manufacturing export) clears the window
+# easily, while checkout-ordering jitter (well under a second, even on slow
+# filesystems with large gerber/render trees) does not. 120s sits far above
+# any plausible single-checkout write spread and far below a real
+# regenerate-the-route-but-forget-to-re-export gap.
+_STALE_MTIME_TOLERANCE_S = 120.0
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -1104,10 +1129,16 @@ def _survey_board(
         routing.drift_added = added
         routing.drift_removed = removed
         mfg = _detect_manufacturing(board_dir)
+        # Issue #3767: require the routed PCB to be newer than the manifest
+        # by more than _STALE_MTIME_TOLERANCE_S before flagging STALE. This
+        # absorbs git's non-preservation of mtimes (a fresh checkout stamps
+        # all files with the checkout time and orders siblings by filename,
+        # not content), which otherwise false-flags at-parity boards whose
+        # routed-PCB filename happens to sort after ``manufacturing/``.
         if (
             routed_mtime is not None
             and mfg.manifest_mtime is not None
-            and routed_mtime > mfg.manifest_mtime
+            and routed_mtime - mfg.manifest_mtime > _STALE_MTIME_TOLERANCE_S
         ):
             mfg.stale = True
         drc = _detect_drc(routed_pcb, drc_tolerances or {})
