@@ -19,6 +19,17 @@ board directory it:
 - asserts ``output/board.json`` reports ``status: ok``, ``drc_violations: 0``,
   ``lvs_clean: true``;
 
+``--lvs-only`` mode (issue #3779) restricts the gate to artifact presence
++ ``lvs.json clean: true`` and **skips** the ``board.json``
+``status``/``drc_violations`` assertions.  This is for boards 06/07
+(diffpair-test, matchgroup-test): they are copper-LVS clean (so the LVS
+gate applies) but carry **allowlisted DRC residuals** in
+``.github/routed-drc-tolerance.yml`` and route PARTIAL by design, so their
+``board.json`` is ``status: "partial"`` / ``drc_violations > 0`` and the
+full ``status: ok`` / ``drc_violations: 0`` assertion would (incorrectly)
+fail.  ``board.json[lvs_clean]`` is still asserted when ``board.json`` is
+present, since copper-LVS clean is the whole point of those jobs.
+
 and exits non-zero with a ``::error::``-annotated message on any mismatch
 so the failure surfaces inline on the GitHub PR Files-changed view.
 
@@ -92,6 +103,13 @@ REQUIRED_BOARD_JSON_FIELDS: dict[str, Any] = {
     "lvs_clean": True,
 }
 
+# In ``--lvs-only`` mode (boards 06/07) we still assert the board is
+# copper-LVS clean, but NOT ``status``/``drc_violations`` (those boards
+# carry allowlisted DRC residuals and route PARTIAL by design).
+LVS_ONLY_BOARD_JSON_FIELDS: dict[str, Any] = {
+    "lvs_clean": True,
+}
+
 
 def _err(msg: str, file: str | Path | None = None) -> None:
     """Emit a GitHub Actions ``::error::`` annotation to stdout.
@@ -137,8 +155,16 @@ def assert_lvs_clean(lvs_path: Path) -> str | None:
     return None
 
 
-def assert_board_json_fields(board_json_path: Path) -> list[str]:
+def assert_board_json_fields(
+    board_json_path: Path,
+    required_fields: dict[str, Any] = REQUIRED_BOARD_JSON_FIELDS,
+) -> list[str]:
     """Assert ``board.json`` has the required field values.
+
+    ``required_fields`` defaults to the full set (``status``,
+    ``drc_violations``, ``lvs_clean``); ``--lvs-only`` mode passes
+    :data:`LVS_ONLY_BOARD_JSON_FIELDS` (just ``lvs_clean``) so boards with
+    allowlisted DRC residuals are not failed on ``status``/``drc_violations``.
 
     Returns the list of error messages (empty list = all OK).
     """
@@ -147,7 +173,7 @@ def assert_board_json_fields(board_json_path: Path) -> list[str]:
         data = json.loads(board_json_path.read_text())
     except (OSError, json.JSONDecodeError) as e:
         return [f"could not read/parse {board_json_path}: {e}"]
-    for key, want in REQUIRED_BOARD_JSON_FIELDS.items():
+    for key, want in required_fields.items():
         got = data.get(key)
         if got != want:
             errors.append(f"board.json[{key!r}]={got!r}, expected {want!r}")
@@ -178,6 +204,17 @@ def main(argv: list[str] | None = None) -> int:
             "Board file stem used to derive the schematic/PCB artifact names "
             f"(default: {DEFAULT_STEM!r} for board 00; e.g. 'voltage_divider' "
             "for board 01)."
+        ),
+    )
+    parser.add_argument(
+        "--lvs-only",
+        action="store_true",
+        help=(
+            "Restrict the gate to artifact presence + lvs.json clean=true "
+            "(plus board.json lvs_clean=true when present), and SKIP the "
+            "board.json status=ok / drc_violations=0 assertions.  Use for "
+            "boards 06/07 (diffpair-test, matchgroup-test): copper-LVS clean "
+            "but carrying allowlisted DRC residuals (status='partial')."
         ),
     )
     args = parser.parse_args(argv)
@@ -216,9 +253,13 @@ def main(argv: list[str] | None = None) -> int:
     # (missing lvs.json was already reported above)
 
     # 3. board.json fields ----------------------------------------------------
+    # In --lvs-only mode assert only lvs_clean (boards 06/07 carry allowlisted
+    # DRC residuals -> status='partial' / drc_violations>0, which the full
+    # field set would incorrectly reject).
+    required_fields = LVS_ONLY_BOARD_JSON_FIELDS if args.lvs_only else REQUIRED_BOARD_JSON_FIELDS
     board_json_path = output_dir / "board.json"
     if board_json_path.is_file():
-        field_errors = assert_board_json_fields(board_json_path)
+        field_errors = assert_board_json_fields(board_json_path, required_fields)
         if field_errors:
             for msg in field_errors:
                 _err(msg, file=board_json_path)
@@ -226,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 "[ok] board.json fields: "
-                + ", ".join(f"{k}={v!r}" for k, v in REQUIRED_BOARD_JSON_FIELDS.items())
+                + ", ".join(f"{k}={v!r}" for k, v in required_fields.items())
             )
 
     return 2 if failed else 0

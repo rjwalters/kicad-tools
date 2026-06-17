@@ -34,6 +34,7 @@ from design_spec import (
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.lvs import write_lvs_report
 from kicad_tools.schematic.grid import GridSize
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 
@@ -627,14 +628,31 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
 
 def run_drc(pcb_path: Path) -> bool:
-    """Run DRC on the PCB."""
+    """Run DRC on the PCB.
+
+    Issue #3779: pass ``--allow-incomplete`` (mirroring boards 00/01's
+    ``run_drc``) because this DRC pass runs BEFORE
+    ``export_manufacturing_bundle`` writes ``output/manufacturing/
+    manifest.json`` and BEFORE ``write_lvs_report`` writes ``output/
+    lvs.json``.  Without the opt-in the Manifest/LVS meta sub-checks
+    (#3755) report ``NOT RUN`` (-> Overall INCOMPLETE -> exit 2) and the
+    recipe would fail here on a fresh regen even though DRC itself passes.
+    LVS is run separately by ``write_lvs_report`` further down the recipe.
+    """
     print("\n" + "=" * 60)
     print("Running DRC (via kct check)...")
     print("=" * 60)
 
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(pcb_path),
+                "--allow-incomplete",
+            ],
             capture_output=True,
             text=True,
         )
@@ -742,6 +760,24 @@ def main() -> int:
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
+        # Step 6.5: LVS (#3779) -- assert the routed PCB's nets match the
+        # schematic's design intent via the shared
+        # ``kicad_tools.lvs.write_lvs_report`` helper.  Board 02 is verified
+        # clean on both the copper-extracted and label-based comparators, so
+        # it hard-gates on both (``require_clean=True``): a dirty result
+        # raises ``BoardNetlistMismatch`` and the recipe exits non-zero.
+        # Writes ``output/lvs.json`` so ``kct board-metrics`` surfaces
+        # ``lvs_clean: true`` and the gallery LVS chip turns green.
+        copper_clean, label_clean = write_lvs_report(
+            sch_path,
+            routed_path,
+            output_dir,
+            require_clean=True,
+            run_copper=True,
+            run_label=True,
+        )
+        lvs_success = copper_clean and label_clean
+
         # Step 7: Export manufacturing bundle (#3147) so ``kct fleet
         # status`` reports ``ship_ready=true`` (the bundle's manifest
         # mtime must be newer than the freshly routed PCB).
@@ -761,14 +797,17 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
+        print(f"  LVS: {'PASS' if lvs_success else 'FAIL'}")
         print(f"  MFG bundle: {'PASS' if mfg_success else 'FAIL'}")
         print("\nCharlieplex LED mapping:")
         print("  LED   Anode    Cathode")
         for led_conn in LED_CONNECTIONS:
             print(f"  {led_conn.ref}    {led_conn.anode_node}  {led_conn.cathode_node}")
 
-        # Partial routing is acceptable; success if ERC and DRC pass
-        return 0 if erc_success and drc_success else 1
+        # Partial routing is acceptable; success if ERC, DRC, and LVS pass.
+        # (``write_lvs_report`` raises on a dirty LVS so a False
+        # ``lvs_success`` here would mean LVS short-circuited.)
+        return 0 if erc_success and drc_success and lvs_success else 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
