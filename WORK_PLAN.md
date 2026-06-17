@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-06-16*
+*Last updated: 2026-06-17*
 
 ---
 
@@ -12,23 +12,32 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 ## In Progress (`loom:building`)
 
-*Nothing in flight.* The backlog was fully cleared on 2026-06-16 — Epic #2556 (diff-pair support, Phases 1A–1D) merged, and the v0.14.0 release shipped.
+*Nothing in flight.* 0 open PRs.
 
 ## Ready for Work (`loom:issue`)
 
 *Empty.* No approved issues are currently queued for Builders.
 
-## Proposals Awaiting Human Approval (`loom:architect`)
+## LVS Soundness Epic — COMPLETE (2026-06-17)
 
-An Architect pass on 2026-06-16 repopulated the backlog with three proposals:
+The independent copper-LVS soundness epic (motivated by #3742) is shipped. A `/loom:sweep` run on 2026-06-16/17 processed the #3762/#3763 Architect proposals and their entire follow-on tree — **16 PRs merged**:
 
-| Issue | Title | Focus |
-|-------|-------|-------|
-| **#3761** | Robust label-free zone-pour copper extraction for independent LVS (#3742 follow-up) | LVS soundness — closes the declared-net false-negative gap in `extract_pad_partition()`; sequence-first |
-| **#3762** | Make copper-LVS a first-class manufacturability leg across all demo boards (#3742 follow-up) | LVS soundness — rolls board 00's LVS recipe/CI pattern fleet-wide; depends conceptually on #3761 |
-| **#3763** | Board parity refresh: re-audit boards 02–07 against board-01 end-state (supersedes #2394) | Board parity — read-only audit deliverable that scopes remaining per-board slices |
+- **Gate + extractor hardening**: independent copper-extracted LVS gate (#3757); label-free pour extraction (#3761); per-zone pour-pad bonding across disjoint fill islands (#3772); foreign-net track-segment carve in zone fill (#3773); layer-aware segment chaining to kill phantom via-less-crossover shorts (#3783/#3792).
+- **Fleet rollout**: shared `write_lvs_report` helper + board 00/01 hard gates (#3762); boards 02/06/07 wired (#3779); boards 03/04 advisory (#3780).
+- **Board fixes the gate surfaced** (real defects DRC missed): board-03 GND F.Cu/B.Cu plane stitching (#3787); board-04 OSC_IN↔OSC_OUT crystal-pin short re-route (#3785) + GND re-pour (#3791); board-03/04 schematic↔PCB net-drift reconciliation (#3764/#3765); fleet staleness-detection fix (#3767); the 2026-06 parity audit (#3763).
 
-Suggested order: **#3761 → #3762** (robust extraction before fleet rollout); **#3763** is a cheap, read-only audit that can run anytime and will scope further board work.
+Net result: boards 00/01/02/03 are copper-LVS clean and reproducible; the gate caught (and fixed) genuine shorts on boards 02/03/04 that passed DRC.
+
+## Remaining — Human-led design decisions (`loom:architect` / `loom:blocked`)
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| **#3775** | board-05 U3-south relayout to free PHASE_A/B/C escape channels | **Research-grade.** Curator (2026-06-17) confirmed not safely automatable in one builder pass: U3 south edge packs 20 nets across 9.5mm @ 0.5mm pitch, zero slack, all prior widening levers spent. Needs a human to pick a relayout strategy (inner-layer PHASE corridors / ISENSE-return relocation / J2 re-clustering) — full analysis posted on the issue. Stays `loom:architect`. |
+| **#3766** | board-05: complete the 7 blocking unrouted nets | **Blocked** behind #3775 (the relayout is the prerequisite). |
+
+## Tracked follow-ups (advisory / low-priority)
+
+`loom:architect`: none currently beyond #3775. (Board-03/04 LVS hard-gate *graduation* is the deferred Part 2 of #3780, gated on the board defects now fixed — a tight follow-up.)
 
 ## Recently Completed
 
