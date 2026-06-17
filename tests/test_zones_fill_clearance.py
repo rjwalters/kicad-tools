@@ -136,6 +136,166 @@ class TestForeignPadCarved:
         assert fill.area > 380.0
 
 
+# A +3.3V F.Cu pour crossed by a foreign-net (GND) track segment and sitting
+# next to a foreign-net GND via.  A same-net (+3.3V) segment also runs through
+# the pour and must be preserved.  Regression fixture for issue #3773: the
+# foreign-net carve previously subtracted only pads and vias, leaving GND
+# traces embedded in the rail copper -> clearance_segment_zone shorts.
+_SEGMENT_BOARD = """
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 1 "+3.3V")
+  (net 3 "GND")
+  (footprint "lib:rail"
+    (layer "F.Cu")
+    (at 1 10)
+    (pad "1" thru_hole rect (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "+3.3V"))
+  )
+  (footprint "lib:gnd"
+    (layer "F.Cu")
+    (at 19 10)
+    (pad "1" thru_hole rect (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 3 "GND"))
+  )
+  (segment (start 0 5) (end 20 5) (width 0.25) (layer "F.Cu") (net 3))
+  (segment (start 0 15) (end 20 15) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 0 8) (end 20 8) (width 0.25) (layer "B.Cu") (net 3))
+  (segment (start 0 12) (end 20 12) (width 0.25) (layer "F.Cu") (net 0))
+  (via (at 10 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 3))
+  (zone
+    (net "+3.3V")
+    (layer "F.Cu")
+    (uuid "rail-zone")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.3))
+    (min_thickness 0.25)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+    (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+    (filled_polygon
+      (layer "F.Cu")
+      (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20))
+    )
+  )
+)
+"""
+
+
+def _segment_copper(sx, sy, ex, ey, width):
+    from shapely.geometry import LineString
+
+    return LineString([(sx, sy), (ex, ey)]).buffer(width / 2.0)
+
+
+class TestForeignSegmentCarved:
+    """Issue #3773: foreign-net track segments must be carved from pours.
+
+    A GND trace routed across a +3.3V pour was previously left embedded in
+    the rail copper because ``_collect_obstacles`` only modelled pads and
+    vias, never ``segment`` primitives.
+    """
+
+    def test_foreign_segment_is_excluded_with_clearance(self):
+        doc = _parse(_SEGMENT_BOARD)
+        modified = apply_foreign_pad_clearance(doc)
+        assert modified >= 1
+
+        fill = _fill_polygon(doc)
+        # Foreign GND F.Cu segment at y=5, full width, 0.25mm trace.
+        gnd_seg = _segment_copper(0, 5, 20, 5, 0.25)
+        assert fill.intersection(gnd_seg).area == pytest.approx(0.0, abs=1e-9)
+        # Cleared by at least the zone clearance (0.3mm).
+        assert fill.distance(gnd_seg) >= 0.3 - 1e-6
+
+    def test_foreign_via_still_excluded(self):
+        doc = _parse(_SEGMENT_BOARD)
+        apply_foreign_pad_clearance(doc)
+        fill = _fill_polygon(doc)
+        via = shapely.geometry.Point(10.0, 5.0).buffer(0.3)
+        assert fill.intersection(via).area == pytest.approx(0.0, abs=1e-9)
+        assert fill.distance(via) >= 0.3 - 1e-6
+
+    def test_same_net_segment_preserved(self):
+        """A +3.3V trace inside the pour must NOT be carved out."""
+        doc = _parse(_SEGMENT_BOARD)
+        apply_foreign_pad_clearance(doc)
+        fill = _fill_polygon(doc)
+        # Same-net +3.3V F.Cu segment at y=15 must remain inside the fill.
+        same_seg = _segment_copper(0, 15, 20, 15, 0.25)
+        assert fill.intersection(same_seg).area > 0.0
+
+    def test_wrong_layer_segment_not_carved(self):
+        """A GND segment on B.Cu must not carve the F.Cu fill."""
+        doc = _parse(_SEGMENT_BOARD)
+        apply_foreign_pad_clearance(doc)
+        fill = _fill_polygon(doc)
+        # GND B.Cu segment at y=8 -- its footprint must remain covered by the
+        # F.Cu fill (only the F.Cu GND segment/via carve copper here).
+        bcu_seg = _segment_copper(0, 8, 20, 8, 0.25)
+        assert fill.intersection(bcu_seg).area > 0.0
+
+    def test_net0_segment_ignored(self):
+        """An unassigned (net 0) segment is not a clearance obstacle."""
+        doc = _parse(_SEGMENT_BOARD)
+        apply_foreign_pad_clearance(doc)
+        fill = _fill_polygon(doc)
+        # net-0 F.Cu segment at y=12 must remain covered (not carved).
+        net0_seg = _segment_copper(0, 12, 20, 12, 0.25)
+        assert fill.intersection(net0_seg).area > 0.0
+
+    def test_no_shapely_is_noop(self, monkeypatch):
+        """With shapely unavailable the carve is a no-op, not a crash."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "shapely" or name.startswith("shapely."):
+                raise ImportError("shapely disabled for test")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        doc = _parse(_SEGMENT_BOARD)
+        modified = apply_foreign_pad_clearance(doc)
+        assert modified == 0
+
+    def test_drc_reports_zero_segment_and_via_zone_errors(self, tmp_path):
+        """End-to-end through the real DRC rules the CI gate runs."""
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.clearance import (
+            SegmentZoneClearanceRule,
+            ViaZoneClearanceRule,
+        )
+
+        class _Rules:
+            min_clearance_mm = 0.127
+
+        doc = _parse(_SEGMENT_BOARD)
+        out = tmp_path / "board.kicad_pcb"
+        save_pcb(doc, out)
+        pcb_before = PCB.load(str(out))
+        seg_rule = SegmentZoneClearanceRule()
+        via_rule = ViaZoneClearanceRule()
+
+        before = seg_rule.check(pcb_before, _Rules()).violations
+        before += via_rule.check(pcb_before, _Rules()).violations
+        # Sanity: pre-carve, the GND segment and via overlap the +3.3V fill.
+        assert any(v.rule_id in ("clearance_segment_zone", "clearance_via_zone") for v in before), (
+            "fixture should produce zone shorts before the carve"
+        )
+
+        apply_foreign_pad_clearance(doc)
+        save_pcb(doc, out)
+        pcb_after = PCB.load(str(out))
+        after = seg_rule.check(pcb_after, _Rules()).violations
+        after += via_rule.check(pcb_after, _Rules()).violations
+        zone_shorts = [
+            v for v in after if v.rule_id in ("clearance_segment_zone", "clearance_via_zone")
+        ]
+        assert zone_shorts == [], f"expected no segment/via-zone errors, got: {zone_shorts}"
+
+
 class TestNoForeignCopper:
     def test_no_modification_when_all_same_net(self):
         """A fill with only same-net pads is left untouched."""

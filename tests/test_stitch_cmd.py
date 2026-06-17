@@ -1,5 +1,6 @@
 """Tests for the kicad-pcb-stitch CLI command."""
 
+import importlib.util
 import math
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from kicad_tools.cli.stitch_cmd import (
     TrackSegment,
     ViaPlacement,
     ZonePolygon,
+    _carve_foreign_copper_after_stitch,
     _is_ground_net,
     _should_use_stackup_fallback,
     calculate_dogleg_via_position,
@@ -6085,3 +6087,108 @@ class TestCrossNetTraceCoCheck:
                     f"NETB via at ({vb.via_x}, {vb.via_y}) violates NETA stitch "
                     f"trace clearance: {dist:.4f} < {required:.4f}"
                 )
+
+
+class TestPostStitchForeignCopperCarve:
+    """Issue #3773: re-carve foreign-net copper out of zone fills after stitch.
+
+    ``kct stitch`` adds GND vias and pad-to-via trace segments across the
+    existing rail pours but does not refill the zones, leaving the new GND
+    copper embedded in the +3.3V/+5V fill (clearance_via_zone /
+    clearance_segment_zone shorts on a fresh regen).
+    ``_carve_foreign_copper_after_stitch`` re-applies the pure-Python
+    foreign-pad clearance carve so the existing fill clears the new copper.
+    """
+
+    _BOARD = """
+    (kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (net 0 "")
+      (net 1 "+3.3V")
+      (net 3 "GND")
+      (footprint "lib:rail"
+        (layer "F.Cu")
+        (at 1 10)
+        (pad "1" thru_hole rect (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "+3.3V"))
+      )
+      (segment (start 0 5) (end 20 5) (width 0.25) (layer "F.Cu") (net 3))
+      (via (at 10 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 3))
+      (zone
+        (net "+3.3V")
+        (layer "F.Cu")
+        (uuid "rail-zone")
+        (hatch edge 0.5)
+        (connect_pads (clearance 0.3))
+        (min_thickness 0.25)
+        (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.4))
+        (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+        (filled_polygon
+          (layer "F.Cu")
+          (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20))
+        )
+      )
+    )
+    """
+
+    def _zone_shorts(self, pcb_path: Path):
+        from collections import Counter
+
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.clearance import (
+            SegmentZoneClearanceRule,
+            ViaZoneClearanceRule,
+        )
+
+        class _Rules:
+            min_clearance_mm = 0.127
+
+        pcb = PCB.load(str(pcb_path))
+        v = SegmentZoneClearanceRule().check(pcb, _Rules()).violations
+        v += ViaZoneClearanceRule().check(pcb, _Rules()).violations
+        return Counter(x.rule_id for x in v)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("shapely") is None,
+        reason="shapely required for the foreign-pad clearance carve",
+    )
+    def test_carve_removes_foreign_via_and_segment_shorts(self, tmp_path):
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_string
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        doc = parse_string(self._BOARD)
+        save_pcb(doc, pcb_path)
+
+        before = self._zone_shorts(pcb_path)
+        assert before.get("clearance_segment_zone", 0) >= 1
+        assert before.get("clearance_via_zone", 0) >= 1
+
+        _carve_foreign_copper_after_stitch(pcb_path)
+
+        after = self._zone_shorts(pcb_path)
+        assert after.get("clearance_segment_zone", 0) == 0
+        assert after.get("clearance_via_zone", 0) == 0
+
+    def test_carve_is_noop_without_shapely(self, tmp_path, monkeypatch):
+        import builtins
+
+        from kicad_tools.core.sexp_file import save_pcb
+        from kicad_tools.sexp import parse_string
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        doc = parse_string(self._BOARD)
+        save_pcb(doc, pcb_path)
+        original = pcb_path.read_text()
+
+        real_import = builtins.__import__
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "shapely" or name.startswith("shapely."):
+                raise ImportError("shapely disabled for test")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        # Must not raise and must not modify the board.
+        _carve_foreign_copper_after_stitch(pcb_path)
+        assert pcb_path.read_text() == original

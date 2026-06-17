@@ -131,7 +131,10 @@ def _collect_obstacles(
     are modelled by their circular barrel.  Net-0 (unassigned) copper is
     skipped — it does not participate in clearance checks.
     """
-    from shapely.geometry import Point  # type: ignore[import-untyped]
+    from shapely.geometry import (  # type: ignore[import-untyped]
+        LineString,
+        Point,
+    )
 
     obstacles: list[_Obstacle] = []
 
@@ -227,6 +230,37 @@ def _collect_obstacles(
         )
         shape = Point(cx, cy).buffer(diameter / 2.0)
         obstacles.append(_Obstacle(net_key=net_key, layers=tuple(via_layers), shape=shape))
+
+    # --- Track segments (top level) ---
+    # A foreign-net trace routed across a pour is copper the fill must clear,
+    # exactly like a foreign pad or via.  We model the segment by its buffered
+    # centreline (a half-width-radius capsule) on its single copper layer,
+    # mirroring the same-net anchor geometry in ``_collect_same_net_anchors``.
+    # Without this branch a GND trace crossing a +3.3V/+5V pour stays embedded
+    # in the rail copper and ``SegmentZoneClearanceRule`` reports a short
+    # (issue #3773).
+    for seg in doc.find_all("segment"):
+        net_key = _net_key(seg.find("net"), name_map)
+        if net_key is None:
+            continue
+        layer_node = seg.find("layer")
+        layer = layer_node.get_string(0) if layer_node is not None else None
+        if not layer:
+            continue
+        start = seg.find("start")
+        end = seg.find("end")
+        if start is None or end is None:
+            continue
+        sx = start.get_float(0) or 0.0
+        sy = start.get_float(1) or 0.0
+        ex = end.get_float(0) or 0.0
+        ey = end.get_float(1) or 0.0
+        width_node = seg.find("width")
+        width = (width_node.get_float(0) if width_node is not None else None) or 0.0
+        if width <= 0:
+            continue
+        shape = LineString([(sx, sy), (ex, ey)]).buffer(width / 2.0)
+        obstacles.append(_Obstacle(net_key=net_key, layers=(layer,), shape=shape))
 
     return obstacles
 

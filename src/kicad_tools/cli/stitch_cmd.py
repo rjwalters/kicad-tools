@@ -4333,6 +4333,44 @@ def run_stitch(
     return result
 
 
+def _carve_foreign_copper_after_stitch(pcb_path: Path) -> None:
+    """Re-carve foreign-net copper out of zone fills after stitching.
+
+    Issue #3773: ``kct stitch`` adds GND vias and pad-to-via trace segments
+    that cross the existing rail pours (e.g. ``+3.3V`` / ``+5V`` F.Cu), but
+    it does not refill the zones.  The freshly added GND copper is therefore
+    left embedded in the rail fill, producing ``clearance_via_zone`` and
+    ``clearance_segment_zone`` shorts on a fresh board regen.
+
+    :func:`apply_foreign_pad_clearance` subtracts an antipad around every
+    foreign-net pad, via, **and** track segment from each committed
+    ``filled_polygon`` (the segment branch added in issue #3773), so it
+    cleanly removes the new GND copper from the rail pour.  It edits the
+    parsed S-expression directly (no kicad-cli refill, so the post-route
+    carve is preserved) and is a no-op when shapely is unavailable.
+    """
+    try:
+        from kicad_tools.core.sexp_file import load_pcb, save_pcb
+        from kicad_tools.zones.fill_clearance import apply_foreign_pad_clearance
+    except ImportError:
+        return
+    try:
+        doc = load_pcb(pcb_path)
+        modified = apply_foreign_pad_clearance(doc)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        print(
+            f"\nWarning: post-stitch zone-fill clearance carve skipped ({exc}).",
+            file=sys.stderr,
+        )
+        return
+    if modified:
+        save_pcb(doc, pcb_path)
+        print(
+            f"  ~ Carved foreign-net copper out of {modified} zone fill(s) "
+            "(post-stitch clearance correction)"
+        )
+
+
 def run_post_stitch_drc(pcb_path: Path) -> int:
     """Run DRC on the PCB after stitching and display summary.
 
@@ -4879,6 +4917,19 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         output_result(result, dry_run=args.dry_run, run_drc=args.drc, edited_path=pcb_path)
+
+        # Issue #3773: stitching adds new foreign-net copper (GND vias and
+        # pad-to-via trace segments) *across* the existing rail pours, but
+        # does not refill the zones (a refill would revert the post-route
+        # foreign-pad clearance carve).  Without re-carving, those new GND
+        # vias/segments stay embedded in the +3.3V/+5V fill, producing
+        # ``clearance_via_zone`` / ``clearance_segment_zone`` shorts on a
+        # fresh regen.  Re-apply the pure-Python carve here so the existing
+        # fill clears the freshly added GND copper too.  It operates only on
+        # the committed ``filled_polygon`` geometry (no kicad-cli refill, so
+        # route's carve is preserved) and is a no-op when shapely is absent.
+        if not args.dry_run and result.vias_added:
+            _carve_foreign_copper_after_stitch(pcb_path)
 
         # Run DRC if requested (and not dry run, and vias were actually added)
         if args.drc and not args.dry_run and result.vias_added:
