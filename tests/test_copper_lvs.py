@@ -713,6 +713,97 @@ def test_pour_extraction_ignores_zone_and_pad_net_labels(tmp_path: Path) -> None
     assert any("R2.1" in c for c in partition)
 
 
+def _pcb_pour_two_disjoint_islands() -> str:
+    """One GND zone whose fill is two DISJOINT same-net islands, one pad each.
+
+    Distilled from board 03: KiCad stores a single poured zone as many
+    ``filled_polygon`` entries when thermal reliefs / clearance moats fragment
+    the copper.  Here the GND F.Cu zone is filled as two separate solid squares
+    that do not touch (a 4 mm gap between them):
+
+    * island A: solid copper 0..4 in x, bonding ``C1`` pad "2" at board (2, 2)
+    * island B: solid copper 8..12 in x, bonding ``C2`` pad "2" at board (10, 2)
+
+    Both pads are declared GND and both sit squarely in solid copper, so the
+    bonding *test* (``region.intersects`` of the eroded pad box) succeeds for
+    each — there is no moat involved.  The ONLY thing under test is whether the
+    extractor unions pads across the zone's two disjoint fill islands.
+
+    * Per-fill (the #3769 bug): C1.2 bonds only within island A, C2.2 only
+      within island B -> two singleton components -> a false GND open.
+    * Per-zone (the fix): both pads are accumulated for the one ``zone`` object
+      and unioned together -> a single GND component -> clean.
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000b1")
+    (at 2 2)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-b1-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-b1-val"))
+    (pad "2" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000b2")
+    (at 10 2)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-b2-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-b2-val"))
+    (pad "2" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (zone
+    (net 1 "GND")
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000z2")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 0 0) (xy 12 0) (xy 12 4) (xy 0 4)))
+    (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 4 0) (xy 4 4) (xy 0 4)))
+    (filled_polygon (layer "F.Cu") (pts (xy 8 0) (xy 12 0) (xy 12 4) (xy 8 4)))
+  )
+)
+"""
+
+
+@requires_shapely
+def test_pour_extraction_unions_pads_across_disjoint_fill_islands_of_one_zone(
+    tmp_path: Path,
+) -> None:
+    """Regression (#3772): one zone, two disjoint fill islands -> one component.
+
+    KiCad fragments a single poured zone into multiple ``filled_polygon``
+    entries (board 03's GND F.Cu zone is one main pour plus a dozen tiny
+    per-pad fragments).  The pre-fix extractor unioned bonded pads only WITHIN
+    a single fill index, so a pad alone in its own fragment landed in a
+    singleton component and copper-LVS reported it as a false ``open``.
+
+    This fixture is that failure shape distilled: two GND pads, each bonded to
+    a *different* disjoint fill island of the SAME ``zone`` object.  Both must
+    land in one connected component.  FAILS on origin/main (per-fill unioning
+    splits them); PASSES after the per-zone unioning fix.
+    """
+    pcb_path = _write(tmp_path, "two_islands.kicad_pcb", _pcb_pour_two_disjoint_islands())
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    component = next(c for c in partition if "C1.2" in c)
+    assert {"C1.2", "C2.2"} <= component, (
+        "pads bonded to disjoint fill islands of the same zone must share one "
+        f"component (no false open); partition={partition}"
+    )
+
+
 @requires_shapely
 def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     """End-to-end: the label-free pour model stays clean on a pour-heavy board.
