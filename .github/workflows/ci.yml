@@ -1064,3 +1064,179 @@ jobs:
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem voltage_divider \
             /tmp/board01-staging/01-voltage-divider
+
+  board-06-end-to-end:
+    # Issue #3779: LVS-ONLY end-to-end gate for board 06 ("diffpair-test").
+    # Board 06 is a PCB-first routing fixture (USB3 connectors with no
+    # schematic-side net), so its label-LVS is all ``schematic_net=None``
+    # advisory noise.  Its recipe now runs
+    # ``write_lvs_report(..., require_clean=True, run_copper=True,
+    # run_label=False)`` in the ``--step all`` branch, hard-gating on the
+    # copper-extracted comparator only and emitting ``output/lvs.json``.
+    #
+    # This job is a NEW, ADDITIVE gate -- it does NOT replace the
+    # ``diffpair-routing-regression`` job (which keeps its allowlist-based
+    # DRC coverage gate on the ``--step route`` re-route).  Unlike board
+    # 00/01, board 06 carries allowlisted DRC residuals
+    # (.github/routed-drc-tolerance.yml: diffpair_test_routed.kicad_pcb=18)
+    # and routes PARTIAL by design, so its board.json is
+    # ``status:"partial"`` / ``drc_violations>0``.  It therefore CANNOT
+    # assert ``kct check Overall: PASSED`` or ``board.json status:ok`` --
+    # this job uses the asserter's ``--lvs-only`` mode, which checks only
+    # artifact presence + ``lvs.json clean=true`` (+ ``board.json
+    # lvs_clean=true``).
+    #
+    # The recipe returns non-zero on PARTIAL routing (expected on this
+    # board), so the regen step tolerates a non-zero recipe exit (``|| true``)
+    # and the LVS-only asserter is the real gate: a copper short/open makes
+    # ``write_lvs_report`` write ``lvs.json clean=false`` (before it raises),
+    # which the asserter catches.  Determinism via ``--seed 42`` +
+    # PYTHONHASHSEED (mirrors the routing-regression jobs).
+    #
+    # Advisory until a repo admin adds it to branch protection (same as the
+    # board 00/01 e2e jobs).
+    name: Board 06 End-to-End (LVS-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: kicad/kicad:10.0
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 06 from recipe (--step all, clean tmp directory)
+        # PARTIAL routing is expected on this board (USB3_TX1 blocked by the
+        # BGA partner-via escape, #2677), so the recipe may exit non-zero
+        # even when copper-LVS is clean -- tolerate it (|| true).  The
+        # LVS-only asserter below is the gate: write_lvs_report writes
+        # lvs.json (clean=false before raising) on any copper short/open.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board06-ci
+          mkdir -p /tmp/board06-ci
+          uv run python boards/06-diffpair-test/generate_design.py \
+            /tmp/board06-ci --step all --seed 42 || true
+          test -f /tmp/board06-ci/lvs.json
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board06-staging
+          mkdir -p /tmp/board06-staging/06-diffpair-test/output
+          cp -r /tmp/board06-ci/. /tmp/board06-staging/06-diffpair-test/output/
+          uv run kct board-metrics /tmp/board06-staging/06-diffpair-test
+
+      - name: Assert artifacts + lvs.json clean (LVS-only)
+        # --lvs-only: assert artifact presence + lvs.json clean=true +
+        # board.json lvs_clean=true, but NOT status:ok / drc_violations:0
+        # (board 06 carries allowlisted DRC residuals -> status='partial').
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem diffpair_test \
+            --lvs-only \
+            /tmp/board06-staging/06-diffpair-test
+
+  board-07-end-to-end:
+    # Issue #3779: LVS-ONLY end-to-end gate for board 07 ("matchgroup-test").
+    # Same shape as the board-06 job: board 07 is a PCB-first routing
+    # fixture (MIPI/TMDS connectors with no schematic-side net) whose
+    # label-LVS is all ``schematic_net=None`` advisory noise.  Its recipe
+    # now runs ``write_lvs_report(..., require_clean=True, run_copper=True,
+    # run_label=False)`` in the ``--step all`` branch, hard-gating on
+    # copper only and emitting ``output/lvs.json``.
+    #
+    # NEW, ADDITIVE gate -- does NOT replace the
+    # ``matchgroup-routing-regression`` job.  Board 07 carries allowlisted
+    # DRC residuals (.github/routed-drc-tolerance.yml:
+    # matchgroup_test_routed.kicad_pcb=120) and routes PARTIAL by design,
+    # so it uses the asserter's ``--lvs-only`` mode (no Overall: PASSED /
+    # status:ok / drc_violations:0 assertions).  Advisory until a repo
+    # admin adds it to branch protection.
+    name: Board 07 End-to-End (LVS-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: kicad/kicad:10.0
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
+        # PARTIAL routing is expected on this board, so tolerate a non-zero
+        # recipe exit (|| true); the LVS-only asserter is the real gate.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board07-ci
+          mkdir -p /tmp/board07-ci
+          uv run python boards/07-matchgroup-test/generate_design.py \
+            /tmp/board07-ci --step all --seed 42 || true
+          test -f /tmp/board07-ci/lvs.json
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board07-staging
+          mkdir -p /tmp/board07-staging/07-matchgroup-test/output
+          cp -r /tmp/board07-ci/. /tmp/board07-staging/07-matchgroup-test/output/
+          uv run kct board-metrics /tmp/board07-staging/07-matchgroup-test
+
+      - name: Assert artifacts + lvs.json clean (LVS-only)
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem matchgroup_test \
+            --lvs-only \
+            /tmp/board07-staging/07-matchgroup-test

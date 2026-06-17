@@ -56,6 +56,7 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.lvs import write_lvs_report
 from kicad_tools.router.rules import (
     NET_CLASS_POWER,
     NetClassRouting,
@@ -1977,6 +1978,25 @@ def main() -> int:
             routed_path = output_dir / "matchgroup_test_routed.kicad_pcb"
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
+
+            # LVS (#3779) -- copper-only hard gate.  Board 07 is a PCB-first
+            # routing fixture (MIPI/TMDS connectors with no schematic-side
+            # net), so the label comparator reports every pad as
+            # ``schematic_net=None`` (advisory noise, not a real defect).  The
+            # copper-extracted comparator correctly ignores ``None``-net pads,
+            # so we gate on copper only (``run_label=False``): a copper
+            # short/open raises ``BoardNetlistMismatch`` and fails the recipe.
+            # Writes ``output/lvs.json`` so ``kct board-metrics`` surfaces
+            # ``lvs_clean: true``.  This step only runs in ``--step all`` (the
+            # ``--step route`` CI branch has no schematic).
+            copper_clean, _label_clean = write_lvs_report(
+                sch_path,
+                routed_path,
+                output_dir,
+                require_clean=True,
+                run_copper=True,
+                run_label=False,
+            )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
             # reports ``ship_ready=true`` (the bundle's manifest mtime must

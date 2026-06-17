@@ -99,3 +99,76 @@ def test_main_default_stem_still_works_for_board_00_shape(tmp_path: Path) -> Non
     # No --stem passed: must default to board 00's artifact set and pass.
     rc = helper.main([str(board_dir)])
     assert rc == 0
+
+
+# --- --lvs-only mode (issue #3779) -----------------------------------------
+#
+# Boards 06/07 carry allowlisted DRC residuals -> board.json is
+# status='partial' / drc_violations>0.  The full asserter would reject those
+# fields; --lvs-only asserts only artifact presence + lvs.json clean=true
+# (+ board.json lvs_clean=true), so a copper-LVS-clean but DRC-partial board
+# passes while a copper-dirty board still fails.
+
+
+def _stage_partial_board(root: Path, stem: str) -> Path:
+    """Build a staging dir mimicking boards 06/07: lvs clean, DRC partial."""
+    helper = _load_helper()
+    board_dir = root / "board"
+    output = board_dir / "output"
+    (output / "manufacturing").mkdir(parents=True)
+    for rel in helper.required_artifacts(stem):
+        p = output / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("placeholder")
+    (output / "lvs.json").write_text(json.dumps({"clean": True, "mismatches": []}))
+    # status='partial' + drc_violations>0 (allowlisted residuals), but
+    # copper-LVS clean -> lvs_clean=True.
+    (output / "board.json").write_text(
+        json.dumps({"status": "partial", "drc_violations": 18, "lvs_clean": True})
+    )
+    return board_dir
+
+
+def test_lvs_only_passes_partial_board(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_partial_board(tmp_path, "diffpair_test")
+    # --lvs-only must NOT reject status='partial' / drc_violations=18.
+    rc = helper.main([str(board_dir), "--stem", "diffpair_test", "--lvs-only"])
+    assert rc == 0
+
+
+def test_full_asserter_rejects_partial_board(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_partial_board(tmp_path, "diffpair_test")
+    # Without --lvs-only, the same partial board fails on status/drc_violations.
+    rc = helper.main([str(board_dir), "--stem", "diffpair_test"])
+    assert rc == 2
+
+
+def test_lvs_only_still_fails_on_dirty_lvs(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_partial_board(tmp_path, "diffpair_test")
+    (board_dir / "output" / "lvs.json").write_text(
+        json.dumps(
+            {
+                "clean": False,
+                "mismatches": [],
+                "copper_mismatches": [
+                    {"kind": "short", "net_a": "A", "net_b": "B", "pad_a": "U1.1", "pad_b": "U2.1"}
+                ],
+            }
+        )
+    )
+    rc = helper.main([str(board_dir), "--stem", "diffpair_test", "--lvs-only"])
+    assert rc == 2
+
+
+def test_lvs_only_rejects_board_json_lvs_clean_false(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_partial_board(tmp_path, "diffpair_test")
+    # board.json lvs_clean=False is still gated even in --lvs-only mode.
+    (board_dir / "output" / "board.json").write_text(
+        json.dumps({"status": "partial", "drc_violations": 18, "lvs_clean": False})
+    )
+    rc = helper.main([str(board_dir), "--stem", "diffpair_test", "--lvs-only"])
+    assert rc == 2
