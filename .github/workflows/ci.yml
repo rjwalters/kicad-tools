@@ -1065,6 +1065,85 @@ jobs:
             --stem voltage_divider \
             /tmp/board01-staging/01-voltage-divider
 
+  board-02-end-to-end:
+    # Issue #3783: same full end-to-end gate as ``board-00-end-to-end`` /
+    # ``board-01-end-to-end``, applied to board 02 ("charlieplex-led").
+    # This job was deferred in #3779 because a fresh regen produced a
+    # spurious copper short (NODE_B<->NODE_C) — a layer-agnostic copper-LVS
+    # extractor false-positive on a legal via-less F.Cu/B.Cu crossover.
+    # With the layer-aware ``_build_segment_chains`` fix (this PR), a fresh
+    # board-02 regen is copper-LVS clean (Overall: PASSED), so the full
+    # e2e gate (regen → ``kct check`` Overall PASSED → board.json status:ok
+    # / drc_violations:0 / lvs_clean:true) is now green and added here.
+    # See the board-00 job above for the full rationale on container choice,
+    # the C++ backend build, and the advisory (non-required-check) status
+    # until a repo admin flips the branch-protection setting.
+    name: Board 02 End-to-End
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: kicad/kicad:10.0
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 02 from recipe (clean tmp directory)
+        # The recipe exits non-zero if ERC/DRC/LVS fail OR write_lvs_report
+        # raises BoardNetlistMismatch -- board 02 hard-gates on both the
+        # copper-extracted and label-based comparators (require_clean=True).
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board02-ci
+          mkdir -p /tmp/board02-ci
+          uv run python boards/02-charlieplex-led/generate_design.py /tmp/board02-ci
+
+      - name: Assert kct check Overall PASSED on regenerated routed PCB
+        run: |
+          set -euo pipefail
+          uv run kct check /tmp/board02-ci/charlieplex_3x3_routed.kicad_pcb \
+            | tee /tmp/board02-ci/check.out
+          grep -qE '^Overall:[[:space:]]+PASSED' /tmp/board02-ci/check.out
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board02-staging
+          mkdir -p /tmp/board02-staging/02-charlieplex-led/output
+          cp -r /tmp/board02-ci/. /tmp/board02-staging/02-charlieplex-led/output/
+          uv run kct board-metrics /tmp/board02-staging/02-charlieplex-led
+
+      - name: Assert artifacts + lvs.json + board.json fields
+        # Reuse the generalized board-00 asserter with --stem so it derives
+        # board 02's artifact names (charlieplex_3x3*.kicad_{sch,pcb}).
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem charlieplex_3x3 \
+            /tmp/board02-staging/02-charlieplex-led
+
   board-06-end-to-end:
     # Issue #3779: LVS-ONLY end-to-end gate for board 06 ("diffpair-test").
     # Board 06 is a PCB-first routing fixture (USB3 connectors with no

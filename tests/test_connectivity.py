@@ -1196,3 +1196,182 @@ class TestConnectivityProResolution:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "PCB file not found" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Layer-aware segment chaining (issue #3783)
+#
+# A via-less F.Cu/B.Cu crossover — two different-net traces that merely cross
+# at the same (x, y) on opposite copper layers with NO via — is a legal,
+# DRC-clean layer crossover and must NOT be fused into one component.  A via
+# (or a multi-layer / through-hole pad) at that point DOES bridge the layers,
+# so a same-net trace that legitimately hops layers through a via must still
+# flood as one component.
+# ---------------------------------------------------------------------------
+
+
+def _crossover_pcb(*, with_via: bool, same_net: bool) -> str:
+    """Build a 2-layer PCB with NODE_B (F.Cu) crossing NODE_C (B.Cu).
+
+    Geometry mirrors the board-02 false-positive (issue #3783): a vertical
+    F.Cu trace from R1.1 and a horizontal B.Cu trace from R2.1 cross at
+    (110, 110).  ``with_via`` drops a through-hole via at the crossing.
+    ``same_net`` labels both traces/pads on the same net (only meaningful
+    together with ``with_via`` to model a real layer hop).
+    """
+    net_b = '(net 1 "NODE_B")'
+    pad2_net = '(net 1 "NODE_B")' if same_net else '(net 2 "NODE_C")'
+    via_block = ""
+    if with_via:
+        via_block = (
+            '  (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(net 1) (uuid "00000000-0000-0000-0000-0000000000f9"))\n'
+        )
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NODE_B")
+  (net 2 "NODE_C")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c1")
+    (at 110 105)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) {net_b})
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c2")
+    (at 105 110)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-c2-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-c2-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) {pad2_net})
+  )
+  (segment (start 110 105) (end 110 110) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000c3"))
+  (segment (start 110 110) (end 110 115) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000c4"))
+  (segment (start 105 110) (end 110 110) (width 0.25) (layer "B.Cu") (net {1 if same_net else 2})
+    (uuid "00000000-0000-0000-0000-0000000000c5"))
+  (segment (start 110 110) (end 115 110) (width 0.25) (layer "B.Cu") (net {1 if same_net else 2})
+    (uuid "00000000-0000-0000-0000-0000000000c6"))
+{via_block})
+"""
+
+
+def _four_layer_thruvia_pcb() -> str:
+    """4-layer PCB: a through-hole via must bridge an inner-layer hop.
+
+    R1.1 routes on F.Cu to a via at (110, 110); the trace continues on the
+    inner layer In1.Cu to R2.1.  ``via.layers`` only names ["F.Cu","B.Cu"],
+    so the chainer must expand the through-hole span to include In1.Cu —
+    otherwise the same-net hop falsely splits (the board-05 regression in
+    issue #3783).
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "SIG")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000d1")
+    (at 110 105)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-d1-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-d1-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "SIG"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000d2")
+    (at 115 110)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-d2-ref"))
+    (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-d2-val"))
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (layers "In1.Cu")
+      (roundrect_rratio 0.25) (net 1 "SIG"))
+  )
+  (segment (start 110 105) (end 110 110) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000d3"))
+  (segment (start 110 110) (end 115 110) (width 0.25) (layer "In1.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000d4"))
+  (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000d5"))
+)
+"""
+
+
+class TestLayerAwareSegmentChaining:
+    """Issue #3783: cross-layer copper only fuses where a via/pad bridges."""
+
+    def test_via_less_crossover_is_two_components(self, tmp_path: Path) -> None:
+        """Different-net F.Cu/B.Cu traces crossing with NO via -> 2 groups."""
+        pcb_file = tmp_path / "crossover.kicad_pcb"
+        pcb_file.write_text(_crossover_pcb(with_via=False, same_net=False))
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        # R1.1 (NODE_B, F.Cu) and R2.1 (NODE_C, B.Cu) must NOT fuse.
+        assert frozenset({"R1.1"}) in partition
+        assert frozenset({"R2.1"}) in partition
+        assert len(partition) == 2
+
+    def test_via_bridged_crossover_is_one_component(self, tmp_path: Path) -> None:
+        """Same-net F.Cu/B.Cu traces joined by a via -> 1 group."""
+        pcb_file = tmp_path / "via_bridge.kicad_pcb"
+        pcb_file.write_text(_crossover_pcb(with_via=True, same_net=True))
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        # The via at the crossing bridges F.Cu<->B.Cu, so both pads fuse.
+        assert frozenset({"R1.1", "R2.1"}) in partition
+        assert len(partition) == 1
+
+    def test_via_at_crossover_bridges_different_nets(self, tmp_path: Path) -> None:
+        """A via present at a crossover DOES bridge layers (sanity check).
+
+        With a via at the crossing the two traces become galvanically one
+        component even when labeled as different nets — this is what makes
+        the label-free extractor catch a *real* via-on-crossover short, and
+        confirms the layer-aware gate is not blanket-suppressing vias.
+        """
+        pcb_file = tmp_path / "via_short.kicad_pcb"
+        pcb_file.write_text(_crossover_pcb(with_via=True, same_net=False))
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        assert frozenset({"R1.1", "R2.1"}) in partition
+        assert len(partition) == 1
+
+    def test_through_via_bridges_inner_layer_hop(self, tmp_path: Path) -> None:
+        """A through-hole via bridges inner layers not named in via.layers."""
+        pcb_file = tmp_path / "thruvia.kicad_pcb"
+        pcb_file.write_text(_four_layer_thruvia_pcb())
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        # F.Cu -> via -> In1.Cu hop must keep the net as one component even
+        # though via.layers only lists F.Cu/B.Cu.
+        assert frozenset({"R1.1", "R2.1"}) in partition
+        assert len(partition) == 1
+
+    def test_copper_layer_order_expands_thru_via(self, tmp_path: Path) -> None:
+        """The via-span expander includes inner copper layers."""
+        pcb_file = tmp_path / "thruvia.kicad_pcb"
+        pcb_file.write_text(_four_layer_thruvia_pcb())
+        validator = ConnectivityValidator(pcb_file)
+        order = validator._copper_layer_order()
+        assert order == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        bridged = validator._via_bridged_layers(["F.Cu", "B.Cu"])
+        assert bridged == frozenset({"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"})
