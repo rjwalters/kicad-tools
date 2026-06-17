@@ -166,10 +166,16 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     # =========================================================================
     print("\n3. Placing Joystick connector via create_analog_joystick factory...")
 
-    # The factory drops the 5-pin connector + per-axis RC anti-aliasing filters
-    # + a BTN pull-up resistor and emits the VCC/GND/X/Y/BTN labels itself, so
-    # the inline connector + JOY_PIN_MAP + wiring loop that lived here before
-    # all collapse into a single call.
+    # The factory drops the 5-pin connector and emits the VCC/GND/X/Y/BTN
+    # labels.  The anti-alias RC filter (R10/C10, R11/C11) and the BTN
+    # pull-up (R12) are added explicitly below instead of via the
+    # factory's series-filter so the schematic netlist matches the PCB's
+    # ``generate_joystick_filter()`` topology pad-for-pad (issue #3764).
+    # On the PCB the filter resistors carry the SAME net on both pads
+    # (JOY_X / JOY_Y) — modelled as a 0-ohm continuation rather than a
+    # series element introducing an extra wiper net — so we mirror that
+    # here to keep ``schematic_net_count == pcb_net_count == 16`` and
+    # ``compare_netlists().clean == True``.
     joy_pos = sch.suggest_position(
         "Connector_Generic:Conn_01x05",
         near=(50.8, 101.6),
@@ -185,16 +191,38 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         x_net="JOY_X",
         y_net="JOY_Y",
         btn_net="JOY_BTN",
-        filter_cutoff_hz=1000.0,
-        btn_pullup="10k",
-        # Board uses C1-C4 for decoupling; bump filter refs out of the way.
-        filter_ref_start=10,
-        resistor_footprint="Resistor_SMD:R_0402_1005Metric",
-        capacitor_footprint="Capacitor_SMD:C_0402_1005Metric",
+        # Filter + pull-up are emitted explicitly below (see note above);
+        # disable the factory's series filter so it labels the raw
+        # connector pins JOY_X / JOY_Y / JOY_BTN directly.
+        filter_cutoff_hz=None,
+        btn_pullup=None,
     )
     joy_conn = joy_block.connector
     print(f"   J2 (Joystick): placed at ({joy_conn.x}, {joy_conn.y})")
-    print(f"   Filter Rs/Cs + BTN pull-up: {len(joy_block.components)} components total")
+
+    # Explicit RC anti-alias filter + BTN pull-up, mirroring
+    # ``generate_pcb.py:generate_joystick_filter()`` net-for-net:
+    #   R10 (JOY_X / JOY_X) + C10 (JOY_X / GND)
+    #   R11 (JOY_Y / JOY_Y) + C11 (JOY_Y / GND)
+    #   R12 (JOY_BTN / VCC)  -- pull-up to VCC
+    joy_filter_specs = [
+        ("R10", "Device:R", "10k", "Resistor_SMD:R_0402_1005Metric", "JOY_X", "JOY_X"),
+        ("C10", "Device:C", "16nF", "Capacitor_SMD:C_0402_1005Metric", "JOY_X", "GND"),
+        ("R11", "Device:R", "10k", "Resistor_SMD:R_0402_1005Metric", "JOY_Y", "JOY_Y"),
+        ("C11", "Device:C", "16nF", "Capacitor_SMD:C_0402_1005Metric", "JOY_Y", "GND"),
+        ("R12", "Device:R", "10k", "Resistor_SMD:R_0402_1005Metric", "JOY_BTN", "VCC"),
+    ]
+    filt_base_x, filt_base_y = joy_conn.x + 25.4, joy_conn.y
+    for i, (ref, sym, val, fp, net1, net2) in enumerate(joy_filter_specs):
+        fpos = sch.suggest_position(sym, near=(filt_base_x, filt_base_y + i * 7.62), padding=2.54)
+        comp = sch.add_symbol(sym, x=fpos[0], y=fpos[1], ref=ref, value=val, footprint=fp)
+        p1 = comp.pin_position("1")
+        p2 = comp.pin_position("2")
+        if p1:
+            add_pin_label(sch, p1, net1, direction="left")
+        if p2:
+            add_pin_label(sch, p2, net2, direction="right")
+        print(f"   {ref}: {net1}/{net2} at ({comp.x}, {comp.y})")
 
     # =========================================================================
     # Section 4: Place Crystal with load capacitors
@@ -322,39 +350,50 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     # =========================================================================
     print("\n9. Adding signal wiring...")
 
-    # Define MCU pin assignments for a typical USB microcontroller:
-    # Conn_02x16_Counter_Clockwise has pins 1-16 on left, 17-32 on right
-    # Pin mapping (typical USB MCU pinout):
+    # MCU pin assignments — kept pad-for-pad identical to the PCB's
+    # ``generate_pcb.py:generate_mcu()`` ``pin_nets`` table so the
+    # schematic↔PCB netlist reconciles cleanly (issue #3764).  The PCB
+    # layout is the source of truth: it was routed against this exact
+    # pinout (USB belt on the north edge, crystal on the west edge,
+    # joystick/button GPIO on the south edge).  Every one of the 32 pins
+    # carries a real net — there are no no-connects on U1.
     MCU_PIN_MAP = {
-        # Power pins
-        "1": "VCC",  # VCC
-        "16": "GND",  # GND
-        "17": "VCC",  # AVCC
-        "32": "GND",  # AGND
-        # USB pins
-        "29": "USB_D+",  # USB D+
-        "30": "USB_D-",  # USB D-
-        # Crystal pins
-        "7": "XTAL1",  # Crystal in
-        "8": "XTAL2",  # Crystal out
-        # Joystick ADC pins
-        "2": "JOY_X",  # ADC0 - Joystick X axis
-        "3": "JOY_Y",  # ADC1 - Joystick Y axis
-        # Button GPIO pins
-        "9": "BTN1",  # GPIO - Button 1
-        "10": "BTN2",  # GPIO - Button 2
-        "11": "BTN3",  # GPIO - Button 3
-        "12": "BTN4",  # GPIO - Button 4
-        "13": "JOY_BTN",  # GPIO - Joystick button
-        # Unused inputs tied to GND to prevent JLCPCB review holds
-        "5": "GND",
-        "6": "GND",
+        # Left side (pins 1-8): GND / crystal / VCC
+        "1": "GND",
+        "2": "XTAL1",  # Crystal in
+        "3": "XTAL2",  # Crystal out
+        "4": "VCC",
+        "5": "GND",  # Unused input tied to GND
+        "6": "GND",  # Unused input tied to GND
+        "7": "GND",
+        "8": "VCC",
+        # Bottom (pins 9-16): joystick + button GPIO
+        "9": "JOY_X",  # ADC0 - Joystick X axis
+        "10": "JOY_Y",  # ADC1 - Joystick Y axis
+        "11": "JOY_BTN",  # Joystick push-button
+        "12": "BTN1",
+        "13": "BTN2",
+        "14": "BTN3",
+        "15": "BTN4",
+        "16": "GND",
+        # Right side (pins 17-24): power / unused-to-GND
+        "17": "VCC",
         "18": "GND",
         "19": "GND",
         "20": "GND",
         "21": "GND",
         "22": "GND",
-        "31": "GND",
+        "23": "GND",
+        "24": "VCC",
+        # Top (pins 25-32): USB belt (matches the routed north-edge order)
+        "25": "GND",
+        "26": "VBUS",
+        "27": "USB_CC2",
+        "28": "USB_D-",
+        "29": "USB_D+",
+        "30": "USB_CC1",
+        "31": "GND",  # Unused input tied to GND
+        "32": "GND",
     }
 
     # Joystick pin labels (VCC/GND/JOY_X/JOY_Y/JOY_BTN) are emitted by
@@ -387,22 +426,26 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     # two D+ pins for cable-orientation mux). Iterate the symbol's pins
     # and emit a global label per pin so all instances share the same net.
     print("   Wiring USB connector (J1) pins...")
-    # Pin-name -> net mapping. Pins without an entry here are tied to GND
-    # if they're SBU side-band lines (unused), or marked NC.
+    # Pin-name -> net mapping.  Matches the PCB's J1 footprint nets in
+    # ``generate_pcb.py:generate_usb_connector()`` pad-for-pad (issue
+    # #3764): VBUS, USB_CC1, USB_CC2 are DISTINCT nets (a real Type-C
+    # model), not folded into VCC/GND.  Pins mapped to ``None`` are
+    # emitted as no-connects to match the PCB pads that carry no net.
     USB_PIN_NET_MAP = {
-        "VBUS": "VCC",
+        "VBUS": "VBUS",
         "GND": "GND",
         "D+": "USB_D+",
         "D-": "USB_D-",
+        # CC1/CC2 are distinct configuration-channel nets routed to the
+        # MCU (U1 pins 30/27).  The PCB exposes them as USB_CC1/USB_CC2.
+        "CC1": "USB_CC1",
+        "CC2": "USB_CC2",
+        # Connector shield tied to GND (PCB S1/S2 mounting tabs -> GND).
         "SHIELD": "GND",
-        # CC1/CC2 grounded — passive device-mode default. (Real Type-C
-        # device-mode designs use 5.1k pulldowns; ground keeps ERC clean
-        # while preserving the pre-refactor net set.)
-        "CC1": "GND",
-        "CC2": "GND",
-        # SBU side-band pins are unused for USB 2.0; tie to GND.
-        "SBU1": "GND",
-        "SBU2": "GND",
+        # SBU side-band pins are unused for USB 2.0; the PCB leaves the
+        # corresponding A8/B8 pads with no net, so mark them NC here.
+        "SBU1": None,
+        "SBU2": None,
     }
     for pin in usb_conn.symbol_def.pins:
         pin_pos = usb_conn.pin_position(pin.number)
@@ -422,7 +465,12 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     # Connect the load-cap ground bus to the GND rail and label IN/OUT for
     # routing back to the MCU XTAL1/XTAL2 pins.
     print("   Wiring Crystal (Y1) pins...")
-    xtal_block.connect_to_rails(gnd_rail_y=RAIL_GND)
+    # Label the load-cap ground bus as GND so C5/C6 pad 2 resolve to the
+    # GND net (matches PCB C5-2/C6-2 = GND).  ``connect_to_rails`` only
+    # draws a wire to a bare y-coordinate with no net label, which left
+    # the load caps on auto-named ``Net-(C5-2)`` nets and broke LVS
+    # (issue #3764).
+    add_pin_label(sch, xtal_block.port("GND"), "GND", direction="right")
     add_pin_label(sch, xtal_block.port("IN"), "XTAL1", direction="left")
     print("      IN -> XTAL1")
     add_pin_label(sch, xtal_block.port("OUT"), "XTAL2", direction="right")
@@ -442,15 +490,20 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
             add_pin_label(sch, pin2_pos, "GND", direction="right")
             print(f"      {btn.reference} Pin 2 -> GND")
 
-    # Wire decoupling capacitors between VCC and GND
+    # Wire decoupling capacitors.  C1-C3 are VCC->GND MCU decoupling.
+    # C4 is the USB VBUS input bypass cap, so its pad 1 ties to VBUS
+    # (matching the PCB's ``("C4", ..., "VBUS", "GND")`` placement) — not
+    # VCC.  Tying it to VCC was part of the schematic↔PCB drift fixed in
+    # issue #3764.
     print("   Wiring Decoupling Capacitors (C1-C4)...")
     for cap in caps:
-        # Capacitors have 2 pins - connect pin 1 to VCC, pin 2 to GND
+        # Capacitors have 2 pins - pin 1 to the rail, pin 2 to GND
+        pad1_net = "VBUS" if cap.reference == "C4" else "VCC"
         pin1_pos = cap.pin_position("1")
         pin2_pos = cap.pin_position("2")
         if pin1_pos:
-            add_pin_label(sch, pin1_pos, "VCC", direction="left")
-            print(f"      {cap.reference} Pin 1 -> VCC")
+            add_pin_label(sch, pin1_pos, pad1_net, direction="left")
+            print(f"      {cap.reference} Pin 1 -> {pad1_net}")
         if pin2_pos:
             add_pin_label(sch, pin2_pos, "GND", direction="right")
             print(f"      {cap.reference} Pin 2 -> GND")
@@ -459,8 +512,11 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
     print("   Adding power symbols...")
 
     # Add PWR_FLAG to indicate power entry points
-    # VCC power flag near top-left with global label
-    vcc_pwr = sch.add_power("power:+5V", x=25.4, y=RAIL_VCC, rotation=0)
+    # VCC power flag near top-left with global label.  Use a ``power:VCC``
+    # symbol (not ``power:+5V``) so the schematic exposes the VCC rail the
+    # PCB actually uses and does NOT leak a spurious ``+5V`` global net
+    # (issue #3764 — the ``+5V`` drift was one of the ship-ready blockers).
+    vcc_pwr = sch.add_power("power:VCC", x=25.4, y=RAIL_VCC, rotation=0)
     sch.add_wire((vcc_pwr.x, vcc_pwr.y), (vcc_pwr.x + WIRE_STUB, vcc_pwr.y), snap=False)
     sch.add_global_label(
         "VCC", vcc_pwr.x + WIRE_STUB, vcc_pwr.y, shape="input", rotation=180, snap=False

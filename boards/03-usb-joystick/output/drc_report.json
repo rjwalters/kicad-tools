@@ -1,0 +1,290 @@
+{
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3764/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "layers": 2,
+  "summary": {
+    "errors": 0,
+    "warnings": 16,
+    "infos": 0,
+    "rules_checked": 29,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "diffpair_clearance_intra": 1
+    },
+    "passed": true
+  },
+  "violations": [
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C6",
+      "location": [
+        24.439999999999998,
+        26.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C6 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C5",
+      "location": [
+        19.560000000000002,
+        26.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C5 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C10",
+      "location": [
+        29.0,
+        32.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C10 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on R11",
+      "location": [
+        27.0,
+        34.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "R11 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW2",
+      "location": [
+        35.0,
+        52.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "SW2 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C11",
+      "location": [
+        29.0,
+        34.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C11 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW4",
+      "location": [
+        65.0,
+        52.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "SW4 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on R10",
+      "location": [
+        27.0,
+        32.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "R10 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C2",
+      "location": [
+        48.0,
+        28.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C2 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C4",
+      "location": [
+        46.0,
+        12.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C4 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW1",
+      "location": [
+        20.0,
+        52.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "SW1 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C3",
+      "location": [
+        40.0,
+        42.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C3 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on Y1",
+      "location": [
+        22.0,
+        30.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "Y1 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.80mm < minimum 1.00mm on SW3",
+      "location": [
+        50.0,
+        52.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.8,
+      "required_value": 1.0,
+      "items": [
+        "SW3 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on R12",
+      "location": [
+        27.0,
+        40.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "R12 (reference)"
+      ],
+      "nets": []
+    },
+    {
+      "rule_id": "silkscreen_text_height",
+      "type": "silkscreen_text_height",
+      "severity": "warning",
+      "message": "Silkscreen text height 0.50mm < minimum 1.00mm on C1",
+      "location": [
+        32.0,
+        28.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.5,
+      "required_value": 1.0,
+      "items": [
+        "C1 (reference)"
+      ],
+      "nets": []
+    }
+  ]
+}

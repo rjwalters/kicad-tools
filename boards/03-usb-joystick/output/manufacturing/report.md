@@ -1,8 +1,8 @@
 ---
 title: "usb_joystick_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-16 | jlcpcb-tier1"
+author: "kicad-tools 0.14.0"
+date: "Rev 1 | 2026-06-17 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 19 (17 SMD, 2 THT, 0 other) |
 | Nets | 16 |
-| Traces | 582 segments |
+| Traces | 570 segments |
 | Vias | 15 |
 | Board Size | 80.0 x 60.0 mm |
 
@@ -38,11 +38,11 @@ Demonstrates autolayout functionality
 
 | Protocol | Signals |
 |----------|---------|
-| USB | USB_D+, USB_D- |
+| USB | USB_D+, USB_D-, VBUS |
 
 ### Power Architecture
 
-**Power Rails**: +5V, GND, PWR_FLAG
+**Power Rails**: GND, PWR_FLAG, VCC
 
 ## Assembly Notes
 
@@ -130,26 +130,29 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
+| Errors | 5 |
 | Warnings | 16 |
-| Blocking | 0 |
+| Blocking | 5 |
 
-**Status**: PASS
+**Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
 | silkscreen_text_height | 16 |
+| via_in_pad | 4 |
+| kicad-cli:clearance | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: NOT_READY
 
 ### Action Items
 
+- **[CRITICAL]** Fix 5 blocking DRC violations (via_in_pad (4); kicad-cli: clearance (1))
 - **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
 - **[OPTIONAL]** Review 16 DRC warnings
 

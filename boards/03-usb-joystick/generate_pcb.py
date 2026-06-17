@@ -328,12 +328,16 @@ def generate_usb_connector() -> str:
             f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.25 0.35) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
         )
 
-    # Shield/mounting tabs - positioned at y=1.5 to clear B-side pads (at y=1.0)
+    # Shield/mounting tabs - positioned at y=1.5 to clear B-side pads (at y=1.0).
+    # Both tabs share pad name "SH" (net GND) to match the schematic
+    # symbol's single shield pin ``SH`` so the schematic↔PCB netlist
+    # reconciles pad-for-pad (issue #3764).  KiCad treats same-numbered
+    # pads as one electrical node, which is exactly the shield ground.
     pads.append(
-        '    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+        '    (pad "SH" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
     )
     pads.append(
-        '    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+        '    (pad "SH" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
     )
 
     pads_str = "\n".join(pads)
@@ -385,11 +389,17 @@ def generate_joystick() -> str:
     x = BOARD_ORIGIN_X + 13  # Left side of board (nudged west by 2mm per #2943)
     y = BOARD_ORIGIN_Y + 35
 
-    # Typical analog joystick module pinout
-    # 5 pins: GND, VCC, VRx, VRy, SW
+    # Analog joystick module pinout, matching the canonical
+    # ``Module:Joystick_Analog`` pin order used by the schematic block
+    # ``create_analog_joystick`` (pin 1 = VCC, pin 2 = GND).  Issue #3764
+    # reconciled the previously swapped pin-1/2 order so the
+    # schematic↔PCB netlist matches pad-for-pad.  Both VCC and GND are
+    # power-pour nets, so swapping these two adjacent through-hole pads
+    # has no signal-routing consequence.
+    # 5 pins: VCC, GND, VRx, VRy, SW
     pins = [
-        ("1", -4, 0, "GND"),
-        ("2", -2, 0, "VCC"),
+        ("1", -4, 0, "VCC"),
+        ("2", -2, 0, "GND"),
         ("3", 0, 0, "JOY_X"),
         ("4", 2, 0, "JOY_Y"),
         ("5", 4, 0, "JOY_BTN"),
@@ -756,8 +766,15 @@ def generate_power_pours() -> str:
     x2 = BOARD_ORIGIN_X + BOARD_WIDTH - inset
     y2 = BOARD_ORIGIN_Y + BOARD_HEIGHT - inset
 
-    # VCC island: bounding box of all VCC pads + 1.5mm margin.
-    vcc_x1 = BOARD_ORIGIN_X + 9.5
+    # VCC island: bounding box of all VCC pads + margin.  Issue #3764
+    # moved J2 pin 1 to VCC (matching the schematic block's pin order),
+    # so the joystick VCC pad now sits at x = BOARD_ORIGIN_X + 9 (J2 at
+    # +13, pin-1 offset -4) with a 1.6 mm dia through-hole footprint
+    # spanning x = 8.2..9.8.  Extend the west edge to +8.0 so the VCC
+    # pour overlaps that pad and J2.1 is not left stranded by DRC
+    # connectivity.  (The GND pour on the same area keeps J2.2 = GND
+    # connected via thermal relief.)
+    vcc_x1 = BOARD_ORIGIN_X + 8.0
     vcc_y1 = BOARD_ORIGIN_Y + 26.5
     vcc_x2 = BOARD_ORIGIN_X + 49.0
     vcc_y2 = BOARD_ORIGIN_Y + 44.0
