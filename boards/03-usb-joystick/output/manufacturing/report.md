@@ -21,7 +21,7 @@ header-includes:
 | Footprints | 19 (17 SMD, 2 THT, 0 other) |
 | Nets | 16 |
 | Traces | 570 segments |
-| Vias | 15 |
+| Vias | 17 |
 | Board Size | 80.0 x 60.0 mm |
 
 ## Design Overview

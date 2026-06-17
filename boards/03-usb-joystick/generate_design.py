@@ -261,6 +261,194 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
         return 0
 
 
+def add_gnd_stitching_vias(routed_path: Path) -> int:
+    """Add GND F.Cu<->B.Cu stitching vias to bond fragmented GND islands.
+
+    Issue #3787: this board carries two full-board GND planes (``GND`` on
+    ``F.Cu`` and ``GND`` on ``B.Cu``, both priority 1 -- see
+    ``generate_pcb.py:generate_power_pours()``) but the router emits *zero*
+    GND vias (every via on the board is a signal-net layer change).  Without
+    a via tying F.Cu-GND to B.Cu-GND, the J1 USB-C connector's F.Cu-only GND
+    shield/return pads (A12 / B1) sit over the B.Cu GND pour with no
+    galvanic path into it -- the F.Cu pour is carved away around the
+    fine-pitch USB-C pad field, so those pads land in their own copper
+    islands.  ``compare_copper_netlist`` correctly reports these as GND
+    *opens* (KiCad's own DRC treats same-net zones as logically connected
+    and so misses the missing physical bond).  This is the board-03 analogue
+    of the universal "you must stitch your ground planes" rule.
+
+    The fix is a recipe step -- run *after* :func:`route_pcb` and *before*
+    :func:`fill_zones_in_routed_pcb` -- that finds every GND pad island that
+    is **not** part of the main (largest) GND island and drops a GND-net
+    ``(via ... (layers "F.Cu" "B.Cu"))`` at that island's pad so the
+    subsequent re-fill bonds it into both GND planes.  The placement is
+    derived dynamically from the routed copper partition
+    (:meth:`ConnectivityValidator.extract_pad_partition`), so it stays
+    correct if the deterministic route shifts which pads strand.
+
+    The routed board reaching this step is *unfilled* (the zone fill runs in
+    the next step, :func:`fill_zones_in_routed_pcb`), and copper-pour
+    connectivity can only be measured against *filled* zones.  So the island
+    detection is run against a throwaway **filled copy** of the board -- the
+    same fill the real artifact will get -- while the vias are written into
+    the real (unfilled) routed board, which Step 5.5 then fills for keeps.
+
+    Mirrors the read-text / mutate / write-text / return-count style of
+    :func:`fill_zones_in_routed_pcb`.  The via geometry (0.6mm size /
+    0.3mm drill, F.Cu<->B.Cu) matches the signal-net vias already on the
+    board and is jlcpcb-tier1 legal; the isolated GND pads are >=1.0mm from
+    any neighbouring pad, leaving ample clearance for the annular ring.
+
+    Returns the number of stitching vias added (0 if GND is already a
+    single island -- e.g. on a re-run of an already-stitched board).
+    """
+    import re as _re
+    import shutil as _shutil
+    import tempfile as _tempfile
+    import uuid as _uuid
+
+    from kicad_tools.cli.runner import find_kicad_cli, run_fill_zones
+    from kicad_tools.lvs.board_lvs import _schematic_pin_to_net
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    print("\n" + "=" * 60)
+    print("Adding GND stitching vias (F.Cu<->B.Cu)...")
+    print("=" * 60)
+
+    sch_path = routed_path.parent / "usb_joystick.kicad_sch"
+
+    text = routed_path.read_text()
+
+    # Island detection needs *filled* zones (copper-pour connectivity is only
+    # measurable against ``filled_polygon`` copper).  The routed board here is
+    # still unfilled, so fill a throwaway copy and partition THAT; the vias
+    # are written back into the real (unfilled) ``routed_path`` below.
+    kicad_cli = find_kicad_cli()
+    detect_path = routed_path
+    _tmpdir: _tempfile.TemporaryDirectory[str] | None = None
+    if kicad_cli is not None:
+        _tmpdir = _tempfile.TemporaryDirectory()
+        detect_path = Path(_tmpdir.name) / routed_path.name
+        _shutil.copy(routed_path, detect_path)
+        fill_result = run_fill_zones(detect_path, kicad_cli=kicad_cli)
+        if not fill_result.success:
+            print(
+                "\n   WARNING: temp zone fill failed; partitioning the "
+                "unfilled board (stitch placement may be conservative)."
+            )
+            detect_path = routed_path
+    else:
+        print(
+            "\n   WARNING: kicad-cli not found; partitioning the unfilled "
+            "board (stitch placement may be conservative)."
+        )
+
+    # Resolve the GND net id dynamically from the (net N "GND") table -- do
+    # NOT hardcode (it is 3 on the current artifact but is route-dependent).
+    net_table = dict(_re.findall(r'\(net (\d+) "([^"]*)"\)', text))
+    gnd_net_id: int | None = None
+    for nid, name in net_table.items():
+        if name == "GND":
+            gnd_net_id = int(nid)
+            break
+    if gnd_net_id is None:
+        raise RuntimeError(
+            f'{routed_path} has no (net N "GND") entry -- cannot place GND '
+            "stitching vias (issue #3787)."
+        )
+
+    # Map each pad id -> schematic net so we can pick out the GND islands.
+    schematic_net_of_pad = _schematic_pin_to_net(sch_path)
+    gnd_pads = {f"{ref}.{pad}" for (ref, pad), net in schematic_net_of_pad.items() if net == "GND"}
+
+    # Build the physical copper partition and the board-frame pad positions
+    # from the SAME validator instance so islands and coordinates agree.
+    #
+    # NB: the parser normalises footprint positions by the detected board
+    # origin (``PCB._board_origin``, e.g. (100, 100) here), so the partition
+    # frame is origin-relative.  The raw ``.kicad_pcb`` ``(via (at ...))``
+    # s-expressions we emit must be in *file* coordinates, so add the origin
+    # offset back when computing each via's ``(at ...)``.
+    validator = ConnectivityValidator(detect_path)
+    origin_x, origin_y = validator.pcb._board_origin
+    partition = validator.extract_pad_partition()
+    pad_positions: dict[str, tuple[float, float]] = {}
+    for fp in validator.pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        fp_x, fp_y = fp.position
+        rotation = fp.rotation
+        for pad in fp.pads:
+            if pad.number is None or pad.number == "":
+                continue
+            pad_positions[f"{fp.reference}.{pad.number}"] = validator._transform_pad_position(
+                pad.position, fp_x, fp_y, rotation
+            )
+
+    # Islands that contain at least one GND pad.
+    gnd_islands = [
+        sorted(p for p in island if p in gnd_pads)
+        for island in partition
+        if any(p in gnd_pads for p in island)
+    ]
+    gnd_islands = [isl for isl in gnd_islands if isl]
+    if len(gnd_islands) <= 1:
+        print("\n   GND is already a single copper island -- no vias needed.")
+        return 0
+
+    # The largest GND island is the bonded plane; every other island is a
+    # fragment that needs a stitch via to reach it.  Pick a representative
+    # pad per fragment (the lexicographically-first, for determinism) and
+    # place the via at that pad's board-frame centre.
+    gnd_islands.sort(key=len, reverse=True)
+    main_island, fragments = gnd_islands[0], gnd_islands[1:]
+    print(
+        f"\n   GND fragmented into {len(gnd_islands)} island(s); "
+        f"main island has {len(main_island)} pad(s), "
+        f"{len(fragments)} fragment(s) to stitch."
+    )
+
+    vias = []
+    for frag in fragments:
+        anchor = frag[0]
+        pos = pad_positions.get(anchor)
+        if pos is None:
+            print(f"   WARNING: no position for {anchor}; skipping stitch via")
+            continue
+        # Convert from the partition's origin-relative frame back to raw
+        # file coordinates for the emitted ``(via (at ...))``.
+        x, y = pos[0] + origin_x, pos[1] + origin_y
+        vias.append((anchor, x, y))
+
+    if not vias:
+        print("\n   No placeable GND fragments found.")
+        return 0
+
+    via_blocks = []
+    for anchor, x, y in vias:
+        via_blocks.append(
+            "\t(via\n"
+            f"\t\t(at {x:g} {y:g})\n"
+            "\t\t(size 0.6)\n"
+            "\t\t(drill 0.3)\n"
+            '\t\t(layers "F.Cu" "B.Cu")\n'
+            f'\t\t(uuid "{_uuid.uuid4()}")\n'
+            f"\t\t(net {gnd_net_id})\n"
+            "\t)\n"
+        )
+        print(f"   + GND stitch via at {anchor} ({x:g}, {y:g})")
+
+    # Insert the via s-expressions just before the file's final closing
+    # paren (the top-level (kicad_pcb ...) close), mirroring how KiCad
+    # appends board items.
+    insert_at = text.rstrip().rfind(")")
+    new_text = text[:insert_at] + "".join(via_blocks) + text[insert_at:]
+    routed_path.write_text(new_text)
+
+    print(f"\n   Added {len(vias)} GND stitching via(s).")
+    return len(vias)
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB with the production ``kct route`` recipe.
 
@@ -537,24 +725,35 @@ def main() -> int:
         routed_path = output_dir / "usb_joystick_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
+        # Step 5.4: Add GND F.Cu<->B.Cu stitching vias (#3787).  The board
+        # has GND planes on both copper layers but the router emits zero GND
+        # vias, so the J1 USB-C F.Cu-only shield pads strand in their own
+        # copper islands (copper-LVS GND opens).  Drop a stitch via at each
+        # fragmented GND island BEFORE the fill so the re-fill below bonds
+        # the new vias into both GND planes.
+        add_gnd_stitching_vias(routed_path)
+
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
-        # ``connectivity`` rule sees the power-net pads as connected.
+        # ``connectivity`` rule sees the power-net pads as connected.  This
+        # MUST run after Step 5.4 so the fill engine recomputes copper that
+        # bonds through the freshly-added GND stitching vias.
         fill_zones_in_routed_pcb(routed_path)
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
         # Step 6.5: LVS (advisory, #3780) -- board 03 is in
-        # ``ADVISORY_LVS_BOARDS`` and is genuinely copper-dirty today (the
-        # J1 USB-C connector's F.Cu-only pads sit over the B.Cu pour with no
-        # stitching via, leaving residual opens), so ``require_clean=False``:
-        # ``write_lvs_report`` logs the mismatch summary and writes
-        # ``output/lvs.json`` but does NOT raise.  This surfaces
-        # ``lvs_clean=false`` (with ``copper_mismatches`` detail) in
-        # board.json / the gallery LVS chip without gating CI.  ``run_label``
-        # is off because the board is label-dirty too and the copper
-        # comparator is the meaningful leg.  Graduation to a hard gate is
-        # deferred (see #3785 + the board-03 residual-opens follow-up).
+        # ``ADVISORY_LVS_BOARDS``.  The residual GND copper-opens are now
+        # FIXED (#3787): Step 5.4 stitches the F.Cu/B.Cu GND planes so the
+        # J1 USB-C F.Cu-only shield pads bond into the GND net and the
+        # copper comparator reports 0 shorts / 0 opens.  ``require_clean``
+        # stays ``False`` here on purpose: flipping it to a hard gate (and
+        # removing the board from ``ADVISORY_LVS_BOARDS``) is #3780 Part 2,
+        # tracked separately and explicitly out of scope for #3787.
+        # ``write_lvs_report`` still logs the summary and writes
+        # ``output/lvs.json`` (now ``clean: true``) so board.json / the
+        # gallery LVS chip surface the green status.  ``run_label`` is off
+        # because the copper comparator is the meaningful leg here.
         write_lvs_report(
             sch_path,
             routed_path,
