@@ -823,3 +823,150 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     result = compare_copper_netlist(sch, pcb)
     assert isinstance(result, CopperLVSResult)
     assert result.clean, f"pour-heavy board 07 copper LVS unexpectedly dirty: {result.mismatches}"
+
+
+# ---------------------------------------------------------------------------
+# Board-04 short diagnosis (issue #3781): the two named shorts, classified.
+# ---------------------------------------------------------------------------
+#
+# The #3762 copper-LVS fleet survey flagged board-04's committed
+# ``stm32_devboard_routed.kicad_pcb`` with two alarming shorts. Issue #3781
+# classified each against the committed artifact on current main:
+#
+#   * ``+5V <-> GND`` (witnesses C1.1, U1.1) — RESOLVED, not reproducible.
+#     The curator's survey predated PR #3774 (schematic<->PCB net drift
+#     reconciliation to one 12-net model).  On current main, C1.1 and U1.1 are
+#     BOTH net 1 (+5V) on F.Cu, so the ``{C1.1, U1.1}`` copper component the
+#     extractor produces is a legitimate *same-net* +5V pour bond — not a
+#     ``+5V<->GND`` short.  No extractor change is warranted; the report was an
+#     artifact of the older (pre-#3774) net assignment.
+#
+#   * ``OSC_IN <-> OSC_OUT`` (witnesses C10.1, C11.1) — REAL routing defect.
+#     A B.Cu track segment runs straight from U2.6 (26.8375, 21.75 = OSC_OUT)
+#     to U2.5 (26.8375, 21.25 = OSC_IN), galvanically bridging the STM32's two
+#     crystal pins on a single copper layer.  This is the documented
+#     #2834/#3033 OSC_OUT-escape stub landing on the adjacent OSC_IN pad.  The
+#     committed routed PCB is a deliberately pinned (--seed 42, byte-identical
+#     per #3039) artifact that #3765/#3774 preserve; breaking the short needs a
+#     re-route that risks regression, so it is routed to a scoped board-04
+#     layout-fix follow-up (gates #3780) rather than edited in place here.
+#
+# These assertions pin both verdicts as executable regression guards: if a
+# future change either re-introduces the +5V<->GND short or silently makes the
+# real OSC short vanish (e.g. by re-routing the board), this test flags it so
+# the verdict and its follow-up can be revisited.
+
+
+def _load_board_04() -> tuple[Path, Path] | None:
+    repo_root = Path(__file__).resolve().parent.parent
+    board_out = repo_root / "boards" / "04-stm32-devboard" / "output"
+    sch = board_out / "stm32_devboard.kicad_sch"
+    pcb = board_out / "stm32_devboard_routed.kicad_pcb"
+    if not (sch.exists() and pcb.exists()):
+        return None
+    return sch, pcb
+
+
+def test_board04_plus5v_gnd_short_resolved_on_main() -> None:
+    """Issue #3781 verdict: ``+5V<->GND`` is NOT a short on current main.
+
+    The pour-overlap component ``{C1.1, U1.1}`` is a legitimate same-net +5V
+    bond (both pads are net 1 ``+5V`` on F.Cu post-#3774), so no copper short
+    fuses ``+5V`` with ``GND``.
+    """
+    paths = _load_board_04()
+    if paths is None:
+        pytest.skip("board 04 artifacts not present; run generate_design.py")
+    sch, pcb = paths
+    result = compare_copper_netlist(sch, pcb)
+    fused_5v_gnd = [m for m in result.shorts if {m.net_a, m.net_b} == {"+5V", "GND"}]
+    assert not fused_5v_gnd, (
+        "regression: +5V<->GND short re-appeared on board-04 "
+        f"(witnesses: {[(m.pad_a, m.pad_b) for m in fused_5v_gnd]}). "
+        "Per #3781 this was resolved by #3774's net reconciliation; "
+        "C1.1 and U1.1 must both be +5V."
+    )
+
+
+def test_board04_plus5v_gnd_witness_component_is_same_net() -> None:
+    """The ``{C1.1, U1.1}`` copper component is a same-net (+5V) pour bond.
+
+    Confirms the extractor still fuses these two pads (the pour overlap is
+    real copper) but that the fusion is sound because both pads are declared
+    ``+5V`` — the classic ``+5V<->GND`` short signature is gone because the net
+    labels were reconciled, not because the bond disappeared.
+    """
+    paths = _load_board_04()
+    if paths is None:
+        pytest.skip("board 04 artifacts not present; run generate_design.py")
+    from kicad_tools.schema.pcb import PCB
+
+    _, pcb_path = paths
+    pcb = PCB.load(str(pcb_path))
+    declared: dict[str, str] = {}
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+        for pad in fp.pads:
+            if pad.number:
+                declared[f"{fp.reference}.{pad.number}"] = pad.net_name
+    assert declared.get("C1.1") == "+5V"
+    assert declared.get("U1.1") == "+5V"
+
+    partition = ConnectivityValidator(pcb).extract_pad_partition()
+    comp = next((c for c in partition if "C1.1" in c), frozenset())
+    # Every pad sharing C1.1's copper component must be the same net (+5V):
+    # a cross-net member would be the real short signature.
+    member_nets = {declared.get(p) for p in comp if p in declared}
+    assert member_nets == {"+5V"}, (
+        f"C1.1's copper component fuses foreign nets {member_nets} — "
+        "the +5V<->GND artifact signature would re-appear here."
+    )
+
+
+def test_board04_osc_in_out_real_short_present() -> None:
+    """Issue #3781 verdict: ``OSC_IN<->OSC_OUT`` is a REAL copper short.
+
+    A single-layer (B.Cu) track segment from U2.6 (OSC_OUT) straight to U2.5
+    (OSC_IN) galvanically bridges the crystal pins.  This guard documents the
+    defect until the scoped board-04 re-route follow-up lands; if a future
+    re-route clears it, this test flips to a failure prompting the verdict and
+    follow-up to be closed/updated.
+    """
+    paths = _load_board_04()
+    if paths is None:
+        pytest.skip("board 04 artifacts not present; run generate_design.py")
+    sch, pcb_path = paths
+
+    # 1. The comparator reports the OSC short (witness load caps C10.1/C11.1).
+    result = compare_copper_netlist(sch, pcb_path)
+    osc_short = [m for m in result.shorts if {m.net_a, m.net_b} == {"OSC_IN", "OSC_OUT"}]
+    assert osc_short, (
+        "expected the documented board-04 OSC_IN<->OSC_OUT real short; "
+        "if a re-route cleared it, update issue #3781's follow-up."
+    )
+
+    # 2. The fusing copper is a single B.Cu segment joining U2.6 -> U2.5,
+    #    i.e. the OSC_OUT pad-6 center (26.8375, 21.75) straight to the
+    #    OSC_IN pad-5 center (26.8375, 21.25).  Confirm it exists on one layer.
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(pcb_path))
+
+    def _close(a: tuple[float, float], b: tuple[float, float], tol: float = 0.02) -> bool:
+        return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+
+    osc_out = (26.8375, 21.75)  # U2.6 / OSC_OUT pad center
+    osc_in = (26.8375, 21.25)  # U2.5 / OSC_IN pad center
+    bridging = [
+        seg
+        for seg in pcb.segments
+        if (
+            (_close(seg.start, osc_out) and _close(seg.end, osc_in))
+            or (_close(seg.start, osc_in) and _close(seg.end, osc_out))
+        )
+    ]
+    assert bridging, "no single segment found directly joining the OSC pads"
+    assert all(seg.layer == "B.Cu" for seg in bridging), (
+        "the OSC bridging segment is expected on B.Cu (the OSC_OUT escape stub)"
+    )
