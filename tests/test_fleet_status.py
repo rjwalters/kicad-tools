@@ -596,6 +596,40 @@ class TestFleetStatusBasics:
         assert b["manufacturing"]["stale"] is True
         assert "artifacts stale" in b["blockers"]
 
+    def test_fleet_status_checkout_jitter_not_stale(self, tmp_path: Path, capsys):
+        """Issue #3767: a routed PCB only a few ms/s newer than the manifest
+        (the signature of git-checkout write-ordering, which does NOT
+        preserve mtimes) must NOT be flagged STALE.
+
+        Boards 00/01/07 were false-flagged because their
+        ``*_routed.kicad_pcb`` filename sorts after ``manufacturing/``, so a
+        fresh checkout wrote the PCB a few milliseconds later. The
+        staleness check tolerates sub-``_STALE_MTIME_TOLERANCE_S`` deltas so
+        content-correct boards stay shippable across checkouts.
+        """
+        boards = tmp_path / "boards"
+        routed_pcb = make_fake_board(
+            boards,
+            "jitter-board",
+            routed_complete=True,
+            has_gerbers=True,
+            has_bom=True,
+            has_cpl=True,
+            has_manifest=True,
+        )
+        # Manifest is 3 seconds OLDER than the routed PCB -- comfortably
+        # within checkout-jitter range and far below the 120s tolerance.
+        manifest_path = boards / "jitter-board" / "output" / "manufacturing" / "manifest.json"
+        routed_mtime = routed_pcb.stat().st_mtime
+        os.utime(manifest_path, (routed_mtime - 3.0, routed_mtime - 3.0))
+
+        main(["status", "--boards-dir", str(boards), "--format", "json"])
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        b = data["boards"][0]
+        assert b["manufacturing"]["stale"] is False
+        assert not any("artifacts stale" in blocker for blocker in b["blockers"]), b["blockers"]
+
     def test_fleet_status_pattern_override(self, tmp_path: Path, capsys):
         """--pattern '*.kicad_pcb' picks up unrouted PCBs too."""
         boards = tmp_path / "boards"
