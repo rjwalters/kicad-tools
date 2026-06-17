@@ -17,7 +17,6 @@ Usage:
     python generate_design.py [output_dir]
 """
 
-import json
 import subprocess
 import sys
 import uuid
@@ -25,7 +24,7 @@ from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
-from kicad_tools.lvs import BoardNetlistMismatch, compare_netlists
+from kicad_tools.lvs import write_lvs_report
 from kicad_tools.schematic.models.schematic import Schematic
 
 # Warn if running source scripts with stale pipx install
@@ -887,56 +886,25 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
 def run_lvs(sch_path: Path, routed_pcb_path: Path, output_dir: Path) -> bool:
     """Step 6.5: assert schematic <-> routed-PCB netlist equivalence (#3748).
 
-    Compares each ``(ref, pad)`` pair's net name between the schematic
-    (the design intent) and the routed PCB (what manufacturing receives)
-    and writes the result to ``output/lvs.json`` for downstream tools
-    (``kct fleet status``, the demo site, etc.) following the v1 schema
-    documented in ``docs/board-json-schema.md``.
+    Thin delegate to the shared :func:`kicad_tools.lvs.write_lvs_report`
+    helper (#3762).  Board 00 is verified clean on both the label-based and
+    copper-extracted comparators, so it hard-gates on both: the helper
+    writes ``output/lvs.json`` (v1 schema) and raises
+    :class:`BoardNetlistMismatch` when either comparator is dirty so the
+    caller's exit gate trips -- a silent dirty board would defeat the
+    purpose of wiring LVS into the recipe.
 
-    Returns ``True`` iff the comparison was clean.  Raises
-    :class:`BoardNetlistMismatch` when it is dirty so the caller's exit
-    gate trips -- a silent dirty board would defeat the purpose of
-    wiring LVS into the recipe.
+    Returns ``True`` iff both comparators were clean.
     """
-    print("\n" + "=" * 60)
-    print("Running LVS (schematic <-> PCB netlist match)...")
-    print("=" * 60)
-
-    result = compare_netlists(sch_path, routed_pcb_path)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    lvs_path = output_dir / "lvs.json"
-    lvs_path.write_text(
-        json.dumps(
-            {
-                "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
-                "clean": result.clean,
-                "mismatches": [
-                    {
-                        "ref": m.ref,
-                        "pad": m.pad,
-                        "schematic_net": m.schematic_net,
-                        "pcb_net": m.pcb_net,
-                    }
-                    for m in result.mismatches
-                ],
-            },
-            indent=2,
-        )
-        + "\n"
+    copper_clean, label_clean = write_lvs_report(
+        sch_path,
+        routed_pcb_path,
+        output_dir,
+        require_clean=True,
+        run_copper=True,
+        run_label=True,
     )
-
-    if result.clean:
-        print(f"\n   PASS: {lvs_path.name} clean (0 mismatches)")
-        return True
-
-    # Print up to the first 5 mismatches before raising, so the recipe
-    # log surfaces what went wrong without forcing the user to crack
-    # open lvs.json.
-    print(f"\n   FAIL: {len(result.mismatches)} schematic/PCB mismatch(es):")
-    for m in result.mismatches[:5]:
-        print(f"      - {m.ref}.{m.pad}: schematic={m.schematic_net!r} pcb={m.pcb_net!r}")
-    raise BoardNetlistMismatch(result)
+    return copper_clean and label_clean
 
 
 def main() -> int:
