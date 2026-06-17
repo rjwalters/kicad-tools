@@ -2,38 +2,25 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-05-08*
+*Last updated: 2026-06-16*
 
 ---
 
 ## Urgent (Top Priority)
 
-*No issues currently carry the `loom:urgent` label.* Builders are saturated on Epic #2556 Phase 1 (see "In Progress" below); the Guide will revisit urgent assignment once Phase 1A/1B land and the next-priority issues are unblocked.
+*No issues currently carry the `loom:urgent` label.*
 
 ## In Progress (`loom:building`)
 
-| Issue | Title | Notes |
-|-------|-------|-------|
-| **#2558** | [Epic #2556] Phase 1B: Reliable diff-pair detection (explicit + KiCad group + suffix) | Builder active — depends on #2557 |
-| **#2557** | [Epic #2556] Phase 1A: Add `NetClass.intra_pair_clearance` field | Builder active — foundation for Phase 1C/1D |
-
-Do not retarget these issues — Phase 1A/1B underpin the rest of Epic #2556.
+*Nothing in flight.* The backlog was fully cleared on 2026-06-16 — Epic #2556 (diff-pair support, Phases 1A–1D) merged, and the v0.14.0 release shipped.
 
 ## Ready for Work (`loom:issue`)
 
-| Issue | Title | Blocked By |
-|-------|-------|------------|
-| **#2559** | [Epic #2556] Phase 1C: Thread `intra_pair_clearance` through pathfinder + cpp_backend | #2557, #2558 |
-| **#2560** | [Epic #2556] Phase 1D: New DRC rule `diffpair_clearance_intra` | #2557, #2559 |
-
-Both Phase 1C/1D are queued for Builders once their Phase 1A/1B prerequisites merge. They carry `loom:approved` and `loom:curated` and are eligible to claim as soon as the dependency chain clears.
+*Empty.* No approved issues are currently queued for Builders.
 
 ## Proposals Awaiting Human Approval (`loom:architect`)
 
-| Issue | Title | Status |
-|-------|-------|--------|
-| **#2556** | Epic: First-class differential pair support across the routing pipeline | Phase 1 already broken into #2557–#2560; Architect may extend with Phase 2 (length matching) once Phase 1 ships |
-| **#2394** | Roadmap: bring all five example boards to manufacturer-ready parity with board 01 | Long-running roadmap. Significant progress in late April / early May (boards 02, 03, 04, 05 placement and routing). Architect should re-evaluate which sub-tasks remain after the recent board burst |
+*An Architect pass was kicked off on 2026-06-16 to repopulate the backlog* (focus: finishing the independent-LVS soundness story from #3742/PR #3757, board-parity re-scope of #2394, and other high-value next epics). New `loom:architect` proposals will be listed here once filed and reviewed.
 
 ## Recently Completed
 
@@ -57,12 +44,12 @@ The May 1–8 sprint cleared an enormous backlog of router-pipeline polish, boar
 
 | Metric | Value |
 |--------|-------|
-| Total open issues | 6 |
-| Ready for work (`loom:issue`) | 2 (#2559, #2560) |
+| Total open issues | 0 |
+| Ready for work (`loom:issue`) | 0 |
 | Urgent (`loom:urgent`) | 0 |
-| Building (`loom:building`) | 2 (#2557, #2558) |
+| Building (`loom:building`) | 0 |
 | Blocked (`loom:blocked`) | 0 |
-| Proposals pending approval (`loom:architect`) | 2 (#2556, #2394) |
-| Active epics | 1 (Epic #2556 — diff-pair support, Phase 1 in flight) |
+| Proposals pending approval (`loom:architect`) | 0 (Architect pass in flight to repopulate) |
+| Active epics | 0 |
 
-**Assessment:** The backlog is tightly focused around Epic #2556 (differential-pair first-class support). Phase 1 is fully scoped into four sequential issues: 1A and 1B are actively building; 1C and 1D are approved and ready to claim once their dependencies merge. The roadmap epic #2394 (board parity) remains as a meta-tracker — it benefited heavily from the May 1–8 board burst and should be re-curated by the Architect to identify any remaining gaps. No urgent issues; no blocked issues. Project velocity is high (693 commits since 2026-02-27, three releases shipped).
+**Assessment:** The backlog is **empty** as of 2026-06-16 — both open issues and open PRs are at zero. Epic #2556 (differential-pair first-class support, Phases 1A–1D) has fully merged, and v0.14.0 shipped to PyPI (demo gallery, renders, board-metrics, and the first independent copper-LVS soundness gate). With the queue clear, an Architect pass was launched to generate the next wave of work, prioritizing: (1) finishing the LVS soundness story (#3742 follow-ups — robust zone-pour extraction and copper-LVS as a first-class manufacturability leg), (2) re-scoping board-parity (#2394) after the recent board 00/04/05/06 DRC/LVS burst, and (3) other high-value epics. Re-run the Guide once those proposals are filed and approved.

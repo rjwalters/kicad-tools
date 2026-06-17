@@ -15,7 +15,7 @@ file manipulation. We complement KiCad—we don't replace it.
 
 ---
 
-## Current State (v0.11.0)
+## Current State (v0.14.0)
 
 The complete agent PCB design workflow is now supported:
 
@@ -32,6 +32,10 @@ The complete agent PCB design workflow is now supported:
 | Design intent & feedback | `intent` module, incremental DRC | v0.9.0 |
 | Pattern library & explanations | `patterns`, `explain` modules | v0.10.0 |
 | Placement optimization | CMA-ES, Bayesian, routing orchestration | v0.11.0 |
+| Manufacturing export pipeline | BOM/CPL/gerber, JLCPCB LCSC auto-match, design report | v0.12.0 |
+| Global routing | Two-phase RSMT decomposition, RUDY congestion, Specctra DSN export | v0.13.0 |
+| Demo gallery & renders | kicad-tools.org gallery, `kct render`/`board-metrics`, oblique 3D + 2D-SVG | v0.14.0 |
+| Independent LVS gate | Copper-extracted netlist comparison (label-independent for autorouter copper) | v0.14.0 |
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
 
