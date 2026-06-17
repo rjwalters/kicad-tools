@@ -3462,14 +3462,14 @@
 	(embedded_fonts no)
 	(segment
 		(start 31.8375 26.75)
-		(end 31.6875 26.55)
+		(end 31.6875 26.6)
 		(width 0.2)
 		(layer "B.Cu")
 		(net 5)
 		(uuid "93f59f63-d79b-40ca-98c5-75b5b7f76bc0")
 	)
 	(segment
-		(start 31.6875 26.55)
+		(start 31.6875 26.6)
 		(end 31.6875 26.1)
 		(width 0.2)
 		(layer "B.Cu")
