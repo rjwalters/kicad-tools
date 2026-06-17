@@ -12,10 +12,15 @@ uv run python boards/05-bldc-motor-controller/design.py
 > **Status**: Schematic, PCB layout (with STM32G431K8Tx MCU + complete
 > DRV8301 QFN-56 footprint) and autorouting are all implemented.  After
 > regeneration, every net has at least two pads so the autorouter can
-> attempt full connectivity.  The autorouter still leaves a few segment
-> clearance violations on this complex high-density board; those are
-> tracked separately and do not affect the schematic correctness or
-> the BOM/netlist.
+> attempt full connectivity.  The three motor-phase nets (PHASE_A/B/C)
+> are currently SKIPPED from routing and are NOT yet pour-served, so they
+> ship as open circuits -- closing them is placement-bound (see
+> "High-Current Traces" below and issue #3766) and tracked as a follow-up.
+> The residual U3-south current-sense (ISENSE) cluster is congestion-
+> limited (#3471).  The autorouter also leaves a few segment clearance
+> violations on this complex high-density board; those are tracked
+> separately and do not affect the schematic correctness or the
+> BOM/netlist.
 
 ## Overview
 
@@ -76,7 +81,18 @@ This board exercises kicad-tools capabilities that simpler boards don't:
 ### 2. High-Current Traces
 
 - Motor phase traces carry 10A continuous
-- Requires 2mm+ trace width or polygon pours
+- **PHASE_A/B/C connectivity is placement-bound (issue #3766).** They are
+  classified `HIGH_CURRENT_SIGNAL` (`is_pour_net=False`, "phase outputs
+  must NOT be poured"), so a polygon pour is not the right tool -- and the
+  FET->motor phase pads are scattered across the layout, so a bounding-box
+  pour island would span the whole board and short against the rail pours.
+  Routing them as traces *does* connect PHASE_A/B/C, but on the current
+  70x90 mm placement the extra high-current traces consume the U3-south
+  escape channels the ISENSE / PWM / GATE_DRV / BST nets also need: two
+  full seed-7 regens measured 9 blocking signal nets (vs the committed 7),
+  i.e. fixing PHASE breaks ~4 previously-complete nets.  Closing PHASE
+  cleanly therefore needs a targeted U3-south / power-stage relayout
+  (tracked as a follow-up) rather than a recipe change.
 - Power input traces carry 15A
 - Tests net class differentiation
 
