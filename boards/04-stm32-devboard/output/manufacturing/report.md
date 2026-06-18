@@ -2,7 +2,7 @@
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-06-17 | jlcpcb-tier1"
+date: "Rev 1 | 2026-06-18 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -21,7 +21,7 @@ header-includes:
 | Footprints | 17 (15 SMD, 2 THT, 0 other) |
 | Nets | 12 |
 | Traces | 182 segments |
-| Vias | 28 |
+| Vias | 31 |
 | Board Size | 60.0 x 40.0 mm |
 
 ## Design Overview
@@ -158,7 +158,7 @@ Demonstrates circuit blocks API
 | Complete Nets | 11 / 12 |
 | Zone-Connected Nets | 3 |
 | Incomplete Nets | 1 |
-| Unconnected Pads | 3 |
+| Unconnected Pads | 1 |
 
 ### Zone-Connected Nets
 

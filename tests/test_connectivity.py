@@ -1375,3 +1375,112 @@ class TestLayerAwareSegmentChaining:
         assert order == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
         bridged = validator._via_bridged_layers(["F.Cu", "B.Cu"])
         assert bridged == frozenset({"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"})
+
+
+# ---------------------------------------------------------------------------
+# Via-into-pour bonding in extract_pad_partition (issue #3794)
+# ---------------------------------------------------------------------------
+
+
+def _shapely_present() -> bool:
+    try:
+        import shapely  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+_VIA_INTO_POUR_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000e1")
+    (at 5 5)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-e1-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-e1-val"))
+    (pad "2" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000e2")
+    (at 15 15)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-e2-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-e2-val"))
+    (pad "2" smd roundrect (at 0 0) (size 1.5 1.5) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000e3")
+    (at 30 30)
+    (property "Reference" "C3" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-e3-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-e3-val"))
+    (pad "2" smd roundrect (at 0 0) (size 1.5 1.5) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 2 "SIG"))
+  )
+  (segment (start 5 5) (end 10 10) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000s2"))
+  (via (at 10 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000v3") (net 1))
+  (zone
+    (net 1 "GND")
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000z5")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+    (filled_polygon (layer "B.Cu") (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+  )
+)
+"""
+
+
+class TestExtractPartitionViaIntoPour:
+    """extract_pad_partition bonds a via/trace endpoint landing in a pour (#3794).
+
+    The label-free partition previously only tested pad boxes against a pour
+    and only fused a via's *coincident* pads, so a pad reaching a pour through
+    ``pad -> trace -> via -> opposite-layer pour`` stranded as a false same-net
+    open.  These tests pin the new via-into-pour bond AND its soundness guard:
+    the bond unions only copper that physically lands in the pour, so it cannot
+    fabricate a short across a foreign net sitting outside the pour.
+    """
+
+    @pytest.mark.skipif(not _shapely_present(), reason="requires shapely")
+    def test_pad_reaching_pour_via_stitch_via_is_bonded(self, tmp_path: Path) -> None:
+        pcb_file = tmp_path / "via_pour.kicad_pcb"
+        pcb_file.write_text(_VIA_INTO_POUR_PCB)
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        comp = next(c for c in partition if "C1.2" in c)
+        # C1.2 reaches the B.Cu pour only through its F.Cu trace + stitch via.
+        assert "C2.2" in comp
+
+    @pytest.mark.skipif(not _shapely_present(), reason="requires shapely")
+    def test_via_into_pour_does_not_short_a_foreign_net(self, tmp_path: Path) -> None:
+        """The bond must NOT pull a foreign-net pad outside the pour into it.
+
+        C3.2 (SIG) sits at (30, 30) — outside the 0..20 GND pour and touched by
+        no GND copper.  The via-into-pour bond unions only the GND via's island,
+        so C3.2 must stay isolated: no GND<->SIG short is manufactured.
+        """
+        pcb_file = tmp_path / "via_pour.kicad_pcb"
+        pcb_file.write_text(_VIA_INTO_POUR_PCB)
+        partition = ConnectivityValidator(pcb_file).extract_pad_partition()
+        assert frozenset({"C3.2"}) in partition
+        gnd_comp = next(c for c in partition if "C1.2" in c)
+        assert "C3.2" not in gnd_comp
+        # No synthetic via node leaks into the returned partition.
+        assert all(not p.startswith("__via") for c in partition for p in c)

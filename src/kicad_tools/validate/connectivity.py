@@ -405,6 +405,36 @@ class ConnectivityValidator:
                 )
                 pad_layers[pad_id] = pad.layers
 
+        # 1b. Synthetic via *nodes* (issue #3794).  A via that lands inside a
+        #     pour's solid region is the bridge a pad reaches the pour through
+        #     when the pour is on a *different* layer than the pad (the
+        #     ``pad -> F.Cu trace -> stitch via -> B.Cu pour`` path on board
+        #     04, whose GND pour is B.Cu-only).  Steps 2a–2c only union *pads*,
+        #     and step 2d only tests *pad* boxes against the pour — so a via
+        #     offset from its pad and reached by a trace is invisible to the
+        #     pour bond and the GND pads strand as false ``opens``.
+        #
+        #     We model each via as a first-class graph node placed at the via
+        #     position and carrying the via's bridged copper layer span.  The
+        #     existing segment chainer (2b) then connects any pad whose trace
+        #     ends at the via to that node, and the pour bonder (2d) unions a
+        #     via node that overlaps a pour's solid region into that island —
+        #     so the pads chained to the via inherit the pour bond.  Via nodes
+        #     are flagged in ``synthetic_nodes`` and dropped from the returned
+        #     partition (3); they only carry connectivity, they are not pads.
+        #
+        #     This adds *real* copper paths (a via physically tying a trace to
+        #     a pour) and reuses the same ``_fill_solid_region`` / layer-match
+        #     / ``POUR_PAD_ERODE`` machinery, so it cannot manufacture a false
+        #     short: a via must land in the eroded solid pour to bond, exactly
+        #     as a pad must.
+        synthetic_nodes: set[str] = set()
+        for via_index, via in enumerate(self.pcb.vias):
+            node_id = f"__via{via_index}"
+            pad_positions[node_id] = via.position
+            pad_layers[node_id] = sorted(self._via_bridged_layers(via.layers))
+            synthetic_nodes.add(node_id)
+
         # 2. Build a copper adjacency graph over pads, ignoring net labels.
         #    Every pad starts as its own node; copper fuses them.
         graph: dict[str, set[str]] = {pad_id: set() for pad_id in pad_positions}
@@ -445,6 +475,23 @@ class ConnectivityValidator:
             for i, p in enumerate(via_pads):
                 for other in via_pads[i + 1 :]:
                     _connect(p, other)
+
+        # 2c2. Via-in-pad bonding (issue #3794).  A via whose position lands
+        #      inside a pad's copper box on a layer the via spans is
+        #      galvanically bonded to that pad — the via barrel pierces the
+        #      pad's copper.  Step 2c only fuses a via's *coincident* pads
+        #      (within ``POSITION_TOLERANCE`` of the via centre); a via placed
+        #      off-centre but still *under* a fine-pitch pad's copper (a
+        #      via-in-pad tie, e.g. board-04's congested LQFP GND pads where a
+        #      centred via cannot clear the neighbour escape) is missed.  We
+        #      bond the via's synthetic node (1b) to any pad whose eroded
+        #      copper box contains the via centre on a shared copper layer.
+        #      The erosion (``POUR_PAD_ERODE``) keeps a via merely grazing a
+        #      pad edge across a clearance moat from counting — only a via well
+        #      inside the pad copper bonds, so no false short is introduced on
+        #      a DRC-clean board (where a via never overlaps a *foreign* pad).
+        if _has_shapely():
+            self._connect_via_in_pad(pad_positions, pad_layers, synthetic_nodes, _connect)
 
         # 2d. Filled zones (copper pours) — LABEL-FREE (issue #3761).
         #
@@ -496,7 +543,7 @@ class ConnectivityValidator:
         #     installs keep working (the soundness upgrade simply requires the
         #     ``geometry``/``dev`` extra to be installed).
         if _has_shapely():
-            self._connect_pour_pads_label_free(pad_positions, pad_layers, _connect)
+            self._connect_pour_pads_label_free(pad_positions, pad_layers, _connect, synthetic_nodes)
         else:  # pragma: no cover - exercised only on core-only installs
             self._connect_pour_pads_by_declared_net(pad_positions, pad_layers, _connect)
 
@@ -508,7 +555,10 @@ class ConnectivityValidator:
                 if self._points_close(pad_positions[p], pad_positions[other]):
                     _connect(p, other)
 
-        # 3. Flood-fill connected components of the pad graph.
+        # 3. Flood-fill connected components of the pad graph.  Synthetic via
+        #    nodes (1b) participate in the flood so they carry connectivity
+        #    across a pour, but they are stripped from each component before it
+        #    is emitted — only real pads belong in the returned partition.
         visited: set[str] = set()
         partition: list[frozenset[str]] = []
         for pad_id in pad_positions:
@@ -523,7 +573,9 @@ class ConnectivityValidator:
                 visited.add(current)
                 component.add(current)
                 queue.extend(graph[current] - visited)
-            partition.append(frozenset(component))
+            real_pads = component - synthetic_nodes
+            if real_pads:
+                partition.append(frozenset(real_pads))
 
         partition.sort(key=lambda comp: min(comp))
         return partition
@@ -1154,11 +1206,67 @@ class ConnectivityValidator:
             return None
         return poly
 
+    def _connect_via_in_pad(
+        self,
+        pad_positions: dict[str, tuple[float, float]],
+        pad_layers: dict[str, list[str]],
+        synthetic_nodes: set[str],
+        connect: Any,
+    ) -> None:
+        """Bond each via node to any pad whose copper box contains it (#3794).
+
+        A through-via whose centre sits inside a pad's copper, on a copper
+        layer the via spans, is galvanically tied to that pad — the via barrel
+        pierces the pad metal.  This complements the *coincident*-via union of
+        step 2c, which only fires when the via centre is within
+        ``POSITION_TOLERANCE`` of the pad centre; a via-in-pad tie placed
+        off-centre (to clear a neighbour escape on a fine-pitch package) is
+        still fully under the pad copper but is missed by the centre test.
+
+        The pad's *eroded* copper box (:meth:`_pad_copper_polygon`,
+        ``POUR_PAD_ERODE`` inset) is used so a via merely grazing the pad edge
+        across a clearance moat does not bond — only a via well inside the pad
+        copper counts.  On a DRC-clean board a via never overlaps a *foreign*
+        pad's copper (clearance forbids it), so this cannot manufacture a
+        false short; it only recovers a real via-in-pad bond the centre test
+        drops.  Requires ``shapely`` (guarded by the caller).
+        """
+        # Board-frame eroded copper box per pad.
+        pad_polygons: dict[str, Any] = {}
+        for fp in self.pcb.footprints:
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+            for pad in fp.pads:
+                if pad.number is None or pad.number == "":
+                    continue
+                poly = self._pad_copper_polygon(fp, pad)
+                if poly is not None:
+                    pad_polygons[f"{fp.reference}.{pad.number}"] = poly
+
+        for node_id in synthetic_nodes:
+            pos = pad_positions.get(node_id)
+            if pos is None:
+                continue
+            via_layers = pad_layers.get(node_id, [])
+            via_point = _ShapelyPoint(pos)
+            for pad_id, pad_geom in pad_polygons.items():
+                # Require a shared copper layer: the via must span a layer the
+                # pad lives on for the barrel to pierce that pad's metal.
+                if not any(
+                    self._pad_layer_matches_zone(pad_layers.get(pad_id, []), via_layer)
+                    for via_layer in via_layers
+                    if via_layer.endswith(".Cu")
+                ):
+                    continue
+                if pad_geom.contains(via_point) or pad_geom.intersects(via_point):
+                    connect(node_id, pad_id)
+
     def _connect_pour_pads_label_free(
         self,
         pad_positions: dict[str, tuple[float, float]],
         pad_layers: dict[str, list[str]],
         connect: Any,
+        synthetic_nodes: set[str] | None = None,
     ) -> None:
         """Union pads bonded to the same poured copper island (label-free).
 
@@ -1168,6 +1276,16 @@ class ConnectivityValidator:
         pad/zone ``net_name`` is consulted — pads are tied solely by shared
         metal, so a pad moated out of a pour is left isolated and a
         foreign-net pad whose copper bonds to the pour is fused into it.
+
+        Synthetic via nodes (issue #3794, listed in ``synthetic_nodes``) are
+        bonded the same way, but tested as a *point* at the via position
+        rather than a size box — a via that lands inside the pour's solid
+        region on a layer the via spans is unioned into the island, so a pad
+        reaching that via through a trace (on the via's *other* layer) inherits
+        the pour bond.  This is what closes the ``pad -> trace -> stitch via
+        -> opposite-layer pour`` path that pad-box-only testing misses; it adds
+        only real copper (a via tying a trace to a pour) and re-uses the same
+        eroded-solid-region guard, so it cannot fabricate a false short.
 
         Pads are approximated by their size box (:meth:`_pad_copper_polygon`)
         rather than a bare center point: a thermally-relieved pad's center
@@ -1188,8 +1306,15 @@ class ConnectivityValidator:
         fragment would land in a singleton component and be reported as a
         false ``open``.
         """
+        synthetic_nodes = synthetic_nodes or set()
+
         # Board-frame pad copper polygons, keyed by pad id.  Built once here
         # so each fill island can be tested against every candidate pad.
+        # Synthetic via nodes (issue #3794) have no footprint pad, so they are
+        # represented by a bare point at the via position: a via that lands in
+        # the solid pour region penetrates the copper there, and a point test
+        # is the conservative analogue of the eroded pad box (the via must be
+        # inside the solid region, past any clearance moat, to bond).
         pad_polygons: dict[str, Any] = {}
         for fp in self.pcb.footprints:
             if not fp.reference or fp.reference.startswith("#"):
@@ -1200,6 +1325,10 @@ class ConnectivityValidator:
                 poly = self._pad_copper_polygon(fp, pad)
                 if poly is not None:
                     pad_polygons[f"{fp.reference}.{pad.number}"] = poly
+        for node_id in synthetic_nodes:
+            pos = pad_positions.get(node_id)
+            if pos is not None:
+                pad_polygons[node_id] = _ShapelyPoint(pos)
 
         for zone in self.pcb.zones:
             if not zone.filled_polygons:

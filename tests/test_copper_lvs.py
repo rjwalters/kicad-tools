@@ -1056,3 +1056,228 @@ def test_via_less_crossover_copper_lvs_clean(tmp_path: Path) -> None:
     result = compare_partitions(sch, partition)
     assert result.clean
     assert result.mismatches == ()
+
+
+# ---------------------------------------------------------------------------
+# Via-into-pour + via-in-pad bonding (issue #3794)
+# ---------------------------------------------------------------------------
+#
+# Board-04's GND pour is B.Cu-only, so a GND SMD pad on F.Cu reaches the plane
+# through ``pad -> F.Cu trace -> stitch via -> B.Cu pour``.  Before #3794 the
+# label-free partition (``extract_pad_partition``) only tested *pad* boxes
+# against a pour and only fused a via's *coincident* pads — so the via-into-
+# pour hop and an off-centre via-in-pad tie were both invisible, stranding the
+# GND pads as false same-net opens.  These fixtures pin the two new bonds:
+#
+#   * a via / trace-endpoint that lands inside a pour's solid region unions the
+#     pads reaching it into that pour island (synthetic via node, step 1b/2d);
+#   * a via whose centre sits inside a pad's copper box (off-centre via-in-pad)
+#     bonds to that pad (step 2c2).
+#
+# Both reuse the existing ``_fill_solid_region`` / ``POUR_PAD_ERODE`` guards,
+# so neither relaxes the #3769/#3772/#3792 moat/erosion adversarial guards.
+
+
+def _pcb_via_into_pour() -> str:
+    """A B.Cu-only GND pour reached only through a stitch via (issue #3794).
+
+    Mirrors board-04's GND topology in miniature:
+
+    * GND pour fills a solid square 0..20 on **B.Cu** only.
+    * ``C1`` pad "2" at board (5, 5) is an F.Cu SMD GND pad.  It is moated out
+      of any F.Cu copper (there is none) and does NOT sit over the pour on its
+      own layer, so a pad-box-only pour test cannot bond it.
+    * An ``F.Cu``->``B.Cu`` GND via at (10, 10) lands squarely inside the B.Cu
+      pour, and an F.Cu trace runs ``(5, 5) -> (10, 10)`` from the pad to the
+      via.  The only galvanic path C1.2 has to the pour is
+      ``pad -> F.Cu trace -> via -> B.Cu pour``.
+    * ``C2`` pad "2" at board (15, 15) is a B.Cu SMD GND pad sitting directly
+      in the solid pour (the pour "anchor" C1.2 must join).
+
+    Pre-#3794 the via-into-pour hop is invisible: C1.2 lands in its own
+    singleton (a false GND open against C2.2).  Post-#3794 the via node inside
+    the pour unions C1.2 into the pour island with C2.2.
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c1")
+    (at 5 5)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c1-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c1-val"))
+    (pad "2" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000c2")
+    (at 15 15)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-c2-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-c2-val"))
+    (pad "2" smd roundrect (at 0 0) (size 1.5 1.5) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (segment (start 5 5) (end 10 10) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-0000000000s1"))
+  (via (at 10 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000v1") (net 1))
+  (zone
+    (net 1 "GND")
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000z3")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+    (filled_polygon (layer "B.Cu") (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+  )
+)
+"""
+
+
+@requires_shapely
+def test_via_into_pour_bonds_pad_reaching_pour_through_via(tmp_path: Path) -> None:
+    """A pad reaching a pour only via a stitch via is bonded (issue #3794).
+
+    C1.2 (F.Cu) reaches the B.Cu GND pour only through
+    ``pad -> F.Cu trace -> via -> B.Cu pour``.  The via node inside the pour
+    must union C1.2 into the same component as C2.2 (the pad sitting directly
+    in the pour).  Pre-#3794 this hop was invisible and C1.2 was a singleton
+    (a false GND open).
+    """
+    pcb_path = _write(tmp_path, "via_pour.kicad_pcb", _pcb_via_into_pour())
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+
+    c1_component = next(c for c in partition if "C1.2" in c)
+    assert "C2.2" in c1_component, (
+        "C1.2 should bond to the B.Cu GND pour through its stitch via and join "
+        f"C2.2; partition={sorted(sorted(c) for c in partition)}"
+    )
+    # No synthetic via node leaks into the returned partition.
+    assert all(not p.startswith("__via") for c in partition for p in c)
+
+
+@requires_shapely
+def test_via_into_pour_copper_lvs_clean(tmp_path: Path) -> None:
+    """The via-into-pour board is copper-LVS clean (no false GND open)."""
+    pcb_path = _write(tmp_path, "via_pour.kicad_pcb", _pcb_via_into_pour())
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    sch = {("C1", "2"): "GND", ("C2", "2"): "GND"}
+    result = compare_partitions(sch, partition)
+    assert result.clean, f"unexpected mismatches: {result.mismatches}"
+    assert result.opens == ()
+    assert result.shorts == ()
+
+
+def _pcb_via_in_pad_offcenter() -> str:
+    """An off-centre via-in-pad tie into a B.Cu pour (issue #3794).
+
+    Distilled from board-04's congested LQFP VSS pads, where a centred stitch
+    via cannot clear the neighbour escape so the tie via is pushed off-centre
+    but still under the pad copper:
+
+    * ``U1`` pad "8" at board (5, 5) is a tall F.Cu SMD GND pad
+      (size 0.3 x 1.5, long axis = y).
+    * A GND ``F.Cu``->``B.Cu`` via sits at (5, 5.5) — 0.5 mm *off* the pad
+      centre along the long axis but well inside the pad copper (and outside
+      ``POSITION_TOLERANCE`` of the centre, so step-2c coincidence does NOT
+      fire).  It lands in the B.Cu GND pour.
+    * ``U2`` pad "1" at board (15, 15) is a B.Cu GND pad in the solid pour.
+
+    Only the via-in-pad bond (step 2c2) ties U1.8 to its via; the via-into-pour
+    bond then joins it to U2.1.  Pre-#3794 U1.8 is a singleton (false open).
+    """
+    return """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000d1")
+    (at 5 5)
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.SilkS") (uuid "fp-d1-ref"))
+    (property "Value" "MCU" (at 0 3 0) (layer "F.Fab") (uuid "fp-d1-val"))
+    (pad "8" smd roundrect (at 0 0) (size 0.3 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000d2")
+    (at 15 15)
+    (property "Reference" "U2" (at 0 -1.5 0) (layer "B.SilkS") (uuid "fp-d2-ref"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "B.Fab") (uuid "fp-d2-val"))
+    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "B.Cu" "B.Paste" "B.Mask")
+      (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (via micro (at 5 5.5) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000v2") (net 1))
+  (zone
+    (net 1 "GND")
+    (layer "B.Cu")
+    (uuid "00000000-0000-0000-0000-0000000000z4")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+    (filled_polygon (layer "B.Cu") (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+  )
+)
+"""
+
+
+@requires_shapely
+def test_via_in_pad_offcenter_bonds_pad(tmp_path: Path) -> None:
+    """An off-centre via-in-pad tie bonds the pad into the pour (issue #3794).
+
+    U1.8's only copper is a micro-via sitting 0.5 mm off its centre but inside
+    the pad copper; that via lands in the B.Cu GND pour.  The via-in-pad bond
+    (step 2c2) plus the via-into-pour bond must join U1.8 to U2.1.  The via is
+    outside ``POSITION_TOLERANCE`` of the pad centre, so the pre-#3794
+    coincidence test (step 2c) does NOT fire — this exercises the new bond.
+    """
+    pcb_path = _write(tmp_path, "via_in_pad.kicad_pcb", _pcb_via_in_pad_offcenter())
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    u1_component = next(c for c in partition if "U1.8" in c)
+    assert "U2.1" in u1_component, (
+        "U1.8 should bond through its off-centre via-in-pad into the B.Cu GND "
+        f"pour and join U2.1; partition={sorted(sorted(c) for c in partition)}"
+    )
+
+
+@requires_shapely
+def test_via_in_pad_does_not_bond_foreign_pad(tmp_path: Path) -> None:
+    """A via well clear of a pad's eroded copper does NOT bond it (guard).
+
+    Move the via fully outside U1.8's pad box (and off the pour anchor's path).
+    The via-in-pad bond must NOT fire — only a via inside the eroded pad copper
+    counts — so U1.8 must NOT be fused to that via's island.  This pins the
+    soundness guard: the new bond cannot manufacture a short by grabbing a via
+    that merely passes near a foreign pad.
+    """
+    # Push the via to (8, 5.5): 3 mm east of U1.8's pad box (half-width 0.15),
+    # still in the B.Cu pour but nowhere near the pad copper.
+    text = _pcb_via_in_pad_offcenter().replace("(at 5 5.5)", "(at 8 5.5)")
+    pcb_path = _write(tmp_path, "via_far.kicad_pcb", text)
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # U1.8 has no copper of its own reaching the pour -> singleton (open).
+    assert frozenset({"U1.8"}) in partition, (
+        "a via 3 mm clear of U1.8's pad copper must NOT bond it (no via-in-pad "
+        f"false bond); partition={sorted(sorted(c) for c in partition)}"
+    )
