@@ -26,10 +26,12 @@ Gate policy is per-board (see the curator matrix on #3762):
 * Boards 06/07 are copper-clean but label-dirty (PCB-first test fixtures
   whose floating schematic pins read ``schematic_net=None``); they gate on
   copper only (``run_label=False``).
-* Boards in :data:`ADVISORY_LVS_BOARDS` (03/04/05) are genuinely dirty
-  today; they still run LVS and emit ``lvs.json`` so the gallery chip and
-  ``board-metrics`` surface the true state, but pass ``require_clean=False``
-  so the recipe logs the mismatch summary without raising.
+* Boards in :data:`ADVISORY_LVS_BOARDS` (04/05) are genuinely dirty on a
+  fresh clean-room regen; they still run LVS and emit ``lvs.json`` so the
+  gallery chip and ``board-metrics`` surface the true state, but pass
+  ``require_clean=False`` so the recipe logs the mismatch summary without
+  raising.  Board 03 graduated to a hard copper-LVS gate in #3795 (its
+  recipe regenerates copper-clean) and is no longer in the allowlist.
 """
 
 from __future__ import annotations
@@ -48,11 +50,21 @@ from kicad_tools.lvs.copper_lvs import CopperLVSResult, compare_copper_netlist
 # Recipes for these boards must pass ``require_clean=False`` so a dirty
 # comparator logs a summary instead of raising.  CI does NOT assert
 # ``clean=true`` for these boards.  This allowlist is the single auditable
-# place for the exemption -- shrink it as per-board fix follow-ups land
-# (boards 03/04 board-fix issues; board 05 blocked behind #3775/#3766).
+# place for the exemption -- shrink it as per-board fix follow-ups land.
+#
+# Graduated (removed): board 03 (#3795) -- its recipe regenerates
+# copper-LVS clean (0/0) on a fresh clean-room route, now hard-gated.
+#
+# Still advisory:
+# * 04-stm32-devboard -- the COMMITTED PCB was hand-fixed (#3785/#3796:
+#   OSC short + power-pad bonding), but a fresh ``generate_design.py``
+#   regen re-introduces the OSC_IN<->OSC_OUT short + 20 same-net power
+#   opens (21 mismatches).  The RECIPE cannot yet produce a clean board
+#   from scratch, so a hard gate would be RED.  Graduation blocked on a
+#   recipe-reproducibility fix (board-04 follow-up).
+# * 05-bldc-motor-controller -- incomplete routing, blocked on #3775/#3766.
 ADVISORY_LVS_BOARDS: frozenset[str] = frozenset(
     {
-        "03-usb-joystick",
         "04-stm32-devboard",
         "05-bldc-motor-controller",
     }

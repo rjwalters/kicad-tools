@@ -197,9 +197,12 @@ def test_no_comparator_selected_raises_value_error(
 
 
 def test_advisory_allowlist_contains_known_dirty_boards() -> None:
-    assert "03-usb-joystick" in ADVISORY_LVS_BOARDS
+    # Boards whose fresh clean-room regen is still copper/label dirty.
     assert "04-stm32-devboard" in ADVISORY_LVS_BOARDS
     assert "05-bldc-motor-controller" in ADVISORY_LVS_BOARDS
+    # Graduated boards must NOT be exempted.  Board 03 graduated to a hard
+    # copper-LVS gate in #3795 (its recipe regenerates copper-clean).
+    assert "03-usb-joystick" not in ADVISORY_LVS_BOARDS
     # Clean boards must NOT be exempted.
     assert "00-simple-led" not in ADVISORY_LVS_BOARDS
     assert "01-voltage-divider" not in ADVISORY_LVS_BOARDS

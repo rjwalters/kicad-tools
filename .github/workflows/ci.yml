@@ -1144,6 +1144,100 @@ jobs:
             --stem charlieplex_3x3 \
             /tmp/board02-staging/02-charlieplex-led
 
+  board-03-end-to-end:
+    # Issue #3795 (#3780 Part 2): LVS-ONLY end-to-end gate for board 03
+    # ("usb-joystick"), graduated out of ``ADVISORY_LVS_BOARDS``.  Board 03's
+    # recipe now runs ``write_lvs_report(..., require_clean=True,
+    # run_copper=True, run_label=False)`` -- a HARD copper-LVS gate.  A fresh
+    # clean-room regen routes fully and regenerates copper-clean (0 shorts /
+    # 0 opens, verified 2/2 runs), so this job is GREEN.
+    #
+    # This uses the asserter's ``--lvs-only`` mode (like boards 06/07), NOT
+    # the full e2e asserter (boards 00/01/02).  Board 03 carries 4 advisory
+    # ``via_in_pad`` DRC residuals (the recipe prints ``DRC: PASS``; the
+    # board is not in ``.github/routed-drc-tolerance.yml``), so board-metrics
+    # classifies it ``status: partial`` / ``drc_violations: 4``.  The full
+    # asserter hard-asserts ``status: ok`` / ``drc_violations: 0`` and would
+    # FAIL on those advisories; ``--lvs-only`` asserts only artifact presence
+    # + ``lvs.json clean=true`` (+ ``board.json lvs_clean=true``), which is
+    # the meaningful copper-LVS gate.
+    #
+    # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
+    # during regen, and per CLAUDE.md a missing native extension makes routing
+    # multi-minute-per-net.  Board 03's recipe takes only an output-dir arg
+    # (no ``--step`` / ``--seed``); it routes fully and exits 0.
+    #
+    # Advisory until a repo admin adds it to branch protection (same as the
+    # board 00/01/02/06/07 e2e jobs).
+    name: Board 03 End-to-End (LVS-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: kicad/kicad:10.0
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 03 from recipe (clean tmp directory)
+        # Board 03's recipe takes only an output-dir argument and routes
+        # fully (no --step / --seed).  It regenerates copper-LVS clean and
+        # exits 0.  write_lvs_report(require_clean=True) writes lvs.json and
+        # raises on any copper short/open; the LVS-only asserter below is the
+        # gate.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board03-ci
+          mkdir -p /tmp/board03-ci
+          uv run python boards/03-usb-joystick/generate_design.py \
+            /tmp/board03-ci
+          test -f /tmp/board03-ci/lvs.json
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board03-staging
+          mkdir -p /tmp/board03-staging/03-usb-joystick/output
+          cp -r /tmp/board03-ci/. /tmp/board03-staging/03-usb-joystick/output/
+          uv run kct board-metrics /tmp/board03-staging/03-usb-joystick
+
+      - name: Assert artifacts + lvs.json clean (LVS-only)
+        # --lvs-only: assert artifact presence + lvs.json clean=true +
+        # board.json lvs_clean=true, but NOT status:ok / drc_violations:0
+        # (board 03 carries 4 advisory via_in_pad DRC residuals ->
+        # status='partial').
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem usb_joystick \
+            --lvs-only \
+            /tmp/board03-staging/03-usb-joystick
+
   board-06-end-to-end:
     # Issue #3779: LVS-ONLY end-to-end gate for board 06 ("diffpair-test").
     # Board 06 is a PCB-first routing fixture (USB3 connectors with no
