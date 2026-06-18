@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3791/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3794/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 2,
   "summary": {
@@ -17,7 +17,7 @@
       "rule_id": "connectivity",
       "type": "connectivity",
       "severity": "error",
-      "message": "Net 'GND' is partially routed: 3 of 18 pads stranded (connected island has 15 pads)",
+      "message": "Net 'GND' is partially routed: 1 of 18 pads stranded (connected island has 17 pads)",
       "location": [
         33.25,
         26.1625

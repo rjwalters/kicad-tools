@@ -223,14 +223,28 @@ def test_board_01_real_outputs_are_clean(tmp_path: Path) -> None:
     assert _read(tmp_path)["clean"] is True
 
 
-def test_board_04_real_outputs_advisory_does_not_raise(tmp_path: Path) -> None:
-    """Board 04 is copper-dirty; advisory mode writes the report w/o raising."""
+def test_board_04_real_outputs_copper_clean_advisory(tmp_path: Path) -> None:
+    """Board 04 is now copper-LVS clean (#3794) but stays advisory-classified.
+
+    Before #3794 the committed board-04 routed PCB read 0 shorts / 20 opens
+    on the copper comparator (same-net power-pad opens).  The #3794 Leg A
+    extractor via-into-pour bond + Leg B ``tie_power_pads`` recipe step closed
+    them, so ``compare_copper_netlist`` is now clean.  Board 04 remains in
+    ``ADVISORY_LVS_BOARDS`` (graduation to a hard copper-LVS gate is #3795), so
+    the recipe still writes the report in advisory mode (``require_clean`` off
+    in ``generate_design.py``) — but the copper leg itself is clean here.
+    """
     out = REPO_ROOT / "boards" / "04-stm32-devboard" / "output"
     sch = out / "stm32_devboard.kicad_sch"
     pcb = out / "stm32_devboard_routed.kicad_pcb"
     if not (sch.is_file() and pcb.is_file()):
         pytest.skip("board 04 committed outputs not present")
-    copper_clean, label_clean = write_lvs_report(sch, pcb, tmp_path, require_clean=False)
-    # Board 04 is known dirty -- at least one comparator must be dirty.
-    assert not (copper_clean and label_clean)
-    assert _read(tmp_path)["clean"] is False
+    # Mirror the recipe: only the copper comparator is the meaningful leg for
+    # board 04 (run_label=False in generate_design.py).
+    copper_clean, label_clean = write_lvs_report(
+        sch, pcb, tmp_path, require_clean=False, run_copper=True, run_label=False
+    )
+    # Copper-LVS is now clean (#3794); the label leg is skipped (None -> True).
+    assert copper_clean is True
+    assert _read(tmp_path)["clean"] is True
+    assert _read(tmp_path)["copper_mismatches"] == []
