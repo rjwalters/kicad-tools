@@ -742,23 +742,25 @@ def main() -> int:
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
-        # Step 6.5: LVS (advisory, #3780) -- board 03 is in
-        # ``ADVISORY_LVS_BOARDS``.  The residual GND copper-opens are now
-        # FIXED (#3787): Step 5.4 stitches the F.Cu/B.Cu GND planes so the
-        # J1 USB-C F.Cu-only shield pads bond into the GND net and the
-        # copper comparator reports 0 shorts / 0 opens.  ``require_clean``
-        # stays ``False`` here on purpose: flipping it to a hard gate (and
-        # removing the board from ``ADVISORY_LVS_BOARDS``) is #3780 Part 2,
-        # tracked separately and explicitly out of scope for #3787.
-        # ``write_lvs_report`` still logs the summary and writes
-        # ``output/lvs.json`` (now ``clean: true``) so board.json / the
-        # gallery LVS chip surface the green status.  ``run_label`` is off
-        # because the copper comparator is the meaningful leg here.
+        # Step 6.5: LVS (HARD copper gate, #3795 / #3780 Part 2) -- board 03
+        # graduated out of ``ADVISORY_LVS_BOARDS``.  The residual GND
+        # copper-opens were FIXED in #3787: Step 5.4 stitches the F.Cu/B.Cu
+        # GND planes so the J1 USB-C F.Cu-only shield pads bond into the GND
+        # net and the copper comparator reports 0 shorts / 0 opens.  A fresh
+        # clean-room ``generate_design.py`` regen regenerates copper-clean,
+        # so ``require_clean=True`` now hard-gates the copper leg: a
+        # copper short/open raises :class:`BoardNetlistMismatch` and trips
+        # the recipe exit gate (and the new ``board-03-end-to-end`` CI job
+        # asserts ``lvs.json clean=true``).  ``write_lvs_report`` still
+        # writes ``output/lvs.json`` so board.json / the gallery LVS chip
+        # surface the green status.  ``run_label`` stays ``False``: the
+        # copper comparator is the meaningful leg, and the USB-C fixture's
+        # ``schematic_net=None`` label noise keeps the label leg advisory.
         write_lvs_report(
             sch_path,
             routed_path,
             output_dir,
-            require_clean=False,
+            require_clean=True,
             run_copper=True,
             run_label=False,
         )
