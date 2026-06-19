@@ -23,6 +23,7 @@ Usage:
 If no output directory is specified, files are written to ./output/
 """
 
+import os
 import subprocess
 import sys
 import uuid
@@ -1239,12 +1240,32 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # across runs and PR #3063 measurements are reproducible.
         "--seed",
         "42",
+        # Issue #3799: route under an ITERATION budget instead of the
+        # per-net WALL-CLOCK cutoff.  --seed only seeds Python's global
+        # random; it does NOT control the per-net A* deadline checked in
+        # the C++ loop.  On a loaded machine that wall-clock budget fires
+        # mid-search and the net lands less copper -- same seed, different
+        # copper (the observed 153/145/145-segment divergence).
+        # --deterministic-budget (#3538) disables the per-net wall-clock
+        # cutoff and pins a fixed node-expansion backstop, so the seed-42
+        # re-route is byte-identical (UUID-normalized) regardless of
+        # machine speed/load.  --timeout 600 below is then a SAFETY
+        # backstop only (the normalizer warns if it would bind).
+        "--deterministic-budget",
         "--timeout",
         "600",
     ]
     print(f"\n   Command: {' '.join(cmd)}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Issue #3799: pin PYTHONHASHSEED for the route subprocess so any
+    # string-keyed dict/set iteration in the negotiated router is
+    # reproducible across runner environments.  Combined with --seed 42 +
+    # --deterministic-budget this makes the full pipeline deterministic,
+    # not just the A* loop.  Mirrors board-07's convention.
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = "42"
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.stdout:
         # Echo router output (last ~80 lines is plenty for the summary)
         for line in result.stdout.strip().split("\n"):

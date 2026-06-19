@@ -19,6 +19,7 @@ Usage:
 If no output directory is specified, files are written to ./output/
 """
 
+import os
 import subprocess
 import sys
 import uuid
@@ -580,8 +581,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "negotiated",
         "--iterations",
         "30",
-        "--per-net-timeout",
-        "30",
+        # Issue #3799: route under an ITERATION budget instead of the
+        # per-net WALL-CLOCK cutoff.  --seed only seeds Python's global
+        # random; it does NOT control the per-net A* deadline checked in
+        # the C++ loop.  On a loaded machine that wall-clock budget fires
+        # mid-search and the net lands less copper -- same seed, different
+        # copper.  --deterministic-budget (#3538) disables the per-net
+        # wall-clock cutoff and pins a fixed node-expansion backstop, so
+        # the seed-42 re-route is byte-identical (UUID-normalized) across
+        # machines.  --timeout 240 below is retained only as a SAFETY
+        # backstop (the normalizer warns if it would bind).
+        "--deterministic-budget",
         "--timeout",
         "240",
         "--seed",
@@ -598,13 +608,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "jlcpcb",
     ]
 
+    # Issue #3799: pin PYTHONHASHSEED for the route subprocess so any
+    # string-keyed dict/set iteration in the negotiated router is
+    # reproducible across runner environments (CPython randomizes string
+    # hashing per-process otherwise).  Combined with --seed 42 +
+    # --deterministic-budget this makes the full pipeline deterministic,
+    # not just the A* loop.  Mirrors board-07's convention.
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = "42"
+
     print(f"\n1. Input: {input_path}")
     print(f"   Output: {output_path}")
     print(f"   Skipping nets: {skip_nets}")
-    print(f"   Command: {' '.join(cmd)}")
+    print(f"   Command: PYTHONHASHSEED={env['PYTHONHASHSEED']} {' '.join(cmd)}")
     print("\n2. Routing...")
 
-    result = subprocess.run(cmd, capture_output=False, text=True)
+    result = subprocess.run(cmd, capture_output=False, text=True, env=env)
 
     # ``kct route`` returns 0 on full success and a non-zero code on
     # partial / failed routing.  Either way it writes a routed PCB to

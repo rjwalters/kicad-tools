@@ -29,6 +29,7 @@ Example:
 """
 
 import contextlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -194,8 +195,19 @@ def main():
         "negotiated",
         "--iterations",
         "30",
-        "--per-net-timeout",
-        "30",
+        # Issue #3799: route under an ITERATION budget instead of the
+        # per-net WALL-CLOCK cutoff so the seed-42 route is byte-identical
+        # (UUID-normalized) across machines.  --seed only seeds Python's
+        # global random; it does NOT control the per-net A* deadline checked
+        # in the C++ loop.  On a loaded machine that wall-clock budget fires
+        # mid-search and the net lands less copper -- same seed, different
+        # copper.  --deterministic-budget (#3538) disables the per-net
+        # wall-clock cutoff and pins a fixed node-expansion backstop.
+        # --timeout 240 below is retained only as a SAFETY backstop.
+        # This MUST stay in sync with generate_design.py:route_pcb()
+        # (Issue #3207 no-drift guard,
+        # tests/test_board02_route_demo_recipe.py).
+        "--deterministic-budget",
         "--timeout",
         "240",
         "--seed",
@@ -219,7 +231,15 @@ def main():
     # It returns 0 on full success and a non-zero code on partial routing
     # (in which case it still writes the partially-routed PCB).  We capture
     # stdout for net-count parsing by tee-ing through subprocess.PIPE.
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Issue #3799: pin PYTHONHASHSEED for the route subprocess so any
+    # string-keyed dict/set iteration in the negotiated router is
+    # reproducible across runner environments (CPython randomizes string
+    # hashing per-process otherwise).  Combined with --seed 42 +
+    # --deterministic-budget this makes the full pipeline deterministic,
+    # mirroring generate_design.py:route_pcb().
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = "42"
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     # Echo subprocess output so users can see routing progress, errors, etc.
     if result.stdout:
         print(result.stdout)

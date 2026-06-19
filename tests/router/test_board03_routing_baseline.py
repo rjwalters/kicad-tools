@@ -176,6 +176,7 @@ References:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -397,6 +398,12 @@ def _run_kct_route(unrouted: Path, seed: int) -> str:
             "jlcpcb-tier1",
             "--backend",
             "cpp",
+            # Issue #3799: kept in lock-step with the production recipe in
+            # ``generate_design.py:route_pcb()`` -- --deterministic-budget
+            # (#3538) routes under a fixed iteration backstop instead of the
+            # per-net wall-clock cutoff, so the seed-42 re-route is
+            # byte-identical (UUID-normalized) across machines.
+            "--deterministic-budget",
             "--timeout",
             "600",
             # Issues #3507/#3454: ``--raw`` removed in lock-step with the
@@ -405,12 +412,17 @@ def _run_kct_route(unrouted: Path, seed: int) -> str:
             # deterministic clearance_segment_via merge violation that
             # made it load-bearing.  Keep these flag lists in sync.
         ]
+        # Issue #3799: pin PYTHONHASHSEED to match the production recipe so
+        # the baseline measured here is the SAME copper the recipe emits.
+        _route_env = os.environ.copy()
+        _route_env["PYTHONHASHSEED"] = "42"
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=900,
             check=False,
+            env=_route_env,
         )
         # Exit codes from cli/route_cmd.py:
         #   0 = full route + DRC clean

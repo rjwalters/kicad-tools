@@ -23,6 +23,7 @@ Usage:
 If no output directory is specified, files are written to ./output/
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -533,6 +534,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "jlcpcb-tier1",
         "--backend",
         "cpp",
+        # Issue #3799: route under an ITERATION budget instead of the
+        # per-net WALL-CLOCK cutoff.  --seed only seeds Python's global
+        # random; it does NOT control the per-net A* deadline checked in
+        # the C++ loop, so on a loaded machine the wall-clock budget fires
+        # mid-search and the net lands less copper -- same seed, different
+        # copper.  --deterministic-budget (#3538) disables the per-net
+        # wall-clock cutoff and pins a fixed node-expansion backstop, so
+        # the seed-42 re-route is byte-identical (UUID-normalized) across
+        # machines.  --timeout 600 below is then a SAFETY backstop only.
+        # KEEP IN SYNC with tests/router/test_board03_routing_baseline.py.
+        "--deterministic-budget",
         "--timeout",
         "600",
         # Issues #3507/#3454: ``--raw`` (skip TraceOptimizer) was
@@ -549,7 +561,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # the sidecar-aware ``kct check``).
     ]
     print(f"   $ {' '.join(cmd[1:])}")
-    proc = _sp.run(cmd, capture_output=True, text=True, timeout=1800, check=False)
+    # Issue #3799: pin PYTHONHASHSEED for the route subprocess so any
+    # string-keyed dict/set iteration in the negotiated router is
+    # reproducible across runner environments.  Combined with --seed 42 +
+    # --deterministic-budget this makes the full pipeline deterministic,
+    # not just the A* loop.  Mirrors board-07's convention.
+    _route_env = os.environ.copy()
+    _route_env["PYTHONHASHSEED"] = "42"
+    proc = _sp.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+        env=_route_env,
+    )
     # Echo the route output so reach parsers (and humans) see the full log.
     print(proc.stdout)
     if proc.returncode in (1, 5):

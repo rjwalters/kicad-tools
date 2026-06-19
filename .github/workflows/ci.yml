@@ -1087,6 +1087,14 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # Issue #3799: pin PYTHONHASHSEED so the board-02 regen is
+      # reproducible across runner environments (mirrors board-03/06/07).
+      # The recipe ALSO pins it on the route subprocess, but pinning it at
+      # the job level covers the whole regen pipeline (schematic + zone +
+      # LVS) for belt-and-suspenders determinism.
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Ensure container has prerequisites
         run: |
