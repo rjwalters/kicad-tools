@@ -146,36 +146,30 @@ class TestFixOscEscapeStep:
     """Unit coverage for the deterministic ``fix_osc_escape`` recipe step (#3797)."""
 
     def _routed_with_offending_hop(self, tmp_path: Path) -> Path:
-        """A routed-PCB copy that re-inserts the pre-fix OSC_OUT escape stub.
+        """A synthetic routed-PCB fixture carrying the pre-fix OSC_OUT escape.
 
-        The committed artifact is already fixed, so reconstruct the pre-fix
-        geometry (the straight-north hop into the U2.5 pad + the follow-on
-        segment) to exercise the surgery the way a fresh route emits it.
+        ``fix_osc_escape`` runs before the recipe's 45-quantize step (#3797),
+        so the committed artifact no longer carries the literal re-aimed hop
+        (quantize doglegs it).  To keep this unit test hermetic and independent
+        of the post-route quantization, build a minimal PCB containing exactly
+        the geometry ``fix_osc_escape`` operates on as a fresh route emits it:
+        the straight-north first hop into the U2.5 OSC_IN pad centre plus the
+        degenerate follow-on segment (pad centre -> re-aim point).
         """
-        if not BOARD_PCB.exists():
-            pytest.skip("board 04 routed PCB not present; regenerate.")
-        text = BOARD_PCB.read_text()
-        # Replace the re-aimed first hop with the original straight-north hop,
-        # and re-insert the degenerate follow-on segment the fix dropped.
-        reaimed = "(start 126.8375 121.75)\n\t\t(end 126.6875 121.1)"
-        assert reaimed in text, (
-            "committed board 04 PCB does not contain the re-aimed OSC escape "
-            "hop; the #3797 fix may have regressed."
+        original = (
+            "\t(segment\n\t\t(start 126.8375 121.75)\n\t\t(end 126.8375 121.25)\n"
+            '\t\t(width 0.2)\n\t\t(layer "B.Cu")\n'
+            '\t\t(uuid "11111111-1111-1111-1111-111111111111")\n\t\t(net 5)\n\t)\n'
         )
-        original = "(start 126.8375 121.75)\n\t\t(end 126.8375 121.25)"
-        text = text.replace(reaimed, original, 1)
-        # Inject the follow-on (pad centre -> re-aim point) segment right after
-        # the (now-original) first hop's block so fix_osc_escape can drop it.
-        anchor = "(segment\n\t\t(start 126.8375 121.75)\n\t\t(end 126.8375 121.25)"
-        idx = text.find(anchor)
-        assert idx >= 0
-        block_end = text.index("\n\t)\n", idx) + len("\n\t)\n")
         follow_on = (
             "\t(segment\n\t\t(start 126.8375 121.25)\n\t\t(end 126.6875 121.1)\n"
             '\t\t(width 0.2)\n\t\t(layer "B.Cu")\n'
             '\t\t(uuid "00000000-0000-0000-0000-000000000000")\n\t\t(net 5)\n\t)\n'
         )
-        text = text[:block_end] + follow_on + text[block_end:]
+        text = (
+            '(kicad_pcb\n\t(version 20240108)\n\t(generator "test")\n'
+            '\t(net 0 "")\n\t(net 5 "OSC_OUT")\n' + original + follow_on + ")\n"
+        )
         out = tmp_path / "pre_fix_routed.kicad_pcb"
         out.write_text(text)
         return out

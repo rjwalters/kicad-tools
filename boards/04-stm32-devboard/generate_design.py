@@ -1385,6 +1385,57 @@ def fix_osc_escape(routed_path: Path) -> bool:
     return True
 
 
+def quantize_escapes(routed_path: Path) -> bool:
+    """45-degree quantize the fresh deterministic escape copper (issue #3797).
+
+    The fresh deterministic route + the :func:`fix_osc_escape` re-aim ship a
+    handful of arbitrary-angle ``(segment ...)`` hops that fail the fleet
+    45-census gate (``tests/test_fleet_45_census.py``, issue #3532): the OSC_OUT
+    (net 5) B.Cu re-aim hop (~13 deg off) and two F.Cu net-3 escape hops
+    (~22 deg off).  Run the committed copper through the shared #3532 quantizer
+    (:func:`kicad_tools.router.quantize.quantize_pcb_file`), which replaces each
+    off-angle segment with an EXACT two-leg dogleg (45-degree leg + axis-aligned
+    leg) that preserves the original endpoints bit-for-bit — so connectivity
+    (copper-LVS) is unchanged.  Mirrors the board-07 (#3617) and softstart
+    quantize step.
+
+    The default (diagonal-first) dogleg variant is used for every segment.  For
+    the OSC re-aim hop this is load-bearing: the axis-first variant's midpoint
+    lands exactly on the U2.5 OSC_IN pad centre ``(126.8375, 121.25)`` and would
+    re-introduce the OSC_IN<->OSC_OUT short, whereas the diagonal-first midpoint
+    ``(126.6875, 121.6)`` keeps the escape clear of the pad column (copper-LVS
+    stays 0/0; verified).  The subsequent :func:`fill_zones` re-pour backs the
+    GND plane off any small dogleg bulge so DRC stays 0-blocking.
+
+    The quantizer is endpoint-preserving and emits deterministic uuid5 sibling
+    legs, so the step is byte-deterministic and idempotent (a second pass finds
+    no off-angle segment and no-ops).  Returns True on success.
+    """
+    from kicad_tools.router.quantize import quantize_pcb_file, segment_angle_census
+
+    print("\n" + "=" * 60)
+    print("45-degree quantizing escape copper (issue #3797 / #3532)...")
+    print("=" * 60)
+
+    replaced = quantize_pcb_file(routed_path)
+    if replaced:
+        print(f"   Quantized {len(replaced)} off-angle segment(s): {replaced}")
+    else:
+        print("   No off-angle segments: escape copper already 45-aligned")
+
+    # Hard guard: after quantization the committed copper must be 100% on the
+    # 0/45/90/135 grid (the fleet-census invariant).
+    total, bad = segment_angle_census(routed_path)
+    assert not bad, (
+        f"quantize_escapes: {len(bad)}/{total} segments remain off the "
+        f"0/45/90/135 angle set after quantization (#3797/#3532): "
+        f"{[(b['start'], b['end'], round(b['off_deg'], 2)) for b in bad]}"
+    )
+
+    print("\n   SUCCESS: quantize_escapes completed")
+    return True
+
+
 def stitch_pcb(routed_path: Path) -> bool:
     """
     Add GND stitching vias to connect plane-net pads (B.Cu GND plane).
@@ -1817,6 +1868,17 @@ def main() -> int:
         # re-pours so the new ties take effect).
         tie_success = tie_power_pads(routed_path)
 
+        # Step 6.4: 45-degree quantize the escape copper (#3797 / #3532) -- the
+        # fresh deterministic route + the fix_osc_escape re-aim + the kct stitch
+        # GND pad-tails ship a few arbitrary-angle hops (the OSC_OUT re-aim
+        # ~13 deg, two GND stitch-via tails ~22 deg) that fail the fleet
+        # 45-census gate.  Replace each with an EXACT endpoint-preserving dogleg
+        # so the committed artifact is 100% on the 0/45/90/135 grid.  Must run
+        # AFTER stitch_pcb + tie_power_pads (which emit the GND stitch tails) and
+        # BEFORE fill_zones (so the re-pour backs the GND plane off any dogleg
+        # bulge); copper-LVS stays 0/0.
+        quantize_success = quantize_escapes(routed_path)
+
         # Step 6.5: Re-pour zones (#3791) -- refresh the GND B.Cu fill so it
         # backs off the relocated OSC_OUT 45 jog (#3790) by the full 0.3mm
         # zone clearance.  Fill-only: routed copper is byte-identical, only
@@ -1881,6 +1943,7 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  OSC escape fix: {'SUCCESS' if osc_success else 'FAIL'}")
+        print(f"  45-quantize: {'SUCCESS' if quantize_success else 'FAIL'}")
         print(f"  Stitch: {'SUCCESS' if stitch_success else 'FAIL'}")
         print(f"  Power-pad tie: {'SUCCESS' if tie_success else 'FAIL'}")
         print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
@@ -1967,6 +2030,7 @@ def main() -> int:
             if (
                 erc_success
                 and route_success
+                and quantize_success
                 and stitch_success
                 and tie_success
                 and fill_success

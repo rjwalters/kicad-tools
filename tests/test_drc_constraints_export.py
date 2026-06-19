@@ -323,9 +323,9 @@ def test_subspec_standard_via_fires_under_kicad_cli(tmp_path: Path):
     # 0.4 mm diameter (0.05 mm annular) -- below the jlcpcb-tier1 standard
     # 0.6 mm diameter / 0.15 mm annular floors.  This is NOT a micro via, so
     # it must be caught by the built-in standard-via floor.
-    needle = "(at 32.5 38.15)\n\t\t(size 0.6)\n\t\t(drill 0.3)"
-    replacement = "(at 32.5 38.15)\n\t\t(size 0.4)\n\t\t(drill 0.3)"
-    assert needle in text, "expected standard via at (32.5, 38.15) in board 04"
+    needle = "(at 116.5 117.15)\n\t\t(size 0.6)\n\t\t(drill 0.3)"
+    replacement = "(at 116.5 117.15)\n\t\t(size 0.4)\n\t\t(drill 0.3)"
+    assert needle in text, "expected standard via at (116.5, 117.15) in board 04"
     pcb.write_text(text.replace(needle, replacement, 1))
 
     profile = get_profile("jlcpcb-tier1")
