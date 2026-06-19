@@ -216,14 +216,26 @@ def test_normalize_copper_strips_uuid_and_sorts() -> None:
     assert not any("gr_line" in line for line in norm_a)
 
 
+@pytest.mark.timeout(600)
 def test_board02_route_is_reproducible(tmp_path: Path) -> None:
     """Board 02 routes byte-identical copper twice at seed 42 (Issue #3799).
 
-    Runs unconditionally (board 02 routes in ~20-30 s): the fast
-    determinism regression backstop for the ``--deterministic-budget``
-    opt-in.  If this fails, a board-02 route flag regressed (most likely
+    Runs UNCONDITIONALLY (PR CI included): the fast determinism
+    regression backstop for the ``--deterministic-budget`` opt-in.  If
+    this fails, a board-02 route flag regressed (most likely
     ``--deterministic-budget`` was dropped, re-introducing the per-net
     wall-clock cutoff).
+
+    Timeout (Issue #3799 CI fix): a single board-02 route takes ~20-30 s
+    locally and this test routes TWICE, so ~40-60 s of wall-clock.  CI's
+    suite-wide default ``--timeout=60`` (see ``.github/workflows/ci.yml``
+    Test job) killed the two-route run spuriously on the slower hosted
+    runner.  The explicit ``@pytest.mark.timeout(600)`` marker OVERRIDES
+    that default with a host-speed- and xdist-contention-tolerant budget
+    while still catching a genuine router hang.  It does NOT slow the
+    happy path (the marker only changes the reaper deadline).  This keeps
+    the determinism regression running in the main Test job rather than
+    deferring it to the nightly slow-tests workflow.
     """
     _assert_route_reproducible("02", tmp_path)
 

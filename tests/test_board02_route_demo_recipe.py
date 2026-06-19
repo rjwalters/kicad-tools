@@ -189,10 +189,15 @@ def test_route_demo_recipe_mirrors_generate_design() -> None:
     # The flag/value pairs both scripts MUST send to ``kct route``.
     # Keeping these in sync is the whole point of Issue #3207's "no
     # drift" acceptance criterion.
+    #
+    # Issue #3799: ``--per-net-timeout 30`` was REPLACED by the boolean
+    # ``--deterministic-budget`` flag (asserted separately below) so the
+    # seed-42 route is byte-identical across machines.  Both recipes
+    # changed together, so ``--per-net-timeout`` is intentionally no
+    # longer in the expected set.
     required_flag_value_pairs = [
         ("--strategy", "negotiated"),
         ("--iterations", "30"),
-        ("--per-net-timeout", "30"),
         ("--timeout", "240"),
         ("--seed", "42"),
         ("--manufacturer", "jlcpcb"),
@@ -215,6 +220,32 @@ def test_route_demo_recipe_mirrors_generate_design() -> None:
         # this is a coarse co-occurrence check.
         assert value in demo_src, f"route_demo.py is missing value {value!r} for {flag!r}."
         assert value in design_src, f"generate_design.py is missing value {value!r} for {flag!r}."
+
+    # Issue #3799: both recipes must opt into the deterministic ITERATION
+    # budget (boolean flag, no value) so the seed-42 route is
+    # byte-identical across machines.  This is the load-bearing flag the
+    # determinism regression in tests/router/test_board_route_determinism.py
+    # depends on; if it drifts out of either recipe the route reverts to
+    # the per-net wall-clock cutoff and diverges under load.
+    for src_name, src in (("route_demo.py", demo_src), ("generate_design.py", design_src)):
+        assert "--deterministic-budget" in src, (
+            f"{src_name} is missing flag '--deterministic-budget' (Issue "
+            f"#3799).  Both board-02 recipes must route under the iteration "
+            f"budget so the seed-42 route is reproducible.  If this changed "
+            f"intentionally, update the other recipe to match and update "
+            f"this test."
+        )
+
+    # Issue #3799: the per-net WALL-CLOCK cutoff was intentionally removed
+    # from both recipes (it is what caused same-seed/different-copper
+    # divergence under load).  Guard against it silently creeping back.
+    for src_name, src in (("route_demo.py", demo_src), ("generate_design.py", design_src)):
+        assert "--per-net-timeout" not in src, (
+            f"{src_name} re-introduced '--per-net-timeout' (Issue #3799 "
+            f"regression).  The per-net wall-clock cutoff makes the seed-42 "
+            f"route diverge under load; use '--deterministic-budget' "
+            f"instead."
+        )
 
 
 # ---------------------------------------------------------------------------
