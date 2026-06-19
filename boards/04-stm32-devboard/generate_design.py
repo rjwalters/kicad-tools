@@ -1280,6 +1280,111 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return True
 
 
+# --- OSC_OUT escape-stub short fix (issue #3797) ---------------------------
+#
+# On the fresh deterministic route (post-#3800), OSC_OUT (net 5, U2.6 @ abs
+# (126.8375, 121.750)) escapes to B.Cu through a via-in-pad at the U2.6 pad
+# centre, and its FIRST B.Cu hop runs straight north into the U2.5 OSC_IN pad
+# centre at abs (126.8375, 121.250) — the two adjacent 0.5 mm-pitch HSE crystal
+# pins — before turning west.  That single hop shorts OSC_IN <-> OSC_OUT
+# (witnesses C10.1 / C11.1).  This is the #2834 escape-stub short that #3785
+# fixed BY HAND on the committed PCB; here it is fixed PROGRAMMATICALLY so a
+# fresh ``generate_design.py`` regen reproduces a copper-LVS-clean board (the
+# same class of recipe fix board-02 #3783 uses).
+#
+# The fix is a deterministic post-route s-expression surgery (a sibling of
+# ``tie_power_pads``): re-aim that one B.Cu hop's endpoint off the U2.5 pad
+# column to (126.6875, 121.100) — south-west of the U2.5 pad halo, where the
+# next hop already turns — and drop the now-degenerate follow-on segment.  The
+# re-aimed escape clears the U2.5 pad while staying >= the jlcpcb-tier1 track
+# clearance from it (curator-proven: ``compare_copper_netlist`` -> shorts: []).
+#
+# Coordinates are deterministic (pad centres are fixed by the footprint
+# placement), so the surgery is exact-match and idempotent.  It asserts the
+# offending hop is present so a future router change that moves the escape
+# fails LOUDLY rather than silently leaving the short.
+_OSC_VIA = (126.8375, 121.75)  # OSC_OUT (net 5) B.Cu escape via @ U2.6 centre
+_OSC_IN_PAD = (126.8375, 121.25)  # U2.5 OSC_IN pad centre (the short target)
+_OSC_REAIM = (126.6875, 121.1)  # re-aimed first-hop endpoint, off the U2.5 column
+
+
+def fix_osc_escape(routed_path: Path) -> bool:
+    """Re-aim the OSC_OUT B.Cu escape off the OSC_IN pad column (issue #3797).
+
+    The deterministic fresh route drops the OSC_OUT (net 5) escape straight
+    north from the U2.6 via-in-pad into the U2.5 OSC_IN pad centre, shorting
+    the two HSE crystal pins.  This deterministic post-route surgery (mirroring
+    the :func:`tie_power_pads` s-expression edit) re-aims that single B.Cu hop
+    south-west of the U2.5 pad halo so the escape no longer crosses the OSC_IN
+    pad, clearing the short.  Routed copper for every other net is untouched.
+
+    The edit is exact-match on deterministic pad-centre coordinates, so it is
+    idempotent: a second pass finds no offending hop and no-ops.  It asserts the
+    offending hop is present (unless already re-aimed) so a future router change
+    that relocates the OSC_OUT escape fails loudly instead of silently leaving
+    the short.
+
+    Returns True on success.
+    """
+    import re as _re
+
+    print("\n" + "=" * 60)
+    print("Fixing OSC_OUT escape-stub short (issue #3797)...")
+    print("=" * 60)
+
+    def _fmt(v: float) -> str:
+        # Match KiCad's minimal decimal formatting (e.g. 121.25 not 121.250,
+        # but 126.8375 must keep all 4 decimals — ``%g`` would round to 6
+        # significant figures, so format with full precision then trim).
+        return f"{v:.6f}".rstrip("0").rstrip(".")
+
+    via_x, via_y = _fmt(_OSC_VIA[0]), _fmt(_OSC_VIA[1])
+    pad_x, pad_y = _fmt(_OSC_IN_PAD[0]), _fmt(_OSC_IN_PAD[1])
+    new_x, new_y = _fmt(_OSC_REAIM[0]), _fmt(_OSC_REAIM[1])
+
+    text = routed_path.read_text()
+
+    # Idempotency: if the offending hop is already re-aimed, no-op.
+    offending_hop = f"(start {via_x} {via_y})\n\t\t(end {pad_x} {pad_y})"
+    reaimed_hop = f"(start {via_x} {via_y})\n\t\t(end {new_x} {new_y})"
+    if offending_hop not in text and reaimed_hop in text:
+        print("   Escape already re-aimed (idempotent no-op)")
+        print("\n   SUCCESS: fix_osc_escape completed")
+        return True
+
+    count = text.count(offending_hop)
+    assert count == 1, (
+        f"fix_osc_escape: expected exactly 1 OSC_OUT escape hop "
+        f"({via_x},{via_y})->({pad_x},{pad_y}); found {count}. "
+        "The router escape geometry changed — re-derive the OSC_OUT B.Cu "
+        "escape and update _OSC_VIA / _OSC_IN_PAD / _OSC_REAIM (#3797)."
+    )
+
+    # 1. Re-aim the first B.Cu hop's endpoint off the U2.5 pad column.
+    text = text.replace(offending_hop, reaimed_hop)
+
+    # 2. Drop the now-degenerate follow-on segment
+    #    (pad centre -> re-aim point); the re-aimed hop already lands there.
+    degenerate = (
+        rf"\t\(segment\n\t\t\(start {_re.escape(pad_x)} {_re.escape(pad_y)}\)\n"
+        rf"\t\t\(end {_re.escape(new_x)} {_re.escape(new_y)}\)\n"
+        r"(?:\t\t\([^\n]*\)\n)*?\t\)\n"
+    )
+    new_text, n = _re.subn(degenerate, "", text, count=1)
+    assert n == 1, (
+        f"fix_osc_escape: expected 1 follow-on segment "
+        f"({pad_x},{pad_y})->({new_x},{new_y}) to drop; found {n} (#3797)."
+    )
+    routed_path.write_text(new_text)
+
+    print(
+        f"   Re-aimed OSC_OUT escape: via ({via_x},{via_y}) first hop "
+        f"-> ({new_x},{new_y}) (off the U2.5 OSC_IN pad column)"
+    )
+    print("\n   SUCCESS: fix_osc_escape completed")
+    return True
+
+
 def stitch_pcb(routed_path: Path) -> bool:
     """
     Add GND stitching vias to connect plane-net pads (B.Cu GND plane).
@@ -1386,17 +1491,19 @@ def stitch_pcb(routed_path: Path) -> bool:
     return True
 
 
-# Leg B of issue #3794 — the four LQFP-48 VDD pads (+3.3V) and three LQFP-48
+# Leg B of issue #3794 — the four LQFP-48 VDD pads (+3.3V) and four LQFP-48
 # VSS pads (GND) that `stitch_pcb` cannot reach with a standard/micro stitch
 # via (the dense 0.5 mm-pitch escape leaves no clear via window, and the GND
 # pour is B.Cu-only while these pads are F.Cu-only).  ``tie_power_pads`` closes
 # them WITHOUT re-routing (the committed signal copper stays byte-identical):
 #
-#  * GND VSS pads (U2.8 / U2.23 / U2.35): a 0.3 / 0.15 micro-via placed INSIDE
-#    the pad copper (via-in-pad) ties the F.Cu pad straight down to the B.Cu
-#    GND pour.  Each location is hand-verified clear of foreign B.Cu copper
+#  * GND VSS pads (U2.8 / U2.23 / U2.35 / U2.47): a 0.3 / 0.15 micro-via placed
+#    INSIDE the pad copper (via-in-pad) ties the F.Cu pad straight down to the
+#    B.Cu GND pour.  Each location is hand-verified clear of foreign B.Cu copper
 #    (NRST / SWCLK escapes) at the jlcpcb-tier1 0.20 mm via clearance and sits
-#    on the pad's centre x-axis so the via-in-pad bond is unambiguous.
+#    on the pad's centre x-axis so the via-in-pad bond is unambiguous.  U2.47
+#    (the 4th VSS pad, #3797) is added so the fresh deterministic regen — which
+#    no longer reaches U2.47 through a stitch via — still bonds it to the plane.
 #  * +3.3V VDD pads (U2.9 / U2.24 / U2.36 / U2.48): the +3.3V pour is already
 #    on F.Cu (the pads' own layer) and the pads sit only 0.025-0.198 mm outside
 #    the moated fill.  Tightening the +3.3V (and GND) zone ``connect_pads``
@@ -1417,6 +1524,7 @@ _GND_TIE_VIAS: tuple[tuple[float, float], ...] = (
     (26.837, 22.75),  # U2.8  — pad centre (no foreign B.Cu copper overlaps it)
     (33.25, 25.838),  # U2.23 — 0.325 mm south of centre, clears the NRST escape
     (35.163, 19.75),  # U2.35 — pad centre, clears the SWCLK escape
+    (28.75, 17.838),  # U2.47 — pad centre (#3797); window clear of all copper
 )
 
 # Zone nets whose connect-pad clearance + thermal gap are tightened so the
@@ -1686,12 +1794,23 @@ def main() -> int:
         routed_path = output_dir / "stm32_devboard_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
+        # Step 5.5: Fix the OSC_OUT escape-stub short (#3797) -- the fresh
+        # deterministic route drops the OSC_OUT B.Cu escape straight into the
+        # U2.5 OSC_IN pad, shorting the two crystal pins.  This deterministic
+        # post-route surgery re-aims that single B.Cu hop off the OSC_IN pad
+        # column (the programmatic form of #3785's hand fix), so a fresh regen
+        # is copper-LVS clean.  Must run after route_pcb (which emits the
+        # escape) and before fill_zones (so the re-poured GND backs off the
+        # re-aimed jog).
+        osc_success = fix_osc_escape(routed_path)
+
         # Step 6: Stitch GND plane (route -> stitch -> mfr pipeline)
         stitch_success = stitch_pcb(routed_path)
 
         # Step 6.25: Tie the isolated LQFP power pads into their pours (#3794,
-        # Leg B) -- add 3 GND micro-via-in-pads for the VSS pads `kct stitch`
-        # cannot reach and tighten the GND / +3.3V zone connect-pad clearance
+        # Leg B; U2.47 added #3797) -- add 4 GND micro-via-in-pads for the VSS
+        # pads `kct stitch` cannot reach and tighten the GND / +3.3V zone
+        # connect-pad clearance
         # so the next fill bonds the moated-out +3.3V VDD pads.  Same-net only;
         # routed signal copper stays byte-identical.  Must run after stitch_pcb
         # (which adds the bulk of the GND vias) and before fill_zones (which
@@ -1721,18 +1840,25 @@ def main() -> int:
         # extractor now bonds a via / trace endpoint that lands inside a pour's
         # solid region — board 04's GND pads reach the B.Cu-only GND pour
         # through ``pad -> F.Cu trace -> stitch via -> B.Cu pour`` — and
-        # (Leg B, ``tie_power_pads``) the four +3.3V VDD pads + three remaining
-        # GND VSS pads were tied into their pours.  ``require_clean=False`` is
-        # kept (the board stays *advisory* until the #3795 graduation), so
-        # ``write_lvs_report`` writes ``output/lvs.json`` (now ``clean: true``,
-        # ``copper_mismatches: []``) without gating CI.  ``run_label`` is off
-        # because the copper comparator is the meaningful leg.  Graduation to a
-        # hard gate is tracked in #3780 / #3795.
+        # (Leg B, ``tie_power_pads``) the four +3.3V VDD pads + four GND VSS
+        # pads (U2.8/23/35/47) were tied into their pours.
+        #
+        # Per #3797 (2026-06-18): a FRESH deterministic regen is now copper-LVS
+        # clean too.  The two residual fresh-route defects — the OSC_IN<->OSC_OUT
+        # escape-stub short and the U2.47 GND open — are eliminated by
+        # ``fix_osc_escape`` (Step 5.5) and the 4th ``_GND_TIE_VIAS`` entry, so
+        # the recipe reproduces a clean board rather than only the committed
+        # artifact being clean.  ``require_clean=True`` therefore gates the
+        # recipe: ``write_lvs_report`` raises if the fresh copper-LVS is dirty,
+        # so a regression cannot ship silently.  ``run_label`` is off because
+        # the copper comparator is the meaningful leg.  Removing board-04 from
+        # ``ADVISORY_LVS_BOARDS`` + the CI end-to-end gate is the #3795 Slice 2
+        # follow-up (out of scope here).
         write_lvs_report(
             sch_path,
             routed_path,
             output_dir,
-            require_clean=False,
+            require_clean=True,
             run_copper=True,
             run_label=False,
         )
@@ -1754,6 +1880,7 @@ def main() -> int:
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
+        print(f"  OSC escape fix: {'SUCCESS' if osc_success else 'FAIL'}")
         print(f"  Stitch: {'SUCCESS' if stitch_success else 'FAIL'}")
         print(f"  Power-pad tie: {'SUCCESS' if tie_success else 'FAIL'}")
         print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
