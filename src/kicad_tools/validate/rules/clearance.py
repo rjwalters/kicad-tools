@@ -602,6 +602,16 @@ class ClearanceRule(DRCRule):
             for v in violations:
                 results.add(v)
 
+            # Net-0 bridge detection (Issue #3816).  The pairwise loop in
+            # ``_check_layer`` deliberately skips net 0 to avoid flooding
+            # false positives on legitimate unconnected copper (e.g.
+            # board 04's 31 net-0 QFP pins).  That skip masks a genuine
+            # short class: a piece of stray net-0 copper that physically
+            # bridges two different ASSIGNED nets.  Detect that explicitly
+            # as a connectivity property of net-0 copper islands.
+            for v in self._check_net0_bridges(pcb, layer_name, min_clearance):
+                results.add(v)
+
         # Count rules checked (one per layer)
         results.rules_checked = len(pcb.copper_layers)
 
@@ -743,6 +753,164 @@ class ClearanceRule(DRCRule):
                 elements.append(CopperElement.from_via(via))
 
         return elements
+
+    def _elements_touch(self, a: CopperElement, b: CopperElement) -> bool:
+        """Return ``True`` when two copper elements are electrically joined.
+
+        "Touch" means the edge-to-edge clearance is at or below the
+        co-location epsilon (overlapping copper, or coincident within
+        manufacturing-irrelevant float noise).  Used both to group net-0
+        copper into islands and to decide whether an island contacts an
+        assigned net.
+
+        The router's in-pad escape places an inner-layer segment endpoint
+        at *exactly* a via center (router invariant), so a net-0 segment
+        endpoint coinciding with a via center is a modeling artifact, not
+        a real copper join -- mirror the suppression in ``_check_layer``
+        (Issue #2706) so it does not fabricate an island/contact edge.
+        """
+        if {a.element_type, b.element_type} == {"segment", "via"}:
+            seg = a if a.element_type == "segment" else b
+            via = b if a.element_type == "segment" else a
+            sx1, sy1, sx2, sy2, _ = seg.geometry
+            vx, vy, _, _ = via.geometry
+            if (
+                math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
+                or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
+            ):
+                return False
+
+        clearance, _, _ = _calculate_clearance(a, b)
+        return clearance <= _COLOCATION_EPSILON_MM
+
+    def _check_net0_bridges(
+        self,
+        pcb: PCB,
+        layer_name: str,
+        min_clearance: float,
+    ) -> list[DRCViolation]:
+        """Flag net-0 copper that electrically bridges two assigned nets.
+
+        A net-0 copper element (stray fill / unassigned router copper) is
+        only a defect when it touches copper of **two or more distinct
+        assigned (nonzero) nets** at once -- that is a short between those
+        nets carried by a piece of copper that itself has no net.  A net-0
+        element touching zero or one assigned net is legitimate
+        unconnected copper (unused pads, NPTH, test points) and must NOT
+        fire; that is exactly why the base pairwise loop skips net 0.
+
+        Algorithm (connectivity, not full DRC):
+
+        1. Split this layer's copper into net-0 elements and assigned-net
+           elements.
+        2. Union-find net-0 elements that touch each other into islands
+           (so a cluster of adjacent net-0 QFP pins is a single island,
+           which is harmless if it contacts < 2 assigned nets).
+        3. For each island, collect the set of distinct assigned net
+           numbers whose copper any island member touches.
+        4. Emit one ``clearance_net0_bridge`` error per island whose set
+           has >= 2 distinct nets, naming the two bridged nets.
+
+        See Issue #3816.
+        """
+        elements = self._collect_elements(pcb, layer_name)
+        net0 = [e for e in elements if e.net_number == 0]
+        assigned = [e for e in elements if e.net_number != 0]
+
+        if not net0 or not assigned:
+            # No net-0 copper, or no assigned copper for it to bridge.
+            return []
+
+        # --- 2. Group net-0 elements into touching islands (union-find). ---
+        parent = list(range(len(net0)))
+
+        def _find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def _union(i: int, j: int) -> None:
+            ri, rj = _find(i), _find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        for i in range(len(net0)):
+            for j in range(i + 1, len(net0)):
+                if self._elements_touch(net0[i], net0[j]):
+                    _union(i, j)
+
+        islands: dict[int, list[int]] = {}
+        for i in range(len(net0)):
+            islands.setdefault(_find(i), []).append(i)
+
+        # --- 3/4. For each island, find distinct assigned nets it touches. ---
+        violations: list[DRCViolation] = []
+        for members in islands.values():
+            touched: dict[int, CopperElement] = {}
+            contact_elem: CopperElement | None = None
+            for idx in members:
+                n0 = net0[idx]
+                for a in assigned:
+                    if a.net_number in touched:
+                        continue
+                    if self._elements_touch(n0, a):
+                        touched[a.net_number] = a
+                        if contact_elem is None:
+                            contact_elem = n0
+
+            if len(touched) >= 2:
+                violations.append(
+                    self._create_net0_bridge_violation(
+                        net0[members[0]] if contact_elem is None else contact_elem,
+                        list(touched.values()),
+                        min_clearance,
+                        layer_name,
+                    )
+                )
+
+        return violations
+
+    def _create_net0_bridge_violation(
+        self,
+        net0_elem: CopperElement,
+        bridged: list[CopperElement],
+        required: float,
+        layer: str,
+    ) -> DRCViolation:
+        """Build the ``clearance_net0_bridge`` short violation.
+
+        Names the first two bridged assigned nets (deterministically
+        sorted by net number) and locates the violation at the bridging
+        net-0 element.
+        """
+        bridged_sorted = sorted(bridged, key=lambda e: e.net_number)
+        a, b = bridged_sorted[0], bridged_sorted[1]
+        name_a = a.net_name or f"net{a.net_number}"
+        name_b = b.net_name or f"net{b.net_number}"
+
+        # Locate at the net-0 element's representative point.
+        gx = net0_elem.geometry
+        if net0_elem.element_type == "segment":
+            loc_x = (gx[0] + gx[2]) / 2
+            loc_y = (gx[1] + gx[3]) / 2
+        else:
+            loc_x, loc_y = gx[0], gx[1]
+
+        return DRCViolation(
+            rule_id="clearance_net0_bridge",
+            severity="error",
+            message=(
+                f"Net-0 copper ({net0_elem.reference}) bridges nets "
+                f"{name_a} and {name_b} (stray-copper short)"
+            ),
+            location=(round(loc_x, 3), round(loc_y, 3)),
+            layer=layer,
+            actual_value=0.0,
+            required_value=required,
+            items=(net0_elem.reference, a.reference, b.reference),
+            nets=(name_a, name_b),
+        )
 
     def _create_violation(
         self,

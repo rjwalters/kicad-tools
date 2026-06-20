@@ -141,6 +141,13 @@ class ViolationType(Enum):
     # sub-minimum gaps to committed filled_polygon geometry.
     CLEARANCE_SEGMENT_ZONE = "clearance_segment_zone"
     CLEARANCE_VIA_VIA = "clearance_via_via"
+    # Net-0 stray-copper bridge: a piece of unassigned (net 0) copper that
+    # electrically shorts two distinct assigned nets (Issue #3816).  The
+    # base ClearanceRule pairwise loop skips net 0 (legitimate unconnected
+    # copper is common), so this connectivity-based short is reported under
+    # a distinct rule_id and MUST be aliased explicitly below -- the fuzzy
+    # fallback would otherwise miscategorize it as the generic CLEARANCE.
+    CLEARANCE_NET0_BRIDGE = "clearance_net0_bridge"
     # Differential-pair within-pair clearance (Issue #2560, Epic #2556 Phase 1D).
     # Distinct from the generic CLEARANCE family because it validates the
     # *intra-pair* gap (allowed to be tighter than the manufacturer's inter-pair
@@ -282,6 +289,11 @@ class ViolationType(Enum):
             "clearance_segment_segment": cls.CLEARANCE_SEGMENT_SEGMENT,
             "clearance_segment_via": cls.CLEARANCE_SEGMENT_VIA,
             "clearance_via_via": cls.CLEARANCE_VIA_VIA,
+            # Net-0 stray-copper bridge (Issue #3816).  MUST be aliased
+            # explicitly -- the fuzzy "clearance" fallback below would
+            # otherwise drop through to the generic CLEARANCE type and
+            # mask the new short class from downstream exact-type filters.
+            "clearance_net0_bridge": cls.CLEARANCE_NET0_BRIDGE,
             # clearance subtypes using "trace" (synonym for "segment")
             "clearance_pad_trace": cls.CLEARANCE_PAD_SEGMENT,
             "clearance_trace_trace": cls.CLEARANCE_SEGMENT_SEGMENT,
