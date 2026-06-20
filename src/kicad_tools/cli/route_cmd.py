@@ -1544,11 +1544,46 @@ def run_post_route_drc(
         error_count = results.error_count
         warning_count = results.warning_count
 
+        # Reconcile against native KiCad geometric DRC (kicad-cli pcb drc).
+        # The internal DRCChecker is structurally blind to several KiCad
+        # violation classes (shorting_items / tracks_crossing on net 0,
+        # copper_edge_clearance without an Edge.Cuts outline,
+        # solder_mask_bridge, silk_* overlaps), so a clean internal verdict
+        # must NOT be reported as an unqualified PASS when kicad-cli finds
+        # geometric defects.  This mirrors DesignAuditor._merge_geometric_drc
+        # via the shared run_geometric_drc helper (issue #3803).
+        from kicad_tools.drc import run_geometric_drc
+
+        geo = run_geometric_drc(output_path)
+
+        if geo.ran and geo.error_count > 0:
+            # Native DRC found blocking geometric violations -- fold them into
+            # the verdict so PASS requires BOTH engines clean.
+            error_count += geo.error_count
+
         if not quiet:
             print("\n--- DRC Validation ---")
             if error_count == 0 and warning_count == 0:
-                print(f"  DRC PASSED ({manufacturer} profile, {layers} layers)")
+                if geo.ran:
+                    print(f"  DRC PASSED ({manufacturer} profile, {layers} layers)")
+                    print("    (internal engine + kicad-cli geometric DRC both clean)")
+                else:
+                    # kicad-cli unavailable / skipped: never overstate cleanliness.
+                    print(f"  DRC PASSED ({manufacturer} profile, {layers} layers)")
+                    note = geo.note or "geometric DRC skipped"
+                    print(f"    NOTE: {note} -> internal-engine-only PASS")
+                    print("    (native kicad-cli DRC was not run; PASS is not authoritative)")
             else:
+                # Loud divergence warning: internal engine clean but native
+                # DRC flagged geometric violations the internal engine missed.
+                if results.error_count == 0 and geo.has_errors:
+                    top = geo.top_types(4)
+                    type_summary = ", ".join(f"{t} ({c})" for t, c in top)
+                    print(
+                        "  WARNING: internal DRC clean but kicad-cli found "
+                        f"{geo.error_count} geometric violation(s): {type_summary}"
+                    )
+                    print("           PASS withheld -- native KiCad DRC is authoritative.")
                 if error_count > 0:
                     print(f"  Errors:   {error_count}")
                 if warning_count > 0:

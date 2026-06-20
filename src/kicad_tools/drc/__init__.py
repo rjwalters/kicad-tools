@@ -23,6 +23,7 @@ from .checker import (
     ManufacturerCheck,
     check_manufacturer_rules,
 )
+from .geometric import GeometricDRCResult, run_geometric_drc
 from .incremental import (
     DRCDelta,
     DRCState,
@@ -88,4 +89,7 @@ __all__ = [
     "DrillRepairResult",
     # Net compatibility
     "resolve_net_atom",
+    # Native (kicad-cli) geometric DRC reconciliation
+    "GeometricDRCResult",
+    "run_geometric_drc",
 ]

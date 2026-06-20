@@ -103,11 +103,12 @@ class TestMergeGeometricDrc:
         Otherwise ``cli_violations`` is returned from DRCReport.load.
         """
         from kicad_tools import drc as drc_mod
-        from kicad_tools.audit import auditor as auditor_mod
         from kicad_tools.cli import runner as runner_mod
+        from kicad_tools.drc import geometric as geometric_mod
 
-        # _merge_geometric_drc imports find_kicad_cli from cli.runner at call
-        # time, so patch the source module.
+        # _merge_geometric_drc now delegates to the shared run_geometric_drc
+        # helper (issue #3803), which imports find_kicad_cli from cli.runner
+        # at call time, so patch the source module.
         monkeypatch.setattr(
             runner_mod,
             "find_kicad_cli",
@@ -126,7 +127,7 @@ class TestMergeGeometricDrc:
 
             return _R()
 
-        monkeypatch.setattr(auditor_mod.subprocess, "run", _fake_run)
+        monkeypatch.setattr(geometric_mod.subprocess, "run", _fake_run)
         monkeypatch.setattr(
             drc_mod.DRCReport,
             "load",
