@@ -149,6 +149,26 @@ class TestPCBSaveRoundtrip:
 
         _assert_kicad_cli_loads(pcb_path, producer="PCB.save (blank)", tmp_path=tmp_path)
 
+    def test_gr_line_outline_and_version_roundtrip(self, tmp_path: Path) -> None:
+        """Issue #3805: gr_line outline + 20241229 version must load in KiCad 10.
+
+        Guards against the future version stamp (20260206) and the gr_rect
+        outline that previously needed manual fixups before opening in KiCad.
+        """
+        pcb = PCB.create(width=65.0, height=56.0, title="issue-3805 roundtrip")
+        pcb_path = tmp_path / "issue3805.kicad_pcb"
+        pcb.save(pcb_path)
+
+        contents = pcb_path.read_text()
+        assert "(version 20241229)" in contents
+        assert "20260206" not in contents
+        assert "gr_rect" not in contents
+        assert contents.count("(gr_line") == 4
+
+        _assert_kicad_cli_loads(
+            pcb_path, producer="PCB.save (issue-3805 outline)", tmp_path=tmp_path
+        )
+
     def test_pcb_with_silkscreen_text_roundtrip(self, tmp_path: Path) -> None:
         """A PCB with ``gr_text`` silkscreen markings must load via kicad-cli.
 

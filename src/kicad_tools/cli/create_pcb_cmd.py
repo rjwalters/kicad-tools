@@ -154,6 +154,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
 
+            for warning in result.warnings:
+                console.print(f"[yellow]Warning: {warning}[/yellow]")
+
             if result.failed:
                 table = Table(title="Failed Placements")
                 table.add_column("Reference")

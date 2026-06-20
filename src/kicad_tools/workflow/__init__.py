@@ -30,6 +30,7 @@ Example usage:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -95,6 +96,9 @@ class PlacementResult:
 
     failed: list[tuple[str, str]] = field(default_factory=list)
     """List of (reference, error_message) for components that failed to place"""
+
+    warnings: list[str] = field(default_factory=list)
+    """Non-fatal placement warnings (e.g. spacing was auto-shrunk to fit)."""
 
     @property
     def success_count(self) -> int:
@@ -307,6 +311,29 @@ class PCBFromSchematic:
         """
         return self.add_component(reference, x, y, rotation, layer)
 
+    @staticmethod
+    def _shrink_spacing_to_fit(
+        n: int, usable_width: float, usable_height: float, columns: int
+    ) -> float | None:
+        """Largest spacing (mm) at which ``n`` parts fit in ``columns`` columns.
+
+        Used when the requested spacing would overflow the board.  Returns the
+        biggest spacing such that ``columns`` columns fit within
+        ``usable_width`` and ``ceil(n / columns)`` rows fit within
+        ``usable_height``, or ``None`` if even an infinitesimal spacing cannot
+        fit (i.e. the usable area is non-positive).
+        """
+        if columns <= 0 or usable_width <= 0 or usable_height <= 0 or n <= 0:
+            return None
+
+        rows = math.ceil(n / columns)
+        # Column spacing is bounded by width / columns; row spacing by
+        # height / rows.  Use the tighter of the two so both axes fit.
+        spacing_w = usable_width / columns
+        spacing_h = usable_height / rows
+        spacing = min(spacing_w, spacing_h)
+        return spacing if spacing > 0 else None
+
     def place_all_components(
         self,
         start_x: float | None = None,
@@ -346,13 +373,22 @@ class PCBFromSchematic:
         if self._pcb is None:
             raise ValueError("No PCB created. Call create_pcb() first.")
 
-        board_w, _board_h = self._pcb.board_size
+        board_w, board_h = self._pcb.board_size
 
         # Determine starting position
         sx = start_x if start_x is not None else margin
         sy = start_y if start_y is not None else margin
 
-        # Auto-calculate column count from board width if not specified
+        result = PlacementResult()
+        components = self.get_components()
+
+        # Auto-calculate column count from board width if not specified.  When
+        # auto-sizing, also bound the grid by the board *height*: if the parts
+        # would overflow past the bottom edge at the computed column count,
+        # widen the grid (more columns / fewer rows) until it fits, and if it
+        # still cannot fit at the requested spacing, auto-shrink the spacing.
+        # Callers that pass an explicit ``columns`` keep their grid unchanged.
+        auto_columns = columns is None
         if columns is None:
             if board_w > 0 and spacing > 0:
                 usable_width = board_w - sx - margin
@@ -360,18 +396,58 @@ class PCBFromSchematic:
             else:
                 columns = 10  # fallback when board size is unknown
 
-        result = PlacementResult()
-        components = self.get_components()
+        # Number of components that actually need a grid slot (those with a
+        # footprint assigned); components without a footprint are reported as
+        # failures and never consume a position.
+        placeable = [c for c in components if c.footprint]
+        n = len(placeable)
 
-        for i, comp in enumerate(components):
-            col = i % columns
-            row = i // columns
-            x = sx + col * spacing
-            y = sy + row * spacing
+        if auto_columns and board_w > 0 and board_h > 0 and spacing > 0 and n > 0:
+            usable_width = board_w - sx - margin
+            usable_height = board_h - sy - margin
+            max_cols = max(1, int(usable_width / spacing))
+            max_rows = max(1, int(usable_height / spacing))
+            capacity = max_cols * max_rows
 
+            if n <= capacity:
+                # Fits at the requested spacing: pick the smallest column count
+                # (>= current) whose row count stays within max_rows so parts
+                # stay inside the outline.
+                needed_cols = math.ceil(n / max_rows)
+                columns = max(1, min(max_cols, max(columns, needed_cols)))
+            else:
+                # Cannot fit at the requested spacing.  Shrink spacing so all
+                # parts fit inside the outline, and warn the caller.
+                columns = max_cols
+                fitted = self._shrink_spacing_to_fit(n, usable_width, usable_height, columns)
+                if fitted is not None:
+                    spacing = fitted
+                    result.warnings.append(
+                        f"{n} components do not fit within "
+                        f"{board_w:.1f}x{board_h:.1f} mm at {spacing:.1f} mm "
+                        f"spacing; auto-shrank spacing to {fitted:.2f} mm to fit."
+                    )
+                else:
+                    result.warnings.append(
+                        f"{n} components cannot fit within "
+                        f"{board_w:.1f}x{board_h:.1f} mm even at minimal "
+                        f"spacing; some footprints may overflow the outline."
+                    )
+
+        # Grid slots are consumed only by components that actually get placed,
+        # so components without a footprint do not push the rest of the grid
+        # past the board height.
+        slot = 0
+        for comp in components:
             if not comp.footprint:
                 result.failed.append((comp.reference, "No footprint assigned"))
                 continue
+
+            col = slot % columns
+            row = slot // columns
+            x = sx + col * spacing
+            y = sy + row * spacing
+            slot += 1
 
             try:
                 fp = self.add_component(comp.reference, x, y)

@@ -3839,3 +3839,43 @@ class TestRemoveConflictingViasFieldOrder:
 )"""
         result = _remove_conflicting_vias(txt, 0.2)
         assert result == txt
+
+
+class TestExtractBoardDimensionsGrLine:
+    """Issue #3805: board dimensions/origin from gr_line Edge.Cuts outline."""
+
+    _PCB_GR_LINE = """(kicad_pcb
+  (version 20241229)
+  (gr_line (start 116 77) (end 181 77) (stroke (width 0.1) (type default)) (layer "Edge.Cuts") (uuid "a"))
+  (gr_line (start 181 77) (end 181 133) (stroke (width 0.1) (type default)) (layer "Edge.Cuts") (uuid "b"))
+  (gr_line (start 181 133) (end 116 133) (stroke (width 0.1) (type default)) (layer "Edge.Cuts") (uuid "c"))
+  (gr_line (start 116 133) (end 116 77) (stroke (width 0.1) (type default)) (layer "Edge.Cuts") (uuid "d"))
+)"""
+
+    def test_dimensions_from_gr_line_outline(self):
+        from kicad_tools.router.io import extract_board_dimensions
+
+        dims = extract_board_dimensions(self._PCB_GR_LINE)
+        assert dims is not None
+        assert dims[0] == pytest.approx(65.0)
+        assert dims[1] == pytest.approx(56.0)
+
+    def test_origin_from_gr_line_outline(self):
+        from kicad_tools.router.io import extract_board_origin
+
+        origin = extract_board_origin(self._PCB_GR_LINE)
+        assert origin is not None
+        assert origin[0] == pytest.approx(116.0)
+        assert origin[1] == pytest.approx(77.0)
+
+    def test_dimensions_ignore_non_edge_gr_line(self):
+        """Silkscreen gr_lines must not contribute to board dimensions."""
+        from kicad_tools.router.io import extract_board_dimensions
+
+        extra = '  (gr_line (start 0 0) (end 500 500) (layer "F.SilkS") (uuid "z"))\n'
+        # Insert the silkscreen line just before the final closing paren.
+        pcb = self._PCB_GR_LINE[:-1] + extra + ")"
+        dims = extract_board_dimensions(pcb)
+        assert dims is not None
+        assert dims[0] == pytest.approx(65.0)
+        assert dims[1] == pytest.approx(56.0)

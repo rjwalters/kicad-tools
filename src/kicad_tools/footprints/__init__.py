@@ -8,6 +8,7 @@ including common package types (0402, 0603, SOT-23, QFN, etc.).
 from enum import Enum
 
 from kicad_tools.core.types import Layer
+from kicad_tools.core.version import KICAD_BOARD_FORMAT_VERSION
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import fmt
 
@@ -187,7 +188,7 @@ class Footprint:
         Example output::
 
             (footprint "C_0402_1005Metric"
-                (version 20260206)
+                (version 20241229)
                 (generator "kicad-tools")
                 (layer "F.Cu")
                 (descr "Capacitor SMD 0402")
@@ -206,7 +207,7 @@ class Footprint:
         footprint = SExp.list("footprint", self.name)
 
         # Version and generator
-        footprint.append(SExp.list("version", 20260206))
+        footprint.append(SExp.list("version", KICAD_BOARD_FORMAT_VERSION))
         footprint.append(SExp.list("generator", "kicad-tools"))
 
         # Layer

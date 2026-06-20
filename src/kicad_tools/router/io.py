@@ -1651,8 +1651,9 @@ class PadPosition:
 def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
     """Extract board width and height from a KiCad PCB file.
 
-    Parses the Edge.Cuts gr_rect to determine board dimensions. This is a
-    lightweight extraction that avoids full PCB parsing.
+    Parses the Edge.Cuts outline (``gr_rect`` or four ``gr_line`` segments)
+    to determine board dimensions. This is a lightweight extraction that
+    avoids full PCB parsing.
 
     Args:
         pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
@@ -1682,6 +1683,42 @@ def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float
     if edge_match:
         x1, y1, x2, y2 = map(float, edge_match.groups())
         return (abs(x2 - x1), abs(y2 - y1))
+
+    # Fallback: board outlines emitted as four gr_line Edge.Cuts segments
+    # (PCB.create / replace_outline; issue #3805).  Derive the size from the
+    # bounding box of all Edge.Cuts gr_line endpoints.
+    bbox = _edge_cuts_gr_line_bbox(pcb_text)
+    if bbox is not None:
+        min_x, min_y, max_x, max_y = bbox
+        return (max_x - min_x, max_y - min_y)
+    return None
+
+
+def _edge_cuts_gr_line_bbox(pcb_text: str) -> tuple[float, float, float, float] | None:
+    """Bounding box (min_x, min_y, max_x, max_y) of Edge.Cuts gr_line endpoints.
+
+    Lightweight regex scan used by :func:`extract_board_dimensions` and
+    :func:`extract_board_origin` to support board outlines written as four
+    ``gr_line`` segments (issue #3805) rather than a single ``gr_rect``.
+    Returns ``None`` when no Edge.Cuts gr_line geometry is present.
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    # Split on the gr_line opener; each chunk holds one gr_line's body up to
+    # the next graphic element.  Only consider chunks on the Edge.Cuts layer.
+    chunks = pcb_text.split("(gr_line")
+    for chunk in chunks[1:]:
+        # Bound the chunk at the next graphic opener so a later element's
+        # layer/coords cannot leak in.
+        next_gr = re.search(r"\(gr_", chunk)
+        body = chunk[: next_gr.start()] if next_gr else chunk
+        if "Edge.Cuts" not in body:
+            continue
+        for cx, cy in re.findall(r"\((?:start|end)\s+(-?[\d.]+)\s+(-?[\d.]+)\)", body):
+            xs.append(float(cx))
+            ys.append(float(cy))
+    if xs and ys:
+        return (min(xs), min(ys), max(xs), max(ys))
     return None
 
 
@@ -1719,6 +1756,12 @@ def extract_board_origin(pcb_path_or_text: str | Path) -> tuple[float, float] | 
     if edge_match:
         x1, y1, x2, y2 = map(float, edge_match.groups())
         return (min(x1, x2), min(y1, y2))
+
+    # Fallback: four gr_line Edge.Cuts segments (issue #3805).
+    bbox = _edge_cuts_gr_line_bbox(pcb_text)
+    if bbox is not None:
+        min_x, min_y, _max_x, _max_y = bbox
+        return (min_x, min_y)
     return None
 
 

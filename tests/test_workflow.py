@@ -523,6 +523,112 @@ class TestPlaceAllComponentsBoardAware:
         assert calls[6][1] == pytest.approx(5.0)  # x wraps back
         assert calls[6][2] == pytest.approx(5.0 + 15.0)  # y increments
 
+    def _make_workflow_n(self, tmp_path: Path, board_w, board_h, n: int):
+        """Helper to create a workflow with ``n`` resistor components."""
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("(kicad_sch (version 20231120))")
+
+        mock_netlist = MagicMock(spec=Netlist)
+        mock_netlist.components = [
+            NetlistComponent(
+                reference=f"R{i}",
+                value="10k",
+                footprint="Resistor_SMD:R_0805_2012Metric",
+                lib_id="Device:R",
+            )
+            for i in range(1, n + 1)
+        ]
+        mock_netlist.nets = []
+        mock_netlist.get_component = lambda ref: next(
+            (c for c in mock_netlist.components if c.reference == ref), None
+        )
+
+        workflow = PCBFromSchematic.__new__(PCBFromSchematic)
+        workflow.schematic_path = sch_path
+        workflow._netlist_path = tmp_path / "test.kicad_net"
+        workflow._netlist = mock_netlist
+        workflow._pcb = None
+        workflow._components = None
+
+        workflow.create_pcb(width=board_w, height=board_h)
+        return workflow
+
+    def test_grid_stays_within_board_height(self, tmp_path: Path):
+        """Regression for #3805: parts must not overflow past board height.
+
+        63 parts on a 65x56 board at the default 15mm spacing previously
+        reached y ~= 303mm (5x the board height) because rows were unbounded.
+        """
+        workflow = self._make_workflow_n(tmp_path, board_w=65, board_h=56, n=63)
+
+        calls: list[tuple[str, float, float]] = []
+        original_add = workflow.add_component
+
+        def capture_add(ref, x, y, **kwargs):
+            calls.append((ref, x, y))
+            return original_add(ref, x, y, **kwargs)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            with patch.object(workflow, "add_component", side_effect=capture_add):
+                result = workflow.place_all_components(spacing=15.0)
+
+        assert result.success_count == 63
+        # Every placed footprint origin must stay inside the board outline.
+        for ref, x, y in calls:
+            assert 0 <= x <= 65, f"{ref} x={x} outside board width 65"
+            assert 0 <= y <= 56, f"{ref} y={y} outside board height 56"
+
+    def test_overcrowded_board_warns_and_shrinks(self, tmp_path: Path):
+        """When parts cannot fit at the requested spacing, a warning is recorded."""
+        workflow = self._make_workflow_n(tmp_path, board_w=65, board_h=56, n=63)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            result = workflow.place_all_components(spacing=15.0)
+
+        # 63 parts at 15mm cannot fit in 65x56 -> spacing auto-shrunk + warned.
+        assert result.warnings, "expected a placement warning for overcrowded board"
+        assert any("spacing" in w for w in result.warnings)
+
+    def test_explicit_columns_not_height_bounded(self, tmp_path: Path):
+        """Explicit columns preserves prior (unbounded) behavior for callers."""
+        workflow = self._make_workflow_n(tmp_path, board_w=65, board_h=56, n=20)
+
+        calls: list[tuple[str, float, float]] = []
+        original_add = workflow.add_component
+
+        def capture_add(ref, x, y, **kwargs):
+            calls.append((ref, x, y))
+            return original_add(ref, x, y, **kwargs)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            with patch.object(workflow, "add_component", side_effect=capture_add):
+                result = workflow.place_all_components(spacing=15.0, columns=2)
+
+        assert result.success_count == 20
+        # With 2 explicit columns, 20 parts make 10 rows: y is NOT clamped,
+        # confirming explicit-columns behavior is unchanged.
+        max_y = max(y for _ref, _x, y in calls)
+        assert max_y == pytest.approx(3.0 + 9 * 15.0)
+
+    def test_single_part_fits(self, tmp_path: Path):
+        """A single part is placed at the start margin."""
+        workflow = self._make_workflow_n(tmp_path, board_w=65, board_h=56, n=1)
+
+        calls: list[tuple[str, float, float]] = []
+        original_add = workflow.add_component
+
+        def capture_add(ref, x, y, **kwargs):
+            calls.append((ref, x, y))
+            return original_add(ref, x, y, **kwargs)
+
+        with patch.object(PCB, "add_footprint", return_value=MagicMock()):
+            with patch.object(workflow, "add_component", side_effect=capture_add):
+                result = workflow.place_all_components(spacing=15.0)
+
+        assert result.success_count == 1
+        assert calls[0][1] == pytest.approx(3.0)
+        assert calls[0][2] == pytest.approx(3.0)
+
 
 class TestWorkflowExports:
     """Tests for workflow module exports."""

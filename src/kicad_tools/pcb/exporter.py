@@ -10,6 +10,7 @@ import re
 import uuid
 from pathlib import Path
 
+from ..core.version import KICAD_BOARD_FORMAT_VERSION
 from .layout import PCBLayout
 
 
@@ -54,7 +55,7 @@ class KiCadPCBExporter:
     def _generate_header(self, title: str = "PCB Layout") -> str:
         """Generate PCB file header."""
         return f'''(kicad_pcb
-	(version 20241229)
+	(version {KICAD_BOARD_FORMAT_VERSION})
 	(generator "kicad_pcb_blocks.py")
 	(generator_version "1.0")
 	(general
