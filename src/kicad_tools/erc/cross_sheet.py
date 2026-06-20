@@ -370,6 +370,79 @@ def filter_cross_sheet_global_labels(
     return filtered
 
 
+def filter_cross_sheet_global_labels_objs(
+    violations: list[ERCViolation],
+    root_schematic: str,
+) -> list[ERCViolation]:
+    """``ERCViolation``-aware variant of :func:`filter_cross_sheet_global_labels`.
+
+    Suppresses false-positive ``single_global_label`` / ``isolated_pin_label``
+    violations for global labels that appear on multiple sheets of the
+    hierarchy, operating directly on :class:`ERCViolation` objects rather than
+    raw KiCad JSON dicts.
+
+    This mirrors the suppression logic used by ``kct sch validate`` /
+    ``kct sch preflight`` (which works on dicts via
+    :func:`filter_cross_sheet_global_labels`) so that ``kct erc`` produces a
+    consistent result.  The shared inventory helpers
+    (:func:`build_global_label_inventory`, :func:`build_sheet_label_presence`,
+    :func:`_extract_label_name`) are reused unchanged.
+
+    Per-sheet provenance is read from each violation's ``sheet`` attribute,
+    which :meth:`ERCReport.load` populates from the originating sheet path.
+
+    Args:
+        violations: List of :class:`ERCViolation` objects.
+        root_schematic: Path to the root ``.kicad_sch`` file used to build
+            the global label inventory.  A real hierarchy is required; the
+            caller is responsible for only invoking this when a schematic is
+            available.
+
+    Returns:
+        A new list with false-positive violations removed.  Violations of
+        other types pass through unchanged.
+    """
+    target_types = {"single_global_label", "isolated_pin_label"}
+
+    # Quick check: if no target violations exist, skip the expensive
+    # hierarchy traversal.
+    has_target = any(v.type_str in target_types for v in violations)
+    if not has_target:
+        return violations
+
+    inventory = build_global_label_inventory(root_schematic)
+    sheet_label_presence = build_sheet_label_presence(root_schematic)
+
+    filtered: list[ERCViolation] = []
+    for v in violations:
+        if v.type_str not in target_types:
+            filtered.append(v)
+            continue
+
+        # ERCViolation.items is a list[str]; adapt to the {"description": ...}
+        # shape that _extract_label_name expects for the KiCad 10+ path.
+        item_dicts = [{"description": item} for item in v.items] if v.items else None
+        label_name = _extract_label_name(v.description, item_dicts)
+        if label_name is None:
+            # Could not parse label name.  If the violation's sheet has no
+            # labels at all, this is a phantom detection -- suppress it.
+            sheet_path = v.sheet
+            if sheet_path and sheet_path not in sheet_label_presence:
+                continue
+            # Sheet has labels (or no sheet info available) -- keep to be safe.
+            filtered.append(v)
+            continue
+
+        sheets = inventory.get(label_name, set())
+        if len(sheets) >= 2:
+            # Label appears on multiple sheets -- this is a false positive.
+            continue
+
+        filtered.append(v)
+
+    return filtered
+
+
 # ---------------------------------------------------------------------------
 # Cross-sheet power-pin false-positive filtering
 # ---------------------------------------------------------------------------
