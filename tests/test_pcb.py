@@ -20,6 +20,34 @@ requires_kicad_footprint_libs = pytest.mark.skipif(
 )
 
 
+def _edge_cuts_lines(pcb: PCB):
+    """Return all (start, end) gr_line segments on Edge.Cuts from the tree."""
+    segments = []
+    for child in pcb._sexp.iter_children():
+        if child.tag != "gr_line":
+            continue
+        layer = child.find("layer")
+        if layer is None or layer.get_string(0) != "Edge.Cuts":
+            continue
+        start = child.find("start")
+        end = child.find("end")
+        segments.append(
+            (
+                (start.get_float(0), start.get_float(1)),
+                (end.get_float(0), end.get_float(1)),
+            )
+        )
+    return segments
+
+
+def _outline_bbox(pcb: PCB):
+    """Return ((min_x, min_y), (max_x, max_y)) of the Edge.Cuts gr_line outline."""
+    segments = _edge_cuts_lines(pcb)
+    xs = [c for seg in segments for c in (seg[0][0], seg[1][0])]
+    ys = [c for seg in segments for c in (seg[0][1], seg[1][1])]
+    return ((min(xs), min(ys)), (max(xs), max(ys)))
+
+
 def test_load_pcb(minimal_pcb: Path):
     """Load a PCB file."""
     doc = load_pcb(str(minimal_pcb))
@@ -1921,40 +1949,36 @@ class TestPCBCreate:
         # Offset Y: (210 - 120) / 2 = 45mm
         pcb = PCB.create(width=200, height=120)
 
-        # Find the board outline (gr_rect on Edge.Cuts)
-        gr_rect = pcb._sexp.find("gr_rect")
-        assert gr_rect is not None
+        # Board outline is four gr_line segments on Edge.Cuts (issue #3805).
+        assert pcb._sexp.find("gr_rect") is None
+        assert len(_edge_cuts_lines(pcb)) == 4
 
-        start = gr_rect.find("start")
-        end = gr_rect.find("end")
-        assert start is not None
-        assert end is not None
+        (min_x, min_y), (max_x, max_y) = _outline_bbox(pcb)
 
         # Check origin is centered
-        assert start.get_float(0) == pytest.approx(48.5)
-        assert start.get_float(1) == pytest.approx(45.0)
+        assert min_x == pytest.approx(48.5)
+        assert min_y == pytest.approx(45.0)
 
-        # Check end is offset by board dimensions
-        assert end.get_float(0) == pytest.approx(248.5)  # 48.5 + 200
-        assert end.get_float(1) == pytest.approx(165.0)  # 45 + 120
+        # Check far corner is offset by board dimensions
+        assert max_x == pytest.approx(248.5)  # 48.5 + 200
+        assert max_y == pytest.approx(165.0)  # 45 + 120
 
     def test_create_no_centering(self):
         """Test that center=False places board at origin."""
         pcb = PCB.create(width=100, height=80, center=False)
 
-        gr_rect = pcb._sexp.find("gr_rect")
-        assert gr_rect is not None
+        assert pcb._sexp.find("gr_rect") is None
+        assert len(_edge_cuts_lines(pcb)) == 4
 
-        start = gr_rect.find("start")
-        end = gr_rect.find("end")
+        (min_x, min_y), (max_x, max_y) = _outline_bbox(pcb)
 
         # Check origin is at (0, 0)
-        assert start.get_float(0) == pytest.approx(0.0)
-        assert start.get_float(1) == pytest.approx(0.0)
+        assert min_x == pytest.approx(0.0)
+        assert min_y == pytest.approx(0.0)
 
-        # Check end is at (width, height)
-        assert end.get_float(0) == pytest.approx(100.0)
-        assert end.get_float(1) == pytest.approx(80.0)
+        # Check far corner is at (width, height)
+        assert max_x == pytest.approx(100.0)
+        assert max_y == pytest.approx(80.0)
 
     def test_create_with_a3_paper(self):
         """Test centering on A3 paper."""
@@ -1969,14 +1993,12 @@ class TestPCBCreate:
         assert paper is not None
         assert paper.get_string(0) == "A3"
 
-        gr_rect = pcb._sexp.find("gr_rect")
-        start = gr_rect.find("start")
-        end = gr_rect.find("end")
+        (min_x, min_y), (max_x, max_y) = _outline_bbox(pcb)
 
-        assert start.get_float(0) == pytest.approx(110.0)
-        assert start.get_float(1) == pytest.approx(73.5)
-        assert end.get_float(0) == pytest.approx(310.0)  # 110 + 200
-        assert end.get_float(1) == pytest.approx(223.5)  # 73.5 + 150
+        assert min_x == pytest.approx(110.0)
+        assert min_y == pytest.approx(73.5)
+        assert max_x == pytest.approx(310.0)  # 110 + 200
+        assert max_y == pytest.approx(223.5)  # 73.5 + 150
 
     def test_create_with_us_letter_paper(self):
         """Test centering on US Letter (A) paper."""
@@ -1989,11 +2011,10 @@ class TestPCBCreate:
         paper = pcb._sexp.find("paper")
         assert paper.get_string(0) == "A"
 
-        gr_rect = pcb._sexp.find("gr_rect")
-        start = gr_rect.find("start")
+        (min_x, min_y), _ = _outline_bbox(pcb)
 
-        assert start.get_float(0) == pytest.approx(89.7)
-        assert start.get_float(1) == pytest.approx(57.95)
+        assert min_x == pytest.approx(89.7)
+        assert min_y == pytest.approx(57.95)
 
     def test_create_invalid_paper_raises_error(self):
         """Test that invalid paper size raises ValueError."""
@@ -2011,11 +2032,10 @@ class TestPCBCreate:
         # Offset Y: (210 - 300) / 2 = -45mm
         pcb = PCB.create(width=400, height=300, paper="A4")
 
-        gr_rect = pcb._sexp.find("gr_rect")
-        start = gr_rect.find("start")
+        (min_x, min_y), _ = _outline_bbox(pcb)
 
-        assert start.get_float(0) == pytest.approx(-51.5)
-        assert start.get_float(1) == pytest.approx(-45.0)
+        assert min_x == pytest.approx(-51.5)
+        assert min_y == pytest.approx(-45.0)
 
     def test_create_preserves_all_parameters(self):
         """Test that all create() parameters still work with centering."""
@@ -2216,6 +2236,57 @@ class TestPCBCreate:
         else:
             pytest.fail("Footprint R1 not found")
 
+    def test_create_outline_is_four_gr_lines(self):
+        """Issue #3805: board outline must be four gr_line Edge.Cuts segments."""
+        pcb = PCB.create(width=65, height=56, center=False)
+
+        # No gr_rect outline anymore.
+        assert pcb._sexp.find("gr_rect") is None
+
+        segments = _edge_cuts_lines(pcb)
+        assert len(segments) == 4
+
+        # Segments form a closed rectangle: each corner appears as both a
+        # start and an end exactly once.
+        corners = {(0.0, 0.0), (65.0, 0.0), (65.0, 56.0), (0.0, 56.0)}
+        starts = {(round(s[0], 6), round(s[1], 6)) for s, _e in segments}
+        ends = {(round(e[0], 6), round(e[1], 6)) for _s, e in segments}
+        assert starts == corners
+        assert ends == corners
+
+    def test_create_board_size_from_gr_line_outline(self):
+        """board_size resolves correctly from the gr_line outline (#3805)."""
+        pcb = PCB.create(width=65, height=56)
+        w, h = pcb.board_size
+        assert w == pytest.approx(65.0)
+        assert h == pytest.approx(56.0)
+
+    def test_create_board_origin_from_gr_line_outline(self):
+        """Board-origin detection works with the gr_line outline (#3805)."""
+        # Centered on A4: origin = ((297-65)/2, (210-56)/2) = (116, 77).
+        pcb = PCB.create(width=65, height=56)
+        ox, oy = pcb.board_origin
+        assert ox == pytest.approx(116.0)
+        assert oy == pytest.approx(77.0)
+
+    def test_create_stamps_kicad10_format_version(self):
+        """Generated board stamps the KiCad-10 format version 20241229 (#3805)."""
+        from kicad_tools.core.version import KICAD_BOARD_FORMAT_VERSION
+
+        assert KICAD_BOARD_FORMAT_VERSION == 20241229
+
+        pcb = PCB.create(width=65, height=56)
+        version = pcb._sexp.find("version")
+        assert version is not None
+        assert version.get_int(0) == 20241229
+
+    def test_create_4layer_outline_is_gr_line(self):
+        """4-layer boards also emit a gr_line outline (#3805)."""
+        pcb = PCB.create(width=65, height=56, layers=4, center=False)
+        assert pcb._sexp.find("gr_rect") is None
+        assert len(_edge_cuts_lines(pcb)) == 4
+        assert pcb.board_size == pytest.approx((65.0, 56.0))
+
 
 class TestBoardOriginCoordinateConversion:
     """Tests for board origin coordinate conversion.
@@ -2406,20 +2477,18 @@ class TestPCBPageFit:
         margin = 7.5
         new_w, new_h = pcb.page_fit(margin=margin)
 
-        gr_rect = pcb._sexp.find("gr_rect")
-        start = gr_rect.find("start")
-        end = gr_rect.find("end")
+        (min_x, min_y), (max_x, max_y) = _outline_bbox(pcb)
 
         # Board outline min corner moved to (margin, margin).
-        assert start.get_float(0) == pytest.approx(margin)
-        assert start.get_float(1) == pytest.approx(margin)
+        assert min_x == pytest.approx(margin)
+        assert min_y == pytest.approx(margin)
         # Max corner = margin + board size.
-        assert end.get_float(0) == pytest.approx(margin + 200)
-        assert end.get_float(1) == pytest.approx(margin + 120)
+        assert max_x == pytest.approx(margin + 200)
+        assert max_y == pytest.approx(margin + 120)
 
         # Board center == page center.
-        board_cx = (start.get_float(0) + end.get_float(0)) / 2
-        board_cy = (start.get_float(1) + end.get_float(1)) / 2
+        board_cx = (min_x + max_x) / 2
+        board_cy = (min_y + max_y) / 2
         assert board_cx == pytest.approx(new_w / 2)
         assert board_cy == pytest.approx(new_h / 2)
 
@@ -2478,17 +2547,11 @@ class TestPCBPageFit:
     def test_page_fit_preserves_relative_geometry(self):
         """Relative spacing between items is unchanged (DRC-preserving)."""
         pcb = PCB.create(width=80, height=60)
-        gr_rect = pcb._sexp.find("gr_rect")
-        before = (
-            gr_rect.find("end").get_float(0) - gr_rect.find("start").get_float(0),
-            gr_rect.find("end").get_float(1) - gr_rect.find("start").get_float(1),
-        )
+        (bmin, bmax) = _outline_bbox(pcb)
+        before = (bmax[0] - bmin[0], bmax[1] - bmin[1])
         pcb.page_fit(margin=10.0)
-        gr_rect = pcb._sexp.find("gr_rect")
-        after = (
-            gr_rect.find("end").get_float(0) - gr_rect.find("start").get_float(0),
-            gr_rect.find("end").get_float(1) - gr_rect.find("start").get_float(1),
-        )
+        (amin, amax) = _outline_bbox(pcb)
+        after = (amax[0] - amin[0], amax[1] - amin[1])
         assert after[0] == pytest.approx(before[0])
         assert after[1] == pytest.approx(before[1])
 

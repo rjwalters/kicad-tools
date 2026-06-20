@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from kicad_tools.core.version import KICAD_BOARD_FORMAT_VERSION
 from kicad_tools.utils import ensure_parent_dir
 
 
@@ -318,7 +319,7 @@ class Footprint:
     def to_sexp(self) -> str:
         """Convert footprint to KiCad S-expression format."""
         lines = [f'(footprint "{self.name}"']
-        lines.append("\t(version 20241229)")
+        lines.append(f"\t(version {KICAD_BOARD_FORMAT_VERSION})")
         lines.append('\t(generator "kicad_tools")')
         lines.append('\t(layer "F.Cu")')
 

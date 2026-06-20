@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 from kicad_tools.sexp import SExp
 
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
+from ..core.version import KICAD_BOARD_FORMAT_VERSION
 from ..footprints.library_path import (
     detect_kicad_library_path,
     guess_standard_library,
@@ -1493,7 +1494,7 @@ class PCB:
         pcb = SExp.list("kicad_pcb")
 
         # Version and generator info
-        pcb.append(SExp.list("version", 20260206))
+        pcb.append(SExp.list("version", KICAD_BOARD_FORMAT_VERSION))
         pcb.append(SExp.list("generator", "kicad_tools"))
         # generator_version is a strict-typed string field in KiCad; emit the
         # value as a quoted atom so kicad-cli accepts the file even though
@@ -1532,8 +1533,9 @@ class PCB:
         # Empty net (required)
         pcb.append(SExp.list("net", 0, ""))
 
-        # Board outline on Edge.Cuts
-        pcb.append(PCB._build_board_outline_sexp(width, height, origin_x, origin_y))
+        # Board outline on Edge.Cuts (four gr_line segments)
+        for line in PCB._build_board_outline_sexp(width, height, origin_x, origin_y):
+            pcb.append(line)
 
         return pcb
 
@@ -1660,17 +1662,45 @@ class PCB:
     @staticmethod
     def _build_board_outline_sexp(
         width: float, height: float, origin_x: float, origin_y: float
-    ) -> SExp:
-        """Build a rectangular board outline on Edge.Cuts layer."""
-        return SExp.list(
-            "gr_rect",
-            SExp.list("start", origin_x, origin_y),
-            SExp.list("end", origin_x + width, origin_y + height),
-            SExp.list("stroke", SExp.list("width", 0.1), SExp.list("type", "default")),
-            SExp.list("fill", "none"),
-            SExp.list("layer", "Edge.Cuts"),
-            SExp.list("uuid", str(uuid.uuid4())),
-        )
+    ) -> list[SExp]:
+        """Build a rectangular board outline on Edge.Cuts layer.
+
+        Emits four ``gr_line`` segments forming a closed rectangle rather than
+        a single ``gr_rect``.  Downstream placement/route tooling (and some of
+        this package's own DSN/routing paths) expect ``gr_line`` boundary
+        segments, and the PCB parser already ingests ``gr_line`` into
+        ``_graphic_lines`` (used by both ``board_size`` and board-origin
+        detection via their gr_line fallbacks).
+
+        Corners are walked clockwise:
+        ``(ox,oy) -> (ox+w,oy) -> (ox+w,oy+h) -> (ox,oy+h) -> (ox,oy)``.
+
+        Returns:
+            A list of four ``gr_line`` S-expressions.
+        """
+        ox, oy = origin_x, origin_y
+        corners = [
+            (ox, oy),
+            (ox + width, oy),
+            (ox + width, oy + height),
+            (ox, oy + height),
+        ]
+
+        lines: list[SExp] = []
+        for i in range(4):
+            start = corners[i]
+            end = corners[(i + 1) % 4]
+            lines.append(
+                SExp.list(
+                    "gr_line",
+                    SExp.list("start", start[0], start[1]),
+                    SExp.list("end", end[0], end[1]),
+                    SExp.list("stroke", SExp.list("width", 0.1), SExp.list("type", "default")),
+                    SExp.list("layer", "Edge.Cuts"),
+                    SExp.list("uuid", str(uuid.uuid4())),
+                )
+            )
+        return lines
 
     def _parse(self):
         """Parse the PCB data structure."""
@@ -2992,11 +3022,12 @@ class PCB:
         width: float,
         height: float,
     ) -> int:
-        """Replace all outline contours with a single rectangle.
+        """Replace all outline contours with a rectangle.
 
         Removes every Edge.Cuts contour whose bounding-box area is above
-        the mounting-hole threshold, then inserts a new ``gr_rect`` at
-        the given origin and size.  Mounting-hole contours are preserved.
+        the mounting-hole threshold, then inserts a new rectangular outline
+        (four ``gr_line`` Edge.Cuts segments) at the given origin and size.
+        Mounting-hole contours are preserved.
 
         Args:
             origin_x: X coordinate of top-left corner (mm).
@@ -3017,9 +3048,9 @@ class PCB:
                     self._sexp.remove(node)
                 removed += 1
 
-        # Insert new rect outline
-        new_rect = PCB._build_board_outline_sexp(width, height, origin_x, origin_y)
-        self._sexp.append(new_rect)
+        # Insert new outline (four gr_line Edge.Cuts segments)
+        for line in PCB._build_board_outline_sexp(width, height, origin_x, origin_y):
+            self._sexp.append(line)
 
         # Rebuild in-memory lists
         self._graphic_lines = []
