@@ -1673,9 +1673,12 @@ def _add_pcb_parser(subparsers) -> None:
     # pcb move-footprint
     pcb_move_fp = pcb_subparsers.add_parser(
         "move-footprint",
-        help="Move a footprint to new board-relative coordinates",
+        help="Move a footprint to new coordinates (board-relative by default)",
         description="Relocate a footprint to a new position (and optionally "
-        "rotation) by reference designator.  Supports batch mode via --map.",
+        "rotation) by reference designator.  Supports batch mode via --map.  "
+        "Coordinates are board-relative by default (measured from the "
+        "Edge.Cuts top-left origin); pass --absolute to use KiCad page "
+        "coordinates instead.",
     )
     pcb_move_fp.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_move_fp.add_argument(
@@ -1687,7 +1690,10 @@ def _add_pcb_parser(subparsers) -> None:
         nargs=2,
         type=float,
         metavar=("X", "Y"),
-        help="New board-relative position (e.g., --to 132.5 98.25)",
+        help="New position in mm. Board-relative by default (measured from the "
+        "Edge.Cuts top-left origin); the board-origin offset is added "
+        "automatically. Pass --absolute to give KiCad page coordinates "
+        "directly. Example (board-relative): --to 10 10",
     )
     pcb_move_fp.add_argument(
         "--rotation",
@@ -1695,9 +1701,18 @@ def _add_pcb_parser(subparsers) -> None:
         help="New rotation in degrees (optional)",
     )
     pcb_move_fp.add_argument(
+        "--absolute",
+        action="store_true",
+        help="Interpret --to / --map coordinates as absolute KiCad page "
+        "coordinates (the same space as a footprint's raw (at ...) node) "
+        "instead of board-relative. Default: board-relative.",
+    )
+    pcb_move_fp.add_argument(
         "--map",
         dest="batch_map",
-        help='JSON map for batch moves (e.g., \'{"J2": {"x": 132.5, "y": 98.25}}\')',
+        help="JSON map for batch moves; x/y are board-relative by default "
+        "(or absolute page coords with --absolute), "
+        'e.g. \'{"J2": {"x": 10, "y": 10}}\'',
     )
     pcb_move_fp.add_argument(
         "-o",

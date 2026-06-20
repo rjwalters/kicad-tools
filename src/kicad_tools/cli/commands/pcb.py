@@ -691,6 +691,7 @@ def _run_move_footprint_command(args, pcb_path: Path) -> int:
     output_path = Path(output) if output else None
     dry_run = getattr(args, "dry_run", False)
     output_format = getattr(args, "format", "text")
+    absolute = getattr(args, "absolute", False)
 
     # Parse batch map JSON if provided
     batch_map = None
@@ -724,6 +725,7 @@ def _run_move_footprint_command(args, pcb_path: Path) -> int:
         dry_run=dry_run,
         output_path=output_path,
         output_format=output_format,
+        absolute=absolute,
     )
 
 
