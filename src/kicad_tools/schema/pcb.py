@@ -1728,9 +1728,16 @@ class PCB:
             elif tag == "gr_line":
                 line = GraphicLine.from_sexp(child)
                 self._graphic_lines.append(line)
+                # Also surface as a BoardGraphic so the public read path
+                # (``graphics`` / ``graphics_on_layer``) sees gr_line outlines
+                # (e.g. the four-segment Edge.Cuts boundary emitted by
+                # ``PCB.create``).  Without this, gr_line boards would be
+                # invisible to ``graphics_on_layer``.
+                self._graphics.append(BoardGraphic.from_sexp(child, "line"))
             elif tag == "gr_arc":
                 arc = GraphicArc.from_sexp(child)
                 self._graphic_arcs.append(arc)
+                self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
             elif tag == "setup":
                 self._parse_setup(child)
             elif tag == "title_block":
@@ -1738,7 +1745,7 @@ class PCB:
             elif tag == "gr_text":
                 text = GraphicText.from_sexp(child)
                 self._texts.append(text)
-            elif tag in ("gr_line", "gr_rect", "gr_circle", "gr_arc"):
+            elif tag in ("gr_rect", "gr_circle"):
                 graphic_type = tag[3:]  # Remove "gr_" prefix
                 graphic = BoardGraphic.from_sexp(child, graphic_type)
                 self._graphics.append(graphic)
@@ -2670,10 +2677,18 @@ class PCB:
 
         Yields all graphic elements from Edge.Cuts and other layers.
         Used for board outline calculations and layer analysis.
+
+        ``gr_line`` and ``gr_arc`` elements are emitted once, as their richer
+        typed forms (:class:`GraphicLine` / :class:`GraphicArc`).  They are
+        also mirrored into ``_graphics`` as :class:`BoardGraphic` for the
+        ``graphics`` / ``graphics_on_layer`` read path, so those line/arc
+        mirrors are skipped here to avoid double-counting.
         """
         yield from self._graphic_lines
         yield from self._graphic_arcs
-        yield from self._graphics
+        for graphic in self._graphics:
+            if graphic.graphic_type not in ("line", "arc"):
+                yield graphic
 
     def graphics_on_layer(self, layer: str) -> Iterator[BoardGraphic]:
         """Get graphic elements on a specific layer."""
@@ -3007,8 +3022,10 @@ class PCB:
                 tag = child.tag
                 if tag == "gr_line":
                     self._graphic_lines.append(GraphicLine.from_sexp(child))
+                    self._graphics.append(BoardGraphic.from_sexp(child, "line"))
                 elif tag == "gr_arc":
                     self._graphic_arcs.append(GraphicArc.from_sexp(child))
+                    self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
                 elif tag in ("gr_rect", "gr_circle"):
                     graphic_type = tag[3:]
                     self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
@@ -3062,8 +3079,10 @@ class PCB:
             tag = child.tag
             if tag == "gr_line":
                 self._graphic_lines.append(GraphicLine.from_sexp(child))
+                self._graphics.append(BoardGraphic.from_sexp(child, "line"))
             elif tag == "gr_arc":
                 self._graphic_arcs.append(GraphicArc.from_sexp(child))
+                self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
             elif tag in ("gr_rect", "gr_circle"):
                 graphic_type = tag[3:]
                 self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
