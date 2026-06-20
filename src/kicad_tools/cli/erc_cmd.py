@@ -13,9 +13,18 @@ Exit Codes:
     0 - No errors (warnings may be present)
     1 - Errors found or command failure
     2 - Warnings found (only with --strict)
+
+Cross-sheet global labels:
+    When run on a schematic, single_global_label / isolated_pin_label
+    false positives for global labels spanning multiple sheets are
+    suppressed automatically (matching `kct sch validate`). When parsing a
+    bare report (.json/.rpt) this suppression is skipped because the
+    schematic hierarchy needed to build the cross-sheet label inventory is
+    not available -- run on the .kicad_sch directly for filtered results.
 """
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -26,6 +35,7 @@ from ..erc import (
     ERCReport,
     ERCViolation,
     check_cross_sheet_duplicates,
+    filter_cross_sheet_global_labels_objs,
 )
 from .runner import find_kicad_cli, run_erc
 
@@ -117,12 +127,19 @@ def main(argv: list[str] | None = None) -> int:
 
     input_path = Path(args.input)
 
+    # Root schematic used to build the cross-sheet global-label inventory.
+    # Only available when ERC is run on a schematic (not when parsing a bare
+    # report), so the false-positive filter is skipped for report-only input.
+    schematic_for_filter: str | None = None
+
     # Determine if input is schematic or report
     if input_path.suffix == ".kicad_sch":
         # Run ERC on schematic
         report = run_erc_on_schematic(input_path, args.output, args.keep_report)
         if report is None:
             return 1
+
+        schematic_for_filter = str(input_path)
 
         # Run cross-sheet duplicate reference check (supplements KiCad ERC)
         try:
@@ -145,6 +162,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Unsupported file type: {input_path.suffix}", file=sys.stderr)
         print("Expected .kicad_sch (schematic) or .json/.rpt (report)", file=sys.stderr)
         return 1
+
+    # Suppress cross-sheet global-label false positives.
+    #
+    # KiCad's ERC engine emits single_global_label / isolated_pin_label
+    # per-sheet without aggregating a global label across the full
+    # hierarchy, so a label that legitimately spans >= 2 sheets is wrongly
+    # reported as isolated.  The dict-based filter is already applied on the
+    # `kct sch validate` / preflight path; apply the ERCViolation-aware
+    # variant here so `kct erc` is consistent.
+    #
+    # Building the inventory requires a real `.kicad_sch` hierarchy, so this
+    # is skipped when only a bare report (.json/.rpt) is supplied -- the
+    # hierarchy cannot be reconstructed from the report alone.  Wrapped in
+    # try/except to degrade gracefully (matching check_cross_sheet_duplicates)
+    # so a parsing hiccup never turns a clean ERC into a crash.
+    if schematic_for_filter is not None:
+        # Non-fatal: filtering is supplemental; on any error (e.g. a malformed
+        # or missing hierarchy) the raw violations are kept unchanged.
+        with contextlib.suppress(Exception):
+            report.violations = filter_cross_sheet_global_labels_objs(
+                report.violations, schematic_for_filter
+            )
 
     # Apply violation filters from config file
     filter_ignored_count = 0

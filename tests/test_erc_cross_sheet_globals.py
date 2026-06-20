@@ -2,12 +2,15 @@
 
 from pathlib import Path
 
+from kicad_tools.core.types import ERCSeverity
 from kicad_tools.erc.cross_sheet import (
     _extract_label_name,
     build_global_label_inventory,
     build_sheet_label_presence,
     filter_cross_sheet_global_labels,
+    filter_cross_sheet_global_labels_objs,
 )
+from kicad_tools.erc.violation import ERCViolation, ERCViolationType
 
 # ---------------------------------------------------------------------------
 # Schematic templates with global labels
@@ -736,3 +739,159 @@ class TestBuildSheetLabelPresence:
 
         assert "/" not in presence
         assert "/Sub" in presence
+
+
+# ---------------------------------------------------------------------------
+# Tests: filter_cross_sheet_global_labels_objs (ERCViolation-aware wrapper)
+# ---------------------------------------------------------------------------
+
+
+class TestFilterCrossSheetGlobalLabelsObjs:
+    """Tests for the ERCViolation-aware cross-sheet filter used by ``kct erc``."""
+
+    def _make_violation(
+        self,
+        vtype: str,
+        label_name: str | None = None,
+        *,
+        description: str | None = None,
+        sheet: str = "",
+        items: list[str] | None = None,
+    ) -> ERCViolation:
+        if description is None:
+            description = (
+                f"Label '{label_name}' appears only once in the design"
+                if label_name
+                else "Label connected to only one pin"
+            )
+        return ERCViolation(
+            type=ERCViolationType.from_string(vtype),
+            type_str=vtype,
+            severity=ERCSeverity.WARNING,
+            description=description,
+            sheet=sheet,
+            items=items or [],
+        )
+
+    def _build_two_sheet_design(self, tmp_path: Path, label: str) -> str:
+        """Create a root + child sharing *label*; return the root path."""
+        sub_file = "sub.kicad_sch"
+        root_labels = _make_global_label(label, uuid="gl-root")
+        root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=root_sheets
+        )
+        sub_labels = _make_global_label(label, uuid="gl-sub")
+        sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-uuid", global_labels=sub_labels
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_file).write_text(sub_content)
+        return str(tmp_path / "root.kicad_sch")
+
+    def test_suppresses_multi_sheet_global_label(self, tmp_path: Path):
+        """A global label on 2 sheets is NOT reported as single-pin/isolated."""
+        root = self._build_two_sheet_design(tmp_path, "AUDIO_L")
+        violations = [self._make_violation("single_global_label", "AUDIO_L")]
+
+        result = filter_cross_sheet_global_labels_objs(violations, root)
+
+        assert len(result) == 0
+
+    def test_suppresses_multi_sheet_isolated_pin_label(self, tmp_path: Path):
+        root = self._build_two_sheet_design(tmp_path, "SPI_MOSI")
+        violations = [self._make_violation("isolated_pin_label", "SPI_MOSI")]
+
+        result = filter_cross_sheet_global_labels_objs(violations, root)
+
+        assert len(result) == 0
+
+    def test_preserves_genuine_single_pin_label(self, tmp_path: Path):
+        """A label on exactly one sheet IS still reported."""
+        root_labels = _make_global_label("LONELY_NET", uuid="gl-lonely")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels=root_labels, sheets="")
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+
+        violations = [self._make_violation("single_global_label", "LONELY_NET")]
+        result = filter_cross_sheet_global_labels_objs(violations, str(tmp_path / "root.kicad_sch"))
+
+        assert len(result) == 1
+        assert result[0].type_str == "single_global_label"
+
+    def test_kicad10_label_in_items_filtered(self, tmp_path: Path):
+        """KiCad 10+ puts the label name in items (list[str] on ERCViolation)."""
+        root = self._build_two_sheet_design(tmp_path, "SYNC_R")
+        violations = [
+            self._make_violation(
+                "isolated_pin_label",
+                description="Label connected to only one pin",
+                items=["Global Label 'SYNC_R'"],
+            )
+        ]
+
+        result = filter_cross_sheet_global_labels_objs(violations, root)
+
+        assert len(result) == 0
+
+    def test_mixed_selective_filtering(self, tmp_path: Path):
+        """Only the false positive is removed; genuine + unrelated remain."""
+        sub_file = "sub.kicad_sch"
+        root_labels = _make_global_label("MULTI", uuid="gl-r-m") + _make_global_label(
+            "SINGLE", uuid="gl-r-s"
+        )
+        root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(
+            global_labels=root_labels, sheets=root_sheets
+        )
+        sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-uuid", global_labels=_make_global_label("MULTI", uuid="gl-s-m")
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_file).write_text(sub_content)
+
+        violations = [
+            self._make_violation("single_global_label", "MULTI"),  # false positive
+            self._make_violation("single_global_label", "SINGLE"),  # genuine
+            self._make_violation("pin_not_connected", description="Pin 1 of R1 is not connected"),
+        ]
+        result = filter_cross_sheet_global_labels_objs(violations, str(tmp_path / "root.kicad_sch"))
+
+        types = sorted(v.type_str for v in result)
+        assert types == ["pin_not_connected", "single_global_label"]
+        sgl = next(v for v in result if v.type_str == "single_global_label")
+        assert "SINGLE" in sgl.description
+
+    def test_no_target_violations_skips_hierarchy(self, tmp_path: Path):
+        """Skip hierarchy traversal when no target types are present."""
+        violations = [
+            self._make_violation("pin_not_connected", description="Pin 1 of R1 is not connected")
+        ]
+        # nonexistent path would raise if traversed
+        result = filter_cross_sheet_global_labels_objs(
+            violations, str(tmp_path / "nonexistent.kicad_sch")
+        )
+        assert len(result) == 1
+
+    def test_phantom_on_label_free_sheet_suppressed(self, tmp_path: Path):
+        """Unparseable violation on a label-free sheet is suppressed."""
+        sub_file = "sub.kicad_sch"
+        root_sheets = _make_sheet("Sub", sub_file, uuid="sheet-sub")
+        root_content = _ROOT_WITH_GLOBALS_TEMPLATE.format(global_labels="", sheets=root_sheets)
+        sub_content = _SUBSHEET_WITH_GLOBALS_TEMPLATE.format(
+            uuid="sub-uuid", global_labels=_make_global_label("SPI", uuid="gl-sub")
+        )
+        (tmp_path / "root.kicad_sch").write_text(root_content)
+        (tmp_path / sub_file).write_text(sub_content)
+
+        violations = [
+            self._make_violation(
+                "isolated_pin_label",
+                description="Pin connected to only other pins or labels on the sheet",
+                sheet="/",
+            )
+        ]
+        result = filter_cross_sheet_global_labels_objs(violations, str(tmp_path / "root.kicad_sch"))
+        assert len(result) == 0
+
+    def test_empty_violations(self, tmp_path: Path):
+        assert filter_cross_sheet_global_labels_objs([], "ignored.kicad_sch") == []
