@@ -719,3 +719,83 @@ class TestSheetInstancesPageQuoting:
         node = sheet_instances("/00000000-0000-0000-0000-000000000001", "1")
         text = node.to_string()
         assert '(page "1")' in text, f"sheet_instances builder emitted: {text}"
+
+
+# ---------------------------------------------------------------------------
+# Numeric footprint property quoting (issue #3802)
+# ---------------------------------------------------------------------------
+#
+# create-pcb / PCBFromSchematic embed Reference/Value via
+# PCB.add_footprint_from_file(). When a value parses as a float (e.g. a
+# unit-less resistor value "470"), the serializer's textual heuristic used to
+# emit the bare token (property "Value" 470) -- which kicad-cli rejects with
+# "Failed to load board" (exit 3), silently breaking the entire schematic ->
+# PCB -> manufacturing path. The fix forces Reference/Value (and the
+# synthesized-property fallback) through SExp.quoted_atom() so they always
+# serialize quoted. These tests gate the load contract against the real
+# kicad-cli parser; the kicad-cli-free unit assertions live in
+# tests/test_pcb.py:TestAddFootprintNumericPropertyQuoting.
+
+_FIXTURE_FP = (
+    REPO_ROOT / "tests" / "fixtures" / "Test_Library.pretty" / "C_0402_1005Metric.kicad_mod"
+)
+
+
+class TestNumericPropertyValueRoundtrip:
+    """A board with a unit-less numeric footprint Value must load in kicad-cli."""
+
+    @pytest.mark.parametrize("value", ["470", "0", "100"])
+    def test_numeric_value_loads_in_kicad_cli(self, value: str, tmp_path: Path) -> None:
+        """add_footprint_from_file with a numeric Value -> loadable board."""
+        pcb = PCB.create(width=50.0, height=50.0, title="numeric value roundtrip")
+        pcb.add_footprint_from_file(
+            kicad_mod_path=_FIXTURE_FP,
+            reference="R1",
+            x=25.0,
+            y=25.0,
+            value=value,
+        )
+        pcb_path = tmp_path / f"numeric_{value}.kicad_pcb"
+        pcb.save(pcb_path)
+
+        # Regression guard: the value must be quoted before kicad-cli is even
+        # invoked, so the failure is attributed clearly on runners where
+        # kicad-cli's stderr is unhelpful.
+        contents = pcb_path.read_text()
+        assert f'(property "Value" "{value}"' in contents, (
+            f"Regression guard: a numeric Value {value!r} must serialize as "
+            f'(property "Value" "{value}") -- quoted. The bare numeric form is '
+            "rejected by kicad-cli with 'Failed to load board' (exit 3). See "
+            "PCB.add_footprint_from_file in src/kicad_tools/schema/pcb.py "
+            "(issue #3802)."
+        )
+        assert f'(property "Value" {value}' not in contents
+
+        _assert_kicad_cli_loads(
+            pcb_path,
+            producer="PCB.add_footprint_from_file (numeric Value)",
+            tmp_path=tmp_path,
+        )
+
+    def test_numeric_reference_loads_in_kicad_cli(self, tmp_path: Path) -> None:
+        """A numeric-looking Reference designator must not break the load."""
+        pcb = PCB.create(width=50.0, height=50.0, title="numeric reference roundtrip")
+        pcb.add_footprint_from_file(
+            kicad_mod_path=_FIXTURE_FP,
+            reference="1",
+            x=25.0,
+            y=25.0,
+            value="10k",
+        )
+        pcb_path = tmp_path / "numeric_ref.kicad_pcb"
+        pcb.save(pcb_path)
+
+        contents = pcb_path.read_text()
+        assert '(property "Reference" "1"' in contents
+        assert '(property "Reference" 1' not in contents
+
+        _assert_kicad_cli_loads(
+            pcb_path,
+            producer="PCB.add_footprint_from_file (numeric Reference)",
+            tmp_path=tmp_path,
+        )

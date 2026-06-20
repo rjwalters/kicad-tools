@@ -3450,3 +3450,118 @@ class TestPCBConstructorGuard:
         pcb = PCB.load(fixture_path)
         assert len(pcb.layers) > 0
         assert len(pcb.nets) >= 0
+
+
+class TestAddFootprintNumericPropertyQuoting:
+    """Numeric Reference/Value properties must serialize quoted (issue #3802).
+
+    ``add_footprint_from_file`` embeds Reference/Value into the board's
+    S-expression tree. When the value parses as a float (e.g. a unit-less
+    resistor value ``470``), the serializer's textual heuristic would emit a
+    bare token ``(property "Value" 470)``. KiCad/kicad-cli reject that with
+    "Failed to load board" (exit 3), making the whole board unloadable.
+
+    These assertions run without kicad-cli so the regression is caught on any
+    runner; ``tests/test_kicad_cli_roundtrip.py`` adds the load-level gate.
+    """
+
+    FIXTURES_DIR = Path(__file__).parent / "fixtures"
+    TEST_PRETTY_DIR = FIXTURES_DIR / "Test_Library.pretty"
+
+    # Footprint that already carries Reference/Value property nodes, to
+    # exercise the existing-property write branch (the fixture footprint
+    # below has none, exercising the synthesized-property fallback).
+    _FP_WITH_PROPERTIES = """\
+(footprint "Test:R_Numeric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-00000000aaaa")
+    (property "Reference" "REF**" (at 0 -1.5 0) (layer "F.SilkS")
+        (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (property "Value" "Test:R_Numeric" (at 0 1.5 0) (layer "F.Fab")
+        (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu"))
+)
+"""
+
+    @pytest.mark.parametrize("value", ["470", "0", "100", "-5", "3.3"])
+    def test_synthesized_value_property_is_quoted(self, minimal_pcb, tmp_path, value):
+        """A numeric Value emits ``(property "Value" "<n>")`` (synthesized branch)."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="R1",
+            x=50.0,
+            y=30.0,
+            value=value,
+        )
+        out = tmp_path / "synth.kicad_pcb"
+        pcb.save(out)
+        contents = out.read_text()
+        assert f'(property "Value" "{value}"' in contents, (
+            f"Numeric Value {value!r} must serialize quoted; bare numeric "
+            "makes the board unloadable in kicad-cli. Got:\n"
+            + "\n".join(line for line in contents.splitlines() if "Value" in line)
+        )
+        # The bug emitted the value as a bare numeric token (no quotes).
+        assert f'(property "Value" {value}' not in contents
+
+    @pytest.mark.parametrize("value", ["470", "0", "100"])
+    def test_existing_value_property_is_quoted(self, minimal_pcb, tmp_path, value):
+        """A numeric Value emits quoted when the footprint already has the prop."""
+        fp_path = tmp_path / "R_Numeric.kicad_mod"
+        fp_path.write_text(self._FP_WITH_PROPERTIES)
+
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        pcb.add_footprint_from_file(
+            kicad_mod_path=fp_path,
+            reference="R1",
+            x=50.0,
+            y=30.0,
+            value=value,
+        )
+        out = tmp_path / "existing.kicad_pcb"
+        pcb.save(out)
+        contents = out.read_text()
+        assert f'(property "Value" "{value}"' in contents
+        assert f'(property "Value" {value} ' not in contents
+
+    def test_numeric_reference_is_quoted(self, minimal_pcb, tmp_path):
+        """A numeric-looking Reference designator serializes quoted."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="1",
+            x=50.0,
+            y=30.0,
+            value="10k",
+        )
+        out = tmp_path / "ref.kicad_pcb"
+        pcb.save(out)
+        contents = out.read_text()
+        assert '(property "Reference" "1"' in contents
+        assert '(property "Reference" 1' not in contents
+
+    def test_structural_numeric_tokens_stay_unquoted(self, minimal_pcb, tmp_path):
+        """The fix must not over-quote structural numerics (at/size/layer idx)."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            value="470",
+        )
+        out = tmp_path / "structural.kicad_pcb"
+        pcb.save(out)
+        contents = out.read_text()
+        # Pad/geometry coordinates and sizes must remain bare numerics.
+        assert "(size 1 1)" in contents or "(size " in contents
+        assert '(size "1" "1")' not in contents
+        assert '(thickness "0.15")' not in contents
