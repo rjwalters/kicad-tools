@@ -211,8 +211,23 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # DRC
     drc = result.drc
-    drc_status = "PASS" if drc.passed else "FAIL"
-    drc_icon = "OK" if drc.passed else "X"
+    # Three verdict states (issue #3817):
+    #   FAIL                       -> internal/geometric engine found errors
+    #   PASS                       -> clean AND geometric engine actually ran
+    #   PASS (NOT AUTHORITATIVE)   -> clean per --mfr engine but kicad-cli
+    #                                 geometric DRC did not run; the internal
+    #                                 engine is structurally blind to several
+    #                                 KiCad violation classes, so this PASS
+    #                                 cannot be trusted as a clean verdict.
+    if not drc.passed:
+        drc_status = "FAIL"
+        drc_icon = "X"
+    elif not drc.geometric_drc_ran:
+        drc_status = "PASS (NOT AUTHORITATIVE -- geometric DRC did not run)"
+        drc_icon = "!!"
+    else:
+        drc_status = "PASS"
+        drc_icon = "OK"
     print(f"\n[{drc_icon}] DRC (Design Rules Check): {drc_status}")
     if drc.error_count > 0 or drc.warning_count > 0:
         print(f"    Errors: {drc.error_count}, Warnings: {drc.warning_count}")
@@ -220,6 +235,14 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
             print(f"    Blocking: {drc.blocking_count} (must fix)")
         if drc.details:
             print(f"    Details: {drc.details}")
+    elif drc.passed and not drc.geometric_drc_ran:
+        # Clean board but geometric engine skipped: always surface the
+        # qualification (previously gated behind error_count > 0 so it was
+        # never shown on a clean board -- the core false-green defect).
+        note = drc.geometric_drc_note or "native kicad-cli geometric DRC was not run"
+        print(f"    Note: {note}")
+        print("    Verdict is NOT authoritative -- geometric defects (shorts,")
+        print("    edge clearance, mask bridges) could not be checked.")
 
     # Sync drift (schematic <-> PCB)
     sync = result.sync

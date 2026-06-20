@@ -53,7 +53,18 @@ class ERCStatus:
 
 @dataclass
 class DRCStatus:
-    """DRC check results."""
+    """DRC check results.
+
+    ``geometric_drc_ran`` records whether the native ``kicad-cli pcb drc``
+    engine actually executed and produced a report (issue #3817).  It is
+    *distinct* from ``passed``: a board can be ``passed=True`` per the
+    internal ``--mfr`` rule engine while the geometric engine did not run
+    (kicad-cli absent / timed out / crashed), in which case the verdict is
+    **not authoritative** -- the internal engine is structurally blind to
+    several KiCad violation classes (shorts, ``copper_edge_clearance``,
+    ``solder_mask_bridge``, ``silk_*`` overlaps).  Defaults to ``False`` so
+    an un-reconciled status is never silently treated as authoritative.
+    """
 
     error_count: int = 0
     warning_count: int = 0
@@ -62,6 +73,12 @@ class DRCStatus:
     details: str = ""
     report_path: Path | None = None
     violations_by_type: dict[str, int] = field(default_factory=dict)
+    # True only when kicad-cli geometric DRC actually ran and produced a
+    # report.  When False, a ``passed=True`` verdict is NOT authoritative.
+    geometric_drc_ran: bool = False
+    # Human-readable note describing why geometric DRC did not run (skip
+    # path) -- mirrors GeometricDRCResult.note.  None when it ran cleanly.
+    geometric_drc_note: str | None = None
 
     def to_dict(self) -> dict:
         result = {
@@ -70,6 +87,8 @@ class DRCStatus:
             "blocking_count": self.blocking_count,
             "passed": self.passed,
             "details": self.details,
+            "geometric_drc_ran": self.geometric_drc_ran,
+            "geometric_drc_note": self.geometric_drc_note,
         }
         if self.violations_by_type:
             result["violations_by_type"] = dict(self.violations_by_type)
@@ -790,10 +809,28 @@ class ManufacturingAudit:
                 top_rules = sorted(error_rules.items(), key=lambda x: -x[1])[:3]
                 status.details = ", ".join(f"{r[0]} ({r[1]})" for r in top_rules)
 
+        except ImportError as e:
+            # An optional geometry backend (e.g. shapely) is not installed,
+            # so the internal rule engine could not run.  This is the same
+            # class of "could not verify" as kicad-cli being absent: per
+            # issue #3817 we must NOT report it as a hard FAIL (that would
+            # regress backend-less CI), but it is equally NOT an
+            # authoritative clean PASS.  Leave status.passed untouched and
+            # let _merge_geometric_drc / audit_cmd render the verdict as
+            # non-authoritative (geometric_drc_ran stays False).
+            logger.warning(f"DRC check could not run (optional backend absent): {e}")
+            note = f"internal DRC engine could not run: {e}"
+            status.details = f"{status.details}; {note}" if status.details else note
+
         except Exception as e:
+            # A genuine internal DRC checker crash must NOT be reported as a
+            # clean PASS (issue #3817).  Surface it as a could-not-verify
+            # failure so the verdict is fail-loud rather than a false green.
             logger.warning(f"DRC check failed: {e}")
-            status.details = str(e)
-            status.passed = True  # Don't fail on check errors
+            status.details = f"DRC check could not run: {e}"
+            status.passed = False
+            status.error_count = max(status.error_count, 1)
+            status.blocking_count = max(status.blocking_count, 1)
 
         # Merge KiCad's geometric DRC (kicad-cli pcb drc) into the same
         # status.  The two engines catch different real defects: the --mfr
@@ -838,15 +875,23 @@ class ManufacturingAudit:
         result = run_geometric_drc(self.pcb_path)
 
         if not result.ran:
-            # kicad-cli absent / timed out / no report / crashed: append the
-            # helper's explanatory note and leave the --mfr count standing.
+            # kicad-cli absent / timed out / no report / crashed: the
+            # geometric engine did NOT run, so a passing --mfr verdict is
+            # not authoritative (issue #3817).  Record that fact distinctly
+            # from passed -- do NOT flip status.passed here -- and surface
+            # the note so audit_cmd.py can render a third verdict state.
+            status.geometric_drc_ran = False
             note = result.note
+            status.geometric_drc_note = note
             if note == "kicad-cli not found; geometric DRC skipped":
                 # Preserve the audit-specific suffix for backward-compat.
                 note = "kicad-cli not found; geometric DRC skipped (--mfr count only)"
             if note:
                 status.details = f"{status.details}; {note}" if status.details else note
             return
+
+        # The geometric engine ran -- the verdict is now authoritative.
+        status.geometric_drc_ran = True
 
         if result.error_count > 0:
             status.error_count += result.error_count

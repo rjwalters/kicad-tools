@@ -192,6 +192,8 @@ class TestMergeGeometricDrc:
         assert status.blocking_count == 0
         assert status.passed is True
         assert status.violations_by_type == {}
+        # Geometric engine actually ran -> verdict is authoritative.
+        assert status.geometric_drc_ran is True
 
     def test_graceful_fallback_when_kicad_cli_absent(self, tmp_path, monkeypatch):
         """Missing kicad-cli leaves --mfr count intact and adds a note."""
@@ -211,6 +213,10 @@ class TestMergeGeometricDrc:
         assert status.blocking_count == 4
         assert status.violations_by_type == {"clearance_pad_zone": 4}
         assert "kicad-cli not found" in status.details
+        # Geometric engine did NOT run -> verdict is not authoritative.
+        assert status.geometric_drc_ran is False
+        assert status.geometric_drc_note is not None
+        assert "kicad-cli not found" in status.geometric_drc_note
 
     def test_cli_warnings_do_not_count(self, tmp_path, monkeypatch):
         """Non-error kicad-cli violations are ignored (severity-error guard)."""
@@ -228,6 +234,175 @@ class TestMergeGeometricDrc:
 
         assert status.error_count == 1
         assert status.violations_by_type == {"kicad-cli:starved_thermal": 1}
+
+
+class TestDRCStatusGeometricRan:
+    """Tests for the geometric_drc_ran authoritative signal (issue #3817)."""
+
+    def test_default_geometric_drc_ran_is_false(self):
+        """A fresh DRCStatus is never silently authoritative."""
+        status = DRCStatus()
+        assert status.geometric_drc_ran is False
+        assert status.geometric_drc_note is None
+
+    def test_to_dict_includes_geometric_drc_fields(self):
+        """to_dict() serializes the authoritative signal + note."""
+        status = DRCStatus(geometric_drc_ran=True)
+        d = status.to_dict()
+        assert d["geometric_drc_ran"] is True
+        assert "geometric_drc_note" in d
+
+    def test_to_dict_geometric_drc_ran_default(self):
+        """to_dict() reports geometric_drc_ran=False by default."""
+        d = DRCStatus().to_dict()
+        assert d["geometric_drc_ran"] is False
+        assert d["geometric_drc_note"] is None
+
+
+class TestMergeGeometricDrcAuthoritative:
+    """Issue #3817: ran=False must not read as an authoritative PASS."""
+
+    def _make_audit(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    def test_clean_board_with_cli_absent_is_not_authoritative(self, tmp_path, monkeypatch):
+        """Clean --mfr board + kicad-cli absent -> passed but NOT authoritative."""
+        import kicad_tools.drc as drc_mod
+        from kicad_tools.drc import GeometricDRCResult
+
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+
+        # _merge_geometric_drc does `from kicad_tools.drc import
+        # run_geometric_drc` at call time, so patch the package attribute.
+        monkeypatch.setattr(
+            drc_mod,
+            "run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(
+                ran=False, note="kicad-cli not found; geometric DRC skipped"
+            ),
+        )
+
+        audit._merge_geometric_drc(status)
+
+        # passed is untouched (still True per --mfr) but the geometric engine
+        # did not run, so downstream rendering must qualify the verdict.
+        assert status.passed is True
+        assert status.geometric_drc_ran is False
+        assert status.geometric_drc_note is not None
+
+    def test_clean_board_with_cli_present_is_authoritative(self, tmp_path, monkeypatch):
+        """Clean --mfr board + kicad-cli ran clean -> authoritative PASS."""
+        import kicad_tools.drc as drc_mod
+        from kicad_tools.drc import GeometricDRCResult
+
+        audit = self._make_audit(tmp_path)
+        status = DRCStatus(error_count=0, blocking_count=0, passed=True)
+
+        monkeypatch.setattr(
+            drc_mod,
+            "run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(ran=True, error_count=0),
+        )
+
+        audit._merge_geometric_drc(status)
+
+        assert status.passed is True
+        assert status.geometric_drc_ran is True
+
+
+class TestCheckDrcCrashNotGreen:
+    """Issue #3817: a crashed internal DRC checker must NOT report PASS."""
+
+    def test_checker_crash_does_not_pass(self, tmp_path, monkeypatch):
+        """An exception inside DRCChecker.check_all yields passed=False."""
+        import kicad_tools.drc as drc_mod
+        import kicad_tools.validate as validate_mod
+        from kicad_tools.drc import GeometricDRCResult
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb_path, manufacturer="jlcpcb")
+
+        # Make the internal checker explode; isolate from kicad-cli so the
+        # crash path is what drives the verdict.
+        class _BoomChecker:
+            def __init__(self, *a, **k):
+                pass
+
+            def check_all(self, *a, **k):
+                raise RuntimeError("checker exploded")
+
+        monkeypatch.setattr(validate_mod, "DRCChecker", _BoomChecker)
+        monkeypatch.setattr(
+            drc_mod,
+            "run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(ran=False, note="skipped"),
+        )
+
+        status = audit._check_drc(_DummyPcb())
+
+        # A crashed checker must NOT be reported as a clean PASS.
+        assert status.passed is False
+        assert status.blocking_count >= 1
+        assert "could not run" in status.details
+
+
+class _DummyPcb:
+    """Minimal PCB stand-in -- DRCChecker is mocked so it is never used."""
+
+
+class TestAuditTableDrcVerdictRendering:
+    """Issue #3817: output_table renders three distinct DRC verdict states."""
+
+    def test_clean_but_not_authoritative_is_not_bare_pass(self, capsys):
+        """Clean board with geometric DRC skipped -> qualified verdict."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = False
+        result.drc.geometric_drc_note = "kicad-cli not found; geometric DRC skipped"
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        # The DRC line must NOT read as a bare authoritative PASS.
+        assert "NOT AUTHORITATIVE" in out
+        # And the skip note must be surfaced even on a clean board.
+        assert "kicad-cli not found" in out
+
+    def test_authoritative_clean_pass_unchanged(self, capsys):
+        """Clean board with geometric DRC run clean -> plain PASS."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = True
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        assert "DRC (Design Rules Check): PASS" in out
+        assert "NOT AUTHORITATIVE" not in out
+
+    def test_drc_fail_renders_fail(self, capsys):
+        """A failing DRC still renders FAIL regardless of authoritative flag."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = False
+        result.drc.error_count = 3
+        result.drc.blocking_count = 3
+        result.drc.geometric_drc_ran = True
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        assert "DRC (Design Rules Check): FAIL" in out
+        assert "NOT AUTHORITATIVE" not in out
 
 
 class TestAuditResult:
