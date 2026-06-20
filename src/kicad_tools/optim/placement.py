@@ -229,6 +229,21 @@ class PlacementOptimizer:
                 try:
                     board_geom = BoardGeometry.from_pcb(pcb)
                     board = board_geom.to_optim_polygon()
+                    # BoardGeometry.from_pcb subtracts pcb.board_origin from
+                    # every Edge.Cuts vertex, so to_optim_polygon() returns an
+                    # origin-relative outline. The optimizer, however, adds
+                    # components at their raw *absolute* positions (and
+                    # write_to_pcb persists absolute coordinates). Translate the
+                    # outline back into the absolute board frame so the clamp,
+                    # the polygon projection, and out_of_bounds_components() all
+                    # operate in the same coordinate frame the components live
+                    # in. Without this, containment "succeeds" against a board
+                    # at (0,0) while the parts sit ~origin mm away (#3804).
+                    from kicad_tools.optim.geometry import Vector2D
+
+                    ox, oy = pcb.board_origin
+                    if ox or oy:
+                        board = board.translate(Vector2D(ox, oy))
                     logger.debug("Using Shapely-based board geometry engine")
                 except ValueError as exc:
                     # Edge.Cuts could not be closed into a polygon. Remember
