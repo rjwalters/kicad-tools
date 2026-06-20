@@ -100,6 +100,11 @@ class OptimizationResult:
     output_path: Path | None = None
     message: str = ""
 
+    # Board-containment check (issue #3804). After a physics-based run, lists
+    # the refs of any non-fixed component whose center escaped the Edge.Cuts
+    # outline (minus boundary margin). Empty on a healthy run.
+    out_of_bounds_components: list[str] = field(default_factory=list)
+
     # Routing-specific fields (used by PlaceRouteOptimizer)
     pcb_path: Path | None = None
     routes: list[Route] | None = None
@@ -130,6 +135,8 @@ class OptimizationResult:
             parts.append(f", iterations={self.iterations}")
         if self.routes:
             parts.append(f", routes={len(self.routes)}")
+        if self.out_of_bounds_components:
+            parts.append(f", out_of_bounds={len(self.out_of_bounds_components)}")
         if self.message:
             parts.append(f", message={self.message!r}")
         parts.append(")")
@@ -146,6 +153,8 @@ class OptimizationResult:
             "energy": round(self.energy, 4),
             "components_updated": self.components_updated,
             "constraint_violations": self.constraint_violations,
+            "out_of_bounds_components": self.out_of_bounds_components,
+            "out_of_bounds_count": len(self.out_of_bounds_components),
             "output_path": str(self.output_path) if self.output_path else None,
             "message": self.message,
         }
@@ -345,6 +354,17 @@ class OptimizationWorkflow:
         if self.constraints and hasattr(optimizer, "validate_constraints"):
             violations = optimizer.validate_constraints() or []
 
+        # End-of-run containment check (#3804): flag any non-fixed component
+        # that escaped the board outline.
+        out_of_bounds = optimizer.out_of_bounds_components()
+
+        message = "Optimization completed successfully"
+        if out_of_bounds:
+            message += (
+                f"; WARNING: {len(out_of_bounds)} component(s) outside board "
+                f"outline: {', '.join(out_of_bounds)}"
+            )
+
         return OptimizationResult(
             success=True,
             strategy="force-directed",
@@ -353,7 +373,8 @@ class OptimizationWorkflow:
             wire_length_mm=optimizer.total_wire_length(),
             energy=optimizer.compute_energy(),
             constraint_violations=violations,
-            message="Optimization completed successfully",
+            out_of_bounds_components=out_of_bounds,
+            message=message,
         )
 
     def _build_routing_evaluator(self) -> Any | None:
@@ -528,6 +549,20 @@ class OptimizationWorkflow:
 
         self._optimizer = physics_optimizer
 
+        # End-of-run containment check (#3804). The hybrid strategy reuses the
+        # PlacementOptimizer physics layer for its refinement phase, so the
+        # same check applies.
+        out_of_bounds: list[str] = []
+        if hasattr(physics_optimizer, "out_of_bounds_components"):
+            out_of_bounds = physics_optimizer.out_of_bounds_components()
+
+        message = "Hybrid optimization completed successfully"
+        if out_of_bounds:
+            message += (
+                f"; WARNING: {len(out_of_bounds)} component(s) outside board "
+                f"outline: {', '.join(out_of_bounds)}"
+            )
+
         return OptimizationResult(
             success=True,
             strategy="hybrid",
@@ -535,7 +570,8 @@ class OptimizationWorkflow:
             iterations=self.config.generations + self.config.iterations,
             wire_length_mm=physics_optimizer.total_wire_length(),
             energy=physics_optimizer.compute_energy(),
-            message="Hybrid optimization completed successfully",
+            out_of_bounds_components=out_of_bounds,
+            message=message,
         )
 
     def write_to_pcb(self) -> int:

@@ -184,6 +184,7 @@ class PlacementOptimizer:
         edge_constraints: list[EdgeConstraint] | None = None,
         record_decisions: bool = False,
         perf_config: PerformanceConfig | None = None,
+        allow_estimated_outline: bool = False,
     ) -> PlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -199,11 +200,28 @@ class PlacementOptimizer:
             edge_constraints: Manual list of edge constraints to apply
             record_decisions: If True, record placement decisions for later querying
             perf_config: Performance configuration for GPU acceleration
+            allow_estimated_outline: If True, fall back to estimating the board
+                outline from current component positions when the Edge.Cuts
+                outline cannot be parsed. This fallback is unsafe -- if any
+                footprints start off-board it inflates the "board" far beyond
+                the real Edge.Cuts and lets the optimizer scatter components
+                off-board (issue #3804). When False (the default) an
+                unparseable Edge.Cuts raises ``ValueError`` so the failure is
+                visible rather than silently producing a bogus boundary.
+
+        Raises:
+            ValueError: If the board outline cannot be parsed from Edge.Cuts
+                and ``allow_estimated_outline`` is False.
         """
         fixed_refs = set(fixed_refs or [])
 
-        # Try Shapely-based geometry first, fall back to legacy parsing
+        # Try Shapely-based geometry first, fall back to legacy parsing.
+        # Distinguish a genuine geometry parse failure (Edge.Cuts present but
+        # cannot be closed into a polygon -- a ValueError) from Shapely being
+        # unavailable (ImportError), so that a real parse failure is surfaced
+        # rather than silently degrading to an estimated outline (#3804).
         board = None
+        shapely_parse_error: Exception | None = None
         try:
             from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
 
@@ -211,9 +229,31 @@ class PlacementOptimizer:
                 try:
                     board_geom = BoardGeometry.from_pcb(pcb)
                     board = board_geom.to_optim_polygon()
+                    # BoardGeometry.from_pcb subtracts pcb.board_origin from
+                    # every Edge.Cuts vertex, so to_optim_polygon() returns an
+                    # origin-relative outline. The optimizer, however, adds
+                    # components at their raw *absolute* positions (and
+                    # write_to_pcb persists absolute coordinates). Translate the
+                    # outline back into the absolute board frame so the clamp,
+                    # the polygon projection, and out_of_bounds_components() all
+                    # operate in the same coordinate frame the components live
+                    # in. Without this, containment "succeeds" against a board
+                    # at (0,0) while the parts sit ~origin mm away (#3804).
+                    from kicad_tools.optim.geometry import Vector2D
+
+                    ox, oy = pcb.board_origin
+                    if ox or oy:
+                        board = board.translate(Vector2D(ox, oy))
                     logger.debug("Using Shapely-based board geometry engine")
-                except (ValueError, Exception) as exc:
-                    logger.debug("Shapely geometry failed (%s), falling back", exc)
+                except ValueError as exc:
+                    # Edge.Cuts could not be closed into a polygon. Remember
+                    # the real error; we may still succeed via the legacy
+                    # parser below, but if not we re-raise this.
+                    shapely_parse_error = exc
+                    logger.debug("Shapely geometry parse failed (%s), trying legacy parser", exc)
+                except Exception as exc:  # pragma: no cover - defensive
+                    shapely_parse_error = exc
+                    logger.debug("Shapely geometry failed (%s), trying legacy parser", exc)
         except ImportError:
             pass
 
@@ -221,13 +261,30 @@ class PlacementOptimizer:
             board = cls._extract_board_outline(pcb)
 
         if board is None:
-            # Fall back to estimating from component positions.
-            # This typically means Edge.Cuts uses geometry we cannot parse
-            # (e.g. gr_poly, fp_line) -- boundary enforcement will be weaker.
+            # Neither the Shapely engine nor the legacy parser could recover a
+            # closed outline from Edge.Cuts. Estimating a board from component
+            # positions is the mechanism that lets parts spread far off-board
+            # (#3804), so it is now opt-in and otherwise fails loudly.
+            detail = f" ({shapely_parse_error})" if shapely_parse_error else ""
+            if not allow_estimated_outline:
+                raise ValueError(
+                    "Could not extract a closed board outline from Edge.Cuts"
+                    f"{detail}. The placement optimizer requires a valid board "
+                    "boundary to contain components. Add a closed Edge.Cuts "
+                    "outline to the board, or pass allow_estimated_outline=True "
+                    "to fall back to an outline estimated from component "
+                    "positions (which may let components escape the real board)."
+                )
+
+            # Opt-in fallback: estimate from component positions. This is
+            # unsafe when footprints start off-board -- it inflates the
+            # boundary -- so it is gated behind allow_estimated_outline.
             logger.warning(
-                "Could not extract board outline from Edge.Cuts; "
-                "falling back to estimated outline from component positions. "
-                "Boundary enforcement may be degraded."
+                "Could not extract board outline from Edge.Cuts%s; "
+                "falling back to estimated outline from component positions "
+                "(allow_estimated_outline=True). Boundary enforcement may be "
+                "degraded and components may escape the real board.",
+                detail,
             )
             min_x = min_y = float("inf")
             max_x = max_y = float("-inf")
@@ -1922,13 +1979,36 @@ class PlacementOptimizer:
             # footprint stays within the board, not just the center.
             half_w = comp.width / 2 + self.config.boundary_margin
             half_h = comp.height / 2 + self.config.boundary_margin
-            comp.x = max(min_x + half_w, min(max_x - half_w, comp.x))
-            comp.y = max(min_y + half_h, min(max_y - half_h, comp.y))
+            # Guard against an inverted clamp box when the margin (plus half the
+            # component) exceeds half the board: collapse to the box center so
+            # min(...) does not exceed max(...) and flip the bounds (#3804).
+            lo_x, hi_x = min_x + half_w, max_x - half_w
+            lo_y, hi_y = min_y + half_h, max_y - half_h
+            if lo_x > hi_x:
+                lo_x = hi_x = (min_x + max_x) / 2
+            if lo_y > hi_y:
+                lo_y = hi_y = (min_y + max_y) / 2
+            comp.x = max(lo_x, min(hi_x, comp.x))
+            comp.y = max(lo_y, min(hi_y, comp.y))
 
             # If component was clamped, kill its outward velocity
-            if comp.x <= min_x + half_w or comp.x >= max_x - half_w:
+            if comp.x <= lo_x or comp.x >= hi_x:
                 comp.vx = 0.0
-            if comp.y <= min_y + half_h or comp.y >= max_y - half_h:
+            if comp.y <= lo_y or comp.y >= hi_y:
+                comp.vy = 0.0
+
+            # For non-rectangular outlines the AABB clamp above is necessary but
+            # not sufficient: a center can sit inside the bounding box yet
+            # outside a concave/cut-out polygon. Project any such center back to
+            # the nearest point on the outline boundary (#3804). The rectangular
+            # common case is already fully contained by the AABB clamp, so this
+            # only fires on genuinely non-rectangular boards.
+            if len(self.board_outline.vertices) > 4 and not self.board_outline.contains_point(
+                Vector2D(comp.x, comp.y)
+            ):
+                nearest = self.board_outline.nearest_point_on_boundary(Vector2D(comp.x, comp.y))
+                comp.x, comp.y = nearest.x, nearest.y
+                comp.vx = 0.0
                 comp.vy = 0.0
 
             # Update pin positions based on new position and rotation
@@ -2189,6 +2269,62 @@ class PlacementOptimizer:
             total += math.sqrt(dx * dx + dy * dy)
 
         return total
+
+    def out_of_bounds_components(self, margin: float | None = None) -> list[str]:
+        """Return refs of non-fixed components whose center is outside the board.
+
+        A component center is considered out of bounds if it lies outside the
+        board outline's axis-aligned bounding box inset by ``margin`` (or, for
+        non-rectangular outlines with more than four vertices, outside the
+        polygon itself). Fixed components are excluded since they are intended
+        to be pinned by the caller and may legitimately sit on/near the edge.
+
+        This is the end-of-run containment check for issue #3804: a healthy run
+        returns an empty list; a non-empty list signals components escaped the
+        Edge.Cuts outline.
+
+        Args:
+            margin: Boundary margin to apply. Defaults to ``config.boundary_margin``.
+
+        Returns:
+            Sorted list of reference designators that are out of bounds.
+        """
+        if margin is None:
+            margin = self.config.boundary_margin
+
+        verts = self.board_outline.vertices
+        if not verts:
+            return []
+
+        min_x = min(v.x for v in verts)
+        max_x = max(v.x for v in verts)
+        min_y = min(v.y for v in verts)
+        max_y = max(v.y for v in verts)
+
+        # Small epsilon so a component clamped exactly to the inset bound is
+        # not flagged due to floating-point round-off.
+        eps = 1e-6
+        violators: list[str] = []
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            lo_x, hi_x = min_x + margin, max_x - margin
+            lo_y, hi_y = min_y + margin, max_y - margin
+            if lo_x > hi_x:
+                lo_x = hi_x = (min_x + max_x) / 2
+            if lo_y > hi_y:
+                lo_y = hi_y = (min_y + max_y) / 2
+            outside = (
+                comp.x < lo_x - eps
+                or comp.x > hi_x + eps
+                or comp.y < lo_y - eps
+                or comp.y > hi_y + eps
+            )
+            if not outside and len(verts) > 4:
+                outside = not self.board_outline.contains_point(Vector2D(comp.x, comp.y))
+            if outside:
+                violators.append(comp.ref)
+        return sorted(violators)
 
     def report(self) -> str:
         """Generate a text report of current placement."""

@@ -174,6 +174,35 @@ class Polygon:
             j = i
         return inside
 
+    def nearest_point_on_boundary(self, p: Vector2D) -> Vector2D:
+        """Return the closest point on the polygon boundary to ``p``.
+
+        Projects ``p`` onto each edge segment and returns the nearest
+        projection. Used to pull a component center that has escaped a
+        non-rectangular outline back to the polygon edge.
+        """
+        if not self.vertices:
+            return Vector2D(p.x, p.y)
+        if len(self.vertices) == 1:
+            return Vector2D(self.vertices[0].x, self.vertices[0].y)
+
+        best: Vector2D | None = None
+        best_dist_sq = float("inf")
+        for a, b in self.edges():
+            ab = b - a
+            ab_len_sq = ab.magnitude_squared()
+            if ab_len_sq < 1e-12:
+                proj = a
+            else:
+                t = (p - a).dot(ab) / ab_len_sq
+                t = max(0.0, min(1.0, t))
+                proj = a + ab * t
+            dist_sq = (p - proj).magnitude_squared()
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best = proj
+        return best if best is not None else Vector2D(p.x, p.y)
+
     def translate(self, delta: Vector2D) -> Polygon:
         """Return translated polygon."""
         return Polygon(vertices=[v + delta for v in self.vertices])
