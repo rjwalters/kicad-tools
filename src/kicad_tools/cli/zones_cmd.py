@@ -13,6 +13,91 @@ import sys
 from pathlib import Path
 
 
+def parse_bbox(spec: str) -> list[tuple[float, float]]:
+    """Parse a ``MINX,MINY,MAXX,MAXY`` bbox string into a polygon.
+
+    Returns the four corner points of the rectangle in counter-clockwise
+    order, in sheet-absolute millimetres.
+
+    Args:
+        spec: Bounding-box specification, e.g. ``"10,10,40,30"``.
+
+    Returns:
+        List of four ``(x, y)`` corner tuples.
+
+    Raises:
+        ValueError: If the format is malformed (wrong arity, non-numeric,
+            or ``min >= max`` on either axis).
+    """
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 4:
+        raise ValueError(
+            f"Invalid --bbox '{spec}': expected 4 comma-separated numbers "
+            "'MINX,MINY,MAXX,MAXY' (e.g. '10,10,40,30')"
+        )
+    try:
+        min_x, min_y, max_x, max_y = (float(p) for p in parts)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid --bbox '{spec}': all values must be numeric (e.g. '10,10,40,30')"
+        ) from exc
+
+    if min_x >= max_x:
+        raise ValueError(
+            f"Invalid --bbox '{spec}': MINX ({min_x}) must be less than MAXX ({max_x})"
+        )
+    if min_y >= max_y:
+        raise ValueError(
+            f"Invalid --bbox '{spec}': MINY ({min_y}) must be less than MAXY ({max_y})"
+        )
+
+    return [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y),
+    ]
+
+
+def parse_region(spec: str) -> list[tuple[float, float]]:
+    """Parse a ``X1,Y1;X2,Y2;...`` polygon string into a list of points.
+
+    Args:
+        spec: Polygon specification, e.g. ``"10,10;40,10;40,30;10,30"``.
+
+    Returns:
+        List of ``(x, y)`` tuples in sheet-absolute millimetres.
+
+    Raises:
+        ValueError: If the format is malformed (fewer than 3 points, wrong
+            arity per point, or non-numeric values).
+    """
+    points: list[tuple[float, float]] = []
+    items = [p.strip() for p in spec.split(";") if p.strip()]
+    for item in items:
+        coords = [c.strip() for c in item.split(",")]
+        if len(coords) != 2:
+            raise ValueError(
+                f"Invalid --region point '{item}': expected 'X,Y' (e.g. '10,10;40,10;40,30;10,30')"
+            )
+        try:
+            x, y = (float(c) for c in coords)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --region point '{item}': X and Y must be numeric "
+                "(e.g. '10,10;40,10;40,30;10,30')"
+            ) from exc
+        points.append((x, y))
+
+    if len(points) < 3:
+        raise ValueError(
+            f"Invalid --region '{spec}': a polygon needs at least 3 points "
+            "(e.g. '10,10;40,10;40,30;10,30')"
+        )
+
+    return points
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for zones command."""
     parser = argparse.ArgumentParser(
@@ -69,6 +154,28 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.25,
         help="Minimum copper thickness in mm (default: 0.25)",
+    )
+    region_group = add_parser.add_mutually_exclusive_group()
+    region_group.add_argument(
+        "--bbox",
+        metavar="MINX,MINY,MAXX,MAXY",
+        help=(
+            "Restrict the pour to a rectangular region (island pour) instead "
+            "of the full board outline. Coordinates are sheet-absolute "
+            "millimetres (same frame as `zones list` output). "
+            "Example: --bbox 10,10,40,30"
+        ),
+    )
+    region_group.add_argument(
+        "--region",
+        metavar="X1,Y1;X2,Y2;...",
+        help=(
+            "Restrict the pour to an explicit polygon region (island pour) "
+            "instead of the full board outline. At least 3 points, each "
+            "'X,Y' separated by ';'. Coordinates are sheet-absolute "
+            "millimetres (same frame as `zones list` output). "
+            "Example: --region 10,10;40,10;40,30;10,30"
+        ),
     )
     add_parser.add_argument(
         "-v",
@@ -200,6 +307,17 @@ def _run_add(args) -> int:
 
     quiet = args.quiet
 
+    # Parse optional region/island boundary (mutually exclusive in argparse).
+    boundary = None
+    try:
+        if args.bbox:
+            boundary = parse_bbox(args.bbox)
+        elif args.region:
+            boundary = parse_region(args.region)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
     if not quiet:
         print(f"Loading PCB: {pcb_path}")
 
@@ -219,6 +337,7 @@ def _run_add(args) -> int:
             thermal_gap=args.thermal_gap,
             thermal_bridge_width=args.thermal_bridge,
             min_thickness=args.min_thickness,
+            boundary=boundary,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

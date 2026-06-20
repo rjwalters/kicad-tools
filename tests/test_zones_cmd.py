@@ -1378,3 +1378,250 @@ class TestFillIntegration:
         assert out.exists()
         content = out.read_text()
         assert "filled_polygon" in content
+
+
+# ---------------------------------------------------------------------------
+# Test: region/island boundary parsing helpers (Slice 1 of #3807)
+# ---------------------------------------------------------------------------
+
+
+class TestParseBbox:
+    """Unit tests for the --bbox parse helper."""
+
+    def test_valid_bbox_returns_corner_polygon(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        assert parse_bbox("10,10,40,30") == [
+            (10.0, 10.0),
+            (40.0, 10.0),
+            (40.0, 30.0),
+            (10.0, 30.0),
+        ]
+
+    def test_bbox_tolerates_whitespace(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        assert parse_bbox(" 10 , 10 , 40 , 30 ") == [
+            (10.0, 10.0),
+            (40.0, 10.0),
+            (40.0, 30.0),
+            (10.0, 30.0),
+        ]
+
+    def test_bbox_wrong_arity_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="expected 4"):
+            parse_bbox("10,10,40")
+
+    def test_bbox_non_numeric_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="numeric"):
+            parse_bbox("a,b,c,d")
+
+    def test_bbox_min_ge_max_x_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="MINX"):
+            parse_bbox("40,10,10,30")
+
+    def test_bbox_min_ge_max_y_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_bbox
+
+        with pytest.raises(ValueError, match="MINY"):
+            parse_bbox("10,30,40,30")
+
+
+class TestParseRegion:
+    """Unit tests for the --region parse helper."""
+
+    def test_valid_region_round_trips(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        assert parse_region("10,10;40,10;40,30;10,30") == [
+            (10.0, 10.0),
+            (40.0, 10.0),
+            (40.0, 30.0),
+            (10.0, 30.0),
+        ]
+
+    def test_region_too_few_points_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        with pytest.raises(ValueError, match="at least 3"):
+            parse_region("10,10;40,10")
+
+    def test_region_bad_point_arity_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        with pytest.raises(ValueError, match="X,Y"):
+            parse_region("10,10;40;40,30")
+
+    def test_region_non_numeric_raises(self):
+        from kicad_tools.cli.zones_cmd import parse_region
+
+        with pytest.raises(ValueError, match="numeric"):
+            parse_region("10,10;a,b;40,30")
+
+
+# ---------------------------------------------------------------------------
+# Test: --bbox / --region flow through `zones add` to the zone polygon
+# ---------------------------------------------------------------------------
+
+
+class TestAddRegionBoundary:
+    """Verify region flags produce a zone with the requested polygon."""
+
+    def test_bbox_dry_run_emits_requested_rectangle(self, tmp_pcb, capsys):
+        """--bbox produces a polygon matching the requested rectangle."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--bbox",
+                "10,10,40,30",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        # The four rectangle corners appear in the generated polygon, and the
+        # zone reports a 4-point boundary (not the full board outline).
+        assert "(xy 10 10)" in out
+        assert "(xy 40 10)" in out
+        assert "(xy 40 30)" in out
+        assert "(xy 10 30)" in out
+        assert "Boundary:    4 points" in out
+
+    def test_region_dry_run_round_trips_polygon(self, tmp_pcb, capsys):
+        """--region produces a polygon matching the requested points."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--region",
+                "5,5;45,5;45,35;25,35;5,35",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        assert "(xy 5 5)" in out
+        assert "(xy 45 5)" in out
+        assert "(xy 25 35)" in out
+        assert "Boundary:    5 points" in out
+
+    def test_bbox_on_inner_layer(self, tmp_pcb, capsys):
+        """--bbox works on an inner copper layer."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "In1.Cu",
+                "--bbox",
+                "12,12,20,20",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        assert "(xy 12 12)" in out
+        assert "Boundary:    4 points" in out
+
+    def test_no_region_flag_uses_board_outline(self, tmp_pcb, capsys):
+        """Omitting region flags preserves full-board-outline behavior."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--dry-run",
+            ]
+        )
+        assert ret == 0
+        out = capsys.readouterr().out
+        # Board outline produces a polygon; it should not be the tiny island
+        # rectangle and should have a boundary point count.
+        assert "Boundary:" in out
+        assert "(polygon" in out
+
+    def test_invalid_bbox_returns_1_without_traceback(self, tmp_pcb, capsys):
+        """Malformed --bbox returns non-zero with a clear error message."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--bbox",
+                "10,10,40",
+                "--dry-run",
+            ]
+        )
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "Error:" in err
+        assert "expected 4" in err
+
+    def test_invalid_bbox_min_ge_max_returns_1(self, tmp_pcb, capsys):
+        """--bbox with min>=max returns non-zero with a clear message."""
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "GND",
+                "--layer",
+                "F.Cu",
+                "--bbox",
+                "40,10,10,30",
+                "--dry-run",
+            ]
+        )
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "MINX" in err
+
+    def test_bbox_and_region_mutually_exclusive(self, tmp_pcb):
+        """argparse rejects supplying both --bbox and --region."""
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "add",
+                    str(tmp_pcb),
+                    "--net",
+                    "GND",
+                    "--layer",
+                    "F.Cu",
+                    "--bbox",
+                    "10,10,40,30",
+                    "--region",
+                    "10,10;40,10;40,30",
+                    "--dry-run",
+                ]
+            )
+
+    def test_bbox_documented_in_add_help(self, capsys):
+        """--bbox flag and its coordinate frame are documented in help."""
+        with pytest.raises(SystemExit):
+            main(["add", "--help"])
+        out = capsys.readouterr().out
+        assert "--bbox" in out
+        assert "sheet-absolute" in out
