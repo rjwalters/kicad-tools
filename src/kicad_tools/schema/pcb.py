@@ -3936,25 +3936,33 @@ class PCB:
         for prop in fp_sexp.find_all("property"):
             prop_name = prop.get_string(0)
             if prop_name == "Reference":
-                prop.set_value(1, reference)
+                # Use quoted_atom so values that look numeric (e.g. a
+                # reference "1") still serialize quoted. A bare numeric
+                # property value makes the board unloadable in kicad-cli.
+                prop.children[1] = SExp.quoted_atom(reference)
                 ref_updated = True
             elif prop_name == "Value":
-                prop.set_value(1, value)
+                # Use quoted_atom so unit-less numeric values (e.g. "470",
+                # "0", "100") serialize as (property "Value" "470") rather
+                # than the bare token (property "Value" 470), which
+                # kicad-cli rejects with "Failed to load board".
+                prop.children[1] = SExp.quoted_atom(value)
                 val_updated = True
 
         # Fall back to KiCad 7 fp_text format
         for fp_text in fp_sexp.find_all("fp_text"):
             text_type = fp_text.get_string(0)
             if text_type == "reference" and not ref_updated:
-                fp_text.set_value(1, reference)
+                fp_text.children[1] = SExp.quoted_atom(reference)
                 ref_updated = True
             elif text_type == "value" and not val_updated:
-                fp_text.set_value(1, value)
+                fp_text.children[1] = SExp.quoted_atom(value)
                 val_updated = True
 
         # If reference/value weren't found, add them as KiCad 8+ properties
         if not ref_updated:
-            ref_prop = SExp.list("property", "Reference", reference)
+            # Quote the value so a numeric reference doesn't serialize bare.
+            ref_prop = SExp.list("property", "Reference", SExp.quoted_atom(reference))
             ref_prop.append(SExp.list("at", 0.0, -1.5))
             ref_prop.append(SExp.list("layer", layer.replace(".Cu", ".SilkS")))
             ref_prop.append(SExp.list("uuid", str(uuid.uuid4())))
@@ -3967,7 +3975,8 @@ class PCB:
             fp_sexp.append(ref_prop)
 
         if not val_updated:
-            val_prop = SExp.list("property", "Value", value)
+            # Quote the value so a unit-less numeric value doesn't serialize bare.
+            val_prop = SExp.list("property", "Value", SExp.quoted_atom(value))
             val_prop.append(SExp.list("at", 0.0, 1.5))
             val_prop.append(SExp.list("layer", layer.replace(".Cu", ".Fab")))
             val_prop.append(SExp.list("uuid", str(uuid.uuid4())))
