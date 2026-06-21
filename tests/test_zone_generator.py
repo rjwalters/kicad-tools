@@ -1141,3 +1141,109 @@ class TestAutoCreateZones4Layer:
         # and second goes to F.Cu -- no warning expected
         captured = capsys.readouterr()
         assert "WARNING" not in captured.err
+
+
+class TestAutoCreateZonesReplaceExisting:
+    """Issue #3818: ``replace_existing`` makes pour creation idempotent.
+
+    A prior pipeline step (``kct route``'s internal auto-pour) can leave a
+    zone per pour net.  The additive default would stack a SECOND,
+    overlapping same-net same-layer zone on top -- and KiCad's fill
+    resolver awards the shared region to one duplicate non-deterministically,
+    leaving the other with ZERO ``filled_polygon`` regions (the "dead pour"
+    the copper-union audit flags).  ``replace_existing=True`` drops the
+    pre-existing zones first so the board ends with exactly one zone per net.
+    """
+
+    @pytest.fixture
+    def four_layer_pcb_path(self, tmp_path):
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+        pcb_file = tmp_path / "four_layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    def _zone_count_by_net(self, pcb_path):
+        import re
+
+        text = pcb_path.read_text()
+        counts: dict[str, int] = {}
+        idxs = [m.start() for m in re.finditer(r"\(zone\b", text)]
+        idxs.append(len(text))
+        for a, b in zip(idxs[:-1], idxs[1:], strict=True):
+            seg = text[a:b]
+            m = re.search(r'\(net_name "([^"]*)"\)', seg) or re.search(r'\(net "([^"]*)"\)', seg)
+            if m:
+                counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+        return counts
+
+    def test_default_is_additive(self, four_layer_pcb_path):
+        """Without the flag, a second call STACKS a duplicate zone (legacy)."""
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        decl = [("GND", NetClass.GROUND), ("+3.3V", NetClass.POWER)]
+        auto_create_zones_for_pour_nets(four_layer_pcb_path, decl)
+        auto_create_zones_for_pour_nets(four_layer_pcb_path, decl)
+
+        counts = self._zone_count_by_net(four_layer_pcb_path)
+        assert counts == {"GND": 2, "+3.3V": 2}
+
+    def test_replace_existing_is_idempotent(self, four_layer_pcb_path):
+        """With the flag, a second call REPLACES so there is one zone per net."""
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        decl = [("GND", NetClass.GROUND), ("+3.3V", NetClass.POWER)]
+        auto_create_zones_for_pour_nets(four_layer_pcb_path, decl)
+        count = auto_create_zones_for_pour_nets(four_layer_pcb_path, decl, replace_existing=True)
+
+        assert count == 2
+        counts = self._zone_count_by_net(four_layer_pcb_path)
+        assert counts == {"GND": 1, "+3.3V": 1}
+
+    def test_replace_existing_only_touches_listed_nets(self, four_layer_pcb_path):
+        """A foreign-net zone already on the board is left untouched."""
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        # Seed a GND + +3.3V pour, then re-assert only GND.
+        auto_create_zones_for_pour_nets(
+            four_layer_pcb_path,
+            [("GND", NetClass.GROUND), ("+3.3V", NetClass.POWER)],
+        )
+        auto_create_zones_for_pour_nets(
+            four_layer_pcb_path,
+            [("GND", NetClass.GROUND)],
+            replace_existing=True,
+        )
+
+        counts = self._zone_count_by_net(four_layer_pcb_path)
+        # GND was replaced (still 1); +3.3V was not in the list, so its
+        # pre-existing zone is preserved.
+        assert counts.get("GND") == 1
+        assert counts.get("+3.3V") == 1

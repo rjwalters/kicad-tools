@@ -808,11 +808,13 @@ def test_pour_extraction_unions_pads_across_disjoint_fill_islands_of_one_zone(
 def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     """End-to-end: the label-free pour model stays clean on a pour-heavy board.
 
-    Board 07 (match-group test) carries 45 ``filled_polygons`` across multiple
-    pours, so it exercises the hole-aware solid-region extraction and the
-    pad-box erosion guard on real routed copper.  It must NOT introduce false
-    shorts.  Skips when the artifacts (or shapely) are absent, mirroring the
-    board-00 end-to-end policy.
+    Board 07 (match-group test) carries the GND / +1V2 / +1V8 plane pours
+    (one zone per net since #3818 de-duplicated the router/recipe overlap),
+    fragmented into multiple ``filled_polygons`` by thermal reliefs and
+    foreign-pad clearance moats, so it exercises the hole-aware solid-region
+    extraction and the pad-box erosion guard on real routed copper.  It must
+    NOT introduce false shorts.  Skips when the artifacts (or shapely) are
+    absent, mirroring the board-00 end-to-end policy.
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "07-matchgroup-test" / "output"

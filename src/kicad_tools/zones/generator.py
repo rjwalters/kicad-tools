@@ -1698,6 +1698,7 @@ def auto_create_zones_for_pour_nets(
     pcb_path: str | Path,
     pour_nets: list[tuple[str, NetClass]],
     edge_clearance: float | None = None,
+    replace_existing: bool = False,
 ) -> int:
     """Create zones for power and ground nets on a PCB.
 
@@ -1790,6 +1791,22 @@ def auto_create_zones_for_pour_nets(
             zone copper does not extend to the board edge.  The same
             inset is applied to the per-net bounding outlines so they
             also stay inside the inset board.
+        replace_existing: When ``True``, drop any pre-existing zone whose
+            net is in ``pour_nets`` BEFORE creating the new zones, so the
+            board ends with exactly one zone per ``(net, layer)``.  This
+            is the idempotent counterpart to :func:`auto_pour_if_missing`
+            (which skips nets that already have zones): callers that want
+            to assert their OWN authoritative outline/inset over whatever
+            an earlier step (e.g. ``kct route``'s internal auto-pour) left
+            behind use this flag instead of stacking a second, overlapping
+            zone on top.  Issue #3818: two same-net, same-layer,
+            same-priority zones make KiCad's fill resolver award the whole
+            shared region to one of them non-deterministically, so the
+            *other* zone fills to ZERO ``filled_polygon`` regions -- a
+            spurious "dead pour" the copper-union audit flags on a fraction
+            of re-routes (the board-07 match-group CI flake).  Default
+            ``False`` preserves the historical additive behaviour for every
+            other caller.
 
     Returns:
         Number of zones created
@@ -1800,6 +1817,18 @@ def auto_create_zones_for_pour_nets(
             receive zero copper (issue #3240).
     """
     pcb_path = Path(pcb_path)
+
+    # Issue #3818: when the caller is asserting its authoritative pour
+    # outline (replace_existing=True), strip any zone already present for
+    # these nets first so we never stack a second, overlapping same-net
+    # same-layer zone on top of one a prior step left behind (e.g. the
+    # internal auto-pour ``kct route`` runs).  Done before the generator
+    # loads the file so the new zones are the only ones for these nets.
+    if replace_existing:
+        from kicad_tools.router.auto_pour import _remove_zones_for_nets
+
+        _remove_zones_for_nets(pcb_path, {name for name, _ in pour_nets})
+
     gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=edge_clearance)
 
     copper_layer_count = len(gen.pcb.copper_layers)
