@@ -1421,3 +1421,96 @@ jobs:
             --stem matchgroup_test \
             --lvs-only \
             /tmp/board07-staging/07-matchgroup-test
+
+  board-05-routing-regression:
+    # Issue #3822: blocking-net baseline gate for board 05 ("bldc-motor-
+    # controller").  Board 05 is the only demo board whose routing changes
+    # CANNOT be validated on the local macOS host: the committed CI-generated
+    # artifact reaches 7 blocking signal nets, but an unmodified host regen of
+    # the same recipe/seed/backend reaches ~11 (the macOS host router reaches
+    # fewer nets than the Linux CI router).  Because of that divergence there
+    # was no validation path for board-05 routing work (#3775, #3766) -- this
+    # job provides one by regenerating + re-routing board 05 INSIDE the CI
+    # container (which reaches the 7-blocking baseline) and hard-asserting
+    # blocking_incomplete_count <= 7.
+    #
+    # Unlike boards 00-03/06/07, board 05 has NO committed output/lvs.json on
+    # origin/main, so the --lvs-only e2e asserter is not reusable.  The
+    # acceptance criterion is a blocking-net baseline, so this job uses a
+    # dedicated gate (scripts/ci/check_board_05_blocking.py) built on
+    # NetStatusAnalyzer.blocking_incomplete_count (which mirrors the
+    # check_routed_drc advisory/plane-residual filtering).
+    #
+    # The --max-blocking threshold defaults to 7 (the committed baseline) and
+    # is a CLI arg so #3775/#3766 can tighten it as routing improves.  <= 7
+    # catches regressions without requiring full parity (0 blocking).
+    #
+    # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
+    # during regen, and per CLAUDE.md a missing native extension makes routing
+    # multi-minute-per-net.  Board 05's recipe is named design.py (NOT
+    # generate_design.py) and takes ONLY an output-dir positional arg (no
+    # --step / --seed); it routes PARTIAL by design and may exit non-zero, so
+    # tolerate a non-zero recipe exit (|| true) and let the blocking-net gate
+    # be the assertion.
+    #
+    # CI-VALIDATED ONLY: do NOT expect this job to pass on the macOS host
+    # (host routes board 05 to ~11 blocking, CI to 7).  Advisory until a repo
+    # admin adds it to branch protection (same as the board 00/01/02/03/06/07
+    # e2e jobs).
+    name: Board 05 Routing Regression (blocking <= 7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: kicad/kicad:10.0
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate + route board 05 from recipe (clean tmp directory)
+        # Board 05's recipe is design.py (NOT generate_design.py) and takes
+        # only an output-dir positional arg.  It routes PARTIAL by design and
+        # may exit non-zero, so tolerate that (|| true); the blocking-net gate
+        # below is the real assertion.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board05-ci
+          mkdir -p /tmp/board05-ci
+          uv run python boards/05-bldc-motor-controller/design.py \
+            /tmp/board05-ci || true
+          test -f /tmp/board05-ci/bldc_controller_routed.kicad_pcb
+
+      - name: Assert blocking-net baseline (<= 7)
+        # Hard gate: fails the job (exit 2) if blocking_incomplete_count > 7.
+        # CI reaches 7; a LOCAL macOS run would report ~11 -- that is the
+        # documented host-vs-CI divergence (#3822), not a job defect.
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_05_blocking.py \
+            --max-blocking 7 \
+            /tmp/board05-ci/bldc_controller_routed.kicad_pcb
