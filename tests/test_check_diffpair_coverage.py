@@ -144,6 +144,89 @@ class TestCheckRuleCoverage:
         assert missing == []
 
 
+class TestCheckZeroViolations:
+    """Issue #3828: the gate must FAIL when a diff-pair rule fires more
+    than its documented baseline.
+
+    This is the assertion the old gate LACKED -- it could confirm a rule
+    *ran* (coverage>=1) but never that it found *zero* (or no NEW)
+    violations.  Without it the 18 hidden diff-pair errors on board 06
+    passed silently when the sidecar was supplied.
+    """
+
+    def test_zero_violations_strict_baseline_passes(self):
+        mod = _load_helper_module()
+        clean = {
+            "diffpair_clearance_intra": 0,
+            "diffpair_length_skew": 0,
+            "diffpair_routing_continuity": 0,
+        }
+        assert mod.check_zero_violations(clean, baseline=0) == []
+
+    def test_nonzero_violations_strict_baseline_fails(self):
+        """The core anti-regression guarantee: ANY diff-pair error under a
+        strict (0) baseline fails the gate."""
+        mod = _load_helper_module()
+        dirty = {
+            "diffpair_clearance_intra": 0,
+            "diffpair_length_skew": 9,
+            "diffpair_routing_continuity": 9,
+        }
+        failures = mod.check_zero_violations(dirty, baseline=0)
+        assert len(failures) == 1
+        assert "18" in failures[0]
+        assert "diffpair_length_skew=9" in failures[0]
+        assert "diffpair_routing_continuity=9" in failures[0]
+
+    def test_at_documented_baseline_passes(self):
+        """Board 06's accepted 18-error baseline does NOT fail the gate."""
+        mod = _load_helper_module()
+        baseline_state = {
+            "diffpair_clearance_intra": 0,
+            "diffpair_length_skew": 9,
+            "diffpair_routing_continuity": 9,
+        }
+        assert mod.check_zero_violations(baseline_state, baseline=18) == []
+
+    def test_regression_beyond_baseline_fails(self):
+        """One extra diff-pair error over the documented baseline fails --
+        this is what catches a regression on board 06."""
+        mod = _load_helper_module()
+        regressed = {
+            "diffpair_clearance_intra": 1,  # new clearance defect
+            "diffpair_length_skew": 9,
+            "diffpair_routing_continuity": 9,
+        }
+        failures = mod.check_zero_violations(regressed, baseline=18)
+        assert len(failures) == 1
+        assert "19" in failures[0]
+
+    def test_independent_of_allowlist(self):
+        """The zero-violation assertion is INDEPENDENT of the error-count
+        allowlist: a board with clean coverage but nonzero diff-pair
+        violations still fails even if the total error count fits the
+        allowlist (the exact blindness Issue #3828 closes)."""
+        mod = _load_helper_module()
+        dirty = {"diffpair_length_skew": 3}
+        # No allowlist value is consulted here at all -- only the baseline.
+        assert mod.check_zero_violations(dirty, baseline=0)
+
+    def test_board_06_baseline_is_documented(self):
+        """The board-06 entry must exist with the measured 18-error count
+        and be a non-negative int (loud, explicit, tracked)."""
+        mod = _load_helper_module()
+        key = "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb"
+        assert key in mod.DIFFPAIR_VIOLATION_BASELINE
+        assert mod.DIFFPAIR_VIOLATION_BASELINE[key] == 18
+
+    def test_default_baseline_is_strict_zero(self):
+        """A board NOT in the baseline map gets a strict 0 -- so any new
+        board with diff-pair violations fails by default."""
+        mod = _load_helper_module()
+        unlisted = "boards/99-nonexistent/output/foo_routed.kicad_pcb"
+        assert mod.DIFFPAIR_VIOLATION_BASELINE.get(unlisted, 0) == 0
+
+
 class TestAllowlistLoading:
     """Sanity check that the helper's allowlist loader matches the
     sibling ``check_routed_drc.py`` semantic.  Without this, a divergence

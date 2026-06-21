@@ -96,6 +96,66 @@ DIFFPAIR_RULE_IDS: tuple[str, ...] = (
     "diffpair_routing_continuity",
 )
 
+# ---------------------------------------------------------------------------
+# Issue #3828 -- documented diff-pair violation BASELINE (per routed PCB).
+#
+# The diff-pair length-skew / routing-continuity rules are now ACTIVE in this
+# gate (the sidecar is threaded into ``kct check`` and the per-rule
+# error-violation counts are asserted), but board 06 ships a routed artifact
+# that STILL has unresolved coupled diff-pair errors: the coupled router
+# converges 0/9 pairs, so the committed PCB reports
+# ``diffpair_length_skew: 9`` + ``diffpair_routing_continuity: 9`` = 18
+# diff-pair errors (the single-ended fallback measurements -- see the long
+# board-06 narrative in ``.github/routed-drc-tolerance.yml`` around L900-963).
+#
+# Routing those pairs within skew/continuity tolerance is the known-hard
+# coupled-diff-pair routing problem tracked in #3540-#3544 (exit clause (a)
+# of the board-06 allowlist).  Rather than fake-pass it with a coverage-only
+# assertion (the bug this issue fixes) OR block CI on a pre-existing,
+# separately-tracked routing-quality defect, the gate asserts the per-rule
+# error count does not EXCEED a LOUD, explicitly-documented baseline.
+#
+# DEFAULT IS 0 (strict).  A board appears here ONLY with a tracking
+# reference; the gate FAILS the moment any diff-pair rule fires MORE than its
+# documented baseline -- so a regression beyond 18 on board 06, or ANY new
+# diff-pair error on a board not listed here, is caught.  When the coupled
+# router finally converges these pairs, drop the entry (or lower it) and the
+# gate tightens automatically.
+#
+# Keyed by repo-relative routed-PCB path (same key shape as the allowlist).
+DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
+    # Coupled diff-pair convergence is 0/9 on the committed artifact;
+    # 9 diffpair_length_skew + 9 diffpair_routing_continuity = 18.
+    # Tracked: #3540-#3544 (coupled upgrade-in-place re-opens the route fix).
+    "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": 18,
+}
+
+
+def check_zero_violations(
+    error_violations_by_rule: dict[str, int],
+    baseline: int,
+    required_rule_ids: tuple[str, ...] = DIFFPAIR_RULE_IDS,
+) -> list[str]:
+    """Return human-readable failure strings for rules over the baseline.
+
+    Issue #3828: the gate must CATCH diff-pair skew/continuity regressions,
+    which the old coverage>=1 assertion never did.  A rule whose
+    error-severity violation count exceeds ``baseline`` produces a failure
+    string; an empty return means every diff-pair rule is at or under the
+    documented baseline.  ``baseline`` is the TOTAL allowed across the
+    diff-pair rules combined (matching the documented per-board count); the
+    sum of all diff-pair error violations is compared against it so a board
+    cannot trade one rule's regression against another's improvement.
+    """
+    total = sum(error_violations_by_rule.get(rid, 0) for rid in required_rule_ids)
+    if total <= baseline:
+        return []
+    detail = ", ".join(f"{rid}={error_violations_by_rule.get(rid, 0)}" for rid in required_rule_ids)
+    return [
+        f"diff-pair error-severity violations ({total}) EXCEED the documented "
+        f"baseline ({baseline}): {detail}"
+    ]
+
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
     """Load the per-board DRC tolerance allowlist.
@@ -224,6 +284,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from net_class_map_resolver import (  # noqa: E402
     build_net_class_map_for_board,
     load_board_recipe_module,
+    resolve_net_class_map_sidecar,
 )
 
 
@@ -394,12 +455,26 @@ def _measure_skew_data_from_pcb(
     return skew_data
 
 
-def count_errors_via_kct_check(pcb_path: Path) -> int:
+def count_errors_via_kct_check(
+    pcb_path: Path, sidecar: Path | None = None
+) -> tuple[int, dict[str, int]]:
     """Count errors via ``kct check --mfr jlcpcb --errors-only --format json``.
 
     Mirrors ``check_routed_drc.count_errors`` so the allowlist semantic
     matches the sibling diff-driven CI gate exactly -- a value of 28
     on the same routed PCB must mean the same thing across both gates.
+
+    Issue #3828: the ``sidecar`` (a ``net_class_map.json`` path) is
+    threaded into ``--net-class-map`` so the diff-pair length-skew and
+    routing-continuity rules are ACTIVE.  Without it ``kct check`` warns
+    on stderr that those rules are INACTIVE and silently passes them, so
+    the allowlist measured a count that excluded all diff-pair skew /
+    continuity errors (board 06 reported 2 instead of 20).  This mirrors
+    ``check_matchgroup_coverage.count_errors_via_kct_check``.
+
+    Also returns a ``{rule_id -> error_count}`` breakdown parsed from the
+    SAME JSON envelope, so the zero-violation assertion measures the exact
+    same numbers as the allowlist (no in-process drift / double-count).
 
     Uses a subprocess invocation (not in-process) because:
 
@@ -408,6 +483,9 @@ def count_errors_via_kct_check(pcb_path: Path) -> int:
     2. The same ``kct check`` exit-code (0/2) + JSON envelope this
        script depends on is what users see when they reproduce the
        check locally.
+
+    Returns:
+        ``(summary_errors, {rule_id -> error-severity violation count})``.
     """
     cmd = [
         "uv",
@@ -421,6 +499,8 @@ def count_errors_via_kct_check(pcb_path: Path) -> int:
         "--format",
         "json",
     ]
+    if sidecar is not None:
+        cmd.extend(["--net-class-map", str(sidecar)])
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode == 1:
         raise RuntimeError(
@@ -440,7 +520,17 @@ def count_errors_via_kct_check(pcb_path: Path) -> int:
     errors = summary.get("errors")
     if not isinstance(errors, int):
         raise RuntimeError(f"kct check JSON missing summary.errors field for {pcb_path}: {data!r}")
-    return errors
+
+    per_rule_errors: dict[str, int] = {}
+    for v in data.get("violations", []):
+        if not isinstance(v, dict):
+            continue
+        if v.get("severity") != "error":
+            continue
+        rid = v.get("rule_id")
+        if isinstance(rid, str):
+            per_rule_errors[rid] = per_rule_errors.get(rid, 0) + 1
+    return errors, per_rule_errors
 
 
 def compute_rule_coverage(
@@ -614,12 +704,30 @@ def check_board(
     # Two-pass strategy (see docstrings on count_errors_via_kct_check
     # and compute_rule_coverage for the rationale):
     #   1. Error count via subprocess ``kct check`` -- matches the
-    #      sibling allowlist semantic exactly.
+    #      sibling allowlist semantic exactly.  Issue #3828: now run WITH
+    #      the net-class-map sidecar so the diff-pair length-skew /
+    #      routing-continuity rules are ACTIVE and contribute to the
+    #      count (previously they were silently INACTIVE and the gate saw
+    #      a count that excluded every diff-pair skew/continuity error).
     #   2. Rule coverage via in-process DRCChecker(..., net_class_map=...)
     #      -- the only way to exercise the diff-pair rules whose
-    #      engagement is gated on router context.
+    #      engagement is gated on router context.  Also returns per-rule
+    #      error-violation counts for the zero-violation assertion.
     try:
-        error_count = count_errors_via_kct_check(routed_pcb)
+        with resolve_net_class_map_sidecar(routed_pcb) as sidecar:
+            if sidecar is None:
+                annotate_error(
+                    str(routed_pcb),
+                    "No net_class_map sidecar could be resolved for "
+                    f"{routed_pcb}; the diff-pair length-skew / "
+                    "routing-continuity rules would silently no-op under "
+                    "kct check.  A board in this gate's matrix MUST commit "
+                    "a net_class_map.json or expose build_net_class_map(). "
+                    "Refusing to measure with the rules INACTIVE (Issue "
+                    "#3828).",
+                )
+                return 1
+            error_count, per_rule_errors = count_errors_via_kct_check(routed_pcb, sidecar)
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
@@ -629,10 +737,21 @@ def check_board(
         annotate_error(str(routed_pcb), f"Rule-coverage probe failed: {e}")
         return 1
 
+    # Issue #3828: the zero-violation assertion measures the SAME
+    # diff-pair error counts the allowlist sees (from the kct check JSON),
+    # not the in-process coverage probe (which double-counts the length-skew
+    # rule via its second measured pass).
+    diffpair_error_violations = {rid: per_rule_errors.get(rid, 0) for rid in DIFFPAIR_RULE_IDS}
+    baseline = DIFFPAIR_VIOLATION_BASELINE.get(lookup_key, 0)
+
     print(f"\n[diffpair-coverage] Board: {board_dir.name}")
     print(f"[diffpair-coverage] Routed PCB: {routed_pcb}")
     print(f"[diffpair-coverage] DRC error count: {error_count} (allowed: {allowed})")
     print(f"[diffpair-coverage] rules_checked_by_rule: {rules_by_rule}")
+    print(
+        f"[diffpair-coverage] diff-pair error violations: "
+        f"{diffpair_error_violations} (baseline: {baseline})"
+    )
 
     failed = False
 
@@ -714,6 +833,39 @@ def check_board(
         failed = True
     else:
         print(f"[diffpair-coverage] OK: all {len(DIFFPAIR_RULE_IDS)} diff-pair rules exercised.")
+
+    # Issue #3828: zero-violation assertion.  Distinct from coverage>=1
+    # (a rule that RAN) and from the allowlist (total error count): each
+    # diff-pair rule's ERROR-severity violation count must not exceed the
+    # documented per-board baseline (default 0).  This is the assertion the
+    # old gate lacked -- it could confirm a rule ran but never that the rule
+    # found zero (or no NEW) violations.  Without it, the 18 hidden
+    # diff-pair errors on board 06 passed silently.
+    violation_failures = check_zero_violations(diffpair_error_violations, baseline)
+    if violation_failures:
+        msg = (
+            f"Diff-pair VIOLATION regression on {routed_pcb}: "
+            f"{'; '.join(violation_failures)}.  These are real coupled "
+            "diff-pair skew/continuity defects measured WITH the net-class "
+            "sidecar (the rules are now ACTIVE, Issue #3828).  Either fix the "
+            "routing so the pairs meet skew/continuity tolerance, or -- if "
+            "this is an accepted, separately-tracked routing-quality baseline "
+            "-- raise DIFFPAIR_VIOLATION_BASELINE for this PCB in "
+            "scripts/ci/check_diffpair_coverage.py with a tracking reference. "
+            "Do NOT silently widen it: the point of this gate is to catch "
+            "regressions beyond the documented baseline."
+        )
+        annotate_error(str(routed_pcb), msg)
+        failed = True
+    else:
+        if baseline == 0:
+            print("[diffpair-coverage] OK: 0 diff-pair error violations (strict).")
+        else:
+            total = sum(diffpair_error_violations.get(rid, 0) for rid in DIFFPAIR_RULE_IDS)
+            print(
+                f"[diffpair-coverage] OK: {total} diff-pair error violation(s) "
+                f"within documented baseline {baseline}."
+            )
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
     if error_count > allowed:

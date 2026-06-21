@@ -102,6 +102,39 @@ DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 # canonical rule_id string + per-rule counter increment (Issue #2702).
 MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 
+# Issue #3828 -- documented match-group violation BASELINE (per routed PCB).
+# Symmetric with ``check_diffpair_coverage.DIFFPAIR_VIOLATION_BASELINE``.
+# Board 07 reports 0 ``match_group_length_skew`` violations today (its real
+# errors are non-skew), so the default strict 0 holds and no entry is needed;
+# the map exists so a future board with an accepted, separately-tracked
+# match-group skew baseline can document it loudly rather than relying on the
+# large error-count allowlist floor to absorb new skew errors.  Keyed by
+# repo-relative routed-PCB path.
+MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {}
+
+
+def check_zero_violations(
+    error_violations_by_rule: dict[str, int],
+    baseline: int,
+    required_rule_ids: tuple[str, ...] = MATCHGROUP_RULE_IDS,
+) -> list[str]:
+    """Return failure strings when match-group violations exceed baseline.
+
+    Issue #3828: the old gate asserted coverage>=1 (the rule RAN) but never
+    that it found zero violations -- so a future ``match_group_length_skew``
+    regression of a few nets would slip under the large error-count allowlist
+    floor (board 07's is 120) and the coverage check would still pass.  This
+    mirrors ``check_diffpair_coverage.check_zero_violations``.
+    """
+    total = sum(error_violations_by_rule.get(rid, 0) for rid in required_rule_ids)
+    if total <= baseline:
+        return []
+    detail = ", ".join(f"{rid}={error_violations_by_rule.get(rid, 0)}" for rid in required_rule_ids)
+    return [
+        f"match-group error-severity violations ({total}) EXCEED the documented "
+        f"baseline ({baseline}): {detail}"
+    ]
+
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
     """Load the per-board DRC tolerance allowlist.
@@ -411,8 +444,14 @@ def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
 def compute_rule_coverage(
     pcb_path: Path,
     net_class_map: dict | None,
-) -> dict[str, int]:
-    """Compute per-rule check counts for the match-group rule.
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Compute per-rule check counts AND per-rule error-violation counts.
+
+    Issue #3828: also returns a ``{rule_id -> error_violation_count}`` map
+    (error-severity only, restricted to ``MATCHGROUP_RULE_IDS``) so
+    ``check_board`` can fail when the match-group rule fires beyond its
+    documented baseline.  The ``DRCResults`` already carries both, so no
+    second tool run is needed.
 
     Invokes :class:`kicad_tools.validate.DRCChecker` directly so the
     per-rule counter is accessible without re-parsing JSON.  The
@@ -436,7 +475,10 @@ def compute_rule_coverage(
             match-group rule to engage.
 
     Returns:
-        ``rules_checked_by_rule`` dict mapping rule_id -> count.
+        A ``(rules_checked_by_rule, error_violations_by_rule)`` tuple.
+        The first maps ``rule_id -> times-run`` (coverage); the second
+        maps ``rule_id -> count of error-severity violations`` (restricted
+        to ``MATCHGROUP_RULE_IDS``).
 
     Raises:
         RuntimeError: If the PCB cannot be loaded.
@@ -468,7 +510,15 @@ def compute_rule_coverage(
     # the producer wiring (#2710 Phase 2.5G) handles everything.
     results = checker.check_all()
 
-    return dict(results.rules_checked_by_rule)
+    # Issue #3828: per-rule ERROR-severity violation counts for the
+    # match-group rule(s).
+    error_violations_by_rule: dict[str, int] = {}
+    for rule_id in MATCHGROUP_RULE_IDS:
+        error_violations_by_rule[rule_id] = sum(
+            1 for v in results.violations if v.rule_id == rule_id and v.is_error
+        )
+
+    return dict(results.rules_checked_by_rule), error_violations_by_rule
 
 
 def check_rule_coverage(
@@ -601,16 +651,24 @@ def check_board(
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
     try:
-        rules_by_rule = compute_rule_coverage(routed_pcb, net_class_map)
+        rules_by_rule, matchgroup_error_violations = compute_rule_coverage(
+            routed_pcb, net_class_map
+        )
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"Rule-coverage probe failed: {e}")
         return 1
+
+    baseline = MATCHGROUP_VIOLATION_BASELINE.get(lookup_key, 0)
 
     print(f"\n[matchgroup-coverage] Board: {board_dir.name}")
     print(f"[matchgroup-coverage] Routed PCB: {routed_pcb}")
     print(f"[matchgroup-coverage] Sidecar: {sidecar}")
     print(f"[matchgroup-coverage] DRC error count: {error_count} (allowed: {allowed})")
     print(f"[matchgroup-coverage] rules_checked_by_rule: {rules_by_rule}")
+    print(
+        f"[matchgroup-coverage] match-group error violations: "
+        f"{matchgroup_error_violations} (baseline: {baseline})"
+    )
 
     failed = False
 
@@ -637,6 +695,38 @@ def check_board(
             f"[matchgroup-coverage] OK: all {len(MATCHGROUP_RULE_IDS)} match-group "
             "rule(s) exercised."
         )
+
+    # Issue #3828: zero-violation assertion (symmetric with the diff-pair
+    # gate).  Distinct from coverage>=1 (a rule that RAN) and from the
+    # error-count allowlist: the match-group rule's ERROR-severity violation
+    # count must not exceed the documented per-board baseline (default 0).
+    # Without it a future match_group_length_skew regression of a few nets
+    # would slip under board 07's large 120-error allowlist floor and the
+    # coverage>=1 check would still pass.
+    violation_failures = check_zero_violations(matchgroup_error_violations, baseline)
+    if violation_failures:
+        msg = (
+            f"Match-group VIOLATION regression on {routed_pcb}: "
+            f"{'; '.join(violation_failures)}.  These are real length-match "
+            "skew defects measured WITH the net-class sidecar.  Either fix the "
+            "routing so the groups meet their length-match tolerance, or -- if "
+            "this is an accepted, separately-tracked baseline -- raise "
+            "MATCHGROUP_VIOLATION_BASELINE for this PCB in "
+            "scripts/ci/check_matchgroup_coverage.py with a tracking reference. "
+            "Do NOT silently widen it: the point of this gate is to catch "
+            "regressions beyond the documented baseline."
+        )
+        annotate_error(str(routed_pcb), msg)
+        failed = True
+    else:
+        if baseline == 0:
+            print("[matchgroup-coverage] OK: 0 match-group error violations (strict).")
+        else:
+            total = sum(matchgroup_error_violations.get(rid, 0) for rid in MATCHGROUP_RULE_IDS)
+            print(
+                f"[matchgroup-coverage] OK: {total} match-group error violation(s) "
+                f"within documented baseline {baseline}."
+            )
 
     # Issue #3617: pour-connectivity assertion.  The board recipe's
     # copper-union audit verdict was previously informational only -- the

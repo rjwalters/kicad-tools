@@ -1771,6 +1771,24 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     output_path.write_text(output_content)
     print(f"\n8. Routed PCB: {output_path}")
 
+    # Issue #3828: emit the net-class-map sidecar next to the routed PCB so
+    # the recipe's own DRC gate (run_drc) -- and the CI coverage gate -- can
+    # pass ``--net-class-map`` to ``kct check``.  Without the sidecar the
+    # ``diffpair_length_skew``, ``diffpair_routing_continuity`` and
+    # ``match_group_length_skew`` rules silently degrade to no-ops (kct warns
+    # on stderr) and never validate length-match skew / coupled continuity.
+    # Mirrors the board-03 pattern (boards/03-usb-joystick/generate_design.py
+    # ~L498-516).  ``net_class_map`` here is the SAME object the router
+    # consumed above, so the sidecar reflects the exact engagement state the
+    # board was routed under.
+    import json as _json
+
+    from kicad_tools.router.rules import net_class_map_to_dict
+
+    sidecar_path = output_path.parent / "net_class_map.json"
+    sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
+    print(f"   Wrote net-class-map sidecar: {sidecar_path}")
+
     # Issue #2835: emit copper-pour zones for GND + power nets so the
     # net-status report doesn't flag pour-net pads as "incomplete".
     #
@@ -2021,24 +2039,46 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
-def run_drc(pcb_path: Path) -> bool:
-    """Run kct check --mfr jlcpcb on the routed PCB."""
+def run_drc(pcb_path: Path, net_class_map_path: Path | None = None) -> bool:
+    """Run kct check --mfr jlcpcb on the routed PCB.
+
+    Issue #3828: when a ``net_class_map.json`` sidecar exists next to the
+    routed PCB (written by ``route_pcb``), pass it via ``--net-class-map`` so
+    the diff-pair length-skew / routing-continuity rules are ACTIVE in the
+    recipe's own gate.  Without it ``kct check`` warns on stderr that those
+    rules are inactive and silently passes them.  ``net_class_map_path``
+    defaults to ``<pcb_dir>/net_class_map.json`` when not supplied.
+    """
     print("\n" + "=" * 60)
     print("Running DRC (kct check --mfr jlcpcb)...")
     print("=" * 60)
 
+    if net_class_map_path is None:
+        candidate = pcb_path.parent / "net_class_map.json"
+        net_class_map_path = candidate if candidate.is_file() else None
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "check",
+        str(pcb_path),
+        "--mfr",
+        "jlcpcb",
+        "--errors-only",
+    ]
+    if net_class_map_path is not None:
+        cmd.extend(["--net-class-map", str(net_class_map_path)])
+        print(f"   Using net-class-map sidecar: {net_class_map_path}")
+    else:
+        print(
+            "   WARNING: no net_class_map.json sidecar found; diff-pair "
+            "length-skew / routing-continuity rules will be INACTIVE."
+        )
+
     try:
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "kicad_tools.cli",
-                "check",
-                str(pcb_path),
-                "--mfr",
-                "jlcpcb",
-                "--errors-only",
-            ],
+            cmd,
             capture_output=True,
             text=True,
         )

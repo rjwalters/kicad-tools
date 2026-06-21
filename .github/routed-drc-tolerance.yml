@@ -961,7 +961,29 @@ tolerances:
   # 9 ``diffpair_routing_continuity`` -- single-ended fallback measurements;
   # coupled convergence is still 0/9, exit clause (a) tracked in #3540-#3544).
   # Floor tightens 21 -> 18.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 18
+  #
+  # Issue #3828 (June 21 2026): the ``diffpair-routing-regression`` CI gate
+  # (``scripts/ci/check_diffpair_coverage.py``) previously ran ``kct check``
+  # WITHOUT the net-class-map sidecar, so the diff-pair length-skew /
+  # routing-continuity rules were INACTIVE and the gate's error count was 2
+  # (connectivity only) -- 18 diff-pair errors were hidden and 2 << 18 passed
+  # trivially.  The gate now threads the sidecar, so its UN-FILTERED
+  # ``summary.errors`` count is 20 (9 diffpair_length_skew + 9
+  # diffpair_routing_continuity + 2 advisory connectivity).  The sibling
+  # strict gate ``check_routed_drc.py`` already ran WITH the sidecar but
+  # FILTERS advisory ``connectivity`` (DRCChecker.ADVISORY_RULE_IDS), so it
+  # reports 18 against this same floor -- the intentional cross-gate
+  # asymmetry documented above (L729-754).  Floor raised 18 -> 20 to admit
+  # the diff-pair coverage gate's un-filtered sidecar-active count.  The
+  # strict gate retains 2 slack (18 <= 20, emits its by-design tightening
+  # ::warning::).  The diff-pair-ONLY error budget (18) is now ALSO enforced
+  # independently by that gate's new zero-violation assertion
+  # (DIFFPAIR_VIOLATION_BASELINE in check_diffpair_coverage.py): a regression
+  # beyond the 18 documented coupled-routing defects fails the gate even if
+  # the total stays under this 20 floor.  Exit clause (a) unchanged: when the
+  # coupled router converges these pairs (#3540-#3544), drop the baseline AND
+  # tighten this floor back toward ~2.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 20
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure

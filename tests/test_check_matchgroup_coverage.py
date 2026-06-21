@@ -56,6 +56,45 @@ def _load_board_recipe_module():
 
 
 # ---------------------------------------------------------------------------
+# Issue #3828: zero-violation assertion (symmetric with the diff-pair gate)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckZeroViolations:
+    """The gate must FAIL when match_group_length_skew fires beyond its
+    documented baseline -- even when the total error count fits the (large)
+    allowlist floor.  This is the assertion the old gate lacked."""
+
+    def test_zero_violations_strict_baseline_passes(self):
+        mod = _load_helper_module()
+        assert mod.check_zero_violations({"match_group_length_skew": 0}, baseline=0) == []
+
+    def test_nonzero_violations_strict_baseline_fails(self):
+        mod = _load_helper_module()
+        failures = mod.check_zero_violations({"match_group_length_skew": 5}, baseline=0)
+        assert len(failures) == 1
+        assert "match_group_length_skew=5" in failures[0]
+
+    def test_regression_under_large_allowlist_floor_still_fails(self):
+        """The exact blindness #3828 closes: board 07's 120-error allowlist
+        floor would absorb a few new skew errors, but the zero-violation
+        assertion (independent of the allowlist) still fails."""
+        mod = _load_helper_module()
+        assert mod.check_zero_violations({"match_group_length_skew": 3}, baseline=0)
+
+    def test_at_documented_baseline_passes(self):
+        mod = _load_helper_module()
+        assert mod.check_zero_violations({"match_group_length_skew": 4}, baseline=4) == []
+
+    def test_board_07_has_no_baseline_entry_strict_zero(self):
+        """Board 07 reports 0 skew violations today, so it must NOT need a
+        baseline entry -- the default strict 0 holds."""
+        mod = _load_helper_module()
+        key = "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
+        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 0
+
+
+# ---------------------------------------------------------------------------
 # Issue #3617: measure_pour_connectivity unit tests
 # ---------------------------------------------------------------------------
 
