@@ -1,9 +1,11 @@
 """Tests for the board-05 blocking-net CI gate (issue #3822).
 
 ``scripts/ci/check_board_05_blocking.py`` regenerates + routes board 05 in
-CI and asserts ``blocking_incomplete_count <= --max-blocking`` (default 9,
-the measured reproducible CI floor; the committed artifact is 7 but a fresh
-CI re-route reaches 9 -- the 7->9 gap is tracked in #3775/#3766).
+CI and asserts ``blocking_incomplete_count <= --max-blocking`` (default 11,
+a TEMPORARY loose bound above the observed nondeterministic CI ceiling of
+10; board-05's CI re-route is nondeterministic at 9-10 and diverges from the
+committed artifact of 7 -- the gap is tracked in #3775/#3766/#3829, and the
+flaky-gate consequence in #3836).
 
 The pass/fail VERDICT against a real route is CI-only (the macOS host routes
 board 05 to ~11 blocking nets, not 7 -- the documented host-vs-CI reach
@@ -38,13 +40,48 @@ def _load_helper():
     return module
 
 
-def test_default_threshold_is_measured_ci_floor() -> None:
+def test_default_threshold_is_temporary_loose_bound() -> None:
     helper = _load_helper()
-    assert helper.DEFAULT_MAX_BLOCKING == 9
+    assert helper.DEFAULT_MAX_BLOCKING == 11
 
 
-def test_check_pcb_passes_at_ci_floor(tmp_path, monkeypatch) -> None:
-    """9 blocking nets with --max-blocking 9 -> exit 0 (the measured CI floor)."""
+def test_default_clears_nondeterministic_ci_floor(tmp_path, monkeypatch) -> None:
+    """Rationale for the default of 11 (issue #3836): board-05's CI re-route is
+    nondeterministic at 9-10 blocking, so the gate must pass at BOTH 9 and 10
+    and only fail above the observed ceiling.
+
+    This documents WHY 11 was chosen: 9 (main) and 10 (PR #3835 branch, twice,
+    identical router code) must both be green so the gate stops flaking, while
+    12 (a gross regression beyond the ceiling) must still red.
+    """
+    helper = _load_helper()
+    pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+
+    def route_to(count: int):
+        monkeypatch.setattr(
+            helper,
+            "count_blocking",
+            lambda _p: (count, [f"NET{i}" for i in range(count)]),
+        )
+
+    # 9 and 10 -- the observed nondeterministic CI floor/ceiling -- both pass.
+    route_to(9)
+    assert helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)[0] == 0
+    route_to(10)
+    assert helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)[0] == 0
+
+    # 11 (the exact bound) still passes; 12 (gross regression) fails.
+    route_to(11)
+    assert helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)[0] == 0
+    route_to(12)
+    exit_code, message = helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)
+    assert exit_code == 2
+    assert "regression" in message.lower()
+
+
+def test_check_pcb_passes_at_ci_ceiling(tmp_path, monkeypatch) -> None:
+    """10 blocking nets (observed CI ceiling) with --max-blocking 11 -> exit 0."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -52,28 +89,28 @@ def test_check_pcb_passes_at_ci_floor(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         helper,
         "count_blocking",
-        lambda _p: (9, [f"NET{i}" for i in range(9)]),
+        lambda _p: (10, [f"NET{i}" for i in range(10)]),
     )
 
-    exit_code, message = helper.check_pcb(pcb, max_blocking=9)
+    exit_code, message = helper.check_pcb(pcb, max_blocking=11)
     assert exit_code == 0
-    assert "9 blocking incomplete net(s)" in message
+    assert "10 blocking incomplete net(s)" in message
 
 
 def test_check_pcb_passes_when_below_threshold(tmp_path, monkeypatch) -> None:
-    """A future improvement (5 blocking) still passes the <= 9 gate."""
+    """A future improvement (5 blocking) still passes the <= 11 gate."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
 
     monkeypatch.setattr(helper, "count_blocking", lambda _p: (5, ["A", "B", "C", "D", "E"]))
 
-    exit_code, _ = helper.check_pcb(pcb, max_blocking=9)
+    exit_code, _ = helper.check_pcb(pcb, max_blocking=11)
     assert exit_code == 0
 
 
-def test_check_pcb_fails_on_regression(tmp_path, monkeypatch) -> None:
-    """11 blocking nets (the host divergence) with default threshold -> exit 2."""
+def test_check_pcb_fails_on_gross_regression(tmp_path, monkeypatch) -> None:
+    """12 blocking nets (beyond the observed ceiling) with default -> exit 2."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -81,22 +118,22 @@ def test_check_pcb_fails_on_regression(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         helper,
         "count_blocking",
-        lambda _p: (11, [f"NET{i}" for i in range(11)]),
+        lambda _p: (12, [f"NET{i}" for i in range(12)]),
     )
 
-    exit_code, message = helper.check_pcb(pcb, max_blocking=9)
+    exit_code, message = helper.check_pcb(pcb, max_blocking=11)
     assert exit_code == 2
     assert "regression" in message.lower()
-    assert "11 blocking incomplete net(s)" in message
+    assert "12 blocking incomplete net(s)" in message
 
 
 def test_check_pcb_fails_when_threshold_below_actual(tmp_path, monkeypatch) -> None:
-    """--max-blocking 0 against the measured 9 -> exit 2 (test-plan check)."""
+    """--max-blocking 0 against the measured 10 -> exit 2 (test-plan check)."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
 
-    monkeypatch.setattr(helper, "count_blocking", lambda _p: (9, [f"NET{i}" for i in range(9)]))
+    monkeypatch.setattr(helper, "count_blocking", lambda _p: (10, [f"NET{i}" for i in range(10)]))
 
     exit_code, _ = helper.check_pcb(pcb, max_blocking=0)
     assert exit_code == 2
@@ -104,8 +141,9 @@ def test_check_pcb_fails_when_threshold_below_actual(tmp_path, monkeypatch) -> N
 
 def test_check_pcb_fails_when_tightened_toward_committed(tmp_path, monkeypatch) -> None:
     """Tightening --max-blocking to 7 (the committed artifact) fails at the
-    current measured floor of 9 -- this is the lever #3775/#3766 will pull as
-    routing improves and the floor drops back to 7."""
+    current nondeterministic floor of 9-10 -- this is the lever
+    #3775/#3766/#3829 will pull once the re-route is deterministic and the
+    floor drops back to 7."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -142,8 +180,8 @@ def test_main_prints_measured_count_on_regression(tmp_path, monkeypatch, capsys)
     """The measured blocking count is surfaced on stdout EVEN when the gate fails.
 
     Requirement from issue #3822 follow-up: CI must be able to read the real
-    count from the log even on the failing (> threshold) path so a >7 result
-    is observable rather than papered over.
+    count from the log even on the failing (> threshold) path so a result above
+    the threshold is observable rather than papered over.
     """
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
@@ -152,12 +190,12 @@ def test_main_prints_measured_count_on_regression(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(
         helper,
         "count_blocking",
-        lambda _p: (11, [f"NET{i}" for i in range(11)]),
+        lambda _p: (12, [f"NET{i}" for i in range(12)]),
     )
 
     assert helper.main([str(pcb)]) == 2
     out = capsys.readouterr().out
-    assert "MEASURED blocking_incomplete_count = 11" in out
+    assert "MEASURED blocking_incomplete_count = 12" in out
 
 
 def test_main_parses_max_blocking_arg(tmp_path, monkeypatch) -> None:
@@ -166,11 +204,11 @@ def test_main_parses_max_blocking_arg(tmp_path, monkeypatch) -> None:
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
 
-    monkeypatch.setattr(helper, "count_blocking", lambda _p: (8, ["A", "B"]))
+    monkeypatch.setattr(helper, "count_blocking", lambda _p: (10, ["A", "B"]))
 
-    # default 9 -> 8 passes
+    # default 11 -> 10 passes
     assert helper.main([str(pcb)]) == 0
-    # tightened to 7 -> 8 fails
+    # tightened to 7 -> 10 fails
     assert helper.main([str(pcb), "--max-blocking", "7"]) == 2
 
 
