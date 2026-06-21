@@ -199,7 +199,7 @@ def _parse_drc_status(stdout: str) -> bool | None:
 
 
 def _parse_drc_error_rules(stdout: str) -> dict[str, int] | None:
-    """Extract the post-route DRC error count + per-rule breakdown.
+    """Extract the post-route DRC **error** count + per-rule breakdown.
 
     ``kct route`` emits a ``--- DRC Validation ---`` block of the form::
 
@@ -210,23 +210,48 @@ def _parse_drc_error_rules(stdout: str) -> dict[str, int] | None:
             - clearance_pad_zone: Short: pad on net 'GND' overlaps ...
             ...
 
+    When the board has **zero** errors but some non-error (advisory)
+    findings, ``kct route`` omits the ``Errors:`` headline entirely and
+    instead prints only a ``Warnings: N`` block (issue #3843/#3830 added
+    the WARNING-severity ``copper_sliver`` rule, which surfaces a handful
+    of ~0.04mm residual copper ribbons on board 02's committed fill --
+    these are the committed-fill-vs-kicad-cli-refill divergence, tracked
+    behavior, not errors).  We treat that warnings-only block as a clean
+    **0-error** result so the strict 0-ERROR ceiling still passes.
+
     We parse the ``Errors:`` headline count and tally the per-rule
-    breakdown from the ``- <rule_id>:`` lines that follow.  Returns a
-    dict mapping ``rule_id -> count`` (with the synthetic key
-    ``"__total__"`` set to the headline count) or ``None`` if no DRC
-    Validation block / error count was found.
+    breakdown ONLY from the ``- <rule_id>:`` lines in the ERROR section
+    (warning lines must NOT inflate the error tally).  Returns a dict
+    mapping ``rule_id -> count`` (with the synthetic key ``"__total__"``
+    set to the headline error count) or ``None`` if no DRC Validation
+    block was found at all.
 
     Used by ``test_drc_clean_at_jlcpcb_tier1`` to allow ONLY the
     grandfathered #3556 ``clearance_pad_zone`` findings through while
-    still failing on any other (or excess) error.
+    still failing on any other (or excess) ERROR.
     """
     err_match = re.search(r"Errors:\s+(\d+)", stdout)
     if err_match is None:
+        # No ``Errors:`` headline.  If the DRC block ran at all (it emits
+        # a ``Warnings:`` headline when error-free but advisory-bearing),
+        # treat it as a strict 0-error result.  copper_sliver and any
+        # other WARNING-severity findings live here and must NOT count as
+        # errors -- so we return an empty error breakdown, not None.
+        if re.search(r"Warnings:\s+(\d+)", stdout) is not None:
+            return {"__total__": 0}
         return None
     total = int(err_match.group(1))
     # Per-rule lines look like ``    - clearance_pad_zone: <message>``.
+    # Scope the tally to the ERROR section only: start at the ``Errors:``
+    # headline and stop at the next ``Warnings:`` headline (or end of
+    # text), so WARNING-severity rules (e.g. copper_sliver) listed under a
+    # trailing ``Warnings:`` block never inflate the error breakdown.
+    error_section = stdout[err_match.end() :]
+    warn_match = re.search(r"^\s*Warnings:\s+\d+", error_section, re.MULTILINE)
+    if warn_match is not None:
+        error_section = error_section[: warn_match.start()]
     rule_counts: dict[str, int] = {}
-    for rule_id in re.findall(r"^\s+-\s+([a-z][a-z_]+):", stdout, re.MULTILINE):
+    for rule_id in re.findall(r"^\s+-\s+([a-z][a-z_]+):", error_section, re.MULTILINE):
         rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
     rule_counts["__total__"] = total
     return rule_counts
@@ -377,6 +402,18 @@ class TestBoard02ManufacturableBaseline:
         Burn-down: once the VCC/GND pours are re-carved against the final
         pad geometry (sibling of #3549-#3553), drop ``MAX_DRC_ERRORS``
         back to 0 and remove the #3556 entries here + in the tolerance yml.
+
+        Issue #3843/#3830 (June 20 2026): the new WARNING-severity
+        ``copper_sliver`` rule surfaces a handful of ~0.04mm residual
+        copper ribbons on board 02's committed fill (the
+        committed-fill-vs-kicad-cli-refill divergence -- tracked behavior,
+        not errors).  Because the board now has 0 errors but some
+        warnings, ``kct route`` prints a ``Warnings: N`` block with NO
+        ``Errors:`` headline and no ``DRC PASSED`` line.
+        ``_parse_drc_error_rules`` treats that warnings-only block as a
+        strict 0-ERROR result, and the error-section scoping keeps
+        copper_sliver (and any other WARNING) out of the error breakdown,
+        so the strict ``MAX_DRC_ERRORS`` (0) ceiling is preserved.
         """
         # If the route happened to land perfectly clean (e.g. after the
         # pour-carve burn-down), the CLI prints ``DRC PASSED`` and no

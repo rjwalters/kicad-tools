@@ -12,6 +12,7 @@ from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
 from .rules.connectivity import ConnectivityRule
+from .rules.copper_sliver import CopperSliverRule
 from .rules.diffpair_clearance_intra import DiffPairClearanceIntraRule
 from .rules.diffpair_length_skew import DiffPairLengthSkewRule
 from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
@@ -115,6 +116,7 @@ class DRCChecker:
         "check_connectivity",
         "check_segment_zone_clearances",
         "check_via_zone_clearances",
+        "check_copper_slivers",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
@@ -260,6 +262,32 @@ class DRCChecker:
             ``clearance_pad_zone`` violations (severity error, blocking).
         """
         rule = ViaZoneClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
+
+    def check_copper_slivers(self) -> DRCResults:
+        """Check copper layers for thin slivers via a morphological open.
+
+        Unions all filled-zone copper (and track copper) per layer and
+        runs ``buffer(-r).buffer(r)`` with ``r = min_trace_width_mm / 2``;
+        the residual ``original - opened`` regions are copper slivers
+        narrower than the manufacturer's minimum reproducible copper
+        width.  Closes the Issue #3843 gap: ``kicad-cli pcb drc`` flags
+        ``copper_sliver`` defects (16 on the softstart board) but no kct
+        rule inspected the *internal width* of a single copper region --
+        every existing copper rule measures the gap between two distinct
+        features, never the thickness of one region.
+
+        Slivers are a fab-process advisory (an under/over-etch hazard,
+        not a guaranteed short), so violations are ``severity="warning"``
+        to match ``kicad-cli`` and avoid turning a soft fab note into a
+        hard CI gate.  Has its own CLI category (``copper_sliver``) so
+        the morphology pass can be skipped on very large pours via
+        ``--skip copper_sliver``.
+
+        Returns:
+            DRCResults containing ``copper_sliver`` warnings.
+        """
+        rule = CopperSliverRule()
         return rule.check(self.pcb, self.design_rules)
 
     def check_connectivity(self) -> DRCResults:
