@@ -189,6 +189,52 @@ class TestBoard05ERCRegression:
             "(309.88, 83.82); PR #3004's GND-rail extension was dropped."
         )
 
+    def test_no_power_pin_not_driven_error(self, schematic_path: Path) -> None:
+        """No ``power_pin_not_driven`` error anywhere (Issue #3827).
+
+        Issue #3827 added a ``PWR_FLAG`` on the GND rail in ``design.py``.
+        Before that fix, the GND net had no ``power_output`` driver
+        (``AMS1117.GND`` is ``power_input``; MOSFET sources / connector
+        pins are ``passive``/``input``), so every GND ``power_input`` pin
+        — ``U1`` Pin 3 [GND] included — fired the blocking
+        ``power_pin_not_driven`` error on every clean build under both
+        ``kct erc`` and native ``kicad-cli sch erc``.  A regression that
+        drops the GND ``PWR_FLAG`` would re-introduce it.
+        """
+        _, errors = _run_erc_count_errors(schematic_path)
+        not_driven = [v for v in errors if v.get("type") == "power_pin_not_driven"]
+        assert not not_driven, (
+            f"Board 05 has {len(not_driven)} power_pin_not_driven error(s); "
+            f"Issue #3827's GND PWR_FLAG was dropped from design.py.  "
+            f"Items: "
+            + ", ".join(str(it.get("pos", {})) for v in not_driven for it in v.get("items", []))
+        )
+
+    def test_gnd_pwr_flag_present(self, schematic_path: Path) -> None:
+        """The committed schematic carries a PWR_FLAG on the GND rail.
+
+        Issue #3827: ``design.py`` places a ``power:PWR_FLAG`` symbol at
+        ``(X_POWER_IN + 7, RAIL_GND + 10) = (32, 290)`` mm (grid-snapped
+        to ``(31.75, 289.56)``) wired up to the GND rail.  Assert the
+        regenerated/committed schematic still contains a PWR_FLAG instance
+        at that GND-rail column so the artifact and the generator stay in
+        sync.
+        """
+        text = schematic_path.read_text()
+        assert "PWR_FLAG" in text, (
+            "Committed board-05 schematic has no PWR_FLAG symbol at all; "
+            "Issue #3827's GND PWR_FLAG (and the +24V/+5V flags) regressed."
+        )
+        # The GND PWR_FLAG sits at (31.75, 289.56) mm after grid-snap —
+        # assert that coordinate appears so a wholesale removal of just
+        # the GND flag trips this guard even if the +24V/+5V flags remain.
+        assert "(at 31.75 289.56" in text, (
+            "Committed board-05 schematic is missing a symbol at "
+            "(31.75, 289.56) mm — the GND PWR_FLAG added in Issue #3827 was "
+            "dropped or the committed artifact was not regenerated after the "
+            "design change."
+        )
+
     def test_no_c6_pin_not_connected_error(self, schematic_path: Path) -> None:
         """No ``pin_not_connected`` error on the LDO output cap C6.
 
