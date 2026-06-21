@@ -411,6 +411,8 @@ class TestAuditResult:
     def test_verdict_ready_when_all_pass(self):
         """Test that verdict is READY when all checks pass."""
         result = AuditResult()
+        # An authoritative clean board: geometric DRC actually ran (#3825).
+        result.drc.geometric_drc_ran = True
         assert result.verdict == AuditVerdict.READY
         assert result.is_ready is True
 
@@ -475,6 +477,7 @@ class TestAuditResult:
             warning_count=0,
             blocking_count=0,
             passed=True,
+            geometric_drc_ran=True,
         )
         result.connectivity = ConnectivityStatus(
             total_nets=10,
@@ -529,9 +532,10 @@ class TestAuditResult:
         result.erc.error_count = 0
         result.erc.warning_count = 0
 
-        # Gate 2: DRC blocking = 0
+        # Gate 2: DRC blocking = 0 (authoritative -- geometric DRC ran, #3825)
         result.drc.blocking_count = 0
         result.drc.warning_count = 0
+        result.drc.geometric_drc_ran = True
 
         # Gate 3: connectivity passed
         result.connectivity.passed = True
@@ -594,7 +598,9 @@ class TestAuditResult:
             passed=False,
             details="ERC timed out",
         )
-        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(
+            blocking_count=0, warning_count=0, passed=True, geometric_drc_ran=True
+        )
         result.connectivity = ConnectivityStatus(passed=True)
         result.compatibility = ManufacturerCompatibility(passed=True)
 
@@ -613,7 +619,9 @@ class TestAuditResult:
             passed=True,
             details="kicad-cli not found (skipped)",
         )
-        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(
+            blocking_count=0, warning_count=0, passed=True, geometric_drc_ran=True
+        )
         result.connectivity = ConnectivityStatus(passed=True)
         result.compatibility = ManufacturerCompatibility(passed=True)
 
@@ -695,7 +703,9 @@ class TestAuditResult:
         """
         result = AuditResult()
         result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
-        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(
+            blocking_count=0, warning_count=0, passed=True, geometric_drc_ran=True
+        )
         result.connectivity = ConnectivityStatus(
             total_nets=10,
             connected_nets=10,
@@ -1054,7 +1064,8 @@ class TestAuditExitCodes:
         exit code logic in audit_cmd.main returns 0.
         """
         result = AuditResult(project_name="test_ready")
-        # All defaults yield READY
+        # Authoritative clean board (geometric DRC ran) yields READY (#3825).
+        result.drc.geometric_drc_ran = True
         assert result.verdict == AuditVerdict.READY
 
         # Verify the exit code logic directly
@@ -1156,6 +1167,8 @@ class TestAuditExitCodes:
         pcb_file.write_text("(kicad_pcb (version 20221018))")
 
         mock_result = AuditResult()
+        # Authoritative clean board (geometric DRC ran) yields READY (#3825).
+        mock_result.drc.geometric_drc_ran = True
         assert mock_result.verdict == AuditVerdict.READY
 
         mock_audit_instance = MagicMock()
@@ -1180,7 +1193,13 @@ class TestAuditOutputRendering:
         result = AuditResult(project_name="test_ready_board")
         # Explicitly set all checks to passing
         result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
-        result.drc = DRCStatus(error_count=0, warning_count=0, blocking_count=0, passed=True)
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+            geometric_drc_ran=True,
+        )
         result.connectivity = ConnectivityStatus(total_nets=5, connected_nets=5, passed=True)
         result.compatibility = ManufacturerCompatibility(manufacturer="JLCPCB", passed=True)
 
@@ -1919,7 +1938,7 @@ class TestZoneConnectedNets:
             passed=True,
         )
         result.erc = ERCStatus(passed=True)
-        result.drc = DRCStatus(passed=True)
+        result.drc = DRCStatus(passed=True, geometric_drc_ran=True)
         result.compatibility = ManufacturerCompatibility(passed=True)
 
         assert result.verdict == AuditVerdict.READY
@@ -2610,7 +2629,8 @@ class TestSyncDriftVerdict:
         from kicad_tools.audit.auditor import AuditResult, AuditVerdict
 
         r = AuditResult()
-        # All zero
+        # All zero, authoritative clean DRC (geometric engine ran, #3825)
+        r.drc.geometric_drc_ran = True
         assert r.verdict == AuditVerdict.READY
 
     def test_schematic_only_overrides_drc_warnings(self):
@@ -3041,7 +3061,7 @@ class TestConnectivityStatusZoneVerification:
         thanks to zone-connected nets."""
         result = AuditResult()
         result.erc = ERCStatus(passed=True)
-        result.drc = DRCStatus(passed=True)
+        result.drc = DRCStatus(passed=True, geometric_drc_ran=True)
         result.connectivity = ConnectivityStatus(
             total_nets=10,
             connected_nets=10,
@@ -3309,3 +3329,176 @@ class TestAnalogNetActionItems:
         items = audit._generate_action_items(AuditResult())
         assert self._net_items(items) == []
         assert self._bridge_items(items) == []
+
+
+class TestVerdictGateNotAuthoritativeDrc:
+    """Issue #3825: a clean board whose DRC did not run must NOT be READY.
+
+    #3820 fixed the DRC *line label* (PASS NOT AUTHORITATIVE) but left the
+    overall verdict gate returning READY when ``drc.passed`` and
+    ``geometric_drc_ran is False`` (shapely ImportError / kicad-cli absent).
+    The verdict must downgrade to WARNING (never READY) so kct audit /
+    report.md cannot ship a false "READY FOR MANUFACTURING".
+    """
+
+    def test_clean_but_drc_not_run_is_not_ready(self):
+        """drc.passed + geometric_drc_ran=False -> WARNING, never READY."""
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.blocking_count = 0
+        result.drc.geometric_drc_ran = False
+
+        assert result.verdict != AuditVerdict.READY
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+        assert result.to_dict()["verdict"] != "ready"
+        assert result.to_dict()["verdict"] == "warning"
+
+    def test_authoritative_clean_board_is_ready(self):
+        """Both engines clean (geometric_drc_ran=True) -> READY (no regression)."""
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.blocking_count = 0
+        result.drc.geometric_drc_ran = True
+
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+        assert result.to_dict()["verdict"] == "ready"
+
+    def test_drc_blocking_still_not_ready(self):
+        """Real blocking violations still drive NOT_READY regardless of gate."""
+        result = AuditResult()
+        result.drc.passed = False
+        result.drc.blocking_count = 2
+        result.drc.geometric_drc_ran = True
+
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_not_authoritative_drc_banner_not_ready(self, capsys):
+        """output_table banner does not print READY for a not-run DRC."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = False
+
+        output_table(result)
+        out = capsys.readouterr().out
+
+        assert "READY FOR MANUFACTURING" not in out
+
+    def test_not_authoritative_drc_summary_not_ready(self, capsys):
+        """output_summary one-liner does not report READY for a not-run DRC."""
+        from kicad_tools.cli.audit_cmd import output_summary
+
+        result = AuditResult()
+        result.drc.passed = True
+        result.drc.geometric_drc_ran = False
+
+        output_summary(result)
+        out = capsys.readouterr().out
+
+        first_line = out.splitlines()[0]
+        # Must not report a bare READY one-liner (NOT READY is acceptable).
+        assert not first_line.startswith("READY:")
+        assert "Verdict: WARNING" in out
+
+
+class TestCheckerCrashesFailLoud:
+    """Issue #3825: ERC/connectivity/compat crashes must NOT coerce to PASS.
+
+    These three sibling ``except Exception: passed = True`` sites survived
+    #3817/#3820.  A genuine checker exception must surface as a fail-loud
+    could-not-verify result, never a silent green PASS.
+    """
+
+    def _make_audit_with_schematic(self, tmp_path):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        return ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+    def test_erc_crash_does_not_pass(self, tmp_path, monkeypatch):
+        """An exception inside _check_erc yields passed=False + blocking."""
+        audit = self._make_audit_with_schematic(tmp_path)
+
+        # subprocess.run is the first call inside the try block; make it
+        # raise an unexpected (non-FileNotFound, non-Timeout) error.
+        import kicad_tools.audit.auditor as auditor_mod
+
+        def _boom(*a, **k):
+            raise RuntimeError("erc exploded")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", _boom)
+
+        status = audit._check_erc()
+
+        assert status.passed is False
+        assert status.blocking_error_count >= 1
+        assert "could not run" in status.details
+
+    def test_connectivity_crash_does_not_pass(self, monkeypatch):
+        """An exception inside _check_connectivity yields passed=False."""
+
+        class _BoomPcb:
+            @property
+            def footprint_count(self):
+                raise RuntimeError("connectivity exploded")
+
+        audit = ManufacturingAudit.__new__(ManufacturingAudit)
+        status = ManufacturingAudit._check_connectivity(audit, _BoomPcb())
+
+        assert status.passed is False
+        assert "could not run" in status.details
+
+    def test_compatibility_crash_does_not_pass(self, tmp_path, monkeypatch):
+        """An exception inside _check_compatibility yields passed=False."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("profile exploded")
+
+        monkeypatch.setattr(audit, "_get_profile", _boom)
+
+        compat = audit._check_compatibility(_DummyPcb())
+
+        assert compat.passed is False
+        assert "could not run" in compat.details
+
+    def test_compat_crash_drives_not_ready_verdict(self, tmp_path, monkeypatch):
+        """A compat-checker crash makes the overall verdict NOT_READY."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        audit = ManufacturingAudit(pcb, manufacturer="jlcpcb")
+
+        def _boom():
+            raise RuntimeError("profile exploded")
+
+        monkeypatch.setattr(audit, "_get_profile", _boom)
+
+        result = AuditResult()
+        result.compatibility = audit._check_compatibility(_DummyPcb())
+
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_erc_kicad_cli_absent_stays_non_fatal(self, tmp_path, monkeypatch):
+        """Expected-skip path (kicad-cli missing) stays non-authoritative, not red."""
+        audit = self._make_audit_with_schematic(tmp_path)
+
+        import kicad_tools.audit.auditor as auditor_mod
+
+        def _missing(*a, **k):
+            raise FileNotFoundError("kicad-cli")
+
+        monkeypatch.setattr(auditor_mod.subprocess, "run", _missing)
+
+        status = audit._check_erc()
+
+        # kicad-cli absent is an expected skip, not a hard fail.
+        assert status.passed is True
+        assert status.blocking_error_count == 0
