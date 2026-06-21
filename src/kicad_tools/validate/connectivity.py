@@ -28,26 +28,18 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
-# Optional geometry backend.  ``shapely`` is NOT a core dependency (it lives
-# only under the ``geometry``/``dev`` extras in pyproject.toml), so we import
-# it lazily/guardedly here.  When it is absent the label-free pour extractor
+# Geometry backend.  ``shapely`` is a core dependency (issue #3824), but
+# this module keeps a graceful fallback: when shapely is unavailable (a
+# broken/partial install) the label-free pour extractor
 # (``_connect_pour_pads_label_free`` / step 2d) transparently falls back to
 # the legacy declared-net pour grouping, so importing this module — and
-# tracing autorouter segment/via copper — never hard-fails on a core-only
-# install.
-_SHAPELY_AVAILABLE = False
-try:  # pragma: no cover - import guard exercised by environment, not tests
+# tracing autorouter segment/via copper — never hard-fails.  The boolean
+# probe is delegated to the shared guard in :mod:`kicad_tools._shapely`.
+from kicad_tools._shapely import has_shapely as _has_shapely
+
+if _has_shapely():  # pragma: no cover - import guard exercised by environment
     from shapely.geometry import Point as _ShapelyPoint  # type: ignore[import-untyped]
     from shapely.geometry import Polygon as _ShapelyPolygon
-
-    _SHAPELY_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    pass
-
-
-def _has_shapely() -> bool:
-    """Return True when the optional ``shapely`` backend is importable."""
-    return _SHAPELY_AVAILABLE
 
 
 # Sentinel layer-set meaning "every copper layer".  Used to model a ``*.Cu``

@@ -533,6 +533,11 @@ def _remediate_starved_thermal(
         # refill + carve so the shipped copper reflects both.
         if _run_drc(refill=True) is not None:
             _settle()
+    except ModuleNotFoundError:
+        # shapely unavailable -> the carve/remediation is not clearance-
+        # correct (issue #3824).  Propagate loud rather than shipping a
+        # fill that silently omitted foreign-net clearances.
+        raise
     except Exception:
         # Never let remediation abort a successful fill.
         return
@@ -595,20 +600,30 @@ def _apply_foreign_pad_clearance(pcb_path: Path) -> None:
 
     Loads the filled PCB, applies the pure-Python clearance correction,
     and rewrites the file only when at least one filled_polygon changed.
-    Any failure (e.g. shapely missing) is swallowed — the fill is then
-    left exactly as kicad-cli produced it.
-    """
-    try:
-        from kicad_tools.core.sexp_file import save_pcb
-        from kicad_tools.sexp import parse_file
-        from kicad_tools.zones.fill_clearance import apply_foreign_pad_clearance
 
+    A missing/broken ``shapely`` is propagated **loud** (it is a core
+    dependency — issue #3824): silently leaving the fill as kicad-cli
+    produced it would ship a board with uncarved foreign-net antipads and
+    real ``clearance_pad_zone`` shorts while reporting a clean fill.  Only
+    non-import geometry edge cases are swallowed so a degenerate ring never
+    aborts an otherwise successful fill.
+    """
+    from kicad_tools.core.sexp_file import save_pcb
+    from kicad_tools.sexp import parse_file
+    from kicad_tools.zones.fill_clearance import apply_foreign_pad_clearance
+
+    try:
         doc = parse_file(pcb_path)
         modified = apply_foreign_pad_clearance(doc)
         if modified:
             save_pcb(doc, pcb_path)
+    except ModuleNotFoundError:
+        # shapely unavailable -> the fill is NOT clearance-correct.  Never
+        # swallow this: surface it so the caller cannot mistake an uncarved
+        # fill for a clean one.
+        raise
     except Exception:
-        # Never let the correction abort a successful fill.
+        # Non-import geometry edge case: never let it abort a successful fill.
         return
 
 

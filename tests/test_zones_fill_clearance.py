@@ -243,9 +243,18 @@ class TestForeignSegmentCarved:
         net0_seg = _segment_copper(0, 12, 20, 12, 0.25)
         assert fill.intersection(net0_seg).area > 0.0
 
-    def test_no_shapely_is_noop(self, monkeypatch):
-        """With shapely unavailable the carve is a no-op, not a crash."""
+    def test_no_shapely_fails_loud(self, monkeypatch):
+        """With shapely unavailable the carve must FAIL LOUD, never silently no-op.
+
+        Previously this path returned 0 when shapely was missing, which the
+        caller could not distinguish from "nothing needed carving" -- so a
+        board with real ``clearance_pad_zone`` shorts was reported as a
+        clean fill (issue #3824).  The hardened behavior raises a
+        ``ModuleNotFoundError`` with an actionable install hint instead.
+        """
         import builtins
+
+        from kicad_tools import _shapely as shapely_guard
 
         real_import = builtins.__import__
 
@@ -255,9 +264,12 @@ class TestForeignSegmentCarved:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", _fake_import)
+        # Reset the cached availability so the guard re-probes under the block.
+        monkeypatch.setattr(shapely_guard, "_SHAPELY_AVAILABLE", None, raising=False)
         doc = _parse(_SEGMENT_BOARD)
-        modified = apply_foreign_pad_clearance(doc)
-        assert modified == 0
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            apply_foreign_pad_clearance(doc)
+        assert "kicad-tools[geometry]" in str(excinfo.value)
 
     def test_drc_reports_zero_segment_and_via_zone_errors(self, tmp_path):
         """End-to-end through the real DRC rules the CI gate runs."""

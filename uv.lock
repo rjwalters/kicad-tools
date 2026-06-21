@@ -1774,6 +1774,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "shapely" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
@@ -1800,6 +1801,7 @@ all = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "rtree" },
+    { name = "shapely" },
     { name = "weasyprint" },
 ]
 bayesian = [
@@ -1836,7 +1838,6 @@ dev = [
     { name = "responses" },
     { name = "rtree" },
     { name = "ruff" },
-    { name = "shapely" },
     { name = "weasyprint" },
 ]
 drc = [
@@ -1965,7 +1966,8 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "scikit-build-core", marker = "extra == 'native'", specifier = ">=0.8" },
     { name = "scikit-learn", marker = "extra == 'research'", specifier = ">=1.7.2" },
-    { name = "shapely", marker = "extra == 'dev'", specifier = ">=2.0" },
+    { name = "shapely", specifier = ">=2.0" },
+    { name = "shapely", marker = "extra == 'all'", specifier = ">=2.0" },
     { name = "shapely", marker = "extra == 'geometry'", specifier = ">=2.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "weasyprint", marker = "extra == 'all'", specifier = ">=60.0" },

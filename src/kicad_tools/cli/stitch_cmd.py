@@ -4347,16 +4347,26 @@ def _carve_foreign_copper_after_stitch(pcb_path: Path) -> None:
     ``filled_polygon`` (the segment branch added in issue #3773), so it
     cleanly removes the new GND copper from the rail pour.  It edits the
     parsed S-expression directly (no kicad-cli refill, so the post-route
-    carve is preserved) and is a no-op when shapely is unavailable.
+    carve is preserved).  shapely is a core dependency (issue #3824); if it
+    is ever unavailable the carve cannot run and we warn **loud** that the
+    fill is NOT clearance-correct rather than implying the carve was merely
+    an optional skip.
     """
-    try:
-        from kicad_tools.core.sexp_file import load_pcb, save_pcb
-        from kicad_tools.zones.fill_clearance import apply_foreign_pad_clearance
-    except ImportError:
-        return
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.zones.fill_clearance import apply_foreign_pad_clearance
+
     try:
         doc = load_pcb(pcb_path)
         modified = apply_foreign_pad_clearance(doc)
+    except ModuleNotFoundError as exc:
+        print(
+            "\nWARNING: post-stitch zone-fill clearance carve could NOT run "
+            f"({exc}). The zone fill is NOT clearance-correct and may contain "
+            "foreign-net pad/via shorts -- do not treat it as fab-ready until "
+            "shapely is installed and the fill is re-carved.",
+            file=sys.stderr,
+        )
+        return
     except Exception as exc:  # pragma: no cover - defensive guard
         print(
             f"\nWarning: post-stitch zone-fill clearance carve skipped ({exc}).",
