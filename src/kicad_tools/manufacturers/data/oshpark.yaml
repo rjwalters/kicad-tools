@@ -17,6 +17,7 @@ design_rules:
     max_hole_diameter_mm: 6.35      # 250 mil
     min_copper_to_edge_mm: 0.381    # 15 mil
     min_hole_to_edge_mm: 0.381      # 15 mil
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.127  # 5 mil
     min_silkscreen_height_mm: 0.762 # 30 mil
     min_solder_mask_dam_mm: 0.102   # 4 mil
@@ -37,6 +38,7 @@ design_rules:
     max_hole_diameter_mm: 6.35
     min_copper_to_edge_mm: 0.381
     min_hole_to_edge_mm: 0.381
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.127
     min_silkscreen_height_mm: 0.762
     min_solder_mask_dam_mm: 0.102
@@ -57,6 +59,7 @@ design_rules:
     max_hole_diameter_mm: 6.35
     min_copper_to_edge_mm: 0.381
     min_hole_to_edge_mm: 0.381
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.127
     min_silkscreen_height_mm: 0.762
     min_solder_mask_dam_mm: 0.102
@@ -77,6 +80,7 @@ design_rules:
     max_hole_diameter_mm: 6.35
     min_copper_to_edge_mm: 0.254    # Tighter for Swift
     min_hole_to_edge_mm: 0.254
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.127
     min_silkscreen_height_mm: 0.762
     min_solder_mask_dam_mm: 0.102
@@ -97,6 +101,7 @@ design_rules:
     max_hole_diameter_mm: 6.35
     min_copper_to_edge_mm: 0.381
     min_hole_to_edge_mm: 0.381
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.127
     min_silkscreen_height_mm: 0.762
     min_solder_mask_dam_mm: 0.102
@@ -117,6 +122,7 @@ design_rules:
     max_hole_diameter_mm: 6.35
     min_copper_to_edge_mm: 0.381
     min_hole_to_edge_mm: 0.381
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.127
     min_silkscreen_height_mm: 0.762
     min_solder_mask_dam_mm: 0.102

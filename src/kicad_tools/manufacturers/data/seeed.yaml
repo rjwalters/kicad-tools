@@ -19,6 +19,7 @@ design_rules:
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.5
     min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15   # 6 mil
     min_silkscreen_height_mm: 0.8   # 32 mil
     min_solder_mask_dam_mm: 0.1
@@ -38,6 +39,7 @@ design_rules:
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.5
     min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 0.8
     min_solder_mask_dam_mm: 0.1
@@ -57,6 +59,7 @@ design_rules:
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.5
     min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 0.8
     min_solder_mask_dam_mm: 0.1
@@ -76,6 +79,7 @@ design_rules:
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.5
     min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 0.8
     min_solder_mask_dam_mm: 0.1
@@ -95,6 +99,7 @@ design_rules:
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.5
     min_hole_to_edge_mm: 0.5
+    min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 0.8
     min_solder_mask_dam_mm: 0.1

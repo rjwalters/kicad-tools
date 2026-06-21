@@ -167,7 +167,7 @@ def build_project_rules(rules: DesignRules) -> dict[str, float]:
         "min_through_hole_diameter": rules.min_hole_diameter_mm,
         "min_via_hole": rules.min_via_drill_mm,
         "min_microvia_drill": _MICRO_VIA_FLOOR_HOLE_MM,
-        "min_hole_to_hole": rules.min_hole_to_edge_mm,
+        "min_hole_to_hole": rules.min_hole_to_hole_mm,
         "min_copper_edge_clearance": rules.min_copper_to_edge_mm,
         "min_silk_clearance": rules.min_solder_mask_clearance_mm,
         "min_text_thickness": rules.min_silkscreen_width_mm,

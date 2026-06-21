@@ -127,6 +127,12 @@ class DesignRules:
     min_copper_to_edge_mm: float = 0.3
     min_hole_to_edge_mm: float = 0.5
 
+    # Hole-to-hole (drill-to-drill) edge-to-edge spacing.  This is distinct
+    # from ``min_hole_to_edge_mm`` (hole-to-board-edge) and from
+    # ``min_clearance_mm`` (copper trace/space).  Canonical fab value is
+    # 0.5 mm (matches the explain spec and the placement collision check).
+    min_hole_to_hole_mm: float = 0.5
+
     # Silkscreen constraints
     min_silkscreen_width_mm: float = 0.15
     min_silkscreen_height_mm: float = 0.8
@@ -185,6 +191,7 @@ class DesignRules:
             "max_hole_diameter_mm": self.max_hole_diameter_mm,
             "min_copper_to_edge_mm": self.min_copper_to_edge_mm,
             "min_hole_to_edge_mm": self.min_hole_to_edge_mm,
+            "min_hole_to_hole_mm": self.min_hole_to_hole_mm,
             "min_silkscreen_width_mm": self.min_silkscreen_width_mm,
             "min_silkscreen_height_mm": self.min_silkscreen_height_mm,
             "min_solder_mask_dam_mm": self.min_solder_mask_dam_mm,

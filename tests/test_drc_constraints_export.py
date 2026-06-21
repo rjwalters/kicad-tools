@@ -64,7 +64,12 @@ def test_project_rules_match_profile_minimums():
     assert pro_rules["min_via_annular_width"] == _MICRO_VIA_FLOOR_ANNULAR_MM
     assert pro_rules["min_through_hole_diameter"] == rules.min_hole_diameter_mm
     assert pro_rules["min_copper_edge_clearance"] == rules.min_copper_to_edge_mm
-    assert pro_rules["min_hole_to_hole"] == rules.min_hole_to_edge_mm
+    # #3842: min_hole_to_hole maps from the dedicated drill-to-drill spec,
+    # NOT the hole-to-edge spec (which is a different rule). For this profile
+    # the two differ (hole_to_edge=0.4, hole_to_hole=0.5), so this also
+    # guards against the old alias bug.
+    assert pro_rules["min_hole_to_hole"] == rules.min_hole_to_hole_mm
+    assert rules.min_hole_to_hole_mm != rules.min_hole_to_edge_mm
 
 
 def test_project_rules_change_with_layer_config():
