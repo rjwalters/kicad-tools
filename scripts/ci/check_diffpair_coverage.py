@@ -122,11 +122,31 @@ DIFFPAIR_RULE_IDS: tuple[str, ...] = (
 # router finally converges these pairs, drop the entry (or lower it) and the
 # gate tightens automatically.
 #
+# !!! RE-ROUTE vs COMMITTED (Issue #3828 doctor pass, June 21 2026) !!!
+# This baseline is the DIFF-PAIR-ONLY slice and is INDEPENDENT of the total
+# error-count allowlist floor (.github/routed-drc-tolerance.yml).  The binding
+# CI gate (``Diff-Pair Routing Regression``) RE-ROUTES board 06 from scratch
+# (no ``--skip-route``) and measures the re-routed PCB.  That re-route is
+# DETERMINISTIC but does NOT byte-reproduce the committed artifact (the
+# reproducibility gap tracked in #3829): the re-route's TOTAL error count is
+# 25 (= these 18 diff-pair errors + 5 extra non-diff-pair ``clearance_*``
+# errors from the imperfect coupled fan-out + pour-repair vias), whereas the
+# committed artifact totals 20.  The total-count floor was re-baselined to the
+# re-route's 25 in routed-drc-tolerance.yml; THIS baseline stays at the true
+# diff-pair-only count (18 = 9 length_skew + 9 routing_continuity), which is
+# IDENTICAL on the committed artifact and the re-route.  ``check_zero_violations``
+# sums only the DIFFPAIR_RULE_IDS slice, so the 5 extra ``clearance_*`` errors
+# never leak into this assertion -- a 19th diff-pair violation still fails the
+# gate even though the total floor has 0 headroom over the re-route's 25.
+#
 # Keyed by repo-relative routed-PCB path (same key shape as the allowlist).
 DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
-    # Coupled diff-pair convergence is 0/9 on the committed artifact;
-    # 9 diffpair_length_skew + 9 diffpair_routing_continuity = 18.
-    # Tracked: #3540-#3544 (coupled upgrade-in-place re-opens the route fix).
+    # Coupled diff-pair convergence is 0/9 on BOTH the committed artifact and
+    # the deterministic seed-42 re-route; 9 diffpair_length_skew +
+    # 9 diffpair_routing_continuity = 18.  The re-route's 5 extra errors are
+    # ``clearance_*`` (NOT diffpair_*), so they are excluded from this slice.
+    # Tracked: #3540-#3544 (coupled upgrade-in-place re-opens the route fix);
+    # #3829 (re-route vs committed-artifact reproducibility gap).
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": 18,
 }
 
