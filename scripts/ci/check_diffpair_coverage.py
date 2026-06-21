@@ -129,24 +129,33 @@ DIFFPAIR_RULE_IDS: tuple[str, ...] = (
 # (no ``--skip-route``) and measures the re-routed PCB.  That re-route is
 # DETERMINISTIC but does NOT byte-reproduce the committed artifact (the
 # reproducibility gap tracked in #3829): the re-route's TOTAL error count is
-# 25 (= these 18 diff-pair errors + 5 extra non-diff-pair ``clearance_*``
-# errors from the imperfect coupled fan-out + pour-repair vias), whereas the
-# committed artifact totals 20.  The total-count floor was re-baselined to the
-# re-route's 25 in routed-drc-tolerance.yml; THIS baseline stays at the true
-# diff-pair-only count (18 = 9 length_skew + 9 routing_continuity), which is
-# IDENTICAL on the committed artifact and the re-route.  ``check_zero_violations``
-# sums only the DIFFPAIR_RULE_IDS slice, so the 5 extra ``clearance_*`` errors
-# never leak into this assertion -- a 19th diff-pair violation still fails the
-# gate even though the total floor has 0 headroom over the re-route's 25.
+# 33 (= these 18 diff-pair errors + 5 extra non-diff-pair ``clearance_*``
+# errors from the imperfect coupled fan-out + pour-repair vias + 6
+# pre-existing sub-0.5 mm ``dimension_drill_clearance`` true-positives newly
+# surfaced by Issue #3842's corrected ``min_hole_to_hole_mm`` gate -- board
+# layout fix tracked in #3847), whereas the committed artifact totals 24.
+# The total-count floor was re-baselined to the re-route's 33 in
+# routed-drc-tolerance.yml (was 25 before #3842 surfaced the drills); THIS
+# baseline stays at the true diff-pair-only count
+# (18 = 9 length_skew + 9 routing_continuity), which is IDENTICAL on the
+# committed artifact and the re-route.  ``check_zero_violations`` sums only
+# the DIFFPAIR_RULE_IDS slice, so neither the 5 extra ``clearance_*`` errors
+# NOR the 6 ``dimension_drill_clearance`` drills leak into this assertion --
+# a 19th diff-pair violation still fails the gate even though the total floor
+# has 0 headroom over the re-route's 33.
 #
 # Keyed by repo-relative routed-PCB path (same key shape as the allowlist).
 DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
     # Coupled diff-pair convergence is 0/9 on BOTH the committed artifact and
     # the deterministic seed-42 re-route; 9 diffpair_length_skew +
-    # 9 diffpair_routing_continuity = 18.  The re-route's 5 extra errors are
-    # ``clearance_*`` (NOT diffpair_*), so they are excluded from this slice.
+    # 9 diffpair_routing_continuity = 18.  The re-route's extra errors are
+    # ``clearance_*`` (5) and ``dimension_drill_clearance`` (6, the sub-0.5mm
+    # drill true-positives surfaced by Issue #3842's min_hole_to_hole gate;
+    # board-layout fix tracked in #3847) -- NONE are diffpair_*, so they are
+    # all excluded from this slice and the baseline stays 18.
     # Tracked: #3540-#3544 (coupled upgrade-in-place re-opens the route fix);
-    # #3829 (re-route vs committed-artifact reproducibility gap).
+    # #3829 (re-route vs committed-artifact reproducibility gap);
+    # #3847 (sub-0.5mm drill re-spacing, #3842 rule surfaced these).
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": 18,
 }
 

@@ -783,9 +783,31 @@ class TestBoard06StrictGateGuard:
     ``.kicad_dru``.  The remaining 21 -> 18 is the diff-pair quality block
     (9 ``diffpair_length_skew`` + 9 ``diffpair_routing_continuity``; coupled
     convergence is still 0/9, exit clause (a) tracked in #3540-#3544).
+
+    Re-baselined 2026-06-21 (Issue #3842, 18 -> 24): the corrected
+    drill-to-drill gate now keys off a dedicated ``min_hole_to_hole_mm``
+    spec (canonical 0.5 mm fab default; the old code keyed off
+    ``min_clearance_mm`` and never fired below 0.5 mm).  The committed
+    board-06 artifact carries 6 genuine pre-existing
+    ``dimension_drill_clearance`` violations -- sub-0.5 mm drill pairs that
+    were always present but invisible to the broken check.  These are TRUE
+    POSITIVES, NOT new regressions from this PR; the board-layout fix
+    (re-spacing the drills to >= 0.5 mm) is tracked in **#3847**, the rule
+    change refs #3842 / #3830.  The +6 are ``dimension_drill_clearance``,
+    a DISTINCT family from the 18 diff-pair quality defects
+    (``diffpair_length_skew`` / ``diffpair_routing_continuity``), so the
+    diff-pair-only baseline (``DIFFPAIR_VIOLATION_BASELINE`` = 18 in
+    ``scripts/ci/check_diffpair_coverage.py``) is UNCHANGED -- the drill
+    errors do not leak into the diff-pair slice.  The pinned strict-gate
+    count rises 18 -> 24 (= 18 diff-pair + 6 drill); the gate still catches
+    a 25th (NEW) blocking error.  Exit clause: when #3847 re-spaces the
+    drills, drop this back to 18.
     """
 
-    EXPECTED_STRICT_GATE_ERRORS = 18
+    # 18 diff-pair quality defects + 6 pre-existing sub-0.5mm
+    # dimension_drill_clearance true-positives surfaced by Issue #3842's
+    # min_hole_to_hole gate (board-layout fix tracked in #3847).
+    EXPECTED_STRICT_GATE_ERRORS = 24
     EXPECTED_ADVISORY_CONNECTIVITY = 2
 
     @pytest.fixture(scope="class")
@@ -871,9 +893,11 @@ class TestBoard06StrictGateGuard:
         * A router improvement that DROPPED the count below 18 -- in that
           case tighten ``EXPECTED_STRICT_GATE_ERRORS`` in the SAME PR
           and tighten the allowlist in ``.github/routed-drc-tolerance.yml``
-          (currently 18; the strict gate's drift warning will be your
-          guide).  Driving the remaining 18 to 0 is the diff-pair coupled-
-          convergence work tracked in #3540-#3544.
+          (currently 24 = 18 diff-pair + 6 drill; the strict gate's drift
+          warning will be your guide).  Driving the 18 diff-pair errors to
+          0 is the coupled-convergence work tracked in #3540-#3544; the 6
+          ``dimension_drill_clearance`` true-positives (Issue #3842 gate)
+          are the board-layout fix tracked in #3847.
         """
         from kicad_tools.validate.checker import DRCChecker
 
@@ -900,8 +924,9 @@ class TestBoard06StrictGateGuard:
             f"boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb`` "
             f"to confirm and either revert the refresh or accept the new "
             f"floor.  If a router improvement DECREASED this, tighten "
-            f"``EXPECTED_STRICT_GATE_ERRORS`` AND "
-            f"``.github/routed-drc-tolerance.yml:767`` in the same PR."
+            f"``EXPECTED_STRICT_GATE_ERRORS`` AND the board-06 "
+            f"``tolerances:`` entry in "
+            f"``.github/routed-drc-tolerance.yml`` in the same PR."
         )
 
     def test_strict_gate_within_allowlist(self, strict_gate_result: dict) -> None:
