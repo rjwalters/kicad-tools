@@ -112,7 +112,7 @@ class TestMergeGeometricDrc:
         monkeypatch.setattr(
             runner_mod,
             "find_kicad_cli",
-            lambda: (Path("/fake/kicad-cli") if found else None),
+            lambda: Path("/fake/kicad-cli") if found else None,
         )
 
         def _fake_run(cmd, *args, **kwargs):

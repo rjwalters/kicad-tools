@@ -1827,9 +1827,13 @@ class TestSilkscreenRules:
 
         results = check_all_silkscreen(pcb, rules)
 
-        # Should have 2 violations (text + line)
+        # Should have 2 violations (text + line); this fixture has no pads or
+        # board outline so the geometric silk_over_copper / silk_edge_clearance
+        # checks contribute no violations.
         assert len(results) == 2
-        assert results.rules_checked == 3  # 3 rule types checked
+        # 5 rule types checked: line width, text height, legacy over-pad,
+        # geometric silk_over_copper, silk_edge_clearance.
+        assert results.rules_checked == 5
 
         # Check that both rule types are represented
         rule_ids = {v.rule_id for v in results.violations}

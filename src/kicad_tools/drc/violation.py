@@ -218,6 +218,7 @@ class ViolationType(Enum):
 
     # Silkscreen
     SILK_OVER_COPPER = "silk_over_copper"
+    SILK_EDGE_CLEARANCE = "silk_edge_clearance"
     SILK_OVERLAP = "silk_overlap"
     SILKSCREEN_LINE_WIDTH = "silkscreen_line_width"
     SILKSCREEN_TEXT_HEIGHT = "silkscreen_text_height"
