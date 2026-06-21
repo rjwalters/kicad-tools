@@ -151,9 +151,7 @@ def test_board_01_drc_clean_with_jlcpcb_rules() -> None:
     # clear them, which is out of scope for the DRC-rule change).
     _SILK_PLACEMENT_RULES = {"silk_over_copper", "silk_edge_clearance"}
     warn_count = sum(
-        1
-        for v in results.violations
-        if v.is_warning and v.rule_id not in _SILK_PLACEMENT_RULES
+        1 for v in results.violations if v.is_warning and v.rule_id not in _SILK_PLACEMENT_RULES
     )
 
     sample = [
