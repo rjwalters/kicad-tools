@@ -109,6 +109,41 @@ def test_check_pcb_tool_error_on_missing_file(tmp_path) -> None:
     assert "not found" in message.lower()
 
 
+def test_main_prints_measured_count_on_pass(tmp_path, monkeypatch, capsys) -> None:
+    """The measured blocking count is surfaced on stdout when the gate passes."""
+    helper = _load_helper()
+    pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+
+    monkeypatch.setattr(helper, "count_blocking", lambda _p: (7, [f"NET{i}" for i in range(7)]))
+
+    assert helper.main([str(pcb)]) == 0
+    out = capsys.readouterr().out
+    assert "MEASURED blocking_incomplete_count = 7" in out
+
+
+def test_main_prints_measured_count_on_regression(tmp_path, monkeypatch, capsys) -> None:
+    """The measured blocking count is surfaced on stdout EVEN when the gate fails.
+
+    Requirement from issue #3822 follow-up: CI must be able to read the real
+    count from the log even on the failing (> threshold) path so a >7 result
+    is observable rather than papered over.
+    """
+    helper = _load_helper()
+    pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+
+    monkeypatch.setattr(
+        helper,
+        "count_blocking",
+        lambda _p: (11, [f"NET{i}" for i in range(11)]),
+    )
+
+    assert helper.main([str(pcb)]) == 2
+    out = capsys.readouterr().out
+    assert "MEASURED blocking_incomplete_count = 11" in out
+
+
 def test_main_parses_max_blocking_arg(tmp_path, monkeypatch) -> None:
     """The --max-blocking CLI arg is wired through to check_pcb."""
     helper = _load_helper()

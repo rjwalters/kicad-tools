@@ -1457,9 +1457,22 @@ jobs:
     # (host routes board 05 to ~11 blocking, CI to 7).  Advisory until a repo
     # admin adds it to branch protection (same as the board 00/01/02/03/06/07
     # e2e jobs).
+    #
+    # TIMEOUT (90 min): board 05 is the heaviest re-route in the matrix.  The
+    # recipe re-routes 36 nets from scratch AND runs the per-net rescue loop
+    # (Issues #3471/#3474), which re-routes each partially-connected net at
+    # ~2-7 min apiece.  The first attempt at timeout-minutes: 30 (mirrored from
+    # board-03) was CANCELED mid-rescue ("The operation was canceled") after
+    # processing only HALL_A + 3 ISENSE nets, so the gate never produced a
+    # verdict.  The run was on track for ~45-55 min wall-clock, so the budget
+    # is set generously to 90 min to let the full route + rescue loop + gate
+    # run to completion and emit a REAL blocking-net count -- whether that is
+    # <= 7 (green) or > 7 (an honest failure carrying important data).  This is
+    # intentionally higher than every other job (next-highest is the 45-min
+    # Test job) because no other job runs the board-05 rescue loop from clean.
     name: Board 05 Routing Regression (blocking <= 7)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     container:
       image: kicad/kicad:10.0
       options: --user 0:0

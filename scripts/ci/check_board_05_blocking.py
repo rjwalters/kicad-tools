@@ -102,6 +102,19 @@ def check_pcb(pcb_path: Path, max_blocking: int) -> tuple[int, str]:
     except RuntimeError as e:
         return 1, str(e)
 
+    # Always surface the measured count + net names on plain stdout, BEFORE
+    # the pass/fail verdict, so CI logs record the real number on every path
+    # (pass, or regression with exit 2).  This is the authoritative figure CI
+    # reaches on a fresh full re-route -- print it unconditionally so it is
+    # readable even when the gate ultimately fails.
+    names_for_log = ", ".join(blocking_names) if blocking_names else "(none)"
+    print(
+        f"MEASURED blocking_incomplete_count = {count} "
+        f"(threshold <= {max_blocking})\n"
+        f"  blocking nets: {names_for_log}",
+        flush=True,
+    )
+
     names_suffix = f" [blocking nets: {', '.join(blocking_names)}]" if blocking_names else ""
 
     if count <= max_blocking:
