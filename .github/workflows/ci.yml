@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev
 
       # Issue #3464: continue-on-error was removed from both steps below.
       # It made the "Lint & Format" check always green regardless of
@@ -53,7 +53,7 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev
 
       # Issue #3512: the `Run mypy` step used to carry continue-on-error: true,
       # so the Type Check job was green regardless of mypy's exit code and
@@ -119,7 +119,7 @@ jobs:
         # Pin the interpreter via uv (parity with the other jobs that use
         # actions/setup-python with python-version: "3.12"); the container
         # image's own Python version is irrelevant.
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         # Issue #3436: `uv sync` does NOT build the native extension (see
@@ -175,7 +175,7 @@ jobs:
         # actions/setup-python with python-version: "3.12"). uv will install
         # the requested interpreter into its managed cache and create
         # .venv from it.
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Install nanobind
         run: uv pip install nanobind
@@ -293,7 +293,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev
 
       - name: Run kicad-cli round-trip smoke tests
         run: uv run pytest tests/test_kicad_cli_roundtrip.py -v --no-cov
@@ -372,7 +372,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.changed.outputs.files != ''
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev
 
       - name: Run kct check on each modified routed PCB
         if: steps.changed.outputs.files != ''
@@ -597,7 +597,7 @@ jobs:
         # Pin the interpreter via uv (parity with the sibling jobs that use
         # actions/setup-python with python-version: "3.12"); the container
         # image's own Python version is irrelevant.
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         # `uv sync` does NOT build the native extension (see repo CLAUDE.md
@@ -795,7 +795,7 @@ jobs:
         # Pin the interpreter via uv (parity with the sibling jobs that use
         # actions/setup-python with python-version: "3.12"); the container
         # image's own Python version is irrelevant.
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         # Issue #3146: ``uv sync`` does NOT build the native extension
@@ -923,7 +923,7 @@ jobs:
         # dev`` is required because ``kct check`` imports ``shapely`` for
         # the geometry-based DRC rules (see the [project.optional-dependencies]
         # dev block in pyproject.toml for the ``shapely>=2.0`` pin).
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         # ``uv sync`` does NOT build the native extension (see repo
@@ -1026,7 +1026,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         run: uv run kct build-native
@@ -1113,7 +1113,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         run: uv run kct build-native
@@ -1207,7 +1207,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         run: uv run kct build-native
@@ -1306,7 +1306,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         run: uv run kct build-native
@@ -1390,7 +1390,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         run: uv run kct build-native
@@ -1525,7 +1525,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        run: uv sync --extra dev --python 3.12
+        run: uv sync --frozen --extra dev --python 3.12
 
       - name: Build C++ router backend
         run: uv run kct build-native
