@@ -44,6 +44,14 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.24",
     "pydantic>=2.0",
+    # shapely is load-bearing for the correctness-critical copper paths
+    # (zone-fill clearance carving and the zone-vs-copper clearance DRC
+    # rules), so it is a CORE dependency rather than an optional extra
+    # (issue #3824).  shapely 2.x ships prebuilt manylinux/macOS/Windows
+    # wheels (vendored GEOS), so this imposes no system-library build
+    # burden on typical installs.  The ``geometry`` extra remains as a
+    # back-compat alias.
+    "shapely>=2.0",
 ]
 
 [project.urls]
@@ -85,7 +93,9 @@ kicad-fab-rules = "kicad_tools.cli.fab_rules_cmd:main"
 kicad-project-clean = "kicad_tools.cli.clean_cmd:main"
 
 [project.optional-dependencies]
-# Shapely-based board geometry engine
+# Shapely-based board geometry engine.  shapely is now a CORE dependency
+# (see ``[project] dependencies``); this extra is retained as a
+# back-compat alias so ``pip install kicad-tools[geometry]`` keeps working.
 geometry = [
     "shapely>=2.0",
 ]
@@ -189,6 +199,8 @@ all = [
     "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
+    # shapely is a core dependency; listed here too for explicitness.
+    "shapely>=2.0",
 ]
 # Development dependencies
 dev = [
@@ -211,10 +223,8 @@ dev = [
     "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
-    # Issue #3413 phase 4: the board 06 recipe's copper-union pour audit
-    # (and its committed-artifact regression test) require shapely.  The
-    # diffpair CI job and the test jobs install via --extra dev.
-    "shapely>=2.0",
+    # shapely is now a CORE dependency (issue #3824) so it no longer needs
+    # an explicit entry here; it is always installed with the package.
 ]
 
 [tool.hatch.build.targets.wheel]

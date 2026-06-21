@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from kicad_tools._shapely import require_shapely
 from kicad_tools.core.geometry import (
     point_to_segment_distance as _point_to_segment_distance,
 )
@@ -1107,6 +1108,13 @@ class SegmentZoneClearanceRule(DRCRule):
             DRCResults containing segment-vs-zone-fill shorts and
             clearance violations
         """
+        # shapely is a core dependency (issue #3824).  Guard up front so a
+        # broken/partial install fails with an actionable install hint
+        # instead of a raw ``ModuleNotFoundError`` deep inside the geometry
+        # query -- this rule is the one that catches the very shorts a
+        # missing shapely would otherwise let through silently.
+        require_shapely("zone-vs-segment clearance DRC")
+
         results = DRCResults()
         results.rules_checked = 1
 
@@ -1290,6 +1298,12 @@ class ViaZoneClearanceRule(DRCRule):
             DRCResults containing via/pad-vs-zone-fill shorts and
             clearance violations.
         """
+        # shapely is a core dependency (issue #3824).  Guard up front so a
+        # broken/partial install fails with an actionable install hint
+        # instead of a raw ``ModuleNotFoundError`` deep inside the geometry
+        # query.
+        require_shapely("zone-vs-via/pad clearance DRC")
+
         results = DRCResults()
         results.rules_checked = 1
 

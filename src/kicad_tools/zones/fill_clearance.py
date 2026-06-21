@@ -21,9 +21,11 @@ foreign-net copper.  Same-net pads/vias are never subtracted, so thermal
 relief / solid connections to the zone's own net are preserved.
 
 The correction operates directly on the parsed S-expression document so it
-needs neither kicad-cli nor the C++ router — only optional ``shapely`` for
-the polygon difference.  When ``shapely`` is unavailable the correction is
-skipped (the caller logs a hint) rather than producing a wrong fill.
+needs neither kicad-cli nor the C++ router — only ``shapely`` for the
+polygon difference.  ``shapely`` is a core dependency (issue #3824); if it
+is ever unavailable (a broken/partial install) the correctness-critical
+entry points fail **loud** via :func:`kicad_tools._shapely.require_shapely`
+rather than silently returning a non-clearance-correct fill.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from kicad_tools._shapely import require_shapely
 from kicad_tools.core.layers import via_spans_layer
 from kicad_tools.sexp import SExp
 
@@ -725,16 +728,16 @@ def force_solid_on_isolated_island_pads(doc: SExp, zone_uuids: set[str]) -> int:
     refill.  Larger fill lobes are never touched, so substantial copper is
     safe.  Returns the number of pads that received a new solid override.
 
-    A no-op (returns 0) when shapely is unavailable, since the island
-    geometry cannot be reasoned about without it.
+    Raises :class:`ModuleNotFoundError` with an actionable install hint
+    when ``shapely`` is unavailable: the island geometry cannot be
+    reasoned about without it, and silently returning ``0`` would let the
+    caller treat an unremediated fill as clean (issue #3824).
     """
     if not zone_uuids:
         return 0
-    try:
-        import shapely
-        from shapely.geometry import Polygon
-    except ImportError:
-        return 0
+    require_shapely("isolated-copper island remediation")
+    import shapely
+    from shapely.geometry import Polygon
 
     name_map = _build_net_name_map(doc)
     obstacles = _collect_obstacles(doc, shapely, name_map)
@@ -913,15 +916,18 @@ def apply_foreign_pad_clearance(
     The document is mutated in place.  Returns the number of
     ``filled_polygon`` nodes that were modified.
 
-    When ``shapely`` is not importable the function is a no-op and returns
-    ``0`` (the fill is left as kicad-cli produced it).
+    Raises :class:`ModuleNotFoundError` with an actionable install hint
+    when ``shapely`` is not importable.  This path is correctness-critical:
+    silently returning ``0`` (the old behavior) leaves foreign-net pad
+    clearances uncarved while reporting a clean fill, so a fab-ready board
+    would ship with real ``clearance_pad_zone`` shorts.  Failing loud
+    guarantees the caller never mistakes "shapely absent" for "nothing to
+    carve" (issue #3824).
     """
-    try:
-        import shapely
-        from shapely import make_valid
-        from shapely.geometry import Polygon
-    except ImportError:
-        return 0
+    require_shapely("foreign-net pad clearance carving")
+    import shapely
+    from shapely import make_valid
+    from shapely.geometry import Polygon
 
     name_map = _build_net_name_map(doc)
     obstacles = _collect_obstacles(doc, shapely, name_map)
