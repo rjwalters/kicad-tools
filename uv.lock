@@ -1963,7 +1963,7 @@ requires-dist = [
     { name = "rtree", marker = "extra == 'all'", specifier = ">=1.0" },
     { name = "rtree", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "rtree", marker = "extra == 'drc'", specifier = ">=1.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.14.10" },
     { name = "scikit-build-core", marker = "extra == 'native'", specifier = ">=0.8" },
     { name = "scikit-learn", marker = "extra == 'research'", specifier = ">=1.7.2" },
     { name = "shapely", specifier = ">=2.0" },
