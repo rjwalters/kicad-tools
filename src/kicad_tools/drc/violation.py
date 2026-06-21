@@ -76,6 +76,10 @@ def _init_type_category_map() -> None:
             ViolationType.SOLDER_MASK_BRIDGE: ViolationCategory.PLACEMENT,
             # Manufacturing: depends on fab capabilities
             ViolationType.COPPER_EDGE_CLEARANCE: ViolationCategory.MANUFACTURING,
+            # Thin copper sliver (Issue #3843): a fab-capability defect
+            # (the etch process cannot reliably reproduce sub-min-width
+            # copper), categorized with the other manufacturing defects.
+            ViolationType.COPPER_SLIVER: ViolationCategory.MANUFACTURING,
             ViolationType.EDGE_CLEARANCE_TRACE: ViolationCategory.MANUFACTURING,
             ViolationType.EDGE_CLEARANCE_PAD: ViolationCategory.MANUFACTURING,
             ViolationType.EDGE_CLEARANCE_PAD_HOLE: ViolationCategory.MANUFACTURING,
@@ -181,6 +185,11 @@ class ViolationType(Enum):
     # (parallel-coupling continuity), not edge-to-edge spacing.
     DIFFPAIR_ROUTING_CONTINUITY = "diffpair_routing_continuity"
     COPPER_EDGE_CLEARANCE = "copper_edge_clearance"
+    # Thin copper sliver: a single copper region locally narrower than the
+    # minimum reproducible copper width, detected via a morphological open
+    # (Issue #3843).  A fab-capability defect (under/over-etch hazard),
+    # not a clearance gap between two features.
+    COPPER_SLIVER = "copper_sliver"
     EDGE_CLEARANCE_TRACE = "edge_clearance_trace"
     EDGE_CLEARANCE_PAD = "edge_clearance_pad"
     EDGE_CLEARANCE_PAD_HOLE = "edge_clearance_pad_hole"
@@ -379,6 +388,14 @@ class ViolationType(Enum):
             # MUST be aliased explicitly -- the fuzzy fallback below would
             # otherwise match "via" and miscategorize this rule_id.
             "via_in_pad": cls.VIA_IN_PAD,
+            # Copper sliver rule from validate copper_sliver checker
+            # (Issue #3843).  MUST be aliased explicitly -- the fuzzy
+            # fallback below has no branch for "copper_sliver" (no
+            # "clearance"/"via"/"edge"/etc. substring) and would drop it
+            # to UNKNOWN, silently corrupting the violation ``type`` field
+            # for downstream consumers that filter by exact type value.
+            # Do NOT delete this as "redundant".
+            "copper_sliver": cls.COPPER_SLIVER,
         }
 
         alias_match = _ALIASES.get(s_lower)
