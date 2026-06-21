@@ -37,6 +37,8 @@ Gate policy is per-board (see the curator matrix on #3762):
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from kicad_tools.lvs.board_lvs import (
@@ -44,7 +46,12 @@ from kicad_tools.lvs.board_lvs import (
     LVSResult,
     compare_netlists,
 )
-from kicad_tools.lvs.copper_lvs import CopperLVSResult, compare_copper_netlist
+from kicad_tools.lvs.copper_lvs import (
+    CopperLVSMismatch,
+    CopperLVSResult,
+    compare_copper_netlist,
+    result_from_json,
+)
 
 # Boards that run LVS + emit ``lvs.json`` but are NOT yet copper/label clean.
 # Recipes for these boards must pass ``require_clean=False`` so a dirty
@@ -76,6 +83,118 @@ ADVISORY_LVS_BOARDS: frozenset[str] = frozenset(
 _LVS_SCHEMA_URL = "https://kicad-tools.org/schemas/lvs/v1.json"
 
 
+class FreshCopperCheckError(RuntimeError):
+    """The fresh out-of-process copper-LVS check could not be obtained.
+
+    Raised when the ``python -m kicad_tools.lvs.copper_lvs`` subprocess
+    fails to run or emits output we cannot parse.  The gate treats this as
+    fatal (fail closed) rather than silently trusting the in-process result.
+    """
+
+
+def _copper_mismatch_key(
+    result: CopperLVSResult,
+) -> tuple[bool, frozenset[tuple[str, str, str, str, str]]]:
+    """Canonical, order-independent identity of a copper-LVS result.
+
+    Two results are equal iff they agree on ``clean`` AND carry the same
+    set of mismatches.  Used to detect in-process-vs-fresh divergence on
+    identical bytes (#3838).
+    """
+    mismatches = frozenset((m.kind, m.net_a, m.net_b, m.pad_a, m.pad_b) for m in result.mismatches)
+    return (result.clean, mismatches)
+
+
+def _fresh_copper_compare(sch_path: Path, routed_pcb_path: Path) -> CopperLVSResult:
+    """Run :func:`compare_copper_netlist` in a fresh subprocess.
+
+    Spawns ``python -m kicad_tools.lvs.copper_lvs <sch> <pcb>`` so the
+    comparison loads the persisted ``.kicad_pcb`` bytes from a *clean*
+    interpreter — no in-process recipe fill/zone state, no cached netlist,
+    a fresh shapely-availability resolution.  This is byte-for-byte what
+    CI's fresh re-check (and any downstream consumer) will see.
+
+    Raises:
+        FreshCopperCheckError: when the subprocess exits non-zero or its
+            stdout cannot be parsed as a copper-LVS JSON result.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.lvs.copper_lvs",
+        str(sch_path),
+        str(routed_pcb_path),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:  # pragma: no cover - environment-dependent
+        raise FreshCopperCheckError(f"failed to spawn fresh copper-LVS check: {exc}") from exc
+
+    if proc.returncode != 0:
+        raise FreshCopperCheckError(
+            "fresh copper-LVS subprocess exited "
+            f"{proc.returncode}:\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
+    try:
+        payload = json.loads(proc.stdout)
+        return result_from_json(payload)
+    except (ValueError, KeyError) as exc:
+        raise FreshCopperCheckError(
+            f"could not parse fresh copper-LVS output: {exc}\nstdout was:\n{proc.stdout}"
+        ) from exc
+
+
+def _authoritative_copper_result(
+    sch_path: Path,
+    routed_pcb_path: Path,
+    *,
+    in_process: CopperLVSResult,
+) -> CopperLVSResult:
+    """Return the gate-authoritative copper-LVS result, failing closed.
+
+    Re-runs the copper comparison in a fresh subprocess (the byte-for-byte
+    on-disk view a CI re-check uses).  Returns the fresh result, but if the
+    fresh and in-process results disagree on ``clean`` or on their mismatch
+    set, the board is treated as DIRTY: a synthetic ``open`` mismatch is
+    appended recording the divergence so the gate trips and the divergence
+    is visible in ``lvs.json`` / the summary (#3838).
+    """
+    fresh = _fresh_copper_compare(sch_path, routed_pcb_path)
+
+    if _copper_mismatch_key(fresh) == _copper_mismatch_key(in_process):
+        return fresh
+
+    # Disagreement on identical bytes -> fail closed.  Surface BOTH legs so
+    # the divergence itself is debuggable, and union their mismatches so no
+    # real defect is hidden by whichever leg happened to look cleaner.
+    print(
+        "   copper-LVS GATE DIVERGENCE (#3838): in-process result disagrees "
+        "with a fresh out-of-process re-check on the same persisted bytes; "
+        "failing closed (treating board as DIRTY)."
+    )
+    print(f"      in-process: clean={in_process.clean} ({len(in_process.mismatches)} mismatch(es))")
+    print(f"      fresh:      clean={fresh.clean} ({len(fresh.mismatches)} mismatch(es))")
+
+    combined = dict.fromkeys(_copper_mismatch_key(in_process)[1] | _copper_mismatch_key(fresh)[1])
+    union = tuple(
+        CopperLVSMismatch(kind=k, net_a=a, net_b=b, pad_a=pa, pad_b=pb)
+        for (k, a, b, pa, pb) in combined
+    )
+    divergence = CopperLVSMismatch(
+        kind="open",
+        net_a="<gate-divergence>",
+        net_b="<gate-divergence>",
+        pad_a=f"in_process.clean={in_process.clean}",
+        pad_b=f"fresh.clean={fresh.clean}",
+    )
+    return CopperLVSResult(clean=False, mismatches=(divergence, *union))
+
+
 def write_lvs_report(
     sch_path: Path,
     routed_pcb_path: Path,
@@ -84,6 +203,7 @@ def write_lvs_report(
     require_clean: bool = True,
     run_copper: bool = True,
     run_label: bool = True,
+    fresh_copper_check: bool = True,
 ) -> tuple[bool, bool]:
     """Run copper + label LVS, write ``output/lvs.json``, optionally raise.
 
@@ -99,6 +219,14 @@ def write_lvs_report(
             include it in the gated ``clean`` decision.
         run_label: When ``True``, run the label-based comparator and include
             it in the gated ``clean`` decision.
+        fresh_copper_check: When ``True`` (default) and ``run_copper`` is
+            set, the copper-LVS result used for the gate is re-derived in a
+            *fresh subprocess* against the persisted ``routed_pcb_path``
+            bytes (issue #3838), so the gated decision equals what a clean
+            out-of-process re-check / CI sees.  If the in-process and fresh
+            results disagree the board is treated as DIRTY (fail closed).
+            Set ``False`` only in unit tests that monkeypatch the
+            in-process comparator and have no real files on disk.
 
     Returns:
         ``(copper_clean, label_clean)``.  A comparator that was not run is
@@ -108,6 +236,8 @@ def write_lvs_report(
     Raises:
         BoardNetlistMismatch: when ``require_clean`` and a gated comparator
             is dirty.  The report is still written before raising.
+        FreshCopperCheckError: when the fresh out-of-process copper check
+            cannot be obtained (subprocess failure / unparseable output).
         ValueError: when neither comparator is selected to run.
     """
     if not run_copper and not run_label:
@@ -119,6 +249,17 @@ def write_lvs_report(
 
     copper_result = compare_copper_netlist(sch_path, routed_pcb_path) if run_copper else None
     label_result = compare_netlists(sch_path, routed_pcb_path) if run_label else None
+
+    # Make the copper leg authoritative against the ON-DISK artifact: the
+    # in-process ``compare_copper_netlist`` above can see a cleaner board
+    # than a fresh process does (Python-post-processed fill that a fresh
+    # kicad-cli refill reverts; shapely-availability skew).  Re-derive the
+    # gated copper result in a fresh subprocess and fail closed if the two
+    # disagree on identical bytes (#3838).
+    if run_copper and fresh_copper_check and copper_result is not None:
+        copper_result = _authoritative_copper_result(
+            sch_path, routed_pcb_path, in_process=copper_result
+        )
 
     copper_clean = copper_result.clean if copper_result is not None else True
     label_clean = label_result.clean if label_result is not None else True

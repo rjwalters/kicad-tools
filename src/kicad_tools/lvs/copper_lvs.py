@@ -208,3 +208,77 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
     schematic_net_of_pad = _schematic_pin_to_net(sch_path)
     copper_partition = ConnectivityValidator(pcb_path).extract_pad_partition()
     return compare_partitions(schematic_net_of_pad, copper_partition)
+
+
+def result_to_json(result: CopperLVSResult) -> dict:
+    """Serialize a :class:`CopperLVSResult` to a JSON-safe dict.
+
+    Used by the ``python -m kicad_tools.lvs.copper_lvs`` subprocess
+    entrypoint (see :mod:`kicad_tools.lvs.recipe`'s fail-closed gate) so a
+    *fresh* out-of-process comparison can be marshalled back to the parent
+    recipe process for an authoritative, byte-for-byte agreement check.
+    """
+    return {
+        "clean": result.clean,
+        "mismatches": [
+            {
+                "kind": m.kind,
+                "net_a": m.net_a,
+                "net_b": m.net_b,
+                "pad_a": m.pad_a,
+                "pad_b": m.pad_b,
+            }
+            for m in result.mismatches
+        ],
+    }
+
+
+def result_from_json(payload: dict) -> CopperLVSResult:
+    """Reconstruct a :class:`CopperLVSResult` from :func:`result_to_json`."""
+    mismatches = tuple(
+        CopperLVSMismatch(
+            kind=m["kind"],
+            net_a=m["net_a"],
+            net_b=m["net_b"],
+            pad_a=m["pad_a"],
+            pad_b=m["pad_b"],
+        )
+        for m in payload.get("mismatches", ())
+    )
+    return CopperLVSResult(clean=bool(payload["clean"]), mismatches=mismatches)
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """CLI/subprocess entrypoint: emit a fresh copper-LVS result as JSON.
+
+    Usage::
+
+        python -m kicad_tools.lvs.copper_lvs <schematic> <routed_pcb>
+
+    Loads both files fresh (a clean interpreter, no in-process recipe
+    state), runs :func:`compare_copper_netlist`, and prints the result via
+    :func:`result_to_json` to stdout as a single JSON object.  This is the
+    authoritative on-disk check the recipe gate compares its in-process
+    result against (issue #3838).
+    """
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="python -m kicad_tools.lvs.copper_lvs",
+        description="Emit a fresh out-of-process copper-LVS result as JSON.",
+    )
+    parser.add_argument("schematic", help="Path to the .kicad_sch (root sheet).")
+    parser.add_argument("routed_pcb", help="Path to the routed .kicad_pcb.")
+    args = parser.parse_args(argv)
+
+    result = compare_copper_netlist(args.schematic, args.routed_pcb)
+    sys.stdout.write(json.dumps(result_to_json(result)))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
+    import sys
+
+    sys.exit(_main())
