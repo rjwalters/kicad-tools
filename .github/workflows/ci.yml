@@ -1562,3 +1562,141 @@ jobs:
           uv run python scripts/ci/check_board_05_blocking.py \
             --max-blocking 11 \
             /tmp/board05-ci/bldc_controller_routed.kicad_pcb
+
+  board-04-end-to-end:
+    # Issue #3839: end-to-end gate for board 04 ("stm32-devboard").  Two
+    # board-04 gaps shipped regressions undetected: (1) the recipe's main()
+    # success gate omitted the already-computed drc_success / copper-LVS
+    # verdict (fixed in generate_design.py this PR), and (2) board 04 had NO
+    # clean-room regen+validate CI job at all (boards 00/01/02 run the full
+    # asserter, 03/06/07 the --lvs-only asserter, 05 a blocking-net baseline;
+    # 04 was absent).  This job closes (2): it regenerates board 04 inside the
+    # CI container and validates the FRESH artifact OUT-OF-PROCESS against
+    # (a) the DRC allowlist and (b) copper-LVS.
+    #
+    # Board 04 has a committed output/lvs.json (clean: true), so this reuses
+    # the board-03 --lvs-only asserter pattern (NOT the full asserter: board 04
+    # carries 2 grandfathered dimension_drill_clearance drills + 1 advisory
+    # connectivity finding, so board-metrics classifies it status:partial /
+    # drc_violations:2, which the full status:ok / drc_violations:0 assertion
+    # would FAIL).
+    #
+    # DRC is ALLOWLIST-AWARE: the fresh routed PCB is staged over the
+    # repo-relative committed path and checked with scripts/ci/check_routed_drc.py,
+    # which keys tolerance off that path -- so the 2 known sub-0.5mm drills
+    # (.github/routed-drc-tolerance.yml: 2; board-layout fix tracked in #3847)
+    # are tolerated while a 3rd (NEW) blocking error fails the gate.  The
+    # connectivity finding is advisory (DRCChecker.ADVISORY_RULE_IDS), excluded
+    # from the gate count.
+    #
+    # RECIPE EXIT IS NOT GATED (|| true).  Board 04's route is subject to the
+    # same documented host-vs-CI router divergence as board 05 (#3822): a fresh
+    # regen may land a PARTIAL route (route_pcb returns False -> recipe exits 1)
+    # even though the resulting artifact is DRC-within-allowlist and copper-LVS
+    # clean (verified: a fresh host regen with a 9-net partial route still
+    # produces 2 drills + 0 shorts/0 opens).  The OUT-OF-PROCESS DRC + LVS
+    # asserters below are therefore the real gate -- they validate the RESULT,
+    # not the recipe's nondeterministic exit code.  This keeps the job GREEN on
+    # the current board while still catching a real DRC/LVS regression.
+    #
+    # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
+    # during regen, and per CLAUDE.md a missing native extension makes routing
+    # multi-minute-per-net.  Board 04's recipe (generate_design.py) takes only
+    # an output-dir positional arg (no --step / --seed).
+    #
+    # Advisory until a repo admin adds it to branch protection (same as the
+    # board 00/01/02/03/05/06/07 e2e jobs).
+    #
+    # TIMEOUT (45 min): board 04 re-routes ~9 signal nets + stitch + tie +
+    # quantize + fill.  Fewer nets than board 05's 36-net rescue loop (which
+    # needs 90 min), so 45 min leaves comfortable headroom over board 03's
+    # 30 min for the LQFP-48 escape work.
+    name: Board 04 End-to-End (LVS-only + DRC allowlist)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: kicad/kicad:10.0
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build C++ router backend
+        run: uv run kct build-native
+
+      - name: Regenerate board 04 from recipe (clean tmp directory)
+        # Board 04's recipe takes only an output-dir argument.  Its route is
+        # subject to the documented host-vs-CI router divergence (#3822) and may
+        # land a PARTIAL route (recipe exits 1) even though the resulting
+        # artifact is DRC-within-allowlist + copper-LVS clean, so tolerate a
+        # non-zero recipe exit (|| true) -- the out-of-process DRC + LVS
+        # asserters below are the real gate.  write_lvs_report(require_clean=True)
+        # still RAISES on an actual copper short/open, so a genuine LVS
+        # regression aborts the recipe before this step succeeds.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board04-ci
+          mkdir -p /tmp/board04-ci
+          uv run python boards/04-stm32-devboard/generate_design.py \
+            /tmp/board04-ci || true
+          test -f /tmp/board04-ci/lvs.json
+          test -f /tmp/board04-ci/stm32_devboard_routed.kicad_pcb
+
+      - name: Assert fresh DRC within allowlist (drill tolerance of 2)
+        # Stage the fresh routed PCB over the repo-relative committed path so
+        # scripts/ci/check_routed_drc.py finds the board-04 tolerance entry
+        # (.github/routed-drc-tolerance.yml: 2) and the jlcpcb-tier1 mfr
+        # override.  The gate tolerates the 2 grandfathered
+        # dimension_drill_clearance drills (#3847) + the advisory connectivity
+        # finding, but fails (exit 2) on a 3rd blocking error or any new rule.
+        run: |
+          set -euo pipefail
+          cp /tmp/board04-ci/stm32_devboard_routed.kicad_pcb \
+            boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
+          uv run python scripts/ci/check_routed_drc.py \
+            boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
+          # Restore the committed artifact so the workspace stays clean.
+          git checkout -- \
+            boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
+
+      - name: Emit board.json via kct board-metrics
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/board04-staging
+          mkdir -p /tmp/board04-staging/04-stm32-devboard/output
+          cp -r /tmp/board04-ci/. /tmp/board04-staging/04-stm32-devboard/output/
+          uv run kct board-metrics /tmp/board04-staging/04-stm32-devboard
+
+      - name: Assert artifacts + lvs.json clean (LVS-only)
+        # --lvs-only: assert artifact presence + lvs.json clean=true +
+        # board.json lvs_clean=true, but NOT status:ok / drc_violations:0
+        # (board 04 carries 2 allowlisted drills + 1 advisory connectivity ->
+        # status='partial').
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/check_board_00_e2e.py \
+            --stem stm32_devboard \
+            --lvs-only \
+            /tmp/board04-staging/04-stm32-devboard
