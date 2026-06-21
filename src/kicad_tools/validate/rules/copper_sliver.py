@@ -156,8 +156,8 @@ class CopperSliverRule(DRCRule):
         but it must be present so it does not *create* phantom slivers at
         fill-to-pad junctions).
         """
-        from shapely import Point
-        from shapely.geometry import LineString
+        from shapely import Point  # type: ignore[import-untyped]
+        from shapely.geometry import LineString  # type: ignore[import-untyped]
 
         copper_by_layer: dict[str, list[Any]] = {}
         layer_names = [layer.name for layer in pcb.copper_layers]
@@ -218,7 +218,11 @@ class CopperSliverRule(DRCRule):
     ) -> None:
         """Union one layer's copper, morph-open it, and emit residuals."""
         import shapely
-        from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
+        from shapely.geometry import (
+            GeometryCollection,
+            MultiPolygon,
+            Polygon,
+        )
 
         if not geoms:
             return
