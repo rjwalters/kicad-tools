@@ -1035,7 +1035,41 @@ tolerances:
   # gap (the re-route stops introducing the 5 extra clearance errors) drop
   # this floor back to 20; when exit clause (a) (#3540-#3544) lands coupled
   # convergence, drop the DIFFPAIR_VIOLATION_BASELINE and tighten toward ~2.
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 25
+  #
+  # !!! RE-BASELINE 25 -> 33 (Issue #3842, June 21 2026) !!!
+  # ----------------------------------------------------------------------
+  # PR #3842 / Issue #3842 gates the drill-to-drill check on a dedicated
+  # ``min_hole_to_hole_mm`` spec (canonical 0.5 mm fab default; the old
+  # code keyed off ``min_clearance_mm`` and never fired below 0.5 mm).  The
+  # corrected rule surfaces 6 genuine pre-existing sub-0.5 mm
+  # ``dimension_drill_clearance`` drill pairs that were ALWAYS present on
+  # board 06 but invisible to the broken check.  They are TRUE POSITIVES,
+  # NOT new regressions from this PR; the board-layout fix (re-spacing the
+  # drills to >= 0.5 mm) is tracked in **#3847**, rule change refs
+  # #3842 / #3830.
+  #   * RE-ROUTE TOTAL (the binding ``Diff-Pair Routing Regression`` gate,
+  #     un-filtered ``kct check --errors-only`` WITH sidecar): 25 -> 33
+  #     = 18 diff-pair quality defects (9 diffpair_length_skew +
+  #       9 diffpair_routing_continuity -- unchanged)
+  #     + 5 non-diff-pair clearance near-misses from the imperfect coupled
+  #       re-route fan-out + pour-repair vias (unchanged, #3829)
+  #     + 6 dimension_drill_clearance sub-0.5 mm true-positives (NEW to the
+  #       count only because the gate was broken; #3842 surfaces them).
+  #   * COMMITTED strict gate (``Routed PCB DRC Check``, advisory filtered):
+  #     18 -> 24 (= 18 diff-pair + 6 drill).  Pinned by
+  #     ``EXPECTED_STRICT_GATE_ERRORS`` = 24 in
+  #     tests/test_board_06_diffpair_test.py.  24 <= 33, so this floor still
+  #     admits the committed artifact and the strict gate emits its
+  #     by-design tightening ::warning:: (9 slack).
+  # The diff-pair-ONLY slice is STILL exactly 18 -- the 6 drill errors are
+  # ``dimension_drill_clearance`` (a DISTINCT family), so
+  # DIFFPAIR_VIOLATION_BASELINE (18) in check_diffpair_coverage.py is
+  # UNCHANGED and a 19th diff-pair violation still fails the gate.  This
+  # floor (33) governs only the TOTAL error count; it does NOT loosen the
+  # diff-pair regression guard, and the gate still fails on a 34th (NEW)
+  # error.  Exit clause: when #3847 re-spaces the drills, drop this floor
+  # back to 25 (and the strict-gate pin back to 18).
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 33
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -1590,6 +1624,25 @@ tolerances:
   # ``manufacturers:`` override below is retained (the micro-via escape is
   # only legal under tier-1's Capability+ process).  ``MAX_DRC_ERRORS`` in
   # tests/test_board_04_mfr_gate.py is tightened to 0 in the same commit.
+  #
+  # !!! RE-BASELINE: strict-0 -> 2 (Issue #3842, June 21 2026) !!!
+  # ----------------------------------------------------------------------
+  # PR #3842 / Issue #3842 gates the drill-to-drill check on a dedicated
+  # ``min_hole_to_hole_mm`` spec (canonical 0.5 mm fab default; previously
+  # the check keyed off ``min_clearance_mm`` and never fired below 0.5 mm).
+  # The corrected rule surfaces 2 genuine pre-existing
+  # ``dimension_drill_clearance`` violations on the committed board-04
+  # artifact -- a 0.350 mm hole-to-hole drill pair at PCB-local
+  # [26.84, 22.5] and [26.84, 22.0], BELOW the 0.500 mm fab minimum.  These
+  # are TRUE POSITIVES (real sub-0.5 mm drill geometry that the old code
+  # missed), NOT new regressions introduced by this PR; the board layout
+  # fix (re-spacing the drill pair to >= 0.5 mm) is tracked in **#3847**.
+  # Rule change refs #3842 / #3830.  The floor is set to exactly the
+  # measured count (2) so the gate still catches any NEW
+  # ``dimension_drill_clearance`` (or other blocking) regression beyond
+  # these two known drills -- a 3rd error fails the gate.  Exit clause:
+  # when #3847 re-spaces the drill pair, drop this entry back to strict-0.
+  boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: 2
 
   # Board 04 history (STM32F103C8T6 LQFP-48 devboard).  Tightened 60 -> 12
   # by Issue #2908.  The narrowing introduced in #2871 / #2874

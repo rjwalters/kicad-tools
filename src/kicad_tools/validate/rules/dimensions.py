@@ -182,12 +182,14 @@ class DimensionRules(DRCRule):
         design_rules: DesignRules,
         results: DRCResults,
     ) -> None:
-        """Check drill-to-drill clearance.
+        """Check drill-to-drill (hole-to-hole) clearance.
 
-        Uses min_clearance_mm as the minimum edge-to-edge distance between
-        drill holes. This applies to both vias and through-hole pads.
+        Uses min_hole_to_hole_mm as the minimum edge-to-edge distance between
+        drill holes. This is a dedicated fab spec (canonically 0.5 mm),
+        distinct from min_clearance_mm (copper trace/space). It applies to
+        both vias and through-hole pads.
         """
-        min_clearance = design_rules.min_clearance_mm
+        min_clearance = design_rules.min_hole_to_hole_mm
 
         # Collect all drill holes: vias + through-hole pads
         # Each entry: (position, drill_diameter, item_description,
@@ -248,7 +250,7 @@ class DimensionRules(DRCRule):
                             rule_id="dimension_drill_clearance",
                             severity=severity,
                             message=(
-                                f"{message_prefix}Drill-to-drill clearance "
+                                f"{message_prefix}Hole-to-hole clearance "
                                 f"{edge_distance:.3f}mm < "
                                 f"minimum {min_clearance:.3f}mm"
                             ),

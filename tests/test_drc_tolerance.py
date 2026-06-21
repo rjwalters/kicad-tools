@@ -25,6 +25,9 @@ class MockDesignRules:
         self.min_via_drill_mm = kwargs.get("min_via_drill_mm", 0.3)
         self.min_via_diameter_mm = kwargs.get("min_via_diameter_mm", 0.6)
         self.min_annular_ring_mm = kwargs.get("min_annular_ring_mm", 0.15)
+        # Drill-to-drill spec (#3842). Mirror min_clearance_mm when unset so
+        # these tolerance tests keep treating it as the drill threshold.
+        self.min_hole_to_hole_mm = kwargs.get("min_hole_to_hole_mm", self.min_clearance_mm)
 
 
 class MockNet:
