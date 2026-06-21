@@ -190,6 +190,8 @@ class TestVerdictWithBlockingClassification:
             warning_count=0,  # non-blocking errors not counted as warnings here
             passed=True,
         )
+        # Authoritative clean DRC so the not-run gate (#3825) does not apply.
+        result.drc.geometric_drc_ran = True
         assert result.verdict == AuditVerdict.READY
 
     def test_blocking_erc_error_blocks_ready(self):
@@ -248,4 +250,6 @@ class TestVerdictWithBlockingClassification:
             warning_count=0,
             passed=True,
         )
+        # Authoritative clean DRC so the not-run gate (#3825) does not apply.
+        result.drc.geometric_drc_ran = True
         assert result.verdict == AuditVerdict.READY

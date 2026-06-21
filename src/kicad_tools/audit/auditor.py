@@ -341,6 +341,21 @@ class AuditResult:
         ):
             return AuditVerdict.WARNING
 
+        # Non-authoritative DRC gate (issue #3825): a board may be clean per
+        # the internal --mfr rule engine (drc.passed, blocking_count == 0)
+        # while the geometric engine (kicad-cli pcb drc) never actually ran
+        # -- e.g. shapely ImportError or kicad-cli absent leaves
+        # geometric_drc_ran=False.  #3820 fixed the DRC *line label* but the
+        # overall verdict still returned READY, so kct audit / report.md
+        # shipped "READY FOR MANUFACTURING" for a board whose DRC was never
+        # authoritatively verified.  The internal engine is structurally
+        # blind to several KiCad violation classes (shorts, copper-edge
+        # clearance, mask bridges), so a clean-but-un-run DRC MUST NOT be
+        # READY.  Downgrade to WARNING (not NOT_READY) so backend-less CI
+        # does not regress to red, consistent with the #3820 policy.
+        if self.drc.passed and not self.drc.geometric_drc_ran:
+            return AuditVerdict.WARNING
+
         return AuditVerdict.READY
 
     @property
@@ -714,9 +729,15 @@ class ManufacturingAudit:
                 status.passed = False
 
         except Exception as e:
+            # A genuine ERC checker crash must NOT be coerced into a clean
+            # PASS (issue #3825, sibling of the #3817/#3820 DRC fix).  Surface
+            # it as a fail-loud could-not-verify result so the verdict gate
+            # (which reads blocking_error_count) cannot return a false READY.
             logger.warning(f"ERC check failed: {e}")
-            status.details = str(e)
-            status.passed = True  # Don't fail on check errors
+            status.details = f"ERC check could not run: {e}"
+            status.passed = False
+            status.error_count = max(status.error_count, 1)
+            status.blocking_error_count = max(status.blocking_error_count, 1)
 
         return status
 
@@ -1041,9 +1062,13 @@ class ManufacturingAudit:
                     )
 
         except Exception as e:
+            # A genuine connectivity checker crash must NOT be coerced into a
+            # clean PASS (issue #3825).  Mark it fail-loud as could-not-verify
+            # so the verdict cannot silently return READY when net
+            # connectivity was never actually checked.
             logger.warning(f"Connectivity check failed: {e}")
-            status.details = str(e)
-            status.passed = True  # Don't fail on check errors
+            status.details = f"Connectivity check could not run: {e}"
+            status.passed = False
 
         return status
 
@@ -1102,9 +1127,13 @@ class ManufacturingAudit:
             )
 
         except Exception as e:
+            # A genuine compatibility checker crash must NOT be coerced into a
+            # clean PASS (issue #3825).  compat.passed feeds the verdict gate
+            # directly (NOT_READY when False), so a false PASS here is exactly
+            # the false-READY anti-pattern.  Fail loud as could-not-verify.
             logger.warning(f"Compatibility check failed: {e}")
-            compat.details = str(e)
-            compat.passed = True  # Don't fail on check errors
+            compat.details = f"Compatibility check could not run: {e}"
+            compat.passed = False
 
         return compat
 
