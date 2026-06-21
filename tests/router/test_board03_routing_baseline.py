@@ -284,6 +284,15 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # does not raise the 0-error ceiling above; it just appears in the rule
     # breakdown.
     "silk_over_copper",
+    # Issue #3843/#3830 (June 20 2026): the new geometric copper_sliver rule
+    # (per-layer morphological open) flags a few ~0.04mm residual copper
+    # ribbons on the committed fill.  These arise from the
+    # committed-fill-vs-kicad-cli-refill divergence (the committed pour was
+    # not re-carved to byte-identical kicad-cli output), so they show up as
+    # WARNINGs here but vanish on a fresh refill.  It is WARNING severity, so
+    # it does NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) above;
+    # it only appears in the BY-RULE breakdown.  Tracked behavior, not errors.
+    "copper_sliver",
 }
 
 
