@@ -1633,8 +1633,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                 pour_nets_decl.append((net_name, NetClass.GROUND))
             else:
                 pour_nets_decl.append((net_name, NetClass.POWER))
+        # Issue #3818: ``kct route`` already runs an internal auto-pour
+        # (``auto_pour_if_missing`` with ``force_pour_nets=skip_nets``) that
+        # leaves a zone per pour net at its OWN edge inset.  Calling
+        # ``auto_create_zones_for_pour_nets`` additively here would stack a
+        # SECOND, overlapping same-net same-layer zone (this recipe's 0.5 mm
+        # inset) on top -- and KiCad's fill resolver awards the shared region
+        # to one of the two duplicates non-deterministically, leaving the
+        # other with ZERO ``filled_polygon`` regions.  The copper-union audit
+        # counts that empty duplicate as a "dead pour" and the match-group CI
+        # gate flakes PASS/FAIL on functionally-identical re-routes.
+        # ``replace_existing=True`` drops the router's zones first so the
+        # board ends with EXACTLY ONE authoritative zone per (net, layer),
+        # making the per-zone zero-fill term deterministic across runs.
         zone_count = auto_create_zones_for_pour_nets(
-            output_path, pour_nets_decl, edge_clearance=0.5
+            output_path, pour_nets_decl, edge_clearance=0.5, replace_existing=True
         )
         print(f"   Created {zone_count} zone(s) for {[n for n, _ in pour_nets_decl]}")
     except Exception as exc:  # pragma: no cover - degrade gracefully
