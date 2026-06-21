@@ -58,6 +58,11 @@ BOARD_07_PCB = (
 )
 BOARD_07_SIDECAR = REPO_ROOT / "boards" / "07-matchgroup-test" / "output" / "net_class_map.json"
 
+BOARD_06_PCB = (
+    REPO_ROOT / "boards" / "06-diffpair-test" / "output" / "diffpair_test_routed.kicad_pcb"
+)
+BOARD_06_SIDECAR = REPO_ROOT / "boards" / "06-diffpair-test" / "output" / "net_class_map.json"
+
 # The three rule families gated on the net_class_map.  Pinning these by name
 # is the load-bearing assertion: a regression that disables any one of them
 # would drop it from the WITH-sidecar set and fail this test.
@@ -247,25 +252,28 @@ class TestNetClassMapResolver:
             assert resolved is not None
             assert resolved.resolve() == BOARD_07_SIDECAR.resolve()
 
-    def test_board_06_resolves_in_process(self) -> None:
-        """Board 06 has no committed sidecar -> the resolver derives one."""
-        pcb = (
-            REPO_ROOT / "boards" / "06-diffpair-test" / "output" / "diffpair_test_routed.kicad_pcb"
-        )
-        committed = pcb.parent / "net_class_map.json"
-        if not pcb.is_file():
+    def test_board_06_resolves_committed_sidecar(self) -> None:
+        """Board 06's real PCB resolves to its committed sidecar.
+
+        Issue #3828: board 06's ``generate_design.py`` now emits a
+        ``net_class_map.json`` next to the routed PCB (the same sidecar its
+        in-pipeline ``run_drc`` and the diff-pair coverage gate consume), so
+        the diff-pair length-skew / routing-continuity rules are ACTIVE under
+        ``kct check`` on both the committed artifact and every CI re-route.
+        That sidecar is committed alongside the routed PCB, so -- exactly like
+        board 07 -- the resolver yields the committed file directly rather than
+        falling back to in-process derivation.  (The in-process derivation path
+        is still covered generically by ``test_in_process_fallback_when_no_sidecar``.)
+        """
+        if not BOARD_06_PCB.is_file():
             pytest.skip("board 06 routed PCB not present")
-        assert not committed.exists(), (
-            "board 06 is expected to have NO committed sidecar (the in-process "
-            "fallback is what this test exercises)"
-        )
+        assert BOARD_06_SIDECAR.is_file(), "board 06 should ship a committed sidecar"
         resolver = _load_resolver_module()
-        with resolver.resolve_net_class_map_sidecar(pcb) as resolved:
+        with resolver.resolve_net_class_map_sidecar(BOARD_06_PCB) as resolved:
             assert resolved is not None
-            # Derived to a temp file, not the (absent) committed location.
-            assert resolved != committed
+            assert resolved.resolve() == BOARD_06_SIDECAR.resolve()
             data = json.loads(resolved.read_text())
-            assert len(data) > 0, "board 06's derived map should be non-empty"
+            assert len(data) > 0, "board 06's committed map should be non-empty"
 
 
 # ---------------------------------------------------------------------------
