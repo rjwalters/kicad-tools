@@ -560,12 +560,17 @@ class DRCChecker:
         return rule.check(self.pcb, self.design_rules)
 
     def check_silkscreen(self) -> DRCResults:
-        """Check silkscreen rules (line width, text height, over-pad).
+        """Check silkscreen rules.
 
         Validates:
-        - Minimum silkscreen line width
-        - Minimum silkscreen text height
-        - Silkscreen elements overlapping exposed pads
+        - Minimum silkscreen line width (``silkscreen_line_width``)
+        - Minimum silkscreen text height (``silkscreen_text_height``)
+        - Silkscreen overlapping exposed pads -- legacy centroid heuristic
+          (``silkscreen_over_pad``)
+        - Silkscreen text/graphics over pad mask apertures -- geometric shapely
+          check (``silk_over_copper``)
+        - Silkscreen text/graphics too close to the board edge -- geometric
+          shapely check (``silk_edge_clearance``)
 
         Returns:
             DRCResults containing silkscreen violations

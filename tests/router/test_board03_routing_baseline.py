@@ -278,6 +278,12 @@ EXPECTED_TOTAL_NETS = 13
 MAX_COMMITTED_DRC_ERRORS = 0
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
+    # Issue #3844: the new geometric silk_over_copper rule flags reference
+    # designators printed over a neighbor's pad mask aperture on this board
+    # (a real defect kicad-cli also reports).  It is WARNING severity, so it
+    # does not raise the 0-error ceiling above; it just appears in the rule
+    # breakdown.
+    "silk_over_copper",
 }
 
 
