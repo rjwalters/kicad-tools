@@ -51,13 +51,18 @@ from kicad_tools.lvs.copper_lvs import (
     compare_copper_netlist,
     compare_partitions,
 )
-from kicad_tools.lvs.recipe import ADVISORY_LVS_BOARDS, write_lvs_report
+from kicad_tools.lvs.recipe import (
+    ADVISORY_LVS_BOARDS,
+    FreshCopperCheckError,
+    write_lvs_report,
+)
 
 __all__ = [
     "ADVISORY_LVS_BOARDS",
     "BoardNetlistMismatch",
     "CopperLVSMismatch",
     "CopperLVSResult",
+    "FreshCopperCheckError",
     "LVSMismatch",
     "LVSResult",
     "_ref_of",
