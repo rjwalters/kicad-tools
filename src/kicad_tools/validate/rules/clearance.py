@@ -77,6 +77,14 @@ class CopperElement:
     # avoid re-reporting the same geometric pair on every spanned layer
     # (the endpoint-layer scan already covers them).
     explicit_layers: tuple[str, ...] = ()
+    # For pads: a precomputed shapely polygon of the TRUE copper outline
+    # (roundrect/oval honored) in board coordinates.  When two elements
+    # both carry a polygon -- or one polygon plus one circular via -- the
+    # clearance is computed via exact shapely geometry instead of the
+    # analytic axis-aligned-rectangle formulas, which over-approximate
+    # rounded corners and produce phantom sub-10um shorts (issue #3826).
+    # ``None`` for segments and vias (which use the analytic disc path).
+    polygon: object | None = None
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -95,8 +103,13 @@ class CopperElement:
         """Create from a PCB pad with footprint context."""
         # Transform pad position from footprint-local to board coordinates
         abs_x, abs_y = _transform_pad_position(pad, footprint)
-        # Transform pad dimensions to axis-aligned bounding box
+        # Transform pad dimensions to axis-aligned bounding box (retained
+        # for the AABB-bounds fast path / location reporting).
         width, height = _transform_pad_dimensions(pad, footprint)
+        # Build the TRUE copper outline (roundrect/oval honored) so the
+        # pad-pad clearance path can use exact geometry instead of the
+        # over-approximating analytic AABB formulas (issue #3826).
+        polygon = _pad_polygon(pad, footprint)
         return cls(
             element_type="pad",
             layer="*",  # Pads can span multiple layers
@@ -104,6 +117,7 @@ class CopperElement:
             geometry=(abs_x, abs_y, width, height),
             reference=f"{footprint.reference}-{pad.number}",
             net_name=pad.net_name if pad.net_number != 0 else "",
+            polygon=polygon,
         )
 
     @classmethod
@@ -186,6 +200,74 @@ def _transform_pad_dimensions(pad: Pad, footprint: Footprint) -> tuple[float, fl
     new_height = width * sin_a + height * cos_a
 
     return new_width, new_height
+
+
+def _pad_polygon(pad: Pad, footprint: Footprint):
+    """Return a shapely polygon of a pad's copper in board coordinates.
+
+    Unlike :func:`_transform_pad_dimensions` (which returns only an
+    axis-aligned bounding box and therefore over-approximates rounded
+    corners), this builds the *true* copper outline honoring
+    ``pad.shape``:
+
+    * ``circle`` (and ``oval``/``obround`` with ``w == h``) -> exact disc.
+    * ``oval`` / ``obround`` -> stadium / capsule (rectangle core with
+      semicircular caps on the minor axis).
+    * ``roundrect`` -> rectangle with rounded corners of radius
+      ``roundrect_rratio * min(w, h)`` (KiCad default ratio 0.25).
+    * ``rect`` (and any unknown shape) -> exact rectangle, with no
+      over-approximation.
+
+    The polygon is built around the origin from the pad's *local* size,
+    rotated by the total rotation (``footprint.rotation + pad.rotation``)
+    and translated to the pad's absolute board position.  Modeling the
+    rounded geometry instead of an AABB removes the sub-10-micron phantom
+    corner overlaps that KiCad's true geometry never sees (issue #3826).
+
+    Returns ``None`` for degenerate (non-positive) sizes so callers can
+    skip them.
+    """
+    require_shapely("pad clearance geometry")
+    import shapely
+    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+    from shapely.geometry import Point
+
+    cx, cy = _transform_pad_position(pad, footprint)
+    w, h = pad.size  # LOCAL size -- the rotation below orients the polygon
+    if w <= 0 or h <= 0:
+        return None
+
+    total_rot = footprint.rotation + getattr(pad, "rotation", 0.0)
+    shape = pad.shape
+
+    if shape == "circle" or (shape in ("oval", "obround") and abs(w - h) < 1e-6):
+        # Symmetric disc -- rotation and the (origin) translate are no-ops
+        # on a circle, so build it directly at the board position.
+        return Point(cx, cy).buffer(min(w, h) / 2.0)
+
+    if shape in ("oval", "obround"):
+        # Stadium / capsule: a core rectangle shrunk by the minor
+        # half-axis on the long dimension, buffered by that radius so the
+        # short ends become true semicircles.
+        r = min(w, h) / 2.0
+        if w >= h:
+            core = shapely.box(-(w / 2.0 - r), 0.0, (w / 2.0 - r), 0.0)
+        else:
+            core = shapely.box(0.0, -(h / 2.0 - r), 0.0, (h / 2.0 - r))
+        poly = core.buffer(r)
+    elif shape == "roundrect":
+        rr = getattr(pad, "roundrect_rratio", 0.25)
+        r = rr * min(w, h)
+        if r <= 0:
+            poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
+        else:
+            inner = shapely.box(-(w / 2.0 - r), -(h / 2.0 - r), (w / 2.0 - r), (h / 2.0 - r))
+            poly = inner.buffer(r, join_style=1)  # round joins -> rounded corners
+    else:  # "rect" and any unknown shape -> exact rectangle (no over-approx)
+        poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
+
+    poly = rotate(poly, total_rot, origin=(0, 0), use_radians=False)
+    return translate(poly, cx, cy)
 
 
 # _point_to_segment_distance and _segment_to_segment_distance are imported
@@ -433,8 +515,76 @@ def _rect_segment_centerline_distance(
     return min(candidates)
 
 
+def _element_to_shapely_geom(elem: CopperElement):
+    """Return a shapely geometry for a pad/via copper element.
+
+    Pads carry a precomputed ``polygon`` (true outline).  Vias (and any
+    element without a polygon) are represented as a circle buffered around
+    their center using the AABB diameter.  Returns ``None`` if no geometry
+    can be built.
+    """
+    if elem.polygon is not None:
+        return elem.polygon
+    from shapely.geometry import Point
+
+    x, y, w, h = elem.geometry
+    radius = max(w, h) / 2.0
+    if radius <= 0:
+        return None
+    return Point(x, y).buffer(radius)
+
+
+def _polygon_pair_clearance(
+    c1: CopperElement, c2: CopperElement
+) -> tuple[float, float, float] | None:
+    """Exact shapely clearance between two pad/via copper shapes.
+
+    Used when at least one element carries a true pad polygon.  Returns
+    ``(clearance_mm, loc_x, loc_y)`` with the standard sign convention
+    (negative when the shapes overlap), or ``None`` if a geometry could
+    not be built (caller falls back to the analytic path).
+    """
+    require_shapely("pad-pad clearance geometry")
+    g1 = _element_to_shapely_geom(c1)
+    g2 = _element_to_shapely_geom(c2)
+    if g1 is None or g2 is None:
+        return None
+
+    inter = g1.intersection(g2)
+    if not inter.is_empty and inter.area > 0:
+        # Real area overlap: most-negative clearance.  Approximate the
+        # penetration depth by the largest dimension of the
+        # intersection's bounding box -- monotonic in overlap and always
+        # < 0, which is all the DRC gate needs (a real short).
+        minx, miny, maxx, maxy = inter.bounds
+        depth = max(maxx - minx, maxy - miny)
+        clearance = -depth
+        loc_x = (minx + maxx) / 2.0
+        loc_y = (miny + maxy) / 2.0
+        return clearance, loc_x, loc_y
+
+    # Disjoint, or merely touching at a point/edge (zero-area
+    # intersection).  ``distance`` is 0 for a touch, which is the correct
+    # edge-to-edge clearance.
+    dist = g1.distance(g2)
+    from shapely.ops import nearest_points
+
+    p1, p2 = nearest_points(g1, g2)
+    loc_x = (p1.x + p2.x) / 2.0
+    loc_y = (p1.y + p2.y) / 2.0
+    return dist, loc_x, loc_y
+
+
 def _circle_circle_clearance(c1: CopperElement, c2: CopperElement) -> tuple[float, float, float]:
     """Calculate clearance between two pads/vias.
+
+    When either element carries a precomputed pad polygon (roundrect /
+    oval / rect pads), the clearance is computed with exact shapely
+    geometry so rounded corners are not over-approximated as a bounding
+    box (which produced phantom sub-10um pad-pad shorts -- issue #3826).
+    The analytic disc/AABB path below is retained for the common via-via
+    case (pure circles), where it is exact and avoids per-pair shapely
+    overhead.
 
     For vias (circular), uses circle-to-circle distance.
     For rectangular pads, uses axis-aligned rectangle-to-rectangle distance.
@@ -442,6 +592,15 @@ def _circle_circle_clearance(c1: CopperElement, c2: CopperElement) -> tuple[floa
     """
     x1, y1, w1, h1 = c1.geometry
     x2, y2, w2, h2 = c2.geometry
+
+    # Exact-geometry path: when at least one element is a pad with a true
+    # copper polygon, use shapely so rounded corners are modeled
+    # faithfully.  A circular via (no polygon) is represented as a
+    # buffered point; this keeps pad-via and pad-pad pairs exact.
+    if c1.polygon is not None or c2.polygon is not None:
+        result = _polygon_pair_clearance(c1, c2)
+        if result is not None:
+            return result
 
     # Check if elements are circular (vias or square pads)
     is_circular_1 = c1.element_type == "via" or abs(w1 - h1) < 0.001
@@ -954,7 +1113,7 @@ class _ZoneFill:
     polygon: object  # shapely (Multi)Polygon
 
 
-def _repair_fill_polygon(poly):  # type: ignore[no-untyped-def]
+def _repair_fill_polygon(poly):
     """Repair an invalid fill ring, preserving every copper lobe.
 
     Stale fills can carry self-touching outlines (KiCad traces knockout
@@ -1352,16 +1511,13 @@ class ViaZoneClearanceRule(DRCRule):
                         continue
                     if not _pad_on_layer(pad, layer):
                         continue
-                    abs_x, abs_y = _transform_pad_position(pad, fp)
-                    width, height = _transform_pad_dimensions(pad, fp)
-                    if width <= 0 or height <= 0:
+                    # Build the TRUE pad copper outline (roundrect/oval
+                    # honored) rather than an axis-aligned bounding box so
+                    # rounded corners do not produce phantom sub-10um
+                    # shorts against foreign-net fills (issue #3826).
+                    shape = _pad_polygon(pad, fp)
+                    if shape is None:
                         continue
-                    shape = shapely.box(
-                        abs_x - width / 2.0,
-                        abs_y - height / 2.0,
-                        abs_x + width / 2.0,
-                        abs_y + height / 2.0,
-                    )
                     ref = f"{fp.reference}-{pad.number}"
                     self._query_and_check(
                         tree,

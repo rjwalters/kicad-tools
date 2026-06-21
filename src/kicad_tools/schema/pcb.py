@@ -165,6 +165,13 @@ class Pad:
     drill: float = 0.0
     solder_mask_margin: float | None = None
     uuid: str = ""
+    # Per-pad rotation in degrees (the optional third token of ``(at x y angle)``),
+    # relative to the parent footprint. The pad's absolute rotation is
+    # ``footprint.rotation + pad.rotation``. Defaults to 0.
+    rotation: float = 0.0
+    # Corner-radius ratio for ``roundrect`` pads: radius = rratio * min(w, h).
+    # KiCad's default is 0.25 when ``(roundrect_rratio ...)`` is absent.
+    roundrect_rratio: float = 0.25
 
     @property
     def net(self) -> int:
@@ -183,17 +190,24 @@ class Pad:
             layers=[],
         )
 
-        # Position
+        # Position (and optional per-pad rotation as the third token)
         if at := sexp.find("at"):
             x = at.get_float(0) or 0.0
             y = at.get_float(1) or 0.0
             pad.position = (x, y)
+            pad.rotation = at.get_float(2) or 0.0
 
         # Size
         if size := sexp.find("size"):
             w = size.get_float(0) or 0.0
             h = size.get_float(1) or w
             pad.size = (w, h)
+
+        # Corner radius ratio for roundrect pads (default 0.25 when absent)
+        if rratio := sexp.find("roundrect_rratio"):
+            value = rratio.get_float(0)
+            if value is not None:
+                pad.roundrect_rratio = value
 
         # Layers
         if layers := sexp.find("layers"):
