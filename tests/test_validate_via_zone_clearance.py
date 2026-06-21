@@ -57,6 +57,8 @@ class _FakePad:
     net_name: str = "SIG"
     number: str = "1"
     rotation: float = 0.0
+    shape: str = "rect"
+    roundrect_rratio: float = 0.25
 
 
 @dataclass
@@ -334,6 +336,67 @@ class TestPadZone:
         fp = _FakeFootprint(pads=[pad])
         results = _run([zone], footprints=[fp])
         assert results.violations == []
+
+
+# ---------------------------------------------------------------------------
+# Rounded-pad geometry regression (Issue #3826)
+#
+# The fill occupies x,y in [100,110].  Its bottom-left corner is at
+# (100, 100).  We place a 1x1 mm pad in the third quadrant relative to
+# that corner so ONLY the pad's top-right corner is near the fill.  For a
+# roundrect/oval pad the rounded corner clears the fill, while the
+# square AABB used by the old code pokes into it -> phantom short.
+# ---------------------------------------------------------------------------
+
+
+class TestRoundedPadCornerNoPhantomShort:
+    # min_clearance well below the AABB poke-in so we isolate the
+    # short/overlap behavior, not a clearance graze.
+    _MIN_CLEARANCE = 0.001
+
+    def _pad_corner_overlap_setup(self, shape, rratio=0.25):
+        zone = _FakeZone(filled_polygons=[_SQUARE_FILL])
+        # AABB corner of the pad pokes ~0.06mm diagonally into the fill
+        # corner: place pad center so its top-right AABB corner is at
+        # (100.04, 100.04) -- inside the fill -- but the rounded corner
+        # (radius 0.25mm) is pulled back inboard and clears (100,100).
+        cx = 100.04 - 0.5
+        cy = 100.04 - 0.5
+        pad = _FakePad(position=(cx, cy), size=(1.0, 1.0), shape=shape, roundrect_rratio=rratio)
+        fp = _FakeFootprint(pads=[pad], reference="U3")
+        return zone, fp
+
+    def test_rect_pad_aabb_corner_overlaps_is_short(self):
+        # Control: a plain rect pad's sharp corner genuinely overlaps the
+        # fill corner, so a violation MUST be reported.
+        zone, fp = self._pad_corner_overlap_setup("rect")
+        results = _run([zone], footprints=[fp], min_clearance=self._MIN_CLEARANCE)
+        shorts = [v for v in results.violations if v.rule_id == "clearance_pad_zone"]
+        assert len(shorts) == 1, "rect pad with overlapping corner must short"
+
+    def test_roundrect_pad_corner_clears_no_phantom_short(self):
+        # The bug: the roundrect's rounded corner clears the fill, so the
+        # NEW true-geometry code must report NO short (old AABB code did).
+        zone, fp = self._pad_corner_overlap_setup("roundrect")
+        results = _run([zone], footprints=[fp], min_clearance=self._MIN_CLEARANCE)
+        shorts = [v for v in results.violations if v.rule_id == "clearance_pad_zone"]
+        assert shorts == [], "roundrect rounded corner must not phantom-short"
+
+    def test_oval_pad_corner_clears_no_phantom_short(self):
+        zone, fp = self._pad_corner_overlap_setup("oval")
+        results = _run([zone], footprints=[fp], min_clearance=self._MIN_CLEARANCE)
+        shorts = [v for v in results.violations if v.rule_id == "clearance_pad_zone"]
+        assert shorts == [], "oval (circular) corner must not phantom-short"
+
+    def test_roundrect_genuine_body_overlap_still_shorts(self):
+        # Guard: a roundrect pad whose BODY (not just the phantom corner)
+        # overlaps the fill must still be flagged.
+        zone = _FakeZone(filled_polygons=[_SQUARE_FILL])
+        pad = _FakePad(position=(100.4, 105.0), size=(1.0, 1.0), shape="roundrect")
+        fp = _FakeFootprint(pads=[pad], reference="U4")
+        results = _run([zone], footprints=[fp], min_clearance=self._MIN_CLEARANCE)
+        shorts = [v for v in results.violations if v.rule_id == "clearance_pad_zone"]
+        assert len(shorts) == 1, "deep roundrect body overlap must still short"
 
 
 # ---------------------------------------------------------------------------
