@@ -214,11 +214,16 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # after the rail to bridge from (299.72, 279.4) -> (309.88, 279.4) so
     # the C19 GND wire meets a real wire endpoint (closes the
     # ``pin_not_connected`` ERC error on C19's pin 2; see issue #3004).
-    # GND rail.  GND is already driven by AMS1117.GND (power_in pin
-    # type; the LDO symbol does NOT actually have a power_out GND, but
-    # the demo-board MOSFET source pins and the connector pins drive
-    # GND collectively).  Wire the GND symbol up to the rail's left
-    # endpoint so its pin meets a real wire endpoint.
+    # GND rail.  GND requires its own PWR_FLAG: every GND power symbol pin
+    # is ``power_input``, and none of the candidate drivers actually
+    # source power under ERC semantics.  AMS1117.GND is ``power_input``
+    # (only the LDO's VO pin is ``power_output``), and the MOSFET source
+    # pins / connector pins are ``passive``/``input`` -- none are
+    # ``power_output``.  Without the PWR_FLAG added below, every GND
+    # power_input pin (U1.GND included) fires ``power_pin_not_driven``.
+    # Wire the GND symbol (which sits BELOW the rail at RAIL_GND + 10,
+    # unlike +24V/+5V which sit above) up to the rail's left endpoint so
+    # its pin meets a real wire endpoint.
     sch.add_rail(RAIL_GND, x_start=X_POWER_IN, x_end=X_CONNECTORS + 40, net_label="GND")
     sch.add_power("power:GND", x=X_POWER_IN, y=RAIL_GND + 10, rotation=0)
     sch.add_wire(
@@ -226,6 +231,23 @@ def create_bldc_controller(output_dir: Path) -> Path:
         (X_POWER_IN, RAIL_GND),
         warn_on_collision=False,
     )
+    # PWR_FLAG marks GND as an externally driven power source.  GND power
+    # symbols are power_input pins, and the only candidate drivers
+    # (AMS1117.GND, MOSFET sources, connector pins) are power_input/passive,
+    # NOT power_output -- so without this flag every GND power_input pin
+    # (U1.GND included) fires ``power_pin_not_driven``.  Placed 7mm east of
+    # the GND symbol to clear it, mirroring the +24V PWR_FLAG at line ~159.
+    # The flag wire runs UP from RAIL_GND + 10 to RAIL_GND (the GND symbol
+    # is below the rail).  The X_POWER_IN + 7 column is shared with the
+    # +24V PWR_FLAG but at a different y (RAIL_VMOTOR vs RAIL_GND), so
+    # there is no overlap.
+    sch.add_pwr_flag(X_POWER_IN + 7, RAIL_GND + 10)
+    sch.add_wire(
+        (X_POWER_IN + 7, RAIL_GND + 10),
+        (X_POWER_IN + 7, RAIL_GND),
+        warn_on_collision=False,
+    )
+    sch.add_junction(X_POWER_IN + 7, RAIL_GND)
     # GND-rail right-edge extension covering the gate-driver bypass-cap
     # column.  Snapped x's are 299.72 (rail end) and 309.88 (C19 pin 2 x).
     sch.add_wire((299.72, RAIL_GND), (309.88, RAIL_GND), warn_on_collision=False)
