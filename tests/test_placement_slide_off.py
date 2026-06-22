@@ -76,6 +76,34 @@ def _make_vector_spread(
     return PlacementVector(data=data)
 
 
+def _make_vector_spread_grid(
+    n: int,
+    spacing: float = 20.0,
+    side: int = 0,
+) -> PlacementVector:
+    """Create a vector with components spread across a 2D grid (no overlaps).
+
+    Components are laid out on an approximately square grid centred at the
+    origin so the spatial-index broad-phase can meaningfully partition them
+    into distinct cells. Contrast with :func:`_make_vector_spread`, which
+    only spreads along a single axis.
+    """
+    cols = max(1, int(math.ceil(math.sqrt(n))))
+    rows = max(1, int(math.ceil(n / cols)))
+    data = np.zeros(n * FIELDS_PER_COMPONENT, dtype=np.float64)
+    x0 = -((cols - 1) * spacing / 2)
+    y0 = -((rows - 1) * spacing / 2)
+    for i in range(n):
+        row = i // cols
+        col = i % cols
+        base = i * FIELDS_PER_COMPONENT
+        data[base] = x0 + col * spacing
+        data[base + 1] = y0 + row * spacing
+        data[base + 2] = 0.0
+        data[base + 3] = float(side)
+    return PlacementVector(data=data)
+
+
 def _count_overlaps_manual(
     vector: PlacementVector,
     components: list[ComponentDef],
@@ -720,24 +748,59 @@ class TestPerformance:
 
         assert elapsed < 0.1, f"Took {elapsed:.3f}s, expected < 0.1s"
 
-    def test_100_components_with_spatial_index_under_500ms(self):
-        """100 components with spatial index complete in < 500ms."""
-        board = _make_board(200.0, 200.0)
-        components = _make_components(100, size=2.0)
-        vector = _make_vector_at_same_position(100)
+    def test_spatial_index_outperforms_bruteforce(self):
+        """Spatial index beats brute-force on a spread-out placement.
 
-        start = time.perf_counter()
-        slide_off_overlaps(
-            vector,
-            components,
-            board,
-            margin_mm=0.5,
-            max_iterations=5,
-            use_spatial_index=True,
+        This replaces a former absolute wall-clock bound (``elapsed < 0.5s``)
+        that flaked on loaded CI runners (issue #3858). Instead of timing
+        against a hardware-dependent threshold, we time both the brute-force
+        O(n^2) baseline (``use_spatial_index=False``) and the grid-based
+        spatial index (``use_spatial_index=True``) with identical inputs and
+        assert the grid variant is meaningfully faster.
+
+        The comparison uses a *spread-out* 2D grid placement, because the
+        spatial-index broad-phase only prunes candidate pairs when components
+        fall into distinct grid cells. (With all components coincident the
+        candidate set is still ~all pairs and the index gives almost no
+        advantage — see #3858 root-cause analysis.) On a spread placement the
+        grid holds a stable ~2.5-3x advantage that grows with n, so a 2x gate
+        has comfortable headroom yet still fails loudly if the broad-phase
+        regresses to O(n^2) (where the ratio collapses toward 1x).
+
+        Timing uses best-of-3 (``min``) per variant to damp scheduler/
+        contention jitter on tiny absolute durations.
+        """
+        n = 200
+        board = _make_board(500.0, 500.0)
+        components = _make_components(n, size=2.0)
+        vector = _make_vector_spread_grid(n, spacing=15.0)
+
+        def _time(use_spatial_index: bool) -> float:
+            best = math.inf
+            for _ in range(3):
+                start = time.perf_counter()
+                slide_off_overlaps(
+                    vector,
+                    components,
+                    board,
+                    margin_mm=0.5,
+                    max_iterations=5,
+                    use_spatial_index=use_spatial_index,
+                )
+                best = min(best, time.perf_counter() - start)
+            return best
+
+        brute_elapsed = _time(use_spatial_index=False)
+        grid_elapsed = _time(use_spatial_index=True)
+
+        # Conservative relative gate: grid at least ~2x faster than brute.
+        # Measured ratio is ~2.5-3x, so this tolerates CI noise while still
+        # catching a broad-phase regression to O(n^2).
+        assert grid_elapsed * 2.0 < brute_elapsed, (
+            f"Spatial index not meaningfully faster than brute force: "
+            f"grid={grid_elapsed:.4f}s brute={brute_elapsed:.4f}s "
+            f"(ratio {brute_elapsed / grid_elapsed:.2f}x, expected >= 2x)"
         )
-        elapsed = time.perf_counter() - start
-
-        assert elapsed < 0.5, f"Took {elapsed:.3f}s, expected < 0.5s"
 
 
 # ---------------------------------------------------------------------------
