@@ -1673,12 +1673,23 @@ jobs:
         # finding, but fails (exit 2) on a 3rd blocking error or any new rule.
         run: |
           set -euo pipefail
+          # Stage the fresh routed PCB over the repo-relative committed path:
+          # check_routed_drc.py keys the tolerance allowlist + mfr override off
+          # the path's repo-relative form (relative_to(cwd)), so the fresh
+          # artifact MUST live at the committed path for the board-04 entry
+          # (.github/routed-drc-tolerance.yml: 2) and the jlcpcb-tier1 override
+          # to resolve.  No cleanup is needed afterwards: the CI checkout is a
+          # throwaway workspace discarded when the job ends, nothing downstream
+          # reads the committed PCB, and (per #3854 review) the previous
+          # ``git checkout -- ...`` restore aborted the step with exit 128
+          # ("detected dubious ownership") because the kicad/kicad:10.0
+          # container runs as root over a checkout owned by another uid -- which
+          # SKIPPED the board-metrics + --lvs-only asserter steps below under
+          # ``set -euo pipefail``.  Every other board e2e job already avoids any
+          # git usage here; this matches that pattern.
           cp /tmp/board04-ci/stm32_devboard_routed.kicad_pcb \
             boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
           uv run python scripts/ci/check_routed_drc.py \
-            boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
-          # Restore the committed artifact so the workspace stays clean.
-          git checkout -- \
             boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
 
       - name: Emit board.json via kct board-metrics
