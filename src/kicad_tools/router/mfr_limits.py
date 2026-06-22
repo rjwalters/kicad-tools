@@ -33,6 +33,14 @@ class MfrLimits:
         min_via_annular: Minimum via annular ring width
         min_via_diameter: Computed minimum via diameter (drill + 2*annular)
         min_edge_clearance: Minimum copper-to-board-edge clearance
+        min_hole_to_hole: Minimum drill-to-drill (hole-to-hole) edge-to-edge
+            spacing in mm.  Distinct from ``min_clearance`` (copper trace/
+            space) -- this is the fab's drill-pitch floor, canonically
+            0.5mm.  Used by the router's via-placement guards (diff-pair
+            fan-out, escape, stitching) to reject candidates that would
+            emit a sub-fab-minimum drill pair, matching the validate-side
+            ``DesignRules.min_hole_to_hole_mm`` (#3846) and the DRC
+            ``dimension_drill_clearance`` rule (#3842).
         via_in_pad_supported: Whether the manufacturer supports via-in-pad
             (vias drilled directly inside SMD pads, requiring filled and
             plated-over via processing).  Default ``False`` (conservative).
@@ -51,6 +59,7 @@ class MfrLimits:
     min_via_drill: float
     min_via_annular: float
     min_edge_clearance: float = 0.0
+    min_hole_to_hole: float = 0.5
     via_in_pad_supported: bool = False
     cost_note: str | None = None
 

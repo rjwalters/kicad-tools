@@ -69,6 +69,19 @@ class DesignRules:
     via_diameter: float = 0.7  # mm (0.35 drill + 0.35 annular ring)
     via_clearance: float = 0.2  # mm
     min_drill_clearance: float = 0.102  # mm (minimum drill-to-drill spacing, including same-net)
+    # Manufacturer hole-to-hole (drill-to-drill) edge-to-edge floor (Issue #3855).
+    #
+    # Distinct from ``min_drill_clearance`` (the tiny 0.102mm same-net via-MERGE
+    # threshold used by grid.py / pathfinder.py / drc_nudge.py).  This is the
+    # real fab drill-pitch minimum (canonically 0.5mm), consulted by the
+    # via-PLACEMENT guards (diff-pair fan-out, escape, stitching) to reject a
+    # candidate via whose drill would sit within ``min_hole_to_hole`` edge-to-edge
+    # of any existing drill (via OR through-hole pad, ANY net).  Mirrors the
+    # validate-side ``manufacturers.base.DesignRules.min_hole_to_hole_mm`` (#3846)
+    # and the DRC ``dimension_drill_clearance`` rule (#3842) so the router
+    # pre-check and the DRC post-check agree.  Defaults to 0.5 so behavior is
+    # correct even when no manufacturer profile is threaded in.
+    min_hole_to_hole: float = 0.5  # mm
     grid_resolution: float = 0.1  # mm (routing grid)
     grid_origin_offset: tuple[float, float] = (
         0.0,
@@ -300,6 +313,26 @@ class DesignRules:
     # for designs that intentionally never stitch (single-layer, no-plane, etc.)
     # to avoid the small extra clearance reservation.
     stitch_via_halo: bool = True
+
+    def __post_init__(self) -> None:
+        """Populate ``min_hole_to_hole`` from the manufacturer profile.
+
+        Issue #3855: when a ``manufacturer`` is configured AND the caller left
+        ``min_hole_to_hole`` at its conservative default (0.5), pull the real
+        value from the manufacturer's :class:`MfrLimits` so the router's
+        via-placement guards enforce exactly the fab's drill-pitch floor.  An
+        explicitly-passed non-default ``min_hole_to_hole`` is left untouched,
+        and an unknown manufacturer falls back to the 0.5 default (no raise --
+        manufacturer validation belongs to the CLI layer, not the dataclass).
+        """
+        if self.manufacturer and self.min_hole_to_hole == 0.5:
+            try:
+                from .mfr_limits import get_mfr_limits
+
+                self.min_hole_to_hole = get_mfr_limits(self.manufacturer).min_hole_to_hole
+            except ValueError:
+                # Unknown manufacturer: keep the conservative 0.5 default.
+                pass
 
     @property
     def max_clearance(self) -> float:

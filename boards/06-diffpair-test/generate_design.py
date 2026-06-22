@@ -85,6 +85,27 @@ REQUIRE_POUR_CONNECTIVITY: bool = True
 # audit PASS, so a higher cap only costs wall time in failure scenarios.
 MAX_POUR_REPAIR_ROUNDS: int = 6
 
+# Issue #3855 / #3532: segment uuids the 45-degree quantizer must leave
+# UNTOUCHED because BOTH dogleg variants of that off-angle chord clip a
+# neighbouring via barrel (a new ``clearance_segment_via`` error), so the
+# skewed chord is the only manufacturable path through the corridor.  The
+# committed ``--seed 42`` artifact's diff-pair crossover chord on net 2
+# (USB2_D-, ``(112.679,109.947)->(116.616,108.602)``) is such a residual:
+# the default dogleg pushes the strict-gate count 24 -> 26 and the
+# axis-first variant 24 -> 27, while skipping it holds the pinned 24 (18
+# diff-pair + 1 drill + 5 clearance/via).  It stays off-angle and is
+# pinned by uuid in ``tests/test_fleet_45_census.py::DOCUMENTED_OFF_ANGLE``.
+#
+# This set is uuid-keyed and therefore SEED-SPECIFIC: a re-route with a
+# different seed regenerates segment uuids, so an unmatched entry is
+# simply a no-op (the quantizer skips nothing, doglegs every chord, and
+# the resulting count stays within the .github/routed-drc-tolerance.yml
+# floor of 33).  It exists so a deterministic ``--seed 42`` regeneration
+# reproduces the committed artifact's pinned 24-error baseline byte-for-
+# byte.  Exit clause: drop the uuid when a re-route's chord no longer
+# collides (the quantizer then snaps it 45-aligned by construction).
+QUANTIZE_SKIP_UUIDS: frozenset[str] = frozenset({"864fb9ee-effe-4a8c-8f8a-c93533e51a22"})
+
 
 # =============================================================================
 # Per-Protocol Net Class Declarations
@@ -628,7 +649,26 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     CLEAR = 0.15
     STUB_W = 0.15
     BRIDGE_W = 0.2
-    DRILL_CC = 0.45  # min center-to-center vs other drills
+    # Issue #3855: the repair via's DRILL.  Drill spacing must be enforced
+    # EDGE-TO-EDGE against the fab hole-to-hole floor (0.5 mm), not via a
+    # hardcoded center-to-center constant -- the same defect class #3851
+    # fixed in ``generate_pcb._via_ok``.  The old ``DRILL_CC = 0.45`` (c-c)
+    # let two 0.25 mm-drill vias sit 0.20 mm edge-to-edge (a
+    # ``dimension_drill_clearance`` true positive); 0.5 mm edge-to-edge is
+    # the manufacturable floor checked by the DRC rule (#3842).
+    REPAIR_VIA_DRILL = 0.25  # matches the "(drill 0.25)" emitted below
+    MIN_HOLE_TO_HOLE = 0.5  # fab drill-to-drill edge-to-edge floor
+
+    def _drills_clear(vx: float, vy: float, ex: float, ey: float, e_drill: float) -> bool:
+        """Edge-to-edge hole-to-hole guard (canonical DRC formula).
+
+        ``e_drill`` is the EXISTING drill diameter (mm).  Mirrors
+        :func:`kicad_tools.router.via_clearance.drill_hole_to_hole_clear`
+        so the recipe pre-check agrees with the DRC post-check.
+        """
+        center = math.hypot(vx - ex, vy - ey)
+        edge = center - REPAIR_VIA_DRILL / 2.0 - e_drill / 2.0
+        return edge + 1e-3 >= MIN_HOLE_TO_HOLE
 
     def _via_ok(net: str, vx: float, vy: float) -> bool:
         if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
@@ -641,13 +681,17 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False  # via-in-pad ban (same-net included)
             if pnet != net and vgeom.distance(geom) < CLEAR:
                 return False
-            if drill_r > 0 and math.hypot(vx - px, vy - py) < drill_r + 0.125 + 0.2:
+            # Issue #3855: drill hole-to-hole vs through-hole pad drills,
+            # edge-to-edge (drill_r is the pad's drill RADIUS).
+            if drill_r > 0 and not _drills_clear(vx, vy, px, py, drill_r * 2.0):
                 return False
         for geom, snet, _lay in seg_index:
             if snet != net and vgeom.distance(geom) < CLEAR:
                 return False
         for pt, vnet, radius in via_index:
-            if pt.distance(vpt) < DRILL_CC:
+            # Issue #3855: drill hole-to-hole vs existing repair vias
+            # (all 0.25 mm drill), edge-to-edge against the 0.5 mm floor.
+            if not _drills_clear(vx, vy, pt.x, pt.y, REPAIR_VIA_DRILL):
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < CLEAR:
                 return False
@@ -2028,6 +2072,52 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         print("   POUR CONNECTIVITY: FAIL (see above)")
     else:
         print("   POUR CONNECTIVITY: PASS")
+
+    # Issue #3855 / #3532 / #3617: the diff-pair crossover doglegs and the
+    # pour-repair emitter (``_repair_pour_connectivity``) connect copper with
+    # single straight segments to raw geometry-derived endpoints, so they ship
+    # arbitrary-angle copper (~18-22 degrees off the 0/45/90/135 set) that
+    # bypasses the router's on-grid A* output and fails the fleet 45-census
+    # gate (``tests/test_fleet_45_census.py``).  Board 07 already pipes its
+    # pour-repair copper through the shared #3532 quantizer; board 06 was
+    # missing this step, so a fresh ``--step all --seed 42`` re-route emitted
+    # 13 un-quantized chords.  Quantize the artifact through
+    # ``kicad_tools.router.quantize.quantize_pcb_file``, which replaces each
+    # off-angle segment with an EXACT two-leg dogleg (45-degree leg +
+    # axis-aligned leg) that preserves the original endpoints bit-for-bit --
+    # so pour connectivity (and every net's reach) is unchanged.  Mirror the
+    # board-07 / softstart quantize -> re-fill fixpoint: a dogleg's small
+    # perpendicular bulge can graze a foreign via barrel, so re-fill carves
+    # clearance around the converged geometry before returning.  The net-2
+    # crossover chord whose BOTH dogleg variants clip a via is held off-angle
+    # via ``QUANTIZE_SKIP_UUIDS`` (a documented, seed-specific residual) so
+    # the pinned 24-error strict-gate baseline survives quantization.
+    print("\n12. 45-degree quantization of off-angle copper (#3855 / #3532)...")
+    try:
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        quantized = quantize_pcb_file(output_path, skip_uuids=QUANTIZE_SKIP_UUIDS)
+        if quantized:
+            print(f"   Quantized {len(quantized)} off-angle segment(s)")
+            print("12b. Re-filling zones after quantization...")
+            fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+            if fill_result.returncode == 0:
+                print("12c. Copper-union pour-connectivity audit (post-quantize)...")
+                pour_ok = _run_pour_audit("[quant]")
+                print(
+                    "   POUR CONNECTIVITY (post-quantize): "
+                    + ("PASS" if pour_ok else "FAIL (see above)")
+                )
+            else:
+                print(
+                    f"   Zone re-fill after quantization failed "
+                    f"(rc={fill_result.returncode}); committed copper still "
+                    f"connectivity-correct (dogleg preserves endpoints)."
+                )
+        else:
+            print("   No off-angle segments: routed copper already 45-aligned")
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        print(f"   WARNING: 45-degree quantization step skipped: {exc}")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets
