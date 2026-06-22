@@ -67,10 +67,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: quantized emitters will not regenerate the skew).
 DOCUMENTED_OFF_ANGLE: dict[str, dict[str, str]] = {
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {
-        # (114.5, 110.0) -> (115.5, 108.0), 18.4 deg, net 7: threads the
-        # diff-pair landing corridor; both dogleg bulges clip a via
-        # (clearance_segment_via at PCB-local (14.1-15.7, 9.4-10.3)).
-        "e9af299d-7f67-4eec-bda7-0577aee1e86b": "diffpair corridor chord",
+        # (112.679, 109.947) -> (116.616, 108.602), 18.9 deg, net 2
+        # (USB2_D-): the diff-pair crossover chord at the J1 landing
+        # corridor.  BOTH dogleg variants clip a neighbouring via barrel
+        # -- the default bulge adds 2 clearance_segment_via errors (DRC
+        # 26 vs the pinned 24) and the axis-first bulge adds 3 (DRC 27),
+        # so the only manufacturable path through this corridor is the
+        # skewed chord.  The board-06 recipe quantizes this uuid via
+        # ``skip_uuids`` (see ``route_pcb``'s step-12 comment) so the
+        # committed artifact holds the pinned 24-error / 18-diff-pair
+        # baseline.  Issue #3855 re-routed the corridor (the prior net-7
+        # ``e9af299d`` residual is gone -- the fresh route doglegs it
+        # 45-aligned); this net-2 chord is the new in-place residual.
+        # Exit clause: remove when a re-route's chord no longer collides
+        # (the quantizer will then snap it 45-aligned by construction).
+        "864fb9ee-effe-4a8c-8f8a-c93533e51a22": "diffpair crossover chord",
     },
     # Issue #3617: board 07's prior corridor-chord exemption
     # (351d1137-..., TMDS_D0) is gone -- the regenerated filled artifact

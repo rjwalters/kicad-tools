@@ -85,6 +85,27 @@ REQUIRE_POUR_CONNECTIVITY: bool = True
 # audit PASS, so a higher cap only costs wall time in failure scenarios.
 MAX_POUR_REPAIR_ROUNDS: int = 6
 
+# Issue #3855 / #3532: segment uuids the 45-degree quantizer must leave
+# UNTOUCHED because BOTH dogleg variants of that off-angle chord clip a
+# neighbouring via barrel (a new ``clearance_segment_via`` error), so the
+# skewed chord is the only manufacturable path through the corridor.  The
+# committed ``--seed 42`` artifact's diff-pair crossover chord on net 2
+# (USB2_D-, ``(112.679,109.947)->(116.616,108.602)``) is such a residual:
+# the default dogleg pushes the strict-gate count 24 -> 26 and the
+# axis-first variant 24 -> 27, while skipping it holds the pinned 24 (18
+# diff-pair + 1 drill + 5 clearance/via).  It stays off-angle and is
+# pinned by uuid in ``tests/test_fleet_45_census.py::DOCUMENTED_OFF_ANGLE``.
+#
+# This set is uuid-keyed and therefore SEED-SPECIFIC: a re-route with a
+# different seed regenerates segment uuids, so an unmatched entry is
+# simply a no-op (the quantizer skips nothing, doglegs every chord, and
+# the resulting count stays within the .github/routed-drc-tolerance.yml
+# floor of 33).  It exists so a deterministic ``--seed 42`` regeneration
+# reproduces the committed artifact's pinned 24-error baseline byte-for-
+# byte.  Exit clause: drop the uuid when a re-route's chord no longer
+# collides (the quantizer then snaps it 45-aligned by construction).
+QUANTIZE_SKIP_UUIDS: frozenset[str] = frozenset({"864fb9ee-effe-4a8c-8f8a-c93533e51a22"})
+
 
 # =============================================================================
 # Per-Protocol Net Class Declarations
@@ -2051,6 +2072,52 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         print("   POUR CONNECTIVITY: FAIL (see above)")
     else:
         print("   POUR CONNECTIVITY: PASS")
+
+    # Issue #3855 / #3532 / #3617: the diff-pair crossover doglegs and the
+    # pour-repair emitter (``_repair_pour_connectivity``) connect copper with
+    # single straight segments to raw geometry-derived endpoints, so they ship
+    # arbitrary-angle copper (~18-22 degrees off the 0/45/90/135 set) that
+    # bypasses the router's on-grid A* output and fails the fleet 45-census
+    # gate (``tests/test_fleet_45_census.py``).  Board 07 already pipes its
+    # pour-repair copper through the shared #3532 quantizer; board 06 was
+    # missing this step, so a fresh ``--step all --seed 42`` re-route emitted
+    # 13 un-quantized chords.  Quantize the artifact through
+    # ``kicad_tools.router.quantize.quantize_pcb_file``, which replaces each
+    # off-angle segment with an EXACT two-leg dogleg (45-degree leg +
+    # axis-aligned leg) that preserves the original endpoints bit-for-bit --
+    # so pour connectivity (and every net's reach) is unchanged.  Mirror the
+    # board-07 / softstart quantize -> re-fill fixpoint: a dogleg's small
+    # perpendicular bulge can graze a foreign via barrel, so re-fill carves
+    # clearance around the converged geometry before returning.  The net-2
+    # crossover chord whose BOTH dogleg variants clip a via is held off-angle
+    # via ``QUANTIZE_SKIP_UUIDS`` (a documented, seed-specific residual) so
+    # the pinned 24-error strict-gate baseline survives quantization.
+    print("\n12. 45-degree quantization of off-angle copper (#3855 / #3532)...")
+    try:
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        quantized = quantize_pcb_file(output_path, skip_uuids=QUANTIZE_SKIP_UUIDS)
+        if quantized:
+            print(f"   Quantized {len(quantized)} off-angle segment(s)")
+            print("12b. Re-filling zones after quantization...")
+            fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+            if fill_result.returncode == 0:
+                print("12c. Copper-union pour-connectivity audit (post-quantize)...")
+                pour_ok = _run_pour_audit("[quant]")
+                print(
+                    "   POUR CONNECTIVITY (post-quantize): "
+                    + ("PASS" if pour_ok else "FAIL (see above)")
+                )
+            else:
+                print(
+                    f"   Zone re-fill after quantization failed "
+                    f"(rc={fill_result.returncode}); committed copper still "
+                    f"connectivity-correct (dogleg preserves endpoints)."
+                )
+        else:
+            print("   No off-angle segments: routed copper already 45-aligned")
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        print(f"   WARNING: 45-degree quantization step skipped: {exc}")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets
