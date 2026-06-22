@@ -1225,6 +1225,42 @@ jobs:
           uv run python boards/03-usb-joystick/generate_design.py \
             /tmp/board03-ci
           test -f /tmp/board03-ci/lvs.json
+          test -f /tmp/board03-ci/usb_joystick.kicad_sch
+          test -f /tmp/board03-ci/usb_joystick_routed.kicad_pcb
+
+      - name: Independent copper-LVS re-check (out-of-process, issue #3840)
+        # Re-run compare_copper_netlist in a process the CI job controls (NOT
+        # the recipe) on the REGENERATED schematic + routed PCB, and assert
+        # clean.  This does NOT read lvs.json, so it catches a copper short/
+        # open even if a future recipe change mis-wrote lvs.json or skipped
+        # the fresh check.  The subprocess entrypoint (python -m
+        # kicad_tools.lvs.copper_lvs) was added in #3838; the asserter
+        # (check_copper_lvs.py) maps clean->0, dirty->2, malformed->1.
+        run: |
+          set -euo pipefail
+          uv run python -m kicad_tools.lvs.copper_lvs \
+            /tmp/board03-ci/usb_joystick.kicad_sch \
+            /tmp/board03-ci/usb_joystick_routed.kicad_pcb \
+            > /tmp/board03-copper.json
+          uv run python scripts/ci/check_copper_lvs.py /tmp/board03-copper.json
+
+      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
+        # Validate the REGENERATED routed PCB's DRC out-of-process against the
+        # per-board allowlist (.github/routed-drc-tolerance.yml).  Board 03 has
+        # NO tolerance entry (strict 0-blocking gate) but DOES carry a
+        # jlcpcb-tier1 manufacturers: override; check_routed_drc.py keys both
+        # off the repo-relative path, so the fresh PCB MUST be staged over the
+        # committed path for the override + strict-0 gate to resolve.  This is
+        # the SAME tolerance mechanism the board-04 job and the
+        # routed-pcb-drc-check job use, so it never double-fails on
+        # already-grandfathered errors.  No git restore is needed: the CI
+        # checkout is a throwaway workspace (mirrors the board-04 job).
+        run: |
+          set -euo pipefail
+          cp /tmp/board03-ci/usb_joystick_routed.kicad_pcb \
+            boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
+          uv run python scripts/ci/check_routed_drc.py \
+            boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
 
       - name: Emit board.json via kct board-metrics
         run: |
@@ -1324,6 +1360,41 @@ jobs:
           uv run python boards/06-diffpair-test/generate_design.py \
             /tmp/board06-ci --step all --seed 42 || true
           test -f /tmp/board06-ci/lvs.json
+          test -f /tmp/board06-ci/diffpair_test.kicad_sch
+          test -f /tmp/board06-ci/diffpair_test_routed.kicad_pcb
+
+      - name: Independent copper-LVS re-check (out-of-process, issue #3840)
+        # Re-run compare_copper_netlist in a process the CI job controls (NOT
+        # the recipe) on the REGENERATED schematic + routed PCB, and assert
+        # clean.  Does NOT read lvs.json, so it catches a copper short/open
+        # even if the recipe mis-wrote lvs.json.  Board 06 routes PARTIAL by
+        # design (recipe exits non-zero, tolerated above), but the persisted
+        # *_routed.kicad_pcb exists regardless, so this re-check still runs and
+        # gates.  Entrypoint from #3838; asserter maps clean->0, dirty->2.
+        run: |
+          set -euo pipefail
+          uv run python -m kicad_tools.lvs.copper_lvs \
+            /tmp/board06-ci/diffpair_test.kicad_sch \
+            /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
+            > /tmp/board06-copper.json
+          uv run python scripts/ci/check_copper_lvs.py /tmp/board06-copper.json
+
+      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
+        # Validate the REGENERATED routed PCB's DRC out-of-process against the
+        # per-board allowlist (.github/routed-drc-tolerance.yml: 33 for board
+        # 06's diff-pair + drill residuals).  This is the SAME tolerance
+        # mechanism the routed-pcb-drc-check + matchgroup/diffpair regression
+        # jobs use, so it does NOT double-fail on the already-grandfathered
+        # errors -- it only catches a NEW DRC regression above the allowlist.
+        # check_routed_drc.py keys tolerance off the repo-relative path, so
+        # stage the fresh PCB over the committed path (throwaway CI checkout;
+        # mirrors the board-04 job).
+        run: |
+          set -euo pipefail
+          cp /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
+            boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb
+          uv run python scripts/ci/check_routed_drc.py \
+            boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb
 
       - name: Emit board.json via kct board-metrics
         run: |
@@ -1405,6 +1476,40 @@ jobs:
           uv run python boards/07-matchgroup-test/generate_design.py \
             /tmp/board07-ci --step all --seed 42 || true
           test -f /tmp/board07-ci/lvs.json
+          test -f /tmp/board07-ci/matchgroup_test.kicad_sch
+          test -f /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
+
+      - name: Independent copper-LVS re-check (out-of-process, issue #3840)
+        # Re-run compare_copper_netlist in a process the CI job controls (NOT
+        # the recipe) on the REGENERATED schematic + routed PCB, and assert
+        # clean.  Does NOT read lvs.json, so it catches a copper short/open
+        # even if the recipe mis-wrote lvs.json.  Board 07 routes PARTIAL by
+        # design (recipe exits non-zero, tolerated above), but the persisted
+        # *_routed.kicad_pcb exists regardless, so this re-check still runs and
+        # gates.  Entrypoint from #3838; asserter maps clean->0, dirty->2.
+        run: |
+          set -euo pipefail
+          uv run python -m kicad_tools.lvs.copper_lvs \
+            /tmp/board07-ci/matchgroup_test.kicad_sch \
+            /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
+            > /tmp/board07-copper.json
+          uv run python scripts/ci/check_copper_lvs.py /tmp/board07-copper.json
+
+      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
+        # Validate the REGENERATED routed PCB's DRC out-of-process against the
+        # per-board allowlist (.github/routed-drc-tolerance.yml: 120 for board
+        # 07's matchgroup baseline).  This is the SAME tolerance mechanism the
+        # routed-pcb-drc-check + matchgroup regression jobs use, so it does NOT
+        # double-fail on the already-grandfathered errors -- it only catches a
+        # NEW DRC regression above the allowlist.  check_routed_drc.py keys
+        # tolerance off the repo-relative path, so stage the fresh PCB over the
+        # committed path (throwaway CI checkout; mirrors the board-04 job).
+        run: |
+          set -euo pipefail
+          cp /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
+            boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb
+          uv run python scripts/ci/check_routed_drc.py \
+            boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb
 
       - name: Emit board.json via kct board-metrics
         run: |
