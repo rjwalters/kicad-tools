@@ -23,6 +23,7 @@ Usage:
 If no output directory is specified, files are written to ./output/
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -1753,6 +1754,27 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     return True
 
 
+# Issue #3839: board-04's main() success gate must reflect DRC.  The DRC
+# leg is allowlist-aware so it tolerates EXACTLY the same grandfathered
+# violations the CI gate tolerates -- no more.  Today that is:
+#
+#   * advisory ``connectivity`` (1 stranded GND-stitch pad; in
+#     ``DRCChecker.ADVISORY_RULE_IDS``, filtered from every CI gate), and
+#   * up to 2 ``dimension_drill_clearance`` errors -- the 2 true-positive
+#     sub-0.5mm drills (a 0.350mm hole-to-hole pair) surfaced by the
+#     corrected ``min_hole_to_hole_mm`` rule (#3842/#3846).  These are
+#     allowlisted at exactly 2 in ``.github/routed-drc-tolerance.yml``
+#     (board-layout fix tracked in #3847).
+#
+# Any 3rd drill error, OR any OTHER blocking rule, fails the gate so a
+# real DRC regression cannot ship 0.  EXIT CLAUSE: when #3847 re-spaces
+# the drill pair, drop the allowlist entry back to strict-0 and set
+# ``_DRILL_CLEARANCE_ALLOWANCE`` to 0 here in lockstep.
+_ADVISORY_DRC_RULE_IDS: frozenset[str] = frozenset({"connectivity"})
+_DRILL_CLEARANCE_RULE_ID = "dimension_drill_clearance"
+_DRILL_CLEARANCE_ALLOWANCE = 2  # keep in lockstep with .github/routed-drc-tolerance.yml (#3847)
+
+
 def run_drc(pcb_path: Path) -> bool:
     """Run DRC on the routed PCB and write ``drc_report.json`` beside it.
 
@@ -1775,6 +1797,19 @@ def run_drc(pcb_path: Path) -> bool:
     profile this board ships and is CI-gated against (the GND micro-via
     stitching needs the Capability-Plus tier; see the manufacturers:
     override in ``.github/routed-drc-tolerance.yml``).
+
+    Issue #3839: the return value now gates ``main()``'s exit code, so it
+    is **allowlist-aware** rather than a raw ``returncode == 0`` check.
+    ``kct check --drc-only`` exits 2 on the 2 grandfathered
+    ``dimension_drill_clearance`` drills (#3842/#3847) and on the advisory
+    ``connectivity`` finding, neither of which should fail the recipe.
+    Instead of trusting the exit code we parse the emitted JSON and count
+    *blocking* violations the same way the CI gate
+    (``scripts/ci/check_routed_drc.py``) does: advisory rules are excluded,
+    and up to ``_DRILL_CLEARANCE_ALLOWANCE`` (=2) drill-clearance errors are
+    tolerated.  Returns ``True`` iff no other blocking error exists and the
+    drill count is within the allowance -- so a 3rd drill or any new rule
+    flips the recipe to a non-zero exit.
     """
     print("\n" + "=" * 60)
     print("Running DRC (via kct check --drc-only)...")
@@ -1792,6 +1827,9 @@ def run_drc(pcb_path: Path) -> bool:
                 "--mfr",
                 "jlcpcb-tier1",
                 "--drc-only",
+                "--errors-only",
+                "--format",
+                "json",
                 "--output",
                 str(report_path),
             ],
@@ -1799,21 +1837,68 @@ def run_drc(pcb_path: Path) -> bool:
             text=True,
         )
 
-        # Print the output
-        if result.stdout:
-            for line in result.stdout.strip().split("\n"):
-                print(f"   {line}")
-
         if report_path.is_file():
             print(f"\n   DRC report: {report_path}")
 
-        # Check for success
-        if result.returncode == 0:
-            return True
-        else:
+        # The JSON payload is written to ``report_path`` via --output; parse
+        # it (preferred) and fall back to stdout if the file is absent.
+        payload: dict | None = None
+        if report_path.is_file():
+            try:
+                payload = json.loads(report_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                payload = None
+        if payload is None and result.stdout:
+            brace = result.stdout.find("{")
+            if brace >= 0:
+                try:
+                    payload = json.loads(result.stdout[brace:])
+                except json.JSONDecodeError:
+                    payload = None
+
+        if payload is None:
+            # No parseable verdict -> fail closed.
+            print("\n   Error: could not parse DRC JSON output")
             if result.stderr:
-                print(f"\n   Error: {result.stderr}")
+                print(f"   stderr: {result.stderr}")
             return False
+
+        violations = payload.get("violations", [])
+        blocking_other = 0
+        drill_errors = 0
+        advisory = 0
+        for v in violations:
+            if not isinstance(v, dict) or v.get("severity") != "error":
+                continue
+            rule_id = v.get("rule_id", "")
+            if rule_id in _ADVISORY_DRC_RULE_IDS:
+                advisory += 1
+            elif rule_id == _DRILL_CLEARANCE_RULE_ID:
+                drill_errors += 1
+            else:
+                blocking_other += 1
+
+        print(
+            f"\n   DRC errors: {blocking_other} blocking (excl. drill+advisory), "
+            f"{drill_errors} {_DRILL_CLEARANCE_RULE_ID} (allow {_DRILL_CLEARANCE_ALLOWANCE}), "
+            f"{advisory} advisory (excluded)"
+        )
+
+        # PASS iff: no other-rule blocking error AND drill count within the
+        # grandfathered allowance.  Advisory rules never gate (#3074).
+        if blocking_other == 0 and drill_errors <= _DRILL_CLEARANCE_ALLOWANCE:
+            return True
+        print(
+            "\n   DRC FAIL: "
+            + (f"{blocking_other} non-allowlisted blocking error(s); " if blocking_other else "")
+            + (
+                f"{drill_errors} drill-clearance errors exceed allowance "
+                f"of {_DRILL_CLEARANCE_ALLOWANCE}"
+                if drill_errors > _DRILL_CLEARANCE_ALLOWANCE
+                else ""
+            )
+        )
+        return False
 
     except Exception as e:
         print(f"\n   Error running DRC: {e}")
@@ -1916,7 +2001,12 @@ def main() -> int:
         # the copper comparator is the meaningful leg.  Removing board-04 from
         # ``ADVISORY_LVS_BOARDS`` + the CI end-to-end gate is the #3795 Slice 2
         # follow-up (out of scope here).
-        write_lvs_report(
+        # Issue #3839: capture the (copper_clean, label_clean) return so the
+        # exit gate ANDs the copper-LVS verdict explicitly.  require_clean=True
+        # already RAISES on a dirty copper comparator (so a short can't reach
+        # the gate at all), but ANDing copper_clean makes the gate's intent
+        # self-documenting and defends against a future require_clean=False.
+        copper_clean, _label_clean = write_lvs_report(
             sch_path,
             routed_path,
             output_dir,
@@ -2025,6 +2115,18 @@ def main() -> int:
         # from 3 — but it remains in ``ADVISORY_RULE_IDS`` and is filtered from
         # the CI gate; ``blocking_errors`` stays 0.  This unblocks the #3795
         # board-04 copper-LVS hard-gate graduation.
+        #
+        # Per #3839 (2026-06-21): the exit gate previously omitted
+        # ``drc_success`` (computed + printed but never gating) and discarded
+        # the ``write_lvs_report`` return -- so a board with a NEW blocking DRC
+        # error or a copper-LVS short could print SUCCESS and exit 0.  The gate
+        # now ANDs ``drc_success`` (allowlist-aware per ``run_drc``: tolerates
+        # the 2 grandfathered ``dimension_drill_clearance`` drills (#3847) +
+        # advisory ``connectivity`` but fails on a 3rd drill or any new rule)
+        # and ``copper_clean`` (the copper-LVS verdict) so a real DRC/LVS
+        # regression exits non-zero.  The current committed board -- 2
+        # allowlisted drills, 1 advisory connectivity, copper-LVS clean --
+        # still exits 0.
         return (
             0
             if (
@@ -2034,6 +2136,8 @@ def main() -> int:
                 and stitch_success
                 and tie_success
                 and fill_success
+                and drc_success
+                and copper_clean
                 and mfr_success
             )
             else 1
