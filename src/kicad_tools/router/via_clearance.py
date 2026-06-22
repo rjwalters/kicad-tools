@@ -73,6 +73,70 @@ class FilledPolygonLike(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Drill hole-to-hole (drill-to-drill edge-to-edge) guard
+# ---------------------------------------------------------------------------
+
+#: Default manufacturer hole-to-hole (drill-to-drill) minimum, in mm.  Mirrors
+#: ``manufacturers.base.DesignRules.min_hole_to_hole_mm`` and the canonical fab
+#: floor used by the DRC ``dimension_drill_clearance`` rule.
+DEFAULT_MIN_HOLE_TO_HOLE = 0.5
+
+#: Numerical tolerance for the hole-to-hole comparison, mirroring
+#: ``validate.rules.dimensions.DRC_TOLERANCE`` so the router pre-check and the
+#: DRC post-check agree on borderline geometry.
+HOLE_TO_HOLE_TOLERANCE = 1e-3
+
+
+def drill_hole_to_hole_clear(
+    x: float,
+    y: float,
+    drill: float,
+    existing_drills: list[tuple[float, float, float]] | None,
+    min_hole_to_hole: float = DEFAULT_MIN_HOLE_TO_HOLE,
+) -> bool:
+    """Return True iff a drill of diameter ``drill`` at (x, y) clears every
+    existing drill by at least ``min_hole_to_hole`` edge-to-edge.
+
+    This mirrors the canonical edge-to-edge formula used by the DRC
+    ``dimension_drill_clearance`` rule
+    (:meth:`validate.rules.dimensions.DimensionRules._check_drill_clearance`)
+    so a candidate via the router accepts here will not trip a hole-to-hole
+    DRC error later::
+
+        edge_distance = center_distance - drill_candidate / 2 - drill_existing / 2
+        violation if edge_distance + tol < min_hole_to_hole
+
+    Args:
+        x: Candidate drill center X (mm, world coordinates).
+        y: Candidate drill center Y (mm, world coordinates).
+        drill: Candidate drill diameter (mm).
+        existing_drills: Board-wide registry of existing drills (vias of ALL
+            nets + through-hole pad drills) as ``(x, y, drill_diameter)``
+            tuples.  ``None`` or empty means there is nothing to conflict
+            with and the check is a no-op (returns ``True``) -- this keeps
+            the guard back-compatible with call sites that supply no
+            registry.
+        min_hole_to_hole: Minimum edge-to-edge drill spacing (mm).  Defaults
+            to the canonical 0.5mm fab floor.
+
+    Returns:
+        True if the candidate clears every existing drill, False on any
+        sub-minimum pair.
+    """
+    if not existing_drills:
+        return True
+    cand_radius = drill / 2.0
+    for ex, ey, edrill in existing_drills:
+        dx = ex - x
+        dy = ey - y
+        center_distance = math.sqrt(dx * dx + dy * dy)
+        edge_distance = center_distance - cand_radius - (edrill / 2.0)
+        if edge_distance + HOLE_TO_HOLE_TOLERANCE < min_hole_to_hole:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

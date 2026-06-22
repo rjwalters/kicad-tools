@@ -2358,6 +2358,33 @@ class DiffPairRouter:
         # directly.
         self.enable_shadow_construction: bool = False
 
+    def _collect_existing_drills(self) -> list[tuple[float, float, float]]:
+        """Assemble a board-wide drill registry for the hole-to-hole guard.
+
+        Issue #3855: returns ``(x, y, drill_diameter)`` for every drilled
+        hole the diff-pair fan-out via must keep clear of:
+
+        * every through-hole pad (any net) -- ``pad.through_hole`` with a
+          positive ``pad.drill``;
+        * every via already committed to ``self.autorouter.routes`` (any
+          net), including fan-out vias placed by earlier crossovers.
+
+        The list is consulted edge-to-edge by
+        :func:`kicad_tools.router.via_clearance.drill_hole_to_hole_clear`.
+        Cheap to assemble (the fan-out path already iterates pads/routes
+        for other reasons) and rebuilt per crossover so vias placed by
+        prior crossovers are visible.
+        """
+        drills: list[tuple[float, float, float]] = []
+        for pad in self.autorouter.pads.values():
+            if getattr(pad, "through_hole", False) and pad.drill > 0:
+                drills.append((pad.x, pad.y, pad.drill))
+        for route in self.autorouter.routes:
+            for via in route.vias:
+                if via.drill > 0:
+                    drills.append((via.x, via.y, via.drill))
+        return drills
+
     def _resolve_detection_inputs(
         self,
     ) -> tuple[dict | None, dict[str, str] | None, list | None]:
@@ -3138,10 +3165,37 @@ class DiffPairRouter:
                     out.append((cx + toward * ux * a + nxp * b, cy + toward * uy * a + nyp * b))
             return out
 
+        # Issue #3855: board-wide drill registry (through-hole pads + all
+        # committed vias, any net) so each fan-out via candidate can be
+        # rejected when its drill would sit within ``min_hole_to_hole``
+        # edge-to-edge of an existing drill.  Assembled once per crossover.
+        from .via_clearance import drill_hole_to_hole_clear
+
+        existing_drills = self._collect_existing_drills()
+        min_h2h = getattr(rules, "min_hole_to_hole", 0.5)
+
         for v1 in _via_candidates(head.x, head.y, 1.0):
             for v2 in _via_candidates(goal.x, goal.y, -1.0):
-                if math.hypot(v2[0] - v1[0], v2[1] - v1[1]) < 0.6:
-                    continue  # via-to-via clearance
+                # Issue #3855: replace the hardcoded 0.6mm center-to-center
+                # via-to-via check with an edge-to-edge ``min_hole_to_hole``
+                # check.  This single crossover's two vias must clear each
+                # other AND every other existing drill (other crossovers'
+                # fan-out vias + through-hole pad drills, any net).
+                edge_v1v2 = (
+                    math.hypot(v2[0] - v1[0], v2[1] - v1[1])
+                    - rules.via_drill / 2
+                    - rules.via_drill / 2
+                )
+                if edge_v1v2 < min_h2h:
+                    continue  # the two crossover vias too close drill-to-drill
+                if not drill_hole_to_hole_clear(
+                    v1[0], v1[1], rules.via_drill, existing_drills, min_h2h
+                ):
+                    continue
+                if not drill_hole_to_hole_clear(
+                    v2[0], v2[1], rules.via_drill, existing_drills, min_h2h
+                ):
+                    continue
                 g1 = grid.world_to_grid(*v1)
                 g2 = grid.world_to_grid(*v2)
                 if pathfinder._is_via_blocked(g1[0], g1[1], head.net):

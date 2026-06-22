@@ -628,7 +628,26 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     CLEAR = 0.15
     STUB_W = 0.15
     BRIDGE_W = 0.2
-    DRILL_CC = 0.45  # min center-to-center vs other drills
+    # Issue #3855: the repair via's DRILL.  Drill spacing must be enforced
+    # EDGE-TO-EDGE against the fab hole-to-hole floor (0.5 mm), not via a
+    # hardcoded center-to-center constant -- the same defect class #3851
+    # fixed in ``generate_pcb._via_ok``.  The old ``DRILL_CC = 0.45`` (c-c)
+    # let two 0.25 mm-drill vias sit 0.20 mm edge-to-edge (a
+    # ``dimension_drill_clearance`` true positive); 0.5 mm edge-to-edge is
+    # the manufacturable floor checked by the DRC rule (#3842).
+    REPAIR_VIA_DRILL = 0.25  # matches the "(drill 0.25)" emitted below
+    MIN_HOLE_TO_HOLE = 0.5  # fab drill-to-drill edge-to-edge floor
+
+    def _drills_clear(vx: float, vy: float, ex: float, ey: float, e_drill: float) -> bool:
+        """Edge-to-edge hole-to-hole guard (canonical DRC formula).
+
+        ``e_drill`` is the EXISTING drill diameter (mm).  Mirrors
+        :func:`kicad_tools.router.via_clearance.drill_hole_to_hole_clear`
+        so the recipe pre-check agrees with the DRC post-check.
+        """
+        center = math.hypot(vx - ex, vy - ey)
+        edge = center - REPAIR_VIA_DRILL / 2.0 - e_drill / 2.0
+        return edge + 1e-3 >= MIN_HOLE_TO_HOLE
 
     def _via_ok(net: str, vx: float, vy: float) -> bool:
         if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
@@ -641,13 +660,17 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False  # via-in-pad ban (same-net included)
             if pnet != net and vgeom.distance(geom) < CLEAR:
                 return False
-            if drill_r > 0 and math.hypot(vx - px, vy - py) < drill_r + 0.125 + 0.2:
+            # Issue #3855: drill hole-to-hole vs through-hole pad drills,
+            # edge-to-edge (drill_r is the pad's drill RADIUS).
+            if drill_r > 0 and not _drills_clear(vx, vy, px, py, drill_r * 2.0):
                 return False
         for geom, snet, _lay in seg_index:
             if snet != net and vgeom.distance(geom) < CLEAR:
                 return False
         for pt, vnet, radius in via_index:
-            if pt.distance(vpt) < DRILL_CC:
+            # Issue #3855: drill hole-to-hole vs existing repair vias
+            # (all 0.25 mm drill), edge-to-edge against the 0.5 mm floor.
+            if not _drills_clear(vx, vy, pt.x, pt.y, REPAIR_VIA_DRILL):
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < CLEAR:
                 return False

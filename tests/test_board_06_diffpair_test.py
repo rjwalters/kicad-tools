@@ -804,11 +804,36 @@ class TestBoard06StrictGateGuard:
     drills, drop this back to 18.
     """
 
-    # 18 diff-pair quality defects + 6 pre-existing sub-0.5mm
-    # dimension_drill_clearance true-positives surfaced by Issue #3842's
-    # min_hole_to_hole gate (board-layout fix tracked in #3847).
+    # Re-baselined 2026-06-22 (Issue #3855 -- router hole-to-hole guard +
+    # board-06 ``_repair_pour_connectivity`` edge-to-edge drill fix).  The
+    # blocking count is unchanged at 24, but its COMPOSITION shifted:
+    #
+    #   * 18 diff-pair quality defects (9 ``diffpair_length_skew`` + 9
+    #     ``diffpair_routing_continuity``) -- UNCHANGED; coupled
+    #     convergence is tracked in #3540-#3544.
+    #   * ``dimension_drill_clearance`` dropped 6 -> 1.  The router /
+    #     recipe via placers now reject sub-0.5mm drill pairs (#3855), so
+    #     5 of the 6 prior drill true-positives are gone.  The lone
+    #     remainder is a same-net USB2_D+ coupled-route via pair placed by
+    #     the A* path (``diffpair_routing._build_route_from_path``);
+    #     fixing it requires changing the A* via decision, which #3855
+    #     explicitly held out of scope.
+    #   * +5 fresh-route clearance/via errors (1 ``clearance_pad_via`` +
+    #     3 ``clearance_segment_via`` + 1 ``via_in_pad``).  These are a
+    #     property of re-routing board-06 fresh on the current recipe --
+    #     they appear identically WITHOUT the #3855 guard, so they are NOT
+    #     caused by this PR (the committed artifact is now a fresh
+    #     ``--step all --seed 42`` route, replacing the older hand-snapshot
+    #     that happened to lack them).  Well within the CI tolerance floor
+    #     of 33 in ``.github/routed-drc-tolerance.yml``.
+    #
+    # Net: 18 diff-pair + 1 drill + 5 clearance/via = 24.  When #3540-#3544
+    # drive the diff-pair errors down, tighten this AND the tolerance entry.
     EXPECTED_STRICT_GATE_ERRORS = 24
-    EXPECTED_ADVISORY_CONNECTIVITY = 2
+    # Advisory ``connectivity`` dropped 2 -> 1 on the fresh re-route (one
+    # fewer NetStatusAnalyzer false positive); the copper-union audit still
+    # PASSES (see ``TestPourCopperUnionAudit``).
+    EXPECTED_ADVISORY_CONNECTIVITY = 1
 
     @pytest.fixture(scope="class")
     def routed_pcb(self) -> Path:

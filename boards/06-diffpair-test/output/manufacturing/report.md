@@ -1,8 +1,8 @@
 ---
 title: "diffpair_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.13.0"
-date: "Rev 1 | 2026-06-16 | jlcpcb"
+author: "kicad-tools 0.14.0"
+date: "Rev 1 | 2026-06-22 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 7 (5 SMD, 2 THT, 0 other) |
 | Nets | 26 |
-| Traces | 938 segments |
-| Vias | 172 |
+| Traces | 1690 segments |
+| Vias | 188 |
 | Board Size | 100.0 x 80.0 mm |
 
 ## Design Overview
@@ -48,7 +48,7 @@ Epic #2556 Phase 4L (issue #2658)
 
 4 fine-pitch components
 
-- **Fine-pitch components**: 4 (U4, U2, U1, U3)
+- **Fine-pitch components**: 4 (U2, U1, U3, U4)
 
 ## ERC Status
 
@@ -128,30 +128,40 @@ Epic #2556 Phase 4L (issue #2658)
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
-| Warnings | 3 |
-| Blocking | 0 |
+| Errors | 10 |
+| Warnings | 10 |
+| Blocking | 10 |
 
-**Status**: PASS
+**Status**: FAIL
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| connectivity | 2 |
+| silk_over_copper | 4 |
+| clearance_segment_via | 3 |
+| copper_sliver | 3 |
 | silkscreen_text_height | 2 |
+| kicad-cli:shorting_items | 2 |
+| clearance_pad_via | 1 |
+| connectivity | 1 |
+| dimension_drill_clearance | 1 |
 | silkscreen_over_pad | 1 |
+| via_in_pad | 1 |
+| kicad-cli:clearance | 1 |
+| kicad-cli:hole_clearance | 1 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: NOT_READY
 
 ### Action Items
 
+- **[CRITICAL]** Fix 10 blocking DRC violations (clearance_segment_via (3), clearance_pad_via (1), dimension_drill_clearance (1); kicad-cli: shorting_items (2), clearance (1), hole_clearance (1))
 - **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
-- **[OPTIONAL]** Review 3 DRC warnings
+- **[OPTIONAL]** Review 10 DRC warnings
 
 
 \newpage
@@ -161,11 +171,11 @@ Epic #2556 Phase 4L (issue #2658)
 | Metric | Value |
 |--------|-------|
 | Signal Net Completion | 100.0% (21/21) |
-| Overall Completion | 92.3% |
-| Complete Nets | 24 / 26 |
+| Overall Completion | 96.2% |
+| Complete Nets | 25 / 26 |
 | Zone-Connected Nets | 5 |
-| Incomplete Nets | 2 |
-| Unconnected Pads | 15 |
+| Incomplete Nets | 1 |
+| Unconnected Pads | 14 |
 
 ### Zone-Connected Nets
 
@@ -177,7 +187,6 @@ Epic #2556 Phase 4L (issue #2658)
 
 ### Incomplete Nets
 
-- +1V2
 - GND
 
 

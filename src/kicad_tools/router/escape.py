@@ -5937,6 +5937,17 @@ class EscapeRouter:
         # Group by approximate row/column
         rows = self._group_pads_to_grid(pads)
 
+        # Issue #3855: drill registry from through-hole pad context so a
+        # staggered escape via is rejected if its drill would sit within
+        # ``min_hole_to_hole`` of a through-hole pad drill (any net).  The
+        # registry also accumulates vias placed earlier in THIS fan so two
+        # staggered escape vias never form a sub-minimum drill pair.
+        existing_drills: list[tuple[float, float, float]] = []
+        if foreign_pads:
+            for fp_pad in foreign_pads:
+                if getattr(fp_pad, "through_hole", False) and fp_pad.drill > 0:
+                    existing_drills.append((fp_pad.x, fp_pad.y, fp_pad.drill))
+
         for row_idx, row in enumerate(rows):
             for col_idx, pad in enumerate(row):
                 # Offset based on row and column parity
@@ -5950,12 +5961,15 @@ class EscapeRouter:
                 # filtering happens inside ``_can_place_via``).  When
                 # ``foreign_pads`` / ``foreign_tracks`` are omitted the
                 # call collapses to the legacy grid-cell-only check.
+                # Issue #3855: also forward the drill registry so the
+                # hole-to-hole guard rejects sub-fab-minimum drill pairs.
                 if self._can_place_via(
                     via_x,
                     via_y,
                     net=pad.net,
                     foreign_pads=foreign_pads,
                     foreign_tracks=foreign_tracks,
+                    existing_drills=existing_drills,
                 ):
                     via = Via(
                         x=via_x,
@@ -5967,6 +5981,9 @@ class EscapeRouter:
                         net_name=pad.net_name,
                     )
                     vias.append(via)
+                    # Issue #3855: subsequent candidates in this fan must
+                    # also clear the via just placed (hole-to-hole).
+                    existing_drills.append((via_x, via_y, via.drill))
 
         return vias
 
@@ -5995,6 +6012,8 @@ class EscapeRouter:
         foreign_tracks: list[Segment] | None = None,
         clearance: float | None = None,
         via_diameter: float | None = None,
+        existing_drills: list[tuple[float, float, float]] | None = None,
+        via_drill: float | None = None,
     ) -> bool:
         """Check if a via can be placed at the given position.
 
@@ -6024,6 +6043,17 @@ class EscapeRouter:
                 (mm).  Defaults to the design rules' via clearance.
             via_diameter: Via pad diameter (mm).  Defaults to the design
                 rules' via diameter.
+            existing_drills: Optional board-wide drill registry as
+                ``(x, y, drill_diameter)`` over existing vias (any net) +
+                through-hole pad drills.  Issue #3855: when supplied, the
+                candidate via's DRILL is checked edge-to-edge against every
+                entry using the canonical hole-to-hole formula
+                (:func:`kicad_tools.router.via_clearance.drill_hole_to_hole_clear`),
+                rejecting any candidate that would emit a sub-fab-minimum
+                drill pair.  ``None`` (the legacy default) skips the check,
+                preserving back-compat for callers without drill context.
+            via_drill: Candidate via drill diameter (mm) for the hole-to-hole
+                check.  Defaults to the design rules' via drill.
 
         Returns:
             True if the position is clear; False if blocked.
@@ -6122,6 +6152,20 @@ class EscapeRouter:
                 other_net_tracks=adapted_segs,
                 other_net_pads=pad_tuples,
             ):
+                return False
+
+        # Issue #3855: drill hole-to-hole guard.  The copper-clearance check
+        # above operates on PAD diameters; it does not enforce the fab's
+        # drill-to-drill (hole-to-hole) minimum, so an escape via could land
+        # within ``min_hole_to_hole`` of a through-hole pad / existing via
+        # drill and trip a ``dimension_drill_clearance`` DRC error.  Reject
+        # such candidates (callers treat ``False`` as "try the next site").
+        if existing_drills:
+            from .via_clearance import drill_hole_to_hole_clear
+
+            eff_via_drill = via_drill if via_drill is not None else self.rules.via_drill
+            min_h2h = getattr(self.rules, "min_hole_to_hole", 0.5)
+            if not drill_hole_to_hole_clear(x, y, eff_via_drill, existing_drills, min_h2h):
                 return False
 
         return True

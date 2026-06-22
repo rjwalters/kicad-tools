@@ -2,7 +2,7 @@
   "USB2_D+": {
     "name": "USB2",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.25,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -32,7 +32,7 @@
   "USB2_D-": {
     "name": "USB2",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.25,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -62,7 +62,7 @@
   "USB3_TX1+": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -92,7 +92,7 @@
   "USB3_TX1-": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -122,7 +122,7 @@
   "USB3_RX1+": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -152,7 +152,7 @@
   "USB3_RX1-": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -182,7 +182,7 @@
   "USB3_TX2+": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -212,7 +212,7 @@
   "USB3_TX2-": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -242,7 +242,7 @@
   "USB3_RX2+": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -272,7 +272,7 @@
   "USB3_RX2-": {
     "name": "USB3",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.275,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -302,7 +302,7 @@
   "PCIE_TX+": {
     "name": "PCIe",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -332,7 +332,7 @@
   "PCIE_TX-": {
     "name": "PCIe",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -362,7 +362,7 @@
   "PCIE_RX+": {
     "name": "PCIe",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -392,7 +392,7 @@
   "PCIE_RX-": {
     "name": "PCIe",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -422,7 +422,7 @@
   "MIPI_CLK+": {
     "name": "MIPI",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -452,7 +452,7 @@
   "MIPI_CLK-": {
     "name": "MIPI",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -482,7 +482,7 @@
   "MIPI_D0+": {
     "name": "MIPI",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -512,7 +512,7 @@
   "MIPI_D0-": {
     "name": "MIPI",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.225,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -542,7 +542,7 @@
   "USB_CC1": {
     "name": "Sideband",
     "priority": 4,
-    "trace_width": 0.2,
+    "trace_width": 0.375,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -572,7 +572,7 @@
   "USB_CC2": {
     "name": "Sideband",
     "priority": 4,
-    "trace_width": 0.2,
+    "trace_width": 0.375,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
@@ -602,7 +602,7 @@
   "MIPI_RST": {
     "name": "Sideband",
     "priority": 4,
-    "trace_width": 0.2,
+    "trace_width": 0.375,
     "clearance": 0.15,
     "via_size": 0.6,
     "cost_multiplier": 1.0,
