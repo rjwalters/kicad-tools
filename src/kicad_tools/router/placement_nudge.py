@@ -499,12 +499,12 @@ def nudge_placement_bound_nets(
         else:
             # Always include the nudged nets; fill the rest of the budget with
             # other partials (order is the checker's, deterministic).
-            cohort = [n for n in unfinished if n in nudged_nets]
-            for n in unfinished:
+            cohort = [net for net in unfinished if net in nudged_nets]
+            for net in unfinished:
                 if len(cohort) >= cfg.max_reroute_nets:
                     break
-                if n not in cohort:
-                    cohort.append(n)
+                if net not in cohort:
+                    cohort.append(net)
         if cohort:
             strip_net_copper(routed_path, cohort)
 
