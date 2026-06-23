@@ -134,6 +134,12 @@ class PreflightChecker:
         # Schematic check (needed for BOM/CPL)
         results.append(self._check_schematic_exists())
 
+        # Schematic footprint completeness (fail-loud before export).
+        # A footprint-less schematic symbol can never be placed/assembled,
+        # so this is a hard gate (issue #3866).
+        if self.schematic_path and self.schematic_path.exists():
+            results.append(self._check_schematic_footprints())
+
         # Board outline
         if self._pcb is not None:
             results.append(self._check_board_outline_closed())
@@ -255,6 +261,128 @@ class PreflightChecker:
             name="schematic_file",
             status="OK",
             message=f"Schematic file found: {self.schematic_path.name}",
+        )
+
+    def _check_schematic_footprints(self) -> PreflightResult:
+        """Fail loud when a component is genuinely missing a footprint.
+
+        Walks the schematic hierarchy via the shared
+        ``iter_missing_footprint_symbols`` predicate (same power/DNP skip
+        rules as ``sch validate``) to find symbols with a blank or ``~``
+        schematic Footprint field, then **reconciles each one against the
+        routed PCB**.
+
+        Unlike the pure-schematic ``sch validate`` gate (which has no PCB
+        to consult), this is an *export* gate running on a routed PCB that
+        is about to be manufactured. A blank schematic Footprint field is
+        only a real, export-blocking defect when the component will not be
+        built — i.e. it is absent from the PCB, or present on the PCB but
+        itself missing a footprint. A schematic-blank field whose component
+        IS placed on the PCB with a concrete footprint is manufacturable
+        and must NOT block export (e.g. generators that build the PCB with
+        footprints but never write them back into the schematic — see
+        board-05 and #3869). Without this reconciliation, a footprint-less
+        symbol could silently drop out of the PCB and its nets never route
+        (issue #3866).
+        """
+        if self.schematic_path is None:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="OK",
+                message="No schematic to check for missing footprints",
+            )
+
+        try:
+            from kicad_tools.cli.sch_footprint_common import (
+                iter_missing_footprint_symbols,
+            )
+
+            sch_missing = [
+                sym for _node, sym, _sch in iter_missing_footprint_symbols(self.schematic_path)
+            ]
+        except Exception as e:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="WARN",
+                message=f"Could not check schematic footprints: {e}",
+            )
+
+        if not sch_missing:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="OK",
+                message="All schematic symbols have a footprint assigned",
+            )
+
+        # Reconcile against the PCB: a schematic-blank footprint is only an
+        # export blocker when the component is not actually built. Map each
+        # PCB footprint reference to whether it carries a concrete library
+        # footprint name.
+        pcb_fp_has_name: dict[str, bool] = {}
+        if self._pcb is not None:
+            for fp in self._pcb.footprints:
+                ref = (getattr(fp, "reference", "") or "").strip()
+                if not ref:
+                    continue
+                has_name = bool((getattr(fp, "name", "") or "").strip())
+                # A reference appearing more than once is footprinted if any
+                # instance carries a name.
+                pcb_fp_has_name[ref] = pcb_fp_has_name.get(ref, False) or has_name
+
+        genuinely_missing: list[str] = []
+        reconciled: list[str] = []
+        for sym in sch_missing:
+            ref = (getattr(sym, "reference", "") or "").strip()
+            label = ref or (getattr(sym, "lib_id", "") or "")
+            if self._pcb is None:
+                # No PCB to reconcile against -- fall back to the
+                # schematic-only judgement (fail loud).
+                genuinely_missing.append(label)
+                continue
+            if ref and pcb_fp_has_name.get(ref):
+                # Placed on the PCB with a footprint -> manufacturable.
+                reconciled.append(label)
+            else:
+                # Absent from the PCB, or on the PCB without a footprint.
+                genuinely_missing.append(label)
+
+        if genuinely_missing:
+            refs = ", ".join(genuinely_missing[:10])
+            suffix = (
+                f" (and {len(genuinely_missing) - 10} more)" if len(genuinely_missing) > 10 else ""
+            )
+            return PreflightResult(
+                name="schematic_footprints",
+                status="FAIL",
+                message=(
+                    f"{len(genuinely_missing)} component(s) missing a footprint "
+                    "on the PCB (not manufacturable)"
+                ),
+                details=(
+                    f"References: {refs}{suffix}. "
+                    "These components are absent from the PCB or placed without "
+                    "a footprint. Run "
+                    "`kct sch assign-footprints <schematic> --assign-missing` "
+                    "to auto-assign standard parts; unknown parts must be "
+                    "assigned by hand before export."
+                ),
+            )
+
+        # Every schematic-blank symbol is placed on the PCB with a
+        # footprint -> manufacturable. Surface the reconciliation as OK.
+        detail = ""
+        if reconciled:
+            shown = ", ".join(reconciled[:10])
+            suffix = f" (and {len(reconciled) - 10} more)" if len(reconciled) > 10 else ""
+            detail = (
+                f"{len(reconciled)} symbol(s) have a blank schematic Footprint "
+                f"field but are placed on the PCB with a footprint: {shown}{suffix}"
+            )
+        return PreflightResult(
+            name="schematic_footprints",
+            status="OK",
+            message="All components have a footprint on the PCB",
+            details=detail,
         )
 
     def _check_board_outline_closed(self) -> PreflightResult:

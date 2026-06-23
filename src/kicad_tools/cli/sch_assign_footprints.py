@@ -54,6 +54,7 @@ from kicad_tools.cli.sch_suggest_footprint import (
     find_footprint_candidates,
 )
 from kicad_tools.footprints.fp_lib_table import find_project_fp_lib_table
+from kicad_tools.footprints.heuristics import guess_chip_footprint
 from kicad_tools.footprints.library_path import detect_kicad_library_path
 
 
@@ -91,14 +92,24 @@ def _classify_symbol(
     paths: Any,
     limit: int,
     use_project_table: bool,
+    use_heuristic: bool = False,
 ) -> dict[str, Any]:
     """Compute the candidate list + auto-assign decision for one symbol.
 
     Returns a dict with the keys ``reference``, ``value``, ``lib_id``,
     ``current_footprint``, ``pin_count``, ``package_keyword``,
     ``fp_filters``, ``candidates`` (top-``limit``), ``status``
-    (``"assigned" | "ambiguous" | "no_candidates"``) and ``assigned``
-    (the chosen footprint string when ``status == "assigned"``).
+    (``"assigned" | "ambiguous" | "no_candidates"``), ``assigned``
+    (the chosen footprint string when ``status == "assigned"``) and
+    ``assigned_by`` (``"library"`` or ``"heuristic"`` when assigned).
+
+    When *use_heuristic* is true and the library scan does not yield an
+    unambiguous candidate, a deterministic value+package heuristic
+    (:func:`guess_chip_footprint`) is consulted for standard two-pin SMD
+    passives. This lets the command auto-assign on environments with no
+    installed KiCad library, and resolve parts whose footprint is fully
+    determined by their class + chip size. Genuinely unknown parts remain
+    ``ambiguous`` / ``no_candidates`` so the caller can fail loud.
     """
     target_pins = _resolve_target_pin_count(sch, sym)
     keyword = _derive_keyword(sym)
@@ -125,17 +136,37 @@ def _classify_symbol(
         "candidates": candidates,
         "status": "no_candidates",
         "assigned": None,
+        "assigned_by": None,
     }
 
-    if not candidates:
-        return record
-
-    if _is_unambiguous(candidates, fp_filters, keyword):
+    if candidates and _is_unambiguous(candidates, fp_filters, keyword):
         top = candidates[0]
         record["status"] = "assigned"
         record["assigned"] = f"{top['library']}:{top['footprint']}"
-    else:
+        record["assigned_by"] = "library"
+        return record
+
+    if candidates:
         record["status"] = "ambiguous"
+
+    # Library scan was unhelpful (no candidates, or an unresolved tie).
+    # Fall back to the deterministic chip-passive heuristic, which works
+    # without any installed library. A successful heuristic match overrides
+    # an "ambiguous" library result: a high-confidence class+size mapping is
+    # more useful than "I found two equally-ranked library hits".
+    if use_heuristic:
+        match = guess_chip_footprint(
+            value=sym.value,
+            lib_id=sym.lib_id,
+            reference=sym.reference,
+            package=keyword,
+            pin_count=target_pins,
+        )
+        if match is not None:
+            record["status"] = "assigned"
+            record["assigned"] = match.footprint
+            record["assigned_by"] = "heuristic"
+            record["heuristic_reason"] = match.reason
 
     return record
 
@@ -172,7 +203,9 @@ def _emit_text_report(
         print()
         print(f"Assigned ({len(assigned)}):")
         for r in assigned:
-            print(f"  {r['reference']:<8} -> {r['assigned']}  ({r['lib_id']})")
+            via = r.get("assigned_by")
+            via_tag = f" [{via}]" if via else ""
+            print(f"  {r['reference']:<8} -> {r['assigned']}{via_tag}  ({r['lib_id']})")
 
     if ambiguous:
         print()
@@ -211,14 +244,24 @@ def run_assign_footprints(
     include_dnp: bool = False,
     force: bool = False,
     no_project_lib: bool = False,
+    assign_missing: bool = False,
     config_override: str | Path | None = None,
 ) -> int:
     """Bulk-assign unambiguous footprints to missing-footprint symbols.
 
     Returns 0 when at least one assignment succeeds OR there were no
     missing-footprint symbols to consider. Returns 1 when no library is
-    available, every symbol was ambiguous / no-candidate, or any write
-    error occurred.
+    available (and ``assign_missing`` is off), every symbol was ambiguous /
+    no-candidate, or any write error occurred.
+
+    When *assign_missing* is true, a deterministic value+package heuristic
+    (:func:`kicad_tools.footprints.heuristics.guess_chip_footprint`) is
+    consulted for standard two-pin SMD passives whenever the library scan is
+    unhelpful. This makes the command work with **no** installed KiCad
+    library, and lets it resolve passives whose footprint is fully
+    determined by class + chip size. Parts the heuristic cannot resolve are
+    reported and cause a non-zero exit so a missing footprint can never be
+    silently skipped (issue #3866).
 
     See the module docstring for the ambiguity policy.
     """
@@ -228,7 +271,7 @@ def run_assign_footprints(
 
     paths = detect_kicad_library_path(config_override)
     project_table = find_project_fp_lib_table(schematic_path) if not no_project_lib else None
-    if not paths.found and project_table is None:
+    if not paths.found and project_table is None and not assign_missing:
         print(
             "Error: No KiCad footprint library found. "
             "assign-footprints requires the standard KiCad footprint libraries "
@@ -236,7 +279,9 @@ def run_assign_footprints(
             "Set the KICAD_FOOTPRINT_DIR environment variable to the directory "
             "containing your '*.pretty' footprint libraries, e.g.\n"
             "  export KICAD_FOOTPRINT_DIR="
-            "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints",
+            "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints\n"
+            "Or pass --assign-missing to auto-assign standard SMD passives "
+            "from value+package heuristics (no library required).",
             file=sys.stderr,
         )
         return 1
@@ -278,6 +323,7 @@ def run_assign_footprints(
             paths=paths,
             limit=limit,
             use_project_table=not no_project_lib,
+            use_heuristic=assign_missing,
         )
         records.append(record)
 
@@ -299,6 +345,7 @@ def run_assign_footprints(
                     "reference": r["reference"],
                     "lib_id": r["lib_id"],
                     "footprint": r["assigned"],
+                    "assigned_by": r.get("assigned_by"),
                 }
                 for r in records
                 if r["status"] == "assigned"
@@ -344,6 +391,33 @@ def run_assign_footprints(
 
     # Symbols existed but nothing was assignable -> non-zero so CI fails loudly.
     if not mapping:
+        return 1
+
+    # Fail-loud (issue #3866): when the caller asked us to resolve every
+    # missing footprint (--assign-missing), any symbol we could NOT resolve
+    # (ambiguous or no-candidate / unknown part) must surface as a non-zero
+    # exit -- even though we assigned the others. A truly unknown part is
+    # never silently left footprint-less. Without --assign-missing the
+    # historical "assigned-something == success" contract is preserved.
+    unresolved = [r for r in records if r["status"] != "assigned"]
+    if assign_missing and unresolved:
+        # Still write what we could resolve (unless dry-run) so the human's
+        # remaining manual work is minimised, then report the failure.
+        if not dry_run:
+            run_set_footprint(
+                schematic_path=schematic_path,
+                mapping=mapping,
+                backup=backup,
+                validate=validate,
+                config_override=config_override,
+            )
+        refs = ", ".join(r["reference"] for r in unresolved[:10])
+        suffix = f" (and {len(unresolved) - 10} more)" if len(unresolved) > 10 else ""
+        print(
+            f"Error: {len(unresolved)} symbol(s) could not be auto-assigned a "
+            f"footprint and must be set by hand: {refs}{suffix}",
+            file=sys.stderr,
+        )
         return 1
 
     if dry_run:
@@ -419,6 +493,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Also consider DNP symbols (default: skip).",
     )
     parser.add_argument(
+        "--assign-missing",
+        action="store_true",
+        help=(
+            "Resolve missing footprints with a deterministic value+package "
+            "heuristic for standard SMD passives (works with no installed "
+            "KiCad library). Parts the heuristic cannot resolve are reported "
+            "and cause a non-zero exit (fail-loud) so a missing footprint is "
+            "never silently skipped."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -448,6 +533,7 @@ def main(argv: list[str] | None = None) -> int:
         include_dnp=args.include_dnp,
         force=args.force,
         no_project_lib=args.no_project_lib,
+        assign_missing=args.assign_missing,
     )
 
 

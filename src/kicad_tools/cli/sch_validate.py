@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.cli.sch_footprint_common import iter_missing_footprint_symbols
 from kicad_tools.erc.cross_sheet import (
     filter_cross_sheet_global_labels,
     filter_cross_sheet_power_violations,
@@ -234,44 +235,48 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
 
 
 def check_missing_footprints(schematic_path: str) -> list[ValidationIssue]:
-    """Check for symbols missing footprints."""
+    """Check for symbols missing footprints.
+
+    Delegates symbol selection to the shared
+    :func:`iter_missing_footprint_symbols` predicate so this preflight
+    path and the assign-footprints / export-preflight paths can never
+    drift on their skip rules (power, ``kicad_tools_pwr:``, ``#PWR``,
+    DNP — see #3866). This is the single source of truth.
+
+    A footprint-less symbol is a HARD error (severity ``error``), not a
+    warning: the component cannot be placed on the PCB, so its nets can
+    never route and it silently drops out of the manufactured board
+    (issue #3866). The message names the actionable fix.
+    """
     issues = []
 
+    def _on_sheet_error(node: object, exc: Exception) -> None:
+        location = node.get_path_string()  # type: ignore[attr-defined]
+        issues.append(
+            ValidationIssue(
+                severity="info",
+                category="footprint",
+                message=f"Skipped sheet {location}: {exc}",
+                location=location,
+            )
+        )
+
     try:
-        hierarchy = build_hierarchy(schematic_path)
-
-        for node in hierarchy.all_nodes():
-            try:
-                sch = Schematic.load(node.path)
-                for sym in sch.symbols:
-                    # Skip power symbols
-                    if sym.lib_id.startswith("power:"):
-                        continue
-
-                    # Skip DNP
-                    if sym.dnp:
-                        continue
-
-                    # Check for missing footprint
-                    if not sym.footprint or sym.footprint == "~":
-                        issues.append(
-                            ValidationIssue(
-                                severity="warning",
-                                category="footprint",
-                                message=f"Missing footprint: {sym.reference} ({sym.value})",
-                                location=node.get_path_string(),
-                            )
-                        )
-            except Exception as e:
-                issues.append(
-                    ValidationIssue(
-                        severity="info",
-                        category="footprint",
-                        message=f"Skipped sheet {node.get_path_string()}: {e}",
-                        location=node.get_path_string(),
-                    )
+        for node, sym, _sch in iter_missing_footprint_symbols(
+            schematic_path, on_sheet_error=_on_sheet_error
+        ):
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="footprint",
+                    message=(
+                        f"Missing footprint: {sym.reference} ({sym.value}) "
+                        "-- run `kct sch assign-footprints "
+                        "<schematic> --assign-missing` to auto-assign"
+                    ),
+                    location=node.get_path_string(),
                 )
-
+            )
     except Exception as e:
         issues.append(
             ValidationIssue(

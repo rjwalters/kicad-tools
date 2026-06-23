@@ -449,7 +449,9 @@ def test_iter_missing_matches_preflight_check(tmp_path, monkeypatch):
     iter_refs = {sym.reference for _node, sym, _sch in iter_missing_footprint_symbols(sch)}
     preflight_refs: set[str] = set()
     for issue in check_missing_footprints(str(sch)):
-        if issue.category == "footprint" and issue.severity == "warning":
+        # Missing footprints are now error-severity (issue #3866); the
+        # invariant only cares about the "Missing footprint:" records.
+        if issue.category == "footprint" and issue.severity == "error":
             # The validator message format is "Missing footprint: REF (VALUE)".
             msg = issue.message
             if msg.startswith("Missing footprint:"):
