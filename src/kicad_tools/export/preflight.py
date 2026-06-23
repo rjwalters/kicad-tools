@@ -134,6 +134,12 @@ class PreflightChecker:
         # Schematic check (needed for BOM/CPL)
         results.append(self._check_schematic_exists())
 
+        # Schematic footprint completeness (fail-loud before export).
+        # A footprint-less schematic symbol can never be placed/assembled,
+        # so this is a hard gate (issue #3866).
+        if self.schematic_path and self.schematic_path.exists():
+            results.append(self._check_schematic_footprints())
+
         # Board outline
         if self._pcb is not None:
             results.append(self._check_board_outline_closed())
@@ -255,6 +261,60 @@ class PreflightChecker:
             name="schematic_file",
             status="OK",
             message=f"Schematic file found: {self.schematic_path.name}",
+        )
+
+    def _check_schematic_footprints(self) -> PreflightResult:
+        """Fail loud when any schematic symbol is missing a footprint.
+
+        Walks the schematic hierarchy via the shared
+        ``iter_missing_footprint_symbols`` predicate (same power/DNP skip
+        rules as ``sch validate``) and FAILS the preflight if any symbol has
+        a blank or ``~`` footprint. Without this gate, a footprint-less
+        symbol silently drops out of the PCB and its nets can never route
+        (issue #3866).
+        """
+        if self.schematic_path is None:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="OK",
+                message="No schematic to check for missing footprints",
+            )
+
+        try:
+            from kicad_tools.cli.sch_footprint_common import (
+                iter_missing_footprint_symbols,
+            )
+
+            missing = [
+                sym.reference or sym.lib_id
+                for _node, sym, _sch in iter_missing_footprint_symbols(self.schematic_path)
+            ]
+        except Exception as e:
+            return PreflightResult(
+                name="schematic_footprints",
+                status="WARN",
+                message=f"Could not check schematic footprints: {e}",
+            )
+
+        if missing:
+            refs = ", ".join(missing[:10])
+            suffix = f" (and {len(missing) - 10} more)" if len(missing) > 10 else ""
+            return PreflightResult(
+                name="schematic_footprints",
+                status="FAIL",
+                message=f"{len(missing)} schematic symbol(s) missing a footprint",
+                details=(
+                    f"References: {refs}{suffix}. "
+                    "Run `kct sch assign-footprints <schematic> --assign-missing` "
+                    "to auto-assign standard parts; unknown parts must be "
+                    "assigned by hand before export."
+                ),
+            )
+
+        return PreflightResult(
+            name="schematic_footprints",
+            status="OK",
+            message="All schematic symbols have a footprint assigned",
         )
 
     def _check_board_outline_closed(self) -> PreflightResult:

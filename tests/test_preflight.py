@@ -143,6 +143,98 @@ class TestPreflightSchematic:
 
 
 # ---------------------------------------------------------------------------
+# PreflightChecker -- schematic footprint completeness gate (issue #3866)
+# ---------------------------------------------------------------------------
+
+
+_SCH_WITH_MISSING_FP = """(kicad_sch
+    (version 20231120)
+    (generator "test")
+    (uuid "00000000-0000-0000-0000-0000000000ff")
+    (paper "A4")
+    (lib_symbols)
+    (symbol
+        (lib_id "Device:R")
+        (at 50 50 0)
+        (unit 1)
+        (in_bom yes)
+        (on_board yes)
+        (dnp no)
+        (uuid "11111111-1111-1111-1111-111111111111")
+        (property "Reference" "R1" (at 0 0 0))
+        (property "Value" "10k" (at 0 0 0))
+        (property "Footprint" "" (at 0 0 0))
+        (pin "1" (uuid "11111111-1111-1111-1111-000000000001"))
+        (pin "2" (uuid "11111111-1111-1111-1111-000000000002"))
+        (instances (project "test" (path "/" (reference "R1") (unit 1))))
+    )
+    (sheet_instances (path "/" (page "1")))
+)
+"""
+
+_SCH_ALL_FP_SET = """(kicad_sch
+    (version 20231120)
+    (generator "test")
+    (uuid "00000000-0000-0000-0000-0000000000fe")
+    (paper "A4")
+    (lib_symbols)
+    (symbol
+        (lib_id "Device:R")
+        (at 50 50 0)
+        (unit 1)
+        (in_bom yes)
+        (on_board yes)
+        (dnp no)
+        (uuid "22222222-2222-2222-2222-222222222222")
+        (property "Reference" "R1" (at 0 0 0))
+        (property "Value" "10k" (at 0 0 0))
+        (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 0 0 0))
+        (pin "1" (uuid "22222222-2222-2222-2222-000000000001"))
+        (pin "2" (uuid "22222222-2222-2222-2222-000000000002"))
+        (instances (project "test" (path "/" (reference "R1") (unit 1))))
+    )
+    (sheet_instances (path "/" (page "1")))
+)
+"""
+
+
+class TestPreflightSchematicFootprints:
+    """The schematic-footprint completeness gate fails loud (issue #3866)."""
+
+    def test_missing_footprint_fails(self, tmp_path):
+        pcb = _create_minimal_pcb(tmp_path)
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text(_SCH_WITH_MISSING_FP)
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        fp_result = _find_result(results, "schematic_footprints")
+        assert fp_result is not None
+        assert fp_result.status == "FAIL"
+        assert "R1" in fp_result.details
+        assert "assign-footprints" in fp_result.details
+        # The overall preflight is blocked.
+        assert checker.has_failures(results)
+
+    def test_all_footprints_present_ok(self, tmp_path):
+        pcb = _create_minimal_pcb(tmp_path)
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text(_SCH_ALL_FP_SET)
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        fp_result = _find_result(results, "schematic_footprints")
+        assert fp_result is not None
+        assert fp_result.status == "OK"
+
+
+# ---------------------------------------------------------------------------
 # PreflightChecker -- board outline checks
 # ---------------------------------------------------------------------------
 

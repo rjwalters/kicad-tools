@@ -754,6 +754,15 @@ def _add_sch_parser(subparsers) -> None:
         help="Also consider DNP symbols (default: skip)",
     )
     sch_assign_fp.add_argument(
+        "--assign-missing",
+        action="store_true",
+        help=(
+            "Resolve missing footprints with a deterministic value+package "
+            "heuristic for standard SMD passives (no installed library "
+            "required); unknown parts fail loud with a non-zero exit"
+        ),
+    )
+    sch_assign_fp.add_argument(
         "--force",
         action="store_true",
         help="Reconsider symbols that already have a non-empty footprint",

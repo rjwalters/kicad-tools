@@ -252,13 +252,23 @@ def check_missing_footprints(schematic_path: str) -> list[ValidationIssue]:
                     if sym.dnp:
                         continue
 
-                    # Check for missing footprint
+                    # Check for missing footprint.
+                    #
+                    # A footprint-less symbol is a HARD error (severity
+                    # "error"), not a warning: the component cannot be placed
+                    # on the PCB, so its nets can never route and it silently
+                    # drops out of the manufactured board (issue #3866). The
+                    # message names the actionable fix.
                     if not sym.footprint or sym.footprint == "~":
                         issues.append(
                             ValidationIssue(
-                                severity="warning",
+                                severity="error",
                                 category="footprint",
-                                message=f"Missing footprint: {sym.reference} ({sym.value})",
+                                message=(
+                                    f"Missing footprint: {sym.reference} ({sym.value}) "
+                                    "-- run `kct sch assign-footprints "
+                                    "<schematic> --assign-missing` to auto-assign"
+                                ),
                                 location=node.get_path_string(),
                             )
                         )

@@ -209,6 +209,7 @@ def run_sch_command(args) -> int:
             include_dnp=getattr(args, "include_dnp", False),
             force=getattr(args, "force", False),
             no_project_lib=getattr(args, "no_project_lib", False),
+            assign_missing=getattr(args, "assign_missing", False),
         )
 
     elif args.sch_command == "set-value":
