@@ -5000,6 +5000,16 @@ def _add_net_status_parser(subparsers) -> None:
         action="store_true",
         help="Show all pads with coordinates",
     )
+    net_status_parser.add_argument(
+        "--why",
+        dest="net_status_why",
+        action="store_true",
+        help=(
+            "Classify each incomplete signal net by WHY it is stuck "
+            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / PLACEMENT_BOUND) with "
+            "supporting evidence. Read-only diagnostic (issue #3863)."
+        ),
+    )
 
 
 def _add_board_metrics_parser(subparsers) -> None:
