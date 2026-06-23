@@ -233,6 +233,99 @@ class TestPreflightSchematicFootprints:
         assert fp_result is not None
         assert fp_result.status == "OK"
 
+    def test_blank_schematic_footprint_but_placed_on_pcb_ok(self, tmp_path):
+        """Export reconciliation: a schematic-blank Footprint field whose
+        component IS placed on the PCB with a footprint must NOT block
+        export (issue #3866 / board-05).
+
+        The export gate runs on a routed PCB about to be manufactured. A
+        component that is on the PCB with a concrete footprint is
+        manufacturable even if its *schematic* Footprint field is blank
+        (e.g. a generator that builds the PCB but never writes footprints
+        back into the schematic -- the board-05 case). This is the
+        reconciliation the Judge required."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1"])
+        sch = tmp_path / "board.kicad_sch"
+        # R1 has a BLANK schematic Footprint field...
+        sch.write_text(_SCH_WITH_MISSING_FP)
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        fp_result = _find_result(results, "schematic_footprints")
+        assert fp_result is not None
+        # ...but R1 IS on the PCB with a footprint -> manufacturable -> OK.
+        assert fp_result.status == "OK", fp_result.details
+        assert not checker.has_failures(results)
+
+    def test_blank_schematic_footprint_absent_from_pcb_fails(self, tmp_path):
+        """Export reconciliation: a schematic component with a blank
+        Footprint field that is ALSO absent from the PCB is genuinely
+        unmanufacturable and MUST block export (issue #3866)."""
+        # PCB has a different component (C9), so R1 from the schematic is
+        # absent from the PCB entirely.
+        pcb = _create_pcb_with_footprints(tmp_path, ["C9"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text(_SCH_WITH_MISSING_FP)
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        fp_result = _find_result(results, "schematic_footprints")
+        assert fp_result is not None
+        assert fp_result.status == "FAIL", fp_result.message
+        assert "R1" in fp_result.details
+        assert "assign-footprints" in fp_result.details
+        assert checker.has_failures(results)
+
+    def test_blank_schematic_footprint_on_pcb_without_footprint_fails(self, tmp_path):
+        """Export reconciliation: a schematic component present on the PCB
+        but WITHOUT a library footprint name is unmanufacturable and MUST
+        block export (issue #3866)."""
+        # A PCB footprint for R1 with an EMPTY library footprint name.
+        pcb_content = """(kicad_pcb (version 20231014) (generator "pcbnew")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 0) (end 50 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 50) (end 0 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 50) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+  (footprint ""
+    (layer "F.Cu")
+    (at 25 25)
+    (attr smd)
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (fp_text value "10k" (at 0 1.5) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(pcb_content)
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text(_SCH_WITH_MISSING_FP)
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        fp_result = _find_result(results, "schematic_footprints")
+        assert fp_result is not None
+        assert fp_result.status == "FAIL", fp_result.message
+        assert "R1" in fp_result.details
+        assert checker.has_failures(results)
+
 
 # ---------------------------------------------------------------------------
 # PreflightChecker -- board outline checks
