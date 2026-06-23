@@ -1,11 +1,18 @@
 """Unit tests for the congestion/escape-driven placement nudge (issue #3865, M3).
 
-The expensive part of the M3 stage -- the re-route subprocess and the
-net-positive accept/reject -- is exercised end-to-end on chorus (see the PR
-description for measured numbers).  These unit tests target the load-bearing
-*new* code: the bounded, board-outline-aware nudge-vector geometry in
-:class:`kicad_tools.router.placement_nudge.PlacementNudge`, which decides WHICH
-part to move and BY HOW MUCH for a PLACEMENT_BOUND net.
+Two layers of coverage, both router-free so they run in seconds:
+
+1. ``TestProposeGeometry`` -- the bounded, board-outline-aware nudge-vector
+   geometry in :class:`~kicad_tools.router.placement_nudge.PlacementNudge`,
+   which decides WHICH part to move and BY HOW MUCH for a PLACEMENT_BOUND net.
+
+2. ``TestNetPositiveGuard`` -- the accept/reject decision of
+   :func:`~kicad_tools.router.placement_nudge.nudge_placement_bound_nets`.
+   The expensive re-route subprocess and the strict/DRC measurements are
+   stubbed so the *decision logic* (accept on strict gain, roll back
+   byte-for-byte otherwise) is proven deterministically -- the M2-analogous
+   synthetic proof.  The real re-route is exercised end-to-end on chorus (see
+   the PR description for measured numbers).
 
 Each test builds a small synthetic board (the same pattern as
 ``test_stuck_classifier.py``) so the real classifier + proposal pipeline runs
@@ -19,9 +26,11 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.router import placement_nudge as pn
 from kicad_tools.router.placement_nudge import (
     NudgeConfig,
     PlacementNudge,
+    nudge_placement_bound_nets,
 )
 from kicad_tools.router.stuck_classifier import (
     StuckClass,
@@ -196,3 +205,154 @@ class TestProposeGeometry:
         pcb = _load(p)
         nudger = PlacementNudge(pcb, NudgeConfig(max_components=1))
         assert len(nudger.propose()) == 1
+
+
+class TestNetPositiveGuard:
+    """The accept/reject decision, with the re-route + measurements stubbed.
+
+    These prove the safety contract that makes M3 loss-free by construction:
+    the nudged placement is kept ONLY when the strict count strictly increases
+    AND DRC does not worsen; otherwise the board file is restored byte-for-byte.
+    """
+
+    def _stub_measurements(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        strict_seq: list[int],
+        drc_seq: list[int],
+        reroute_effect=None,
+    ) -> None:
+        """Stub strict/DRC counters (called before, then after) and the route.
+
+        ``strict_seq``/``drc_seq`` are consumed in call order: index 0 is the
+        "before" measurement, index 1 the "after".  ``reroute_effect`` (if
+        given) is invoked with the board path to simulate what the re-route
+        wrote to the file.
+        """
+        strict_calls = iter(strict_seq)
+        drc_calls = iter(drc_seq)
+
+        monkeypatch.setattr(
+            pn, "_count_strict_signal_nets", lambda pcb, excluded: next(strict_calls)
+        )
+        monkeypatch.setattr(pn, "_count_blocking_drc", lambda path, mfr: next(drc_calls))
+        # Avoid the real (slow) classifier-driven stub strip/skip helpers
+        # touching the file in surprising ways.
+        monkeypatch.setattr(pn, "partially_connected_signal_nets", lambda *a, **k: ["TGT"])
+        monkeypatch.setattr(pn, "strip_net_copper", lambda *a, **k: 0)
+        monkeypatch.setattr(pn, "_strict_net_names", lambda *a, **k: [])
+
+        def fake_run(cmd, *args, **kwargs):  # noqa: ANN001
+            if reroute_effect is not None:
+                # Identify the board path argument (the route command's pcb).
+                reroute_effect(Path(cmd[cmd.index("--output") + 1]))
+
+            class _R:
+                returncode = 0
+
+            return _R()
+
+        monkeypatch.setattr(pn.subprocess, "run", fake_run)
+
+    def test_accepts_and_keeps_nudge_on_strict_gain(
+        self, placement_pcb: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # before strict=5, after strict=6 (the nudged net got routed); DRC flat.
+        self._stub_measurements(monkeypatch, strict_seq=[5, 6], drc_seq=[2, 2])
+        original_bytes = placement_pcb.read_bytes()
+
+        result = nudge_placement_bound_nets(placement_pcb, NudgeConfig(), quiet=True)
+
+        assert result.accepted is True
+        assert result.reason == "net_positive"
+        assert result.strict_before == 5
+        assert result.strict_after == 6
+        assert result.nudges  # a move was proposed and kept
+        # The board file was MUTATED (the nudge applied + saved) -- not the
+        # byte-identical original.
+        assert placement_pcb.read_bytes() != original_bytes
+        # No leftover backup file.
+        assert not placement_pcb.with_suffix(placement_pcb.suffix + ".nudge_bak").exists()
+
+    def test_rolls_back_byte_exact_on_no_strict_gain(
+        self, placement_pcb: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # before strict=5, after strict=5 (no gain). The re-route wrote a
+        # VALID-but-unhelpful board (append a harmless comment-like segment so
+        # the file differs from the post-nudge save); rollback must restore the
+        # exact PRE-NUDGE original bytes regardless.
+        def _reroute_writes_valid_change(path: Path) -> None:
+            text = path.read_text()
+            # Insert another routed segment before the closing paren -- a valid
+            # edit that does not raise on reload but yields no strict gain.
+            text = text.replace(
+                ")\n",
+                '  (segment (start 1 1) (end 2 1) (width 0.25) (layer "F.Cu") (net 1))\n)\n',
+                1,
+            )
+            path.write_text(text)
+
+        self._stub_measurements(
+            monkeypatch,
+            strict_seq=[5, 5],
+            drc_seq=[2, 2],
+            reroute_effect=_reroute_writes_valid_change,
+        )
+        original_bytes = placement_pcb.read_bytes()
+
+        result = nudge_placement_bound_nets(placement_pcb, NudgeConfig(), quiet=True)
+
+        assert result.accepted is False
+        assert result.reason == "no_strict_gain"
+        # Byte-for-byte restore of the pre-nudge board.
+        assert placement_pcb.read_bytes() == original_bytes
+        assert not placement_pcb.with_suffix(placement_pcb.suffix + ".nudge_bak").exists()
+
+    def test_rolls_back_when_drc_worsens_despite_strict_gain(
+        self, placement_pcb: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Strict improved (5 -> 6) but DRC got worse (2 -> 5): reject.
+        self._stub_measurements(monkeypatch, strict_seq=[5, 6], drc_seq=[2, 5])
+        original_bytes = placement_pcb.read_bytes()
+
+        result = nudge_placement_bound_nets(placement_pcb, NudgeConfig(), quiet=True)
+
+        assert result.accepted is False
+        assert result.reason == "drc_worsened"
+        assert placement_pcb.read_bytes() == original_bytes
+
+    def test_no_candidate_is_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        # A board with no placement-bound net -> no nudge -> file untouched and
+        # no re-route attempted.
+        body = _placement_bound_board().replace(
+            '  (gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.1))\n',
+            "",
+        )
+        p = tmp_path / "noop.kicad_pcb"
+        p.write_text(body)
+        original_bytes = p.read_bytes()
+
+        # Strict measured once (before); after equals before for a no-op.
+        monkeypatch.setattr(pn, "_count_strict_signal_nets", lambda pcb, excluded: 7)
+        monkeypatch.setattr(pn, "_count_blocking_drc", lambda path, mfr: 0)
+
+        ran = {"reroute": False}
+
+        def fake_run(cmd, *args, **kwargs):  # noqa: ANN001
+            ran["reroute"] = True
+
+            class _R:
+                returncode = 0
+
+            return _R()
+
+        monkeypatch.setattr(pn.subprocess, "run", fake_run)
+
+        result = nudge_placement_bound_nets(p, NudgeConfig(), quiet=True)
+
+        assert result.accepted is False
+        assert result.reason == "no_candidate"
+        assert result.nudges == []
+        assert ran["reroute"] is False  # no re-route on a no-op
+        assert p.read_bytes() == original_bytes

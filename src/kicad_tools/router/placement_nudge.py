@@ -111,6 +111,15 @@ class NudgeConfig:
     include_escape_blocked: bool = False
     #: Wall budget for the re-route subprocess that validates the nudge.
     reroute_timeout_s: int = 600
+    #: Cap on how many unfinished nets the validation re-route attempts.  The
+    #: nudge only changed the geometry around the moved parts, so re-routing
+    #: the whole unfinished cohort (e.g. all 43 partials on a far-from-done
+    #: chorus board) wastes the budget on nets the nudge never touched and can
+    #: time out before reaching the nudged nets.  Re-route only the nudged
+    #: nets plus a bounded number of the densest remaining partials; everything
+    #: else is skipped (its committed copper preserved).  None = no cap (route
+    #: the whole unfinished cohort, the original behaviour).
+    max_reroute_nets: int | None = 8
 
 
 @dataclass
@@ -471,22 +480,44 @@ def nudge_placement_bound_nets(
         nudger.apply(nudges)
         pcb.save(str(routed_path))
 
-        # Re-route the unfinished cohort against the new placement.  Strip the
-        # stranded stubs of the unfinished nets first (the #3470 lesson) so the
-        # re-route starts clean, then route them together with
-        # --preserve-existing (the strict nets' copper is protected).
+        # Re-route a TARGETED cohort against the new placement.  The nudge only
+        # changed the geometry around the moved parts, so the re-route should
+        # focus on the nudged nets (the ones whose owning part moved) plus a
+        # bounded number of the densest remaining partials -- not the entire
+        # unfinished set (re-routing 43 partials on a far-from-done board times
+        # out before it reaches the nudged nets).  Everything outside the
+        # cohort is skipped so its committed copper is preserved.
         unfinished = partially_connected_signal_nets(
             routed_path,
             manufacturer=cfg.rescue.manufacturer,
             excluded_nets=excluded,
             include_unrouted=True,
         )
-        if unfinished:
-            strip_net_copper(routed_path, unfinished)
+        nudged_nets = {n.target_net for n in nudges}
+        if cfg.max_reroute_nets is None:
+            cohort = list(unfinished)
+        else:
+            # Always include the nudged nets; fill the rest of the budget with
+            # other partials (order is the checker's, deterministic).
+            cohort = [n for n in unfinished if n in nudged_nets]
+            for n in unfinished:
+                if len(cohort) >= cfg.max_reroute_nets:
+                    break
+                if n not in cohort:
+                    cohort.append(n)
+        if cohort:
+            strip_net_copper(routed_path, cohort)
 
-        strict_complete = [
-            n for n in _strict_net_names(routed_path, excluded) if n not in unfinished
+        # Skip everything that is NOT in the re-route cohort: the strict nets
+        # (preserve their copper) AND the unfinished nets we deliberately left
+        # out of this bounded re-route.
+        cohort_set = set(cohort)
+        skip_nets = [
+            n
+            for n in (_strict_net_names(routed_path, excluded) + list(unfinished))
+            if n not in cohort_set
         ]
+        strict_complete = sorted(set(skip_nets))
         reroute_cfg = RescueConfig(
             manufacturer=cfg.rescue.manufacturer,
             backend=cfg.rescue.backend,
