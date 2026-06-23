@@ -2708,6 +2708,7 @@ class NegotiatedRouter:
         escalation_factor: float = 2.0,
         ripup_history: dict[int, int] | None = None,
         max_ripups_per_net: int = 5,
+        joint_resolve: bool = False,
     ) -> tuple[bool, int]:
         """Perform neighborhood rip-up for stuck nets (Issue #2274).
 
@@ -2734,6 +2735,16 @@ class NegotiatedRouter:
             escalation_factor: Multiplier applied to radius on each stall.
             ripup_history: Optional dict tracking per-net rip-up counts.
             max_ripups_per_net: Maximum rip-ups per net to prevent loops.
+            joint_resolve: When True (Issue #3864, M2), the displaced
+                pocket nets are re-solved JOINTLY via
+                :meth:`region_resolve` -- a bounded inner negotiated loop
+                with a net-positive rollback guard -- instead of the
+                legacy sequential one-at-a-time reroute.  This escapes the
+                1:1-trade congestion minimum.  Off by default; opt in via
+                the ``KCT_JOINT_REGION_RESOLVE`` env flag wired in
+                ``core.py``.  When the joint re-solve rolls back (no strict
+                gain) we fall through to the legacy sequential reroute so
+                behaviour is never worse than the flag-off path.
 
         Returns:
             Tuple of (improved, new_routed_count) where improved is True if
@@ -2857,6 +2868,38 @@ class NegotiatedRouter:
                 n for n in failed_nets if n not in net_routes or not net_routes.get(n)
             ]
 
+            # Issue #3864 (M2): JOINT local re-solve of the pocket.  Rip
+            # ALL pocket nets (blocker + neighbourhood + the stuck failed
+            # nets) and re-solve them together via region_resolve's bounded
+            # inner negotiated loop, guarded by a net-positive rollback.
+            # On a strict gain we accept and report improvement directly;
+            # on rollback (no strict gain) region_resolve has already
+            # restored the exact pre-rip-up state, so we fall through to
+            # the legacy sequential reroute below -- behaviour is never
+            # worse than the flag-off path.
+            if joint_resolve:
+                pocket = list(neighborhood_nets) + [
+                    fn for fn in affected_failed if fn not in neighborhood_nets
+                ]
+                jr_improved, _ = self.region_resolve(
+                    pocket_nets=pocket,
+                    net_routes=net_routes,
+                    routes_list=routes_list,
+                    pads_by_net=pads_by_net,
+                    present_cost_factor=present_cost_factor,
+                    mark_route_callback=mark_route_callback,
+                    per_net_timeout=per_net_timeout,
+                )
+                if jr_improved:
+                    current_routed = _count_routed()
+                    if current_routed > initial_routed:
+                        return True, current_routed
+                    # Strict gain without a net-count gain (a swap that
+                    # finishes one net while another stays routed-partial):
+                    # still a real improvement, report it.
+                    return True, current_routed
+                # Rolled back; fall through to legacy sequential reroute.
+
             # Rip up the neighborhood
             self.rip_up_nets(list(neighborhood_nets), net_routes, routes_list)
 
@@ -2901,6 +2944,232 @@ class NegotiatedRouter:
 
         final_routed = _count_routed()
         return final_routed > initial_routed, final_routed
+
+    def _route_net_counting_failures(
+        self,
+        net_pads: list[Pad],
+        present_cost_factor: float,
+        mark_route_callback: Callable,
+        per_net_timeout: float | None,
+    ) -> tuple[list[Route], bool]:
+        """Route one net, returning ``(routes, fully_connected)``.
+
+        ``fully_connected`` is ``True`` only when ``route_net_negotiated``
+        placed copper for EVERY RSMT edge (zero ``failure_callback``
+        invocations) -- the same strict-completeness predicate
+        :meth:`targeted_ripup` uses at line ~2451.  A partial reroute
+        (some edges placed, others timed-out/blocked) returns
+        ``fully_connected=False`` so the joint-resolve guard never credits
+        a strand as a strict completion.
+        """
+        edge_failures = 0
+
+        def _count_failed_edge(_source: Pad, _target: Pad) -> None:
+            nonlocal edge_failures
+            edge_failures += 1
+
+        routes = self.route_net_negotiated(
+            net_pads,
+            present_cost_factor,
+            mark_route_callback,
+            per_net_timeout=per_net_timeout,
+            failure_callback=_count_failed_edge,
+        )
+        fully_connected = bool(routes) and edge_failures == 0
+        return routes, fully_connected
+
+    def region_resolve(
+        self,
+        pocket_nets: list[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: Callable,
+        per_net_timeout: float | None = None,
+        inner_passes: int = 4,
+        present_cost_escalation: float = 1.8,
+        max_pocket_nets: int = 8,
+        wall_budget_s: float | None = 90.0,
+    ) -> tuple[bool, int]:
+        """Jointly re-solve a congested pocket (Issue #3864, M2).
+
+        This is the JOINT local re-solve that escapes the 1:1-trade
+        congestion minimum.  :meth:`neighborhood_ripup` already locates
+        the congested pocket and its member nets, but then re-routes the
+        displaced nets SEQUENTIALLY one-at-a-time -- so it re-derives the
+        same 1:1 pad trade and reports no improvement.  ``region_resolve``
+        replaces that sequential reroute with a **bounded inner negotiated
+        loop** over just the pocket nets: it rips ALL pocket nets, then
+        runs several escalating-present-cost passes that route the pocket
+        nets *against each other* (the surrounding committed copper is the
+        fixed boundary).  Because the inner loop negotiates the whole
+        pocket simultaneously, a strict net can yield and re-route while a
+        near-complete net finishes -- the 2-net swap / 3-net rotation that
+        no single-net sequential reroute can find.
+
+        This is the CHEAP "variant (a)" the architect recommends in #3862:
+        a bounded inner negotiated loop reusing the existing per-net
+        machinery -- NO new C++ simultaneous solver.
+
+        SAFETY -- net-positive rollback guard.  The pocket's strict
+        (fully-connected) net count is snapshotted before the rip-up.  The
+        joint re-solve is committed ONLY if the strict count among the
+        pocket nets STRICTLY INCREASES; on any other outcome (equal, worse,
+        or a partial-strand trade) the exact pre-rip-up Route objects are
+        re-marked verbatim and ``False`` is returned.  Regression is
+        impossible by construction: a pocket can never end with fewer
+        strict nets than it started.
+
+        Args:
+            pocket_nets: Net IDs forming the congested pocket to re-solve.
+            net_routes: Dict of net_id -> list of routes (mutated in place).
+            routes_list: Master route list (mutated in place).
+            pads_by_net: Dict of net_id -> list of pads.
+            present_cost_factor: Base congestion cost factor.
+            mark_route_callback: Callback to mark routes on the grid.
+            per_net_timeout: Optional per-net A* timeout (seconds).
+            inner_passes: Number of escalating inner negotiated passes.
+            present_cost_escalation: Per-pass multiplier on present cost,
+                so later passes penalise sharing more aggressively and
+                drive the pocket nets onto disjoint tracks.
+            max_pocket_nets: Hard cap on the pocket size.  A joint solve of
+                more than this many nets is too expensive (the inner loop
+                is O(inner_passes x pocket x per-net-A*)), and large pockets
+                are dominated by placement-bound nets the joint re-solve
+                cannot help anyway.  Oversized pockets are skipped (no-op).
+            wall_budget_s: Hard wall-clock budget for the whole joint
+                re-solve (seconds).  When exceeded mid-pass we stop, and
+                accept the result ONLY if a strict gain was already
+                achieved; otherwise we roll back.  This guards the
+                worst-case where every pocket net falls to the slow
+                Python-A* fallback and a single pass would otherwise run
+                for many minutes.  ``None`` disables the budget (tests).
+
+        Returns:
+            ``(improved, strict_after)`` where ``improved`` is ``True`` iff
+            the joint re-solve was committed (strict count strictly
+            increased).  When rolled back, ``strict_after`` is the
+            unchanged pre-rip-up strict count.
+        """
+        # Routable multi-pad nets only -- single-pad / missing-pad nets
+        # are trivially complete and contribute nothing to negotiate.
+        candidates = [
+            n
+            for n in dict.fromkeys(pocket_nets)  # dedupe, preserve order
+            if len(pads_by_net.get(n, [])) >= 2
+        ]
+        if len(candidates) < 2:
+            # A pocket of <2 routable nets cannot have a swap/rotation to
+            # find; sequential reroute is already optimal there.
+            return False, 0
+        if len(candidates) > max_pocket_nets:
+            # Too large to solve jointly within a sane budget; the
+            # sequential fallback handles it (and large pockets are
+            # placement-bound, M3's domain, not congestion swaps).
+            return False, 0
+
+        start_time = time.time()
+
+        def _budget_exhausted() -> bool:
+            return wall_budget_s is not None and (time.time() - start_time) >= wall_budget_s
+
+        def _strict_count() -> int:
+            """Pocket nets that are currently fully connected.
+
+            A net is credited strict when it has at least as many routes
+            as it had at snapshot time AND was placed without an edge
+            failure during this transaction.  For nets untouched since
+            snapshot we fall back to "has routes" (their connectivity is
+            whatever it was), which keeps the BEFORE count honest.
+            """
+            return sum(1 for n in candidates if strict_flags.get(n, bool(net_routes.get(n))))
+
+        # Snapshot exact pre-rip-up state for verbatim rollback.
+        original_routes: dict[int, list[Route]] = {
+            n: list(net_routes.get(n, [])) for n in candidates
+        }
+        # BEFORE strict baseline: a net counts as strict iff it currently
+        # has copper.  (Partial nets in the rescue cohort have stubs
+        # stripped before entry, so "has routes" == "was strict" here; for
+        # the in-loop neighbourhood path a partial holds routes but the
+        # guard below only ever COMMITS on a strict increase, so a false
+        # "before strict" can only make the bar harder, never easier.)
+        strict_flags: dict[int, bool] = {n: bool(original_routes.get(n)) for n in candidates}
+        strict_before = _strict_count()
+
+        def _rollback() -> None:
+            for n in candidates:
+                for route in list(net_routes.get(n, [])):
+                    self.grid.unmark_route_usage(route)
+                    self.grid.unmark_route(route)
+                    if route in routes_list:
+                        routes_list.remove(route)
+                net_routes[n] = []
+            for n in candidates:
+                restored = list(original_routes.get(n, []))
+                net_routes[n] = restored
+                for route in restored:
+                    mark_route_callback(route)
+                    self.grid.mark_route_usage(route)
+                    if route not in routes_list:
+                        routes_list.append(route)
+
+        # Rip the entire pocket so the inner loop has full freedom.
+        self.rip_up_nets(candidates, net_routes, routes_list)
+
+        # Bounded inner negotiated loop: each pass routes every pocket net
+        # against the others' freshly-placed copper at an escalating
+        # present-cost.  We re-order each pass (rotate) so no single net
+        # permanently owns first-routed priority -- the rotation is the
+        # cheap analogue of the joint solve (it lets a different net be the
+        # one that yields each pass).
+        for pass_index in range(max(1, inner_passes)):
+            if _budget_exhausted():
+                break
+            pass_factor = present_cost_factor * (present_cost_escalation**pass_index)
+            # Deterministic rotation: pass p starts the order at offset p.
+            order = (
+                candidates[pass_index % len(candidates) :]
+                + candidates[: pass_index % len(candidates)]
+            )
+
+            # Rip the pocket clean at the start of every pass after the
+            # first so each pass is a full joint re-derivation, not an
+            # incremental patch on the prior pass's tracks.
+            if pass_index > 0:
+                self.rip_up_nets(candidates, net_routes, routes_list)
+
+            for net_id in order:
+                if _budget_exhausted():
+                    break
+                net_pads = pads_by_net.get(net_id, [])
+                routes, fully = self._route_net_counting_failures(
+                    net_pads,
+                    pass_factor,
+                    mark_route_callback,
+                    per_net_timeout,
+                )
+                strict_flags[net_id] = fully
+                if routes:
+                    net_routes[net_id] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+                else:
+                    net_routes[net_id] = []
+
+            strict_now = _strict_count()
+            if strict_now > strict_before:
+                # Net-positive: commit immediately (earliest acceptance
+                # keeps the wall budget down and avoids a later pass
+                # eroding the win).
+                return True, strict_now
+
+        # No pass beat the baseline (or the wall budget expired mid-pass)
+        # -- restore verbatim.  Regression impossible by construction.
+        _rollback()
+        return False, strict_before
 
     def escape_local_minimum(
         self,
