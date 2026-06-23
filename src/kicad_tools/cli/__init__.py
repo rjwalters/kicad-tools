@@ -415,6 +415,8 @@ def _dispatch_command(args) -> int:
             sub_argv.append("--by-class")
         if hasattr(args, "net_status_verbose") and args.net_status_verbose:
             sub_argv.append("--verbose")
+        if hasattr(args, "net_status_why") and args.net_status_why:
+            sub_argv.append("--why")
         return net_status_cmd(sub_argv)
 
     elif args.command == "clean":

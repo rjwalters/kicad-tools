@@ -60,6 +60,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show all pads with coordinates",
     )
+    parser.add_argument(
+        "--why",
+        action="store_true",
+        help=(
+            "Classify each incomplete signal net by WHY it is stuck "
+            "(ESCAPE_BLOCKED / CONGESTION_SATURATED / PLACEMENT_BOUND) with "
+            "supporting evidence. Read-only diagnostic (issue #3863)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -76,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"Error during analysis: {e}", file=sys.stderr)
         return 1
+
+    # --why: stuck-net classifier (issue #3863). Read-only diagnostic that
+    # labels each incomplete signal net by WHY it is stuck. Handled before the
+    # normal filter/output path because it has its own output shape.
+    if args.why:
+        return output_why(pcb_path, args.format)
 
     # Filter results if needed
     if args.net:
@@ -264,6 +279,50 @@ def output_json(
         data["nets"] = [n.to_dict() for n in result.nets]
 
     print(json.dumps(data, indent=2))
+
+
+def output_why(pcb_path: Path, fmt: str) -> int:
+    """Classify incomplete signal nets by why they are stuck and print them.
+
+    Returns 2 if any stuck nets were found (matching the rest of net-status'
+    exit-code convention), 0 if the board has no stuck signal nets.
+    """
+    from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+    result = classify_stuck_nets(pcb_path)
+
+    if fmt == "json":
+        data = {"pcb": str(pcb_path), **result.to_dict()}
+        print(json.dumps(data, indent=2))
+        return 2 if result.diagnoses else 0
+
+    print(f"Stuck-net classification: {pcb_path.name}")
+    print("=" * 70)
+    print()
+    counts = result.counts
+    print(f"Stuck signal nets: {len(result.diagnoses)}")
+    print(f"  ESCAPE_BLOCKED:       {counts['escape_blocked']}")
+    print(f"  CONGESTION_SATURATED: {counts['congestion_saturated']}")
+    print(f"  PLACEMENT_BOUND:      {counts['placement_bound']}")
+    print()
+
+    if not result.diagnoses:
+        print("No stuck signal nets -- board is fully routed (or only advisory")
+        print("plane/pour residuals remain).")
+        return 0
+
+    # Group for readability, escape-blocked first (most upstream).
+    order = {"escape_blocked": 0, "congestion_saturated": 1, "placement_bound": 2}
+    for diag in sorted(result.diagnoses, key=lambda d: order[d.classification_value]):
+        pads = ", ".join(diag.unconnected_pads) or "(none)"
+        print(f"[{diag.classification.value.upper()}] {diag.net_name}")
+        print(f"  unconnected pads: {pads}")
+        if diag.blocking_nets:
+            print(f"  blocking nets:    {', '.join(diag.blocking_nets)}")
+        print(f"  evidence:         {diag.evidence}")
+        print()
+
+    return 2
 
 
 if __name__ == "__main__":
