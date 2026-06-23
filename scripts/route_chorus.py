@@ -241,7 +241,27 @@ def main() -> int:
             "pruning it (useful for debugging where partial routes end)."
         ),
     )
+    parser.add_argument(
+        "--joint-region-resolve",
+        action="store_true",
+        help=(
+            "Issue #3864 (M2): enable the JOINT region re-solve in the "
+            "completion stage.  Sets KCT_JOINT_REGION_RESOLVE=1 in the "
+            "environment so each completion-pass `kct route` subprocess "
+            "re-solves a ripped congested pocket JOINTLY (a bounded inner "
+            "negotiated loop with a net-positive rollback guard) instead "
+            "of the legacy sequential one-at-a-time reroute.  Off by "
+            "default; commits only on a strict-count increase so it can "
+            "never regress the board."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.joint_region_resolve:
+        # Inherited by every completion-pass subprocess (they run with the
+        # parent environment).  See negotiated.region_resolve / core.py.
+        os.environ["KCT_JOINT_REGION_RESOLVE"] = "1"
+        print("Joint region re-solve ENABLED (KCT_JOINT_REGION_RESOLVE=1)")
 
     if not args.skip_main_pass:
         if not args.pcb.exists():

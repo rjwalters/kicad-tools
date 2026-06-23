@@ -6810,6 +6810,15 @@ class Autorouter:
         # a diagnostic / emergency escape hatch.
         relief_disabled = bool(os.environ.get("KCT_DISABLE_RELIEF"))
         max_relief_probes_per_net = 0 if relief_disabled else 3
+        # Issue #3864 (M2): ``KCT_JOINT_REGION_RESOLVE=1`` switches
+        # neighborhood rip-up from the legacy sequential reroute of the
+        # displaced pocket nets to a JOINTLY-negotiated inner re-solve
+        # (``region_resolve``) with a net-positive rollback guard.  Off by
+        # default -- this mutates routing on the shared engine path, so it
+        # only ever commits when the pocket's strict count strictly
+        # increases (regression impossible by construction).  Threaded
+        # through both ``neighborhood_ripup`` call sites below.
+        joint_region_resolve = bool(os.environ.get("KCT_JOINT_REGION_RESOLVE"))
         # Issue #3413: hard wall-clock deadline for relief rescues.  A
         # rescue is a composite of stages that are each bounded but whose
         # product is not (board 06 measurement: one rescue ran 342s past
@@ -8524,6 +8533,7 @@ class Autorouter:
                                     initial_radius_factor=neighborhood_initial_radius,
                                     escalation_factor=neighborhood_escalation_factor,
                                     ripup_history=ripup_history,
+                                    joint_resolve=joint_region_resolve,
                                 )
 
                                 overflow = self.grid.get_total_overflow()
@@ -9107,6 +9117,7 @@ class Autorouter:
                                     initial_radius_factor=neighborhood_initial_radius,
                                     escalation_factor=neighborhood_escalation_factor,
                                     ripup_history=ripup_history,
+                                    joint_resolve=joint_region_resolve,
                                 )
 
                                 overflow = self.grid.get_total_overflow()
