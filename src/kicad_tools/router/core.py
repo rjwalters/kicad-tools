@@ -6509,14 +6509,34 @@ class Autorouter:
         # pathological search cannot starve the whole queue (the stage
         # timeout check only runs BETWEEN nets).  Explicit
         # ``--per-net-timeout`` values pass through unchanged.
-        derived_cap = derive_per_net_cap(per_net_timeout, timeout)
-        if derived_cap is not None and per_net_timeout is None:
-            flush_print(
-                f"  Per-net A* cap: {derived_cap:.1f}s "
-                f"(= {PER_NET_CAP_STAGE_FRACTION:.0%} of {float(timeout):.0f}s stage "
-                f"budget; set --per-net-timeout to override; issue #3474)"
-            )
-        per_net_timeout = derived_cap
+        #
+        # Issue #3877: when the deterministic iteration backstop is pinned
+        # (``--deterministic-budget`` -> ``max_search_iterations`` set), the
+        # per-net search is already bounded by a fixed node-expansion count, so
+        # the wall-clock cap derivation is BYPASSED -- otherwise the derived
+        # 10%-of-stage cap re-introduces the very load-dependence
+        # deterministic-budget exists to remove (the net would be cut at a
+        # wall-clock fraction on a slow machine and land less copper).  The
+        # iteration backstop is the deterministic bound that prevents a
+        # head-of-queue blowup; the outer stage ``timeout`` remains a safety
+        # backstop.
+        if getattr(self, "_max_search_iterations", 0):
+            if per_net_timeout is None:
+                flush_print(
+                    "  Per-net A* cap: iteration-bounded "
+                    f"({self._max_search_iterations:,} node expansions; "
+                    "--deterministic-budget, issue #3877) -- wall-clock per-net "
+                    "cap disabled for machine-independent reach"
+                )
+        else:
+            derived_cap = derive_per_net_cap(per_net_timeout, timeout)
+            if derived_cap is not None and per_net_timeout is None:
+                flush_print(
+                    f"  Per-net A* cap: {derived_cap:.1f}s "
+                    f"(= {PER_NET_CAP_STAGE_FRACTION:.0%} of {float(timeout):.0f}s stage "
+                    f"budget; set --per-net-timeout to override; issue #3474)"
+                )
+            per_net_timeout = derived_cap
 
         # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
         # threading before negotiated routing begins.  This is the default

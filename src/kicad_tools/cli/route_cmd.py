@@ -3151,6 +3151,16 @@ def route_with_layer_escalation(
                     # copper is loaded as grid obstacles + populated into
                     # router.existing_routes so it survives the route pass.
                     load_existing_routes=getattr(args, "preserve_existing", False),
+                    # Issue #3877: thread the C++ iteration backstop through the
+                    # layer-escalation sub-router too.  Without this the
+                    # escalation-mode Autorouter (board-01/03 et al.) routes with
+                    # _max_search_iterations=0, so --deterministic-budget falls
+                    # back to the wall-clock 10%-of-stage per-net cap and the
+                    # route stays load-dependent.  The flag's normalization
+                    # (route_cmd.py:_normalize_deterministic_budget) pins
+                    # args.max_search_iterations to 12M; ``or 0`` preserves the
+                    # historic 0="use cols*rows*4 heuristic" semantics.
+                    max_search_iterations=getattr(args, "max_search_iterations", 0) or 0,
                 )
         except Exception as e:
             if not quiet:

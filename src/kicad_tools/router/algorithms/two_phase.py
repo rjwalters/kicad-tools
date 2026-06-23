@@ -214,14 +214,35 @@ class TwoPhaseRouter:
         # an uncapped head-of-queue blowup (chorus-test SPI_SCK) eats the
         # entire stage before the check ever fires.  Explicit
         # ``--per-net-timeout`` values pass through unchanged.
-        derived_cap = derive_per_net_cap(per_net_timeout, timeout)
-        if derived_cap is not None and per_net_timeout is None:
-            flush_print(
-                f"  Per-net A* cap: {derived_cap:.1f}s "
-                f"(= {PER_NET_CAP_STAGE_FRACTION:.0%} of {float(timeout):.0f}s stage "
-                f"budget; set --per-net-timeout to override; issue #3474)"
-            )
-        per_net_timeout = derived_cap
+        #
+        # Issue #3877: when the deterministic iteration backstop is pinned
+        # (``--deterministic-budget`` -> the pathfinder's
+        # ``_max_search_iterations`` set), the per-net search is already
+        # bounded by a fixed node-expansion count, so the wall-clock cap
+        # derivation is BYPASSED.  Otherwise the derived 10%-of-stage cap
+        # (e.g. chorus's 95.7s) re-introduces the very load-dependence
+        # deterministic-budget exists to remove -- a head-of-queue net like
+        # SPI_SCK would still be cut at a wall-clock fraction on a slow
+        # machine and land less copper.  The iteration backstop is the
+        # deterministic bound; the outer stage ``timeout`` remains a safety
+        # backstop.
+        if getattr(self.router, "_max_search_iterations", 0):
+            if per_net_timeout is None:
+                flush_print(
+                    "  Per-net A* cap: iteration-bounded "
+                    f"({self.router._max_search_iterations:,} node expansions; "
+                    "--deterministic-budget, issue #3877) -- wall-clock per-net "
+                    "cap disabled for machine-independent reach"
+                )
+        else:
+            derived_cap = derive_per_net_cap(per_net_timeout, timeout)
+            if derived_cap is not None and per_net_timeout is None:
+                flush_print(
+                    f"  Per-net A* cap: {derived_cap:.1f}s "
+                    f"(= {PER_NET_CAP_STAGE_FRACTION:.0%} of {float(timeout):.0f}s stage "
+                    f"budget; set --per-net-timeout to override; issue #3474)"
+                )
+            per_net_timeout = derived_cap
 
         # Get nets to route in priority order
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
