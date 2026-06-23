@@ -695,6 +695,11 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print("   Marked 8 unused GPIO pins as no-connect (PA3-PA5, PA11-PA15, PB3-PB5)")
 
     # Crystal oscillator (8MHz)
+    # Carry the PCB-side footprints into Y1 / C10 / C11 (issue #3869).  The
+    # PCB places Y1 on ``Crystal:Crystal_HC49-4H_Vertical`` (see
+    # ``generate_crystal_hc49``) and the 20pF load caps on
+    # ``Capacitor_SMD:C_0805_2012Metric`` (see ``generate_cap_0805``); pass
+    # those strings to the factory so the schematic symbols match the copper.
     xtal = create_crystal_with_loads(
         sch,
         x=X_MCU + 70,
@@ -702,6 +707,8 @@ def create_bldc_controller(output_dir: Path) -> Path:
         frequency="8MHz",
         load_pF=20,
         cap_ref_start=10,
+        crystal_footprint="Crystal:Crystal_HC49-4H_Vertical",
+        cap_footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
     print(f"   Crystal: {xtal.crystal.reference} 8MHz")
@@ -738,6 +745,12 @@ def create_bldc_controller(output_dir: Path) -> Path:
         interface="swd",
         pins=6,
         ref="J4",
+        # Carry the PCB-side 6-pin header footprint into J4 (issue #3869).
+        # The PCB places J4 on
+        # ``Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical`` via
+        # ``generate_pin_header("J4", ..., 6, ...)``; match it here so the
+        # SWD header is not flagged by the missing-footprint gate.
+        header_footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
         pin_nets={
             "1": "+3V3",
             "2": "SWDIO",
@@ -955,7 +968,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # ``GATE_AH/BH/CH`` are the MOSFET-gate-side nets.  The array sits in the
     # path between them.  Low-side gates remain direct-driven for now.
     # Issue #3423 phase-column swap: R20 drives Phase C, R22 Phase A.
-    create_gate_drive_resistor_array(
+    gate_drive_resistors = create_gate_drive_resistor_array(
         sch,
         x=X_GATE_DRV + 30,
         y=120,
@@ -965,6 +978,12 @@ def create_bldc_controller(output_dir: Path) -> Path:
         input_nets=["GATE_DRV_CH", "GATE_DRV_BH", "GATE_DRV_AH"],
         output_nets=["GATE_CH", "GATE_BH", "GATE_AH"],
     )
+    # Carry the PCB-side 0805 footprint into R20-R22 (issue #3869).  The
+    # array creates the resistor symbols with only a ``Package`` property,
+    # not a Footprint field; the PCB places them on
+    # ``Resistor_SMD:R_0805_2012Metric`` (see ``generate_resistor_0805``).
+    for _gr in gate_drive_resistors.resistors:
+        _gr.footprint = "Resistor_SMD:R_0805_2012Metric"
     print("   Gate-drive resistors: R20, R21, R22 (22 ohms, HS only)")
 
     # =========================================================================
@@ -996,6 +1015,18 @@ def create_bldc_controller(output_dir: Path) -> Path:
         gate_hs_nets=["GATE_CH", "GATE_BH", "GATE_AH"],
         gate_ls_nets=["GATE_CL", "GATE_BL", "GATE_AL"],
     )
+    # Carry the PCB-side TO-220 footprint into the Q1-Q6 schematic symbols
+    # (issue #3869).  ``ThreePhaseInverter`` / ``HalfBridge`` create the
+    # MOSFET symbols without a footprint, so without this patch the six
+    # IRLZ44N symbols ship with a blank Footprint field while the PCB
+    # places them on ``Package_TO_SOT_THT:TO-220-3_Vertical`` (see
+    # ``generate_to220`` in ``create_bldc_pcb``).  Mirror that string here
+    # so the schematic BOM matches the copper and the missing-footprint
+    # gate stays clean on a fresh regen.
+    _MOSFET_FOOTPRINT = "Package_TO_SOT_THT:TO-220-3_Vertical"
+    for _hb in inverter.half_bridges:
+        _hb.mosfet_hs.footprint = _MOSFET_FOOTPRINT
+        _hb.mosfet_ls.footprint = _MOSFET_FOOTPRINT
     print("   Three-phase inverter: Q1-Q6 (ThreePhaseInverter block, C/B/A)")
 
     # Add current sense shunts for each phase (R10-R12)
@@ -1024,6 +1055,11 @@ def create_bldc_controller(output_dir: Path) -> Path:
             ref_start=10 + i,  # R10, R11, R12
             amplifier=False,  # No amplifier for basic sensing
         )
+        # Carry the PCB-side 2512 shunt footprint into R10-R12 (issue #3869).
+        # ``CurrentSenseShunt`` creates the shunt symbol without a footprint;
+        # the PCB places it on ``Resistor_SMD:R_2512_6332Metric`` (see
+        # ``generate_resistor_2512`` in ``create_bldc_pcb``).
+        sense.shunt.footprint = "Resistor_SMD:R_2512_6332Metric"
         # NOTE (issue #3379): we intentionally do NOT call
         # ``sense.connect_to_rails(gnd_rail_y=RAIL_GND)`` here. That
         # helper would wire the shunt's IN- pin straight down to the
@@ -1147,6 +1183,14 @@ def create_bldc_controller(output_dir: Path) -> Path:
             y=pin_pos[1],
             ref_start=HALL_REF_BASE + i,
         )
+        # Carry the PCB-side 0805 footprints into R30-R32 / C30-C32
+        # (issue #3869).  ``HallSensorInput`` creates the pull-up resistor
+        # and filter cap without a footprint; the PCB places the pull-ups on
+        # ``Resistor_SMD:R_0805_2012Metric`` (``generate_resistor_0805``) and
+        # the filter caps on ``Capacitor_SMD:C_0805_2012Metric``
+        # (``generate_cap_0805``).
+        hall_block.r_pull.footprint = "Resistor_SMD:R_0805_2012Metric"
+        hall_block.c_filt.footprint = "Capacitor_SMD:C_0805_2012Metric"
         # Connector pin -> block SIGNAL_IN (same Y, horizontal wire)
         sch.add_wire(pin_pos, hall_block.ports["SIGNAL_IN"], warn_on_collision=False)
         # Block SIGNAL_OUT -> label position (same Y, horizontal wire)
@@ -1184,6 +1228,11 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ref_prefix="D3",
         label="PWR",
         resistor_value="1k",
+        # Carry the PCB-side footprints into D3 / R3 (issue #3869): the PCB
+        # places D3 on ``LED_SMD:LED_0805_2012Metric`` (``generate_led_0805``)
+        # and R3 on ``Resistor_SMD:R_0805_2012Metric`` (``generate_resistor_0805``).
+        led_footprint="LED_SMD:LED_0805_2012Metric",
+        resistor_footprint="Resistor_SMD:R_0805_2012Metric",
     )
     led_pwr.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
     # Name the LED-cathode/resistor junction net (issue #3397 defect 1).
@@ -1207,6 +1256,10 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ref_prefix="D4",
         label="STATUS",
         resistor_value="1k",
+        # Carry the PCB-side footprints into D4 / R4 (issue #3869): same
+        # 0805 LED + 0805 resistor footprints as the PWR LED above.
+        led_footprint="LED_SMD:LED_0805_2012Metric",
+        resistor_footprint="Resistor_SMD:R_0805_2012Metric",
     )
     led_status.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
     # Same net-naming fix as D3 above: PCB net name is ``STATUS_LED``.
