@@ -251,3 +251,152 @@ def test_without_assign_missing_no_library_errors(tmp_path, monkeypatch, capsys)
     assert "No KiCad footprint library found" in err
     # The new hint points at --assign-missing.
     assert "--assign-missing" in err
+
+
+# A schematic mixing a synthesized ``kicad_tools_pwr:`` power-flag symbol
+# (reference ``#PWR01``, footprint ``""`` by design) with a real
+# footprint-less passive. The power flag must be SKIPPED by the
+# missing-footprint gate (it is virtual, never placed on the PCB), while
+# the passive must still trip it. Regression for the false positive the
+# Judge found on boards 01-voltage-divider / 04-stm32-devboard (#3866):
+# the skip rule recognized only the stock ``power:`` library and missed
+# the ``kicad_tools_pwr:`` library that generators synthesize.
+_SCH_PWR_FLAG = """(kicad_sch
+    (version 20231120)
+    (generator "kicadtools_test")
+    (uuid "00000000-0000-0000-0000-0000000000ad")
+    (paper "A4")
+    (lib_symbols
+        (symbol "kicad_tools_pwr:VIN"
+            (power)
+            (symbol "VIN_1_1"
+                (pin power_in line (at 0 0 90) (length 0) (name "VIN") (number "1"))
+            )
+        )
+        (symbol "Device:R"
+            (symbol "R_1_1"
+                (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+                (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+            )
+        )
+    )
+    (symbol
+        (lib_id "kicad_tools_pwr:VIN")
+        (at 50 40 0)
+        (unit 1)
+        (in_bom no)
+        (on_board no)
+        (dnp no)
+        (uuid "44444444-4444-4444-4444-444444444444")
+        (property "Reference" "#PWR01" (at 0 0 0))
+        (property "Value" "VIN" (at 0 0 0))
+        (property "Footprint" "" (at 0 0 0))
+        (pin "1" (uuid "44444444-4444-4444-4444-000000000001"))
+        (instances (project "test" (path "/" (reference "#PWR01") (unit 1))))
+    )
+    (symbol
+        (lib_id "Device:R")
+        (at 50 60 0)
+        (unit 1)
+        (in_bom yes)
+        (on_board yes)
+        (dnp no)
+        (uuid "55555555-5555-5555-5555-555555555555")
+        (property "Reference" "R1" (at 0 0 0))
+        (property "Value" "10k 0402" (at 0 0 0))
+        (property "Footprint" "" (at 0 0 0))
+        (pin "1" (uuid "55555555-5555-5555-5555-000000000001"))
+        (pin "2" (uuid "55555555-5555-5555-5555-000000000002"))
+        (instances (project "test" (path "/" (reference "R1") (unit 1))))
+    )
+    (sheet_instances (path "/" (page "1")))
+)
+"""
+
+# A schematic containing ONLY a footprint-less ``kicad_tools_pwr:``
+# power-flag symbol -- mirrors boards 01/04, which failed pre-flight on a
+# single such symbol before the fix. The gate must be clean (no errors).
+_SCH_PWR_FLAG_ONLY = """(kicad_sch
+    (version 20231120)
+    (generator "kicadtools_test")
+    (uuid "00000000-0000-0000-0000-0000000000ae")
+    (paper "A4")
+    (lib_symbols
+        (symbol "kicad_tools_pwr:VIN"
+            (power)
+            (symbol "VIN_1_1"
+                (pin power_in line (at 0 0 90) (length 0) (name "VIN") (number "1"))
+            )
+        )
+    )
+    (symbol
+        (lib_id "kicad_tools_pwr:VIN")
+        (at 50 40 0)
+        (unit 1)
+        (in_bom no)
+        (on_board no)
+        (dnp no)
+        (uuid "66666666-6666-6666-6666-666666666666")
+        (property "Reference" "#PWR01" (at 0 0 0))
+        (property "Value" "VIN" (at 0 0 0))
+        (property "Footprint" "" (at 0 0 0))
+        (pin "1" (uuid "66666666-6666-6666-6666-000000000001"))
+        (instances (project "test" (path "/" (reference "#PWR01") (unit 1))))
+    )
+    (sheet_instances (path "/" (page "1")))
+)
+"""
+
+
+def test_pwr_flag_lib_skipped_by_missing_footprint_gate(tmp_path):
+    """A synthesized ``kicad_tools_pwr:`` power flag (footprint ``""`` by
+    design) must NOT trip the missing-footprint gate, while a real
+    footprint-less passive in the same schematic still MUST (#3866)."""
+    from kicad_tools.cli.sch_validate import check_missing_footprints
+
+    sch = _write(tmp_path, _SCH_PWR_FLAG)
+
+    issues = check_missing_footprints(str(sch))
+    missing = [
+        i
+        for i in issues
+        if i.category == "footprint" and i.message.startswith("Missing footprint:")
+    ]
+    refs = [i.message for i in missing]
+    # The power flag (#PWR01 / kicad_tools_pwr:VIN) is excluded...
+    assert not any("#PWR01" in m for m in refs), refs
+    # ...but the genuine passive R1 still trips the gate.
+    assert len(missing) == 1
+    assert "R1" in missing[0].message
+    assert missing[0].severity == "error"
+
+
+def test_pwr_flag_only_schematic_passes_export_preflight(tmp_path):
+    """The export preflight footprint gate must report OK (not FAIL) on a
+    schematic whose only footprint-less symbol is a ``kicad_tools_pwr:``
+    power flag -- the exact false positive seen on boards 01/04."""
+    from kicad_tools.export.preflight import PreflightChecker
+
+    sch = _write(tmp_path, _SCH_PWR_FLAG_ONLY)
+    # A trivial empty PCB so the checker can construct; only the schematic
+    # footprint gate is exercised here.
+    pcb = tmp_path / "proj.kicad_pcb"
+    pcb.write_text(
+        "(kicad_pcb (version 20240108) (generator pcbnew) (general) (layers) (setup))\n",
+        encoding="utf-8",
+    )
+
+    checker = PreflightChecker(pcb_path=str(pcb), schematic_path=str(sch))
+    result = checker._check_schematic_footprints()
+    assert result.status == "OK", result.message
+
+
+def test_pwr_flag_only_schematic_passes_sch_validate_gate(tmp_path):
+    """``check_missing_footprints`` must return zero footprint errors for a
+    power-flag-only schematic (boards 01/04 regression)."""
+    from kicad_tools.cli.sch_validate import check_missing_footprints
+
+    sch = _write(tmp_path, _SCH_PWR_FLAG_ONLY)
+    issues = check_missing_footprints(str(sch))
+    errors = [i for i in issues if i.severity == "error" and i.category == "footprint"]
+    assert errors == []
