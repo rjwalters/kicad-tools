@@ -1586,6 +1586,7 @@ class CppPathfinder:
                     extra_goal_cells=extra_goal_cells,
                     deadline=route_deadline,
                     reason=self._describe_cpp_failure(result),
+                    cpp_failure_reason=getattr(result, "failure_reason", None),
                 )
 
             for attempt in range(max_resume_attempts + 1):
@@ -1640,6 +1641,7 @@ class CppPathfinder:
                             "post-route clearance validation failed; "
                             f"exhausted {max_resume_attempts} resume attempts"
                         ),
+                        cpp_failure_reason=getattr(result, "failure_reason", None),
                     )
 
                 # Find the goal cell of the failed path and reject it.
@@ -1678,6 +1680,7 @@ class CppPathfinder:
                             "resume after rejected goal cell failed: "
                             + self._describe_cpp_failure(result)
                         ),
+                        cpp_failure_reason=getattr(result, "failure_reason", None),
                     )
 
             return None
@@ -2165,6 +2168,7 @@ class CppPathfinder:
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
         deadline: float | None = None,
         reason: str = "unknown",
+        cpp_failure_reason: int | None = None,
     ) -> Route | None:
         """Attempt to route using the Python pathfinder as a fallback.
 
@@ -2196,13 +2200,56 @@ class CppPathfinder:
                 handed this net to the Python fallback (issue #3456).
                 Surfaced in the once-per-net WARNING and recorded in
                 ``fallback_stats['fallback_reasons']``.
+            cpp_failure_reason: The ``FAILURE_*`` code from the failed C++
+                ``RouteResult`` (issue #3876).  When this is
+                ``FAILURE_TIMEOUT`` -- a WALL-CLOCK artifact, not a
+                geometric dead-end -- the Python fallback is short-circuited
+                (returns ``None`` immediately, before constructing the
+                Python ``Router`` or running the 10-100x-slower A*).  A
+                wall-clock timeout means ~``per_net_timeout`` has already
+                elapsed, so the fallback would start with ~0 budget and
+                immediately time out itself, wasting deadline that
+                subsequent nets need.  Geometric failures
+                (``FAILURE_NO_PATH``, ``FAILURE_VIA_VIA_BLOCKED``,
+                ``FAILURE_ITERATION_LIMIT``) are NOT short-circuited -- the
+                Python A*'s different neighbor expansion is exactly the
+                value-add there (issue #3456).  ``None`` (the default)
+                preserves pre-#3876 behavior.
 
         Returns:
             Route object if fallback succeeds, None if also fails (or the
-            shared per-net deadline is already exhausted).
+            shared per-net deadline is already exhausted, or the C++ failure
+            was a wall-clock timeout per issue #3876).
         """
         py_grid = self._grid._py_grid
         if py_grid is None:
+            return None
+
+        net_name = getattr(start, "net_name", "?")
+
+        # Issue #3876: a wall-clock FAILURE_TIMEOUT is a load artifact, not a
+        # geometric dead-end -- on an idle machine the C++ search would have
+        # found the path at the same (deterministic) iteration count.  The
+        # Python fallback shares the SAME per-net deadline, so on a timeout it
+        # would start with ~0 remaining budget and immediately time out
+        # itself, burning deadline that later nets need.  Short-circuit BEFORE
+        # constructing the Python ``Router`` / running the A* so the deadline
+        # is a hard budget rather than a reason to grind 10-100x longer.  This
+        # is a strict subset of the #3474 ``remaining <= 0.05`` skip below and
+        # cannot reduce routed reach.  ``router_cpp`` may be ``None`` (import
+        # failed); guard the constant lookup as the other failure-path helpers
+        # do.  Geometric failures fall through and keep the fallback.
+        if (
+            cpp_failure_reason is not None
+            and router_cpp is not None
+            and int(cpp_failure_reason) == int(router_cpp.FAILURE_TIMEOUT)
+        ):
+            logger.debug(
+                "Net %s: C++ search hit the per-net wall-clock deadline "
+                "(FAILURE_TIMEOUT); skipping Python fallback so the budget is "
+                "hard (issue #3876)",
+                net_name,
+            )
             return None
 
         # Issue #3456: the silent C++ -> Python downgrade is the bug.
@@ -2214,7 +2261,6 @@ class CppPathfinder:
         # relief-probe mode: probes deliberately stress the search, are
         # never committed, and a probe-time fallback is not a
         # user-facing performance event.
-        net_name = getattr(start, "net_name", "?")
 
         # Issue #3474 R1: clamp the fallback budget to the unspent
         # remainder of the shared per-net deadline.
