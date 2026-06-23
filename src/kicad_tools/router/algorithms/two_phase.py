@@ -226,11 +226,16 @@ class TwoPhaseRouter:
         # machine and land less copper.  The iteration backstop is the
         # deterministic bound; the outer stage ``timeout`` remains a safety
         # backstop.
-        if getattr(self.router, "_max_search_iterations", 0):
+        # ``Router`` does not statically declare ``_max_search_iterations``
+        # (it is set dynamically when --deterministic-budget is pinned), so
+        # capture the value via ``getattr`` into a local to stay mypy-clean
+        # (issue #3877).
+        max_search_iterations = getattr(self.router, "_max_search_iterations", 0)
+        if max_search_iterations:
             if per_net_timeout is None:
                 flush_print(
                     "  Per-net A* cap: iteration-bounded "
-                    f"({self.router._max_search_iterations:,} node expansions; "
+                    f"({max_search_iterations:,} node expansions; "
                     "--deterministic-budget, issue #3877) -- wall-clock per-net "
                     "cap disabled for machine-independent reach"
                 )
