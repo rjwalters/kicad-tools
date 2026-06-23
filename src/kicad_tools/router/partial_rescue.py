@@ -70,8 +70,24 @@ class RescueConfig:
     #: Wall budget per rescue stage (one net).  300 s bounds the #3485
     #: budget-leak overshoot inside escape/rip-up phases.
     stage_timeout_s: int = 300
-    #: Per-net A* budget inside the stage.
+    #: Per-net A* budget inside the stage (wall-clock).  Ignored when
+    #: :attr:`deterministic_budget` is set (issue #3877): the wall-clock
+    #: per-net cutoff is what makes a rescue/completion pass load-dependent
+    #: (a slow/loaded machine cuts a per-net A* short and lands less
+    #: copper), so for a reproducible-across-machines route the chorus
+    #: recipe sets ``deterministic_budget=True`` and drops this cutoff in
+    #: favour of the fixed C++ iteration backstop (#3538).
     per_net_timeout_s: int = 60
+    #: Issue #3877: replace the wall-clock ``--per-net-timeout`` with
+    #: ``--deterministic-budget`` on every rescue/completion ``kct route``
+    #: subprocess.  The flag pins the C++ A* node-expansion backstop to a
+    #: fixed count (12M) so each per-net search aborts after the SAME
+    #: amount of work on every machine, making the rescued copper
+    #: reproducible regardless of load.  The outer ``--timeout``
+    #: (``stage_timeout_s`` / ``pass_timeout_s``) is retained only as a
+    #: safety backstop.  Off by default to preserve legacy behaviour for
+    #: callers that have not re-measured their floor.
+    deterministic_budget: bool = False
     starting_layers: int = 4
     max_layers: int = 4
     #: Pour/skip nets carried by copper zones -- excluded from rescue
@@ -223,8 +239,18 @@ def build_rescue_command(
             str(config.seed),
             "--timeout",
             str(config.stage_timeout_s),
-            "--per-net-timeout",
-            str(config.per_net_timeout_s),
+        ]
+    )
+    # Issue #3877: deterministic-budget mode replaces the wall-clock
+    # per-net cutoff with the fixed C++ iteration backstop so the rescued
+    # copper is reproducible regardless of machine load.  The outer
+    # ``--timeout`` above is kept only as a safety backstop.
+    if config.deterministic_budget:
+        cmd.append("--deterministic-budget")
+    else:
+        cmd.extend(["--per-net-timeout", str(config.per_net_timeout_s)])
+    cmd.extend(
+        [
             "--skip-nets",
             ",".join(skip_nets),
         ]
@@ -321,6 +347,7 @@ def complete_unfinished_nets(
             seed=config.seed,
             stage_timeout_s=pass_timeout_s,
             per_net_timeout_s=config.per_net_timeout_s,
+            deterministic_budget=config.deterministic_budget,
             starting_layers=config.starting_layers,
             max_layers=config.max_layers,
             excluded_nets=config.excluded_nets,

@@ -209,6 +209,51 @@ def test_build_rescue_command_omits_micro_via_by_default(tmp_path: Path) -> None
     assert "--micro-via-in-pad-fallback" not in cmd
 
 
+def test_build_rescue_command_uses_wall_clock_per_net_by_default(tmp_path: Path) -> None:
+    """Without deterministic-budget the legacy wall-clock cutoff is emitted (#3877)."""
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        ["X"],
+        RescueConfig(per_net_timeout_s=60),
+    )
+    # Legacy behaviour preserved bit-for-bit when the flag is off.
+    assert "--per-net-timeout" in cmd
+    assert cmd[cmd.index("--per-net-timeout") + 1] == "60"
+    assert "--deterministic-budget" not in cmd
+
+
+def test_build_rescue_command_deterministic_budget_replaces_per_net_timeout(
+    tmp_path: Path,
+) -> None:
+    """Issue #3877: deterministic-budget drops the wall-clock per-net cutoff.
+
+    A rescue/completion subprocess routed under deterministic-budget must NOT
+    carry ``--per-net-timeout`` (the load-dependent wall-clock cutoff) -- it is
+    replaced by ``--deterministic-budget`` so the rescued copper is
+    reproducible regardless of machine load.  The outer ``--timeout`` (stage
+    budget) is retained as a safety backstop.
+    """
+    cmd = build_rescue_command(
+        tmp_path / "a.kicad_pcb",
+        tmp_path / "b.kicad_pcb",
+        ["SCL", "NRST"],
+        RescueConfig(
+            stage_timeout_s=300,
+            per_net_timeout_s=60,
+            deterministic_budget=True,
+        ),
+    )
+    assert "--deterministic-budget" in cmd
+    # The wall-clock per-net cutoff is GONE under deterministic-budget.
+    assert "--per-net-timeout" not in cmd
+    # The outer stage timeout is retained as a safety backstop.
+    assert cmd[cmd.index("--timeout") + 1] == "300"
+    # skip-nets/seed/preserve still present (recipe otherwise unchanged).
+    assert cmd[cmd.index("--skip-nets") + 1] == "SCL,NRST"
+    assert "--preserve-existing" in cmd
+
+
 def test_rescue_failed_stage_strips_stubs(tmp_path: Path, monkeypatch) -> None:
     """A failed rescue must leave the target net with NO copper (#3470)."""
     pcb = _write_pcb(tmp_path)
