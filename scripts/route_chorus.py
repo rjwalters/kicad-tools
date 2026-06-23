@@ -255,6 +255,21 @@ def main() -> int:
             "never regress the board."
         ),
     )
+    parser.add_argument(
+        "--placement-nudge",
+        action="store_true",
+        help=(
+            "Issue #3865 (M3): after the completion passes, classify the "
+            "remaining stuck nets (M1) and nudge the parts owning "
+            "PLACEMENT_BOUND pads by a bounded, board-outline-aware "
+            "displacement (default <=1.5mm), then re-route and accept ONLY "
+            "if the strict signal-net count strictly increases and DRC does "
+            "not worsen (else roll back byte-for-byte).  Off by default; "
+            "moves parts on the board so it is the riskiest stage, fully "
+            "net-positive-guarded.  Respects locked parts and the J2/J4 "
+            "mechanical connectors."
+        ),
+    )
     args = parser.parse_args()
 
     if args.joint_region_resolve:
@@ -299,6 +314,27 @@ def main() -> int:
     )
     if 0 < len(residual) <= 10:
         rescue_partial_nets(args.output, config, nets=residual)
+
+    # Stage 3.5 (issue #3865, M3): congestion/escape-driven placement nudge.
+    # Off by default; only the placement-bound nets that NO routing change can
+    # fix (chorus U5 codec/QFN analog cluster + the no-rippable control nets)
+    # are addressed here, by MOVING the owning part a bounded amount.  The
+    # stage is net-positive-guarded: it accepts the nudged + re-routed board
+    # only on a strict-count increase with no DRC regression, else rolls back
+    # byte-for-byte.  Runs before the stub-prune so a successful nudge's new
+    # copper is kept and a failed one leaves the board untouched.
+    if args.placement_nudge:
+        from kicad_tools.router.placement_nudge import (
+            NudgeConfig,
+            nudge_placement_bound_nets,
+        )
+
+        print("\nPlacement nudge ENABLED (issue #3865, M3)")
+        nudge_result = nudge_placement_bound_nets(
+            args.output,
+            NudgeConfig(rescue=config),
+        )
+        print(nudge_result.summary())
 
     # Stage 4: prune stranded stubs.  Whatever is still unfinished
     # contributes zero to strict reach but its stranded copper is a DRC
