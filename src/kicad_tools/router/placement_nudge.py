@@ -241,7 +241,21 @@ class PlacementNudge:
     def __init__(self, pcb: PCB, config: NudgeConfig | None = None):
         self.pcb = pcb
         self.config = config or NudgeConfig()
-        self._outline: Polygon | None = extract_board_outline(pcb)
+        # Frame reconciliation (the #3804/#3861 load-bearing fix):
+        # ``extract_board_outline`` returns the Edge.Cuts polygon in raw
+        # page/sexp coordinates, but ``Footprint.position`` and the
+        # classifier's pad positions live in the BOARD frame (board origin
+        # already subtracted).  Mixing the two would test containment of a
+        # board-frame point against a page-frame outline and reject every
+        # interior nudge (measured on chorus: outline bbox x=[118,181] vs a
+        # genuine interior part at x=18).  Translate the outline by
+        # ``-board_origin`` so it shares the frame the parts live in.
+        raw_outline = extract_board_outline(pcb)
+        self._outline: Polygon | None = raw_outline
+        if raw_outline is not None:
+            ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
+            if ox or oy:
+                self._outline = raw_outline.translate(Vector2D(-ox, -oy))
 
     def _find_footprint(self, ref: str):
         for fp in getattr(self.pcb, "footprints", []):
