@@ -199,6 +199,18 @@ class Router:
         # committed routing.
         self.relief_mode = False
 
+        # Issue #3881: optional DETERMINISTIC per-net iteration cap for the A*
+        # loops.  ``None`` (default) preserves the historical
+        # ``cols * rows * 4`` self-bound.  When the C++ backend hands a net to
+        # this Python fallback under ``--deterministic-budget`` + a tuned
+        # per-net cap, ``CppPathfinder._try_python_fallback`` sets this so the
+        # 10-100x-slower Python A* is ALSO bounded by a fixed node-expansion
+        # count (not wall-clock) -- otherwise a geometric-failure net grinds
+        # for minutes in Python and monopolises the budget exactly as the C++
+        # search would have, re-introducing the slowness the per-net cap exists
+        # to prevent.  The effective bound is ``min(cols*rows*4, override)``.
+        self._max_iterations_override: int | None = None
+
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
         # Same layer moves - orthogonal directions
         self.neighbors_2d = [
@@ -2646,6 +2658,11 @@ class Router:
 
         iterations = 0
         max_iterations = self.grid.cols * self.grid.rows * 4  # Prevent infinite loops
+        # Issue #3881: deterministic per-net iteration cap clamps the loop
+        # bound when the C++ fallback sets it (``min`` so it never RAISES the
+        # historical bound, only tightens it for a hard per-net give-up).
+        if self._max_iterations_override is not None:
+            max_iterations = min(max_iterations, self._max_iterations_override)
 
         # Per-net wall-clock timeout (Issue #1605).
         #
@@ -4131,6 +4148,9 @@ class Router:
 
         iterations = 0
         max_iterations = self.grid.cols * self.grid.rows * 4
+        # Issue #3881: deterministic per-net iteration cap (bidirectional A*).
+        if self._max_iterations_override is not None:
+            max_iterations = min(max_iterations, self._max_iterations_override)
 
         while (forward_open or backward_open) and iterations < max_iterations:
             iterations += 1

@@ -798,6 +798,7 @@ class CppPathfinder:
         diagonal_routing: bool = True,
         net_class_map: dict[str, NetClassRouting] | None = None,
         max_search_iterations: int = 0,
+        per_net_iterations: int = 0,
     ):
         if not _CPP_AVAILABLE:
             raise RuntimeError("C++ router backend not available")
@@ -813,6 +814,30 @@ class CppPathfinder:
         # covers all subsequent nets without per-call plumbing through
         # the strategy layer.
         self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
+
+        # Issue #3881: the TUNED per-net iteration cap, distinct from the memory
+        # backstop above.  When set (>0) it becomes the BINDING per-net cap: the
+        # C++ A* is given ``min(per_net_iterations, backstop)`` node expansions,
+        # so a hard net gives up deterministically at the tuned cap (returning
+        # FAILURE_ITERATION_LIMIT) instead of grinding to the 12M backstop and
+        # monopolising the budget.  ``_per_net_iteration_cap_active`` tells the
+        # Python fallback to treat a FAILURE_ITERATION_LIMIT as a deterministic
+        # give-up and SKIP the fallback (so a capped net does not then burn
+        # minutes in the 10-100x-slower Python A*, re-introducing the slowness).
+        self._per_net_iterations = int(per_net_iterations) if per_net_iterations else 0
+        self._per_net_iteration_cap_active = self._per_net_iterations > 0
+        # Effective cap threaded to the C++ search.  When the tuned per-net cap
+        # is set it binds (clamped by the memory backstop when that is also
+        # positive); otherwise the memory backstop / heuristic applies.
+        if self._per_net_iterations > 0:
+            if self._max_search_iterations > 0:
+                self._effective_search_iterations = min(
+                    self._per_net_iterations, self._max_search_iterations
+                )
+            else:
+                self._effective_search_iterations = self._per_net_iterations
+        else:
+            self._effective_search_iterations = self._max_search_iterations
 
         # Convert Python rules to C++ DesignRules
         cpp_rules = router_cpp.DesignRules()
@@ -1543,8 +1568,11 @@ class CppPathfinder:
                 partner_net_id,
                 intra_pair_radius_cells,
                 # Issue #2610: per-net wall-clock deadline + iteration override.
+                # Issue #3881: use the EFFECTIVE cap -- when the tuned per-net
+                # iteration cap is set it binds (clamped by the memory
+                # backstop); otherwise this is the memory backstop / heuristic.
                 timeout_seconds,
-                self._max_search_iterations,
+                self._effective_search_iterations,
                 # Issue #3130: per-net emit widths/diameters.  Forwarded so the
                 # C++-internal RouteResult carries per-net Segment.width and
                 # Via.diameter/drill matching the source net class instead of
@@ -2210,10 +2238,15 @@ class CppPathfinder:
                 elapsed, so the fallback would start with ~0 budget and
                 immediately time out itself, wasting deadline that
                 subsequent nets need.  Geometric failures
-                (``FAILURE_NO_PATH``, ``FAILURE_VIA_VIA_BLOCKED``,
-                ``FAILURE_ITERATION_LIMIT``) are NOT short-circuited -- the
-                Python A*'s different neighbor expansion is exactly the
-                value-add there (issue #3456).  ``None`` (the default)
+                (``FAILURE_NO_PATH``, ``FAILURE_VIA_VIA_BLOCKED``) are NOT
+                short-circuited -- the Python A*'s different neighbor expansion
+                is exactly the value-add there (issue #3456).
+                ``FAILURE_ITERATION_LIMIT`` is short-circuited ONLY when a tuned
+                per-net iteration cap is active (``_per_net_iteration_cap_active``,
+                issue #3881): a capped give-up is deterministic and running the
+                slow Python A* would re-introduce the per-net slowness the cap
+                prevents.  When the iteration limit is the 12M MEMORY backstop
+                (no tuned cap) the fallback still runs.  ``None`` (the default)
                 preserves pre-#3876 behavior.
 
         Returns:
@@ -2249,6 +2282,34 @@ class CppPathfinder:
                 "(FAILURE_TIMEOUT); skipping Python fallback so the budget is "
                 "hard (issue #3876)",
                 net_name,
+            )
+            return None
+
+        # Issue #3881: when a TUNED per-net iteration cap is active, a
+        # FAILURE_ITERATION_LIMIT is a DETERMINISTIC give-up -- the C++ search
+        # was deliberately bounded so the net fails fast and the NEXT net gets
+        # budget.  Running the 10-100x-slower Python A* here would re-introduce
+        # exactly the per-net slowness the cap exists to prevent (a capped net
+        # burning minutes in Python), so short-circuit before constructing the
+        # Python ``Router``.  This keeps the per-net cap a HARD per-net bound
+        # and is load-independent (iteration count), so determinism is
+        # preserved.  Note: this only fires when ``_per_net_iteration_cap_active``
+        # -- when the iteration limit is the 12M MEMORY backstop (no tuned cap),
+        # the fallback still runs as before so genuine dense escapes are not
+        # silently dropped.
+        if (
+            self._per_net_iteration_cap_active
+            and cpp_failure_reason is not None
+            and router_cpp is not None
+            and int(cpp_failure_reason) == int(router_cpp.FAILURE_ITERATION_LIMIT)
+        ):
+            logger.debug(
+                "Net %s: C++ search hit the tuned per-net iteration cap "
+                "(%d expansions, FAILURE_ITERATION_LIMIT); skipping Python "
+                "fallback so the cap is a hard per-net bound and the next net "
+                "gets budget (issue #3881)",
+                net_name,
+                self._effective_search_iterations,
             )
             return None
 
@@ -2310,6 +2371,25 @@ class CppPathfinder:
         # Issue #3438: keep the fallback router's relief-probe mode in
         # lock-step with the C++ side (set via ``set_relief_mode``).
         self._py_router.set_relief_mode(self._relief_mode)
+
+        # Issue #3881: when a tuned per-net iteration cap is active, bound the
+        # Python A* DETERMINISTICALLY by the same iteration budget.  A
+        # geometric-failure net (post-route-clearance / no-path) is NOT
+        # short-circuited above -- the Python A*'s different neighbor expansion
+        # is the value-add (#3456) and legitimately recovers nets the C++
+        # search cannot (e.g. board-03's USB diff pairs).  But under
+        # --deterministic-budget there is NO per-net wall-clock deadline, so an
+        # UNBOUNDED Python fallback grinds for minutes and monopolises the
+        # overall --timeout exactly as the C++ search would have (chorus
+        # observed nets jumping 192s -> 375s -> 471s in the fallback).  An
+        # iteration cap keeps the fallback's reach where the net is quick to
+        # route in Python while cutting off the grinders deterministically
+        # (load-independent), so more nets get a turn.  ``None`` (no tuned cap)
+        # preserves the historical ``cols*rows*4`` self-bound.
+        if self._per_net_iteration_cap_active:
+            self._py_router._max_iterations_override = self._effective_search_iterations
+        else:
+            self._py_router._max_iterations_override = None
 
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
@@ -2670,6 +2750,7 @@ def create_hybrid_router(
     force_python: bool = False,
     net_class_map: dict[str, NetClassRouting] | None = None,
     max_search_iterations: int = 0,
+    per_net_iterations: int = 0,
 ):
     """Create a router, preferring C++ backend if available.
 
@@ -2687,6 +2768,9 @@ def create_hybrid_router(
             iteration backstop.  ``0`` (default) preserves the historical
             ``cols * rows * 4`` cap.  Positive values let dense boards
             trade memory for completeness via ``--max-search-iterations``.
+        per_net_iterations: Issue #3881 -- tuned per-net iteration cap
+            (``0`` = unset).  When set, each net gives up deterministically at
+            the cap and its Python fallback is skipped.
 
     Returns:
         Either CppPathfinder or Python Router instance
@@ -2700,6 +2784,7 @@ def create_hybrid_router(
                 diagonal_routing,
                 net_class_map=net_class_map,
                 max_search_iterations=max_search_iterations,
+                per_net_iterations=per_net_iterations,
             )
         except Exception:
             # Fall back to Python if C++ initialization fails

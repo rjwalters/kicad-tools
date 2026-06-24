@@ -20,9 +20,14 @@ on the ~0 remaining budget -- wasting deadline that subsequent nets need.
 #3876 short-circuits the fallback on ``FAILURE_TIMEOUT``: it returns
 ``None`` BEFORE constructing the Python ``Router`` or running the A*.
 Genuine geometric failures (``FAILURE_NO_PATH``,
-``FAILURE_VIA_VIA_BLOCKED``, ``FAILURE_ITERATION_LIMIT``) STILL fall back
--- the Python A*'s different neighbor expansion is the value-add there
-(issue #3456).
+``FAILURE_VIA_VIA_BLOCKED``) STILL fall back -- the Python A*'s different
+neighbor expansion is the value-add there (issue #3456).
+``FAILURE_ITERATION_LIMIT`` also falls back in THESE tests because the
+pathfinder is built WITHOUT a tuned per-net cap, so an iteration-limit hit
+is the 12M MEMORY backstop firing.  When a tuned ``--per-net-iterations``
+cap IS active, an iteration-limit give-up is deterministic and is
+short-circuited too (issue #3881; see
+``test_per_net_iteration_cap_3881.py``).
 
 These tests patch the lazily-imported ``pathfinder.Router`` and assert it
 is (not) constructed depending on the C++ failure reason.  This is purely

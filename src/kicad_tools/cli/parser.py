@@ -2740,6 +2740,24 @@ def _add_route_parser(subparsers) -> None:
             "aborts so you can tell which limit fired."
         ),
     )
+    # Issue #3881: tuned per-net iteration cap, distinct from the 12M memory
+    # backstop above.  Forwarded to the inner route_cmd parser by
+    # ``commands/routing.py``; both sites declare it (enforced by
+    # ``tests/test_cli_parser_drift.py``).
+    route_parser.add_argument(
+        "--per-net-iterations",
+        type=int,
+        default=0,
+        help=(
+            "Tuned per-net C++ A* iteration cap (default: 0 = unset). When set, "
+            "each net gives up DETERMINISTICALLY after N node expansions so a "
+            "hard net cannot monopolise the budget and more nets get a turn. "
+            "Distinct from --max-search-iterations (the memory backstop): the "
+            "effective cap is min(N, max-search-iterations) and a capped net's "
+            "Python fallback is skipped. Load-independent, so reproducible. "
+            "--deterministic-budget defaults this to a sensible value."
+        ),
+    )
     # Issue #3538: bound routing work by an iteration budget instead of
     # wall-clock time so the routed output (and its DRC count) is reproducible
     # across machines.  Forwarded to the inner route_cmd parser by

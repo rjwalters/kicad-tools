@@ -3189,6 +3189,7 @@ def load_pcb_for_routing(
     force_python: bool = False,
     load_existing_routes: bool = False,
     max_search_iterations: int = 0,
+    per_net_iterations: int = 0,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -3537,6 +3538,8 @@ def load_pcb_for_routing(
         # Issue #2610: thread --max-search-iterations through to the C++ A*
         # iteration backstop override.
         max_search_iterations=max_search_iterations,
+        # Issue #3881: thread the tuned per-net iteration cap through too.
+        per_net_iterations=per_net_iterations,
     )
 
     # Issue #3371 / P_FP3 -- fine-pitch escape region detection.  Must run

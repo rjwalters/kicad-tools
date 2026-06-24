@@ -136,6 +136,18 @@ R2_RECIPE_FLAGS = [
     "--no-auto-layers",
     "--micro-via-in-pad-fallback",
     "--deterministic-budget",
+    # Issue #3881: tuned per-net iteration cap.  --deterministic-budget alone
+    # pins the C++ A* per-net cap to the 12M MEMORY backstop, which is
+    # effectively unbounded per-net: one hard net (e.g. I2S_BCLK) burned 280s
+    # of the 1200s budget and geometric-failure nets fell through to the slow
+    # Python A*, so only ~14 of 51 nets were attempted (chorus 13/51 vs the old
+    # wall-clock recipe's 31/51).  A 1M-expansion per-net cap bounds each net to
+    # a fair iteration slice (load-independent -> still deterministic) so hard
+    # nets give up fast and more nets get a turn -- recovering throughput WHILE
+    # staying reproducible.  (--deterministic-budget defaults this same value;
+    # set explicitly here to make the recipe self-documenting.)
+    "--per-net-iterations",
+    "1000000",
     "--placement-feedback",
     "--placement-feedback-budget",
     "5",
