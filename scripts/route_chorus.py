@@ -7,8 +7,10 @@ R2 of issue #3474.  It is three stages:
 1. **Main pass** -- the R2 recipe (``R2_RECIPE_FLAGS``): pinned 4
    layers (NO escalation ladder -- one attempt with the full 1200s
    budget; the load-bearing change, 14-20/51 -> 33/51 measured),
-   ``--per-net-timeout 60`` (board-05 #3425 finding), jlcpcb-tier1,
-   cpp backend, seed 42, auto-fix, placement feedback,
+   ``--deterministic-budget`` (issue #3877: iteration-budgeted per-net
+   A* so the route is reproducible regardless of machine load --
+   replaced the former wall-clock ``--per-net-timeout 60``),
+   jlcpcb-tier1, cpp backend, seed 42, auto-fix, placement feedback,
    ``PYTHONHASHSEED=0``.
 2. **Completion passes** (``complete_unfinished_nets``) -- every net
    left partially routed (1/N-pad stranding, the #3470-class signature)
@@ -104,13 +106,26 @@ PINNED_RECIPE_FLAGS = [
 #:    of 51.  The single pinned-layers attempt walks the entire 51-net
 #:    queue (detailed routing reached 100% of nets for the first time
 #:    on this board).
-#: 2. ``--per-net-timeout 60`` -- the board-05 #3425 finding (rip-up
-#:    convergence needs more than the 30s default on dense boards).
+#: 2. ``--deterministic-budget`` (issue #3877) -- REPLACES the former
+#:    ``--per-net-timeout 60`` wall-clock cutoff.  ``--per-net-timeout``
+#:    made the per-net A* search load-dependent: on a loaded dev box or
+#:    CI runner the wall-clock budget fired mid-search and the net landed
+#:    LESS copper than on an idle machine, so chorus measured anywhere
+#:    from 8/51 to 31/51 depending on machine load.  ``--deterministic-budget``
+#:    (#3538) swaps that wall-clock cutoff for a fixed C++ A*
+#:    node-expansion ITERATION backstop (12M expansions), so each per-net
+#:    search either finds a path or aborts after the SAME amount of work on
+#:    EVERY machine.  Chorus now routes the same copper run-to-run
+#:    regardless of load, which is what makes the M2/M3 measurement (#3873)
+#:    reliable on any host.  The outer ``--timeout 1200`` is retained ONLY
+#:    as a safety backstop so a pathological net cannot run unbounded; it
+#:    must not be the binding constraint (size it generously).
 #:
 #: Measured strict reach (cpp, seed 42, PYTHONHASHSEED=0, t=1200):
 #:   pinned recipe (5-rung ladder):     14-20/51 across runs
 #:   auto-layers --starting/max 4:      22/51 (2 rungs)
-#:   THIS RECIPE (--layers 4, 1 rung):  33/51 (65%, May-10 parity)
+#:   --layers 4, 1 rung, --per-net-timeout 60: 33/51 (65%, May-10 parity)
+#:   THIS RECIPE (--deterministic-budget):     reproducible run-to-run
 R2_RECIPE_FLAGS = [
     "--manufacturer",
     "jlcpcb-tier1",
@@ -120,8 +135,7 @@ R2_RECIPE_FLAGS = [
     "4",
     "--no-auto-layers",
     "--micro-via-in-pad-fallback",
-    "--per-net-timeout",
-    "60",
+    "--deterministic-budget",
     "--placement-feedback",
     "--placement-feedback-budget",
     "5",
@@ -294,6 +308,12 @@ def main() -> int:
         seed=args.seed,
         excluded_nets=CHORUS_POUR_NETS,
         micro_via_in_pad_fallback=True,
+        # Issue #3877: the completion/rescue passes must be as
+        # load-independent as the main pass, otherwise chorus's final
+        # reach still varies run-to-run.  This drops the wall-clock
+        # per-net cutoff on every rescue subprocess in favour of the
+        # fixed iteration backstop (#3538).
+        deterministic_budget=True,
     )
 
     # Stage 2: batch completion passes.  All unfinished nets route
