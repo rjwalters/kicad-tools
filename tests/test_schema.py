@@ -1746,11 +1746,17 @@ class TestSymbolLibraryLoad:
         """Test loading a valid symbol library."""
         lib = SymbolLibrary.load(str(minimal_symbol_library))
 
-        # Library contains 4 symbols: Device:R, Device:R_0_1, Device:C, Device:C_0_1
-        # (main symbols plus their unit sub-symbols)
-        assert len(lib.symbols) == 4
+        # Library contains 2 top-level symbols: Device:R and Device:C. Their
+        # nested unit sub-symbols (Device:R_0_1, Device:C_0_1) are NOT loaded
+        # as standalone library entries -- they describe the parent symbol's
+        # pins/graphics (see issue #3874).
+        assert len(lib.symbols) == 2
         assert "Device:R" in lib.symbols
         assert "Device:C" in lib.symbols
+        assert "Device:R_0_1" not in lib.symbols
+        assert "Device:C_0_1" not in lib.symbols
+        # Pins from the _0_1 sub-symbol are attached to the parent symbol.
+        assert lib.symbols["Device:R"].pin_count == 2
 
     def test_load_invalid_file(self, tmp_path: Path):
         """Test loading a non-library file raises an error."""
