@@ -29,6 +29,12 @@
 # 04 (stm32-devboard).  Each board's flag set mirrors the ``kct route``
 # argv in its ``boards/<dir>/generate_design.py:route_pcb()``.  KEEP THE
 # FLAG LISTS BELOW IN SYNC with the recipes.
+#
+# NOTE (issue #3880): board 05 is deliberately NOT covered here.  Its main
+# pass stays on the wall-clock ``--per-net-timeout`` cutoff (the iteration
+# budget made the dense BLDC re-route non-terminating on CI -- see PR #3886),
+# so a route-twice-identical-copper check would be load-sensitive and is not
+# meaningful until a deterministic budget is re-adopted for board 05.
 
 set -euo pipefail
 

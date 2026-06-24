@@ -1253,6 +1253,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     """
     import random
 
+    # Issue #3880: reuse the CLI's deterministic-budget constants so a future
+    # tune of the iteration cap is single-source (route_cmd.py), rather than
+    # hardcoding 12M / 1M here.
+    from kicad_tools.cli.route_cmd import (
+        DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
+        DETERMINISTIC_BUDGET_PER_NET_ITERATIONS,
+    )
     from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
@@ -1314,10 +1321,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     )
     print(f"   Skipping pour nets: {skip_nets}")
 
+    # Issue #3880: construct the Autorouter with the deterministic iteration
+    # budget (the same knobs ``kct route --deterministic-budget`` sets via
+    # route_cmd._normalize_deterministic_budget).  Board 06 is the one board
+    # whose main pass routes IN-PROCESS via ``route_all_negotiated`` rather
+    # than the ``kct route`` CLI, so it cannot inherit the CLI flag -- the
+    # iteration cap must be wired through the constructor.  This bounds each
+    # per-net A* by a fixed node-expansion count instead of the wall-clock
+    # ``per_net_timeout`` (set to 0.0 in _negotiated_non_diffpair_strategy
+    # below), so the seed-42 route is reproducible regardless of runner load
+    # -- removing the load-dependence that flaked the board-06 re-route gate.
     router, net_map = load_pcb_for_routing(
         str(input_path),
         skip_nets=skip_nets,
         rules=rules,
+        max_search_iterations=DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
+        per_net_iterations=DETERMINISTIC_BUDGET_PER_NET_ITERATIONS,
     )
 
     # Install per-protocol net classes.  The router consumes:
@@ -1675,8 +1694,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # overflow=2 snapshot.  360s gives the loop the room to BANK the
     # overflow-0 state instead of just discovering it.
     def _negotiated_non_diffpair_strategy() -> list:
+        # Issue #3880: disable the per-net WALL-CLOCK cutoff (was 30.0s).  The
+        # per-net A* search is now bounded by the deterministic ITERATION
+        # budget wired into the Autorouter above (per_net_iterations=1M), which
+        # the CLI's --deterministic-budget path sets identically -- so this
+        # in-process route matches the CLI boards (02/03/04/05/07) and is
+        # reproducible regardless of runner load.
+        #
+        # ``per_net_timeout=None`` (NOT 0.0): the negotiated/MST routers treat
+        # per_net_timeout as a cumulative wall-clock DEADLINE
+        # (``time.monotonic() + per_net_timeout``); a literal 0.0 would make
+        # every edge's remaining budget <= 0 and record all nets as failures.
+        # ``None`` disables the deadline entirely.  This mirrors the CLI, which
+        # sets args.per_net_timeout = 0.0 but forwards
+        # ``getattr(args, "per_net_timeout", None) or None`` -> None
+        # (route_cmd.py:3272 etc.).
+        #
+        # ``timeout=360.0`` is retained as an outer SAFETY BACKSTOP only -- it
+        # must NOT fire, or it re-introduces the load-dependent cutoff the
+        # iteration budget removes.  The negotiated loop's banking work
+        # completes well under 360s on this board (see the #3413 phase-6 note
+        # above).
         return router.route_all_negotiated(
-            per_net_timeout=30.0,
+            per_net_timeout=None,
             timeout=360.0,
             seed=42,
         )

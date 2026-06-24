@@ -3000,10 +3000,25 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "cpp",
         "--seed",
         "7",  # Issue #3425: measured best of {7, 42, 123} -- 28/35 vs 27/35
+        # Issue #3880: board 05 INTENTIONALLY stays on the wall-clock per-net
+        # cutoff below; --deterministic-budget is NOT used here.  Threading the
+        # iteration budget onto this main pass (per #3881: per_net_timeout=0 +
+        # ~1M-per-net / 12M-total iteration cap) removes board 05's terminating
+        # wall-clock cap.  On the slower/contended CI runner the dense BLDC
+        # board (the heaviest re-route in the matrix) then routes effectively
+        # unbounded and blew past the 90-min board-05-routing-regression job
+        # limit (timed out / cancelled -- see PR #3886).  Board 06's
+        # deterministic-budget adoption WAS validated locally and is kept; board
+        # 05 stays on its existing bounded path until a CI-measured terminating
+        # iteration ceiling is available (follow-up to #3880).
         "--timeout",
-        "900",  # Issue #3111: was 360.  #3425: do NOT raise to 1500 (23/35, see docstring)
+        # Issue #3111: was 360.  #3425: do NOT raise to 1500 (23/35, see docstring).
+        "900",
+        # Issue #3425: 30 -> 60; the reach lever (rip-up convergence, see
+        # docstring).  This wall-clock cap is what keeps the board-05 re-route
+        # CI-terminating (see the --deterministic-budget note above).
         "--per-net-timeout",
-        "60",  # Issue #3425: 30 -> 60; the reach lever (rip-up convergence, see docstring)
+        "60",
         "--skip-nets",
         ",".join(skip_nets),
     ]
@@ -3058,7 +3073,13 @@ _RESCUE_EXCLUDED_NETS = frozenset(
 #     0.3 mm in-pad rescue vias the router needs to escape the DRV8301
 #     (U3, 0.5 mm-pitch),
 #   * 60 s per-net matches the main recipe; 300 s stage wall bounds the
-#     #3485 budget-leak overshoot inside escape/rip-up phases,
+#     #3485 budget-leak overshoot inside escape/rip-up phases.  Issue #3880:
+#     the rescue loop INTENTIONALLY stays on this wall-clock per-net cutoff
+#     (no ``deterministic_budget``).  It must match the main pass, which also
+#     stays on wall-clock for board 05 (the iteration budget made the dense
+#     BLDC re-route non-terminating on CI -- see the route_pcb() note and
+#     PR #3886).  Re-enable deterministic_budget here only together with the
+#     main pass, once a CI-terminating iteration ceiling is measured.
 #   * 4-layer, cpp backend, jlcpcb-tier1 -- same as the main pass.
 _RESCUE_CONFIG = RescueConfig(
     manufacturer="jlcpcb-tier1",
