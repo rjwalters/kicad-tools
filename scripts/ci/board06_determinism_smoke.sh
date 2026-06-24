@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Quick board-06 routing determinism smoke test (Issue #3144 / #3272).
+# Quick board-06 routing determinism smoke test (Issue #3144 / #3272 / #3880).
 #
 # Re-routes board 06 N times at seed=42 (default N=5) and asserts:
-#   (1) every routed PCB has the same content-hash (UUIDs stripped),
+#   (1) every routed PCB has the same routed-COPPER SET content-hash
+#       (only ``(segment|via|arc)`` lines, UUID-stripped, SORTED),
 #   (2) every ``kct check`` invocation reports the same error count.
 #
 # The two checks are complementary: (1) catches routing-path
@@ -13,6 +14,20 @@
 # UUID-stripped hashing so a residual file-format randomness (per-via
 # UUID under ``uuid.uuid4()``) does NOT mask the underlying routing
 # invariant.
+#
+# Issue #3880: the copper hash now compares the SORTED SET of copper
+# geometry (matching the sibling ``board_route_determinism_smoke.sh``)
+# rather than the raw file in WRITE ORDER.  Board 06's diff-pair
+# pre-pass completes pairs in a timing-dependent order, so the SAME
+# routed copper set is emitted in a different file order run-to-run.
+# That write-order entropy is cosmetic -- it does NOT change the routed
+# copper, the DRC count, or the diffpair-coverage gate's measured count
+# (all order-insensitive).  Hashing the file in write order would
+# false-positive FAIL on this harmless reordering while the actual
+# determinism invariant (the copper SET + the DRC count, which the CI
+# gate measures) holds.  After the #3880 deterministic-budget switch the
+# per-net A* abort point is machine-independent, so the copper SET is
+# stable; sorting before hashing is what asserts that stability.
 #
 # Usage:
 #   ./scripts/ci/board06_determinism_smoke.sh        # 5 runs
@@ -51,22 +66,28 @@ echo
 # forgot to export it still get deterministic string-hash behaviour.
 export PYTHONHASHSEED="${PYTHONHASHSEED:-42}"
 
-# Helper: compute a content hash of the PCB after stripping every
-# ``(uuid "...")`` token.  Issue #3272: the router emits deterministic
-# UUIDs when a seed is supplied (see
-# :func:`kicad_tools.router.primitives.enable_deterministic_uuids`)
-# but we still strip defensively so the harness catches a regression
-# in that toggle as a CONTENT-hash mismatch rather than masking it as
-# a raw-file MD5 mismatch.  Without the strip a fresh ``uuid.uuid4()``
-# leak in an unrelated module would surface as a false-positive
-# routing-path divergence.
+# Helper: compute a content hash of the routed COPPER SET.  Issue #3880:
+# keep only ``(segment|via|arc)`` lines, strip every ``(uuid "...")`` /
+# ``(tstamp ...)`` token, and SORT -- so element WRITE ORDER in the file
+# does not matter, only the SET of copper geometry.  This mirrors the
+# sibling ``board_route_determinism_smoke.sh`` (#3799) and the
+# order-insensitive DRC-count gate.
+#
+# Issue #3272: the router emits deterministic UUIDs when a seed is
+# supplied (see
+# :func:`kicad_tools.router.primitives.enable_deterministic_uuids`) but
+# we still strip defensively so the harness catches a regression in that
+# toggle via the raw-MD5 NOTE path rather than masking it.  Restricting
+# to copper + sorting (rather than hashing the whole file in write order)
+# is what makes the hash assert the ROUTING invariant -- the diff-pair
+# pre-pass reorders segment emission run-to-run without changing the
+# routed copper, and that cosmetic reordering must not red-light the gate.
 compute_content_hash() {
   local path="$1"
-  if command -v md5 >/dev/null 2>&1; then
-    sed -E 's/\(uuid "[^"]*"\)/(uuid "STRIPPED")/g' "${path}" | md5 -q
-  else
-    sed -E 's/\(uuid "[^"]*"\)/(uuid "STRIPPED")/g' "${path}" | md5sum | awk '{print $1}'
-  fi
+  sed -E 's/\(uuid "[^"]*"\)/(uuid "X")/g; s/\(tstamp [^)]*\)/(tstamp X)/g' "${path}" \
+    | grep -E '^[[:space:]]*\((segment|via|arc)' \
+    | sort \
+    | { if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | awk '{print $1}'; fi; }
 }
 
 prev_hash=""
