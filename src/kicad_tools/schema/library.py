@@ -359,10 +359,16 @@ class LibraryPin:
         return (0, 0)
 
     @classmethod
-    def from_sexp(cls, sexp: SExp) -> LibraryPin:
-        """Parse from S-expression."""
+    def from_sexp(cls, sexp: SExp, unit: int = 1) -> LibraryPin:
+        """Parse from S-expression.
+
+        Args:
+            sexp: The ``(pin ...)`` S-expression node.
+            unit: The unit number of the enclosing ``_N_1`` sub-symbol
+                (1-indexed). Defaults to ``1`` for top-level pins.
+        """
         pin_type = sexp.get_string(0) or "passive"
-        _pin_shape = sexp.get_string(1) or "line"  # noqa: F841 - reserved for rendering
+        pin_shape = sexp.get_string(1) or "line"
 
         pos = (0.0, 0.0)
         rot = 0.0
@@ -391,6 +397,8 @@ class LibraryPin:
             position=pos,
             rotation=rot,
             length=length,
+            unit=unit,
+            shape=pin_shape,
         )
 
     def to_sexp_node(self) -> SExp:
@@ -442,6 +450,39 @@ def _snap_to_kicad_grid(
     if abs(value - nearest) <= tolerance:
         return nearest
     return value
+
+
+def _parse_unit_index(unit_name: str, parent_name: str) -> int | None:
+    """Parse the unit index from a KiCad unit sub-symbol name.
+
+    Unit sub-symbols are named ``{short_name}_{unit}_{variant}`` (e.g.
+    ``MyPart_2_1``). The ``_0_*`` sub-symbol holds graphical decoration and is
+    reported as unit ``0``. ``_N_*`` (N>=1) sub-symbols hold pins for unit N.
+
+    Symbol names may themselves contain underscores, so the trailing
+    ``_<int>_<int>`` suffix is split from the right.
+
+    Args:
+        unit_name: The name of the sub-symbol (e.g. ``MyPart_2_1``).
+        parent_name: The (short) name of the enclosing symbol, used to
+            sanity-check the prefix.
+
+    Returns:
+        The parsed unit index (0 for the graphics sub-symbol, >=1 for pin
+        units), or ``None`` if *unit_name* does not match the expected
+        ``<prefix>_<int>_<int>`` shape.
+    """
+    parts = unit_name.rsplit("_", 2)
+    if len(parts) != 3:
+        return None
+    prefix, unit_str, variant_str = parts
+    if not (unit_str.isdigit() and variant_str.isdigit()):
+        return None
+    # The prefix should match the enclosing symbol's short name. If it does
+    # not, this is not a recognized unit sub-symbol (be conservative).
+    if prefix != parent_name:
+        return None
+    return int(unit_str)
 
 
 @dataclass
@@ -583,15 +624,35 @@ class LibrarySymbol:
             if prop_name:
                 properties[prop_name] = prop_value or ""
 
-        # Parse pins and graphics from unit symbols
+        # Parse pins and graphics from unit sub-symbols.
+        #
+        # Unit sub-symbols are named "{short_name}_{unit}_{variant}" (e.g.
+        # "TPA3116D2_1_1"). The "_0_1" sub-symbol holds graphical decoration;
+        # "_N_1" (N>=1) sub-symbols hold the pins for unit N. We parse the unit
+        # index from each sub-symbol name so that:
+        #   - every pin records its enclosing unit (LibraryPin.unit), and
+        #   - the symbol records how many pin units exist (LibrarySymbol.units).
+        # Sub-symbols whose names do not match the "<prefix>_<int>_<int>" shape
+        # (e.g. pins placed directly under the parent) default to unit 1.
+        short_name = name.split(":", 1)[1] if ":" in name else name
+
         pins: list[LibraryPin] = []
         graphics: list[SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle] = []
-        for unit_sym in sexp.find_all("symbol"):
-            _unit_name = unit_sym.get_string(0) or ""  # noqa: F841
-            # Unit symbols have names like "TPA3116D2_1_1"
-            # Format: {name}_{unit}_{variant}
+        max_unit = 1
+        for unit_sym in sexp.find_children("symbol"):
+            unit_name = unit_sym.get_string(0) or ""
+            parsed_unit = _parse_unit_index(unit_name, short_name)
+            # Pins inherit the enclosing sub-symbol's unit index. The "_0_1"
+            # graphics sub-symbol (parsed_unit == 0) has no pins; treat
+            # unparsable names as unit 1.
+            pin_unit = parsed_unit if (parsed_unit and parsed_unit >= 1) else 1
+
             for pin_sexp in unit_sym.find_all("pin"):
-                pins.append(LibraryPin.from_sexp(pin_sexp))
+                pins.append(LibraryPin.from_sexp(pin_sexp, unit=pin_unit))
+                max_unit = max(max_unit, pin_unit)
+
+            if parsed_unit is not None and parsed_unit >= 1:
+                max_unit = max(max_unit, parsed_unit)
 
             # Parse graphical primitives
             for polyline_sexp in unit_sym.find_all("polyline"):
@@ -608,6 +669,7 @@ class LibrarySymbol:
             properties=properties,
             pins=pins,
             graphics=graphics,
+            units=max_unit,
             extends=extends,
         )
 
@@ -1054,8 +1116,12 @@ class SymbolLibrary:
         if generator_node := sexp.find("generator"):
             generator = generator_node.get_string(0) or ""
 
+        # Only top-level (direct child) symbols are library symbols. Their
+        # nested "_N_1" unit sub-symbols must NOT be parsed as standalone
+        # library entries -- using find_all() here would recurse into them and
+        # corrupt the library with spurious empty top-level symbols.
         symbols = {}
-        for sym_sexp in sexp.find_all("symbol"):
+        for sym_sexp in sexp.find_children("symbol"):
             sym = LibrarySymbol.from_sexp(sym_sexp)
             symbols[sym.name] = sym
 
@@ -1085,8 +1151,10 @@ class SymbolLibrary:
         if generator_node := sexp.find("generator"):
             generator = generator_node.get_string(0) or ""
 
+        # Only top-level (direct child) symbols are library symbols; nested
+        # "_N_1" unit sub-symbols are parsed by LibrarySymbol.from_sexp.
         symbols = {}
-        for sym_sexp in sexp.find_all("symbol"):
+        for sym_sexp in sexp.find_children("symbol"):
             sym = LibrarySymbol.from_sexp(sym_sexp)
             symbols[sym.name] = sym
 
