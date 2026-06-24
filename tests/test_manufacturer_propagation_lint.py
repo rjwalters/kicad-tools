@@ -58,13 +58,14 @@ _SRC_ROOT = _REPO_ROOT / "src" / "kicad_tools"
 # Format: {relative_path: {line_number: reason}}
 _ALLOWLIST: dict[str, dict[int, str]] = {
     # Router core: default-constructed router (line ~400 is the
-    # ``rules_dict``-spread default in _route_with_seed; line ~809 is
+    # ``rules_dict``-spread default in _route_with_seed; line ~817 is
     # the constructor default).  Reaching either means the caller did
-    # not pass rules.  (Line numbers refreshed for issue #3464 and again
-    # for the #3663 ruff lint burn-down, which shifted both sites +2.)
+    # not pass rules.  (Line numbers refreshed for issue #3464, the
+    # #3663 ruff lint burn-down, and again for #3881 which added the
+    # _per_net_iterations field/param shifting both sites.)
     "router/core.py": {
         400: "worker-process rules_dict-spread default (both calls on this line)",
-        809: "Autorouter.__init__ rules-arg default fallback",
+        817: "Autorouter.__init__ rules-arg default fallback",
     },
     # AdaptiveRouter default fallback — same pattern as Autorouter.
     "router/adaptive.py": {
@@ -75,7 +76,7 @@ _ALLOWLIST: dict[str, dict[int, str]] = {
     # The CLI always supplies its own rules with manufacturer wired in.
     "router/io.py": {
         2868: "route_pcb() fallback when caller passes rules=None",
-        3468: "load_pcb_for_routing() inner fallback when neither rules nor pcb_rules supplied",
+        3469: "load_pcb_for_routing() inner fallback when neither rules nor pcb_rules supplied",
     },
     # Benchmark/synthetic fixture generators — no real CLI context.
     "benchmark/runner.py": {
