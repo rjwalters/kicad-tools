@@ -3000,10 +3000,34 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "cpp",
         "--seed",
         "7",  # Issue #3425: measured best of {7, 42, 123} -- 28/35 vs 27/35
+        # Issue #3880: switch the per-net A* cutoff from wall-clock to a fixed
+        # node-expansion ITERATION budget.  The wall-clock ``--per-net-timeout``
+        # below fires earlier on a slow/loaded CI runner than on a fast one, so
+        # a net lands different copper run-to-run -- the root cause of the
+        # board-05 gate's 9-vs-10 blocking flake (#3836).  ``--deterministic-
+        # budget`` (route_cmd._normalize_deterministic_budget) replaces the
+        # wall-clock cutoff with ``max_search_iterations=12M`` /
+        # ``per_net_iterations=1M`` so the abort point is machine-independent
+        # and the seed-7 route is reproducible.  It ALSO zeroes
+        # ``per_net_timeout`` in normalization, so the ``--per-net-timeout 60``
+        # below becomes a no-op -- it is kept only as documentation of the
+        # superseded recipe (do NOT rely on it once --deterministic-budget is
+        # present).
+        "--deterministic-budget",
         "--timeout",
-        "900",  # Issue #3111: was 360.  #3425: do NOT raise to 1500 (23/35, see docstring)
+        # Issue #3111: was 360.  #3425: do NOT raise to 1500 (23/35, see docstring).
+        # Issue #3880: under --deterministic-budget this outer wall-clock
+        # deadline is a SAFETY BACKSTOP only -- it must NOT fire, or it would
+        # re-introduce the load-dependent cutoff the iteration budget removes
+        # (see the --deterministic-budget docstring warning).  The full route +
+        # rescue loop runs ~45-55 min on CI, well under 900 s per ``kct route``
+        # subprocess, so this stays a backstop.
+        "900",
+        # Issue #3880: superseded by --deterministic-budget (no-op above); kept
+        # for recipe provenance.  #3425: 30 -> 60 was the wall-clock reach lever
+        # (rip-up convergence) before the iteration budget replaced it.
         "--per-net-timeout",
-        "60",  # Issue #3425: 30 -> 60; the reach lever (rip-up convergence, see docstring)
+        "60",
         "--skip-nets",
         ",".join(skip_nets),
     ]
@@ -3057,8 +3081,16 @@ _RESCUE_EXCLUDED_NETS = frozenset(
 #   * seed 7 + ``--micro-via-in-pad-fallback`` (Issue #3425/#3118): the
 #     0.3 mm in-pad rescue vias the router needs to escape the DRV8301
 #     (U3, 0.5 mm-pitch),
-#   * 60 s per-net matches the main recipe; 300 s stage wall bounds the
-#     #3485 budget-leak overshoot inside escape/rip-up phases,
+#   * Issue #3880: ``deterministic_budget=True`` -- the rescue subprocess
+#     routes each net with ``--deterministic-budget`` instead of the
+#     wall-clock ``--per-net-timeout`` (partial_rescue.py:248-251).  The
+#     main pass above already switched to the iteration budget; the rescue
+#     loop must match or it re-introduces a load-dependent per-net cutoff
+#     on exactly the residual cluster (ISENSE / PWM_CL) whose copper feeds
+#     the board-05 blocking-net gate count.  ``per_net_timeout_s`` /
+#     ``stage_timeout_s`` are now safety backstops only (the wall-clock
+#     ``--per-net-timeout`` is dropped when deterministic_budget is set;
+#     ``--timeout`` is retained but must not fire).
 #   * 4-layer, cpp backend, jlcpcb-tier1 -- same as the main pass.
 _RESCUE_CONFIG = RescueConfig(
     manufacturer="jlcpcb-tier1",
@@ -3066,6 +3098,7 @@ _RESCUE_CONFIG = RescueConfig(
     seed=7,
     stage_timeout_s=300,
     per_net_timeout_s=60,
+    deterministic_budget=True,  # Issue #3880: iteration budget, not wall-clock
     starting_layers=4,
     max_layers=4,
     excluded_nets=_RESCUE_EXCLUDED_NETS,
