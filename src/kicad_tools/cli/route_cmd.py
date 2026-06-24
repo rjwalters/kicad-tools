@@ -142,6 +142,25 @@ _AUTO_FIX_RESERVE_FLOOR_SEC = 60.0
 # ``--max-search-iterations N`` alongside the flag when a board needs more.
 DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS = 12_000_000
 
+# Issue #3881: the TUNED per-net iteration cap applied by --deterministic-budget.
+#
+# The 12M memory backstop above is effectively UNBOUNDED per-net: on the chorus
+# fixture one net (I2S_BCLK) burned 280s of a 1200s --timeout, and geometric-
+# failure nets fell through to the 10-100x-slower Python A*, so only ~14 of 51
+# nets were even attempted before the outer deadline fired (chorus 13/51 vs the
+# old wall-clock recipe's 31/51).  A smaller per-net iteration cap bounds each
+# net to a fair iteration slice so hard nets give up deterministically and more
+# nets get a turn -- recovering throughput WHILE staying load-independent
+# (iteration count, not wall-clock, so still reproducible).
+#
+# The value is tuned against the chorus fixture: the old recipe gave ~60s/net at
+# 31 routed, and a chorus A* net does roughly tens-of-thousands to low-millions
+# of node expansions in that window.  1,000,000 expansions sits at the top of
+# that band -- generous enough that nets which WOULD succeed still do, while
+# cutting off the genuine grinders (which would otherwise run to 12M) so the
+# remaining nets get budget.  Override with an explicit --per-net-iterations N.
+DETERMINISTIC_BUDGET_PER_NET_ITERATIONS = 1_000_000
+
 
 def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
     """Apply Issue #3538 iteration-budget normalization to ``args`` in place.
@@ -180,6 +199,15 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
     if not getattr(args, "max_search_iterations", 0):
         args.max_search_iterations = DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS
 
+    # (2b) Issue #3881: default the TUNED per-net iteration cap unless the user
+    # passed an explicit positive ``--per-net-iterations``.  The 12M backstop
+    # above is effectively unbounded per-net, so without this a single hard net
+    # monopolises the whole --timeout and only a fraction of nets get attempted
+    # (chorus 13/51).  The per-net cap bounds each net to a fair iteration slice
+    # (load-independent -> still deterministic) so more nets get a turn.
+    if not getattr(args, "per_net_iterations", 0):
+        args.per_net_iterations = DETERMINISTIC_BUDGET_PER_NET_ITERATIONS
+
     # (3) Warn if the outer wall-clock deadline could bind.
     timeout = getattr(args, "timeout", None)
     if not quiet:
@@ -188,6 +216,13 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
             "(Issue #3538): per-net wall-clock cutoff DISABLED, C++ A* "
             f"iteration backstop pinned to {args.max_search_iterations:,} "
             "node expansions.  Routed output is reproducible across machines."
+        )
+        print(
+            "[deterministic-budget] Per-net iteration cap "
+            f"{args.per_net_iterations:,} node expansions (Issue #3881): each "
+            "net gives up deterministically at the cap so hard nets do not "
+            "monopolise the budget and more nets get a turn (Python fallback "
+            "skipped for capped nets)."
         )
         if timeout and timeout > 0:
             print(
@@ -3161,6 +3196,10 @@ def route_with_layer_escalation(
                     # args.max_search_iterations to 12M; ``or 0`` preserves the
                     # historic 0="use cols*rows*4 heuristic" semantics.
                     max_search_iterations=getattr(args, "max_search_iterations", 0) or 0,
+                    # Issue #3881: thread the tuned per-net iteration cap through
+                    # the layer-escalation sub-router too, so the per-net bound
+                    # applies there (defaulted by --deterministic-budget).
+                    per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
                 )
         except Exception as e:
             if not quiet:
@@ -6880,6 +6919,30 @@ def main(argv: list[str] | None = None) -> int:
             "aborts so you can tell which limit fired."
         ),
     )
+    # Issue #3881: --per-net-iterations is the TUNED per-net iteration cap,
+    # distinct from --max-search-iterations (the 12M memory backstop).  Under
+    # --deterministic-budget the 12M backstop is effectively unbounded per-net,
+    # so one hard net can monopolise the whole --timeout and starve the rest.
+    # A smaller per-net cap bounds each net to a fair iteration slice
+    # (load-independent, so still deterministic) and lets more nets get a turn.
+    parser.add_argument(
+        "--per-net-iterations",
+        type=int,
+        default=0,
+        help=(
+            "Tuned per-net C++ A* iteration cap (default: 0 = unset). When set, "
+            "each net's search gives up DETERMINISTICALLY after N node "
+            "expansions (FAILURE_ITERATION_LIMIT) so a hard net cannot "
+            "monopolise the budget -- the next net gets its turn. Distinct from "
+            "--max-search-iterations (the absolute memory backstop): the "
+            "effective per-net cap is min(N, max-search-iterations). A net that "
+            "hits this tuned cap is a deterministic give-up and its Python "
+            "fallback is skipped, so the cap is a hard per-net bound. Iteration "
+            "count is load-independent, so routing stays reproducible. "
+            "--deterministic-budget defaults this to a sensible value "
+            f"({DETERMINISTIC_BUDGET_PER_NET_ITERATIONS:,})."
+        ),
+    )
     parser.add_argument(
         "--deterministic-budget",
         action="store_true",
@@ -8393,6 +8456,10 @@ def main(argv: list[str] | None = None) -> int:
                 # being treated as falsy (which is the intended behaviour:
                 # 0 means "use the cols*rows*4 heuristic").
                 max_search_iterations=args.max_search_iterations or 0,
+                # Issue #3881: thread the tuned per-net iteration cap through.
+                # Defaulted by --deterministic-budget normalization above; 0 =
+                # unset (no per-net cap, legacy behaviour).
+                per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
             )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)

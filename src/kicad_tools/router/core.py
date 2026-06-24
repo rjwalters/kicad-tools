@@ -785,6 +785,7 @@ class Autorouter:
         force_python: bool = False,
         record_decisions: bool = False,
         max_search_iterations: int = 0,
+        per_net_iterations: int = 0,
     ):
         """Initialize the autorouter.
 
@@ -805,6 +806,13 @@ class Autorouter:
                 iteration backstop (default 0 = use cols*rows*4).  Positive
                 values let dense boards trade memory for completeness via
                 the ``--max-search-iterations`` CLI flag.
+            per_net_iterations: Issue #3881 -- tuned per-net A* iteration cap
+                (default 0 = unset).  Distinct from ``max_search_iterations``
+                (the memory backstop): when set, each net's search gives up
+                DETERMINISTICALLY after this many node expansions so a hard net
+                cannot monopolise the budget, and a capped net's Python fallback
+                is skipped.  Plumbed via the ``--per-net-iterations`` CLI flag
+                (defaulted by ``--deterministic-budget``).
         """
         self.rules = rules or DesignRules()
         # Issue #3524: copy the default map instead of aliasing it.  The
@@ -818,6 +826,10 @@ class Autorouter:
         # Issue #2610: stored so _create_grid_and_routers can pass it to
         # create_hybrid_router on the initial construction.
         self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
+        # Issue #3881: tuned per-net iteration cap (0 = unset).  Passed to
+        # create_hybrid_router so the C++ pathfinder bounds each net to a fair
+        # iteration slice and skips the Python fallback for capped nets.
+        self._per_net_iterations = int(per_net_iterations) if per_net_iterations else 0
 
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -1154,6 +1166,8 @@ class Autorouter:
             net_class_map=self.net_class_map,
             # Issue #2610: thread the C++ iteration backstop override through.
             max_search_iterations=getattr(self, "_max_search_iterations", 0),
+            # Issue #3881: thread the tuned per-net iteration cap through.
+            per_net_iterations=getattr(self, "_per_net_iterations", 0),
         )
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
@@ -6522,12 +6536,26 @@ class Autorouter:
         # backstop.
         if getattr(self, "_max_search_iterations", 0):
             if per_net_timeout is None:
-                flush_print(
-                    "  Per-net A* cap: iteration-bounded "
-                    f"({self._max_search_iterations:,} node expansions; "
-                    "--deterministic-budget, issue #3877) -- wall-clock per-net "
-                    "cap disabled for machine-independent reach"
-                )
+                # Issue #3881: when a tuned per-net cap is active it binds (the
+                # 12M backstop is the memory ceiling, not the per-net bound), so
+                # report the smaller binding value.
+                _per_net_cap = getattr(self, "_per_net_iterations", 0)
+                if _per_net_cap:
+                    _binding = min(_per_net_cap, self._max_search_iterations)
+                    flush_print(
+                        "  Per-net A* cap: iteration-bounded "
+                        f"({_binding:,} node expansions; tuned per-net cap, "
+                        f"memory backstop {self._max_search_iterations:,}; "
+                        "--deterministic-budget, issue #3881) -- hard nets give "
+                        "up deterministically so more nets get a turn"
+                    )
+                else:
+                    flush_print(
+                        "  Per-net A* cap: iteration-bounded "
+                        f"({self._max_search_iterations:,} node expansions; "
+                        "--deterministic-budget, issue #3877) -- wall-clock "
+                        "per-net cap disabled for machine-independent reach"
+                    )
         else:
             derived_cap = derive_per_net_cap(per_net_timeout, timeout)
             if derived_cap is not None and per_net_timeout is None:

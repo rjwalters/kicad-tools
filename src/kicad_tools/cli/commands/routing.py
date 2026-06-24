@@ -225,6 +225,14 @@ def run_route_command(args) -> int:
     max_iter_val = getattr(args, "max_search_iterations", 0) or 0
     if max_iter_val:
         sub_argv.extend(["--max-search-iterations", str(max_iter_val)])
+    # Issue #3881: forward --per-net-iterations to the inner parser.  Default
+    # is 0 (= unset), so only forward a non-default value (matches the
+    # --max-search-iterations pattern above).  Under --deterministic-budget the
+    # inner normalization defaults it, so an unset value still becomes the tuned
+    # cap inside route_cmd.
+    per_net_iter_val = getattr(args, "per_net_iterations", 0) or 0
+    if per_net_iter_val:
+        sub_argv.extend(["--per-net-iterations", str(per_net_iter_val)])
     # Issue #3538: forward --deterministic-budget to the inner parser.  Both
     # sites declare it as store_true defaulting to False, so only forward when
     # the user passed it (matches the --targeted-ripup pattern above).  The
