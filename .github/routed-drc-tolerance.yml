@@ -1069,7 +1069,39 @@ tolerances:
   # diff-pair regression guard, and the gate still fails on a 34th (NEW)
   # error.  Exit clause: when #3847 re-spaces the drills, drop this floor
   # back to 25 (and the strict-gate pin back to 18).
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 33
+  #
+  # !!! RATCHET 33 -> 24 (Issue #3888, June 24 2026) !!!
+  # ----------------------------------------------------------------------
+  # Deferred CI-measured follow-up from #3880 / PR #3886.  #3886 threaded
+  # the shared ``DETERMINISTIC_BUDGET_*`` constants through board 06's
+  # in-process re-route (generate_design.py:1256-1339) and DELIBERATELY
+  # left this floor at its flake-absorbing 33 pending a CI measurement
+  # (the "measure-on-CI-never-guess" rule -- local board counts are
+  # non-authoritative, #3822).  The re-route is now deterministic on CI,
+  # so the variance the 33 slack absorbed is gone and the floor ratchets
+  # to the exact MEASURED deterministic count.
+  #
+  # The floor is consulted by TWO gates; the binding (larger) count wins:
+  #   * Diff-Pair Routing Regression (check_diffpair_coverage.py, seed-42
+  #     from-scratch re-route): CI-MEASURED 23, identical across two CI
+  #     runs at the post-#3886 code -- run 28117574190 (main 060afebb) and
+  #     run 28115050517 (PR #3886 head 7d046d12).  The pre-#3886 parent
+  #     (run 28108898553, main 8531384a) measured 27 on the OLD
+  #     non-deterministic re-route, confirming #3886 is what removed the
+  #     variance.  Route-twice -> identical 23 == determinism confirmed.
+  #   * Routed PCB DRC Check (check_routed_drc.py, COMMITTED artifact,
+  #     --mfr jlcpcb, advisory connectivity=1 filtered): 24 (machine-
+  #     deterministic -- ``kct check`` on a fixed file, no re-route).
+  # Binding count = max(re-route 23, committed 24) = 24, so the floor is
+  # the COMMITTED count.  Setting it to the lower re-route 23 would fail
+  # the committed-artifact gate (24 > 23); 24 is the tightest honest
+  # monotonic floor (floor >= committed deterministic count, zero slack).
+  # check_routed_drc.py's own slack warning independently recommends 24.
+  # The strict-gate pin EXPECTED_STRICT_GATE_ERRORS = 24 in
+  # tests/test_board_06_diffpair_test.py already equals this committed
+  # count, so it is unchanged.  Exit clause (unchanged): when #3847
+  # re-spaces the drills, the committed count drops and this floor follows.
+  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb: 24
 
   # Match-group regression testbench (Epic #2661 Phase 3L, #2724).
   # Held at 70 by issue #2781's rect-pad fix.  Two CI jobs measure
@@ -1567,7 +1599,42 @@ tolerances:
   # were invisible. Floor rises 69 -> 120 (= 69 prior blocking + 51 new)
   # to lock the gate in; the per-board fill regeneration is artifact
   # cleanup tracked alongside the #3633 stitcher/pour-repair work.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 120
+  #
+  # !!! RATCHET 120 -> 28 (Issue #3888, June 24 2026) !!!
+  # ----------------------------------------------------------------------
+  # Deferred CI-measured follow-up from #3880 / PR #3886, companion to the
+  # board-06 33 -> 24 ratchet above.  The 120 was STALE slack: it was set
+  # by #3556 as 69 prior + 51 brand-new ``clearance_via_zone`` /
+  # ``clearance_pad_zone`` findings against the THEN-committed dead-pour
+  # artifact.  The board-07 fill regeneration that #3556 deferred has
+  # since landed (real pour copper, the #3617 fill -> stitch -> repair
+  # loop), so the committed artifact no longer carries those 51 stale-
+  # pour-carve findings -- but the floor was never ratcheted back down.
+  # This removes that stale slack to the exact MEASURED deterministic
+  # count, per the measure-on-CI-never-guess rule (#3822).
+  #
+  # The floor is consulted by TWO gates; the binding (larger) count wins:
+  #   * Match-Group Routing Regression (check_matchgroup_coverage.py,
+  #     seed-42 from-scratch re-route): CI-MEASURED 26, identical across
+  #     THREE CI runs -- run 28117574190 (main 060afebb), run 28115050517
+  #     (PR #3886 head 7d046d12) and run 28108898553 (main 8531384a).
+  #     Board 07 was already deterministic via ``--deterministic-budget``
+  #     (#3879); route-twice -> identical 26 == determinism reconfirmed.
+  #   * Routed PCB DRC Check (check_routed_drc.py, COMMITTED artifact,
+  #     --mfr jlcpcb, advisory connectivity=7 filtered): 28 (machine-
+  #     deterministic -- ``kct check`` on a fixed file, no re-route).
+  # Binding count = max(re-route 26, committed 28) = 28, so the floor is
+  # the COMMITTED count.  Setting it to the lower re-route 26 would fail
+  # the committed-artifact gate (28 > 26); 28 is the tightest honest
+  # monotonic floor (floor >= committed deterministic count, zero slack).
+  # check_routed_drc.py's own slack warning independently recommends 28.
+  # The committed-artifact parity pins in tests/test_kct_check_parity.py
+  # measure per-family deltas on the same fixed artifact and are unchanged
+  # (floor 28 >= committed 28).  Exit clauses (unchanged): the #3633
+  # stitcher/pour-repair cross-net clearance fix and the #3471-adjacent
+  # diff-pair engaged-pair work further lower the committed count, and
+  # this floor follows.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 28
 
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a
