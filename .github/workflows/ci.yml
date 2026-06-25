@@ -1573,6 +1573,17 @@ jobs:
     # deterministic.  <= 11 catches GROSS regressions without flaking on the
     # 9-vs-10 nondeterminism.
     #
+    # Issue #3887: board 05's re-route is now DETERMINISTIC -- the main pass and
+    # the rescue loop were migrated from the load-sensitive --per-net-timeout
+    # wall-clock cutoff to a fixed per-net ITERATION budget
+    # (--deterministic-budget --per-net-iterations 200000; see
+    # boards/05-bldc-motor-controller/design.py _BOARD_05_PER_NET_ITERATIONS),
+    # so a fresh re-route here is now reproducible AND terminates with headroom
+    # under the 90-min timeout below.  --max-blocking INTENTIONALLY stays at 11
+    # in the #3887 PR: per #3822 the deterministic blocking count is CI-
+    # authoritative, so the tightened bound (toward 7) is deferred to a measured
+    # follow-up that reads it off a green run of THIS job, rather than guessed.
+    #
     # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
     # during regen, and per CLAUDE.md a missing native extension makes routing
     # multi-minute-per-net.  Board 05's recipe is named design.py (NOT

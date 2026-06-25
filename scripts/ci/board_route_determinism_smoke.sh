@@ -24,17 +24,20 @@
 # Examples:
 #   ./scripts/ci/board_route_determinism_smoke.sh 02        # 2 runs
 #   ./scripts/ci/board_route_determinism_smoke.sh 04 3      # 3 runs
+#   ./scripts/ci/board_route_determinism_smoke.sh 05        # 2 runs
 #
 # Supported boards: 02 (charlieplex-led), 03 (usb-joystick),
-# 04 (stm32-devboard).  Each board's flag set mirrors the ``kct route``
-# argv in its ``boards/<dir>/generate_design.py:route_pcb()``.  KEEP THE
-# FLAG LISTS BELOW IN SYNC with the recipes.
+# 04 (stm32-devboard), 05 (bldc-motor-controller).  Each board's flag set
+# mirrors the ``kct route`` argv in its
+# ``boards/<dir>/{generate_,}design.py:route_pcb()``.  KEEP THE FLAG LISTS
+# BELOW IN SYNC with the recipes.
 #
-# NOTE (issue #3880): board 05 is deliberately NOT covered here.  Its main
-# pass stays on the wall-clock ``--per-net-timeout`` cutoff (the iteration
-# budget made the dense BLDC re-route non-terminating on CI -- see PR #3886),
-# so a route-twice-identical-copper check would be load-sensitive and is not
-# meaningful until a deterministic budget is re-adopted for board 05.
+# NOTE (issue #3887): board 05 IS now covered.  Its main pass was migrated from
+# the load-sensitive wall-clock ``--per-net-timeout 60`` cutoff to a fixed
+# per-net ITERATION budget (``--deterministic-budget --per-net-iterations
+# 200000``), so a route-twice-identical-copper check is now meaningful and the
+# dense BLDC re-route terminates within the CI job limit.  This re-adds the
+# board-05 case that #3880/PR #3886 had deferred.
 
 set -euo pipefail
 
@@ -42,7 +45,7 @@ BOARD="${1:-}"
 N="${2:-2}"
 
 if [[ -z "${BOARD}" ]]; then
-  echo "ERROR: board number required (02, 03, or 04)" >&2
+  echo "ERROR: board number required (02, 03, 04, or 05)" >&2
   echo "Usage: $0 <board-number> [runs]" >&2
   exit 1
 fi
@@ -93,8 +96,31 @@ case "${BOARD}" in
       --timeout 600
     )
     ;;
+  05)
+    # Issue #3887: mirrors boards/05-bldc-motor-controller/design.py:route_pcb()
+    # (note: board 05's recipe file is design.py, not generate_design.py).  The
+    # board-05-tuned --per-net-iterations 200000 is the deterministic per-net
+    # cap (_BOARD_05_PER_NET_ITERATIONS) that keeps the dense BLDC re-route both
+    # reproducible AND terminating within the 90-min CI job limit; KEEP IT IN
+    # SYNC with the recipe.  Seed 7 (not 42) per the recipe's measured best.
+    BOARD_DIR="boards/05-bldc-motor-controller"
+    STEM="bldc_controller"
+    ROUTE_FLAGS=(
+      --auto-layers
+      --starting-layers 4
+      --max-layers 4
+      --manufacturer jlcpcb-tier1
+      --micro-via-in-pad-fallback
+      --backend cpp
+      --seed 7
+      --deterministic-budget
+      --per-net-iterations 200000
+      --timeout 900
+      --skip-nets "+24V,+5V,+3V3,GND,PHASE_A,PHASE_B,PHASE_C"
+    )
+    ;;
   *)
-    echo "ERROR: unsupported board '${BOARD}' (supported: 02, 03, 04)" >&2
+    echo "ERROR: unsupported board '${BOARD}' (supported: 02, 03, 04, 05)" >&2
     exit 1
     ;;
 esac

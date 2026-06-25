@@ -86,6 +86,15 @@ from pathlib import Path
 # gross regressions (> 11). The proper fix is a DETERMINISTIC re-route, after
 # which this should be tightened back toward 7 then 0 -- tracked in
 # #3775 / #3766 / #3829.
+#
+# Issue #3887: board-05's re-route IS now deterministic (the main pass +
+# rescue loop moved from the wall-clock --per-net-timeout cutoff to a fixed
+# per-net ITERATION budget; see boards/05-bldc-motor-controller/design.py
+# _BOARD_05_PER_NET_ITERATIONS). The threshold INTENTIONALLY stays at 11 in
+# this PR: per #3822 the deterministic blocking_incomplete_count is CI-
+# authoritative (the macOS host routes fewer nets than the Linux CI runner),
+# so the tightened bound must be read off a green board-05-routing-regression
+# run and is deferred to that measured follow-up rather than guessed here.
 DEFAULT_MAX_BLOCKING = 11
 
 
