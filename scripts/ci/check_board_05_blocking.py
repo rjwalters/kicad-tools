@@ -87,28 +87,22 @@ from pathlib import Path
 # which this should be tightened back toward 7 then 0 -- tracked in
 # #3775 / #3766 / #3829.
 #
-# Issue #3887: board-05's re-route IS now deterministic (the main pass +
-# rescue loop moved from the wall-clock --per-net-timeout cutoff to a fixed
-# per-net ITERATION budget; see boards/05-bldc-motor-controller/design.py
-# _BOARD_05_PER_NET_ITERATIONS). The threshold INTENTIONALLY stays at 11 in
-# this PR: per #3822 the deterministic blocking_incomplete_count is CI-
-# authoritative (the macOS host routes fewer nets than the Linux CI runner),
-# so the tightened bound must be read off a green board-05-routing-regression
-# run and is deferred to that measured follow-up rather than guessed here.
+# Issue #3887 (SUPERSEDED by #3894): #3887 moved board-05's main pass + rescue
+# loop from the wall-clock --per-net-timeout cutoff to a fixed per-net
+# ITERATION budget, claiming determinism. That claim did not hold up on CI.
 #
-# Issue #3894: #3887's determinism was INCOMPLETE -- it made the per-net
-# budget deterministic but left the OUTER wall-clock caps (--timeout 900 on
-# the main pass, stage_timeout_s 300 on the rescue loop) in place. Those caps
-# FIRED under CI runner load and truncated the otherwise-deterministic route,
-# so the blocking count varied run-to-run (observed 12 vs <=11 on a byte-
-# identical recipe). #3894 disables both outer caps (--timeout 0 == unbounded;
-# the iteration budget is the sole terminator), so the completed-net set --
-# hence this count -- is now machine-independent. The threshold STILL stays at
-# 11 here: per #3822 the true deterministic floor must be read off two
-# consecutive green board-05-routing-regression runs (the un-truncated route
-# is expected to land back at the historical 9-10 floor, comfortably <=11),
-# and tightening 11 -> that measured value is a deliberate follow-up, NOT a
-# locally-guessed number.
+# Issue #3894: REVERTED #3887's deterministic per-net ITERATION budget on
+# board 05 back to the pre-#3887 wall-clock recipe (--per-net-timeout 60 /
+# --timeout 900). #3887's budget did LESS total routing work than the
+# wall-clock outer rip-up/reroute loop, so it completed FEWER nets and
+# REGRESSED this count to 12-15 (vs the historical wall-clock 9-10); the
+# byte-determinism it promised was also never actually achieved on CI.
+# Restoring the wall-clock recipe returns board 05 to its known-GREEN state
+# (<=11). The threshold STAYS at 11: the wall-clock re-route is nondeterministic
+# run-to-run (~9-10), and per #3822 the CI-measured blocking_incomplete_count is
+# authoritative, so any tightening toward the documented target of 7 is a
+# deliberate follow-up gated on a genuine board-05 determinism fix
+# (#3775 / #3766 / #3829), NOT a locally-guessed number.
 DEFAULT_MAX_BLOCKING = 11
 
 
