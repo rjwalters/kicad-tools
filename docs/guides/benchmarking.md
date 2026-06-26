@@ -55,18 +55,14 @@ of nearly every routing-issue insight in #2515, #2517, #2518, #2540,
 
 The PCB is **not** checked into kicad-tools.  It lives in a separate
 hardware repository because the kicad-tools repo does not ship
-real-world PCBs.  Two paths exist for making it available on CI:
+real-world PCBs.
 
-1. **`CHORUS_TEST_LOCAL_PATH`** -- filesystem path on the runner.
-   Self-hosted runners or local workstations can pre-stage the board
-   and set this env var.
-2. **`CHORUS_TEST_GIT_URL` + `CHORUS_TEST_GIT_REF`** -- a private git
-   URL the workflow can shallow-clone.  Stored as repo secrets so the
-   PR build never has access.
-
-The CI workflow `.github/workflows/benchmark-routing.yml` invokes
-`scripts/ci/fetch_chorus_test.py`, which tries both sources in order
-and skips gracefully when neither is set.
+Chorus is a **local-only** fixture -- it is intentionally not run in
+CI.  Make it available on a workstation by pre-staging the board and
+pointing at it with **`CHORUS_TEST_LOCAL_PATH`**, or via the
+`boards/external/chorus-test-revA` symlink into a local checkout of the
+hardware repo.  The opt-in tests (`KCT_RUN_CHORUS_REACH_FLOOR=1`) and
+`scripts/route_chorus.py` then read the board directly.
 
 ## Regression thresholds
 
