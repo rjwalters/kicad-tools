@@ -6,7 +6,9 @@
 # now include ``--deterministic-budget`` + ``--seed 42`` + a pinned
 # ``PYTHONHASHSEED=42`` -- and asserts that the UUID-normalized routed
 # COPPER (the ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` set) is
-# byte-identical across every run.
+# byte-identical across every run AND that the blocking-incomplete-net
+# COUNT (NetStatusAnalyzer.blocking_incomplete_count -- the metric the
+# board-05 CI gate enforces) is identical across every run (Issue #3894).
 #
 # WHY this exists (Issue #3799 root cause):
 #   ``--seed`` only seeds Python's global ``random``.  It does NOT control
@@ -103,6 +105,11 @@ case "${BOARD}" in
     # cap (_BOARD_05_PER_NET_ITERATIONS) that keeps the dense BLDC re-route both
     # reproducible AND terminating within the 90-min CI job limit; KEEP IT IN
     # SYNC with the recipe.  Seed 7 (not 42) per the recipe's measured best.
+    # Issue #3894: --timeout is 0 (DISABLED) to mirror the recipe.  A finite
+    # outer wall-clock cap (was 900 s) fired under CI load and truncated the
+    # deterministic iteration-bounded route to a machine-DEPENDENT completed-
+    # net set; 0 makes the --per-net-iterations budget the sole terminator so
+    # the routed copper AND its blocking count are reproducible across runs.
     BOARD_DIR="boards/05-bldc-motor-controller"
     STEM="bldc_controller"
     ROUTE_FLAGS=(
@@ -115,7 +122,7 @@ case "${BOARD}" in
       --seed 7
       --deterministic-budget
       --per-net-iterations 200000
-      --timeout 900
+      --timeout 0
       --skip-nets "+24V,+5V,+3V3,GND,PHASE_A,PHASE_B,PHASE_C"
     )
     ;;
@@ -160,7 +167,31 @@ normalize_copper() {
     | sort
 }
 
+# Issue #3894: blocking-incomplete-net count for a routed PCB, via the same
+# NetStatusAnalyzer metric the board-05 CI gate (scripts/ci/check_board_05_
+# blocking.py) and the DRC gate use.  The determinism contract is extended
+# from "byte-identical copper" to "identical blocking COUNT": the board-05
+# flake (#3894) was a run-to-run *count* change (12 vs <=11) caused by a
+# load-sensitive outer wall-clock cap truncating the route, NOT a copper-set
+# bug the copper diff could catch.  Asserting a stable count here makes a
+# future reintroduction of count variance fail loudly.  Prints just the
+# integer on stdout (empty on analysis failure, which the caller treats as
+# a tool error).
+blocking_count() {
+  uv run python - "$1" <<'PY' 2>/dev/null || true
+import sys
+from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+try:
+    result = NetStatusAnalyzer(sys.argv[1]).analyze()
+except Exception:
+    sys.exit(1)
+print(result.blocking_incomplete_count)
+PY
+}
+
 prev_norm=""
+prev_count=""
 for ((i = 1; i <= N; i++)); do
   pcb="${OUT_DIR}/run-${i}.kicad_pcb"
   log="${OUT_DIR}/run-${i}.log"
@@ -183,8 +214,16 @@ for ((i = 1; i <= N; i++)); do
   fi
 
   normalize_copper "${pcb}" >"${norm}"
-  echo "  Elapsed:     $((end_s - start_s))s"
+  count="$(blocking_count "${pcb}")"
+  echo "  Elapsed:      $((end_s - start_s))s"
   echo "  Copper lines: $(wc -l <"${norm}")"
+  echo "  Blocking nets: ${count:-<analysis failed>}"
+
+  if [[ -z "${count}" ]]; then
+    echo "FAIL: run ${i} blocking-net analysis failed (NetStatusAnalyzer)." >&2
+    echo "      See ${log} for the route log." >&2
+    exit 2
+  fi
 
   if [[ -n "${prev_norm}" ]]; then
     if ! diff -q "${prev_norm}" "${norm}" >/dev/null; then
@@ -198,9 +237,24 @@ for ((i = 1; i <= N; i++)); do
       echo "      PCBs preserved in ${OUT_DIR} for post-mortem."
       exit 3
     fi
+    # Issue #3894: extend the determinism contract from copper to the
+    # blocking COUNT.  (Within one run/machine this is implied by the copper
+    # diff above; the explicit assertion documents the metric and guards
+    # against a future change that varies the count without varying copper.)
+    if [[ "${count}" != "${prev_count}" ]]; then
+      echo
+      echo "FAIL: run ${i} blocking-net COUNT (${count}) differs from the"
+      echo "      prior run (${prev_count}).  Same board + deterministic"
+      echo "      budget produced a DIFFERENT blocking count -- the count-"
+      echo "      determinism guarantee regressed (Issue #3894)."
+      echo "      PCBs preserved in ${OUT_DIR} for post-mortem."
+      exit 3
+    fi
   fi
   prev_norm="${norm}"
+  prev_count="${count}"
 done
 
 echo
-echo "PASS: board ${BOARD} routed byte-identical copper across ${N} runs."
+echo "PASS: board ${BOARD} routed byte-identical copper AND a stable"
+echo "      blocking-net count (${prev_count}) across ${N} runs."

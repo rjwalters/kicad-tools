@@ -2860,20 +2860,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       measurement (42 -> 27/35, 123 -> 27/35, 7 -> 28/35 at
       otherwise-identical flags).
     - ``--deterministic-budget --per-net-iterations
-      _BOARD_05_PER_NET_ITERATIONS`` + ``--timeout 900`` (safety backstop):
-      Issue #3887 replaced the old ``--per-net-timeout 60`` wall-clock cap
-      with a fixed per-net iteration budget so the re-route is reproducible
-      across machines (the #3880 goal that PR #3886 deferred for board 05).
-      The per-net iteration cap is BOTH the reach lever and the termination
-      guarantee here: the generic #3881 default (1,000,000/net) made this
-      dense board non-terminating on CI (PR #3886's 90-min timeout), and the
-      board-05-tuned 200,000 (see ``_BOARD_05_PER_NET_ITERATIONS``) bounds
-      each per-net A* -- C++ and the Python fallback alike -- to a fixed
-      amount of work so the route lands the productive nets and finishes
-      with clear headroom under the 90-min job limit.  Do NOT restore
-      ``--per-net-timeout`` (it reintroduces the load-sensitivity #3887
-      removed) and do NOT raise ``--timeout`` to bind (a firing outer
-      deadline breaks determinism).
+      _BOARD_05_PER_NET_ITERATIONS`` + ``--timeout 0`` (wall-clock cap
+      DISABLED, Issue #3894): Issue #3887 replaced the old
+      ``--per-net-timeout 60`` wall-clock cap with a fixed per-net iteration
+      budget so the re-route is reproducible across machines (the #3880 goal
+      that PR #3886 deferred for board 05).  The per-net iteration cap is
+      BOTH the reach lever and the termination guarantee here: the generic
+      #3881 default (1,000,000/net) made this dense board non-terminating on
+      CI (PR #3886's 90-min timeout), and the board-05-tuned 200,000 (see
+      ``_BOARD_05_PER_NET_ITERATIONS``) bounds each per-net A* -- C++ and the
+      Python fallback alike -- to a fixed amount of work so the route lands
+      the productive nets and finishes with clear headroom under the 90-min
+      job limit.  Issue #3894: ``--timeout`` is now 0 (unbounded).  #3887
+      KEPT a 900 s outer wall-clock backstop, but that cap was load-sensitive:
+      on a slow/contended CI runner the SAME deterministic work took >900 s
+      and the cap FIRED, truncating the route to a smaller completed-net set
+      and a higher blocking count (the 12-vs-<=11 flake) -- reintroducing the
+      load-sensitivity #3887 removed one layer down.  Disabling it makes the
+      iteration budget the SOLE terminator, so the completed-net set (hence
+      the blocking count) is machine-independent.  Do NOT restore
+      ``--per-net-timeout`` (it reintroduces per-net load-sensitivity) and do
+      NOT set a finite ``--timeout`` that can bind before the iteration budget
+      completes (that firing outer deadline is precisely the #3894 bug); the
+      job's own timeout-minutes:90 is the ultimate, loud-failing backstop.
     - Dropped vs the old 2L recipe (all by measurement, #3425):
       ``--differential-pairs`` (the ISENSE pair classes refuse
       engagement: ``opt_in_disabled``; flag was a no-op for pairing
@@ -3063,9 +3072,28 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--per-net-iterations",
         str(_BOARD_05_PER_NET_ITERATIONS),
         "--timeout",
-        # Issue #3111: was 360.  #3425: do NOT raise to 1500 (23/35).  Under
-        # --deterministic-budget this is only the outer safety backstop.
-        "900",
+        # Issue #3894: the outer wall-clock cap is now DISABLED (0 ==
+        # unbounded; see route_cmd._set_wall_clock_deadline, which treats a
+        # falsy --timeout as "no deadline").  History: #3111 set 360, #3425
+        # raised to 900.  Under --deterministic-budget the per-net ITERATION
+        # cap (_BOARD_05_PER_NET_ITERATIONS) is the binding terminator, so the
+        # 900 s wall-clock was meant to be a never-firing backstop.  It was
+        # NOT never-firing: on a loaded CI runner the SAME deterministic work
+        # took >900 s wall-clock, so the cap fired and TRUNCATED the route,
+        # landing fewer completed nets and a higher blocking count (12 vs the
+        # <=11 the un-truncated route lands) -- run-to-run variance that
+        # reintroduced exactly the load-sensitivity #3887 removed one layer
+        # down (#3894).  Setting it to 0 makes the iteration budget the SOLE
+        # terminator, so the completed-net set -- and therefore the blocking
+        # count -- is machine-independent.  Termination is still guaranteed:
+        # the 200k/net iteration cap bounds each per-net A* to a fixed amount
+        # of work (the #3887 fix for the #3886 90-min hang), and the
+        # board-05-routing-regression job's own timeout-minutes:90 remains the
+        # ultimate backstop -- if the iteration-bounded route ever fails to
+        # terminate it fails LOUD (red job) instead of silently truncating to
+        # a different count.  Do NOT restore a finite --timeout that can bind
+        # before the iteration budget completes (that is the #3894 bug).
+        "0",
         "--skip-nets",
         ",".join(skip_nets),
     ]
@@ -3126,9 +3154,18 @@ _RESCUE_EXCLUDED_NETS = frozenset(
 #     pass and this rescue loop re-route the same dense board, so both must use
 #     the iteration budget (not the old load-sensitive ``per_net_timeout_s=60``
 #     wall-clock cutoff) to stay reproducible across machines AND terminate
-#     within the 90-min CI job limit.  ``stage_timeout_s=300`` is retained ONLY
-#     as the outer per-stage safety backstop (under deterministic_budget the
-#     wall-clock ``per_net_timeout_s`` is ignored; the iteration cap binds).
+#     within the 90-min CI job limit.  Issue #3894: ``stage_timeout_s`` is now
+#     0 (== unbounded; ``build_rescue_command`` forwards it as ``--timeout 0``,
+#     which route_cmd treats as "no deadline").  It was 300 s as a "never-
+#     firing" outer per-stage backstop, but -- exactly like the main pass's
+#     900 s cap -- on a loaded CI runner a per-net rescue stage's fixed
+#     deterministic work occasionally took >300 s wall-clock, so the cap fired
+#     and TRUNCATED that stage, dropping a net that would otherwise complete
+#     and bumping the final blocking count (the 12-vs-<=11 flake, #3894).  With
+#     the cap disabled the per-net ITERATION budget is the sole terminator, so
+#     the rescued copper -- and the blocking count -- is machine-independent.
+#     Termination is still bounded by the iteration cap per net and by the
+#     job's timeout-minutes:90 (a loud red job, never a silent count change).
 #     KEEP THE CAP IN SYNC with the main pass: re-tune both together, never one
 #     alone.  ``build_rescue_command`` honours an explicit ``--per-net-iterations``
 #     in ``extra_args`` verbatim (it overrides the generic #3881 default the bare
@@ -3138,7 +3175,11 @@ _RESCUE_CONFIG = RescueConfig(
     manufacturer="jlcpcb-tier1",
     backend="cpp",
     seed=7,
-    stage_timeout_s=300,
+    # Issue #3894: 0 == unbounded outer wall-clock cap (the deterministic
+    # per-net iteration budget below is the binding terminator).  Was 300 s;
+    # a firing per-stage cap truncated rescues under CI load and varied the
+    # blocking count run-to-run.  See the comment block above.
+    stage_timeout_s=0,
     deterministic_budget=True,
     starting_layers=4,
     max_layers=4,

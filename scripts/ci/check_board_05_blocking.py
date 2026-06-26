@@ -95,6 +95,20 @@ from pathlib import Path
 # authoritative (the macOS host routes fewer nets than the Linux CI runner),
 # so the tightened bound must be read off a green board-05-routing-regression
 # run and is deferred to that measured follow-up rather than guessed here.
+#
+# Issue #3894: #3887's determinism was INCOMPLETE -- it made the per-net
+# budget deterministic but left the OUTER wall-clock caps (--timeout 900 on
+# the main pass, stage_timeout_s 300 on the rescue loop) in place. Those caps
+# FIRED under CI runner load and truncated the otherwise-deterministic route,
+# so the blocking count varied run-to-run (observed 12 vs <=11 on a byte-
+# identical recipe). #3894 disables both outer caps (--timeout 0 == unbounded;
+# the iteration budget is the sole terminator), so the completed-net set --
+# hence this count -- is now machine-independent. The threshold STILL stays at
+# 11 here: per #3822 the true deterministic floor must be read off two
+# consecutive green board-05-routing-regression runs (the un-truncated route
+# is expected to land back at the historical 9-10 floor, comfortably <=11),
+# and tightening 11 -> that measured value is a deliberate follow-up, NOT a
+# locally-guessed number.
 DEFAULT_MAX_BLOCKING = 11
 
 
