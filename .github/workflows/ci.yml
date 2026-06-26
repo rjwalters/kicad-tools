@@ -1573,16 +1573,21 @@ jobs:
     # deterministic.  <= 11 catches GROSS regressions without flaking on the
     # 9-vs-10 nondeterminism.
     #
-    # Issue #3887: board 05's re-route is now DETERMINISTIC -- the main pass and
-    # the rescue loop were migrated from the load-sensitive --per-net-timeout
-    # wall-clock cutoff to a fixed per-net ITERATION budget
-    # (--deterministic-budget --per-net-iterations 200000; see
-    # boards/05-bldc-motor-controller/design.py _BOARD_05_PER_NET_ITERATIONS),
-    # so a fresh re-route here is now reproducible AND terminates with headroom
-    # under the 90-min timeout below.  --max-blocking INTENTIONALLY stays at 11
-    # in the #3887 PR: per #3822 the deterministic blocking count is CI-
-    # authoritative, so the tightened bound (toward 7) is deferred to a measured
-    # follow-up that reads it off a green run of THIS job, rather than guessed.
+    # Issue #3887 (SUPERSEDED by #3894): #3887 migrated board 05's main pass +
+    # rescue loop from the --per-net-timeout wall-clock cutoff to a fixed per-net
+    # ITERATION budget, claiming determinism; that claim did not hold up on CI.
+    #
+    # Issue #3894: REVERTED #3887's deterministic per-net ITERATION budget on
+    # board 05 back to the pre-#3887 wall-clock recipe (--per-net-timeout 60 /
+    # --timeout 900).  #3887's iteration budget did LESS total routing work than
+    # the wall-clock outer rip-up/reroute loop, so it completed FEWER nets and
+    # REGRESSED this job's blocking count to 12-15 (vs the historical wall-clock
+    # 9-10); the byte-determinism it promised was never actually achieved on CI.
+    # The wall-clock recipe is board 05's known-GREEN state (<=11).  It is
+    # admittedly nondeterministic run-to-run (~9-10), so --max-blocking STAYS at
+    # 11 (the loose bound above the observed CI ceiling of 10); genuine board-05
+    # routing determinism -- and any tightening toward 7/0 -- is deferred to
+    # #3775 / #3766 / #3829.
     #
     # The ``Build C++ router backend`` step is REQUIRED: the recipe re-routes
     # during regen, and per CLAUDE.md a missing native extension makes routing

@@ -6,7 +6,9 @@
 # now include ``--deterministic-budget`` + ``--seed 42`` + a pinned
 # ``PYTHONHASHSEED=42`` -- and asserts that the UUID-normalized routed
 # COPPER (the ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` set) is
-# byte-identical across every run.
+# byte-identical across every run AND that the blocking-incomplete-net
+# COUNT (NetStatusAnalyzer.blocking_incomplete_count -- the same metric the
+# board CI gates enforce) is identical across every run (Issue #3894).
 #
 # WHY this exists (Issue #3799 root cause):
 #   ``--seed`` only seeds Python's global ``random``.  It does NOT control
@@ -24,20 +26,23 @@
 # Examples:
 #   ./scripts/ci/board_route_determinism_smoke.sh 02        # 2 runs
 #   ./scripts/ci/board_route_determinism_smoke.sh 04 3      # 3 runs
-#   ./scripts/ci/board_route_determinism_smoke.sh 05        # 2 runs
 #
 # Supported boards: 02 (charlieplex-led), 03 (usb-joystick),
-# 04 (stm32-devboard), 05 (bldc-motor-controller).  Each board's flag set
-# mirrors the ``kct route`` argv in its
-# ``boards/<dir>/{generate_,}design.py:route_pcb()``.  KEEP THE FLAG LISTS
-# BELOW IN SYNC with the recipes.
+# 04 (stm32-devboard).  Each board's flag set mirrors the ``kct route`` argv
+# in its ``boards/<dir>/{generate_,}design.py:route_pcb()``.  KEEP THE FLAG
+# LISTS BELOW IN SYNC with the recipes.
 #
-# NOTE (issue #3887): board 05 IS now covered.  Its main pass was migrated from
-# the load-sensitive wall-clock ``--per-net-timeout 60`` cutoff to a fixed
-# per-net ITERATION budget (``--deterministic-budget --per-net-iterations
-# 200000``), so a route-twice-identical-copper check is now meaningful and the
-# dense BLDC re-route terminates within the CI job limit.  This re-adds the
-# board-05 case that #3880/PR #3886 had deferred.
+# NOTE (issue #3894): board 05 is NOT covered by this strict route-twice
+# determinism gate.  #3887 briefly added a board-05 case on a deterministic
+# per-net ITERATION budget, but #3894 REVERTED board 05 to its pre-#3887
+# wall-clock recipe (``--per-net-timeout 60``): the iteration budget did less
+# total routing work than the wall-clock outer rip-up/reroute loop and
+# REGRESSED reach (12-15 blocking vs the historical 9-10), and was never
+# actually byte-deterministic.  Board 05's wall-clock re-route is inherently
+# nondeterministic run-to-run, so it would FAIL this strict copper/count
+# assertion; genuine board-05 routing determinism is deferred to
+# #3775 / #3766 / #3829.  The count-stability assertion below still guards
+# the boards that ARE deterministic (02/03/04).
 
 set -euo pipefail
 
@@ -45,7 +50,7 @@ BOARD="${1:-}"
 N="${2:-2}"
 
 if [[ -z "${BOARD}" ]]; then
-  echo "ERROR: board number required (02, 03, 04, or 05)" >&2
+  echo "ERROR: board number required (02, 03, or 04)" >&2
   echo "Usage: $0 <board-number> [runs]" >&2
   exit 1
 fi
@@ -96,31 +101,10 @@ case "${BOARD}" in
       --timeout 600
     )
     ;;
-  05)
-    # Issue #3887: mirrors boards/05-bldc-motor-controller/design.py:route_pcb()
-    # (note: board 05's recipe file is design.py, not generate_design.py).  The
-    # board-05-tuned --per-net-iterations 200000 is the deterministic per-net
-    # cap (_BOARD_05_PER_NET_ITERATIONS) that keeps the dense BLDC re-route both
-    # reproducible AND terminating within the 90-min CI job limit; KEEP IT IN
-    # SYNC with the recipe.  Seed 7 (not 42) per the recipe's measured best.
-    BOARD_DIR="boards/05-bldc-motor-controller"
-    STEM="bldc_controller"
-    ROUTE_FLAGS=(
-      --auto-layers
-      --starting-layers 4
-      --max-layers 4
-      --manufacturer jlcpcb-tier1
-      --micro-via-in-pad-fallback
-      --backend cpp
-      --seed 7
-      --deterministic-budget
-      --per-net-iterations 200000
-      --timeout 900
-      --skip-nets "+24V,+5V,+3V3,GND,PHASE_A,PHASE_B,PHASE_C"
-    )
-    ;;
   *)
-    echo "ERROR: unsupported board '${BOARD}' (supported: 02, 03, 04, 05)" >&2
+    echo "ERROR: unsupported board '${BOARD}' (supported: 02, 03, 04)" >&2
+    echo "       Board 05 is intentionally excluded (Issue #3894): its" >&2
+    echo "       wall-clock re-route is nondeterministic run-to-run." >&2
     exit 1
     ;;
 esac
@@ -160,7 +144,31 @@ normalize_copper() {
     | sort
 }
 
+# Issue #3894: blocking-incomplete-net count for a routed PCB, via the same
+# NetStatusAnalyzer.blocking_incomplete_count metric the board CI gates and
+# the DRC gate enforce.  The determinism contract is extended from "byte-
+# identical copper" to "identical blocking COUNT": the count is the metric the
+# gates actually enforce, so asserting it is stable run-to-run guards against a
+# regression that varies the count even when copper looks similar.  This guards
+# the deterministic boards (02/03/04); board 05 is intentionally NOT run here
+# because its wall-clock recipe is nondeterministic (see the case block /
+# header note).  Prints just the integer on stdout (empty on analysis failure,
+# which the caller treats as a tool error).
+blocking_count() {
+  uv run python - "$1" <<'PY' 2>/dev/null || true
+import sys
+from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+try:
+    result = NetStatusAnalyzer(sys.argv[1]).analyze()
+except Exception:
+    sys.exit(1)
+print(result.blocking_incomplete_count)
+PY
+}
+
 prev_norm=""
+prev_count=""
 for ((i = 1; i <= N; i++)); do
   pcb="${OUT_DIR}/run-${i}.kicad_pcb"
   log="${OUT_DIR}/run-${i}.log"
@@ -183,8 +191,16 @@ for ((i = 1; i <= N; i++)); do
   fi
 
   normalize_copper "${pcb}" >"${norm}"
-  echo "  Elapsed:     $((end_s - start_s))s"
+  count="$(blocking_count "${pcb}")"
+  echo "  Elapsed:      $((end_s - start_s))s"
   echo "  Copper lines: $(wc -l <"${norm}")"
+  echo "  Blocking nets: ${count:-<analysis failed>}"
+
+  if [[ -z "${count}" ]]; then
+    echo "FAIL: run ${i} blocking-net analysis failed (NetStatusAnalyzer)." >&2
+    echo "      See ${log} for the route log." >&2
+    exit 2
+  fi
 
   if [[ -n "${prev_norm}" ]]; then
     if ! diff -q "${prev_norm}" "${norm}" >/dev/null; then
@@ -198,9 +214,24 @@ for ((i = 1; i <= N; i++)); do
       echo "      PCBs preserved in ${OUT_DIR} for post-mortem."
       exit 3
     fi
+    # Issue #3894: extend the determinism contract from copper to the
+    # blocking COUNT.  (Within one run/machine this is implied by the copper
+    # diff above; the explicit assertion documents the metric and guards
+    # against a future change that varies the count without varying copper.)
+    if [[ "${count}" != "${prev_count}" ]]; then
+      echo
+      echo "FAIL: run ${i} blocking-net COUNT (${count}) differs from the"
+      echo "      prior run (${prev_count}).  Same board + deterministic"
+      echo "      budget produced a DIFFERENT blocking count -- the count-"
+      echo "      determinism guarantee regressed (Issue #3894)."
+      echo "      PCBs preserved in ${OUT_DIR} for post-mortem."
+      exit 3
+    fi
   fi
   prev_norm="${norm}"
+  prev_count="${count}"
 done
 
 echo
-echo "PASS: board ${BOARD} routed byte-identical copper across ${N} runs."
+echo "PASS: board ${BOARD} routed byte-identical copper AND a stable"
+echo "      blocking-net count (${prev_count}) across ${N} runs."
