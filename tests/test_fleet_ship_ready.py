@@ -709,7 +709,9 @@ class TestBoardRecipeExportWiring:
         ("05-bldc-motor-controller", "design.py"),
         ("06-diffpair-test", "generate_design.py"),
         ("07-matchgroup-test", "generate_design.py"),
-        ("external/softstart", "generate_design.py"),
+        # external/softstart is now a symlink to the canonical rjwalters/softstart
+        # repo (local-only, like chorus-test-revA); its build lives upstream and
+        # is not a kicad-tools fleet recipe.
     ]
 
     def test_every_recipe_invokes_kct_export(self):
@@ -750,7 +752,6 @@ class TestBoardRecipeExportWiring:
             "02-charlieplex-led",
             "06-diffpair-test",
             "07-matchgroup-test",
-            "external/softstart",
         ]
         missing_call: list[str] = []
         for board_subpath in six_fixed:
