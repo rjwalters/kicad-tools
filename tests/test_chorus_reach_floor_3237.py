@@ -484,7 +484,60 @@ CHORUS_V21_AUTOFIX_ROLLED_BACK = True  # connectivity protection, not budget
 CHORUS_V21_R2_PINNED_RECIPE_STRICT = 17  # post-PF-fix, contended, 2026-06-11
 CHORUS_V21_R2_LADDER_BEST_DISCARDED = 20  # pre-fix: best rung PF threw away
 CHORUS_V21_R2_RECIPE_STRICT = 33  # --layers 4 single attempt, checker-verified
-CHORUS_V21_FLOOR = 12  # regression tripwire: below min(14..20) with headroom
+
+# --------------------------------------------------------------------------
+# Wave-11 deterministic baseline (Issue #3883, 2026-07-02, this branch).
+# --------------------------------------------------------------------------
+#
+# Once #3881 added a 1M-expansion per-net iteration cap, the
+# ``--deterministic-budget`` R2 recipe (``scripts/route_chorus.py``
+# ``R2_RECIPE_FLAGS``) became BOTH deterministic AND high-throughput, so
+# the earlier M2/M3 measurements (taken on the broken 12M-per-net budget
+# that starved chorus to 13/51 and made M2/M3 look net-negative) were
+# stale.  All four variants of the FULL route_chorus.py recipe (main pass
+# + completion + rescue) were re-measured, each as a single authoritative
+# deterministic run (the per-net cap makes the route load-independent):
+#
+#   variant                       | strict | note
+#   ------------------------------+--------+------------------------------
+#   baseline (R2 recipe)          | 30/51  | 21 partial, 0 unrouted, 32 DRC
+#   +M2 (--joint-region-resolve)  | 30/51  | identical partition; no change
+#   +M3 (--placement-nudge)       | 30/51  | nudge auto-rolled back by guard
+#                                 |        |   (strict 30->22, DRC 56->127)
+#   +M2+M3                        | 30/51  | same nudge rollback (56->115)
+#
+# HONEST NULL RESULT: neither M2 (--joint-region-resolve) nor M3
+# (--placement-nudge) improves strict reach on the fixed deterministic
+# budget, so neither was graduated into ``R2_RECIPE_FLAGS``.  M2 produced
+# a byte-identical net partition to the baseline; M3's placement nudge
+# proposed 4 moves that WORSENED DRC on re-route, tripping the built-in
+# no-regression guard (net zero).  See the null-result comment beside
+# ``R2_RECIPE_FLAGS`` in ``scripts/route_chorus.py`` for the flag details.
+#
+# The deterministic full-recipe strict reach is 30/51 -- reproducible
+# run-to-run regardless of host load (that is the whole point of the
+# per-net iteration cap).  The floor is ratcheted from 12 to 26 below,
+# leaving generous headroom under the 30 measured baseline.  This is a
+# RATCHETING floor: tighten only, never loosen.
+CHORUS_V21_WAVE11_BASELINE_STRICT = 30  # deterministic full-recipe, seed 42
+CHORUS_V21_WAVE11_M2_STRICT = 30  # +--joint-region-resolve (null)
+CHORUS_V21_WAVE11_M3_STRICT = 30  # +--placement-nudge (nudge rolled back)
+CHORUS_V21_WAVE11_M2M3_STRICT = 30  # +both (null)
+CHORUS_V21_WAVE11_PARTIAL = 21  # partially-routed signal nets (all variants)
+CHORUS_V21_WAVE11_UNROUTED = 0  # unrouted signal nets (all variants)
+CHORUS_V21_WAVE11_BLOCKING_DRC = 32  # non-connectivity DRC errors (all variants)
+# M3 placement-nudge, when applied, WORSENED strict reach and DRC, so the
+# no-regression guard rolled it back.  Captures the fingerprint so a future
+# builder does not re-run the experiment blind.
+CHORUS_V21_WAVE11_M3_NUDGE_ROLLED_BACK = True
+CHORUS_V21_WAVE11_M3_NUDGE_STRICT_BEFORE = 30  # pre-nudge strict
+CHORUS_V21_WAVE11_M3_NUDGE_STRICT_AFTER = 22  # post-nudge (worse) -> rolled back
+
+# Ratcheted 12 -> 26 by the Wave-11 deterministic re-measurement (#3883):
+# the deterministic baseline is a reproducible 30/51, so 26 sits below it
+# with headroom while still being strictly above the prior floor of 12.
+CHORUS_V21_FLOOR = 26  # regression tripwire: below the 30/51 deterministic baseline
+CHORUS_V21_FLOOR_PRIOR = 12  # prior floor (ladder recipe); ratchet-only history
 
 # The vendored chorus-test-revA fixture, surfaced via the
 # ``boards/external/chorus-test-revA`` symlink that points at the
@@ -815,15 +868,17 @@ def test_v21_rebaseline_documented() -> None:
     assert CHORUS_V21_NETS_TOTAL == 51
     assert CHORUS_V21_NETS_TOTAL > CHORUS_NETS_TOTAL
 
-    # The floor is honest and conservative: strictly below BOTH R1
-    # measurements (load-modulation headroom) and strictly below the
-    # May-10-parity class of targets.  Do NOT inflate it -- the bar
-    # for "done" is 100% + 0 DRC (feedback_manufacturable_means_100pct),
-    # and this floor only exists to catch regressions toward the 2/51
-    # budget-starvation class.
+    # The floor is honest and conservative: strictly below the May-10-
+    # parity class of targets, and (since the Wave-11 ratchet) strictly
+    # below the deterministic full-recipe baseline of 30/51 with headroom.
+    # Do NOT inflate it -- the bar for "done" is 100% + 0 DRC
+    # (feedback_manufacturable_means_100pct), and this floor only exists
+    # to catch regressions.  NOTE: the floor now sits ABOVE the stale R1
+    # ladder measurements (14/18) because the deterministic budget (#3881)
+    # + full route_chorus.py recipe genuinely improved reach to 30/51; the
+    # ratchet-only history is asserted in test_r2_remeasurement_documented.
     assert 1 <= CHORUS_V21_FLOOR < CHORUS_MAY10_TARGET
-    assert CHORUS_V21_FLOOR < CHORUS_V21_R1_MEASURED_STRICT_RUN_A
-    assert CHORUS_V21_FLOOR < CHORUS_V21_R1_MEASURED_STRICT
+    assert CHORUS_V21_FLOOR < CHORUS_V21_WAVE11_BASELINE_STRICT
 
     # The R1 fixes must show material recovery over the Phase 0 floor
     # of 2 (both measured runs were >= 7x the starved baseline).
@@ -884,13 +939,77 @@ def test_r2_remeasurement_documented() -> None:
     assert CHORUS_V21_R2_RECIPE_STRICT > CHORUS_V21_R2_LADDER_BEST_DISCARDED
     assert CHORUS_V21_R2_RECIPE_STRICT / CHORUS_V21_NETS_TOTAL >= 30 / 48
 
-    # Floor discipline: re-pinned BELOW the weakest post-fix pinned-
-    # recipe measurement (14), with the manufacturable bar still far
-    # above (feedback_manufacturable_means_100pct).
-    assert CHORUS_V21_FLOOR == 12
-    assert CHORUS_V21_FLOOR < CHORUS_V21_R1_MEASURED_STRICT_RUN_A
-    assert CHORUS_V21_FLOOR < CHORUS_V21_R2_PINNED_RECIPE_STRICT
+    # Floor discipline: ratcheted 12 -> 26 by Wave-11 (#3883) once the
+    # deterministic budget made the full-recipe reach a reproducible
+    # 30/51.  The floor sits below the deterministic baseline with
+    # headroom; the manufacturable bar is still far above
+    # (feedback_manufacturable_means_100pct).
+    assert CHORUS_V21_FLOOR == 26
+    assert CHORUS_V21_FLOOR > CHORUS_V21_FLOOR_PRIOR  # ratchet only, never loosen
+    assert CHORUS_V21_FLOOR < CHORUS_V21_WAVE11_BASELINE_STRICT  # headroom under 30
     assert CHORUS_V21_R2_RECIPE_STRICT < CHORUS_V21_NETS_TOTAL  # not done yet
+
+
+def test_wave11_deterministic_measurement_documented() -> None:
+    """The Wave-11 M2/M3 deterministic re-measurement (#3883) is honest.
+
+    Once #3881 added the 1M-expansion per-net iteration cap, all four
+    variants of the full route_chorus.py recipe were re-measured
+    deterministically (single authoritative run each).  The finding is a
+    clean NULL RESULT: neither M2 (``--joint-region-resolve``) nor M3
+    (``--placement-nudge``) moves the strict count off the 30/51
+    deterministic baseline, so neither was graduated into
+    ``R2_RECIPE_FLAGS`` in ``scripts/route_chorus.py``.
+
+    Failure of this test means the Wave-11 constants were edited without
+    updating the comment block above them -- update both together, and
+    keep ``scripts/route_chorus.py``'s R2_RECIPE_FLAGS null-result comment
+    in sync.
+    """
+    # All four variants converge on the same deterministic strict reach.
+    assert CHORUS_V21_WAVE11_BASELINE_STRICT == 30
+    assert CHORUS_V21_WAVE11_M2_STRICT == CHORUS_V21_WAVE11_BASELINE_STRICT, (
+        "M2 (--joint-region-resolve) must NOT change the strict count in "
+        "the recorded null result; if a future run shows M2 helping, "
+        "graduate it into R2_RECIPE_FLAGS and bump this constant."
+    )
+    assert CHORUS_V21_WAVE11_M3_STRICT == CHORUS_V21_WAVE11_BASELINE_STRICT
+    assert CHORUS_V21_WAVE11_M2M3_STRICT == CHORUS_V21_WAVE11_BASELINE_STRICT
+
+    # The null result is why neither flag graduated: no variant beat the
+    # baseline, so the production recipe stays flag-free.
+    best_variant = max(
+        CHORUS_V21_WAVE11_M2_STRICT,
+        CHORUS_V21_WAVE11_M3_STRICT,
+        CHORUS_V21_WAVE11_M2M3_STRICT,
+    )
+    assert best_variant <= CHORUS_V21_WAVE11_BASELINE_STRICT, (
+        "If any M2/M3 variant EXCEEDS the baseline, this is no longer a "
+        "null result -- graduate the winning flag(s) into R2_RECIPE_FLAGS."
+    )
+
+    # Per-class decomposition must total the v21 signal-net count.
+    assert (
+        CHORUS_V21_WAVE11_BASELINE_STRICT + CHORUS_V21_WAVE11_PARTIAL + CHORUS_V21_WAVE11_UNROUTED
+        == CHORUS_V21_NETS_TOTAL
+    ), (
+        "strict + partial + unrouted must total all v21 chorus signal "
+        f"nets; got {CHORUS_V21_WAVE11_BASELINE_STRICT} + "
+        f"{CHORUS_V21_WAVE11_PARTIAL} + {CHORUS_V21_WAVE11_UNROUTED} "
+        f"!= {CHORUS_V21_NETS_TOTAL}."
+    )
+
+    # M3 placement-nudge fingerprint: it made things worse and was rolled
+    # back by the no-regression guard (net zero).
+    assert CHORUS_V21_WAVE11_M3_NUDGE_ROLLED_BACK is True
+    assert CHORUS_V21_WAVE11_M3_NUDGE_STRICT_AFTER < CHORUS_V21_WAVE11_M3_NUDGE_STRICT_BEFORE, (
+        "M3 nudge should have worsened strict reach before rollback."
+    )
+
+    # The floor was ratcheted (never loosened) to sit under the 30/51
+    # deterministic baseline with headroom.
+    assert CHORUS_V21_FLOOR < CHORUS_V21_WAVE11_BASELINE_STRICT
+    assert CHORUS_V21_FLOOR > CHORUS_V21_FLOOR_PRIOR
 
 
 # --------------------------------------------------------------------------
@@ -927,33 +1046,38 @@ def _chorus_fixture_present() -> bool:
     ),
 )
 def test_chorus_reach_v21_floor(tmp_path: Path) -> None:
-    """Run the chorus recipe on v21 and assert ``nets_fully_routed >= 2``.
+    """Run the chorus recipe on v21 and assert ``nets_routed >= CHORUS_V21_FLOOR``.
 
     Issue #3474 Phase 0 migrated this test from the stale v19_stripped
-    fixture (and its post-Wave-1 floor of 5) to v21_stripped with a
-    freshly measured floor of ``CHORUS_V21_FLOOR`` = 2 (cpp seed 42,
-    2026-06-10, HEAD d45ded4d -- see the v21 constants block).  The
-    recipe is pinned to the C++ backend because that is the backend the
-    v21 floor was measured with.  Wall-clock is 20-30 minutes; the test
+    fixture to v21_stripped.  Issue #3883 (Wave-11, 2026-07-02) then
+    switched the recipe run here from the old PINNED escalation ladder
+    (``--auto-layers``, which measured only 14-20/51) to the DETERMINISTIC
+    R2 recipe (``--layers 4 --no-auto-layers --deterministic-budget
+    --per-net-iterations 1000000``) so the floor guards the SAME recipe
+    that produced the recorded 30/51 deterministic baseline.  The
+    per-net iteration cap (#3881) makes this main-pass reach reproducible
+    run-to-run regardless of host load, which is what lets the floor be
+    ratcheted up to 26 with confidence.
+
+    The recipe is pinned to the C++ backend because that is the backend
+    the v21 floor was measured with.  Wall-clock is ~30 minutes; the test
     is double-guarded by ``@pytest.mark.slow`` AND the
     ``KCT_RUN_CHORUS_REACH_FLOOR`` env var so it never runs by accident.
 
-    The assertion intentionally uses the pinned FLOOR (12, re-pinned by
-    #3474 Phase R2 from R1's 10 after the placement-feedback
-    monotonicity fix; post-fix pinned-recipe measurements are 14-20/51)
-    rather than any target: the floor is a regression tripwire, not a
-    goal.  NOTE: this test still runs the PINNED (ladder) recipe for
-    apples-to-apples history; the R2 recipe in
-    ``scripts/route_chorus.py`` (pinned 4L, single attempt) measures
-    33/51 on the same fixture.  At Phase F flip this assertion to the
-    100%-routed target per ``feedback_manufacturable_means_100pct``.
+    The assertion uses the ratcheted FLOOR (``CHORUS_V21_FLOOR`` = 26,
+    below the 30/51 deterministic baseline with headroom) rather than any
+    target: the floor is a regression tripwire, not a goal.  At Phase F
+    flip this assertion to the 100%-routed target per
+    ``feedback_manufacturable_means_100pct``.
     """
     output_pcb = tmp_path / "chorus_routed.kicad_pcb"
 
-    # Mirror the issue #3474 pinned recipe exactly (cpp backend, the one
-    # the v21 floor was measured with).  Determinism comes from
-    # ``--seed 42`` + the PYTHONHASHSEED env var (issue #3146 / PR #3193
-    # finding).
+    # Mirror the DETERMINISTIC R2 recipe main pass (cpp backend, seed 42)
+    # -- the recipe the ratcheted 26 floor / 30-51 baseline was measured
+    # with (Wave-11, #3883).  Kept in sync with
+    # ``scripts/route_chorus.py``'s R2_RECIPE_FLAGS.  Determinism comes
+    # from ``--deterministic-budget`` + ``--per-net-iterations 1000000``
+    # (#3881), ``--seed 42``, and the PYTHONHASHSEED env var.
     cmd = [
         sys.executable,
         "-m",
@@ -966,6 +1090,13 @@ def test_chorus_reach_v21_floor(tmp_path: Path) -> None:
         "jlcpcb-tier1",
         "--backend",
         "cpp",
+        "--layers",
+        "4",
+        "--no-auto-layers",
+        "--micro-via-in-pad-fallback",
+        "--deterministic-budget",
+        "--per-net-iterations",
+        "1000000",
         "--placement-feedback",
         "--placement-feedback-budget",
         "5",
@@ -974,7 +1105,6 @@ def test_chorus_reach_v21_floor(tmp_path: Path) -> None:
         "--auto-fix",
         "--auto-fix-passes",
         "2",
-        "--auto-layers",
         "--timeout",
         "1200",
         "--seed",
