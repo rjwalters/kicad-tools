@@ -125,7 +125,33 @@ PINNED_RECIPE_FLAGS = [
 #:   pinned recipe (5-rung ladder):     14-20/51 across runs
 #:   auto-layers --starting/max 4:      22/51 (2 rungs)
 #:   --layers 4, 1 rung, --per-net-timeout 60: 33/51 (65%, May-10 parity)
-#:   THIS RECIPE (--deterministic-budget):     reproducible run-to-run
+#:   THIS RECIPE (--deterministic-budget):     30/51 main pass, reproducible
+#:
+#: Wave-11 M2/M3 re-measurement (issue #3883, 2026-07-02, this branch).
+#: With the #3881 per-net iteration cap in place, all four variants of the
+#: FULL route_chorus.py recipe (main pass + completion + rescue) were
+#: re-measured deterministically (single authoritative run each; the cap
+#: makes the route load-independent):
+#:
+#:   variant                    | strict | note
+#:   ---------------------------+--------+--------------------------------
+#:   baseline (this recipe)     | 30/51  | 21 partial, 0 unrouted, 32 DRC
+#:   +M2 (--joint-region-resolve)| 30/51 | identical partition; no change
+#:   +M3 (--placement-nudge)    | 30/51  | nudge auto-rolled back by guard:
+#:                              |        |   strict 30->22, DRC 56->127
+#:   +M2+M3                     | 30/51  | same nudge rollback (DRC 56->115)
+#:
+#: HONEST NULL RESULT: neither M2 (--joint-region-resolve) nor M3
+#: (--placement-nudge) improves strict reach on chorus-test-revA_v21 with
+#: the fixed deterministic budget, so NEITHER is added to this recipe.
+#: M2's joint region re-solve produced a byte-identical partition to the
+#: baseline (the ~5 CONGESTION_SATURATED nets did not benefit). M3's
+#: placement nudge proposed 4 moves; re-routing the nudged board WORSENED
+#: DRC (56->127 / 56->115), so the built-in no-regression guard rolled the
+#: nudge back -- net zero. Do NOT re-run this experiment blind; the M2/M3
+#: flags remain available on the CLI (see --joint-region-resolve / line
+#: ~271, --placement-nudge / line ~285) for future geometry work but do
+#: not graduate into the production recipe as of this measurement.
 R2_RECIPE_FLAGS = [
     "--manufacturer",
     "jlcpcb-tier1",

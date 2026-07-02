@@ -249,20 +249,25 @@ def test_baseline_file_loads() -> None:
     results = load_baseline(baseline_path)
     assert len(results) >= 1
     chorus = next(r for r in results if r.case_name == "chorus_test_revA")
-    # Sanity-check the Issue #3474 Phase 0 v21 re-baseline (2026-06-10,
-    # cpp seed 42, pinned recipe -- see tests/test_chorus_reach_floor_3237.py
-    # CHORUS_V21_* constants for the full measurement record).
+    # Sanity-check the Issue #3883 Wave-11 deterministic re-baseline
+    # (2026-07-02, cpp seed 42, DETERMINISTIC full route_chorus.py recipe
+    # -- see tests/test_chorus_reach_floor_3237.py CHORUS_V21_WAVE11_*
+    # constants for the full four-variant M2/M3 measurement record).  The
+    # prior 2/51 strict, 19-unrouted baseline was measured on the stale
+    # pre-#3881 budget-starved recipe.
     assert chorus.nets_total == 51, (
         "nets_total must match the v21_stripped multi-pad signal-net "
         "count (51 after the five power/ground nets are skipped)."
     )
-    assert chorus.nets_unrouted == 19, (
-        "The 19-net unrouted floor is a load-bearing constant; changing it "
-        "requires justification in the PR description per docs/benchmark.md."
+    assert chorus.nets_unrouted == 0, (
+        "The deterministic full recipe leaves 0 nets with no segments at "
+        "all; an increase here is a regression and requires justification "
+        "in the PR description per docs/benchmark.md."
     )
-    assert chorus.nets_fully_routed == 2, (
-        "The honest (low) v21 strict-reach baseline; expected to RISE as "
-        "#3474 phases R1/R2/P1 land -- bump with justification."
+    assert chorus.nets_fully_routed == 30, (
+        "The deterministic full-recipe strict-reach baseline (30/51, "
+        "reproducible run-to-run under the #3881 per-net iteration cap); "
+        "expected to RISE as #3474 phases land -- bump with justification."
     )
 
 
