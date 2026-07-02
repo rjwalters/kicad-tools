@@ -903,6 +903,13 @@ class Autorouter:
         # pre-pass and PIN_ACCESS retry stay active).
         self._use_waypoint_injection: bool = True
 
+        # Explicit CLI-computed net ordering (Issue #3897).  When set (via
+        # ``kct route --order-method``), this list overrides the internal
+        # ``_get_net_priority`` sort used to seed the base net order in both
+        # :meth:`route_all` and :meth:`route_all_negotiated`.  ``None`` (the
+        # default) preserves the legacy priority-based ordering byte-for-byte.
+        self._forced_net_order: list[int] | None = None
+
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
         # routing so the SubGridRouter uses fine grid resolution for pads
@@ -5244,8 +5251,22 @@ class Autorouter:
         # the underlying pathfinder.  No-op when there are no diff pairs.
         self._prepare_routing()
 
+        # Issue #3897: track whether an explicit ordering is in force so the
+        # priority re-sort below can be skipped (otherwise it would silently
+        # overwrite a CLI-selected order).  Only ``_forced_net_order`` toggles
+        # this -- a caller-supplied ``net_order`` retains the historical
+        # re-sort behaviour to preserve byte-identity for existing callers.
+        _order_forced = False
         if net_order is None:
-            net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+            # Issue #3897: honor a CLI-computed explicit ordering
+            # (``kct route --order-method``) when the caller did not pass an
+            # explicit ``net_order``.  ``_forced_net_order`` is ``None`` unless
+            # set, so the legacy priority sort is preserved byte-for-byte.
+            if self._forced_net_order is not None:
+                net_order = list(self._forced_net_order)
+                _order_forced = True
+            else:
+                net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
 
         # Issue #1295: Filter out pour nets (GND, VCC, etc.) — they should be
         # connected via zone fills, not routed as individual traces.
@@ -5254,8 +5275,10 @@ class Autorouter:
         # Issue #2432: Detect charlieplex/matrix topology and assign
         # alternating layer preferences to break circular blocking.
         self._detect_and_apply_matrix_preferences(net_order)
-        # Re-sort after matrix priority boost
-        net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
+        # Re-sort after matrix priority boost.  Issue #3897: skip when an
+        # explicit CLI ordering is active so the user-selected order survives.
+        if not _order_forced:
+            net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
 
         # Issue #2914: Front-load one representative per match group so no
         # group can be fully starved by the wall-clock budget.  Same hook
@@ -6652,7 +6675,15 @@ class Autorouter:
 
             enable_deterministic_uuids(True)
 
-        net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+        # Issue #3897: honor a CLI-computed explicit ordering
+        # (``kct route --order-method``) as the base order.  When unset
+        # (the default), fall back to the legacy priority sort so existing
+        # runs are byte-identical.  The downstream filters/re-sorts below
+        # (pour-net filter, matrix preferences, sibling boosts) still apply.
+        if self._forced_net_order is not None:
+            net_order = list(self._forced_net_order)
+        else:
+            net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         # Issue #1295: Filter out pour nets before negotiated routing
         net_order = self._filter_pour_nets(net_order)
         net_order = [n for n in net_order if n != 0]
@@ -6696,8 +6727,12 @@ class Autorouter:
         # Issue #2432: Detect charlieplex/matrix topology and assign
         # alternating layer preferences to break circular blocking.
         self._detect_and_apply_matrix_preferences(net_order)
-        # Re-sort after matrix priority boost
-        net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
+        # Re-sort after matrix priority boost.  Issue #3897: skip this re-sort
+        # when an explicit CLI ordering is active so the user-selected order is
+        # not silently overwritten (matrix layer preferences are still applied
+        # above; only the reordering is skipped).
+        if self._forced_net_order is None:
+            net_order = sorted(net_order, key=lambda n: self._get_net_priority(n))
 
         # Issue #2482: Bump connector-siblings of prerouted nets to the
         # front of their priority tier.

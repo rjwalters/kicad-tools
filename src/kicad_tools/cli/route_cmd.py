@@ -69,6 +69,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from kicad_tools.router import Autorouter, LayerStack
     from kicad_tools.router.primitives import Route
 
@@ -2754,6 +2756,84 @@ def _apply_analog_net_class(router: "Autorouter", args, quiet: bool = False) -> 
                 f"  Analog routing: left {len(skipped_pour)} pour/ground net(s) "
                 f"as-is (not forced into pathfinder): {', '.join(skipped_pour)}"
             )
+
+
+def _apply_order_method(
+    router: "Autorouter",
+    args,
+    router_factory: "Callable[[], Autorouter] | None" = None,
+    quiet: bool = False,
+) -> None:
+    """Compute an explicit net order via ``--order-method`` (Issue #3897).
+
+    Wires the previously-orphaned
+    :meth:`kicad_tools.optim.routing.RoutingOptimizer.optimize_net_order`
+    into ``kct route``.  When ``args.order_method`` is one of ``greedy``,
+    ``critical_first``, ``congestion`` or ``hybrid``, this computes the net
+    routing order with that heuristic and stashes it on
+    ``router._forced_net_order``.  Both :meth:`Autorouter.route_all` and
+    :meth:`Autorouter.route_all_negotiated` consult that attribute to seed
+    their base ordering, overriding the internal ``_get_net_priority`` sort.
+
+    Strict no-op when ``--order-method`` is not supplied, so routing output is
+    byte-identical to the historical behaviour (the ``_forced_net_order``
+    attribute stays ``None``).
+
+    The ``congestion`` and ``hybrid`` methods require a congestion map.  We
+    obtain one from the already-loaded ``router`` via
+    :meth:`Autorouter.get_congestion_map`; on failure we emit a warning and
+    fall back to ``greedy`` rather than crashing.
+
+    Args:
+        router: The loaded router whose ``_forced_net_order`` will be set.
+        args: Parsed CLI namespace (reads ``args.order_method``).
+        router_factory: Callable returning a fresh, fully-loaded router used by
+            the optimizer to evaluate the candidate order.  When ``None``, a
+            factory returning ``router`` itself is used (the optimizer's final
+            evaluation route then runs on ``router``; callers that must keep
+            ``router`` pristine should pass a fresh-build factory).
+        quiet: Suppress the informational log line when True.
+    """
+    method = getattr(args, "order_method", None)
+    if method is None:
+        return
+
+    from kicad_tools.cli.progress import flush_print
+    from kicad_tools.optim.routing import RoutingOptimizer
+
+    congestion_map = None
+    effective_method = method
+    if method in ("congestion", "hybrid"):
+        try:
+            congestion_map = router.get_congestion_map()
+        except Exception as exc:  # noqa: BLE001 - fall back rather than crash
+            if not quiet:
+                flush_print(
+                    f"  Warning: --order-method {method} could not obtain a "
+                    f"congestion map ({exc}); falling back to greedy ordering."
+                )
+            effective_method = "greedy"
+            congestion_map = None
+
+    if router_factory is None:
+
+        def router_factory() -> "Autorouter":
+            return router
+
+    optimizer = RoutingOptimizer()
+    order, _fom = optimizer.optimize_net_order(
+        router_factory,
+        method=effective_method,
+        congestion_map=congestion_map,
+    )
+    router._forced_net_order = order
+
+    if not quiet:
+        flush_print(
+            f"  Net order: --order-method {method} "
+            f"(overrides default priority sort; {len(order)} nets)"
+            + (f" [fell back to {effective_method}]" if effective_method != method else "")
+        )
 
 
 def _log_fine_pitch_escape_regions(
@@ -6988,6 +7068,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--order-method",
+        choices=["greedy", "critical_first", "congestion", "hybrid"],
+        default=None,
+        help=(
+            "Compute the net routing order with a named heuristic (Issue #3897) "
+            "instead of the default priority-based sort. Overrides the internal "
+            "_get_net_priority ordering. Choices: 'greedy' (fewest pads first), "
+            "'critical_first' (power/clock nets first), 'congestion' (most "
+            "congested nets first), 'hybrid' (critical_first + congestion). "
+            "'congestion' and 'hybrid' require a congestion map; if one cannot "
+            "be obtained the command warns and falls back to 'greedy'. When "
+            "omitted, ordering is byte-identical to the default behaviour."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -8478,6 +8573,38 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #3371 (P_FP3): surface fine-pitch escape regions installed by
     # ``load_pcb_for_routing``.
     _log_fine_pitch_escape_regions(router, quiet=quiet)
+
+    # Issue #3897: wire the previously-orphaned RoutingOptimizer.optimize_net_order
+    # into ``kct route`` via ``--order-method``.  The optimizer evaluates the
+    # candidate order with a throw-away full route, so we hand it a factory that
+    # builds a FRESH router (identical load parameters) to keep the real
+    # ``router`` above pristine.  Strict no-op when --order-method is absent.
+    if getattr(args, "order_method", None) is not None:
+
+        def _order_router_factory() -> "Autorouter":
+            fresh, _ = load_pcb_for_routing(
+                str(pcb_path),
+                skip_nets=skip_nets,
+                rules=rules,
+                edge_clearance=args.edge_clearance,
+                layer_stack=layer_stack,
+                force_python=force_python,
+                validate_drc=not args.force,
+                strict_drc=False,
+                load_existing_routes=getattr(args, "preserve_existing", False),
+                max_search_iterations=args.max_search_iterations or 0,
+                per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
+            )
+            _apply_net_class_map_sidecar(fresh, args, quiet=True)
+            _apply_analog_net_class(fresh, args, quiet=True)
+            return fresh
+
+        _apply_order_method(
+            router,
+            args,
+            router_factory=_order_router_factory,
+            quiet=quiet,
+        )
 
     # Pass fine zones from multi-resolution plan to the router (Issue #1828).
     # This enables SubGridRouter to use fine-grid resolution for escape

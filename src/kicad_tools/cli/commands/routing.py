@@ -357,6 +357,11 @@ def run_route_command(args) -> int:
     # (router uses os.urandom-derived state, existing behaviour).
     if getattr(args, "seed", None) is not None:
         sub_argv.extend(["--seed", str(args.seed)])
+    # Issue #3897: forward --order-method to the inner parser.  Default is
+    # None (use the internal priority-based net ordering, existing behaviour),
+    # so only forward an explicitly-provided value (matches the --seed pattern).
+    if getattr(args, "order_method", None) is not None:
+        sub_argv.extend(["--order-method", str(args.order_method)])
     # Issue #3054 (Phase 2 of #3045): forward --region-parallel and partition
     # tuning flags to the inner parser.  All four flags are opt-in and only
     # forwarded when set to non-default values, so existing scripts using

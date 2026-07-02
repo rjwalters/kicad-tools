@@ -3120,6 +3120,21 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--order-method",
+        choices=["greedy", "critical_first", "congestion", "hybrid"],
+        default=None,
+        help=(
+            "Compute the net routing order with a named heuristic (Issue #3897) "
+            "instead of the default priority-based sort. Overrides the internal "
+            "_get_net_priority ordering. Choices: 'greedy' (fewest pads first), "
+            "'critical_first' (power/clock nets first), 'congestion' (most "
+            "congested nets first), 'hybrid' (critical_first + congestion). "
+            "'congestion' and 'hybrid' require a congestion map; if one cannot "
+            "be obtained the command warns and falls back to 'greedy'. When "
+            "omitted, ordering is byte-identical to the default behaviour."
+        ),
+    )
+    route_parser.add_argument(
         "--no-auto-build-native",
         action="store_true",
         help=(
