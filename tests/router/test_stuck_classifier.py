@@ -220,6 +220,61 @@ class TestPlacementBound:
         assert "a part must move" in d.evidence
 
 
+def _pour_discontinuous_board() -> str:
+    """VCC (power net) is incomplete: R1.1/R1.2 connected, U1.1 stranded."""
+    return _HEADER + (
+        '  (net 0 "")\n'
+        '  (net 1 "VCC")\n'
+        '  (net 2 "SIG")\n'
+        '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+        '    (property "Reference" "R1")\n'
+        '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))\n'
+        '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))\n'
+        "  )\n"
+        '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+        '    (property "Reference" "U1")\n'
+        '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "VCC"))\n'
+        "  )\n"
+        # connect R1.1-R1.2 so VCC is "incomplete" (not "unrouted")
+        '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+        ")\n"
+    )
+
+
+class TestPourDiscontinuous:
+    def test_power_net_stranded_pad_is_pour_discontinuous(self, tmp_path: Path):
+        p = tmp_path / "pour.kicad_pcb"
+        p.write_text(_pour_discontinuous_board())
+        result = classify_stuck_nets(p)
+        vcc = [d for d in result.diagnoses if d.net_name == "VCC"]
+        assert len(vcc) == 1
+        d = vcc[0]
+        assert d.classification is StuckClass.POUR_DISCONTINUOUS
+        assert "U1.1" in d.unconnected_pads
+        assert "pour-carried" in d.evidence
+
+    def test_pour_discontinuous_not_in_signal_diagnoses(self, tmp_path: Path):
+        """VCC must not appear under any signal failure class."""
+        p = tmp_path / "pour.kicad_pcb"
+        p.write_text(_pour_discontinuous_board())
+        result = classify_stuck_nets(p)
+        signal_classes = {
+            StuckClass.ESCAPE_BLOCKED,
+            StuckClass.CONGESTION_SATURATED,
+            StuckClass.PLACEMENT_BOUND,
+        }
+        for d in result.diagnoses:
+            if d.net_name == "VCC":
+                assert d.classification not in signal_classes
+
+    def test_counts_include_pour_discontinuous(self, tmp_path: Path):
+        p = tmp_path / "pour.kicad_pcb"
+        p.write_text(_pour_discontinuous_board())
+        result = classify_stuck_nets(p)
+        assert "pour_discontinuous" in result.counts
+        assert result.counts["pour_discontinuous"] >= 1
+
+
 class TestClassifierAggregate:
     def test_counts_and_to_dict(self, congestion_pcb: Path):
         result = classify_stuck_nets(congestion_pcb)
@@ -228,6 +283,7 @@ class TestClassifierAggregate:
             "escape_blocked",
             "congestion_saturated",
             "placement_bound",
+            "pour_discontinuous",
         }
         assert counts["congestion_saturated"] == 1
         data = result.to_dict()

@@ -304,6 +304,7 @@ def output_why(pcb_path: Path, fmt: str) -> int:
     print(f"  ESCAPE_BLOCKED:       {counts['escape_blocked']}")
     print(f"  CONGESTION_SATURATED: {counts['congestion_saturated']}")
     print(f"  PLACEMENT_BOUND:      {counts['placement_bound']}")
+    print(f"  POUR_DISCONTINUOUS:   {counts['pour_discontinuous']}")
     print()
 
     if not result.diagnoses:
@@ -312,7 +313,12 @@ def output_why(pcb_path: Path, fmt: str) -> int:
         return 0
 
     # Group for readability, escape-blocked first (most upstream).
-    order = {"escape_blocked": 0, "congestion_saturated": 1, "placement_bound": 2}
+    order = {
+        "escape_blocked": 0,
+        "congestion_saturated": 1,
+        "placement_bound": 2,
+        "pour_discontinuous": 3,
+    }
     for diag in sorted(result.diagnoses, key=lambda d: order[d.classification_value]):
         pads = ", ".join(diag.unconnected_pads) or "(none)"
         print(f"[{diag.classification.value.upper()}] {diag.net_name}")
