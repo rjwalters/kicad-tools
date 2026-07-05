@@ -125,6 +125,7 @@ class StuckClass(Enum):
     ESCAPE_BLOCKED = "escape_blocked"
     CONGESTION_SATURATED = "congestion_saturated"
     PLACEMENT_BOUND = "placement_bound"
+    POUR_DISCONTINUOUS = "pour_discontinuous"
 
     @property
     def description(self) -> str:
@@ -144,6 +145,11 @@ class StuckClass(Enum):
                 "congestion -- no routing order closes it. Fix: placement "
                 "nudge (M3)."
             ),
+            "pour_discontinuous": (
+                "Pour-carried net has stranded pads -- copper zone does not reach "
+                "all pads on this net. Fix: re-pour, add stitching vias, or bridge "
+                "the zone island gap."
+            ),
         }[self.value]
 
     @property
@@ -153,6 +159,7 @@ class StuckClass(Enum):
             "escape_blocked": FailureCause.PIN_ACCESS,
             "congestion_saturated": FailureCause.CONGESTION,
             "placement_bound": FailureCause.ROUTING_ORDER,
+            "pour_discontinuous": FailureCause.BLOCKED_PATH,
         }[self.value]
 
 
@@ -468,6 +475,18 @@ def classify_stuck_nets_from_pcb(
     # Map net name -> net number for richer output.
     number_by_name = {net.name: nid for nid, net in pcb.nets.items() if net.name}
 
+    # Pour-carried incomplete nets: connectivity is expected to be closed by
+    # copper fill (zone/pour), so a signal-geometry analysis would misclassify
+    # them.  Union of (a) the ML-tagged advisory set the analyzer populates and
+    # (b) zone-backed plane/power nets that are still incomplete.  These are
+    # routed to POUR_DISCONTINUOUS in the second pass below rather than dropped.
+    pour_carried_names: set[str] = set(analysis.advisory_incomplete_names)
+    pour_carried_names.update(
+        n.net_name
+        for n in analysis.nets
+        if n.net_type in ("plane", "power") and n.status == "incomplete"
+    )
+
     diagnoses: list[StuckNetDiagnosis] = []
     for net in analysis.nets:
         if net.net_name in excluded_nets:
@@ -478,6 +497,11 @@ def classify_stuck_nets_from_pcb(
             continue
         # Skip advisory (plane/pour) residuals -- not genuine signal gaps.
         if net.is_advisory_incomplete:
+            continue
+        # Signal-named nets the ML pour-net classifier tagged as pour-carried
+        # pass the guards above; route them to POUR_DISCONTINUOUS instead of
+        # letting them receive an incorrect signal-failure classification.
+        if net.net_name in pour_carried_names:
             continue
 
         net_number = number_by_name.get(net.net_name, net.net_number)
@@ -526,6 +550,34 @@ def classify_stuck_nets_from_pcb(
             dense_cluster_threshold=dense_cluster_threshold,
         )
         diagnoses.append(diag)
+
+    # Second pass: pour-carried incomplete nets.  Their connectivity is closed
+    # by copper fill, so the stranded-pad inventory comes straight from
+    # NetStatus.unconnected_pads (no zone-fill geometry analysis for this MVP --
+    # island counting is a possible follow-on).
+    for net in analysis.nets:
+        if net.net_name in excluded_nets:
+            continue
+        if net.net_name not in pour_carried_names:
+            continue
+        if net.status != "incomplete":
+            continue
+        net_number = number_by_name.get(net.net_name, net.net_number)
+        pad_names = [p.full_name for p in net.unconnected_pads]
+        layers_str = ", ".join(net.plane_layers) if net.plane_layers else "no zone definition"
+        evidence = (
+            f"pour-carried net: {net.unconnected_count} pad(s) stranded from main "
+            f"connected island (layers: {layers_str})"
+        )
+        diagnoses.append(
+            StuckNetDiagnosis(
+                net_name=net.net_name,
+                net_number=net_number,
+                classification=StuckClass.POUR_DISCONTINUOUS,
+                unconnected_pads=pad_names,
+                evidence=evidence,
+            )
+        )
 
     return StuckClassifierResult(diagnoses=diagnoses)
 
