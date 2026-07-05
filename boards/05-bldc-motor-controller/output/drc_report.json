@@ -3,12 +3,13 @@
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
-    "errors": 39,
-    "warnings": 0,
+    "errors": 9,
+    "warnings": 9,
     "infos": 8,
-    "rules_checked": 33,
+    "rules_checked": 36,
     "rules_checked_by_rule": {
       "connectivity": 1,
+      "copper_sliver": 1,
       "diffpair_clearance_intra": 3
     },
     "passed": false
@@ -132,25 +133,6 @@
       "rule_id": "connectivity",
       "type": "connectivity",
       "severity": "error",
-      "message": "Net 'PHASE_A' is partially routed: 4 of 5 pads stranded (connected island has 1 pads)",
-      "location": [
-        5.0,
-        59.0
-      ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "C14.2"
-      ],
-      "nets": [
-        "PHASE_A"
-      ]
-    },
-    {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
       "message": "Net 'PHASE_B' is partially routed: 4 of 5 pads stranded (connected island has 1 pads)",
       "location": [
         5.0,
@@ -186,634 +168,184 @@
       ]
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'SWDIO' overlaps zone fill of net '+3V3' on F.Cu (overlap depth 0.013mm)",
+      "rule_id": "copper_sliver",
+      "type": "copper_sliver",
+      "severity": "warning",
+      "message": "Copper sliver on B.Cu: region narrower than minimum copper width 0.102mm (approx width 0.025mm, area 0.0154mm^2)",
       "location": [
-        64.168,
-        17.376
-      ],
-      "layer": "F.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
-      "items": [
-        "J4-2",
-        "ZoneFill-+3V3"
-      ],
-      "nets": [
-        "SWDIO",
-        "+3V3"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'SWO' overlaps zone fill of net '+3V3' on F.Cu (overlap depth 0.013mm)",
-      "location": [
-        64.168,
-        22.456
-      ],
-      "layer": "F.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
-      "items": [
-        "J4-4",
-        "ZoneFill-+3V3"
-      ],
-      "nets": [
-        "SWO",
-        "+3V3"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.018mm)",
-      "location": [
-        27.414,
-        67.151
-      ],
-      "layer": "F.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q3-3",
-        "ZoneFill-+24V"
-      ],
-      "nets": [
-        "PHASE_B",
-        "+24V"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'GND' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.013mm)",
-      "location": [
-        4.168,
-        10.084
-      ],
-      "layer": "F.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
-      "items": [
-        "J1-2",
-        "ZoneFill-+24V"
-      ],
-      "nets": [
-        "GND",
-        "+24V"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'HALL_C' overlaps zone fill of net '+3V3' on F.Cu (overlap depth 0.013mm)",
-      "location": [
-        64.168,
-        58.814
-      ],
-      "layer": "F.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
-      "items": [
-        "J3-3",
-        "ZoneFill-+3V3"
-      ],
-      "nets": [
-        "HALL_C",
-        "+3V3"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.018mm)",
-      "location": [
-        9.666,
-        68.849
-      ],
-      "layer": "F.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q1-3",
-        "ZoneFill-+24V"
-      ],
-      "nets": [
-        "PHASE_C",
-        "+24V"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net '+24V' on F.Cu (overlap depth 0.018mm)",
-      "location": [
-        11.414,
-        67.151
-      ],
-      "layer": "F.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q1-3",
-        "ZoneFill-+24V"
-      ],
-      "nets": [
-        "PHASE_C",
-        "+24V"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'SWDIO' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
-      "location": [
-        65.832,
-        19.004
+        43.389,
+        42.848
       ],
       "layer": "B.Cu",
-      "actual_value": -0.0129,
+      "actual_value": 0.0246,
       "required_value": 0.1016,
-      "items": [
-        "J4-2",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "SWDIO",
-        "GND"
-      ]
+      "items": [],
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
+      "rule_id": "dimension_drill_clearance",
+      "type": "dimension_drill_clearance",
       "severity": "error",
-      "message": "Short: pad on net 'SWCLK' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "message": "Hole-to-hole clearance 0.407mm < minimum 0.500mm",
       "location": [
-        65.832,
-        21.544
+        18.95,
+        55.25
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
+      "layer": null,
+      "actual_value": 0.40710678118654753,
+      "required_value": 0.5,
       "items": [
-        "J4-3",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "SWCLK",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'SWO' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
-      "location": [
-        65.832,
-        24.084
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
-      "items": [
-        "J4-4",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "SWO",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'NRST' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
-      "location": [
-        65.832,
-        24.996
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
-      "items": [
-        "J4-5",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "NRST",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        24.874,
-        75.151
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q4-2",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "PHASE_B",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'ISENSE_B+' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        27.414,
-        75.151
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q4-3",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "ISENSE_B+",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'OSC_IN' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.003mm)",
-      "location": [
-        50.306,
-        37.743
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0025,
-      "required_value": 0.1016,
-      "items": [
-        "Y1-1",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "OSC_IN",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'OSC_OUT' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.003mm)",
-      "location": [
-        55.186,
-        37.743
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0025,
-      "required_value": 0.1016,
-      "items": [
-        "Y1-2",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "OSC_OUT",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        7.126,
-        76.849
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q2-2",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "PHASE_C",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'ISENSE_C+' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        9.666,
-        76.849
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q2-3",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "ISENSE_C+",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net '+24V' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        24.874,
-        67.151
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q3-2",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "+24V",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        27.414,
-        67.151
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q3-3",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "PHASE_B",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_A' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        40.874,
-        75.151
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q6-2",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "PHASE_A",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'ISENSE_A+' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
-      "location": [
-        41.666,
-        76.849
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
-      "items": [
-        "Q6-3",
-        "ZoneFill-GND"
+        "ISENSE_A+",
+        "ISENSE_A+"
       ],
       "nets": [
         "ISENSE_A+",
-        "GND"
+        "ISENSE_A+"
       ]
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net '+24V' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen C8 (reference) overlaps exposed copper of C5 pad 1",
       "location": [
-        40.874,
-        67.151
+        37.0,
+        31.0
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
       "items": [
-        "Q5-2",
-        "ZoneFill-GND"
+        "C8 (reference)",
+        "C5 pad 1"
       ],
-      "nets": [
-        "+24V",
-        "GND"
-      ]
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_A' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen Q3 (reference) overlaps exposed copper of R21 pad 1",
       "location": [
-        43.414,
-        67.151
+        24.0,
+        63.0
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
       "items": [
-        "Q5-3",
-        "ZoneFill-GND"
+        "Q3 (reference)",
+        "R21 pad 1"
       ],
-      "nets": [
-        "PHASE_A",
-        "GND"
-      ]
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'HALL_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen U10 (reference) overlaps exposed copper of U10 pad 30",
       "location": [
-        65.832,
-        56.274
+        37.0,
+        34.5
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
       "items": [
-        "J3-2",
-        "ZoneFill-GND"
+        "U10 (reference)",
+        "U10 pad 30"
       ],
-      "nets": [
-        "HALL_B",
-        "GND"
-      ]
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'HALL_C' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen C7 (reference) overlaps exposed copper of C4 pad 2",
       "location": [
-        65.832,
-        57.186
+        31.0,
+        31.0
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
       "items": [
-        "J3-3",
-        "ZoneFill-GND"
+        "C7 (reference)",
+        "C4 pad 2"
       ],
-      "nets": [
-        "HALL_C",
-        "GND"
-      ]
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net '+3V3' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen Q5 (reference) overlaps exposed copper of R22 pad 2",
       "location": [
-        65.832,
-        59.726
+        40.0,
+        63.0
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
       "items": [
-        "J3-4",
-        "ZoneFill-GND"
+        "Q5 (reference)",
+        "R22 pad 2"
       ],
-      "nets": [
-        "+3V3",
-        "GND"
-      ]
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net '+24V' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "rule_id": "silk_over_copper",
+      "type": "silk_over_copper",
+      "severity": "warning",
+      "message": "Silkscreen Q1 (reference) overlaps exposed copper of R20 pad 2",
       "location": [
-        7.126,
-        68.849
+        8.0,
+        63.0
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
       "items": [
-        "Q1-2",
-        "ZoneFill-GND"
+        "Q1 (reference)",
+        "R20 pad 2"
       ],
-      "nets": [
-        "+24V",
-        "GND"
-      ]
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_C' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.018mm)",
+      "rule_id": "silk_edge_clearance",
+      "type": "silk_edge_clearance",
+      "severity": "warning",
+      "message": "Silkscreen MH1 (reference) to board edge 0.000mm < minimum 0.20mm",
       "location": [
-        9.666,
-        68.849
+        3.0,
+        0.0
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0181,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": 0.0,
+      "required_value": 0.2,
       "items": [
-        "Q1-3",
-        "ZoneFill-GND"
+        "MH1 (reference)",
+        "Edge.Cuts"
       ],
-      "nets": [
-        "PHASE_C",
-        "GND"
-      ]
+      "nets": []
     },
     {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_B' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
+      "rule_id": "silk_edge_clearance",
+      "type": "silk_edge_clearance",
+      "severity": "warning",
+      "message": "Silkscreen MH2 (reference) to board edge 0.000mm < minimum 0.20mm",
       "location": [
-        65.832,
-        75.186
+        77.0,
+        0.0
       ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
+      "layer": "F.SilkS",
+      "actual_value": 0.0,
+      "required_value": 0.2,
       "items": [
-        "J2-2",
-        "ZoneFill-GND"
+        "MH2 (reference)",
+        "Edge.Cuts"
       ],
-      "nets": [
-        "PHASE_B",
-        "GND"
-      ]
-    },
-    {
-      "rule_id": "clearance_pad_zone",
-      "type": "clearance",
-      "severity": "error",
-      "message": "Short: pad on net 'PHASE_A' overlaps zone fill of net 'GND' on B.Cu (overlap depth 0.013mm)",
-      "location": [
-        65.832,
-        77.726
-      ],
-      "layer": "B.Cu",
-      "actual_value": -0.0129,
-      "required_value": 0.1016,
-      "items": [
-        "J2-3",
-        "ZoneFill-GND"
-      ],
-      "nets": [
-        "PHASE_A",
-        "GND"
-      ]
+      "nets": []
     },
     {
       "rule_id": "single_pad_net",
