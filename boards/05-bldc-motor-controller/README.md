@@ -12,15 +12,22 @@ uv run python boards/05-bldc-motor-controller/design.py
 > **Status**: Schematic, PCB layout (with STM32G431K8Tx MCU + complete
 > DRV8301 QFN-56 footprint) and autorouting are all implemented.  After
 > regeneration, every net has at least two pads so the autorouter can
-> attempt full connectivity.  The three motor-phase nets (PHASE_A/B/C)
-> are currently SKIPPED from routing and are NOT yet pour-served, so they
-> ship as open circuits -- closing them is placement-bound (see
-> "High-Current Traces" below and issue #3766) and tracked as a follow-up.
-> The residual U3-south current-sense (ISENSE) cluster is congestion-
-> limited (#3471).  The autorouter also leaves a few segment clearance
-> violations on this complex high-density board; those are tracked
-> separately and do not affect the schematic correctness or the
-> BOM/netlist.
+> attempt full connectivity.  **PHASE_A is now routed on the committed
+> artifact** as a 2.0mm high-current tree (U3.46 sense escape -> In2.Cu ->
+> phase node -> deep-south In1.Cu motor lane -> J2.3), added surgically
+> (no regen) per issue #3766.  **PHASE_B and PHASE_C remain open**: their
+> U3-south sense-pad escapes are walled on the committed artifact --
+> PHASE_C's U3.36 sits 0.45mm from a GATE_CL through-via (below the 0.6mm
+> a 0.2mm/0.2mm-clearance trace needs) and PHASE_B's U3.41 escape is
+> blocked by the BST_A trace that runs along y=59 because C14 sits in the
+> far-west column.  Closing them requires the C12-C14 bootstrap-cap
+> relocation relayout tracked in #3775 (the far-west cap placement is the
+> root cause).  The residual U3-south current-sense (ISENSE) cluster is
+> congestion-limited (#3471): only U3.30 has a clean escape, so the four
+> ISENSE nets remain congestion-saturated pending the same relayout.
+> The autorouter also leaves a few segment clearance violations on this
+> complex high-density board; those are tracked separately and do not
+> affect the schematic correctness or the BOM/netlist.
 
 ## Overview
 
