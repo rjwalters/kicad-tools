@@ -259,6 +259,90 @@ class TestPCBSaveRoundtrip:
         )
 
 
+class TestRotatedFootprintPadGeometry:
+    """Rotated footprints must NOT produce phantom pad-overlap DRC violations.
+
+    Issue #3902: the writer used to emit pad ``(at x y ANGLE)`` as the LOCAL
+    angle. In KiCad the angle is ABSOLUTE (footprint rotation folded in), so
+    elongated pads (e.g. 1.475 x 0.4 mm) rendered unrotated across the pin row,
+    overlapping neighbours and generating phantom ``shorting_items`` /
+    ``solder_mask_bridge`` violations on a footprints-only board.
+
+    This is the manufacturing-correctness gate: with the writer emitting
+    absolute angles, a footprints-only board with rotated elongated-pad parts
+    is clean of the phantom-overlap violation classes.
+    """
+
+    FIXTURES_DIR = Path(__file__).resolve().parents[0] / "fixtures"
+    TEST_PRETTY_DIR = FIXTURES_DIR / "RotatedPad_Test.pretty"
+
+    # Violation classes that a footprints-only board of well-separated parts
+    # must never emit. Phantom pad geometry manifests as these.
+    _PHANTOM_CLASSES = {"shorting_items", "solder_mask_bridge"}
+
+    def test_rotated_footprints_no_phantom_overlaps(self, tmp_path: Path) -> None:
+        """kicad-cli DRC reports zero phantom overlaps for rotated footprints."""
+        import json
+
+        pcb = PCB.create(width=60.0, height=40.0, title="issue-3902 rotated pads")
+
+        # Two elongated-pad footprints, well separated, each placed at a
+        # cardinal rotation. Before the fix, each pad's shape rendered
+        # unrotated and overlapped its neighbour along the pin row.
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "RotatedPad_Test.kicad_mod",
+            reference="U1",
+            x=15.0,
+            y=20.0,
+            rotation=90.0,
+        )
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "RotatedPad_Test.kicad_mod",
+            reference="U2",
+            x=45.0,
+            y=20.0,
+            rotation=-90.0,
+        )
+
+        pcb_path = tmp_path / "rotated_pads.kicad_pcb"
+        pcb.save(pcb_path)
+
+        # Sanity: the writer must have folded fp rotation into the pad angles.
+        text = pcb_path.read_text()
+        assert "120" in text, (
+            "Expected an absolute pad angle (local 30 + fp 90 = 120) in the "
+            f"emitted board; writer may have regressed to LOCAL angles.\n{text}"
+        )
+
+        # First: the board must LOAD (guards against unrelated syntax breaks).
+        _assert_kicad_cli_loads(
+            pcb_path, producer="PCB.save (rotated footprints)", tmp_path=tmp_path
+        )
+
+        # Then: inspect the JSON DRC report for phantom-overlap classes.
+        report = tmp_path / "rotated_pads_drc.json"
+        result = run_drc(
+            pcb_path,
+            output_path=report,
+            format="json",
+            schematic_parity=False,
+        )
+        assert result.success, (
+            "kicad-cli DRC did not produce a report for the rotated-footprint "
+            f"board.\n  return code: {result.return_code}\n  stderr: {result.stderr}"
+        )
+
+        data = json.loads(report.read_text())
+        violations = data.get("violations", [])
+        phantom = [v for v in violations if v.get("type") in self._PHANTOM_CLASSES]
+        assert not phantom, (
+            "Rotated footprints produced phantom pad-overlap DRC violations "
+            "(issue #3902 regression). The writer must emit ABSOLUTE pad "
+            f"angles.\n  Offending violations: {phantom}\n"
+            f"  Inspect: {pcb_path}"
+        )
+
+
 class TestSilkscreenGeneratorRoundtrip:
     """``SilkscreenGenerator.add_board_markings()`` must emit loadable files.
 

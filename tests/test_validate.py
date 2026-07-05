@@ -869,6 +869,9 @@ class TestRotatedPadDimensions:
             position=(0.0, 0.0),
             size=(0.5, 1.2),  # width=0.5, height=1.2
             layers=["F.Cu"],
+            # Pad angle is stored ABSOLUTE (issue #3902): a footprint placed at
+            # 90° writes 90° into every pad's angle field.
+            rotation=90.0,
         )
         footprint = Footprint(
             name="Test",
@@ -896,6 +899,8 @@ class TestRotatedPadDimensions:
             position=(0.0, 0.0),
             size=(0.5, 1.2),
             layers=["F.Cu"],
+            # Absolute pad angle (issue #3902).
+            rotation=180.0,
         )
         footprint = Footprint(
             name="Test",
@@ -923,6 +928,8 @@ class TestRotatedPadDimensions:
             position=(0.0, 0.0),
             size=(0.5, 1.2),
             layers=["F.Cu"],
+            # Absolute pad angle (issue #3902).
+            rotation=270.0,
         )
         footprint = Footprint(
             name="Test",
@@ -950,6 +957,8 @@ class TestRotatedPadDimensions:
             position=(0.0, 0.0),
             size=(1.0, 2.0),
             layers=["F.Cu"],
+            # Absolute pad angle (issue #3902).
+            rotation=45.0,
         )
         footprint = Footprint(
             name="Test",
@@ -982,6 +991,8 @@ class TestRotatedPadDimensions:
             size=(0.5, 1.2),  # width=0.5, height=1.2
             layers=["F.Cu"],
             net_number=1,
+            # Absolute pad angle (issue #3902): a 90°-placed footprint stores 90°.
+            rotation=90.0,
         )
         footprint = Footprint(
             name="Test",
@@ -1011,6 +1022,8 @@ class TestRotatedPadDimensions:
             position=(0.0, 0.0),
             size=(1.0, 1.0),  # Square pad
             layers=["F.Cu"],
+            # Absolute pad angle (issue #3902).
+            rotation=45.0,
         )
         footprint = Footprint(
             name="Test",

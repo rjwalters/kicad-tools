@@ -77,6 +77,9 @@ class TestCopperElementNetName:
         pad.position = (0.0, 0.0)
         pad.size = (1.0, 1.0)
         pad.layers = ["F.Cu"]
+        # Absolute pad angle (issue #3902); a bare MagicMock attribute would
+        # break the cardinal-rotation comparisons in _transform_pad_dimensions.
+        pad.rotation = 0.0
 
         footprint = MagicMock()
         footprint.reference = "U1"
@@ -93,6 +96,8 @@ class TestCopperElementNetName:
         pad.position = (0.0, 0.0)
         pad.size = (1.0, 1.0)
         pad.layers = ["F.Cu"]
+        # Absolute pad angle (issue #3902); see test_from_pad_carries_net_name.
+        pad.rotation = 0.0
 
         footprint = MagicMock()
         footprint.reference = "U1"

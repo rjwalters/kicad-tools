@@ -152,8 +152,12 @@ def _make_pcb_text(fp_rotation: float, pad_rotation: float | None = None) -> str
 
     Args:
         fp_rotation: Footprint rotation in degrees.
-        pad_rotation: Optional pad-local rotation in degrees.  When None the
-            pad ``(at ...)`` omits the rotation field.
+        pad_rotation: Optional pad ABSOLUTE angle in degrees.  KiCad stores each
+            pad's ``(at x y ANGLE)`` in the ABSOLUTE board frame -- the angle
+            already includes the footprint rotation (issue #3902).  When None the
+            pad ``(at ...)`` omits the rotation field, which KiCad reads as an
+            absolute angle of 0 (i.e. an UNROTATED pad, regardless of the
+            footprint's own rotation).
     """
     fp_at = f"(at 100 100 {fp_rotation})"
     if pad_rotation is not None:
@@ -174,80 +178,105 @@ def _make_pcb_text(fp_rotation: float, pad_rotation: float | None = None) -> str
 class TestPadDimensionRotation:
     """Tests that pad width/height are swapped to PCB space at 90/270 degrees.
 
-    The fix (commit a3122259) swaps width and height when the total rotation
-    (footprint + pad) is approximately 90 or 270 degrees.  At 0 and 180 degrees
-    the dimensions remain unchanged.
+    The dimension-swap is driven by the pad's ABSOLUTE angle (the third token of
+    the pad ``(at ...)``), which KiCad stores already including the footprint
+    rotation (issue #3902).  The consumer must therefore read the stored angle
+    directly and must NOT add the footprint rotation on top of it.  At an
+    absolute 90/270 degrees the axes swap; at 0/180 they stay unchanged.
+
+    Historical note: these tests previously encoded the buggy LOCAL convention
+    (``total = fp_rotation + pad_rotation``).  They were updated for #3902 so a
+    footprint placed at 90 degrees emits an absolute pad angle of 90.
     """
 
     def test_0_degree_rotation_no_swap(self):
-        """At 0-degree rotation, pad dimensions stay as defined (1.475 x 0.400)."""
+        """Absolute pad angle 0, dimensions stay as defined (1.475 x 0.400)."""
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(0))
+        pads = load_pads_for_analysis(_make_pcb_text(0, pad_rotation=0))
         assert len(pads) == 1
         assert pads[0].width == pytest.approx(1.475, abs=0.001)
         assert pads[0].height == pytest.approx(0.400, abs=0.001)
 
     def test_90_degree_rotation_swaps_dimensions(self):
-        """At 90-degree rotation, width and height should be swapped."""
+        """Absolute pad angle 90 (fp placed at 90), width/height swapped."""
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(90))
+        pads = load_pads_for_analysis(_make_pcb_text(90, pad_rotation=90))
         assert len(pads) == 1
         # Swapped: original 1.475 x 0.400 becomes 0.400 x 1.475
         assert pads[0].width == pytest.approx(0.400, abs=0.001)
         assert pads[0].height == pytest.approx(1.475, abs=0.001)
 
     def test_180_degree_rotation_no_swap(self):
-        """At 180-degree rotation, dimensions stay unchanged."""
+        """Absolute pad angle 180, dimensions stay unchanged."""
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(180))
+        pads = load_pads_for_analysis(_make_pcb_text(180, pad_rotation=180))
         assert len(pads) == 1
         assert pads[0].width == pytest.approx(1.475, abs=0.001)
         assert pads[0].height == pytest.approx(0.400, abs=0.001)
 
     def test_270_degree_rotation_swaps_dimensions(self):
-        """At 270-degree rotation, width and height should be swapped."""
+        """Absolute pad angle 270, width/height swapped."""
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(270))
+        pads = load_pads_for_analysis(_make_pcb_text(270, pad_rotation=270))
         assert len(pads) == 1
         assert pads[0].width == pytest.approx(0.400, abs=0.001)
         assert pads[0].height == pytest.approx(1.475, abs=0.001)
+
+    def test_absent_pad_angle_under_rotated_footprint_no_swap(self):
+        """A missing pad angle reads as absolute 0 -> UNROTATED pad, no swap.
+
+        Even though the footprint itself is placed at 90 degrees, an absent pad
+        angle means the pad shape is unrotated in the board frame (absolute 0).
+        This is the exact bug #3902 guards against: the pad dimensions must NOT
+        be swapped just because the footprint is rotated.
+        """
+        from kicad_tools.router.io import load_pads_for_analysis
+
+        pads = load_pads_for_analysis(_make_pcb_text(90))
+        assert len(pads) == 1
+        assert pads[0].width == pytest.approx(1.475, abs=0.001)
+        assert pads[0].height == pytest.approx(0.400, abs=0.001)
 
     def test_negative_90_degree_rotation_swaps_dimensions(self):
-        """At -90-degree rotation (equivalent to 270), dimensions should swap."""
+        """Absolute pad angle -90 (equivalent to 270), dimensions swap."""
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(-90))
+        pads = load_pads_for_analysis(_make_pcb_text(-90, pad_rotation=-90))
         assert len(pads) == 1
         assert pads[0].width == pytest.approx(0.400, abs=0.001)
         assert pads[0].height == pytest.approx(1.475, abs=0.001)
 
-    def test_combined_fp_and_pad_rotation_totaling_90(self):
-        """When footprint (45) + pad (45) = 90 total, dimensions should swap."""
+    def test_absolute_pad_angle_90_swaps(self):
+        """Absolute pad angle of 90 swaps dimensions regardless of fp rotation.
+
+        The footprint here is placed at 45 but the pad carries an absolute angle
+        of 90; the swap is decided by the pad angle alone (not fp + pad).
+        """
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(45, pad_rotation=45))
+        pads = load_pads_for_analysis(_make_pcb_text(45, pad_rotation=90))
         assert len(pads) == 1
         assert pads[0].width == pytest.approx(0.400, abs=0.001)
         assert pads[0].height == pytest.approx(1.475, abs=0.001)
 
-    def test_combined_fp_and_pad_rotation_totaling_270(self):
-        """When footprint (180) + pad (90) = 270 total, dimensions should swap."""
+    def test_absolute_pad_angle_270_swaps(self):
+        """Absolute pad angle of 270 swaps dimensions (fp rotation irrelevant)."""
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(180, pad_rotation=90))
+        pads = load_pads_for_analysis(_make_pcb_text(180, pad_rotation=270))
         assert len(pads) == 1
         assert pads[0].width == pytest.approx(0.400, abs=0.001)
         assert pads[0].height == pytest.approx(1.475, abs=0.001)
 
-    def test_combined_fp_and_pad_rotation_totaling_180_no_swap(self):
-        """When footprint (90) + pad (90) = 180 total, dimensions stay unchanged."""
+    def test_absolute_pad_angle_180_no_swap(self):
+        """Absolute pad angle of 180 keeps dimensions unchanged."""
         from kicad_tools.router.io import load_pads_for_analysis
 
-        pads = load_pads_for_analysis(_make_pcb_text(90, pad_rotation=90))
+        pads = load_pads_for_analysis(_make_pcb_text(90, pad_rotation=180))
         assert len(pads) == 1
         assert pads[0].width == pytest.approx(1.475, abs=0.001)
         assert pads[0].height == pytest.approx(0.400, abs=0.001)

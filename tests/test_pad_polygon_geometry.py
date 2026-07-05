@@ -97,18 +97,36 @@ class TestPadPolygonShapes:
 
 
 class TestPadPolygonRotation:
-    def test_footprint_rotation_90_swaps_extents(self):
-        poly = _pad_polygon(_pad("rect", (4.0, 1.0)), _fp(rotation=90.0))
+    """Pad-shape orientation is driven by the pad's ABSOLUTE stored angle.
+
+    KiCad stores each pad's ``(at x y ANGLE)`` in the absolute board frame --
+    the footprint rotation is already folded in (issue #3902). ``_pad_polygon``
+    therefore uses ``pad.rotation`` directly and must NOT add
+    ``footprint.rotation`` on top of it.
+    """
+
+    def test_absolute_pad_angle_90_swaps_extents(self):
+        # A footprint placed at 90deg stores 90deg in every pad angle.
+        poly = _pad_polygon(_pad("rect", (4.0, 1.0), rotation=90.0), _fp(rotation=90.0))
         minx, miny, maxx, maxy = poly.bounds
         assert abs((maxy - miny) - 4.0) < 1e-6
         assert abs((maxx - minx) - 1.0) < 1e-6
 
-    def test_per_pad_rotation_adds_to_footprint_rotation(self):
-        # footprint 45deg + pad 45deg = 90deg total -> extents swap.
-        poly = _pad_polygon(_pad("rect", (4.0, 1.0), rotation=45.0), _fp(rotation=45.0))
+    def test_footprint_rotation_not_double_counted(self):
+        # Pad stores the ABSOLUTE angle 90; the footprint's own 45 must not be
+        # added on top (90 + 45 would leave neither extent axis-aligned at 4.0).
+        poly = _pad_polygon(_pad("rect", (4.0, 1.0), rotation=90.0), _fp(rotation=45.0))
         minx, miny, maxx, maxy = poly.bounds
         assert abs((maxy - miny) - 4.0) < 1e-5
         assert abs((maxx - minx) - 1.0) < 1e-5
+
+    def test_unrotated_pad_under_rotated_footprint_keeps_extents(self):
+        # Absolute angle 0 means the pad shape is axis-aligned in the board
+        # frame even though the footprint is rotated (issue #3902 guard).
+        poly = _pad_polygon(_pad("rect", (4.0, 1.0), rotation=0.0), _fp(rotation=90.0))
+        minx, miny, maxx, maxy = poly.bounds
+        assert abs((maxx - minx) - 4.0) < 1e-6
+        assert abs((maxy - miny) - 1.0) < 1e-6
 
     def test_translation_to_board_position(self):
         poly = _pad_polygon(_pad("rect", (1.0, 1.0)), _fp(position=(10.0, 20.0)))

@@ -176,9 +176,12 @@ def _transform_pad_dimensions(pad: Pad, footprint: Footprint) -> tuple[float, fl
     """
     width, height = pad.size
 
-    # Get total rotation from footprint
-    # Note: pad.rotation is relative to footprint, footprint.rotation is absolute
-    total_rotation = footprint.rotation
+    # pad.rotation is stored in the ABSOLUTE board frame (KiCad already folds
+    # footprint.rotation into each pad's angle -- see Pad.rotation and issue
+    # #3902), so it IS the pad shape's board-frame orientation. Do NOT add
+    # footprint.rotation on top of it. Kept in sync with _pad_polygon so the
+    # AABB fast path and the true-geometry polygon agree.
+    total_rotation = getattr(pad, "rotation", 0.0)
 
     # Normalize rotation to [0, 360)
     total_rotation = total_rotation % 360
@@ -219,7 +222,8 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
       over-approximation.
 
     The polygon is built around the origin from the pad's *local* size,
-    rotated by the total rotation (``footprint.rotation + pad.rotation``)
+    rotated by the pad's ABSOLUTE angle (``pad.rotation`` -- which already
+    includes ``footprint.rotation`` per KiCad's file convention, issue #3902)
     and translated to the pad's absolute board position.  Modeling the
     rounded geometry instead of an AABB removes the sub-10-micron phantom
     corner overlaps that KiCad's true geometry never sees (issue #3826).
@@ -237,7 +241,10 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
     if w <= 0 or h <= 0:
         return None
 
-    total_rot = footprint.rotation + getattr(pad, "rotation", 0.0)
+    # pad.rotation is stored in the ABSOLUTE board frame (it already includes
+    # footprint.rotation per KiCad's file convention -- see Pad.rotation and
+    # issue #3902), so it is the pad shape's board-frame orientation directly.
+    total_rot = getattr(pad, "rotation", 0.0)
     shape = pad.shape
 
     if shape == "circle" or (shape in ("oval", "obround") and abs(w - h) < 1e-6):

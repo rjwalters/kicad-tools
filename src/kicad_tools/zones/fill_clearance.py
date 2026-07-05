@@ -181,8 +181,10 @@ def _collect_obstacles(
             abs_x = fp_x + (local_x * cos_r - local_y * sin_r)
             abs_y = fp_y + (local_x * sin_r + local_y * cos_r)
 
-            # Total pad rotation in board frame.
-            total_rot = (fp_rot + pad_rot) % 360.0
+            # Pad angle is stored ABSOLUTE in the file (KiCad already folds the
+            # footprint rotation into each pad's angle -- issue #3902), so it is
+            # the pad's board-frame orientation directly; do NOT add fp_rot.
+            total_rot = pad_rot % 360.0
             box_w, box_h = _axis_aligned_box_dims(w, h, total_rot)
 
             shape = _build_box(shapely_mod, abs_x, abs_y, box_w, box_h)
