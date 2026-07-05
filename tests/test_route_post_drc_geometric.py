@@ -184,9 +184,12 @@ def test_run_geometric_drc_end_to_end_on_committed_board():
     from kicad_tools.drc import run_geometric_drc
 
     repo_root = Path(__file__).resolve().parents[1]
+    # Any committed routed board exercises the shared geometric-DRC helper.
+    # (softstart used to serve here but is now a local-only external symlink;
+    # use a native board that is always committed in this repo.)
     candidates = [
-        repo_root / "boards/external/softstart/output/softstart_routed.kicad_pcb",
-        repo_root / "boards/external/softstart/output/softstart.kicad_pcb",
+        repo_root / "boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+        repo_root / "boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb",
     ]
     board = next((c for c in candidates if c.exists()), None)
     if board is None:
