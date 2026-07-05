@@ -1333,7 +1333,7 @@ class TestAddFootprintPadAngleAbsolute:
     """
 
     FIXTURES_DIR = Path(__file__).parent / "fixtures"
-    TEST_PRETTY_DIR = FIXTURES_DIR / "Test_Library.pretty"
+    TEST_PRETTY_DIR = FIXTURES_DIR / "RotatedPad_Test.pretty"
 
     def _pad_angles(self, fp) -> dict[str, float]:
         return {pad.number: pad.rotation for pad in fp.pads}

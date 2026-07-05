@@ -274,7 +274,7 @@ class TestRotatedFootprintPadGeometry:
     """
 
     FIXTURES_DIR = Path(__file__).resolve().parents[0] / "fixtures"
-    TEST_PRETTY_DIR = FIXTURES_DIR / "Test_Library.pretty"
+    TEST_PRETTY_DIR = FIXTURES_DIR / "RotatedPad_Test.pretty"
 
     # Violation classes that a footprints-only board of well-separated parts
     # must never emit. Phantom pad geometry manifests as these.
