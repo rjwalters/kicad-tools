@@ -1320,6 +1320,125 @@ class TestAddFootprint:
             assert at_pos < tags_pos, "(at) should appear before (tags)"
 
 
+class TestAddFootprintPadAngleAbsolute:
+    """Writer must emit pad angles as ABSOLUTE (fp_rotation + local) (issue #3902).
+
+    KiCad stores a pad's ``(at x y ANGLE)`` in the ABSOLUTE board frame -- the
+    angle already includes the parent footprint rotation. A library
+    ``.kicad_mod`` is authored at rotation 0, so when we place it at a non-zero
+    rotation the writer must fold that rotation into every pad angle. Emitting
+    the LOCAL angle instead renders elongated pads unrotated in KiCad and
+    produces phantom shorting / solder-mask-bridge DRC violations plus wrong
+    gerber apertures.
+    """
+
+    FIXTURES_DIR = Path(__file__).parent / "fixtures"
+    TEST_PRETTY_DIR = FIXTURES_DIR / "Test_Library.pretty"
+
+    def _pad_angles(self, fp) -> dict[str, float]:
+        return {pad.number: pad.rotation for pad in fp.pads}
+
+    def test_zero_rotation_leaves_pad_angles_unchanged(self, minimal_pcb):
+        """A footprint placed at rotation 0 keeps each pad's authored angle."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "RotatedPad_Test.kicad_mod",
+            reference="U1",
+            x=50.0,
+            y=30.0,
+            rotation=0.0,
+        )
+
+        angles = self._pad_angles(fp)
+        # Pad 1 authored at 0, pad 2 authored at 30 -> unchanged at rotation 0.
+        assert angles["1"] == pytest.approx(0.0)
+        assert angles["2"] == pytest.approx(30.0)
+
+    def test_positive_90_folds_into_pad_angles(self, minimal_pcb):
+        """Placing at +90 emits absolute angles (local + 90) % 360."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "RotatedPad_Test.kicad_mod",
+            reference="U1",
+            x=50.0,
+            y=30.0,
+            rotation=90.0,
+        )
+
+        angles = self._pad_angles(fp)
+        assert angles["1"] == pytest.approx(90.0)  # 0 + 90
+        assert angles["2"] == pytest.approx(120.0)  # 30 + 90
+
+    def test_negative_90_folds_and_wraps(self, minimal_pcb):
+        """Placing at -90 wraps into [0, 360): local 0 -> 270, local 30 -> 300."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "RotatedPad_Test.kicad_mod",
+            reference="U1",
+            x=50.0,
+            y=30.0,
+            rotation=-90.0,
+        )
+
+        angles = self._pad_angles(fp)
+        # (0 + -90) % 360 == 270 ; (30 + -90) % 360 == 300
+        assert angles["1"] == pytest.approx(270.0)
+        assert angles["2"] == pytest.approx(300.0)
+
+    def test_emitted_text_contains_absolute_pad_angle(self, minimal_pcb, tmp_path):
+        """The serialized board text carries the absolute pad angle."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "RotatedPad_Test.kicad_mod",
+            reference="U1",
+            x=50.0,
+            y=30.0,
+            rotation=90.0,
+        )
+        out = tmp_path / "abs_angle.kicad_pcb"
+        pcb.save(out)
+        text = out.read_text()
+
+        # Pad 2 (authored local 30) must serialize with absolute angle 120.
+        assert "(at 1 0 120)" in text or "(at 1.0 0 120)" in text, (
+            f"Pad 2's absolute angle (local 30 + fp 90 = 120) not found in emitted board.\n{text}"
+        )
+        # Pad 1 (authored local 0) must serialize with absolute angle 90.
+        assert "(at -1 0 90)" in text or "(at -1.0 0 90)" in text, (
+            f"Pad 1's absolute angle (local 0 + fp 90 = 90) not found in emitted board.\n{text}"
+        )
+
+    def test_round_trip_reader_reports_absolute_angle(self, minimal_pcb, tmp_path):
+        """Save then reload: the reader reports the same ABSOLUTE pad angle.
+
+        Confirms writer/reader agree on the convention (no double counting).
+        """
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "RotatedPad_Test.kicad_mod",
+            reference="U1",
+            x=50.0,
+            y=30.0,
+            rotation=90.0,
+        )
+        out = tmp_path / "roundtrip.kicad_pcb"
+        pcb.save(out)
+
+        reloaded = PCB(load_pcb(str(out)))
+        fp = next(f for f in reloaded.footprints if f.reference == "U1")
+        angles = {pad.number: pad.rotation for pad in fp.pads}
+        assert angles["1"] == pytest.approx(90.0)
+        assert angles["2"] == pytest.approx(120.0)
+
+
 class TestSilkscreenManagement:
     """Tests for silkscreen management APIs (issue #924)."""
 

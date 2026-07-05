@@ -1,0 +1,17 @@
+(footprint "RotatedPad_Test"
+	(version 20240108)
+	(generator "pcbnew")
+	(layer "F.Cu")
+	(descr "Synthetic footprint with an explicit per-pad angle for issue #3902 tests")
+	(attr smd)
+	(pad "1" smd rect
+		(at -1.0 0)
+		(size 1.475 0.4)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+	)
+	(pad "2" smd rect
+		(at 1.0 0 30)
+		(size 1.475 0.4)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+	)
+)

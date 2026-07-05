@@ -165,9 +165,12 @@ class Pad:
     drill: float = 0.0
     solder_mask_margin: float | None = None
     uuid: str = ""
-    # Per-pad rotation in degrees (the optional third token of ``(at x y angle)``),
-    # relative to the parent footprint. The pad's absolute rotation is
-    # ``footprint.rotation + pad.rotation``. Defaults to 0.
+    # Per-pad rotation in degrees (the optional third token of ``(at x y angle)``).
+    # KiCad stores this angle in the ABSOLUTE board frame -- it already includes
+    # the parent footprint's rotation, so ``pad.rotation`` IS the pad's absolute
+    # orientation (do NOT add ``footprint.rotation`` on top of it). Note the
+    # asymmetry with ``position``, which is stored footprint-local and must be
+    # rotated by ``footprint.rotation`` to reach board coordinates. Defaults to 0.
     rotation: float = 0.0
     # Corner-radius ratio for ``roundrect`` pads: radius = rratio * min(w, h).
     # KiCad's default is 0.25 when ``(roundrect_rratio ...)`` is absent.
@@ -3992,6 +3995,29 @@ class PCB:
         else:
             # Fallback: append to end (shouldn't happen for valid footprints)
             fp_sexp.append(at_sexp)
+
+        # Rewrite each pad's angle to ABSOLUTE (board-frame) rotation.
+        #
+        # KiCad stores a pad's ``(at x y ANGLE)`` with the angle expressed in
+        # the ABSOLUTE board frame -- it already includes the parent
+        # footprint's rotation. A library (.kicad_mod) footprint is authored at
+        # rotation 0, so its pad angles are footprint-local. When we place that
+        # footprint at a non-zero ``rotation`` we must fold that rotation into
+        # every pad angle so the emitted board matches KiCad's convention.
+        #
+        # Without this, KiCad (and kicad-cli DRC) renders elongated pads
+        # (e.g. TSSOP 1.475mm pads) unrotated relative to their pin row,
+        # producing phantom shorting / solder-mask-bridge violations and
+        # geometrically wrong gerber apertures for every rotated footprint
+        # (issue #3902).
+        if rotation != 0.0:
+            for pad in fp_sexp.find_all("pad"):
+                pad_at = pad.find("at")
+                if pad_at is None:
+                    continue
+                local_angle = pad_at.get_float(2) or 0.0
+                abs_angle = (local_angle + rotation) % 360
+                pad_at.set_value(2, abs_angle)
 
         # Update reference and value - try KiCad 8+ property format first
         ref_updated = False
