@@ -31,9 +31,9 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 | # | Board | Status | Components | Nets | Notes |
 |---|-------|--------|------------|------|-------|
 | 01 | [Voltage Divider](01-voltage-divider/) | ✅ Working | 4 | 3 | Simplest possible design, workflow validation |
-| 02 | [Charlieplex LED](02-charlieplex-led/) | ⚠️ Needs optimization | 14 | 8 | Dense topology, may need trace optimization ([#659]) |
-| 03 | [USB Joystick](03-usb-joystick/) | ⚠️ Complex routing | ~20 | 13 | Mixed signals, may not complete all routes on 2-layer |
-| 04 | [STM32 Dev Board](04-stm32-devboard/) | 🚧 Schematic only | ~30 | - | Layout pending, demonstrates programmatic schematic generation |
+| 02 | [Charlieplex LED](02-charlieplex-led/) | ✅ Working | 14 | 8 | Routes 8/8 signal nets; both DRC engines clean (verified 2026-07-05) |
+| 03 | [USB Joystick](03-usb-joystick/) | ✅ Working | ~20 | 13 | Routes 13/13 on 2-layer in ~24s; diff-pair entry regression tracked in [#3922] |
+| 04 | [STM32 Dev Board](04-stm32-devboard/) | ✅ Working | ~30 | 12 | Fully routed via `generate_design.py`; kicad-cli DRC clean (verified 2026-07-05) |
 | 06 | [Diff-Pair Test](06-diffpair-test/) | ⚠️ Scaffold | 7 | 26 | Epic [#2556] Phase 4L regression bench --- USB 2.0/3.0, PCIe, MIPI on 4-layer; exercises Phase 1-3 features (intra_pair_clearance, coupled_routing, coupled_continuity_threshold, target_diff_impedance, skew_tolerance_mm) |
 | 07 | [Match-Group Test](07-matchgroup-test/) | ⚠️ Scaffold | 8 | 33 | Epic [#2661] Phase 3L regression bench --- DDR data byte, MIPI CSI, HDMI TMDS, address bus on 4-layer; exercises Phase 1A-2G match-group features (length_match_group, length_match_reference, length_match_tolerance_mm) |
 
@@ -108,6 +108,13 @@ the `intra_pair_clearance`, `coupled_continuity_threshold`, and
 invoke the Phase A/B pipeline explicitly.  PR #3069 (board 03) and PR #3090
 (board 06) migrated to this entry after the bypass bug was diagnosed.
 
+> **⚠️ Regression ([#3922]):** the #3308/#3410 recipe consolidation silently
+> dropped `--differential-pairs` from board 03's routing recipe
+> (`generate_design.py:route_pcb()`), so board 03 currently routes its USB
+> pair through the plain per-net path again. Its clean skew today is
+> coincidental, not constructed. Do not copy board 03's recipe for a new
+> diff-pair board until [#3922] lands.
+
 ### Subprocess (`kct route`) vs. in-process (`router.route_all_*`)
 
 Both are supported.  The subprocess path (`subprocess.run(["kct", "route", ...])`)
@@ -123,9 +130,13 @@ The in-process path remains the right choice when a board needs to:
 
 - Inject custom logic between routing and post-processing (e.g. board 06's
   custom diff-pair config plumbing).
-- Exercise router internals that the CLI does not yet expose (e.g. the
-  `diffpair_config` object with non-default `intra_pair_clearance` values
-  that don't survive the JSON-roundtrip the CLI uses).
+- Exercise router internals that the CLI does not yet expose (e.g.
+  `DifferentialPairConfig.per_pair_max_iterations`,
+  `enable_shadow_construction`, or board 06's tightly-coupled width
+  re-solve). Note: per-class values like `intra_pair_clearance` **do**
+  survive the CLI's JSON sidecar round-trip (`kct route --net-class-map`,
+  #2996) — an earlier version of this section claimed otherwise; that claim
+  was verified false in the 2026-07-05 sweep.
 
 ### Architectural decision: auto-detect was rejected
 
@@ -134,9 +145,11 @@ default path) to auto-detect diff pairs and short-circuit to the
 Phase-A/B-aware entry.  The decision was to **not** auto-detect, for two
 reasons:
 
-1. The remaining footgun is procedural (new boards forget the right entry),
-   not active --- every existing diff-pair-bearing board is already wired
-   correctly as of PR #3090 (board 06 migration).
+1. The remaining footgun is procedural (new boards forget the right entry).
+   **Update 2026-07-05: the footgun bit** --- board 03 lost its
+   diff-pair-aware entry in a later recipe consolidation without anyone
+   noticing ([#3922]), exactly the failure mode auto-detect would have
+   prevented. Weigh this when re-promoting the auto-detect work.
 2. An auto-detect change would have to land on both surfaces (in-process
    and CLI) to be complete, and the `CoupledPathfinder` latency issue
    tracked in [#3089] makes a CLI-default flip premature.
@@ -153,11 +166,14 @@ These are known limitations that may affect your experience:
 
 | Issue | Affects | Description |
 |-------|---------|-------------|
-| [#659] | 02, 03 | Trace optimization may be needed for dense designs |
+| [#659] | 02, 03 | Trace optimization may be needed for dense designs (02 now routes 8/8 as of 2026-07-05) |
 | [#661] | All | Router doesn't always warn about DRC violations |
+| [#3918] | All | `kct build` currently cannot complete on any demo board — use each board's `generate_design.py`/`design.py` recipe until the orchestrator fixes land |
 
 [#659]: https://github.com/rjwalters/kicad-tools/issues/659
 [#661]: https://github.com/rjwalters/kicad-tools/issues/661
+[#3918]: https://github.com/rjwalters/kicad-tools/issues/3918
+[#3922]: https://github.com/rjwalters/kicad-tools/issues/3922
 
 ## Project Files (.kct)
 

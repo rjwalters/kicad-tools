@@ -96,9 +96,10 @@ This:
 3. Uses A* pathfinding to route connections
 4. Saves the routed result to `output/charlieplex_3x3_routed.kicad_pcb`
 
-**Note:** Due to the dense charlieplex topology, some nets may not be routable on a
-2-layer board. This is expected behavior and demonstrates real-world routing challenges.
-The autorouter successfully routes approximately 5-6 of the 8 signal nets.
+**Note:** The dense charlieplex topology was historically a routing challenge,
+but as of 2026-07-05 the negotiated router completes **all 8 signal nets**
+(plus pour-carried VCC/GND) on 2 layers in a few seconds, clean under both
+`kct check` and `kicad-cli pcb drc`.
 
 ### Step 3: View in KiCad (Optional)
 
