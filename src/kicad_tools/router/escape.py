@@ -1203,6 +1203,14 @@ class EscapeRouter:
         self.byte_lane_corridor_reservations: int = 0
         self.byte_lane_corridor_reserved_cells: int = 0
 
+        # Issue #3900: set by ``_escape_sop_staggered`` when it takes the
+        # rescue-only-band path with the rescue cap disabled
+        # (``_sop_rescue_row_cap() == 0``).  ``generate_escapes`` reads it to
+        # report an empty escape list as "not attempted" (INFO) rather than
+        # "failed clearance validation" (WARNING).  Reset at the start of each
+        # ``generate_escapes`` call.
+        self._escape_not_attempted_rescue_band: bool = False
+
         # Issue #2605: Resolve manufacturer capability flags.  Caller-supplied
         # arg wins; otherwise fall back to ``rules.manufacturer``.  If the
         # manufacturer is unknown we silently treat it as "no via-in-pad"
@@ -1564,6 +1572,13 @@ class EscapeRouter:
         Returns:
             List of EscapeRoute objects for each pin
         """
+        # Issue #3900: track whether the per-package dispatcher deliberately
+        # declined to attempt an escape (rescue-only band with the rescue cap
+        # disabled) versus actually attempting and failing clearance.  Reset
+        # per call; set by ``_escape_sop_staggered`` when it takes the
+        # rescue-only-band path with ``_sop_rescue_row_cap() == 0``.
+        self._escape_not_attempted_rescue_band = False
+
         # ------------------------------------------------------------------
         # Phase 2F pre-pass: paired escape coupling at launch.
         # ------------------------------------------------------------------
@@ -1632,17 +1647,35 @@ class EscapeRouter:
         # Issue #2350: Warn when an entire package gets 0 escapes.
         # Silent failure makes it very hard to diagnose routing problems.
         if not escapes and package.pin_count > 0:
-            logger.warning(
-                "Escape routing for %s (%s, %d pins, %.2fmm pitch): "
-                "0 pins escaped -- all escapes failed clearance validation. "
-                "Consider setting fine_pitch_clearance in DesignRules or "
-                "adding a component_clearances override for %s.",
-                package.ref,
-                package.package_type.name,
-                package.pin_count,
-                package.pin_pitch,
-                package.ref,
-            )
+            if self._escape_not_attempted_rescue_band:
+                # Issue #3900: a rescue-only-band SOP package with the rescue
+                # cap disabled (``SOP_RESCUE_MAX_PER_ROW=0``) deliberately
+                # emits no escape geometry -- no clearance check ever runs, so
+                # the empty list is *correct* behaviour, not a failure.  Report
+                # it as INFO with no ``fine_pitch_clearance`` suggestion (which
+                # would be fabricated attribution -- see #3900).
+                logger.info(
+                    "Escape routing for %s (%s, %d pins, %.2fmm pitch): "
+                    "escape not attempted -- rescue band disabled "
+                    "(SOP_RESCUE_MAX_PER_ROW=0). To enable the in-pad rescue "
+                    "experiment set KICAD_TOOLS_SOP_RESCUE_ROW_CAP=1.",
+                    package.ref,
+                    package.package_type.name,
+                    package.pin_count,
+                    package.pin_pitch,
+                )
+            else:
+                logger.warning(
+                    "Escape routing for %s (%s, %d pins, %.2fmm pitch): "
+                    "0 pins escaped -- all escapes failed clearance validation. "
+                    "Consider setting fine_pitch_clearance in DesignRules or "
+                    "adding a component_clearances override for %s.",
+                    package.ref,
+                    package.package_type.name,
+                    package.pin_count,
+                    package.pin_pitch,
+                    package.ref,
+                )
 
         return escapes
 
@@ -5229,6 +5262,14 @@ class EscapeRouter:
         # rescue; the production default cap is 0 (defer all; see the
         # :data:`SOP_RESCUE_MAX_PER_ROW` measurement table).
         if rescue_only_band:
+            # Issue #3900: when the rescue cap is 0 (the production default)
+            # no escape is *attempted* for this band -- every pad defers and
+            # the package routes exactly as it did before entering the dense
+            # list.  Record that fact so ``generate_escapes`` reports "not
+            # attempted" instead of the misleading "failed clearance
+            # validation" when the resulting escape list is empty.
+            if _sop_rescue_row_cap() == 0:
+                self._escape_not_attempted_rescue_band = True
             escapes.extend(
                 self._rescue_only_band_escapes(
                     pads=pads,
