@@ -1,9 +1,9 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3766/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-3775/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
-    "errors": 9,
+    "errors": 7,
     "warnings": 9,
     "infos": 8,
     "rules_checked": 36,
@@ -130,44 +130,6 @@
       ]
     },
     {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'PHASE_B' is partially routed: 4 of 5 pads stranded (connected island has 1 pads)",
-      "location": [
-        5.0,
-        53.0
-      ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "C13.2"
-      ],
-      "nets": [
-        "PHASE_B"
-      ]
-    },
-    {
-      "rule_id": "connectivity",
-      "type": "connectivity",
-      "severity": "error",
-      "message": "Net 'PHASE_C' is partially routed: 4 of 5 pads stranded (connected island has 1 pads)",
-      "location": [
-        5.0,
-        47.0
-      ],
-      "layer": null,
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "C12.2"
-      ],
-      "nets": [
-        "PHASE_C"
-      ]
-    },
-    {
       "rule_id": "copper_sliver",
       "type": "copper_sliver",
       "severity": "warning",
@@ -243,7 +205,7 @@
       "rule_id": "silk_over_copper",
       "type": "silk_over_copper",
       "severity": "warning",
-      "message": "Silkscreen U10 (reference) overlaps exposed copper of U10 pad 30",
+      "message": "Silkscreen U10 (reference) overlaps exposed copper of U10 pad 28",
       "location": [
         37.0,
         34.5
@@ -253,7 +215,7 @@
       "required_value": null,
       "items": [
         "U10 (reference)",
-        "U10 pad 30"
+        "U10 pad 28"
       ],
       "nets": []
     },
@@ -279,7 +241,7 @@
       "rule_id": "silk_over_copper",
       "type": "silk_over_copper",
       "severity": "warning",
-      "message": "Silkscreen Q5 (reference) overlaps exposed copper of R22 pad 2",
+      "message": "Silkscreen Q5 (reference) overlaps exposed copper of R22 pad 1",
       "location": [
         40.0,
         63.0
@@ -289,7 +251,7 @@
       "required_value": null,
       "items": [
         "Q5 (reference)",
-        "R22 pad 2"
+        "R22 pad 1"
       ],
       "nets": []
     },
