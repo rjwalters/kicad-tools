@@ -12,22 +12,31 @@ uv run python boards/05-bldc-motor-controller/design.py
 > **Status**: Schematic, PCB layout (with STM32G431K8Tx MCU + complete
 > DRV8301 QFN-56 footprint) and autorouting are all implemented.  After
 > regeneration, every net has at least two pads so the autorouter can
-> attempt full connectivity.  **PHASE_A is now routed on the committed
-> artifact** as a 2.0mm high-current tree (U3.46 sense escape -> In2.Cu ->
-> phase node -> deep-south In1.Cu motor lane -> J2.3), added surgically
-> (no regen) per issue #3766.  **PHASE_B and PHASE_C remain open**: their
-> U3-south sense-pad escapes are walled on the committed artifact --
-> PHASE_C's U3.36 sits 0.45mm from a GATE_CL through-via (below the 0.6mm
-> a 0.2mm/0.2mm-clearance trace needs) and PHASE_B's U3.41 escape is
-> blocked by the BST_A trace that runs along y=59 because C14 sits in the
-> far-west column.  Closing them requires the C12-C14 bootstrap-cap
-> relocation relayout tracked in #3775 (the far-west cap placement is the
-> root cause).  The residual U3-south current-sense (ISENSE) cluster is
-> congestion-limited (#3471): only U3.30 has a clean escape, so the four
-> ISENSE nets remain congestion-saturated pending the same relayout.
-> The autorouter also leaves a few segment clearance violations on this
-> complex high-density board; those are tracked separately and do not
-> affect the schematic correctness or the BOM/netlist.
+> attempt full connectivity.  **All three motor-phase nets (PHASE_A,
+> PHASE_B, PHASE_C) are now routed** on the committed artifact as 2.0mm
+> high-current trees, added surgically (no regen; `design.py` unchanged)
+> per issues #3766/#3906/#3775.  The completing increment (#3775)
+> **relocated the C12-C14 bootstrap caps** from the far-west column to
+> each phase's MOSFET-column node (C12 -> (14.5,63) by Q1, C13 -> (29,73)
+> by Q3, C14 -> (46.5,64.5) by Q5), which shortened BST_A/B/C to local
+> runs and cleared the y=59 BST_A wall that had blocked PHASE_B's
+> corridor.  PHASE_B escapes U3.41 (F.Cu neck -> In2.Cu, HS/LS phase node
+> Q3.3<->Q4.2 -> deep-south lane -> J2.2); PHASE_C escapes the tight
+> 0.45mm U3.36 channel via a short F.Cu stub to a tagged micro-via that
+> drops just north of the GATE_DRV_CH diagonal into a clear In2.Cu column
+> (Q1.3<->Q2.2 -> deep lane -> J2.1).  All new copper is 45-legal
+> (`tests/test_fleet_45_census.py` passes).  **Blocking signal nets: 6 ->
+> 0** (the artifact now reports only the four U3-south current-sense
+> (ISENSE_A-/B+/B-/C-) nets incomplete, plus the two advisory
+> POUR_DISCONTINUOUS plane pours).
+>
+> The four **ISENSE Kelvin-sense nets remain open**: `kct net-status
+> --why` classifies them PLACEMENT_BOUND / CONGESTION_SATURATED -- each
+> threads U3's 0.5mm-pitch south band into the dense U10/R10-R12 analog
+> cluster (nearest strict blocker 0.050-0.354mm; "a part must move" or a
+> 1:1 rip trade), and re-routing them risks the shunt-to-pad Kelvin
+> geometry.  They are documented advisory residuals on #3766 pending an
+> analog-aware relayout; connecting them is not a targeted-copper fix.
 
 ## Overview
 
