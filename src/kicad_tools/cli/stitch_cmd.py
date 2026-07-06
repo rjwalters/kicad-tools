@@ -2963,6 +2963,69 @@ def _check_point_filled_polygon_clearance(
     return True
 
 
+def _fallback_grazes_foreign_pour(
+    via_pos: tuple[float, float] | None,
+    dogleg_pos: tuple[float, float, float, float] | None,
+    extended_pos: tuple[float, float, list[tuple[float, float]]] | None,
+    via_size: float,
+    clearance: float,
+    other_net_filled_polygons: list[FilledPolygon],
+) -> bool:
+    """Test whether a connectivity-fallback via lands on foreign pour copper.
+
+    The connectivity fallback (issue #3633) intentionally drops just-placed
+    sibling stitch geometry from the obstacle pool so a stranded pour pad can
+    reclaim its load-bearing bridge via.  That is only safe when the sole
+    blocker was self-inflicted stitch geometry.  When the *pre-existing*
+    poured copper of a **different** net already overlaps the candidate
+    position, dropping the sibling obstacles exposes a via that physically
+    grazes the foreign fill polygon -- once KiCad re-fills zones the boundary
+    resolves against the new via and produces a genuine short (issue #3910).
+
+    This gate re-checks the committed via pad circle against
+    ``other_net_filled_polygons`` alone (foreign pour fill).  It deliberately
+    ignores sibling stitch geometry: a graze against a just-placed sibling via
+    remains grandfathered per #3633; only a graze against foreign *pour*
+    copper is rejected here.
+
+    Args:
+        via_pos: Straight-line placement ``(x, y)`` or ``None``.
+        dogleg_pos: Dog-leg placement ``(via_x, via_y, mid_x, mid_y)`` or
+            ``None``.  Only the via center ``(via_x, via_y)`` is checked.
+        extended_pos: Extended-escape placement
+            ``(via_x, via_y, waypoints)`` or ``None``.  Only the via center is
+            checked.
+        via_size: Diameter of the placed via (micro or standard).
+        clearance: Required clearance from foreign pour copper.
+        other_net_filled_polygons: Foreign-net poured zone fill polygons.
+
+    Returns:
+        True if the via pad circle overlaps a foreign pour polygon within
+        ``clearance`` (i.e. the placement must be rejected); False if the via
+        clears all foreign pour copper.
+    """
+    if extended_pos is not None:
+        via_x, via_y = extended_pos[0], extended_pos[1]
+    elif dogleg_pos is not None:
+        via_x, via_y = dogleg_pos[0], dogleg_pos[1]
+    elif via_pos is not None:
+        via_x, via_y = via_pos[0], via_pos[1]
+    else:
+        # No placement to evaluate -- nothing to reject.
+        return False
+
+    via_radius = via_size / 2.0
+    # _check_point_filled_polygon_clearance returns True when clearance is
+    # satisfied.  A graze is its negation.
+    return not _check_point_filled_polygon_clearance(
+        via_x,
+        via_y,
+        via_radius,
+        other_net_filled_polygons,
+        clearance,
+    )
+
+
 def _check_segment_filled_polygon_clearance(
     sx: float,
     sy: float,
@@ -4273,9 +4336,53 @@ def run_stitch(
                     )
                 )
                 continue
-            # Fallback succeeded: place the least-violating via anyway and log
-            # it so the marginal cross-net graze is auditable.
+            # Fallback found a candidate against pre-existing copper.
             via_pos, dogleg_pos, extended_pos, is_micro = fallback_result
+
+            # Issue #3910: the fallback deliberately drops just-placed sibling
+            # stitch geometry so a self-inflicted graze (#3633) can be
+            # rescued.  But if the candidate via lands on FOREIGN pour copper,
+            # the graze is not self-inflicted -- once KiCad re-fills zones the
+            # boundary resolves against the new via and creates a genuine
+            # cross-net short.  A stranded pad is a visible DRC ``unconnected``
+            # the operator can fix; a short silently ships a manufacturing
+            # defect.  So reject the fallback when it grazes foreign pour fill,
+            # degrading to the same skip diagnostic as a genuine obstruction.
+            fallback_via_size = micro_via_size if is_micro else via_size
+            if _fallback_grazes_foreign_pour(
+                via_pos,
+                dogleg_pos,
+                extended_pos,
+                fallback_via_size,
+                clearance,
+                other_net_filled_polys,
+            ):
+                detail = identify_nearest_obstacle(
+                    pad,
+                    fallback_via_size,
+                    clearance,
+                    existing_vias,
+                    other_net_tracks,
+                    other_net_vias,
+                    other_net_pads,
+                    other_net_filled_polys,
+                    net_map=obstacle_net_map,
+                )
+                result.skip_details.append((pad, detail))
+                result.pads_skipped.append(
+                    (
+                        pad,
+                        "connectivity fallback rejected: only reachable via "
+                        "position grazes a foreign pour fill polygon (placing "
+                        "it would short across nets once zones re-fill); pad "
+                        f"left unconnected instead (nearest obstacle: {detail.reason})",
+                    )
+                )
+                continue
+
+            # Fallback via clears foreign pour copper: place the
+            # least-violating via anyway and log it so the marginal cross-net
+            # graze (against sibling stitch geometry only) is auditable.
             result.connectivity_fallback.append(
                 (
                     pad,
