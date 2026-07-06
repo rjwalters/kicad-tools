@@ -104,13 +104,25 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 
 # Issue #3828 -- documented match-group violation BASELINE (per routed PCB).
 # Symmetric with ``check_diffpair_coverage.DIFFPAIR_VIOLATION_BASELINE``.
-# Board 07 reports 0 ``match_group_length_skew`` violations today (its real
-# errors are non-skew), so the default strict 0 holds and no entry is needed;
-# the map exists so a future board with an accepted, separately-tracked
-# match-group skew baseline can document it loudly rather than relying on the
-# large error-count allowlist floor to absorb new skew errors.  Keyed by
+# The map exists so a board with an accepted, separately-tracked match-group
+# skew baseline can document it loudly rather than relying on the large
+# error-count allowlist floor to absorb new skew errors.  Keyed by
 # repo-relative routed-PCB path.
-MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {}
+#
+# Issue #3931 (via-imbalance now visible since #3915) -- board 07's ADDR_BUS
+# match group carries a via-count mismatch: the A4/A6 members route with an
+# extra via pair vs A0, adding ~1.6 mm of via-transition length that pushes
+# the group past its 0.5 mm length-match tolerance.  This was invisible while
+# ``check_match_group_length_skew`` was via-blind; PR #3915 threads the
+# board stackup (``board_thickness_mm`` / ``num_copper_layers``) into
+# ``derive_group_skew_data`` so via-transition length is now counted and the
+# pre-existing imbalance is correctly flagged as 1 ``match_group_length_skew``
+# error.  Dropping this baseline back to strict 0 requires a via-balanced
+# re-route (or an artifact refresh), which is blocked on the artifact-churn
+# problem tracked in #3925.  See #3931 for the resolution plan.
+MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
+    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 1,
+}
 
 
 def check_zero_violations(

@@ -86,12 +86,16 @@ class TestCheckZeroViolations:
         mod = _load_helper_module()
         assert mod.check_zero_violations({"match_group_length_skew": 4}, baseline=4) == []
 
-    def test_board_07_has_no_baseline_entry_strict_zero(self):
-        """Board 07 reports 0 skew violations today, so it must NOT need a
-        baseline entry -- the default strict 0 holds."""
+    def test_board_07_documented_via_skew_baseline(self):
+        """Board 07's ADDR_BUS carries a via-count mismatch (A4/A6 extra via
+        pair vs A0) that became visible once #3915 threaded the board stackup
+        into via-aware match-group skew measurement.  It is documented as a
+        baseline of 1 pending a via-balanced re-route (Issue #3931, blocked on
+        the artifact-churn problem #3925), not silently absorbed by the large
+        error-count allowlist floor."""
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
-        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 0
+        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 1
 
 
 # ---------------------------------------------------------------------------
