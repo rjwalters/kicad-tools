@@ -1520,3 +1520,94 @@ class TestDRCSafetyFloor:
 
         assert assembly_called["value"]
         assert result.success, f"Unexpected errors: {result.errors}"
+
+
+class TestManufacturingPreflightSpecOverlay:
+    """Integration: preflight run by ManufacturingPackage must not falsely
+    warn about LCSC fields that the ``.kct`` spec overlay will populate
+    (issue #3926).
+
+    Preflight (Step 0) sees a raw BOM; the spec overlay is applied later in
+    the assembly pipeline (Step 1).  The manufacturing package must wire the
+    checker to the board directory so ``find_spec_file`` locates the spec and
+    the ``bom_fields`` check can distinguish spec-covered from truly-missing
+    LCSC.
+    """
+
+    def _make_bom_all_missing_lcsc(self, refs):
+        """Build a raw BOM (no LCSC set) for the given references."""
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        return BOM(
+            items=[
+                BOMItem(reference=r, value="100nF", footprint="C_0402", lib_id="Device:C", lcsc="")
+                for r in refs
+            ]
+        )
+
+    def _write_project(self, tmp_path, kct_body=None):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        if kct_body is not None:
+            (project_dir / "project.kct").write_text(kct_body)
+        return project_dir, pcb
+
+    def _bom_fields_result(self, pkg, monkeypatch, bom):
+        """Run only ``_check_bom_fields`` on a checker wired like the package.
+
+        The checker is constructed with the same paths the manufacturing
+        package would use (``pkg.pcb_path`` lives in the board directory), so
+        ``find_spec_file`` locates the sibling ``project.kct`` exactly as it
+        does in the real Step-0 preflight.  We mock only ``_load_bom`` to
+        supply a raw (pre-overlay) BOM without needing a parseable PCB.
+        """
+        checker = PreflightChecker(
+            pcb_path=pkg.pcb_path,
+            schematic_path=pkg.schematic_path,
+            manufacturer=pkg.manufacturer,
+            config=PreflightConfig(),
+            bom_source=pkg.config.bom_source,
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+        return checker._check_bom_fields()
+
+    def test_spec_covered_lcsc_no_false_warn(self, tmp_path, monkeypatch):
+        """Board with a spec covering all items => no bom_fields LCSC WARN."""
+        kct = (
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "T"\n'
+            '  revision: "A"\n'
+            "bom_entries:\n"
+            "  - ref: C1\n"
+            "    part: MPN1\n"
+            "    lcsc: C111\n"
+            "  - ref: C2\n"
+            "    part: MPN2\n"
+            "    lcsc: C222\n"
+        )
+        _, pcb = self._write_project(tmp_path, kct)
+        config = ManufacturingConfig(include_report=False)
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+
+        bom = self._make_bom_all_missing_lcsc(["C1", "C2"])
+        result = self._bom_fields_result(pkg, monkeypatch, bom)
+
+        assert result.status == "OK"
+        assert "missing LCSC" not in result.message
+        assert "missing LCSC" not in result.details
+
+    def test_no_spec_still_warns(self, tmp_path, monkeypatch):
+        """Board with no spec file => genuine missing-LCSC WARN still fires."""
+        _, pcb = self._write_project(tmp_path, kct_body=None)
+        config = ManufacturingConfig(include_report=False)
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+
+        bom = self._make_bom_all_missing_lcsc(["C1", "C2"])
+        result = self._bom_fields_result(pkg, monkeypatch, bom)
+
+        assert result.status == "WARN"
+        assert "2/2 active item(s) missing LCSC part number" in result.details
