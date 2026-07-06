@@ -3274,9 +3274,13 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
         "jlcpcb",
         "--output",
         str(mfr_dir),
-        # The post-route PCB has known clearance violations on this
-        # board (see M-E follow-up); allow the bundle to be produced
-        # so downstream tooling/UI sees the artifacts.
+        # 2026-07-05 (#3912): --skip-preflight skips BOM/ERC/LCSC/cosmetic
+        # checks so the bundle is produced despite this board's known
+        # *clearance* violations (see M-E follow-up).  It does NOT suppress
+        # the connectivity safety floor added in #3912 -- if the committed
+        # drc_report.json ever contains net shorts, export will still abort
+        # non-zero.  That is intentional: skipping cosmetic checks is safe;
+        # shipping a shorted board is not.
         "--skip-preflight",
     ]
     print(f"\n   Command: {' '.join(cmd)}")
@@ -3448,7 +3452,11 @@ def main() -> int:
         print(f"  Zones: {zones_created} zone(s) created, {zones_filled} filled")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
-        print(f"  Manufacturing bundle: {'PASS' if mfg_success else 'FAIL'}")
+        # #3912: mfg_success reflects whether `kct export` wrote a bundle
+        # (exit 0), NOT whether the board is DRC-clean.  Board DRC status is
+        # reported separately above ("DRC: ...").  Label this line "written"
+        # to avoid implying the board passed DRC.
+        print(f"  Manufacturing bundle: {'WRITTEN' if mfg_success else 'FAILED'}")
         print("\nComponent summary:")
         print("  Power input: J1, F1, D1, C1-C2")
         print("  Buck (24V->5V): U1, L1, D2, C3-C4")

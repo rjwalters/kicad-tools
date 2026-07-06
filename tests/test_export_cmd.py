@@ -836,3 +836,159 @@ class TestExportCmdSchematicAutoDiscovery:
             ]
         )
         assert rc == 0
+
+
+class TestExportDRCSafetyFloor:
+    """CLI-level tests for the connectivity safety floor (#3912)."""
+
+    @staticmethod
+    def _patch_assembly(monkeypatch):
+        from kicad_tools.export import assembly
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            return assembly.AssemblyPackageResult(output_dir=od, bom_path=bom_path)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+    @staticmethod
+    def _write_shorting_drc_report(path: Path) -> None:
+        import json
+
+        path.write_text(
+            json.dumps(
+                {
+                    "file": "board.kicad_pcb",
+                    "manufacturer": "jlcpcb",
+                    "summary": {"errors": 1, "warnings": 0, "passed": False},
+                    "violations": [
+                        {
+                            "rule_id": "shorting_items",
+                            "severity": "error",
+                            "message": "Two items share a net (GND / PHASE_A)",
+                            "items": ["Track [GND]", "Track [PHASE_A]"],
+                        }
+                    ],
+                }
+            )
+        )
+
+    def test_skip_preflight_blocks_on_drc_shorts(self, tmp_path, monkeypatch):
+        """`kct export --skip-preflight` on a shorted board must return 1."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        self._write_shorting_drc_report(project_dir / "drc_report.json")
+
+        self._patch_assembly(monkeypatch)
+
+        out_dir = tmp_path / "manufacturing"
+        rc = export_main(
+            [
+                str(pcb),
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(out_dir),
+                "--no-report",
+                "--skip-preflight",
+            ]
+        )
+
+        assert rc == 1, "Export must exit non-zero on net shorts"
+        # No manifest should have been written -- export aborted before assembly.
+        assert not (out_dir / "manifest.json").exists()
+
+    def test_skip_drc_floor_allows_shorted_export(self, tmp_path, monkeypatch):
+        """`--skip-drc-floor` bypasses the floor and exits 0 (escape hatch)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        self._write_shorting_drc_report(project_dir / "drc_report.json")
+
+        self._patch_assembly(monkeypatch)
+
+        out_dir = tmp_path / "manufacturing"
+        rc = export_main(
+            [
+                str(pcb),
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(out_dir),
+                "--no-report",
+                "--skip-preflight",
+                "--skip-drc-floor",
+            ]
+        )
+
+        assert rc == 0, "Escape hatch should allow export despite shorts"
+        assert (out_dir / "manifest.json").exists()
+
+    def test_skip_preflight_clean_board_still_exports(self, tmp_path, monkeypatch):
+        """`--skip-preflight` on a board with no DRC report exits 0 (no regression)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
+        # No drc_report.json -- floor is a no-op.
+
+        self._patch_assembly(monkeypatch)
+
+        out_dir = tmp_path / "manufacturing"
+        rc = export_main(
+            [
+                str(pcb),
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(out_dir),
+                "--no-report",
+                "--skip-preflight",
+            ]
+        )
+
+        assert rc == 0
+        assert (out_dir / "manifest.json").exists()
+
+    def test_parser_skip_drc_floor_flag(self):
+        """--skip-drc-floor parses to export_skip_drc_floor=True."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["export", "board.kicad_pcb", "--skip-drc-floor"])
+        assert args.export_skip_drc_floor is True
+
+    def test_parser_skip_drc_floor_default_false(self):
+        """--skip-drc-floor defaults to False."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["export", "board.kicad_pcb"])
+        assert args.export_skip_drc_floor is False
+
+    def test_dispatch_forwards_skip_drc_floor(self, tmp_path, monkeypatch):
+        """--skip-drc-floor should be forwarded through dispatch to export_cmd."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        captured = {}
+
+        def spy_main(argv=None):
+            captured["argv"] = argv
+            return 0
+
+        monkeypatch.setattr("kicad_tools.cli.export_cmd.main", spy_main)
+
+        from kicad_tools.cli import main as cli_main
+
+        cli_main(["export", str(pcb), "--skip-drc-floor"])
+        assert "--skip-drc-floor" in captured["argv"]

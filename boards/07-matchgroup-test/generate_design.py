@@ -1900,6 +1900,12 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         str(mfg_dir),
         "--mfr",
         "jlcpcb",
+        # 2026-07-05 (#3912): --skip-preflight skips BOM/ERC/LCSC/cosmetic
+        # checks for this synthetic match-group test board.  It does NOT
+        # suppress the connectivity safety floor added in #3912 -- if a
+        # pre-existing drc_report.json next to the routed PCB contains net
+        # shorts, export still aborts non-zero.  Cosmetic-check skipping is
+        # safe here; shipping a shorted board is not.
         "--skip-preflight",
     ]
     print(f"\n   Command: {' '.join(cmd)}")
@@ -2029,7 +2035,11 @@ def main() -> int:
             print("\nResults:")
             print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
             print(f"  DRC:     {'PASS' if drc_ok else 'FAIL (see above)'}")
-            print(f"  MFG:     {'PASS' if mfg_ok else 'FAIL (see above)'}")
+            # #3912: mfg_ok means `kct export` wrote a bundle (exit 0), not
+            # that the board is DRC-clean.  Board DRC status is the "DRC:"
+            # line above.  Label "WRITTEN" so PASS is never mistaken for a
+            # DRC pass.
+            print(f"  MFG:     {'WRITTEN' if mfg_ok else 'FAILED (see above)'}")
 
             return 0 if route_success else 1
 

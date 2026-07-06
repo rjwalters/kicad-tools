@@ -142,7 +142,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-preflight",
         action="store_true",
-        help="Skip all pre-flight validation checks",
+        help=(
+            "Skip BOM/ERC/LCSC/cosmetic pre-flight validation checks. Does NOT "
+            "suppress the hard connectivity safety floor (net shorts / "
+            "connectivity errors in a pre-existing DRC report still block "
+            "export). Use --skip-drc-floor to override that too."
+        ),
+    )
+    parser.add_argument(
+        "--skip-drc-floor",
+        action="store_true",
+        help=(
+            "Disable the connectivity safety floor that blocks export on net "
+            "shorts found in a pre-existing DRC report. Only for known-safe "
+            "workarounds -- shipping a shorted board is never safe."
+        ),
     )
     parser.add_argument(
         "--strict-preflight",
@@ -249,6 +263,7 @@ def run_export(args: argparse.Namespace) -> int:
         skip_all=getattr(args, "skip_preflight", False),
         skip_drc=getattr(args, "skip_drc", False),
         skip_erc=getattr(args, "skip_erc", False),
+        skip_drc_floor=getattr(args, "skip_drc_floor", False),
         drc_report_path=getattr(args, "drc_report", None),
         erc_report_path=getattr(args, "erc_report", None),
     )
