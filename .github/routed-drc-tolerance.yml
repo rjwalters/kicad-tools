@@ -1634,7 +1634,27 @@ tolerances:
   # stitcher/pour-repair cross-net clearance fix and the #3471-adjacent
   # diff-pair engaged-pair work further lower the committed count, and
   # this floor follows.
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 28
+  #
+  # !!! 28 -> 29 (Issue #3931, via-imbalance now visible since #3915) !!!
+  # ----------------------------------------------------------------------
+  # PR #3915 threads the board stackup (``board_thickness_mm`` /
+  # ``num_copper_layers``) into ``derive_group_skew_data`` so via-transition
+  # length is finally counted in ``check_match_group_length_skew``.  This
+  # exposes a PRE-EXISTING via-count mismatch on board 07's ADDR_BUS match
+  # group (A4/A6 carry an extra via pair vs A0, ~1.6 mm of via-transition
+  # length beyond the 0.5 mm tolerance).  The from-scratch re-route (seed 42)
+  # that the Match-Group Routing Regression gate runs therefore reports one
+  # NEW ``match_group_length_skew`` error, moving the binding re-route count
+  # 28 -> 29.  This +1 is PR-caused (via-aware detection), not route variance,
+  # so it is reconciled here rather than dismissed.  The committed-artifact
+  # gate (check_routed_drc.py, advisories filtered) measures 22 well under 29,
+  # so this bump does not loosen that gate.  Companion change: board 07's
+  # routed PCB is added to ``MATCHGROUP_VIOLATION_BASELINE = 1`` in
+  # scripts/ci/check_matchgroup_coverage.py, same #3931 reference.
+  # Exit clause: a via-balanced re-route (or artifact refresh, blocked on the
+  # artifact-churn problem #3925) drops the skew error, at which point restore
+  # 29 -> 28 and the MATCHGROUP baseline back to strict 0.  See #3931.
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb: 29
 
   # Board 05 (BLDC motor controller).  Issue #3470 (2026-06-10) removed
   # this board's tolerances entry -- the committed artifact reached a

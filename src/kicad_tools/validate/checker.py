@@ -578,7 +578,10 @@ class DRCChecker:
             from kicad_tools.validate.match_group_skew import derive_group_skew_data
 
             group_skew_data, tracker_match_groups, threshold_map = derive_group_skew_data(
-                self.pcb, self.net_class_map
+                self.pcb,
+                self.net_class_map,
+                board_thickness_mm=self.design_rules.board_thickness_mm,
+                num_copper_layers=self.layers,
             )
             rule = MatchGroupLengthSkewRule(
                 group_skew_data=group_skew_data,
