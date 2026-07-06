@@ -34,7 +34,13 @@ from kicad_tools.cli.build_cmd import (
     BuildStep,
     _run_step_stitch,
 )
-from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
+from kicad_tools.cli.stitch_cmd import (
+    PadInfo,
+    StitchResult,
+    ViaPlacement,
+    find_all_plane_nets,
+    run_stitch,
+)
 from kicad_tools.core.sexp_file import load_pcb
 
 # ---------------------------------------------------------------------------
@@ -504,6 +510,52 @@ class TestRunStepStitchBehaviour:
         assert "kct stitch" in result.message
         # File contents unchanged.
         assert four_layer_with_zones_pcb.read_text() == original_content
+
+
+class TestStitchConnectivityFallbackWarning:
+    """Issue #3910: the build step must surface a warning when the stitcher
+    reports a non-empty ``connectivity_fallback`` list.
+
+    Pour pads that grazed FOREIGN pour copper are now rejected inside
+    ``run_stitch`` (they short once zones re-fill), so a remaining
+    ``connectivity_fallback`` entry is only a marginal graze against sibling
+    stitch geometry -- but it is still worth flagging so the operator can
+    cross-check with ``kicad-cli pcb drc --refill-zones``.
+    """
+
+    def test_warns_on_connectivity_fallback(
+        self,
+        four_layer_with_zones_pcb: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys,
+    ) -> None:
+        # Force run_stitch to report one connectivity fallback.
+        pad = PadInfo("C1", "1", 2, "+3.3V", 110.0, 110.0, "F.Cu", 0.54, 0.64)
+
+        def fake_run_stitch(*args, **kwargs) -> StitchResult:  # type: ignore[no-untyped-def]
+            result = StitchResult(pcb_name="four_layer_zones", target_nets=["+3.3V"])
+            result.vias_added.append(
+                ViaPlacement(
+                    pad=pad,
+                    via_x=110.5,
+                    via_y=110.0,
+                    size=0.45,
+                    drill=0.2,
+                    layers=("F.Cu", "In2.Cu"),
+                )
+            )
+            result.connectivity_fallback.append((pad, "marginal graze"))
+            return result
+
+        monkeypatch.setattr("kicad_tools.cli.stitch_cmd.run_stitch", fake_run_stitch)
+
+        ctx = _make_ctx(pcb_file=four_layer_with_zones_pcb)
+        result = _run_step_stitch(ctx, Console())
+        assert result.success is True
+
+        out = capsys.readouterr().out
+        assert "connectivity fallback" in out.lower()
+        assert "warning" in out.lower()
 
 
 # ---------------------------------------------------------------------------

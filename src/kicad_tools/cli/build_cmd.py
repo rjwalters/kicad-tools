@@ -1699,6 +1699,20 @@ def _run_step_stitch(ctx: BuildContext, console: Console) -> BuildResult:
     added = len(result.vias_added)
     already = result.already_connected
     skipped = len(result.pads_skipped)
+    fallback = len(result.connectivity_fallback)
+
+    # Issue #3910: connectivity fallbacks that graze FOREIGN pour copper are
+    # now rejected inside run_stitch (they short across nets once zones
+    # re-fill), so a remaining non-empty connectivity_fallback list is only a
+    # marginal graze against sibling stitch geometry (#3633), not a short.
+    # Surface it as a visible warning so the operator can inspect the board.
+    if fallback and not ctx.quiet:
+        console.print(
+            f"  [yellow]warning:[/yellow] {fallback} pour pad(s) used the "
+            "connectivity fallback (marginal cross-net graze against sibling "
+            "stitch geometry; run `kicad-cli pcb drc --refill-zones` to "
+            "confirm no shorts)"
+        )
 
     if added == 0 and already > 0:
         message = (

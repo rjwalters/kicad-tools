@@ -15,6 +15,8 @@ from kicad_tools.cli.stitch_cmd import (
     ViaPlacement,
     ZonePolygon,
     _carve_foreign_copper_after_stitch,
+    _check_point_filled_polygon_clearance,
+    _fallback_grazes_foreign_pour,
     _is_ground_net,
     _should_use_stackup_fallback,
     calculate_dogleg_via_position,
@@ -5896,6 +5898,215 @@ class TestPourConnectivityFallback:
         assert len(plus_vias) == 3, "every stranded pour pad must get a via"
         assert len(result.connectivity_fallback) == 3
         assert all(pad.net_name == "+3.3V" for pad, _ in result.connectivity_fallback)
+
+    def test_no_committed_fallback_via_grazes_foreign_pour(self, tmp_path: Path) -> None:
+        """Issue #3910: no via recorded in ``connectivity_fallback`` may graze
+        a foreign pour fill polygon.
+
+        This is acceptance criterion #5: the fallback deliberately drops
+        just-placed sibling stitch geometry from the obstacle pool, which can
+        expose a via that lands on pre-existing FOREIGN pour copper -- once
+        KiCad re-fills zones the boundary resolves against the new via and
+        shorts the two nets.  The fix rejects any such fallback candidate
+        before it is appended, so every committed fallback via must clear all
+        foreign pour polygons.
+
+        Fixture: the board-07 sibling-graze pattern (GND stitches first and
+        boxes in each +3.3V pad's escape) plus a NET1 pour band placed where
+        the +3.3V fallback vias were probed to land (x~111.33/121.33/131.33,
+        y=110).  NET1 is not stitched, so it is pure pre-existing pour copper.
+        """
+        foreign_pour = (
+            '  (zone (net 3) (net_name "NET1") (layer "F.Cu") (uuid "zone-net1-band")\n'
+            '    (name "NET1_band")\n'
+            "    (connect_pads (clearance 0.2))\n"
+            "    (min_thickness 0.2)\n"
+            "    (fill yes)\n"
+            "    (polygon (pts (xy 111 109.5) (xy 132 109.5) (xy 132 110.5) (xy 111 110.5)))\n"
+            '    (filled_polygon (layer "F.Cu") '
+            "(pts (xy 111 109.5) (xy 132 109.5) (xy 132 110.5) (xy 111 110.5)))\n"
+            "  )\n"
+        )
+        pcb_text = STITCH_TEST_PCB.rstrip()
+        assert pcb_text.endswith(")")
+        pcb_text = pcb_text[:-1] + foreign_pour + ")\n"
+
+        pcb_file = tmp_path / "fallback_grazes_pour.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["GND", "+3.3V"],
+            dry_run=True,
+        )
+
+        # Rebuild the foreign-pour polygon set the fallback gate consults.
+        sexp = load_pcb(pcb_file)
+        net_map = get_net_map(sexp)
+        target_nets = {num for num, name in net_map.items() if name in {"GND", "+3.3V"}}
+        foreign_polys = find_all_filled_polygons(sexp, exclude_nets=target_nets)
+        assert foreign_polys, "fixture must expose the NET1 foreign pour"
+
+        # Every via recorded as a connectivity fallback must clear the foreign
+        # pour (radius = via_size / 2), else it would short once zones re-fill.
+        for pad, _reason in result.connectivity_fallback:
+            placed = next(v for v in result.vias_added if v.pad is pad)
+            assert _check_point_filled_polygon_clearance(
+                placed.via_x,
+                placed.via_y,
+                placed.size / 2.0,
+                foreign_polys,
+                0.2,
+            ), (
+                f"connectivity-fallback via for {pad.net_name}:{pad.reference} at "
+                f"({placed.via_x:.3f}, {placed.via_y:.3f}) grazes a foreign pour"
+            )
+
+    def test_fallback_on_foreign_pour_lands_in_pads_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #3910 (acceptance criterion #6): when the fallback's only
+        candidate overlaps a foreign pour polygon, the pad must land in
+        ``pads_skipped``, NOT ``vias_added``.
+
+        The normal placement path can independently relocate vias, which makes
+        a pure-geometry full-PCB fixture brittle for isolating the fallback
+        branch.  To exercise exactly the fallback rejection wiring, we force
+        the placement helpers: the cross-net-augmented attempt returns ``None``
+        (no clearing placement -> fallback fires), and the un-augmented
+        fallback attempt returns a via position that sits inside the foreign
+        NET1 pour.  The fix must reject it and skip the pad.
+        """
+        import kicad_tools.cli.stitch_cmd as stitch_mod
+
+        # Fixture: one +3.3V pad plus a NET1 pour band the fallback via lands on.
+        pcb_text = (
+            '(kicad_pcb (version 20240108) (generator test) (generator_version "8.0")\n'
+            '  (general (thickness 1.6) (legacy_teardrops no)) (paper "A4")\n'
+            '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))\n'
+            "  (setup (pad_to_mask_clearance 0))\n"
+            '  (net 0 "") (net 2 "+3.3V") (net 3 "NET1")\n'
+            '  (zone (net 3) (net_name "NET1") (layer "F.Cu") (uuid "z-net1")\n'
+            '    (name "NET1_band") (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes)\n'
+            "    (polygon (pts (xy 111 109.5) (xy 113 109.5) (xy 113 110.5) (xy 111 110.5)))\n"
+            '    (filled_polygon (layer "F.Cu") '
+            "(pts (xy 111 109.5) (xy 113 109.5) (xy 113 110.5) (xy 111 110.5)))\n"
+            "  )\n"
+            '  (footprint "Capacitor_SMD:C_0402_1005Metric" (layer "F.Cu")\n'
+            '    (uuid "00000000-0000-0000-0000-0000000000f1") (at 110 110)\n'
+            '    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "r-c1"))\n'
+            '    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64) '
+            '(layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))\n'
+            "  )\n"
+            ")\n"
+        )
+        pcb_file = tmp_path / "forced_fallback.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        # Fallback via lands at (112.0, 110.0) -- inside the NET1 band.
+        grazing_via = (112.0, 110.0)
+
+        def fake_calc_via(pad, *, other_net_vias, **kwargs):  # type: ignore[no-untyped-def]
+            # The augmented attempt includes cross-net stitch vias; the
+            # un-augmented fallback attempt does not.  Here there is no sibling
+            # stitch geometry, so distinguish by identity is not possible --
+            # instead, fail the FIRST call (augmented) and succeed on the
+            # SECOND call (fallback).  Track via a mutable counter.
+            fake_calc_via.calls += 1  # type: ignore[attr-defined]
+            if fake_calc_via.calls == 1:  # type: ignore[attr-defined]
+                return None
+            return grazing_via
+
+        fake_calc_via.calls = 0  # type: ignore[attr-defined]
+
+        # Dog-leg / extended must also fail on the augmented attempt so the
+        # augmented _attempt_placement returns None and the fallback fires.
+        monkeypatch.setattr(stitch_mod, "calculate_via_position", fake_calc_via)
+        monkeypatch.setattr(stitch_mod, "calculate_dogleg_via_position", lambda *a, **k: None)
+        monkeypatch.setattr(stitch_mod, "calculate_extended_escape_position", lambda *a, **k: None)
+
+        result = run_stitch(
+            pcb_path=pcb_file,
+            net_names=["+3.3V"],
+            via_size=0.45,
+            drill=0.2,
+            clearance=0.2,
+            dry_run=True,
+        )
+
+        # The fallback via at (112, 110) grazes the NET1 pour -> rejected.
+        assert len(result.connectivity_fallback) == 0
+        assert len(result.vias_added) == 0, "grazing fallback via must not be placed"
+        assert len(result.pads_skipped) == 1
+        skipped_pad, reason = result.pads_skipped[0]
+        assert skipped_pad.net_name == "+3.3V"
+        assert "foreign pour" in reason
+
+    def test_fallback_grazes_foreign_pour_helper(self) -> None:
+        """Unit-level proof of the rejection predicate (issue #3910).
+
+        A via center inside a foreign pour polygon (or within clearance of its
+        edge) grazes; a via center far from the polygon clears.
+        """
+        polygon = FilledPolygon(
+            net_number=3,
+            net_name="NET1",
+            layer="F.Cu",
+            points=[(111.0, 109.5), (132.0, 109.5), (132.0, 110.5), (111.0, 110.5)],
+        )
+
+        # Via center inside the pour band -> graze (reject).
+        assert (
+            _fallback_grazes_foreign_pour(
+                via_pos=(111.33, 110.0),
+                dogleg_pos=None,
+                extended_pos=None,
+                via_size=0.45,
+                clearance=0.2,
+                other_net_filled_polygons=[polygon],
+            )
+            is True
+        )
+
+        # Dog-leg placement (via center is the first two coords) inside the
+        # band -> graze (reject).
+        assert (
+            _fallback_grazes_foreign_pour(
+                via_pos=None,
+                dogleg_pos=(121.33, 110.0, 120.0, 110.0),
+                extended_pos=None,
+                via_size=0.45,
+                clearance=0.2,
+                other_net_filled_polygons=[polygon],
+            )
+            is True
+        )
+
+        # Via center far from the pour band -> clears (accept).
+        assert (
+            _fallback_grazes_foreign_pour(
+                via_pos=(50.0, 50.0),
+                dogleg_pos=None,
+                extended_pos=None,
+                via_size=0.45,
+                clearance=0.2,
+                other_net_filled_polygons=[polygon],
+            )
+            is False
+        )
+
+        # No foreign pour at all -> nothing to reject.
+        assert (
+            _fallback_grazes_foreign_pour(
+                via_pos=(111.33, 110.0),
+                dogleg_pos=None,
+                extended_pos=None,
+                via_size=0.45,
+                clearance=0.2,
+                other_net_filled_polygons=[],
+            )
+            is False
+        )
 
     def test_non_stranded_pad_still_uses_clearing_placement(self, tmp_path: Path) -> None:
         """When a clearing placement DOES exist, the fallback must NOT fire --
