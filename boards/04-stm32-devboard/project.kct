@@ -74,8 +74,8 @@ requirements:
 
   mechanical:
     dimensions:
-      width: "50mm"
-      height: "25mm"
+      width: "60mm"
+      height: "40mm"
 
   manufacturing:
     target_fab: jlcpcb
@@ -158,7 +158,7 @@ decisions:
     alternatives: ["16MHz", "12MHz"]
 
 progress:
-  phase: schematic
+  phase: layout
   phases:
     concept:
       status: completed
@@ -168,19 +168,19 @@ progress:
         - "[x] Determine debug interface (SWD)"
         - "[x] Choose crystal frequency"
     schematic:
-      status: in_progress
+      status: completed
       checklist:
         - "[x] Power input section"
         - "[x] LDO with decoupling"
         - "[x] Crystal oscillator block"
         - "[x] Debug header"
         - "[x] User LED"
-        - "[ ] Add MCU symbol (manual step)"
-        - "[ ] Connect MCU to peripherals"
+        - "[x] Add MCU symbol"
+        - "[x] Connect MCU to peripherals"
     layout:
-      status: pending
+      status: completed
       checklist:
-        - "[ ] Component placement"
-        - "[ ] Power routing"
-        - "[ ] Signal routing"
-        - "[ ] DRC clean"
+        - "[x] Component placement"
+        - "[x] Power routing"
+        - "[x] Signal routing"
+        - "[x] DRC clean (kicad-cli 0 violations, 2026-07-05)"

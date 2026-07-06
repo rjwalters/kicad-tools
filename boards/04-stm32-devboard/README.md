@@ -96,14 +96,15 @@ connected) and has **0 blocking DRC errors** against `--mfr jlcpcb-tier1`
   #2834 / #3033 case). The MCU VSS rail still bonds to plane through the other
   stitched VSS pads.
 
-**Routed-PCB regeneration note (#3773):** a fresh end-to-end regen on current
-`main` cannot reproduce this clean routed PCB — the zone filler emits `+3.3V` /
-`+5V` F.Cu pours that are not cleared around the router's GND tracks/vias,
-producing ~30 `clearance_segment_zone` / `clearance_via_zone` shorts. This is a
-**separate regression** (reproducible from pristine `main` with the PCB net
-table unchanged, i.e. independent of the net reconciliation), tracked in
-**#3773**. Until it lands, board-04 ships the committed-good routed PCB, which
-is net-consistent with the reconciled schematic.
+**Routed-PCB regeneration note (#3773):** the zone-filler regression described
+in #3773 (~30 `clearance_*_zone` shorts on fresh regen) **no longer reproduces**
+as of the 2026-07-05 fresh-build sweep: a from-scratch `generate_design.py` run
+produced a fully routed board with copper-LVS 0 shorts / 0 opens and
+`kicad-cli pcb drc --refill-zones` reporting 0 violations. Caveats that remain:
+the recipe is run-twice non-idempotent (first run from a clean dir exits 1 via
+a constraint-sidecar interaction, second run passes — #3919) and `kct build`
+still cannot reproduce the board (#3918), so regenerate via
+`generate_design.py` directly.
 
 The 2026-05-11 audit table (router 8/9, #2695/#2696/#3075/#3080) was removed
 when those issues closed — see issue #3212 for the rationale.

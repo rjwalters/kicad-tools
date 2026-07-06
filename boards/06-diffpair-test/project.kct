@@ -112,8 +112,8 @@ requirements:
 
   mechanical:
     dimensions:
-      width: "80mm"
-      height: "60mm"
+      width: "100mm"
+      height: "80mm"
 
   manufacturing:
     target_fab: jlcpcb
